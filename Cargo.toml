@@ -1,0 +1,82 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vault",
+    "crates/audit",
+    "crates/ipc",
+    # "crates/gateway",         # requires reqwest — enable when building gateway
+    # "crates/adapter-telegram", # requires teloxide (needs Rust 1.88+) — enable when upgrading rustc
+    # "crates/agent",
+    # "crates/cli",             # depends on gateway
+    "crates/webchat",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/gebruder/wirken"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.50", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+reqwest-eventsource = "0.6"
+
+# SQLite
+rusqlite = { version = "0.39", features = ["bundled"] }
+
+# Crypto
+chacha20poly1305 = "0.10"
+secrecy = "0.10"
+zeroize = { version = "1.8", features = ["derive"] }
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+argon2 = "0.5"
+sha2 = "0.10"
+rand = "0.8"
+
+# Keychain
+security-framework = "3.7"
+secret-service = "5.1"
+
+# IPC
+capnp = "0.25"
+
+# Sandbox
+wasmtime = "43.0"
+bollard = "0.20"
+
+# CLI
+clap = { version = "4.6", features = ["derive"] }
+dialoguer = "0.12"
+
+# Rate limiting
+governor = "0.10"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# JWT
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
+
+# Channel SDKs
+teloxide = { version = "0.17", features = ["macros"] }
+serenity = "0.12"
+slack-morphism = "2.19"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Testing
+tempfile = "3"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
