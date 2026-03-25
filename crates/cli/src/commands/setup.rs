@@ -5,7 +5,7 @@ use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 use super::{config, data_dir};
 use super::channel::register_channel;
 
-pub async fn run() -> Result<()> {
+pub async fn run(install_service: bool) -> Result<()> {
     println!();
     println!("  wirken setup");
     println!("  ────────────");
@@ -157,8 +157,29 @@ pub async fn run() -> Result<()> {
 
     println!();
 
-    // --- Step 3: Done ---
+    // --- Step 3: Service installation ---
 
+    let should_install = if install_service {
+        true
+    } else {
+        Confirm::new()
+            .with_prompt("  Install as a system service (starts on login)?")
+            .default(true)
+            .interact()?
+    };
+
+    if should_install {
+        println!();
+        let exe = std::env::current_exe().context("Failed to determine binary path")?;
+        if let Err(e) = super::service::install_service(&exe, &data) {
+            println!("  Warning: service installation failed: {e}");
+            println!("  You can start manually with: wirken run");
+        }
+    }
+
+    // --- Done ---
+
+    println!();
     println!("  Setup complete!");
     println!();
     println!("  Provider: {} ({})", provider_name, model);
@@ -171,10 +192,12 @@ pub async fn run() -> Result<()> {
     println!("  Your credentials are encrypted in {}", cfg.vault_db_path().display());
     println!("  Audit log at {}", cfg.audit_db_path().display());
     println!();
-    println!("  Next steps:");
-    println!("    wirken channel add telegram   # add more channels");
-    println!("    wirken audit log              # view audit trail");
-    println!("    wirken agent --message \"hi\"   # talk to your agent");
+    if should_install {
+        println!("  The gateway is running as a service.");
+        println!("  Manage with: wirken setup --uninstall-service");
+    } else {
+        println!("  Start the gateway: wirken run");
+    }
     println!();
 
     Ok(())
