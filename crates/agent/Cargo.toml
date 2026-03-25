@@ -8,9 +8,17 @@ license.workspace = true
 wirken-vault = { path = "../vault" }
 wirken-audit = { path = "../audit" }
 wirken-ipc = { path = "../ipc" }
+wirken-gateway = { path = "../gateway" }
 tokio = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
