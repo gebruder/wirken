@@ -108,14 +108,16 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Current status
 
-12 crates, 191 tests, CI on every push, release binaries for four platforms.
+14 crates, 210 tests, CI on every push, release binaries for four platforms.
 
 **Ships now:**
-- Four channel adapters running simultaneously as isolated processes:
+- Five channel adapters running simultaneously as isolated processes:
   - Telegram (teloxide 0.17, long polling)
   - Discord (serenity 0.12, gateway WebSocket, mention-gated in guilds)
   - Slack (slack-morphism 2.19, Socket Mode, mention-gated in channels)
-  - Microsoft Teams (Bot Framework REST API via reqwest, HTTP webhook, mention-gated)
+  - Microsoft Teams (Bot Framework REST API, HTTP webhook, mention-gated)
+  - Matrix (Client-Server API, rooms + DMs, mention-gated in rooms)
+- Multi-agent routing (work agent on Slack/Teams, personal on Telegram/Discord)
 - Agent runtime with LLM tool calling (OpenAI, Anthropic, Ollama, custom endpoints)
 - Built-in tools: shell exec, file read/write, directory listing
 - SKILL.md loader (compatible with OpenClaw's 52 bundled skills)

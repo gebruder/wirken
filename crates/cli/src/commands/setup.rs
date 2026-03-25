@@ -133,6 +133,7 @@ pub async fn run(install_service: bool) -> Result<()> {
         "Discord",
         "Slack",
         "Microsoft Teams",
+        "Matrix",
         "Skip for now",
     ];
     let mut selected_channels = Vec::new();
@@ -161,7 +162,11 @@ pub async fn run(install_service: bool) -> Result<()> {
                 setup_teams_channel(&cfg, &data).await?;
                 selected_channels.push("teams");
             }
-            4 => break,
+            4 => {
+                setup_matrix_channel(&cfg, &data).await?;
+                selected_channels.push("matrix");
+            }
+            5 => break,
             _ => unreachable!(),
         }
 
@@ -300,5 +305,41 @@ async fn setup_teams_channel(
         .context("Failed to store Teams app ID")?;
 
     println!("  teams: app ID and password encrypted.");
+    Ok(())
+}
+
+async fn setup_matrix_channel(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+) -> Result<()> {
+    let homeserver: String = dialoguer::Input::new()
+        .with_prompt("  Homeserver URL (e.g., https://matrix.org)")
+        .interact_text()?;
+
+    let username: String = dialoguer::Input::new()
+        .with_prompt("  Username (e.g., @wirken:matrix.org)")
+        .interact_text()?;
+
+    let password = Password::new().with_prompt("  Password").interact()?;
+
+    // Store password as the primary token
+    register_channel("matrix", &password, cfg, data).await?;
+
+    // Store homeserver URL and username in vault
+    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    let hs_secret = wirken_vault::VaultSecret::new(homeserver);
+    store
+        .store("matrix-homeserver", "matrix", &hs_secret, None, None)
+        .context("Failed to store homeserver URL")?;
+
+    let user_secret = wirken_vault::VaultSecret::new(username);
+    store
+        .store("matrix-username", "matrix", &user_secret, None, None)
+        .context("Failed to store username")?;
+
+    println!("  matrix: credentials encrypted, E2EE enabled.");
     Ok(())
 }

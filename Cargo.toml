@@ -9,6 +9,7 @@ members = [
     "crates/adapter-discord",
     "crates/adapter-slack",
     "crates/adapter-teams",
+    "crates/adapter-matrix",
     "crates/agent",
     "crates/cli",
     "crates/webchat",
@@ -69,6 +70,7 @@ jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
 teloxide = { version = "0.17", features = ["macros"] }
 serenity = "0.12"
 slack-morphism = { version = "2.19", features = ["hyper"] }
+
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
