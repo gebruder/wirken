@@ -6,7 +6,7 @@ members = [
     "crates/ipc",
     "crates/gateway",
     "crates/adapter-telegram",
-    # "crates/agent",           # depends on gateway
+    "crates/agent",
     # "crates/cli",             # depends on gateway
     "crates/webchat",
 ]

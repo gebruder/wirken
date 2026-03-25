@@ -1,2 +1,13 @@
-// wirken-agent: LLM interaction, tool execution, workspace management
-// Stub — not yet implemented
+pub mod conversation;
+pub mod error;
+pub mod llm;
+pub mod runtime;
+pub mod skill;
+pub mod tool;
+
+pub use error::AgentError;
+pub use runtime::Agent;
+pub use skill::SkillLoader;
+
+#[cfg(test)]
+mod tests;
