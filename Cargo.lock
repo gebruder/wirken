@@ -3412,6 +3412,7 @@ name = "wirken-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "capnp",
  "chrono",
  "clap",
  "dialoguer",
@@ -3421,6 +3422,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wirken-adapter-telegram",
  "wirken-agent",
  "wirken-audit",
  "wirken-gateway",

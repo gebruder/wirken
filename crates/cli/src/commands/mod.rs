@@ -1,11 +1,14 @@
+pub mod adapter;
 pub mod agent;
 pub mod audit;
 pub mod channel;
 pub mod credential;
 pub mod doctor;
 pub mod permission;
+pub mod run;
 pub mod session;
 pub mod setup;
+pub mod webchat;
 
 use std::path::PathBuf;
 use wirken_gateway::config::GatewayConfig;
