@@ -15,6 +15,20 @@ enum Commands {
     /// Interactive setup wizard — configure AI provider, channels, and start the gateway
     Setup,
 
+    /// Start the gateway daemon
+    Run {
+        /// WebChat port
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
+
+    /// Run an adapter process (called by the gateway daemon)
+    #[command(hide = true)]
+    Adapter {
+        /// Channel to run
+        channel: String,
+    },
+
     /// Manage messaging channels
     #[command(subcommand)]
     Channel(ChannelCommands),
@@ -137,6 +151,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Setup => commands::setup::run().await,
+        Commands::Run { port } => commands::run::run(port).await,
+        Commands::Adapter { channel } => commands::adapter::run(&channel).await,
         Commands::Channel(cmd) => match cmd {
             ChannelCommands::Add { channel } => commands::channel::add(&channel).await,
             ChannelCommands::List => commands::channel::list().await,

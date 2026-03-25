@@ -14,6 +14,8 @@ wirken-audit = { path = "../audit" }
 wirken-gateway = { path = "../gateway" }
 wirken-agent = { path = "../agent" }
 wirken-ipc = { path = "../ipc" }
+wirken-adapter-telegram = { path = "../adapter-telegram" }
+capnp = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
 tokio = { workspace = true }
