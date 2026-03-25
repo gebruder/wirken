@@ -100,9 +100,21 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
     ) -> Result<LlmResponse, AgentError> {
+        if self.config.provider == "anthropic" {
+            return self.complete_anthropic(messages, tools, api_key).await;
+        }
+        self.complete_openai(messages, tools, api_key).await
+    }
+
+    /// OpenAI-compatible completion (OpenAI, Ollama, custom endpoints).
+    async fn complete_openai(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        api_key: Option<&str>,
+    ) -> Result<LlmResponse, AgentError> {
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        // Build request body (OpenAI format — works for OpenAI, Ollama, and compatible APIs)
         let messages_json: Vec<serde_json::Value> = messages.iter()
             .map(|m| message_to_json(m))
             .collect();
@@ -114,7 +126,6 @@ impl LlmClient {
             "temperature": self.config.temperature,
         });
 
-        // Add tools if any
         if !tools.is_empty() {
             let tools_json: Vec<serde_json::Value> = tools.iter()
                 .map(|t| serde_json::json!({
@@ -133,14 +144,8 @@ impl LlmClient {
             .header("Content-Type", "application/json")
             .json(&body);
 
-        // Set auth header if API key provided
         if let Some(key) = api_key {
-            if self.config.provider == "anthropic" {
-                request = request.header("x-api-key", key)
-                    .header("anthropic-version", "2023-06-01");
-            } else {
-                request = request.header("Authorization", format!("Bearer {key}"));
-            }
+            request = request.header("Authorization", format!("Bearer {key}"));
         }
 
         let response = request.send().await
@@ -156,6 +161,98 @@ impl LlmClient {
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
         parse_completion_response(&response_body)
+    }
+
+    /// Anthropic Messages API completion.
+    async fn complete_anthropic(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        api_key: Option<&str>,
+    ) -> Result<LlmResponse, AgentError> {
+        let url = format!("{}/messages", self.config.base_url);
+
+        // Anthropic separates system prompt from messages
+        let system_prompt: String = messages.iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let messages_json: Vec<serde_json::Value> = messages.iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| {
+                let role = match m.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::Tool => "user", // Anthropic: tool results go in user messages
+                    Role::System => unreachable!(),
+                };
+                let mut obj = serde_json::json!({
+                    "role": role,
+                    "content": m.content,
+                });
+                // Tool results: wrap in tool_result content block
+                if m.role == Role::Tool {
+                    if let Some(ref id) = m.tool_call_id {
+                        obj = serde_json::json!({
+                            "role": "user",
+                            "content": [{
+                                "type": "tool_result",
+                                "tool_use_id": id,
+                                "content": m.content,
+                            }]
+                        });
+                    }
+                }
+                obj
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": self.config.model,
+            "messages": messages_json,
+            "max_tokens": self.config.max_tokens,
+        });
+
+        if !system_prompt.is_empty() {
+            body["system"] = serde_json::Value::String(system_prompt);
+        }
+
+        if !tools.is_empty() {
+            let tools_json: Vec<serde_json::Value> = tools.iter()
+                .map(|t| serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                }))
+                .collect();
+            body["tools"] = serde_json::Value::Array(tools_json);
+        }
+
+        let mut request = self.http.post(&url)
+            .header("Content-Type", "application/json")
+            .header("anthropic-version", "2023-06-01");
+
+        if let Some(key) = api_key {
+            request = request.header("x-api-key", key);
+        }
+
+        let request = request.json(&body);
+
+        let response = request.send().await
+            .map_err(|e| AgentError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
+        }
+
+        let response_body: serde_json::Value = response.json().await
+            .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        parse_anthropic_response(&response_body)
     }
 
     /// Get the current config.
@@ -222,6 +319,48 @@ pub fn parse_completion_response(body: &serde_json::Value) -> Result<LlmResponse
         if !content.is_empty() {
             return Ok(LlmResponse::Text(content.to_string()));
         }
+    }
+
+    Ok(LlmResponse::Empty)
+}
+
+/// Parse an Anthropic Messages API response.
+pub fn parse_anthropic_response(body: &serde_json::Value) -> Result<LlmResponse, AgentError> {
+    let content = body.get("content")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| AgentError::Llm("no content array in Anthropic response".into()))?;
+
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    for block in content {
+        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match block_type {
+            "text" => {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    if !text.is_empty() {
+                        text_parts.push(text.to_string());
+                    }
+                }
+            }
+            "tool_use" => {
+                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                let input = block.get("input").unwrap_or(&serde_json::Value::Null);
+                let arguments = input.to_string();
+                tool_calls.push(ToolCallRequest { id, name, arguments });
+            }
+            _ => {}
+        }
+    }
+
+    if !tool_calls.is_empty() {
+        return Ok(LlmResponse::ToolCalls(tool_calls));
+    }
+
+    if !text_parts.is_empty() {
+        return Ok(LlmResponse::Text(text_parts.join("")));
     }
 
     Ok(LlmResponse::Empty)

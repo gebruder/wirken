@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 use wirken_adapter_discord::DiscordAdapter;
 use wirken_adapter_slack::SlackAdapter;
+use wirken_adapter_teams::TeamsAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
 use wirken_gateway::config::GatewayConfig;
 use wirken_ipc::AdapterIdentity;
@@ -73,8 +74,24 @@ pub async fn run(channel: &str) -> Result<()> {
             adapter.run(&socket_path).await
                 .map_err(|e| anyhow::anyhow!("Slack adapter error: {e}"))?;
         }
+        "teams" => {
+            // Teams needs App ID in addition to App Password (bot token)
+            let app_id_name = format!("{channel}-app-id");
+            let (app_id_secret, _) = store.retrieve(&app_id_name)
+                .context("No app ID found for 'teams'. Run `wirken channel add teams`.")?;
+            let app_id = app_id_secret.expose().to_string();
+
+            let listen_port: u16 = std::env::var("WIRKEN_TEAMS_PORT")
+                .unwrap_or_else(|_| "3978".into())
+                .parse()
+                .unwrap_or(3978);
+
+            let adapter = TeamsAdapter::new(identity, app_id, bot_token, listen_port);
+            adapter.run(&socket_path).await
+                .map_err(|e| anyhow::anyhow!("Teams adapter error: {e}"))?;
+        }
         other => {
-            anyhow::bail!("Unknown adapter: '{other}'. Supported: telegram, discord, slack");
+            anyhow::bail!("Unknown adapter: '{other}'. Supported: telegram, discord, slack, teams");
         }
     }
 

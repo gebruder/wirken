@@ -100,6 +100,12 @@ impl Channel for Matrix {
     fn id() -> &'static str { "matrix" }
 }
 
+/// Microsoft Teams channel marker.
+pub struct Teams;
+impl Channel for Teams {
+    fn id() -> &'static str { "teams" }
+}
+
 /// Generic channel marker for testing and dynamic dispatch.
 pub struct Generic;
 impl Channel for Generic {

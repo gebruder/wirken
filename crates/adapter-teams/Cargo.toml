@@ -1,0 +1,21 @@
+[package]
+name = "wirken-adapter-teams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wirken-ipc = { path = "../ipc" }
+capnp = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
