@@ -51,6 +51,17 @@ impl MatrixAdapter {
         let writer = Arc::new(Mutex::new(writer));
         let http = reqwest::Client::new();
 
+        // Validate HTTPS — refuse to send credentials over plaintext HTTP
+        if !self.homeserver_url.starts_with("https://")
+            && !self.homeserver_url.starts_with("http://localhost")
+            && !self.homeserver_url.starts_with("http://127.0.0.1")
+        {
+            return Err(MatrixError::Matrix(format!(
+                "Homeserver URL must use HTTPS: {}",
+                self.homeserver_url
+            )));
+        }
+
         // Login to Matrix
         tracing::info!("Logging in to {} as {}", self.homeserver_url, self.username);
         let login_url = format!("{}/_matrix/client/v3/login", self.homeserver_url);
