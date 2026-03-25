@@ -60,13 +60,12 @@ OpenClaw's agent uses bootstrap files: `AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER
 | Single process, all channels in-process | Separate process per channel |
 | Plaintext credentials on disk | Encrypted vault, OS keychain |
 | No audit trail | Append-only hash-chained audit log |
-| `npm install -g openclaw` | `cargo install --path crates/cli` (release binaries coming) |
+| `npm install -g openclaw` | `curl -fsSL .../install.sh \| sh` or `cargo install --path crates/cli` |
 | `openclaw onboard` | `wirken setup` |
 | `openclaw gateway` | `wirken run` |
 
 ## What's not yet available
 
-- Discord and Slack adapters (Telegram only in MVP)
 - Multi-agent routing
 - Voice/TTS
 - Mobile companion apps
