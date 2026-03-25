@@ -4,13 +4,21 @@ Wirken is a secure, model-agnostic personal AI agent gateway. It connects to the
 
 ## Install and run
 
-Build from source (requires Rust 1.85+):
+Download the latest release binary:
 
 ```bash
-cargo install --path crates/cli
+curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
 
 wirken setup
 wirken run
+```
+
+Prebuilt binaries are available for Linux (x86_64, aarch64) and macOS (x86_64, Apple Silicon). The Linux binaries are statically linked against musl — no glibc dependency.
+
+Or build from source (requires Rust 1.85+ and the `capnp` compiler):
+
+```bash
+cargo install --path crates/cli
 ```
 
 `wirken setup` walks you through three steps:
@@ -100,7 +108,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Current status
 
-MVP. 12 crates, 191 tests, single binary.
+12 crates, 191 tests, CI on every push, release binaries for four platforms.
 
 **Ships now:**
 - Four channel adapters running simultaneously as isolated processes:
@@ -123,6 +131,9 @@ MVP. 12 crates, 191 tests, single binary.
 - WebChat UI at localhost
 - Service installation (systemd / launchd)
 - Diagnostics (`wirken doctor`)
+- CI: cargo test + clippy + fmt on every push
+- Release binaries: Linux x86_64/aarch64 (static musl), macOS x86_64/aarch64
+- Install script: `curl | sh`
 
 **Not yet:**
 - Multi-agent routing (gateway supports it, CLI doesn't expose it yet)
@@ -146,14 +157,16 @@ See [docs/migration.md](docs/migration.md) for a detailed migration guide.
 Wirken is a Rust workspace. All crates compile and test independently:
 
 ```bash
-cargo test              # run all 140 tests
+cargo test              # run all 191 tests
 cargo test -p wirken-vault    # test one crate
 cargo build -p wirken-cli     # build the binary
 ```
 
+Building from source requires the Cap'n Proto compiler (`capnproto` package on Ubuntu, `capnp` via Homebrew on macOS).
+
 The architecture is documented in [docs/architecture.md](docs/architecture.md). The build plan and sequencing are in [docs/build-plan.md](docs/build-plan.md).
 
-**Adapter contributions are especially welcome.** Each adapter is an independent crate (`crates/adapter-<channel>/`) that implements the same IPC contract: connect to the gateway UDS, perform Ed25519 handshake, convert platform messages to/from Cap'n Proto frames. The Telegram adapter is the reference implementation. Discord and Slack adapters are next.
+**Adapter contributions are especially welcome.** Each adapter is an independent crate (`crates/adapter-<channel>/`) that implements the same IPC contract: connect to the gateway UDS, perform Ed25519 handshake, convert platform messages to/from Cap'n Proto frames. See any existing adapter for the pattern — Telegram is the simplest, Teams shows the HTTP webhook variant.
 
 ## The name
 
