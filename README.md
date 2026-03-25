@@ -108,7 +108,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Current status
 
-14 crates, 210 tests, CI on every push, release binaries for four platforms.
+14 crates, 217 tests, CI on every push, release binaries for four platforms.
 
 **Ships now:**
 - Five channel adapters running simultaneously as isolated processes:
@@ -117,7 +117,8 @@ This isolation is enforced at the type level. Session handles are parameterized 
   - Slack (slack-morphism 2.19, Socket Mode, mention-gated in channels)
   - Microsoft Teams (Bot Framework REST API, HTTP webhook, mention-gated)
   - Matrix (Client-Server API, rooms + DMs, mention-gated in rooms)
-- Multi-agent routing (work agent on Slack/Teams, personal on Telegram/Discord)
+- Multi-agent routing (work agent on Slack/Teams, personal on Telegram/Discord, each with its own model, API key, workspace, and skills)
+- Skill registry with Ed25519 signing (`wirken skills search/install/sign/verify`)
 - Agent runtime with LLM tool calling (OpenAI, Anthropic, Ollama, custom endpoints)
 - Built-in tools: shell exec, file read/write, directory listing
 - SKILL.md loader (compatible with OpenClaw's 52 bundled skills)
@@ -138,13 +139,12 @@ This isolation is enforced at the type level. Session handles are parameterized 
 - Install script: `curl | sh`
 
 **Not yet:**
-- Multi-agent routing (gateway supports it, CLI doesn't expose it yet)
 - Voice/TTS
 - Wasm skill sandbox (Wasmtime integration designed, not built)
 - gVisor container sandbox for code skills
-- Skill registry and signing
 - Mobile companion apps
 - MCP server support
+- Matrix E2EE (blocked by matrix-sdk sqlite version conflict)
 
 ## Migrating from OpenClaw
 
