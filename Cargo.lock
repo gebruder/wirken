@@ -131,6 +131,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "capnpc"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6cdfa6b0df161a71201367910265b97180541ecdb48bd08e05ef8694c295d1f"
+dependencies = [
+ "capnp",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1617,10 +1626,15 @@ name = "wirken-ipc"
 version = "0.1.0"
 dependencies = [
  "capnp",
+ "capnpc",
  "ed25519-dalek",
+ "rand",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
