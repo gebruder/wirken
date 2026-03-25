@@ -9,13 +9,18 @@ wirken-vault = { path = "../vault" }
 wirken-audit = { path = "../audit" }
 wirken-ipc = { path = "../ipc" }
 tokio = { workspace = true }
-reqwest = { workspace = true }
-reqwest-eventsource = { workspace = true }
 governor = { workspace = true }
-jsonwebtoken = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+rusqlite = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
