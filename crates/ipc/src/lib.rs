@@ -1,7 +1,7 @@
 mod auth;
 mod channel;
 mod error;
-mod transport;
+pub mod transport;
 
 // Generated Cap'n Proto code
 pub mod wirken_capnp {
