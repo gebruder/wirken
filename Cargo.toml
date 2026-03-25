@@ -6,6 +6,7 @@ members = [
     "crates/ipc",
     "crates/gateway",
     "crates/adapter-telegram",
+    "crates/adapter-discord",
     "crates/agent",
     "crates/cli",
     "crates/webchat",
