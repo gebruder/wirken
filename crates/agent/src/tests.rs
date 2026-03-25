@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use crate::conversation::{Conversation, Role};
-use crate::llm::{LlmClient, LlmConfig, LlmResponse};
+use crate::llm::{LlmConfig, LlmResponse};
 use crate::skill::{Skill, SkillLoader};
-use crate::tool::{ToolDef, ToolRegistry};
+use crate::tool::ToolRegistry;
 
 // ---------------------------------------------------------------------------
 // Conversation

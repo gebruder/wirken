@@ -1,4 +1,4 @@
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
+use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 

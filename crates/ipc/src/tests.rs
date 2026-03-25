@@ -118,8 +118,8 @@ fn different_identities_have_different_keys() {
 async fn frame_roundtrip_inbound_message() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
 
-    let (client_reader, mut client_writer) = split_stream(client);
-    let (mut server_reader, server_writer) = split_stream(server);
+    let (_client_reader, mut client_writer) = split_stream(client);
+    let (mut server_reader, _server_writer) = split_stream(server);
 
     // Client sends an inbound message
     let mut msg = capnp::message::Builder::new_default();
