@@ -1,0 +1,352 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+
+use crate::error::GatewayError;
+
+/// A skill entry in the registry index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillEntry {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub author: String,
+    /// URL to download the SKILL.md file.
+    pub url: String,
+    /// Hex-encoded Ed25519 signature of the SKILL.md content hash.
+    pub signature: Option<String>,
+    /// Hex-encoded Ed25519 public key of the signer.
+    pub signer_key: Option<String>,
+}
+
+/// The registry index — a list of published skills.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillIndex {
+    pub skills: Vec<SkillEntry>,
+}
+
+impl SkillIndex {
+    /// Search skills by name or description substring.
+    pub fn search(&self, query: &str) -> Vec<&SkillEntry> {
+        let q = query.to_lowercase();
+        self.skills
+            .iter()
+            .filter(|s| {
+                s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)
+            })
+            .collect()
+    }
+
+    /// Find a skill by exact name.
+    pub fn find(&self, name: &str) -> Option<&SkillEntry> {
+        self.skills.iter().find(|s| s.name == name)
+    }
+}
+
+/// Compute the SHA-256 hash of a file's contents.
+pub fn hash_skill_file(path: &Path) -> Result<Vec<u8>, GatewayError> {
+    let content = std::fs::read(path)
+        .map_err(|e| GatewayError::Config(format!("read {}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    Ok(hasher.finalize().to_vec())
+}
+
+/// Sign a skill directory. Signs the SKILL.md content hash with Ed25519.
+/// Writes the signature to SKILL.sig as hex.
+pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, GatewayError> {
+    let skill_md = skill_dir.join("SKILL.md");
+    if !skill_md.exists() {
+        return Err(GatewayError::Config(format!(
+            "no SKILL.md in {}",
+            skill_dir.display()
+        )));
+    }
+
+    let hash = hash_skill_file(&skill_md)?;
+    let signature = signing_key.sign(&hash);
+    let sig_hex = hex_encode(&signature.to_bytes());
+
+    // Write signature file
+    let sig_path = skill_dir.join("SKILL.sig");
+    std::fs::write(&sig_path, &sig_hex)
+        .map_err(|e| GatewayError::Config(format!("write sig: {e}")))?;
+
+    // Write public key file
+    let pub_key_hex = hex_encode(&signing_key.verifying_key().to_bytes());
+    let key_path = skill_dir.join("SKILL.pub");
+    std::fs::write(&key_path, &pub_key_hex)
+        .map_err(|e| GatewayError::Config(format!("write pub key: {e}")))?;
+
+    Ok(sig_hex)
+}
+
+/// Verify a skill's signature. Returns Ok(true) if valid, Ok(false) if
+/// no signature present, Err if signature is present but invalid.
+pub fn verify_skill(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let sig_path = skill_dir.join("SKILL.sig");
+    let key_path = skill_dir.join("SKILL.pub");
+
+    if !sig_path.exists() || !key_path.exists() {
+        return Ok(VerifyResult::Unsigned);
+    }
+
+    let hash = hash_skill_file(&skill_md)?;
+
+    let sig_hex = std::fs::read_to_string(&sig_path)
+        .map_err(|e| GatewayError::Config(format!("read sig: {e}")))?;
+    let sig_bytes =
+        hex_decode(sig_hex.trim()).map_err(|e| GatewayError::Config(format!("decode sig: {e}")))?;
+    if sig_bytes.len() != 64 {
+        return Err(GatewayError::Config(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        )));
+    }
+
+    let key_hex = std::fs::read_to_string(&key_path)
+        .map_err(|e| GatewayError::Config(format!("read pub key: {e}")))?;
+    let key_bytes = hex_decode(key_hex.trim())
+        .map_err(|e| GatewayError::Config(format!("decode pub key: {e}")))?;
+    if key_bytes.len() != 32 {
+        return Err(GatewayError::Config(format!(
+            "public key must be 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let signature = Signature::from_bytes(&sig_arr);
+
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&key_bytes);
+    let verifying_key = VerifyingKey::from_bytes(&key_arr)
+        .map_err(|e| GatewayError::Config(format!("invalid pub key: {e}")))?;
+
+    match verifying_key.verify(&hash, &signature) {
+        Ok(()) => Ok(VerifyResult::Valid {
+            signer: key_hex.trim().to_string(),
+        }),
+        Err(_) => Ok(VerifyResult::Invalid),
+    }
+}
+
+/// Generate a new Ed25519 keypair for skill signing.
+/// Returns (secret_key_hex, public_key_hex).
+pub fn generate_signing_keypair() -> (String, String) {
+    let mut rng = rand::thread_rng();
+    let signing_key = SigningKey::generate(&mut rng);
+    let secret_hex = hex_encode(signing_key.as_bytes());
+    let public_hex = hex_encode(&signing_key.verifying_key().to_bytes());
+    (secret_hex, public_hex)
+}
+
+/// Result of signature verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyResult {
+    /// Skill has a valid signature.
+    Valid { signer: String },
+    /// Skill has a signature but it's invalid.
+    Invalid,
+    /// Skill has no signature.
+    Unsigned,
+}
+
+/// Public hex encode (for CLI).
+pub fn hex_encode_public(bytes: &[u8]) -> String {
+    hex_encode(bytes)
+}
+
+/// Public hex decode (for CLI).
+pub fn hex_decode_public(hex: &str) -> Result<Vec<u8>, GatewayError> {
+    hex_decode(hex).map_err(|e| GatewayError::Config(format!("hex decode: {e}")))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("odd-length hex string".into());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn sign_and_verify_skill() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("weather");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: weather\n---\nUse curl wttr.in",
+        )
+        .unwrap();
+
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        sign_skill(&skill_dir, &signing_key).unwrap();
+
+        assert!(skill_dir.join("SKILL.sig").exists());
+        assert!(skill_dir.join("SKILL.pub").exists());
+
+        match verify_skill(&skill_dir).unwrap() {
+            VerifyResult::Valid { .. } => {}
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_skill() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("unsigned");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: test\n---\nbody").unwrap();
+
+        match verify_skill(&skill_dir).unwrap() {
+            VerifyResult::Unsigned => {}
+            other => panic!("expected Unsigned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tampered_skill_detected() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("tampered");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "original content").unwrap();
+
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        sign_skill(&skill_dir, &signing_key).unwrap();
+
+        // Tamper with the content
+        std::fs::write(skill_dir.join("SKILL.md"), "TAMPERED content").unwrap();
+
+        match verify_skill(&skill_dir).unwrap() {
+            VerifyResult::Invalid => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrong_key_detected() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("wrongkey");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "content").unwrap();
+
+        let key1 = SigningKey::generate(&mut rand::thread_rng());
+        sign_skill(&skill_dir, &key1).unwrap();
+
+        // Replace pub key with a different key
+        let key2 = SigningKey::generate(&mut rand::thread_rng());
+        let pub_hex = hex_encode(&key2.verifying_key().to_bytes());
+        std::fs::write(skill_dir.join("SKILL.pub"), &pub_hex).unwrap();
+
+        match verify_skill(&skill_dir).unwrap() {
+            VerifyResult::Invalid => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_keypair_returns_valid_hex() {
+        let (secret, public) = generate_signing_keypair();
+        assert_eq!(secret.len(), 64); // 32 bytes = 64 hex chars
+        assert_eq!(public.len(), 64);
+
+        // Can reconstruct from hex
+        let secret_bytes = hex_decode(&secret).unwrap();
+        assert_eq!(secret_bytes.len(), 32);
+    }
+
+    #[test]
+    fn search_index() {
+        let index = SkillIndex {
+            skills: vec![
+                SkillEntry {
+                    name: "weather".into(),
+                    description: "Get current weather".into(),
+                    version: "1.0.0".into(),
+                    author: "wirken".into(),
+                    url: "https://example.com/weather".into(),
+                    signature: None,
+                    signer_key: None,
+                },
+                SkillEntry {
+                    name: "github".into(),
+                    description: "GitHub operations via gh CLI".into(),
+                    version: "1.0.0".into(),
+                    author: "wirken".into(),
+                    url: "https://example.com/github".into(),
+                    signature: None,
+                    signer_key: None,
+                },
+                SkillEntry {
+                    name: "tmux".into(),
+                    description: "Control tmux sessions".into(),
+                    version: "1.0.0".into(),
+                    author: "wirken".into(),
+                    url: "https://example.com/tmux".into(),
+                    signature: None,
+                    signer_key: None,
+                },
+            ],
+        };
+
+        let results = index.search("weather");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "weather");
+
+        let results = index.search("git");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "github");
+
+        let results = index.search("CLI");
+        assert_eq!(results.len(), 1); // github has "CLI" in description
+
+        let results = index.search("nonexistent");
+        assert!(results.is_empty());
+
+        assert!(index.find("tmux").is_some());
+        assert!(index.find("nope").is_none());
+    }
+
+    #[test]
+    fn sign_verify_roundtrip_with_generated_keypair() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("roundtrip");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: test\ndescription: roundtrip test\n---\nBody content here.",
+        )
+        .unwrap();
+
+        let (secret_hex, _public_hex) = generate_signing_keypair();
+        let secret_bytes = hex_decode(&secret_hex).unwrap();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&secret_bytes);
+        let signing_key = SigningKey::from_bytes(&arr);
+
+        sign_skill(&skill_dir, &signing_key).unwrap();
+
+        match verify_skill(&skill_dir).unwrap() {
+            VerifyResult::Valid { signer } => {
+                assert_eq!(signer.len(), 64);
+            }
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+}

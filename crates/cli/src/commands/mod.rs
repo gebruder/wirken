@@ -10,6 +10,7 @@ pub mod run;
 pub mod service;
 pub mod session;
 pub mod setup;
+pub mod skills;
 pub mod webchat;
 
 use std::path::PathBuf;
