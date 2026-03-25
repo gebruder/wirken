@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use wirken_adapter_discord::DiscordAdapter;
+use wirken_adapter_slack::SlackAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
 use wirken_gateway::config::GatewayConfig;
 use wirken_ipc::AdapterIdentity;
@@ -61,8 +62,19 @@ pub async fn run(channel: &str) -> Result<()> {
             adapter.run(&socket_path).await
                 .map_err(|e| anyhow::anyhow!("Discord adapter error: {e}"))?;
         }
+        "slack" => {
+            // Slack Socket Mode requires an app token in addition to the bot token
+            let app_token_name = format!("{channel}-app-token");
+            let (app_token_secret, _) = store.retrieve(&app_token_name)
+                .context("No app token found for 'slack'. Run `wirken channel add slack`.")?;
+            let app_token = app_token_secret.expose().to_string();
+
+            let adapter = SlackAdapter::new(identity, bot_token, app_token);
+            adapter.run(&socket_path).await
+                .map_err(|e| anyhow::anyhow!("Slack adapter error: {e}"))?;
+        }
         other => {
-            anyhow::bail!("Unknown adapter: '{other}'. Supported: telegram, discord");
+            anyhow::bail!("Unknown adapter: '{other}'. Supported: telegram, discord, slack");
         }
     }
 

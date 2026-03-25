@@ -229,9 +229,25 @@ async fn setup_slack_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
+    let bot_token = Password::new()
+        .with_prompt("  Slack bot token (xoxb-...)")
+        .interact()?;
+
     let app_token = Password::new()
         .with_prompt("  Slack app token (xapp-...)")
         .interact()?;
 
-    register_channel("slack", &app_token, cfg, data).await
+    // Register with the bot token as the primary
+    register_channel("slack", &bot_token, cfg, data).await?;
+
+    // Store the app token separately (Socket Mode needs both)
+    let keychain = wirken_vault::probe_keychain(data, || String::new());
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    let secret = wirken_vault::VaultSecret::new(app_token);
+    store.store("slack-app-token", "slack", &secret, None, None)
+        .context("Failed to store Slack app token")?;
+
+    println!("  slack: both tokens encrypted.");
+    Ok(())
 }
