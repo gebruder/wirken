@@ -6,6 +6,7 @@ pub mod credential;
 pub mod doctor;
 pub mod permission;
 pub mod run;
+pub mod service;
 pub mod session;
 pub mod setup;
 pub mod webchat;

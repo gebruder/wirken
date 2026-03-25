@@ -13,7 +13,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Interactive setup wizard — configure AI provider, channels, and start the gateway
-    Setup,
+    Setup {
+        /// Install Wirken as a system service (systemd on Linux, launchd on macOS)
+        #[arg(long)]
+        install_service: bool,
+        /// Uninstall the Wirken system service
+        #[arg(long)]
+        uninstall_service: bool,
+    },
 
     /// Start the gateway daemon
     Run {
@@ -150,7 +157,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup => commands::setup::run().await,
+        Commands::Setup { install_service, uninstall_service } => {
+            if uninstall_service {
+                return commands::service::uninstall_service();
+            }
+            commands::setup::run(install_service).await
+        }
         Commands::Run { port } => commands::run::run(port).await,
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,
         Commands::Channel(cmd) => match cmd {
