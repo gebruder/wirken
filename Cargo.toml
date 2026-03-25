@@ -83,3 +83,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # Error handling
 thiserror = "2"
 anyhow = "1"
+
+# OpenSSL (vendored for static musl builds — pulled by serenity/teloxide via reqwest 0.12)
+openssl = { version = "0.10", features = ["vendored"] }
