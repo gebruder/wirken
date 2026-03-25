@@ -60,6 +60,10 @@ enum Commands {
     #[command(subcommand)]
     Agents(AgentCommands),
 
+    /// Search, install, and manage skills
+    #[command(subcommand)]
+    Skills(SkillCommands),
+
     /// Send a message to an agent
     #[command(name = "ask")]
     Ask {
@@ -163,6 +167,32 @@ enum AgentCommands {
 }
 
 #[derive(Subcommand)]
+enum SkillCommands {
+    /// Search the skill registry
+    Search {
+        /// Search query
+        query: String,
+    },
+    /// Install a skill from the registry
+    Install {
+        /// Skill name
+        name: String,
+    },
+    /// List installed skills
+    List,
+    /// Sign a skill directory with Ed25519
+    Sign {
+        /// Path to skill directory
+        dir: String,
+    },
+    /// Verify a skill's signature
+    Verify {
+        /// Path to skill directory
+        dir: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum CredentialCommands {
     /// List stored credentials (metadata only — no secrets shown)
     List,
@@ -222,6 +252,13 @@ async fn main() -> Result<()> {
         Commands::Credentials(cmd) => match cmd {
             CredentialCommands::List => commands::credential::list().await,
             CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
+        },
+        Commands::Skills(cmd) => match cmd {
+            SkillCommands::Search { query } => commands::skills::search(&query).await,
+            SkillCommands::Install { name } => commands::skills::install(&name).await,
+            SkillCommands::List => commands::skills::list().await,
+            SkillCommands::Sign { dir } => commands::skills::sign(&dir).await,
+            SkillCommands::Verify { dir } => commands::skills::verify(&dir).await,
         },
         Commands::Agents(cmd) => match cmd {
             AgentCommands::Add => commands::agents::add().await,

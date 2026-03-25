@@ -20,6 +20,8 @@ wirken-adapter-slack = { path = "../adapter-slack" }
 wirken-adapter-teams = { path = "../adapter-teams" }
 wirken-adapter-matrix = { path = "../adapter-matrix" }
 capnp = { workspace = true }
+ed25519-dalek = { workspace = true }
+reqwest = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
 tokio = { workspace = true }

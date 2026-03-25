@@ -6,6 +6,7 @@ pub mod permissions;
 pub mod rate_limit;
 pub mod router;
 pub mod session;
+pub mod skill_registry;
 
 #[cfg(test)]
 mod tests;
