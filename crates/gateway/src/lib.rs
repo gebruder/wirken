@@ -1,4 +1,5 @@
 pub mod adapter_registry;
+pub mod agent_config;
 pub mod config;
 pub mod error;
 pub mod permissions;

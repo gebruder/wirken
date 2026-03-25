@@ -61,6 +61,23 @@ impl GatewayConfig {
         self.data_dir.join("adapters.db")
     }
 
+    pub fn agent_config_db_path(&self) -> PathBuf {
+        self.data_dir.join("agent_config.db")
+    }
+
+    /// Per-agent workspace directory.
+    pub fn agent_workspace(&self, agent_id: &str) -> PathBuf {
+        self.data_dir
+            .join("agents")
+            .join(agent_id)
+            .join("workspace")
+    }
+
+    /// Per-agent skills directory.
+    pub fn agent_skills_dir(&self, agent_id: &str) -> PathBuf {
+        self.data_dir.join("agents").join(agent_id).join("skills")
+    }
+
     pub fn socket_dir(&self) -> PathBuf {
         self.data_dir.join("sockets")
     }

@@ -2,14 +2,30 @@ use anyhow::{Context, Result};
 
 use wirken_agent::Agent;
 use wirken_agent::llm::LlmConfig;
+use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
 
-pub async fn send(message: &str) -> Result<()> {
+pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     let cfg = config();
 
-    // Load provider config
+    // Try to load agent config from the multi-agent store first
+    let agent_config_path = cfg.agent_config_db_path();
+    if agent_config_path.exists()
+        && let Ok(store) = AgentConfigStore::open(&agent_config_path)
+        && let Ok(agent_cfg) = store.get(agent_id)
+    {
+        return send_with_agent_config(message, &agent_cfg, &cfg).await;
+    }
+
+    // Fall back to legacy provider.json for "default" agent
+    if agent_id != "default" {
+        anyhow::bail!(
+            "Agent '{agent_id}' not found. Run `wirken agents add` or use --agent default."
+        );
+    }
+
     let provider_path = cfg.data_dir.join("provider.json");
     if !provider_path.exists() {
         anyhow::bail!("No AI provider configured. Run `wirken setup` first.");
@@ -26,7 +42,6 @@ pub async fn send(message: &str) -> Result<()> {
 
     let llm_config = LlmConfig::custom(base_url, model);
 
-    // Get API key from vault if needed
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
             dialoguer::Password::new()
@@ -34,47 +49,81 @@ pub async fn send(message: &str) -> Result<()> {
                 .interact()
                 .unwrap_or_default()
         });
-
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
-
         let cred_name = format!("{provider}-api-key");
         match store.retrieve(&cred_name) {
             Ok((secret, _)) => Some(secret.expose().to_string()),
-            Err(_) => {
-                eprintln!("  Warning: no API key found for '{provider}'. Proceeding without auth.");
-                None
-            }
+            Err(_) => None,
         }
     } else {
         None
     };
 
-    // Create agent
     let workspace = cfg.data_dir.join("workspace");
     std::fs::create_dir_all(&workspace)?;
 
     let mut agent = Agent::new("default".into(), workspace.clone(), llm_config, api_key);
 
-    // Load skills if directory exists
     let skills_dir = cfg.data_dir.join("skills");
     if skills_dir.is_dir() {
-        match agent.load_skills(&skills_dir) {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::info!("Loaded {count} skills");
-                }
-            }
-            Err(e) => tracing::warn!("Failed to load skills: {e}"),
+        let _ = agent.load_skills(&skills_dir);
+    }
+
+    println!();
+    match agent.process_message(message).await {
+        Ok(response) => println!("{response}"),
+        Err(e) => {
+            eprintln!("  Error: {e}");
+            std::process::exit(1);
         }
     }
 
-    // Process message
+    Ok(())
+}
+
+async fn send_with_agent_config(
+    message: &str,
+    agent_cfg: &wirken_gateway::agent_config::AgentConfig,
+    cfg: &wirken_gateway::config::GatewayConfig,
+) -> Result<()> {
+    let llm_config = LlmConfig::custom(&agent_cfg.base_url, &agent_cfg.model);
+
+    let api_key = if !agent_cfg.api_key_credential.is_empty() {
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            dialoguer::Password::new()
+                .with_prompt("  Vault passphrase")
+                .interact()
+                .unwrap_or_default()
+        });
+        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("Failed to open credential store")?;
+        match store.retrieve(&agent_cfg.api_key_credential) {
+            Ok((secret, _)) => Some(secret.expose().to_string()),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+
+    let workspace = cfg.agent_workspace(&agent_cfg.id);
+    std::fs::create_dir_all(&workspace)?;
+
+    let mut agent = Agent::new(agent_cfg.id.clone(), workspace.clone(), llm_config, api_key);
+
+    let skills_dir = cfg.agent_skills_dir(&agent_cfg.id);
+    if skills_dir.is_dir() {
+        let _ = agent.load_skills(&skills_dir);
+    }
+    // Also load shared skills
+    let shared_skills = cfg.data_dir.join("skills");
+    if shared_skills.is_dir() {
+        let _ = agent.load_skills(&shared_skills);
+    }
+
     println!();
     match agent.process_message(message).await {
-        Ok(response) => {
-            println!("{response}");
-        }
+        Ok(response) => println!("{response}"),
         Err(e) => {
             eprintln!("  Error: {e}");
             std::process::exit(1);

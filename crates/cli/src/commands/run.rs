@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,6 +10,7 @@ use wirken_agent::Agent;
 use wirken_agent::llm::LlmConfig;
 use wirken_audit::{AuditEvent, AuditWriter};
 use wirken_gateway::adapter_registry::AdapterRegistry;
+use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
 use wirken_ipc::perform_gateway_handshake;
@@ -85,35 +87,108 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open session store")?,
     ));
 
-    // --- Setup router ---
+    // --- Setup router and create agents ---
     let router = Arc::new(Router::new());
-    // Bind all registered adapters to the default agent with wildcard routing
-    for adapter in registry.lock().await.list() {
-        router.bind(RouteBinding {
-            channel: adapter.channel.clone(),
-            conversation_pattern: "*".into(),
-            agent_id: "default".into(),
+    let mut agents_map: HashMap<String, Mutex<Agent>> = HashMap::new();
+
+    // Load multi-agent configs if available
+    let agent_config_path = cfg.agent_config_db_path();
+    let has_multi_agent = agent_config_path.exists()
+        && AgentConfigStore::open(&agent_config_path)
+            .map(|s| !s.list().unwrap_or_default().is_empty())
+            .unwrap_or(false);
+
+    if has_multi_agent {
+        let agent_store = AgentConfigStore::open(&agent_config_path)
+            .context("Failed to open agent config store")?;
+
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            dialoguer::Password::new()
+                .with_prompt("  Vault passphrase")
+                .interact()
+                .unwrap_or_default()
         });
-        println!("  Route: {} -> agent:default", adapter.channel);
-    }
+        let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
 
-    // --- Create agent ---
-    let workspace = cfg.data_dir.join("workspace");
-    std::fs::create_dir_all(&workspace)?;
+        for agent_cfg in agent_store.list()? {
+            // Resolve API key from vault
+            let agent_api_key = if !agent_cfg.api_key_credential.is_empty() {
+                vault
+                    .as_ref()
+                    .and_then(|v| v.retrieve(&agent_cfg.api_key_credential).ok())
+                    .map(|(secret, _)| secret.expose().to_string())
+            } else {
+                None
+            };
 
-    let llm_config = LlmConfig::custom(base_url, model);
-    let mut agent = Agent::new("default".into(), workspace.clone(), llm_config, api_key);
+            let llm = LlmConfig::custom(&agent_cfg.base_url, &agent_cfg.model);
+            let workspace = cfg.agent_workspace(&agent_cfg.id);
+            std::fs::create_dir_all(&workspace)?;
 
-    // Load skills
-    let skills_dir = cfg.data_dir.join("skills");
-    if skills_dir.is_dir() {
-        match agent.load_skills(&skills_dir) {
-            Ok(count) if count > 0 => println!("  Skills: {count} loaded"),
-            _ => {}
+            let mut agent = Agent::new(agent_cfg.id.clone(), workspace, llm, agent_api_key);
+
+            // Load per-agent skills + shared skills
+            let agent_skills = cfg.agent_skills_dir(&agent_cfg.id);
+            if agent_skills.is_dir() {
+                let _ = agent.load_skills(&agent_skills);
+            }
+            let shared_skills = cfg.data_dir.join("skills");
+            if shared_skills.is_dir() {
+                let _ = agent.load_skills(&shared_skills);
+            }
+
+            // Bind channels to this agent
+            for channel in &agent_cfg.channels {
+                router.bind(RouteBinding {
+                    channel: channel.clone(),
+                    conversation_pattern: "*".into(),
+                    agent_id: agent_cfg.id.clone(),
+                });
+                println!(
+                    "  Route: {} -> agent:{} ({}/{})",
+                    channel, agent_cfg.id, agent_cfg.provider, agent_cfg.model
+                );
+            }
+
+            agents_map.insert(agent_cfg.id.clone(), Mutex::new(agent));
         }
     }
 
-    let agent = Arc::new(Mutex::new(agent));
+    // Create default agent for any unbound channels (backward compat with wirken setup)
+    if !agents_map.contains_key("default") {
+        let llm_config = LlmConfig::custom(base_url, model);
+        let workspace = cfg.data_dir.join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+
+        let mut default_agent = Agent::new("default".into(), workspace, llm_config, api_key);
+
+        let skills_dir = cfg.data_dir.join("skills");
+        if skills_dir.is_dir() {
+            let _ = default_agent.load_skills(&skills_dir);
+        }
+
+        // Bind any channels not already routed
+        for adapter in registry.lock().await.list() {
+            let already_routed = router.resolve(&adapter.channel, "any").is_ok();
+            if !already_routed {
+                router.bind(RouteBinding {
+                    channel: adapter.channel.clone(),
+                    conversation_pattern: "*".into(),
+                    agent_id: "default".into(),
+                });
+                println!("  Route: {} -> agent:default", adapter.channel);
+            }
+        }
+
+        agents_map.insert("default".into(), Mutex::new(default_agent));
+    }
+
+    println!(
+        "  Agents: {}",
+        agents_map.keys().cloned().collect::<Vec<_>>().join(", ")
+    );
+
+    let agents: Arc<HashMap<String, Mutex<Agent>>> = Arc::new(agents_map);
 
     // --- Setup UDS listener ---
     let socket_path = cfg.socket_dir().join("gateway.sock");
@@ -162,13 +237,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Webchat ---
     let webchat_port = port.unwrap_or(18790);
-    let webchat_agent = agent.clone();
+    let webchat_agents = agents.clone();
     let webchat_audit = audit.clone();
     let webchat_sessions = sessions.clone();
     let webchat_handle = tokio::spawn(async move {
-        if let Err(e) =
-            super::webchat::serve(webchat_port, webchat_agent, webchat_audit, webchat_sessions)
-                .await
+        if let Err(e) = super::webchat::serve(
+            webchat_port,
+            webchat_agents,
+            webchat_audit,
+            webchat_sessions,
+        )
+        .await
         {
             tracing::error!("Webchat server error: {e}");
         }
@@ -181,7 +260,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Accept adapter connections ---
     let accept_registry = registry.clone();
-    let accept_agent = agent.clone();
+    let accept_agents = agents.clone();
     let accept_audit = audit.clone();
     let accept_sessions = sessions.clone();
     let accept_router = router.clone();
@@ -191,7 +270,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let reg = accept_registry.clone();
-                    let ag = accept_agent.clone();
+                    let ag = accept_agents.clone();
                     let au = accept_audit.clone();
                     let sess = accept_sessions.clone();
                     let rtr = accept_router.clone();
@@ -242,7 +321,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 async fn handle_adapter_connection(
     stream: UnixStream,
     registry: Arc<Mutex<AdapterRegistry>>,
-    agent: Arc<Mutex<Agent>>,
+    agents: Arc<HashMap<String, Mutex<Agent>>>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
@@ -284,7 +363,7 @@ async fn handle_adapter_connection(
         &adapter_id,
         &mut reader,
         writer.clone(),
-        agent,
+        agents,
         audit.clone(),
         sessions,
         router,
@@ -307,7 +386,7 @@ async fn message_loop(
     adapter_id: &str,
     reader: &mut FrameReader,
     writer: Arc<Mutex<FrameWriter>>,
-    agent: Arc<Mutex<Agent>>,
+    agents: Arc<HashMap<String, Mutex<Agent>>>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
@@ -430,14 +509,28 @@ async fn message_loop(
                     .resolve(&channel, &conversation_id)
                     .unwrap_or_else(|_| "default".into());
 
-                // Process with agent
-                let response = {
-                    let mut ag = agent.lock().await;
-                    match ag.process_message(&text).await {
-                        Ok(response) => response,
-                        Err(e) => {
-                            tracing::error!("Agent error: {e}");
-                            format!("Error processing message: {e}")
+                // Process with the routed agent
+                let response = match agents.get(&agent_id) {
+                    Some(agent_mutex) => {
+                        let mut ag = agent_mutex.lock().await;
+                        match ag.process_message(&text).await {
+                            Ok(response) => response,
+                            Err(e) => {
+                                tracing::error!("Agent '{agent_id}' error: {e}");
+                                format!("Error processing message: {e}")
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::error!("No agent '{agent_id}' found, trying default");
+                        match agents.get("default") {
+                            Some(default_mutex) => {
+                                let mut ag = default_mutex.lock().await;
+                                ag.process_message(&text)
+                                    .await
+                                    .unwrap_or_else(|e| format!("Error: {e}"))
+                            }
+                            None => "No agent available to process this message.".into(),
                         }
                     }
                 };

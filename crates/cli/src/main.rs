@@ -56,11 +56,19 @@ enum Commands {
     #[command(subcommand)]
     Credentials(CredentialCommands),
 
-    /// Send a message to the agent directly
-    Agent {
+    /// Manage agents
+    #[command(subcommand)]
+    Agents(AgentCommands),
+
+    /// Send a message to an agent
+    #[command(name = "ask")]
+    Ask {
         /// The message to send
         #[arg(short, long)]
         message: String,
+        /// Agent ID (default: "default")
+        #[arg(long, default_value = "default")]
+        agent: String,
     },
 
     /// Run diagnostics
@@ -135,6 +143,26 @@ enum PermissionCommands {
 }
 
 #[derive(Subcommand)]
+enum AgentCommands {
+    /// Add a new agent with its own model, workspace, and channel bindings
+    Add,
+    /// List all configured agents
+    List,
+    /// Remove an agent
+    Remove {
+        /// Agent ID
+        id: String,
+    },
+    /// Bind a channel to an agent
+    Bind {
+        /// Agent ID
+        agent: String,
+        /// Channel to bind
+        channel: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum CredentialCommands {
     /// List stored credentials (metadata only — no secrets shown)
     List,
@@ -195,7 +223,15 @@ async fn main() -> Result<()> {
             CredentialCommands::List => commands::credential::list().await,
             CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
         },
-        Commands::Agent { message } => commands::agent::send(&message).await,
+        Commands::Agents(cmd) => match cmd {
+            AgentCommands::Add => commands::agents::add().await,
+            AgentCommands::List => commands::agents::list().await,
+            AgentCommands::Remove { id } => commands::agents::remove(&id).await,
+            AgentCommands::Bind { agent, channel } => {
+                commands::agents::bind(&agent, &channel).await
+            }
+        },
+        Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
         Commands::Doctor => commands::doctor::run().await,
     }
 }
