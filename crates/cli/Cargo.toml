@@ -1,0 +1,19 @@
+[package]
+name = "wirken-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wirken-vault = { path = "../vault" }
+wirken-audit = { path = "../audit" }
+wirken-gateway = { path = "../gateway" }
+clap = { workspace = true }
+dialoguer = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
