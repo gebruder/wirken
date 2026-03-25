@@ -5,7 +5,7 @@ members = [
     "crates/audit",
     "crates/ipc",
     "crates/gateway",
-    # "crates/adapter-telegram", # requires teloxide (needs Rust 1.88+) — enable when upgrading rustc
+    "crates/adapter-telegram",
     # "crates/agent",           # depends on gateway
     # "crates/cli",             # depends on gateway
     "crates/webchat",
