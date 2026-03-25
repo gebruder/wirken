@@ -1,10 +1,10 @@
+use crate::VaultError;
+use crate::secret::VaultSecret;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
 use rand::RngCore;
-use crate::VaultError;
-use crate::secret::VaultSecret;
 
 /// Nonce size for XChaCha20-Poly1305 (24 bytes).
 const NONCE_SIZE: usize = 24;
@@ -16,9 +16,10 @@ pub fn encrypt(plaintext: &VaultSecret, key: &VaultSecret) -> Result<Vec<u8>, Va
     let key_bytes = hex_decode(key.expose())
         .map_err(|e| VaultError::Encryption(format!("invalid hex key: {e}")))?;
     if key_bytes.len() != 32 {
-        return Err(VaultError::Encryption(
-            format!("key must be 32 bytes (64 hex chars), got {} bytes", key_bytes.len()),
-        ));
+        return Err(VaultError::Encryption(format!(
+            "key must be 32 bytes (64 hex chars), got {} bytes",
+            key_bytes.len()
+        )));
     }
 
     let cipher = XChaCha20Poly1305::new_from_slice(&key_bytes)
@@ -52,9 +53,10 @@ pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, Vault
     let key_bytes = hex_decode(key.expose())
         .map_err(|e| VaultError::Decryption(format!("invalid hex key: {e}")))?;
     if key_bytes.len() != 32 {
-        return Err(VaultError::Decryption(
-            format!("key must be 32 bytes (64 hex chars), got {} bytes", key_bytes.len()),
-        ));
+        return Err(VaultError::Decryption(format!(
+            "key must be 32 bytes (64 hex chars), got {} bytes",
+            key_bytes.len()
+        )));
     }
 
     let cipher = XChaCha20Poly1305::new_from_slice(&key_bytes)
@@ -67,8 +69,8 @@ pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, Vault
         .decrypt(nonce, ciphertext)
         .map_err(|e| VaultError::Decryption(e.to_string()))?;
 
-    let plaintext = String::from_utf8(plaintext_bytes)
-        .map_err(|e| VaultError::Decryption(e.to_string()))?;
+    let plaintext =
+        String::from_utf8(plaintext_bytes).map_err(|e| VaultError::Decryption(e.to_string()))?;
 
     Ok(VaultSecret::new(plaintext))
 }
@@ -89,7 +91,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("odd-length hex string".into());
     }
     (0..hex.len())
@@ -100,12 +102,15 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 
 /// Derive a 32-byte key from a passphrase using Argon2id.
 /// Returns a hex-encoded 32-byte key as a VaultSecret.
-pub fn derive_key_from_passphrase(passphrase: &str, salt: &[u8]) -> Result<VaultSecret, VaultError> {
-    use argon2::{Argon2, Algorithm, Params, Version};
+pub fn derive_key_from_passphrase(
+    passphrase: &str,
+    salt: &[u8],
+) -> Result<VaultSecret, VaultError> {
+    use argon2::{Algorithm, Argon2, Params, Version};
 
     // Argon2id: 64MB memory, 3 iterations — matches spec
-    let params = Params::new(65536, 3, 1, Some(32))
-        .map_err(|e| VaultError::Derivation(e.to_string()))?;
+    let params =
+        Params::new(65536, 3, 1, Some(32)).map_err(|e| VaultError::Derivation(e.to_string()))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
     let mut output = [0u8; 32];

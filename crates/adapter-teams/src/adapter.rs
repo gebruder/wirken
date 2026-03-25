@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixStream};
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{split_stream, FrameReader, FrameWriter};
+use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
@@ -28,7 +28,12 @@ impl TeamsAdapter {
         app_password: String,
         listen_port: u16,
     ) -> Self {
-        Self { identity, app_id, app_password, listen_port }
+        Self {
+            identity,
+            app_id,
+            app_password,
+            listen_port,
+        }
     }
 
     /// Connect to the gateway, authenticate, then run the webhook listener.
@@ -47,18 +52,21 @@ impl TeamsAdapter {
         let outbound_writer = writer.clone();
         let outbound_app_id = self.app_id.clone();
         let outbound_password = self.app_password.clone();
-        let outbound_handle = tokio::spawn(async move {
+        let _outbound_handle = tokio::spawn(async move {
             handle_outbound(reader, outbound_app_id, outbound_password, outbound_writer).await;
         });
 
         // Spawn heartbeat
         let hb_writer = writer.clone();
-        let hb_handle = tokio::spawn(async move {
+        let _hb_handle = tokio::spawn(async move {
             heartbeat_loop(hb_writer).await;
         });
 
         // Run HTTP webhook listener for incoming Bot Framework activities
-        tracing::info!("Starting Teams webhook listener on port {}", self.listen_port);
+        tracing::info!(
+            "Starting Teams webhook listener on port {}",
+            self.listen_port
+        );
         let listener = TcpListener::bind(format!("127.0.0.1:{}", self.listen_port)).await?;
 
         let bot_id = self.app_id.clone();
@@ -105,7 +113,8 @@ async fn handle_webhook_request(
         Ok(a) => a,
         Err(e) => {
             tracing::warn!("Invalid activity JSON: {e}");
-            let response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let response =
+                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             stream.write_all(response.as_bytes()).await?;
             return Ok(());
         }
@@ -125,8 +134,7 @@ async fn handle_webhook_request(
     convert::activity_to_inbound(&activity, bot_id, &mut capnp_msg);
 
     let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
-    w.write_message(&capnp_msg).await
-        .map_err(|e| TeamsError::Ipc(e))?;
+    w.write_message(&capnp_msg).await.map_err(TeamsError::Ipc)?;
 
     tracing::debug!(
         "Forwarded Teams activity {} to gateway",
@@ -196,7 +204,10 @@ async fn handle_outbound(
                             tracing::error!("Failed to get Bot Framework token: {e}");
                             let mut result_msg = capnp::message::Builder::new_default();
                             convert::build_outbound_result(
-                                &mut result_msg, false, "", &e.to_string(),
+                                &mut result_msg,
+                                false,
+                                "",
+                                &e.to_string(),
                             );
                             let mut w = writer.lock().await;
                             let _ = w.write_message(&result_msg).await;
@@ -223,7 +234,8 @@ async fn handle_outbound(
                     reply_body["replyToId"] = serde_json::Value::String(reply_to.clone());
                 }
 
-                let resp = http.post(&reply_url)
+                let resp = http
+                    .post(&reply_url)
                     .header("Authorization", format!("Bearer {token}"))
                     .header("Content-Type", "application/json")
                     .json(&reply_body)
@@ -233,7 +245,8 @@ async fn handle_outbound(
                 let (success, msg_id, error) = match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
-                        let id = body.get("id")
+                        let id = body
+                            .get("id")
                             .and_then(|i| i.as_str())
                             .unwrap_or("")
                             .to_string();
@@ -278,7 +291,8 @@ async fn get_bot_framework_token(
         url_encode("https://api.botframework.com/.default"),
     );
 
-    let resp = http.post(token_url)
+    let resp = http
+        .post(token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(form_body)
         .send()
@@ -287,13 +301,18 @@ async fn get_bot_framework_token(
 
     if !resp.status().is_success() {
         let body_text: String = resp.text().await.unwrap_or_default();
-        return Err(TeamsError::Auth(format!("token request failed: {body_text}")));
+        return Err(TeamsError::Auth(format!(
+            "token request failed: {body_text}"
+        )));
     }
 
-    let body_json: serde_json::Value = resp.json().await
+    let body_json: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| TeamsError::Auth(format!("parse token response: {e}")))?;
 
-    body_json.get("access_token")
+    body_json
+        .get("access_token")
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| TeamsError::Auth("no access_token in response".into()))

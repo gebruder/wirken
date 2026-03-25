@@ -50,12 +50,15 @@ impl Conversation {
         // Remove existing system message if any
         self.messages.retain(|m| m.role != Role::System);
         // Insert at the front
-        self.messages.insert(0, Message {
-            role: Role::System,
-            content: prompt.to_string(),
-            tool_call_id: None,
-            tool_calls: None,
-        });
+        self.messages.insert(
+            0,
+            Message {
+                role: Role::System,
+                content: prompt.to_string(),
+                tool_call_id: None,
+                tool_calls: None,
+            },
+        );
     }
 
     /// Add a user message.
@@ -105,9 +108,7 @@ impl Conversation {
 
     /// Approximate token count (4 chars ≈ 1 token).
     pub fn approx_tokens(&self) -> usize {
-        self.messages.iter()
-            .map(|m| m.content.len() / 4 + 1)
-            .sum()
+        self.messages.iter().map(|m| m.content.len() / 4 + 1).sum()
     }
 
     /// Whether the conversation exceeds the token budget.
@@ -122,19 +123,24 @@ impl Conversation {
             return;
         }
 
-        let system: Vec<Message> = self.messages.iter()
+        let system: Vec<Message> = self
+            .messages
+            .iter()
             .filter(|m| m.role == Role::System)
             .cloned()
             .collect();
 
-        let non_system: Vec<Message> = self.messages.iter()
+        let non_system: Vec<Message> = self
+            .messages
+            .iter()
             .filter(|m| m.role != Role::System)
             .cloned()
             .collect();
 
         // Keep the most recent half of non-system messages
         let keep = non_system.len() / 2;
-        let recent: Vec<Message> = non_system.into_iter()
+        let recent: Vec<Message> = non_system
+            .into_iter()
             .rev()
             .take(keep.max(2))
             .collect::<Vec<_>>()

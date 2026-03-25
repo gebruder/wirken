@@ -1,6 +1,6 @@
+use crate::crypto::derive_key_from_passphrase;
 use crate::error::VaultError;
 use crate::secret::VaultSecret;
-use crate::crypto::derive_key_from_passphrase;
 
 /// The kind of keychain backend in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub trait Keychain: Send + Sync {
 mod macos {
     use super::*;
     use security_framework::passwords::{
-        set_generic_password, get_generic_password, delete_generic_password,
+        delete_generic_password, get_generic_password, set_generic_password,
     };
 
     const SERVICE: &str = "dev.wirken.vault";
@@ -88,8 +88,8 @@ pub use macos::MacOsKeychain;
 #[cfg(feature = "keychain-linux")]
 mod linux {
     use super::*;
-    use secret_service::blocking::{SecretService, Collection};
     use secret_service::EncryptionType;
+    use secret_service::blocking::{Collection, SecretService};
 
     const LABEL: &str = "wirken-device-key";
 
@@ -102,14 +102,17 @@ mod linux {
         {
             let ss = SecretService::connect(EncryptionType::Dh)
                 .map_err(|e| VaultError::Keychain(format!("D-Bus connect: {e}")))?;
-            let collection = ss.get_default_collection()
+            let collection = ss
+                .get_default_collection()
                 .map_err(|e| VaultError::Keychain(format!("D-Bus default collection: {e}")))?;
 
             // Unlock if locked
-            if collection.is_locked()
+            if collection
+                .is_locked()
                 .map_err(|e| VaultError::Keychain(format!("D-Bus lock check: {e}")))?
             {
-                collection.unlock()
+                collection
+                    .unlock()
                     .map_err(|e| VaultError::Keychain(format!("D-Bus unlock: {e}")))?;
             }
 
@@ -128,13 +131,15 @@ mod linux {
                 let _ = self.delete_device_key();
 
                 let attributes = vec![("application", "wirken"), ("usage", "device-key")];
-                collection.create_item(
-                    LABEL,
-                    attributes.into_iter().collect(),
-                    key.expose().as_bytes(),
-                    true, // replace
-                    "text/plain",
-                ).map_err(|e| VaultError::Keychain(format!("D-Bus store: {e}")))?;
+                collection
+                    .create_item(
+                        LABEL,
+                        attributes.into_iter().collect(),
+                        key.expose().as_bytes(),
+                        true, // replace
+                        "text/plain",
+                    )
+                    .map_err(|e| VaultError::Keychain(format!("D-Bus store: {e}")))?;
                 Ok(())
             })
         }
@@ -142,12 +147,15 @@ mod linux {
         fn retrieve_device_key(&self) -> Result<VaultSecret, VaultError> {
             self.with_collection(|collection| {
                 let attributes = vec![("application", "wirken"), ("usage", "device-key")];
-                let items = collection.search_items(attributes.into_iter().collect())
+                let items = collection
+                    .search_items(attributes.into_iter().collect())
                     .map_err(|e| VaultError::Keychain(format!("D-Bus search: {e}")))?;
 
-                let item = items.first()
-                    .ok_or_else(|| VaultError::Keychain("device key not found in Secret Service".into()))?;
-                let secret = item.get_secret()
+                let item = items.first().ok_or_else(|| {
+                    VaultError::Keychain("device key not found in Secret Service".into())
+                })?;
+                let secret = item
+                    .get_secret()
                     .map_err(|e| VaultError::Keychain(format!("D-Bus get secret: {e}")))?;
                 let s = String::from_utf8(secret)
                     .map_err(|e| VaultError::Keychain(format!("D-Bus decode: {e}")))?;
@@ -158,7 +166,8 @@ mod linux {
         fn delete_device_key(&self) -> Result<(), VaultError> {
             self.with_collection(|collection| {
                 let attributes = vec![("application", "wirken"), ("usage", "device-key")];
-                let items = collection.search_items(attributes.into_iter().collect())
+                let items = collection
+                    .search_items(attributes.into_iter().collect())
                     .map_err(|e| VaultError::Keychain(format!("D-Bus search: {e}")))?;
                 for item in items {
                     item.delete()
@@ -179,7 +188,7 @@ pub use linux::LinuxKeychain;
 
 mod age_file {
     use super::*;
-    use crate::crypto::{encrypt, decrypt};
+    use crate::crypto::{decrypt, encrypt};
     use std::fs;
     use std::path::PathBuf;
 
@@ -235,7 +244,7 @@ mod age_file {
             let encrypted = encrypt(key, &wrapping_key)?;
 
             // Write salt and encrypted key
-            fs::write(self.salt_file_path(), &salt)?;
+            fs::write(self.salt_file_path(), salt)?;
 
             // Set restrictive permissions before writing the key file
             let key_path = self.key_file_path();

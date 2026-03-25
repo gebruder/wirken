@@ -5,15 +5,15 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use wirken_agent::llm::LlmConfig;
 use wirken_agent::Agent;
+use wirken_agent::llm::LlmConfig;
 use wirken_audit::{AuditEvent, AuditWriter};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
-use wirken_ipc::transport::{split_stream, FrameReader, FrameWriter};
-use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::perform_gateway_handshake;
+use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
+use wirken_ipc::wirken_capnp::frame;
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -33,12 +33,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     if !provider_path.exists() {
         anyhow::bail!("No AI provider configured. Run `wirken setup` first.");
     }
-    let provider_json: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&provider_path)?
-    )?;
+    let provider_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&provider_path)?)?;
     let provider = provider_json["provider"].as_str().unwrap_or("ollama");
     let model = provider_json["model"].as_str().unwrap_or("llama3");
-    let base_url = provider_json["base_url"].as_str().unwrap_or("http://localhost:11434/v1");
+    let base_url = provider_json["base_url"]
+        .as_str()
+        .unwrap_or("http://localhost:11434/v1");
 
     println!("  Provider: {provider}/{model}");
 
@@ -65,18 +66,24 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     };
 
     // --- Start audit writer ---
-    let (audit_writer, audit_handle) = AuditWriter::new(&cfg.audit_db_path())
-        .context("Failed to start audit writer")?;
+    let (audit_writer, audit_handle) =
+        AuditWriter::new(&cfg.audit_db_path()).context("Failed to start audit writer")?;
     let audit = Arc::new(audit_writer);
 
-    audit.log(AuditEvent::new("gateway", "gateway.start", "daemon")).await?;
+    audit
+        .log(AuditEvent::new("gateway", "gateway.start", "daemon"))
+        .await?;
     println!("  Audit log: {}", cfg.audit_db_path().display());
 
     // --- Open stores ---
-    let registry = Arc::new(Mutex::new(AdapterRegistry::open(&cfg.adapters_db_path())
-        .context("Failed to open adapter registry")?));
-    let sessions = Arc::new(Mutex::new(SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
-        .context("Failed to open session store")?));
+    let registry = Arc::new(Mutex::new(
+        AdapterRegistry::open(&cfg.adapters_db_path())
+            .context("Failed to open adapter registry")?,
+    ));
+    let sessions = Arc::new(Mutex::new(
+        SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
+            .context("Failed to open session store")?,
+    ));
 
     // --- Setup router ---
     let router = Arc::new(Router::new());
@@ -159,12 +166,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let webchat_audit = audit.clone();
     let webchat_sessions = sessions.clone();
     let webchat_handle = tokio::spawn(async move {
-        if let Err(e) = super::webchat::serve(
-            webchat_port,
-            webchat_agent,
-            webchat_audit,
-            webchat_sessions,
-        ).await {
+        if let Err(e) =
+            super::webchat::serve(webchat_port, webchat_agent, webchat_audit, webchat_sessions)
+                .await
+        {
             tracing::error!("Webchat server error: {e}");
         }
     });
@@ -192,9 +197,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let rtr = accept_router.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = handle_adapter_connection(
-                            stream, reg, ag, au, sess, rtr,
-                        ).await {
+                        if let Err(e) =
+                            handle_adapter_connection(stream, reg, ag, au, sess, rtr).await
+                        {
                             tracing::error!("Adapter connection error: {e}");
                         }
                     });
@@ -211,7 +216,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!();
     println!("  Shutting down...");
 
-    audit.log(AuditEvent::new("gateway", "gateway.stop", "daemon")).await?;
+    audit
+        .log(AuditEvent::new("gateway", "gateway.stop", "daemon"))
+        .await?;
 
     // Abort adapter processes
     for handle in adapter_handles {
@@ -246,28 +253,29 @@ async fn handle_adapter_connection(
     // Collect known adapters for handshake verification (avoids holding lock across await)
     let known: std::collections::HashMap<String, [u8; 32]> = {
         let reg = registry.lock().await;
-        reg.list().into_iter().map(|a| (a.adapter_id, a.public_key)).collect()
+        reg.list()
+            .into_iter()
+            .map(|a| (a.adapter_id, a.public_key))
+            .collect()
     };
 
-    let (adapter_id, _pub_key) = perform_gateway_handshake(
-        &mut reader,
-        &mut writer,
-        move |id, pk| {
+    let (adapter_id, _pub_key) =
+        perform_gateway_handshake(&mut reader, &mut writer, move |id, pk| {
             match known.get(id) {
                 None => Err(wirken_ipc::HandshakeError::UnknownAdapter(id.to_string())),
                 Some(expected) if expected == pk => Ok(()),
                 Some(_) => Err(wirken_ipc::HandshakeError::InvalidSignature),
             }
-        },
-    ).await.context("Adapter handshake failed")?;
+        })
+        .await
+        .context("Adapter handshake failed")?;
 
     tracing::info!("Adapter '{adapter_id}' authenticated");
     registry.lock().await.set_connected(&adapter_id, true);
 
-    audit.log(
-        AuditEvent::new("gateway", "adapter.connect", &adapter_id)
-            .with_channel(&adapter_id)
-    ).await?;
+    audit
+        .log(AuditEvent::new("gateway", "adapter.connect", &adapter_id).with_channel(&adapter_id))
+        .await?;
 
     let writer = Arc::new(Mutex::new(writer));
 
@@ -280,13 +288,15 @@ async fn handle_adapter_connection(
         audit.clone(),
         sessions,
         router,
-    ).await;
+    )
+    .await;
 
     registry.lock().await.set_connected(&adapter_id, false);
-    audit.log(
-        AuditEvent::new("gateway", "adapter.disconnect", &adapter_id)
-            .with_channel(&adapter_id)
-    ).await?;
+    audit
+        .log(
+            AuditEvent::new("gateway", "adapter.disconnect", &adapter_id).with_channel(&adapter_id),
+        )
+        .await?;
 
     tracing::info!("Adapter '{adapter_id}' disconnected");
     result
@@ -317,28 +327,41 @@ async fn message_loop(
 
         // Extract fields before any .await (Cap'n Proto readers are not Send)
         let action = {
-            let frame_reader = msg.get_root::<frame::Reader<'_>>()
+            let frame_reader = msg
+                .get_root::<frame::Reader<'_>>()
                 .context("Failed to parse frame")?;
 
             match frame_reader.which()? {
                 frame::Inbound(inbound) => {
                     let m = inbound?;
-                    let text = m.get_text()?.to_str()
+                    let text = m
+                        .get_text()?
+                        .to_str()
                         .map_err(|e| anyhow::anyhow!("text not utf8: {e}"))?
                         .to_string();
-                    let sender_id = m.get_sender_id()?.to_str()
+                    let sender_id = m
+                        .get_sender_id()?
+                        .to_str()
                         .map_err(|e| anyhow::anyhow!("sender_id not utf8: {e}"))?
                         .to_string();
-                    let sender_name = m.get_sender_name()?.to_str()
+                    let sender_name = m
+                        .get_sender_name()?
+                        .to_str()
                         .map_err(|e| anyhow::anyhow!("sender_name not utf8: {e}"))?
                         .to_string();
-                    let channel = m.get_channel()?.to_str()
+                    let channel = m
+                        .get_channel()?
+                        .to_str()
                         .map_err(|e| anyhow::anyhow!("channel not utf8: {e}"))?
                         .to_string();
-                    let conversation_id = m.get_conversation_id()?.to_str()
+                    let conversation_id = m
+                        .get_conversation_id()?
+                        .to_str()
                         .map_err(|e| anyhow::anyhow!("conversation_id not utf8: {e}"))?
                         .to_string();
-                    let msg_id = m.get_id()?.to_str()
+                    let msg_id = m
+                        .get_id()?
+                        .to_str()
                         .map_err(|e| anyhow::anyhow!("id not utf8: {e}"))?
                         .to_string();
 
@@ -358,8 +381,7 @@ async fn message_loop(
                 frame::OutboundResult(r) => {
                     let r = r?;
                     let success = r.get_success();
-                    let msg_id = r.get_message_id()?.to_str()
-                        .unwrap_or_default().to_string();
+                    let msg_id = r.get_message_id()?.to_str().unwrap_or_default().to_string();
                     InboundAction::DeliveryResult { success, msg_id }
                 }
                 _ => InboundAction::Unknown,
@@ -369,7 +391,12 @@ async fn message_loop(
 
         match action {
             InboundAction::Message {
-                id, text, sender_id, sender_name, channel, conversation_id,
+                id,
+                text,
+                sender_id,
+                sender_name,
+                channel,
+                conversation_id,
             } => {
                 tracing::info!(
                     "[{}] {} ({}): {}",
@@ -380,11 +407,13 @@ async fn message_loop(
                 );
 
                 // Audit inbound
-                audit.log(
-                    AuditEvent::new(&sender_id, "message.inbound", &text)
-                        .with_channel(&channel)
-                        .with_session(&conversation_id)
-                ).await?;
+                audit
+                    .log(
+                        AuditEvent::new(&sender_id, "message.inbound", &text)
+                            .with_channel(&channel)
+                            .with_session(&conversation_id),
+                    )
+                    .await?;
 
                 // Resolve session
                 let session = {
@@ -397,7 +426,8 @@ async fn message_loop(
                 }
 
                 // Route to agent
-                let agent_id = router.resolve(&channel, &conversation_id)
+                let agent_id = router
+                    .resolve(&channel, &conversation_id)
                     .unwrap_or_else(|_| "default".into());
 
                 // Process with agent
@@ -415,11 +445,13 @@ async fn message_loop(
                 tracing::info!("[{}] -> {}", channel, truncate(&response, 80));
 
                 // Audit outbound
-                audit.log(
-                    AuditEvent::new(&agent_id, "message.outbound", &response)
-                        .with_channel(&channel)
-                        .with_session(&conversation_id)
-                ).await?;
+                audit
+                    .log(
+                        AuditEvent::new(&agent_id, "message.outbound", &response)
+                            .with_channel(&channel)
+                            .with_session(&conversation_id),
+                    )
+                    .await?;
 
                 // Send response back to adapter
                 let mut reply = capnp::message::Builder::new_default();
@@ -433,7 +465,8 @@ async fn message_loop(
                 }
 
                 let mut w = writer.lock().await;
-                w.write_message(&reply).await
+                w.write_message(&reply)
+                    .await
                     .context("Failed to send outbound to adapter")?;
             }
 
@@ -474,7 +507,10 @@ enum InboundAction {
         conversation_id: String,
     },
     Heartbeat(u64),
-    DeliveryResult { success: bool, msg_id: String },
+    DeliveryResult {
+        success: bool,
+        msg_id: String,
+    },
     Unknown,
 }
 

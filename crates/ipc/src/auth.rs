@@ -66,18 +66,23 @@ pub async fn perform_adapter_handshake(
     identity: &AdapterIdentity,
 ) -> Result<(), HandshakeError> {
     // 1. Read challenge
-    let challenge_msg = reader.read_message().await
+    let challenge_msg = reader
+        .read_message()
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("read challenge: {e}")))?;
-    let frame_reader = challenge_msg.get_root::<frame::Reader<'_>>()
+    let frame_reader = challenge_msg
+        .get_root::<frame::Reader<'_>>()
         .map_err(|e| HandshakeError::Protocol(format!("parse challenge frame: {e}")))?;
 
-    let nonce = match frame_reader.which()
+    let nonce = match frame_reader
+        .which()
         .map_err(|e| HandshakeError::Protocol(format!("challenge frame variant: {e}")))?
     {
         frame::AuthChallenge(challenge) => {
-            let c = challenge
-                .map_err(|e| HandshakeError::Protocol(format!("read challenge: {e}")))?;
-            let nonce = c.get_nonce()
+            let c =
+                challenge.map_err(|e| HandshakeError::Protocol(format!("read challenge: {e}")))?;
+            let nonce = c
+                .get_nonce()
                 .map_err(|e| HandshakeError::Protocol(format!("get nonce: {e}")))?;
             nonce.to_vec()
         }
@@ -96,25 +101,31 @@ pub async fn perform_adapter_handshake(
         auth_resp.set_signature(&signature.to_bytes());
         auth_resp.set_adapter_id(&identity.adapter_id);
     }
-    writer.write_message(&response_msg).await
+    writer
+        .write_message(&response_msg)
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("write response: {e}")))?;
 
     // 4. Read result
-    let result_msg = reader.read_message().await
+    let result_msg = reader
+        .read_message()
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("read result: {e}")))?;
-    let result_reader = result_msg.get_root::<frame::Reader<'_>>()
+    let result_reader = result_msg
+        .get_root::<frame::Reader<'_>>()
         .map_err(|e| HandshakeError::Protocol(format!("parse result frame: {e}")))?;
 
-    match result_reader.which()
+    match result_reader
+        .which()
         .map_err(|e| HandshakeError::Protocol(format!("result frame variant: {e}")))?
     {
         frame::AuthResult(result) => {
-            let r = result
-                .map_err(|e| HandshakeError::Protocol(format!("read result: {e}")))?;
+            let r = result.map_err(|e| HandshakeError::Protocol(format!("read result: {e}")))?;
             if r.get_accepted() {
                 Ok(())
             } else {
-                let reason = r.get_reason()
+                let reason = r
+                    .get_reason()
                     .map_err(|e| HandshakeError::Protocol(format!("get reason: {e}")))?
                     .to_string()
                     .unwrap_or_default();
@@ -152,43 +163,54 @@ where
         let mut challenge = frame_builder.init_auth_challenge();
         challenge.set_nonce(&nonce);
     }
-    writer.write_message(&challenge_msg).await
+    writer
+        .write_message(&challenge_msg)
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("write challenge: {e}")))?;
 
     // 2. Read response
-    let response_msg = reader.read_message().await
+    let response_msg = reader
+        .read_message()
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("read response: {e}")))?;
-    let response_reader = response_msg.get_root::<frame::Reader<'_>>()
+    let response_reader = response_msg
+        .get_root::<frame::Reader<'_>>()
         .map_err(|e| HandshakeError::Protocol(format!("parse response frame: {e}")))?;
 
-    let (adapter_id, pub_key_bytes, sig_bytes) = match response_reader.which()
+    let (adapter_id, pub_key_bytes, sig_bytes) = match response_reader
+        .which()
         .map_err(|e| HandshakeError::Protocol(format!("response frame variant: {e}")))?
     {
         frame::AuthResponse(response) => {
-            let r = response
-                .map_err(|e| HandshakeError::Protocol(format!("read response: {e}")))?;
-            let pk = r.get_public_key()
+            let r =
+                response.map_err(|e| HandshakeError::Protocol(format!("read response: {e}")))?;
+            let pk = r
+                .get_public_key()
                 .map_err(|e| HandshakeError::Protocol(format!("get public key: {e}")))?;
-            let sig = r.get_signature()
+            let sig = r
+                .get_signature()
                 .map_err(|e| HandshakeError::Protocol(format!("get signature: {e}")))?;
-            let id = r.get_adapter_id()
+            let id = r
+                .get_adapter_id()
                 .map_err(|e| HandshakeError::Protocol(format!("get adapter id: {e}")))?
                 .to_string()
                 .map_err(|e| HandshakeError::Protocol(format!("adapter id not utf8: {e}")))?;
 
             let mut pk_arr = [0u8; 32];
             if pk.len() != 32 {
-                return Err(HandshakeError::Protocol(
-                    format!("public key must be 32 bytes, got {}", pk.len())
-                ));
+                return Err(HandshakeError::Protocol(format!(
+                    "public key must be 32 bytes, got {}",
+                    pk.len()
+                )));
             }
             pk_arr.copy_from_slice(pk);
 
             let mut sig_arr = [0u8; 64];
             if sig.len() != 64 {
-                return Err(HandshakeError::Protocol(
-                    format!("signature must be 64 bytes, got {}", sig.len())
-                ));
+                return Err(HandshakeError::Protocol(format!(
+                    "signature must be 64 bytes, got {}",
+                    sig.len()
+                )));
             }
             sig_arr.copy_from_slice(sig);
 
@@ -201,10 +223,11 @@ where
     verify_adapter(&adapter_id, &pub_key_bytes)?;
 
     // 4. Verify the signature
-    let verifying_key = VerifyingKey::from_bytes(&pub_key_bytes)
-        .map_err(|_| HandshakeError::InvalidSignature)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&pub_key_bytes).map_err(|_| HandshakeError::InvalidSignature)?;
     let signature = Signature::from_bytes(&sig_bytes);
-    verifying_key.verify(&nonce, &signature)
+    verifying_key
+        .verify(&nonce, &signature)
         .map_err(|_| HandshakeError::InvalidSignature)?;
 
     // 5. Send success
@@ -215,17 +238,16 @@ where
         result.set_accepted(true);
         result.set_reason("");
     }
-    writer.write_message(&result_msg).await
+    writer
+        .write_message(&result_msg)
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("write result: {e}")))?;
 
     Ok((adapter_id, pub_key_bytes))
 }
 
 /// Send a rejection result (gateway helper).
-pub async fn send_rejection(
-    writer: &mut FrameWriter,
-    reason: &str,
-) -> Result<(), HandshakeError> {
+pub async fn send_rejection(writer: &mut FrameWriter, reason: &str) -> Result<(), HandshakeError> {
     let mut msg = capnp::message::Builder::new_default();
     {
         let frame_builder = msg.init_root::<frame::Builder<'_>>();
@@ -233,7 +255,9 @@ pub async fn send_rejection(
         result.set_accepted(false);
         result.set_reason(reason);
     }
-    writer.write_message(&msg).await
+    writer
+        .write_message(&msg)
+        .await
         .map_err(|e| HandshakeError::Protocol(format!("write rejection: {e}")))?;
     Ok(())
 }

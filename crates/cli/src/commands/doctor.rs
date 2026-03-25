@@ -1,8 +1,8 @@
 use anyhow::Result;
 
+use super::config;
 use wirken_audit::{AuditLog, VerifyResult};
 use wirken_gateway::adapter_registry::AdapterRegistry;
-use super::config;
 
 pub async fn run() -> Result<()> {
     println!();
@@ -38,7 +38,10 @@ pub async fn run() -> Result<()> {
     }
 
     // Check vault
-    print_check("Credential vault", &cfg.vault_db_path().display().to_string());
+    print_check(
+        "Credential vault",
+        &cfg.vault_db_path().display().to_string(),
+    );
     if cfg.vault_db_path().exists() {
         print_ok();
     } else {
@@ -46,7 +49,10 @@ pub async fn run() -> Result<()> {
     }
 
     // Check adapters
-    print_check("Adapter registry", &cfg.adapters_db_path().display().to_string());
+    print_check(
+        "Adapter registry",
+        &cfg.adapters_db_path().display().to_string(),
+    );
     if cfg.adapters_db_path().exists() {
         match AdapterRegistry::open(&cfg.adapters_db_path()) {
             Ok(reg) => {
@@ -90,7 +96,7 @@ pub async fn run() -> Result<()> {
                     print_fail(&format!("  {e}"));
                     issues += 1;
                 }
-            }
+            },
             Err(e) => {
                 print_fail(&format!("  {e}"));
                 issues += 1;

@@ -40,8 +40,7 @@ impl SkillLoader {
             .map_err(|e| AgentError::SkillLoad(format!("read dir {}: {e}", dir.display())))?;
 
         for entry in entries {
-            let entry = entry
-                .map_err(|e| AgentError::SkillLoad(format!("dir entry: {e}")))?;
+            let entry = entry.map_err(|e| AgentError::SkillLoad(format!("dir entry: {e}")))?;
             let path = entry.path();
 
             if !path.is_dir() {
@@ -75,7 +74,8 @@ impl SkillLoader {
         let required_bins = extract_required_bins(&frontmatter);
         let available = check_bins_available(&required_bins);
 
-        let dir_name = path.parent()
+        let dir_name = path
+            .parent()
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
@@ -123,16 +123,20 @@ fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentE
 
     if !content.starts_with("---") {
         // No frontmatter — treat entire content as body
-        return Ok((SkillFrontmatter {
-            name: None,
-            description: None,
-            metadata: None,
-        }, content.to_string()));
+        return Ok((
+            SkillFrontmatter {
+                name: None,
+                description: None,
+                metadata: None,
+            },
+            content.to_string(),
+        ));
     }
 
     // Find the closing ---
     let rest = &content[3..];
-    let end = rest.find("---")
+    let end = rest
+        .find("---")
         .ok_or_else(|| AgentError::SkillLoad("unclosed frontmatter".into()))?;
 
     let yaml_str = &rest[..end].trim();
@@ -147,7 +151,8 @@ fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentE
 /// Extract required binary names from the metadata field.
 /// Handles the OpenClaw format: metadata.openclaw.requires.bins
 fn extract_required_bins(fm: &SkillFrontmatter) -> Vec<String> {
-    fm.metadata.as_ref()
+    fm.metadata
+        .as_ref()
         .and_then(|m| m.get("openclaw"))
         .and_then(|oc| oc.get("requires"))
         .and_then(|req| req.get("bins"))
@@ -162,9 +167,7 @@ fn extract_required_bins(fm: &SkillFrontmatter) -> Vec<String> {
 
 /// Check if all required binaries are available on PATH.
 fn check_bins_available(bins: &[String]) -> bool {
-    bins.iter().all(|bin| {
-        which_exists(bin)
-    })
+    bins.iter().all(|bin| which_exists(bin))
 }
 
 fn which_exists(bin: &str) -> bool {

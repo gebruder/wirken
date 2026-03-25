@@ -22,9 +22,7 @@ pub struct CredentialMetadata {
 impl CredentialMetadata {
     /// Check if this credential has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at
-            .map(|exp| Utc::now() > exp)
-            .unwrap_or(false)
+        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
     }
 
     /// Check if this credential is due for rotation.
@@ -67,7 +65,7 @@ impl CredentialStore {
                  expires_at TEXT,
                  last_used_at TEXT,
                  rotation_due_at TEXT
-             );"
+             );",
         )?;
 
         Ok(Self { conn, device_key })
@@ -88,7 +86,7 @@ impl CredentialStore {
                  expires_at TEXT,
                  last_used_at TEXT,
                  rotation_due_at TEXT
-             );"
+             );",
         )?;
 
         Ok(Self { conn, device_key })
@@ -129,29 +127,44 @@ impl CredentialStore {
     pub fn retrieve(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError> {
         let mut stmt = self.conn.prepare(
             "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at
-             FROM credentials WHERE name = ?1"
+             FROM credentials WHERE name = ?1",
         )?;
 
-        let row = stmt.query_row(params![name], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-            ))
-        }).map_err(|_| VaultError::NotFound(name.to_string()))?;
+        let row = stmt
+            .query_row(params![name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|_| VaultError::NotFound(name.to_string()))?;
 
-        let (channel, encrypted, created_at_str, expires_at_str, last_used_at_str, rotation_due_at_str) = row;
+        let (
+            channel,
+            encrypted,
+            created_at_str,
+            expires_at_str,
+            last_used_at_str,
+            rotation_due_at_str,
+        ) = row;
 
         let meta = CredentialMetadata {
             name: name.to_string(),
             channel,
             created_at: parse_datetime(&created_at_str)?,
             expires_at: expires_at_str.as_deref().map(parse_datetime).transpose()?,
-            last_used_at: last_used_at_str.as_deref().map(parse_datetime).transpose()?,
-            rotation_due_at: rotation_due_at_str.as_deref().map(parse_datetime).transpose()?,
+            last_used_at: last_used_at_str
+                .as_deref()
+                .map(parse_datetime)
+                .transpose()?,
+            rotation_due_at: rotation_due_at_str
+                .as_deref()
+                .map(parse_datetime)
+                .transpose()?,
         };
 
         if meta.is_expired() {
@@ -171,10 +184,9 @@ impl CredentialStore {
 
     /// Delete a credential by name.
     pub fn delete(&self, name: &str) -> Result<(), VaultError> {
-        let changes = self.conn.execute(
-            "DELETE FROM credentials WHERE name = ?1",
-            params![name],
-        )?;
+        let changes = self
+            .conn
+            .execute("DELETE FROM credentials WHERE name = ?1", params![name])?;
 
         if changes == 0 {
             return Err(VaultError::NotFound(name.to_string()));
@@ -187,7 +199,7 @@ impl CredentialStore {
     pub fn list(&self) -> Result<Vec<CredentialMetadata>, VaultError> {
         let mut stmt = self.conn.prepare(
             "SELECT name, channel, created_at, expires_at, last_used_at, rotation_due_at
-             FROM credentials ORDER BY name"
+             FROM credentials ORDER BY name",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -203,14 +215,27 @@ impl CredentialStore {
 
         let mut result = Vec::new();
         for row in rows {
-            let (name, channel, created_at_str, expires_at_str, last_used_at_str, rotation_due_at_str) = row?;
+            let (
+                name,
+                channel,
+                created_at_str,
+                expires_at_str,
+                last_used_at_str,
+                rotation_due_at_str,
+            ) = row?;
             result.push(CredentialMetadata {
                 name,
                 channel,
                 created_at: parse_datetime(&created_at_str).unwrap_or_else(|_| Utc::now()),
-                expires_at: expires_at_str.as_deref().and_then(|s| parse_datetime(s).ok()),
-                last_used_at: last_used_at_str.as_deref().and_then(|s| parse_datetime(s).ok()),
-                rotation_due_at: rotation_due_at_str.as_deref().and_then(|s| parse_datetime(s).ok()),
+                expires_at: expires_at_str
+                    .as_deref()
+                    .and_then(|s| parse_datetime(s).ok()),
+                last_used_at: last_used_at_str
+                    .as_deref()
+                    .and_then(|s| parse_datetime(s).ok()),
+                rotation_due_at: rotation_due_at_str
+                    .as_deref()
+                    .and_then(|s| parse_datetime(s).ok()),
             });
         }
 
@@ -226,9 +251,9 @@ impl CredentialStore {
         rotation_due_at: Option<DateTime<Utc>>,
     ) -> Result<(), VaultError> {
         // Verify credential exists
-        let mut stmt = self.conn.prepare(
-            "SELECT channel FROM credentials WHERE name = ?1"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT channel FROM credentials WHERE name = ?1")?;
         let _channel: String = stmt
             .query_row(params![name], |row| row.get(0))
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
@@ -257,9 +282,9 @@ impl CredentialStore {
     /// Write an encrypted credential to a file descriptor for adapter process spawning.
     /// Returns the encrypted bytes that can be written to an FD.
     pub fn export_encrypted(&self, name: &str) -> Result<Vec<u8>, VaultError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT encrypted_value FROM credentials WHERE name = ?1"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT encrypted_value FROM credentials WHERE name = ?1")?;
         let encrypted: Vec<u8> = stmt
             .query_row(params![name], |row| row.get(0))
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
@@ -286,7 +311,10 @@ impl CredentialStore {
 fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| VaultError::Serialization(serde_json::Error::io(
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        )))
+        .map_err(|e| {
+            VaultError::Serialization(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                e.to_string(),
+            )))
+        })
 }

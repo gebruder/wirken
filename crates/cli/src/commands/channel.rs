@@ -3,8 +3,8 @@ use dialoguer::Password;
 
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::config::GatewayConfig;
-use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 use wirken_ipc::AdapterIdentity;
+use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
 use super::{config, data_dir};
 
@@ -38,8 +38,15 @@ pub async fn list() -> Result<()> {
     println!("  Configured channels:");
     println!();
     for adapter in &adapters {
-        let status = if adapter.connected { "connected" } else { "disconnected" };
-        println!("  {:12} {:12} {}", adapter.adapter_id, adapter.channel, status);
+        let status = if adapter.connected {
+            "connected"
+        } else {
+            "disconnected"
+        };
+        println!(
+            "  {:12} {:12} {}",
+            adapter.adapter_id, adapter.channel, status
+        );
     }
     println!();
     Ok(())
@@ -51,11 +58,12 @@ pub async fn remove(channel: &str) -> Result<()> {
     let registry = AdapterRegistry::open(&cfg.adapters_db_path())
         .context("Failed to open adapter registry")?;
 
-    registry.unregister(channel)
+    registry
+        .unregister(channel)
         .context(format!("Failed to remove channel '{channel}'"))?;
 
     // Remove credential
-    let keychain = probe_keychain(&cfg.data_dir, || String::new());
+    let keychain = probe_keychain(&cfg.data_dir, String::new);
     if let Ok(store) = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
         let _ = store.delete(&format!("{channel}-token"));
     }
@@ -83,31 +91,30 @@ pub async fn register_channel(
         .context("Failed to open credential store")?;
 
     let secret = VaultSecret::new(token.to_string());
-    store.store(
-        &format!("{channel}-token"),
-        channel,
-        &secret,
-        None,
-        None,
-    ).context("Failed to store channel token")?;
+    store
+        .store(&format!("{channel}-token"), channel, &secret, None, None)
+        .context("Failed to store channel token")?;
 
     // Generate adapter Ed25519 keypair
     let identity = AdapterIdentity::generate(channel);
     let pub_key = identity.public_key_bytes();
 
     // Store secret key in vault
-    let secret_key_hex: String = identity.secret_key_bytes()
+    let secret_key_hex: String = identity
+        .secret_key_bytes()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     let sk_secret = VaultSecret::new(secret_key_hex);
-    store.store(
-        &format!("{channel}-adapter-key"),
-        channel,
-        &sk_secret,
-        None,
-        None,
-    ).context("Failed to store adapter key")?;
+    store
+        .store(
+            &format!("{channel}-adapter-key"),
+            channel,
+            &sk_secret,
+            None,
+            None,
+        )
+        .context("Failed to store adapter key")?;
 
     // Register in adapter registry
     let registry = AdapterRegistry::open(&cfg.adapters_db_path())
@@ -116,7 +123,8 @@ pub async fn register_channel(
     // Unregister first if already exists (re-registration)
     let _ = registry.unregister(channel);
 
-    registry.register(channel, &pub_key, channel)
+    registry
+        .register(channel, &pub_key, channel)
         .context("Failed to register adapter")?;
 
     println!("  {channel}: token encrypted, adapter keypair generated, registered.");

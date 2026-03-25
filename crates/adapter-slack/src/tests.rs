@@ -1,5 +1,5 @@
-use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::transport::split_stream;
+use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
 use crate::convert::{self, SlackInbound};
@@ -32,7 +32,10 @@ fn slack_inbound_to_frame() {
             assert_eq!(m.get_id().unwrap().to_str().unwrap(), "1711234567.890123");
             assert_eq!(m.get_sender_id().unwrap().to_str().unwrap(), "U12345ABC");
             assert_eq!(m.get_channel().unwrap().to_str().unwrap(), "slack");
-            assert_eq!(m.get_conversation_id().unwrap().to_str().unwrap(), "C98765XYZ");
+            assert_eq!(
+                m.get_conversation_id().unwrap().to_str().unwrap(),
+                "C98765XYZ"
+            );
             assert_eq!(m.get_text().unwrap().to_str().unwrap(), "Hello from Slack!");
             assert_eq!(m.get_timestamp(), 1711234567890);
             assert!(m.get_is_group()); // not a DM
@@ -89,7 +92,10 @@ fn slack_threaded_message() {
     match reader.which().unwrap() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();
-            assert_eq!(m.get_reply_to_id().unwrap().to_str().unwrap(), "1711234560.000000");
+            assert_eq!(
+                m.get_reply_to_id().unwrap().to_str().unwrap(),
+                "1711234560.000000"
+            );
             let meta_str = m.get_metadata().unwrap().to_str().unwrap();
             let meta: serde_json::Value = serde_json::from_str(meta_str).unwrap();
             assert_eq!(meta["thread_ts"], "1711234560.000000");
@@ -134,9 +140,15 @@ fn slack_message_with_files() {
 #[test]
 fn mention_gate_dm_always_passes() {
     let msg = SlackInbound {
-        message_ts: "1.0".into(), user_id: "U1".into(), user_name: "u".into(),
-        channel_id: "D1".into(), text: "hi".into(), thread_ts: None,
-        is_dm: true, bot_mentioned: false, files: vec![],
+        message_ts: "1.0".into(),
+        user_id: "U1".into(),
+        user_name: "u".into(),
+        channel_id: "D1".into(),
+        text: "hi".into(),
+        thread_ts: None,
+        is_dm: true,
+        bot_mentioned: false,
+        files: vec![],
     };
     assert!(convert::should_process(&msg));
 }
@@ -144,9 +156,15 @@ fn mention_gate_dm_always_passes() {
 #[test]
 fn mention_gate_channel_needs_mention() {
     let msg = SlackInbound {
-        message_ts: "1.0".into(), user_id: "U1".into(), user_name: "u".into(),
-        channel_id: "C1".into(), text: "hi".into(), thread_ts: None,
-        is_dm: false, bot_mentioned: false, files: vec![],
+        message_ts: "1.0".into(),
+        user_id: "U1".into(),
+        user_name: "u".into(),
+        channel_id: "C1".into(),
+        text: "hi".into(),
+        thread_ts: None,
+        is_dm: false,
+        bot_mentioned: false,
+        files: vec![],
     };
     assert!(!convert::should_process(&msg));
 }
@@ -154,9 +172,15 @@ fn mention_gate_channel_needs_mention() {
 #[test]
 fn mention_gate_channel_with_mention_passes() {
     let msg = SlackInbound {
-        message_ts: "1.0".into(), user_id: "U1".into(), user_name: "u".into(),
-        channel_id: "C1".into(), text: "<@U_BOT> help".into(), thread_ts: None,
-        is_dm: false, bot_mentioned: true, files: vec![],
+        message_ts: "1.0".into(),
+        user_id: "U1".into(),
+        user_name: "u".into(),
+        channel_id: "C1".into(),
+        text: "<@U_BOT> help".into(),
+        thread_ts: None,
+        is_dm: false,
+        bot_mentioned: true,
+        files: vec![],
     };
     assert!(convert::should_process(&msg));
 }
@@ -175,7 +199,10 @@ fn build_outbound_result_success() {
         frame::OutboundResult(r) => {
             let r = r.unwrap();
             assert!(r.get_success());
-            assert_eq!(r.get_message_id().unwrap().to_str().unwrap(), "1711234567.890456");
+            assert_eq!(
+                r.get_message_id().unwrap().to_str().unwrap(),
+                "1711234567.890456"
+            );
         }
         _ => panic!("expected OutboundResult"),
     }
@@ -205,7 +232,8 @@ fn serialize_and_read(
     capnp::serialize::read_message(
         std::io::Cursor::new(buf),
         capnp::message::ReaderOptions::default(),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[test]
@@ -258,16 +286,16 @@ async fn adapter_handshake_with_gateway() {
     let (mut cr, mut cw) = split_stream(client);
     let (mut sr, mut sw) = split_stream(server);
 
-    let adapter_side = tokio::spawn(async move {
-        perform_adapter_handshake(&mut cr, &mut cw, &identity).await
-    });
+    let adapter_side =
+        tokio::spawn(async move { perform_adapter_handshake(&mut cr, &mut cw, &identity).await });
 
     let gateway_side = tokio::spawn(async move {
         perform_gateway_handshake(&mut sr, &mut sw, |id, pk| {
             assert_eq!(id, "slack");
             assert_eq!(pk, &expected_pk);
             Ok(())
-        }).await
+        })
+        .await
     });
 
     let (ar, gr) = tokio::join!(adapter_side, gateway_side);
@@ -293,7 +321,9 @@ async fn full_message_flow_simulation() {
 
     // Phase 1: Handshake
     let adapter_hs = tokio::spawn(async move {
-        perform_adapter_handshake(&mut ar, &mut aw, &identity).await.unwrap();
+        perform_adapter_handshake(&mut ar, &mut aw, &identity)
+            .await
+            .unwrap();
         (ar, aw)
     });
     let gateway_hs = tokio::spawn(async move {
@@ -301,7 +331,9 @@ async fn full_message_flow_simulation() {
             assert_eq!(id, "slack");
             assert_eq!(pk, &expected_pk);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         (gr, gw)
     });
 
@@ -335,7 +367,13 @@ async fn full_message_flow_simulation() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();
             assert_eq!(m.get_channel().unwrap().to_str().unwrap(), "slack");
-            assert!(m.get_text().unwrap().to_str().unwrap().contains("what time"));
+            assert!(
+                m.get_text()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .contains("what time")
+            );
         }
         _ => panic!("expected Inbound"),
     }
@@ -373,7 +411,10 @@ async fn full_message_flow_simulation() {
         frame::OutboundResult(r) => {
             let r = r.unwrap();
             assert!(r.get_success());
-            assert_eq!(r.get_message_id().unwrap().to_str().unwrap(), "1711234568.000001");
+            assert_eq!(
+                r.get_message_id().unwrap().to_str().unwrap(),
+                "1711234568.000001"
+            );
         }
         _ => panic!("expected OutboundResult"),
     }
@@ -385,8 +426,8 @@ async fn full_message_flow_simulation() {
 
 #[test]
 fn three_channel_types_are_distinct() {
+    use wirken_ipc::channels::{Discord, Slack, Telegram};
     use wirken_ipc::{SessionHandle, SessionId};
-    use wirken_ipc::channels::{Telegram, Discord, Slack};
 
     let tg: SessionHandle<Telegram> = SessionHandle::new(SessionId("s1".into()));
     let dc: SessionHandle<Discord> = SessionHandle::new(SessionId("s1".into()));

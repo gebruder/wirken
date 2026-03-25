@@ -12,8 +12,7 @@ use crate::writer::AuditWriter;
 #[test]
 fn write_and_query_single_event() {
     let log = AuditLog::open_in_memory().unwrap();
-    let event = AuditEvent::new("user", "exec", "/bin/ls")
-        .with_channel("telegram");
+    let event = AuditEvent::new("user", "exec", "/bin/ls").with_channel("telegram");
 
     log.write_batch(&[event]).unwrap();
 
@@ -70,10 +69,8 @@ fn tampered_row_detected() {
     drop(log);
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "UPDATE audit_events SET hash = 'tampered' WHERE id = 5",
-            [],
-        ).unwrap();
+        conn.execute("UPDATE audit_events SET hash = 'tampered' WHERE id = 5", [])
+            .unwrap();
     }
 
     let log = AuditLog::open(&db_path).unwrap();
@@ -98,10 +95,8 @@ fn tampered_row_data_detected() {
     drop(log);
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "UPDATE audit_events SET action = 'HACKED' WHERE id = 3",
-            [],
-        ).unwrap();
+        conn.execute("UPDATE audit_events SET action = 'HACKED' WHERE id = 3", [])
+            .unwrap();
     }
 
     let log = AuditLog::open(&db_path).unwrap();
@@ -132,10 +127,12 @@ fn query_filter_by_action() {
     ];
     log.write_batch(&events).unwrap();
 
-    let results = log.query(&AuditQuery {
-        action: Some("exec".into()),
-        ..Default::default()
-    }).unwrap();
+    let results = log
+        .query(&AuditQuery {
+            action: Some("exec".into()),
+            ..Default::default()
+        })
+        .unwrap();
 
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r.event.action == "exec"));
@@ -152,10 +149,12 @@ fn query_filter_by_channel() {
     ];
     log.write_batch(&events).unwrap();
 
-    let results = log.query(&AuditQuery {
-        channel: Some("telegram".into()),
-        ..Default::default()
-    }).unwrap();
+    let results = log
+        .query(&AuditQuery {
+            channel: Some("telegram".into()),
+            ..Default::default()
+        })
+        .unwrap();
 
     assert_eq!(results.len(), 2);
 }
@@ -169,10 +168,12 @@ fn query_with_limit() {
         .collect();
     log.write_batch(&events).unwrap();
 
-    let results = log.query(&AuditQuery {
-        limit: Some(10),
-        ..Default::default()
-    }).unwrap();
+    let results = log
+        .query(&AuditQuery {
+            limit: Some(10),
+            ..Default::default()
+        })
+        .unwrap();
 
     assert_eq!(results.len(), 10);
 }
@@ -193,14 +194,16 @@ fn prune_old_events() {
             "INSERT INTO audit_events (ts, actor, action, target, channel, session, detail, hash)
              VALUES (?1, 'actor', ?2, 'target', '', '', 'null', ?3)",
             rusqlite::params![old_ts, format!("old-{i}"), format!("hash-old-{i}")],
-        ).unwrap();
+        )
+        .unwrap();
     }
     for i in 0..3 {
         conn.execute(
             "INSERT INTO audit_events (ts, actor, action, target, channel, session, detail, hash)
              VALUES (?1, 'actor', ?2, 'target', '', '', 'null', ?3)",
             rusqlite::params![recent_ts, format!("new-{i}"), format!("hash-new-{i}")],
-        ).unwrap();
+        )
+        .unwrap();
     }
     drop(conn);
 
@@ -258,8 +261,7 @@ fn events_with_json_detail() {
         "duration_ms": 42
     });
 
-    let event = AuditEvent::new("agent-1", "exec", "/tmp/test")
-        .with_detail(detail.clone());
+    let event = AuditEvent::new("agent-1", "exec", "/tmp/test").with_detail(detail.clone());
     log.write_batch(&[event]).unwrap();
 
     let results = log.query(&AuditQuery::default()).unwrap();

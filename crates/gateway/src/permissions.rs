@@ -41,9 +41,9 @@ impl Action {
     /// Determine which tier this action belongs to.
     pub fn tier(&self) -> PermissionTier {
         match self {
-            Action::WorkspaceFileAccess
-            | Action::ChannelConverse
-            | Action::WebSearch => PermissionTier::Tier1,
+            Action::WorkspaceFileAccess | Action::ChannelConverse | Action::WebSearch => {
+                PermissionTier::Tier1
+            }
 
             Action::ShellExec { .. }
             | Action::ExternalFileAccess { .. }
@@ -97,7 +97,7 @@ impl PermissionStore {
                  approved_by TEXT NOT NULL,
                  expires_at TEXT NOT NULL,
                  PRIMARY KEY (action_key, agent_id)
-             );"
+             );",
         )?;
 
         Ok(Self {
@@ -121,17 +121,21 @@ impl PermissionStore {
                         if Utc::now() > approval.expires_at {
                             // Expired — needs re-approval
                             self.revoke(&key, agent_id)?;
-                            Ok(PermissionCheck::NeedsApproval { tier: PermissionTier::Tier2 })
+                            Ok(PermissionCheck::NeedsApproval {
+                                tier: PermissionTier::Tier2,
+                            })
                         } else {
                             Ok(PermissionCheck::Allowed)
                         }
                     }
-                    None => Ok(PermissionCheck::NeedsApproval { tier: PermissionTier::Tier2 }),
+                    None => Ok(PermissionCheck::NeedsApproval {
+                        tier: PermissionTier::Tier2,
+                    }),
                 }
             }
-            PermissionTier::Tier3 => {
-                Ok(PermissionCheck::NeedsApproval { tier: PermissionTier::Tier3 })
-            }
+            PermissionTier::Tier3 => Ok(PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier3,
+            }),
         }
     }
 
@@ -174,7 +178,7 @@ impl PermissionStore {
     pub fn list(&self, agent_id: &str) -> Result<Vec<Approval>, GatewayError> {
         let mut stmt = self.conn.prepare(
             "SELECT action_key, agent_id, approved_at, approved_by, expires_at
-             FROM approvals WHERE agent_id = ?1 ORDER BY approved_at DESC"
+             FROM approvals WHERE agent_id = ?1 ORDER BY approved_at DESC",
         )?;
 
         let rows = stmt.query_map(params![agent_id], |row| {
@@ -194,7 +198,11 @@ impl PermissionStore {
         Ok(result)
     }
 
-    fn get_approval(&self, action_key: &str, agent_id: &str) -> Result<Option<Approval>, GatewayError> {
+    fn get_approval(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+    ) -> Result<Option<Approval>, GatewayError> {
         let result = self.conn.query_row(
             "SELECT action_key, agent_id, approved_at, approved_by, expires_at
              FROM approvals WHERE action_key = ?1 AND agent_id = ?2",

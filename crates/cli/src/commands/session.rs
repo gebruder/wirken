@@ -9,7 +9,8 @@ pub async fn list(channel: Option<String>) -> Result<()> {
     let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
         .context("Failed to open session store")?;
 
-    let sessions = store.list_active(channel.as_deref())
+    let sessions = store
+        .list_active(channel.as_deref())
         .context("Failed to list sessions")?;
 
     if sessions.is_empty() {
@@ -17,8 +18,17 @@ pub async fn list(channel: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    println!("  {:32}  {:12}  {:>6}  {:20}", "ID", "CHANNEL", "MSGS", "LAST ACTIVITY");
-    println!("  {}  {}  {}  {}", "─".repeat(32), "─".repeat(12), "─".repeat(6), "─".repeat(20));
+    println!(
+        "  {:32}  {:12}  {:>6}  {:20}",
+        "ID", "CHANNEL", "MSGS", "LAST ACTIVITY"
+    );
+    println!(
+        "  {}  {}  {}  {}",
+        "─".repeat(32),
+        "─".repeat(12),
+        "─".repeat(6),
+        "─".repeat(20)
+    );
 
     for session in &sessions {
         println!(
@@ -40,7 +50,8 @@ pub async fn close(id: &str) -> Result<()> {
     let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
         .context("Failed to open session store")?;
 
-    store.close(id)
+    store
+        .close(id)
         .context(format!("Failed to close session '{id}'"))?;
 
     println!("  Session '{id}' closed.");

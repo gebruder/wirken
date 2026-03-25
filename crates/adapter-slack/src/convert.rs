@@ -47,7 +47,7 @@ pub fn slack_to_inbound(
     }
     meta["bot_mentioned"] = serde_json::json!(msg.bot_mentioned);
 
-    inbound.set_metadata(&meta.to_string());
+    inbound.set_metadata(meta.to_string());
 }
 
 /// Check if a channel message should be processed (mention-gating).

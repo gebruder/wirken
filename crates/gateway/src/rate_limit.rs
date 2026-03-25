@@ -1,6 +1,6 @@
-use governor::{Quota, RateLimiter};
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
+use governor::{Quota, RateLimiter};
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::RwLock;
@@ -34,10 +34,12 @@ impl AuthRateLimiter {
     /// Returns Err if the source is now locked out.
     pub fn record_failure(&self, source: &str) -> Result<(), RateLimitExceeded> {
         let mut sources = self.sources.write().unwrap();
-        let state = sources.entry(source.to_string()).or_insert_with(|| SourceState {
-            attempts: Vec::new(),
-            locked_until: None,
-        });
+        let state = sources
+            .entry(source.to_string())
+            .or_insert_with(|| SourceState {
+                attempts: Vec::new(),
+                locked_until: None,
+            });
 
         let now = Instant::now();
 
@@ -55,7 +57,9 @@ impl AuthRateLimiter {
         }
 
         // Prune old attempts outside the window
-        state.attempts.retain(|t| now.duration_since(*t) < self.window);
+        state
+            .attempts
+            .retain(|t| now.duration_since(*t) < self.window);
 
         // Record this attempt
         state.attempts.push(now);
@@ -82,9 +86,10 @@ impl AuthRateLimiter {
     pub fn is_locked(&self, source: &str) -> bool {
         let sources = self.sources.read().unwrap();
         match sources.get(source) {
-            Some(state) => {
-                state.locked_until.map(|until| Instant::now() < until).unwrap_or(false)
-            }
+            Some(state) => state
+                .locked_until
+                .map(|until| Instant::now() < until)
+                .unwrap_or(false),
             None => false,
         }
     }
@@ -95,10 +100,10 @@ impl AuthRateLimiter {
         let now = Instant::now();
         sources.retain(|_, state| {
             // Keep if locked or has recent attempts
-            if let Some(until) = state.locked_until {
-                if now < until {
-                    return true;
-                }
+            if let Some(until) = state.locked_until
+                && now < until
+            {
+                return true;
             }
             !state.attempts.is_empty()
                 && now.duration_since(*state.attempts.last().unwrap()) < Duration::from_secs(300)
@@ -114,7 +119,11 @@ pub struct RateLimitExceeded {
 
 impl std::fmt::Display for RateLimitExceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rate limited: {} (retry after {:?})", self.source, self.retry_after)
+        write!(
+            f,
+            "rate limited: {} (retry after {:?})",
+            self.source, self.retry_after
+        )
     }
 }
 
@@ -135,6 +144,8 @@ impl ControlPlaneRateLimiter {
 
     /// Check if an operation is allowed. Returns Ok(()) or Err with wait time.
     pub fn check(&self) -> Result<(), Duration> {
-        self.limiter.check().map_err(|e| e.wait_time_from(governor::clock::Clock::now(&DefaultClock::default())))
+        self.limiter
+            .check()
+            .map_err(|e| e.wait_time_from(governor::clock::Clock::now(&DefaultClock::default())))
     }
 }

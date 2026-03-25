@@ -23,7 +23,11 @@ pub enum VerifyResult {
     /// The hash chain is intact.
     Ok { rows_verified: usize },
     /// The hash chain is broken at the specified row.
-    Broken { row_id: i64, expected: String, found: String },
+    Broken {
+        row_id: i64,
+        expected: String,
+        found: String,
+    },
     /// The audit log is empty.
     Empty,
 }
@@ -65,7 +69,7 @@ impl AuditLog {
              );
              CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
              CREATE INDEX IF NOT EXISTS idx_audit_channel ON audit_events(channel);
-             CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);"
+             CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);",
         )?;
         Ok(())
     }
@@ -108,7 +112,7 @@ impl AuditLog {
     pub fn query(&self, q: &AuditQuery) -> Result<Vec<StoredEvent>, AuditError> {
         let mut sql = String::from(
             "SELECT id, ts, actor, action, target, channel, session, detail, hash
-             FROM audit_events WHERE 1=1"
+             FROM audit_events WHERE 1=1",
         );
         let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -172,7 +176,7 @@ impl AuditLog {
     pub fn verify(&self) -> Result<VerifyResult, AuditError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, ts, actor, action, target, detail, hash
-             FROM audit_events ORDER BY id ASC"
+             FROM audit_events ORDER BY id ASC",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -225,7 +229,9 @@ impl AuditLog {
         if count == 0 {
             Ok(VerifyResult::Empty)
         } else {
-            Ok(VerifyResult::Ok { rows_verified: count })
+            Ok(VerifyResult::Ok {
+                rows_verified: count,
+            })
         }
     }
 

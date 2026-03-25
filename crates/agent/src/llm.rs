@@ -115,9 +115,7 @@ impl LlmClient {
     ) -> Result<LlmResponse, AgentError> {
         let url = format!("{}/chat/completions", self.config.base_url);
 
-        let messages_json: Vec<serde_json::Value> = messages.iter()
-            .map(|m| message_to_json(m))
-            .collect();
+        let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -127,20 +125,25 @@ impl LlmClient {
         });
 
         if !tools.is_empty() {
-            let tools_json: Vec<serde_json::Value> = tools.iter()
-                .map(|t| serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.parameters,
-                    }
-                }))
+            let tools_json: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    })
+                })
                 .collect();
             body["tools"] = serde_json::Value::Array(tools_json);
         }
 
-        let mut request = self.http.post(&url)
+        let mut request = self
+            .http
+            .post(&url)
             .header("Content-Type", "application/json")
             .json(&body);
 
@@ -148,7 +151,9 @@ impl LlmClient {
             request = request.header("Authorization", format!("Bearer {key}"));
         }
 
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .map_err(|e| AgentError::Http(e.to_string()))?;
 
         if !response.status().is_success() {
@@ -157,7 +162,9 @@ impl LlmClient {
             return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
         }
 
-        let response_body: serde_json::Value = response.json().await
+        let response_body: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
         parse_completion_response(&response_body)
@@ -173,13 +180,15 @@ impl LlmClient {
         let url = format!("{}/messages", self.config.base_url);
 
         // Anthropic separates system prompt from messages
-        let system_prompt: String = messages.iter()
+        let system_prompt: String = messages
+            .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.content.clone())
             .collect::<Vec<_>>()
             .join("\n");
 
-        let messages_json: Vec<serde_json::Value> = messages.iter()
+        let messages_json: Vec<serde_json::Value> = messages
+            .iter()
             .filter(|m| m.role != Role::System)
             .map(|m| {
                 let role = match m.role {
@@ -193,17 +202,17 @@ impl LlmClient {
                     "content": m.content,
                 });
                 // Tool results: wrap in tool_result content block
-                if m.role == Role::Tool {
-                    if let Some(ref id) = m.tool_call_id {
-                        obj = serde_json::json!({
-                            "role": "user",
-                            "content": [{
-                                "type": "tool_result",
-                                "tool_use_id": id,
-                                "content": m.content,
-                            }]
-                        });
-                    }
+                if m.role == Role::Tool
+                    && let Some(ref id) = m.tool_call_id
+                {
+                    obj = serde_json::json!({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": id,
+                            "content": m.content,
+                        }]
+                    });
                 }
                 obj
             })
@@ -220,17 +229,22 @@ impl LlmClient {
         }
 
         if !tools.is_empty() {
-            let tools_json: Vec<serde_json::Value> = tools.iter()
-                .map(|t| serde_json::json!({
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": t.parameters,
-                }))
+            let tools_json: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    })
+                })
                 .collect();
             body["tools"] = serde_json::Value::Array(tools_json);
         }
 
-        let mut request = self.http.post(&url)
+        let mut request = self
+            .http
+            .post(&url)
             .header("Content-Type", "application/json")
             .header("anthropic-version", "2023-06-01");
 
@@ -240,7 +254,9 @@ impl LlmClient {
 
         let request = request.json(&body);
 
-        let response = request.send().await
+        let response = request
+            .send()
+            .await
             .map_err(|e| AgentError::Http(e.to_string()))?;
 
         if !response.status().is_success() {
@@ -249,7 +265,9 @@ impl LlmClient {
             return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
         }
 
-        let response_body: serde_json::Value = response.json().await
+        let response_body: serde_json::Value = response
+            .json()
+            .await
             .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
 
         parse_anthropic_response(&response_body)
@@ -272,15 +290,18 @@ fn message_to_json(msg: &Message) -> serde_json::Value {
     }
 
     if let Some(ref tool_calls) = msg.tool_calls {
-        let calls: Vec<serde_json::Value> = tool_calls.iter()
-            .map(|tc| serde_json::json!({
-                "id": tc.id,
-                "type": "function",
-                "function": {
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                }
-            }))
+        let calls: Vec<serde_json::Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    }
+                })
+            })
             .collect();
         obj["tool_calls"] = serde_json::Value::Array(calls);
     }
@@ -289,23 +310,30 @@ fn message_to_json(msg: &Message) -> serde_json::Value {
 }
 
 pub fn parse_completion_response(body: &serde_json::Value) -> Result<LlmResponse, AgentError> {
-    let choice = body.get("choices")
+    let choice = body
+        .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|arr| arr.first())
         .ok_or_else(|| AgentError::Llm("no choices in response".into()))?;
 
-    let message = choice.get("message")
+    let message = choice
+        .get("message")
         .ok_or_else(|| AgentError::Llm("no message in choice".into()))?;
 
     // Check for tool calls
     if let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
-        let calls: Vec<ToolCallRequest> = tool_calls.iter()
+        let calls: Vec<ToolCallRequest> = tool_calls
+            .iter()
             .filter_map(|tc| {
                 let id = tc.get("id")?.as_str()?.to_string();
                 let func = tc.get("function")?;
                 let name = func.get("name")?.as_str()?.to_string();
                 let arguments = func.get("arguments")?.as_str()?.to_string();
-                Some(ToolCallRequest { id, name, arguments })
+                Some(ToolCallRequest {
+                    id,
+                    name,
+                    arguments,
+                })
             })
             .collect();
 
@@ -315,10 +343,10 @@ pub fn parse_completion_response(body: &serde_json::Value) -> Result<LlmResponse
     }
 
     // Text response
-    if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-        if !content.is_empty() {
-            return Ok(LlmResponse::Text(content.to_string()));
-        }
+    if let Some(content) = message.get("content").and_then(|c| c.as_str())
+        && !content.is_empty()
+    {
+        return Ok(LlmResponse::Text(content.to_string()));
     }
 
     Ok(LlmResponse::Empty)
@@ -326,7 +354,8 @@ pub fn parse_completion_response(body: &serde_json::Value) -> Result<LlmResponse
 
 /// Parse an Anthropic Messages API response.
 pub fn parse_anthropic_response(body: &serde_json::Value) -> Result<LlmResponse, AgentError> {
-    let content = body.get("content")
+    let content = body
+        .get("content")
         .and_then(|c| c.as_array())
         .ok_or_else(|| AgentError::Llm("no content array in Anthropic response".into()))?;
 
@@ -338,18 +367,30 @@ pub fn parse_anthropic_response(body: &serde_json::Value) -> Result<LlmResponse,
 
         match block_type {
             "text" => {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    if !text.is_empty() {
-                        text_parts.push(text.to_string());
-                    }
+                if let Some(text) = block.get("text").and_then(|t| t.as_str())
+                    && !text.is_empty()
+                {
+                    text_parts.push(text.to_string());
                 }
             }
             "tool_use" => {
-                let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                let id = block
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let input = block.get("input").unwrap_or(&serde_json::Value::Null);
                 let arguments = input.to_string();
-                tool_calls.push(ToolCallRequest { id, name, arguments });
+                tool_calls.push(ToolCallRequest {
+                    id,
+                    name,
+                    arguments,
+                });
             }
             _ => {}
         }
@@ -368,14 +409,17 @@ pub fn parse_anthropic_response(body: &serde_json::Value) -> Result<LlmResponse,
 
 /// Build the tool definitions in OpenAI function calling format.
 pub fn tools_to_json(tools: &[ToolDef]) -> Vec<serde_json::Value> {
-    tools.iter()
-        .map(|t| serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            }
-        }))
+    tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
         .collect()
 }

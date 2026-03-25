@@ -129,7 +129,8 @@ pub async fn serve(
             if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    HTML.len(), HTML
+                    HTML.len(),
+                    HTML
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             } else if first_line.starts_with("POST /api/chat") {
@@ -142,20 +143,26 @@ pub async fn serve(
                     let resp = r#"{"error":"empty message"}"#;
                     let response = format!(
                         "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        resp.len(), resp
+                        resp.len(),
+                        resp
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                     return;
                 }
 
                 // Audit
-                let _ = audit.log(
-                    AuditEvent::new("webchat-user", "message.inbound", message)
-                        .with_channel("webchat")
-                ).await;
+                let _ = audit
+                    .log(
+                        AuditEvent::new("webchat-user", "message.inbound", message)
+                            .with_channel("webchat"),
+                    )
+                    .await;
 
                 // Session
-                let _ = sessions.lock().await.get_or_create("webchat", "webchat-default");
+                let _ = sessions
+                    .lock()
+                    .await
+                    .get_or_create("webchat", "webchat-default");
 
                 // Process with agent
                 let result = {
@@ -165,10 +172,12 @@ pub async fn serve(
 
                 let resp_json = match result {
                     Ok(response) => {
-                        let _ = audit.log(
-                            AuditEvent::new("default", "message.outbound", &response)
-                                .with_channel("webchat")
-                        ).await;
+                        let _ = audit
+                            .log(
+                                AuditEvent::new("default", "message.outbound", &response)
+                                    .with_channel("webchat"),
+                            )
+                            .await;
                         serde_json::json!({ "response": response })
                     }
                     Err(e) => {
@@ -179,11 +188,13 @@ pub async fn serve(
                 let resp_body = resp_json.to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp_body.len(), resp_body
+                    resp_body.len(),
+                    resp_body
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             } else {
-                let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let response =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });

@@ -18,16 +18,24 @@ pub async fn list() -> Result<()> {
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
-    let creds = store.list()
-        .context("Failed to list credentials")?;
+    let creds = store.list().context("Failed to list credentials")?;
 
     if creds.is_empty() {
         println!("  No credentials stored.");
         return Ok(());
     }
 
-    println!("  {:24}  {:12}  {:20}  {:12}", "NAME", "CHANNEL", "CREATED", "STATUS");
-    println!("  {}  {}  {}  {}", "─".repeat(24), "─".repeat(12), "─".repeat(20), "─".repeat(12));
+    println!(
+        "  {:24}  {:12}  {:20}  {:12}",
+        "NAME", "CHANNEL", "CREATED", "STATUS"
+    );
+    println!(
+        "  {}  {}  {}  {}",
+        "─".repeat(24),
+        "─".repeat(12),
+        "─".repeat(20),
+        "─".repeat(12)
+    );
 
     for cred in &creds {
         let status = if cred.is_expired() {
@@ -48,7 +56,10 @@ pub async fn list() -> Result<()> {
     }
 
     println!();
-    println!("  {} credentials. Values are encrypted — never shown.", creds.len());
+    println!(
+        "  {} credentials. Values are encrypted — never shown.",
+        creds.len()
+    );
     Ok(())
 }
 
@@ -72,7 +83,8 @@ pub async fn rotate(name: &str) -> Result<()> {
     let secret = VaultSecret::new(new_value);
     let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
 
-    store.rotate(name, &secret, Some(rotation_due))
+    store
+        .rotate(name, &secret, Some(rotation_due))
         .context(format!("Failed to rotate '{name}'"))?;
 
     println!("  Credential '{name}' rotated. Next rotation due in 90 days.");

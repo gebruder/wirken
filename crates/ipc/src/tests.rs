@@ -1,4 +1,3 @@
-
 use crate::auth::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 use crate::channel::{Channel, Discord, Generic, SessionHandle, SessionId, Telegram};
 use crate::error::HandshakeError;
@@ -182,7 +181,10 @@ async fn frame_roundtrip_outbound_message() {
     match frame_reader.which().unwrap() {
         frame::Outbound(outbound) => {
             let m = outbound.unwrap();
-            assert_eq!(m.get_conversation_id().unwrap().to_str().unwrap(), "chat-789");
+            assert_eq!(
+                m.get_conversation_id().unwrap().to_str().unwrap(),
+                "chat-789"
+            );
             assert_eq!(m.get_text().unwrap().to_str().unwrap(), "Reply from agent");
             assert_eq!(m.get_reply_to_id().unwrap().to_str().unwrap(), "msg-001");
         }
@@ -282,7 +284,8 @@ async fn handshake_success() {
                 assert_eq!(pubkey, &expected_pubkey);
                 Ok(())
             },
-        ).await
+        )
+        .await
     });
 
     let (adapter_result, gateway_result) = tokio::join!(adapter_handle, gateway_handle);
@@ -310,16 +313,17 @@ async fn handshake_rejected_unknown_adapter() {
         let result = perform_gateway_handshake(
             &mut server_reader,
             &mut server_writer,
-            |adapter_id, _pubkey| {
-                Err(HandshakeError::UnknownAdapter(adapter_id.to_string()))
-            },
-        ).await;
+            |adapter_id, _pubkey| Err(HandshakeError::UnknownAdapter(adapter_id.to_string())),
+        )
+        .await;
 
         // Gateway should have errored
         assert!(result.is_err());
 
         // Send rejection to adapter so it doesn't hang
-        crate::auth::send_rejection(&mut server_writer, "unknown adapter").await.unwrap();
+        crate::auth::send_rejection(&mut server_writer, "unknown adapter")
+            .await
+            .unwrap();
     });
 
     let (adapter_result, _) = tokio::join!(adapter_handle, gateway_handle);
@@ -354,10 +358,13 @@ async fn handshake_wrong_key_rejected() {
                     Ok(())
                 }
             },
-        ).await;
+        )
+        .await;
 
         assert!(result.is_err());
-        crate::auth::send_rejection(&mut server_writer, "key mismatch").await.unwrap();
+        crate::auth::send_rejection(&mut server_writer, "key mismatch")
+            .await
+            .unwrap();
     });
 
     let (adapter_result, _) = tokio::join!(adapter_handle, gateway_handle);

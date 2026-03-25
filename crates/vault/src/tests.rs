@@ -124,8 +124,10 @@ fn key_derivation_different_passphrases() {
 
 #[test]
 fn key_derivation_different_salts() {
-    let key1 = derive_key_from_passphrase("same-pass", b"salt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-    let key2 = derive_key_from_passphrase("same-pass", b"salt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+    let key1 =
+        derive_key_from_passphrase("same-pass", b"salt-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
+    let key2 =
+        derive_key_from_passphrase("same-pass", b"salt-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
 
     assert_ne!(key1.expose(), key2.expose());
 }
@@ -197,7 +199,9 @@ fn store_and_retrieve_credential() {
     let store = test_store(&tmp);
 
     let secret = VaultSecret::new("sk-abc123".into());
-    store.store("openai-key", "openai", &secret, None, None).unwrap();
+    store
+        .store("openai-key", "openai", &secret, None, None)
+        .unwrap();
 
     let (retrieved, meta) = store.retrieve("openai-key").unwrap();
     assert_eq!(retrieved.expose(), "sk-abc123");
@@ -238,7 +242,9 @@ fn expired_credential_returns_error() {
 
     let secret = VaultSecret::new("expired-value".into());
     let past = Utc::now() - Duration::hours(1);
-    store.store("expired", "chan", &secret, Some(past), None).unwrap();
+    store
+        .store("expired", "chan", &secret, Some(past), None)
+        .unwrap();
 
     let result = store.retrieve("expired");
     assert!(matches!(result, Err(crate::VaultError::Expired(_))));
@@ -251,7 +257,9 @@ fn rotation_due_flagged() {
 
     let secret = VaultSecret::new("value".into());
     let past = Utc::now() - Duration::hours(1);
-    store.store("rotate-me", "chan", &secret, None, Some(past)).unwrap();
+    store
+        .store("rotate-me", "chan", &secret, None, Some(past))
+        .unwrap();
 
     let metas = store.list().unwrap();
     let meta = metas.iter().find(|m| m.name == "rotate-me").unwrap();
@@ -265,7 +273,9 @@ fn rotation_not_due_yet() {
 
     let secret = VaultSecret::new("value".into());
     let future = Utc::now() + Duration::days(90);
-    store.store("fresh", "chan", &secret, None, Some(future)).unwrap();
+    store
+        .store("fresh", "chan", &secret, None, Some(future))
+        .unwrap();
 
     let metas = store.list().unwrap();
     let meta = metas.iter().find(|m| m.name == "fresh").unwrap();
@@ -278,7 +288,9 @@ fn delete_credential() {
     let store = test_store(&tmp);
 
     let secret = VaultSecret::new("value".into());
-    store.store("to-delete", "chan", &secret, None, None).unwrap();
+    store
+        .store("to-delete", "chan", &secret, None, None)
+        .unwrap();
 
     store.delete("to-delete").unwrap();
     let result = store.retrieve("to-delete");
@@ -365,7 +377,9 @@ fn export_encrypted_returns_bytes() {
     let store = test_store(&tmp);
 
     let secret = VaultSecret::new("export-me".into());
-    store.store("export-test", "chan", &secret, None, None).unwrap();
+    store
+        .store("export-test", "chan", &secret, None, None)
+        .unwrap();
 
     let encrypted = store.export_encrypted("export-test").unwrap();
     assert!(!encrypted.is_empty());
@@ -389,7 +403,9 @@ fn full_flow_age_keychain_to_store() {
 
     // Store a credential
     let secret = VaultSecret::new("integration-secret".into());
-    store.store("int-test", "telegram", &secret, None, None).unwrap();
+    store
+        .store("int-test", "telegram", &secret, None, None)
+        .unwrap();
 
     // Open store again (retrieves existing device key)
     let store2 = CredentialStore::open(&tmp.path().join("vault.db"), &kc).unwrap();

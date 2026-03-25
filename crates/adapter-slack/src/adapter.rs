@@ -5,7 +5,7 @@ use slack_morphism::prelude::*;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{split_stream, FrameReader, FrameWriter};
+use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
@@ -85,24 +85,20 @@ impl SlackAdapter {
 
         // Socket Mode listener with event_tx for forwarding
         let listener_env = Arc::new(
-            SlackClientEventsListenerEnvironment::new(Arc::new(client))
-                .with_user_state(event_tx),
+            SlackClientEventsListenerEnvironment::new(Arc::new(client)).with_user_state(event_tx),
         );
 
-        let callbacks = SlackSocketModeListenerCallbacks::new()
-            .with_push_events(
-                |event: SlackPushEventCallback,
-                 _client: Arc<SlackHyperClient>,
-                 states| {
-                    async move {
-                        let tx_lock = states.read().await;
-                        if let Some(tx) = tx_lock.get_user_state::<tokio::sync::mpsc::Sender<convert::SlackInbound>>() {
-                            process_push_event(event, tx).await;
-                        }
-                        Ok(())
-                    }
-                },
-            );
+        let callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(
+            |event: SlackPushEventCallback, _client: Arc<SlackHyperClient>, states| async move {
+                let tx_lock = states.read().await;
+                if let Some(tx) =
+                    tx_lock.get_user_state::<tokio::sync::mpsc::Sender<convert::SlackInbound>>()
+                {
+                    process_push_event(event, tx).await;
+                }
+                Ok(())
+            },
+        );
 
         let socket_listener = SlackClientSocketModeListener::new(
             &SlackClientSocketModeConfig::new(),
@@ -204,9 +200,7 @@ async fn handle_outbound(
     bot_token: String,
     writer: Arc<Mutex<FrameWriter>>,
 ) {
-    let client = SlackClient::new(
-        SlackClientHyperConnector::new().expect("slack connector"),
-    );
+    let client = SlackClient::new(SlackClientHyperConnector::new().expect("slack connector"));
     let token = make_token(&bot_token);
     let session = client.open_session(&token);
 

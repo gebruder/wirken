@@ -1,15 +1,15 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use serenity::Client;
 use serenity::all::{
     ChannelId, Context, CreateMessage, EventHandler, GatewayIntents, Message as DcMessage,
     MessageId, Ready,
 };
-use serenity::Client;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{split_stream, FrameReader, FrameWriter};
+use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
@@ -24,7 +24,10 @@ pub struct DiscordAdapter {
 
 impl DiscordAdapter {
     pub fn new(identity: AdapterIdentity, bot_token: String) -> Self {
-        Self { identity, bot_token }
+        Self {
+            identity,
+            bot_token,
+        }
     }
 
     /// Connect to the gateway, authenticate, then run the bot.
@@ -120,7 +123,8 @@ impl EventHandler for Handler {
         } else {
             tracing::debug!(
                 "Forwarded message {} from {} to gateway",
-                msg.id, msg.author.name
+                msg.id,
+                msg.author.name
             );
         }
     }
@@ -195,13 +199,11 @@ async fn handle_outbound(
                     message = message.reference_message((channel_id, MessageId::new(reply_id)));
                 }
 
-                let (success, msg_id, error) = match channel_id
-                    .send_message(&http_client, message)
-                    .await
-                {
-                    Ok(sent) => (true, sent.id.to_string(), String::new()),
-                    Err(e) => (false, String::new(), e.to_string()),
-                };
+                let (success, msg_id, error) =
+                    match channel_id.send_message(&http_client, message).await {
+                        Ok(sent) => (true, sent.id.to_string(), String::new()),
+                        Err(e) => (false, String::new(), e.to_string()),
+                    };
 
                 let mut result_msg = capnp::message::Builder::new_default();
                 convert::build_outbound_result(&mut result_msg, success, &msg_id, &error);

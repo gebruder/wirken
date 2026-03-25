@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use crate::conversation::{Conversation, Role};
-use crate::llm::{LlmConfig, LlmResponse, LlmClient};
-use crate::skill::{SkillLoader, Skill};
-use crate::tool::{ToolRegistry, ToolDef};
+use crate::llm::{LlmClient, LlmConfig, LlmResponse};
+use crate::skill::{Skill, SkillLoader};
+use crate::tool::{ToolDef, ToolRegistry};
 
 // ---------------------------------------------------------------------------
 // Conversation
@@ -38,7 +38,9 @@ fn conversation_system_prompt_replaced() {
     conv.set_system_prompt("First prompt");
     conv.set_system_prompt("Second prompt");
 
-    let system_msgs: Vec<_> = conv.messages().iter()
+    let system_msgs: Vec<_> = conv
+        .messages()
+        .iter()
         .filter(|m| m.role == Role::System)
         .collect();
     assert_eq!(system_msgs.len(), 1);
@@ -50,13 +52,11 @@ fn conversation_tool_calls() {
     let mut conv = Conversation::new(10_000);
     conv.add_user_message("What's the weather?");
 
-    conv.add_assistant_tool_calls(vec![
-        crate::conversation::ToolCallRequest {
-            id: "call_1".into(),
-            name: "exec".into(),
-            arguments: r#"{"command":"curl wttr.in/London"}"#.into(),
-        }
-    ]);
+    conv.add_assistant_tool_calls(vec![crate::conversation::ToolCallRequest {
+        id: "call_1".into(),
+        name: "exec".into(),
+        arguments: r#"{"command":"curl wttr.in/London"}"#.into(),
+    }]);
 
     conv.add_tool_result("call_1", "Sunny, 22°C");
 
@@ -110,7 +110,9 @@ fn load_skill_from_markdown() {
     let tmp = TempDir::new().unwrap();
     let skill_dir = tmp.path().join("weather");
     std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(skill_dir.join("SKILL.md"), r#"---
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
 name: weather
 description: "Get current weather via wttr.in"
 metadata: { "openclaw": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
@@ -124,7 +126,9 @@ Use `curl wttr.in/{city}` to get current weather.
 
 - "What's the weather in London?"
 - "Temperature in Tokyo"
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
@@ -139,7 +143,11 @@ fn load_skill_no_frontmatter() {
     let tmp = TempDir::new().unwrap();
     let skill_dir = tmp.path().join("notes");
     std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(skill_dir.join("SKILL.md"), "# Just a plain skill\n\nNo frontmatter here.").unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "# Just a plain skill\n\nNo frontmatter here.",
+    )
+    .unwrap();
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
@@ -152,13 +160,17 @@ fn load_skill_no_required_bins() {
     let tmp = TempDir::new().unwrap();
     let skill_dir = tmp.path().join("summarize");
     std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(skill_dir.join("SKILL.md"), r#"---
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
 name: summarize
 description: "Summarize text"
 ---
 
 Summarize the given text concisely.
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
@@ -171,14 +183,18 @@ fn load_skill_missing_bin() {
     let tmp = TempDir::new().unwrap();
     let skill_dir = tmp.path().join("impossible");
     std::fs::create_dir(&skill_dir).unwrap();
-    std::fs::write(skill_dir.join("SKILL.md"), r#"---
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
 name: impossible
 description: "Needs a nonexistent binary"
 metadata: { "openclaw": { "requires": { "bins": ["nonexistent_binary_xyz_999"] } } }
 ---
 
 This skill requires a binary that doesn't exist.
-"#).unwrap();
+"#,
+    )
+    .unwrap();
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
@@ -192,7 +208,11 @@ fn load_multiple_skills() {
     for name in &["alpha", "beta", "gamma"] {
         let dir = tmp.path().join(name);
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: skill {name}\n---\n\nBody of {name}.")).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: skill {name}\n---\n\nBody of {name}."),
+        )
+        .unwrap();
     }
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
@@ -253,7 +273,10 @@ async fn tool_exec_command() {
     let tmp = TempDir::new().unwrap();
     let tools = ToolRegistry::new(tmp.path().to_path_buf());
 
-    let result = tools.execute("exec", r#"{"command":"echo hello world"}"#).await.unwrap();
+    let result = tools
+        .execute("exec", r#"{"command":"echo hello world"}"#)
+        .await
+        .unwrap();
     assert!(result.success);
     assert!(result.output.contains("hello world"));
 }
@@ -263,7 +286,10 @@ async fn tool_exec_failing_command() {
     let tmp = TempDir::new().unwrap();
     let tools = ToolRegistry::new(tmp.path().to_path_buf());
 
-    let result = tools.execute("exec", r#"{"command":"false"}"#).await.unwrap();
+    let result = tools
+        .execute("exec", r#"{"command":"false"}"#)
+        .await
+        .unwrap();
     assert!(!result.success);
 }
 
@@ -273,12 +299,21 @@ async fn tool_read_write_file() {
     let tools = ToolRegistry::new(tmp.path().to_path_buf());
 
     // Write
-    let write_result = tools.execute("write_file", r#"{"path":"test.txt","content":"hello from wirken"}"#).await.unwrap();
+    let write_result = tools
+        .execute(
+            "write_file",
+            r#"{"path":"test.txt","content":"hello from wirken"}"#,
+        )
+        .await
+        .unwrap();
     assert!(write_result.success);
     assert!(write_result.output.contains("17 bytes"));
 
     // Read
-    let read_result = tools.execute("read_file", r#"{"path":"test.txt"}"#).await.unwrap();
+    let read_result = tools
+        .execute("read_file", r#"{"path":"test.txt"}"#)
+        .await
+        .unwrap();
     assert!(read_result.success);
     assert_eq!(read_result.output, "hello from wirken");
 }
@@ -288,7 +323,10 @@ async fn tool_read_nonexistent() {
     let tmp = TempDir::new().unwrap();
     let tools = ToolRegistry::new(tmp.path().to_path_buf());
 
-    let result = tools.execute("read_file", r#"{"path":"nope.txt"}"#).await.unwrap();
+    let result = tools
+        .execute("read_file", r#"{"path":"nope.txt"}"#)
+        .await
+        .unwrap();
     assert!(!result.success);
     assert!(result.output.contains("Error reading"));
 }
@@ -301,7 +339,10 @@ async fn tool_list_files() {
     std::fs::create_dir(tmp.path().join("subdir")).unwrap();
 
     let tools = ToolRegistry::new(tmp.path().to_path_buf());
-    let result = tools.execute("list_files", r#"{"path":"."}"#).await.unwrap();
+    let result = tools
+        .execute("list_files", r#"{"path":"."}"#)
+        .await
+        .unwrap();
     assert!(result.success);
     assert!(result.output.contains("a.txt"));
     assert!(result.output.contains("b.txt"));
@@ -509,7 +550,11 @@ fn agent_loads_skills() {
     std::fs::create_dir(&skills_dir).unwrap();
     let weather = skills_dir.join("weather");
     std::fs::create_dir(&weather).unwrap();
-    std::fs::write(weather.join("SKILL.md"), "---\nname: weather\ndescription: get weather\n---\nUse curl wttr.in").unwrap();
+    std::fs::write(
+        weather.join("SKILL.md"),
+        "---\nname: weather\ndescription: get weather\n---\nUse curl wttr.in",
+    )
+    .unwrap();
 
     let mut agent = crate::runtime::Agent::new(
         "test-agent".into(),

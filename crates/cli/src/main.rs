@@ -157,7 +157,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup { install_service, uninstall_service } => {
+        Commands::Setup {
+            install_service,
+            uninstall_service,
+        } => {
             if uninstall_service {
                 return commands::service::uninstall_service();
             }
@@ -171,9 +174,11 @@ async fn main() -> Result<()> {
             ChannelCommands::Remove { channel } => commands::channel::remove(&channel).await,
         },
         Commands::Audit(cmd) => match cmd {
-            AuditCommands::Log { action, channel, limit } => {
-                commands::audit::log(action, channel, limit).await
-            }
+            AuditCommands::Log {
+                action,
+                channel,
+                limit,
+            } => commands::audit::log(action, channel, limit).await,
             AuditCommands::Verify => commands::audit::verify().await,
         },
         Commands::Sessions(cmd) => match cmd {

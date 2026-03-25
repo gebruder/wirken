@@ -31,69 +31,81 @@ impl ToolRegistry {
     pub fn new(workspace: PathBuf) -> Self {
         let mut tools = HashMap::new();
 
-        tools.insert("exec".into(), ToolDef {
-            name: "exec".into(),
-            description: "Execute a shell command and return its output.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute"
-                    }
-                },
-                "required": ["command"]
-            }),
-        });
-
-        tools.insert("read_file".into(), ToolDef {
-            name: "read_file".into(),
-            description: "Read the contents of a file.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read"
-                    }
-                },
-                "required": ["path"]
-            }),
-        });
-
-        tools.insert("write_file".into(), ToolDef {
-            name: "write_file".into(),
-            description: "Write content to a file.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to write"
+        tools.insert(
+            "exec".into(),
+            ToolDef {
+                name: "exec".into(),
+                description: "Execute a shell command and return its output.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        }
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "Content to write to the file"
-                    }
-                },
-                "required": ["path", "content"]
-            }),
-        });
+                    "required": ["command"]
+                }),
+            },
+        );
 
-        tools.insert("list_files".into(), ToolDef {
-            name: "list_files".into(),
-            description: "List files in a directory.".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory path to list (default: workspace root)"
-                    }
-                },
-                "required": []
-            }),
-        });
+        tools.insert(
+            "read_file".into(),
+            ToolDef {
+                name: "read_file".into(),
+                description: "Read the contents of a file.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to read"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+        );
+
+        tools.insert(
+            "write_file".into(),
+            ToolDef {
+                name: "write_file".into(),
+                description: "Write content to a file.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file to write"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write to the file"
+                        }
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+        );
+
+        tools.insert(
+            "list_files".into(),
+            ToolDef {
+                name: "list_files".into(),
+                description: "List files in a directory.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Directory path to list (default: workspace root)"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+        );
 
         Self { workspace, tools }
     }
@@ -118,7 +130,8 @@ impl ToolRegistry {
     }
 
     async fn exec_command(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
-        let command = args["command"].as_str()
+        let command = args["command"]
+            .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'command' argument".into()))?;
 
         let output = tokio::process::Command::new("sh")
@@ -162,7 +175,8 @@ impl ToolRegistry {
     }
 
     async fn read_file(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
-        let path_str = args["path"].as_str()
+        let path_str = args["path"]
+            .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?;
 
         let path = self.resolve_path(path_str);
@@ -174,7 +188,10 @@ impl ToolRegistry {
                     output.truncate(64_000);
                     output.push_str("\n... (truncated)");
                 }
-                Ok(ToolResult { output, success: true })
+                Ok(ToolResult {
+                    output,
+                    success: true,
+                })
             }
             Err(e) => Ok(ToolResult {
                 output: format!("Error reading {}: {e}", path.display()),
@@ -184,21 +201,23 @@ impl ToolRegistry {
     }
 
     async fn write_file(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
-        let path_str = args["path"].as_str()
+        let path_str = args["path"]
+            .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?;
-        let content = args["content"].as_str()
+        let content = args["content"]
+            .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'content' argument".into()))?;
 
         let path = self.resolve_path(path_str);
 
         // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return Ok(ToolResult {
-                    output: format!("Error creating directory: {e}"),
-                    success: false,
-                });
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            return Ok(ToolResult {
+                output: format!("Error creating directory: {e}"),
+                success: false,
+            });
         }
 
         match tokio::fs::write(&path, content).await {
@@ -219,10 +238,12 @@ impl ToolRegistry {
 
         let mut entries = match tokio::fs::read_dir(&path).await {
             Ok(rd) => rd,
-            Err(e) => return Ok(ToolResult {
-                output: format!("Error listing {}: {e}", path.display()),
-                success: false,
-            }),
+            Err(e) => {
+                return Ok(ToolResult {
+                    output: format!("Error listing {}: {e}", path.display()),
+                    success: false,
+                });
+            }
         };
 
         let mut names = Vec::new();
