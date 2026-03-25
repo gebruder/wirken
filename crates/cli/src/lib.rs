@@ -1,2 +1,1 @@
-// wirken-cli: setup wizard, channel management, audit queries
-// Stub — not yet implemented
+// wirken-cli library — main entry point is src/main.rs (the `wirken` binary)

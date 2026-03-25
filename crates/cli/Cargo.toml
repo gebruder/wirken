@@ -4,10 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "wirken"
+path = "src/main.rs"
+
 [dependencies]
 wirken-vault = { path = "../vault" }
 wirken-audit = { path = "../audit" }
 wirken-gateway = { path = "../gateway" }
+wirken-agent = { path = "../agent" }
+wirken-ipc = { path = "../ipc" }
 clap = { workspace = true }
 dialoguer = { workspace = true }
 tokio = { workspace = true }
@@ -17,3 +23,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
