@@ -1,29 +1,19 @@
 [package]
-name = "wirken-cli"
+name = "wirken-adapter-discord"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "wirken"
-path = "src/main.rs"
-
 [dependencies]
-wirken-vault = { path = "../vault" }
-wirken-audit = { path = "../audit" }
-wirken-gateway = { path = "../gateway" }
-wirken-agent = { path = "../agent" }
 wirken-ipc = { path = "../ipc" }
-wirken-adapter-telegram = { path = "../adapter-telegram" }
-wirken-adapter-discord = { path = "../adapter-discord" }
 capnp = { workspace = true }
-clap = { workspace = true }
-dialoguer = { workspace = true }
+serenity = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 
