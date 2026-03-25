@@ -119,7 +119,7 @@ pub async fn run(install_service: bool) -> Result<()> {
     println!("  Step 2: Pick your channels");
     println!();
 
-    let channels = &["Telegram", "Discord", "Slack", "Skip for now"];
+    let channels = &["Telegram", "Discord", "Slack", "Microsoft Teams", "Skip for now"];
     let mut selected_channels = Vec::new();
 
     loop {
@@ -142,7 +142,11 @@ pub async fn run(install_service: bool) -> Result<()> {
                 setup_slack_channel(&cfg, &data).await?;
                 selected_channels.push("slack");
             }
-            3 => break,
+            3 => {
+                setup_teams_channel(&cfg, &data).await?;
+                selected_channels.push("teams");
+            }
+            4 => break,
             _ => unreachable!(),
         }
 
@@ -249,5 +253,32 @@ async fn setup_slack_channel(
         .context("Failed to store Slack app token")?;
 
     println!("  slack: both tokens encrypted.");
+    Ok(())
+}
+
+async fn setup_teams_channel(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+) -> Result<()> {
+    let app_id: String = dialoguer::Input::new()
+        .with_prompt("  Microsoft App ID")
+        .interact_text()?;
+
+    let app_password = Password::new()
+        .with_prompt("  Microsoft App Password")
+        .interact()?;
+
+    // Register with the app password as the primary token
+    register_channel("teams", &app_password, cfg, data).await?;
+
+    // Store the app ID separately
+    let keychain = wirken_vault::probe_keychain(data, || String::new());
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    let secret = wirken_vault::VaultSecret::new(app_id);
+    store.store("teams-app-id", "teams", &secret, None, None)
+        .context("Failed to store Teams app ID")?;
+
+    println!("  teams: app ID and password encrypted.");
     Ok(())
 }

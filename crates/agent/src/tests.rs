@@ -432,6 +432,67 @@ fn parse_empty_response() {
 }
 
 // ---------------------------------------------------------------------------
+// Anthropic response parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_anthropic_text_response() {
+    let body = serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": "Hello! How can I help you today?"
+        }],
+        "model": "claude-sonnet-4-20250514",
+        "stop_reason": "end_turn"
+    });
+
+    let response = crate::llm::parse_anthropic_response(&body).unwrap();
+    match response {
+        LlmResponse::Text(text) => assert_eq!(text, "Hello! How can I help you today?"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_anthropic_tool_use_response() {
+    let body = serde_json::json!({
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_01A",
+            "name": "exec",
+            "input": {"command": "date"}
+        }],
+        "stop_reason": "tool_use"
+    });
+
+    let response = crate::llm::parse_anthropic_response(&body).unwrap();
+    match response {
+        LlmResponse::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, "toolu_01A");
+            assert_eq!(calls[0].name, "exec");
+            assert!(calls[0].arguments.contains("date"));
+        }
+        other => panic!("expected ToolCalls, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_anthropic_mixed_response() {
+    let body = serde_json::json!({
+        "content": [
+            {"type": "text", "text": "Let me check. "},
+            {"type": "tool_use", "id": "toolu_01B", "name": "exec", "input": {"command": "date"}}
+        ],
+        "stop_reason": "tool_use"
+    });
+
+    // Tool calls take priority over text
+    let response = crate::llm::parse_anthropic_response(&body).unwrap();
+    assert!(matches!(response, LlmResponse::ToolCalls(_)));
+}
+
+// ---------------------------------------------------------------------------
 // Agent runtime (unit — no live LLM)
 // ---------------------------------------------------------------------------
 

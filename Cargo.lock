@@ -4340,6 +4340,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "wirken-adapter-teams"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capnp",
+ "chrono",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wirken-ipc",
+]
+
+[[package]]
 name = "wirken-adapter-telegram"
 version = "0.1.0"
 dependencies = [
@@ -4409,6 +4427,7 @@ dependencies = [
  "tracing-subscriber",
  "wirken-adapter-discord",
  "wirken-adapter-slack",
+ "wirken-adapter-teams",
  "wirken-adapter-telegram",
  "wirken-agent",
  "wirken-audit",

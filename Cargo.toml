@@ -8,6 +8,7 @@ members = [
     "crates/adapter-telegram",
     "crates/adapter-discord",
     "crates/adapter-slack",
+    "crates/adapter-teams",
     "crates/agent",
     "crates/cli",
     "crates/webchat",
