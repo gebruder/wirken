@@ -159,7 +159,7 @@ See [docs/migration.md](docs/migration.md) for a detailed migration guide.
 Wirken is a Rust workspace. All crates compile and test independently:
 
 ```bash
-cargo test              # run all 191 tests
+cargo test              # run all 217 tests
 cargo test -p wirken-vault    # test one crate
 cargo build -p wirken-cli     # build the binary
 ```
