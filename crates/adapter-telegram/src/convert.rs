@@ -50,14 +50,12 @@ pub fn telegram_to_inbound(
         .unwrap_or_default();
     inbound.set_reply_to_id(&reply_to_id);
 
-    // Metadata: include username if available
-    let metadata = msg
-        .from
-        .as_ref()
-        .and_then(|u| u.username.as_ref())
-        .map(|username| format!("{{\"username\":\"{username}\"}}"))
-        .unwrap_or_else(|| "{}".to_string());
-    inbound.set_metadata(&metadata);
+    // Metadata: structured JSON, not string interpolation
+    let mut meta = serde_json::json!({});
+    if let Some(username) = msg.from.as_ref().and_then(|u| u.username.as_ref()) {
+        meta["username"] = serde_json::Value::String(username.clone());
+    }
+    inbound.set_metadata(&meta.to_string());
 }
 
 /// Parse a Cap'n Proto OutboundMessage frame into fields for sending via Telegram.
