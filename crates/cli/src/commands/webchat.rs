@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -103,7 +104,7 @@ input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 /// Minimal HTTP server — no framework dependency.
 pub async fn serve(
     port: u16,
-    agent: Arc<Mutex<Agent>>,
+    agents: Arc<HashMap<String, Mutex<Agent>>>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
 ) -> Result<()> {
@@ -112,7 +113,7 @@ pub async fn serve(
 
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let agent = agent.clone();
+        let agents = agents.clone();
         let audit = audit.clone();
         let sessions = sessions.clone();
 
@@ -164,10 +165,15 @@ pub async fn serve(
                     .await
                     .get_or_create("webchat", "webchat-default");
 
-                // Process with agent
-                let result = {
-                    let mut ag = agent.lock().await;
-                    ag.process_message(message).await
+                // Process with default agent (webchat always uses default)
+                let result = match agents.get("default") {
+                    Some(agent_mutex) => {
+                        let mut ag = agent_mutex.lock().await;
+                        ag.process_message(message).await
+                    }
+                    None => Err(wirken_agent::AgentError::Llm(
+                        "no default agent configured".into(),
+                    )),
                 };
 
                 let resp_json = match result {
