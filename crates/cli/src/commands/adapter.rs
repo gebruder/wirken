@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use wirken_adapter_discord::DiscordAdapter;
+use wirken_adapter_matrix::MatrixAdapter;
 use wirken_adapter_slack::SlackAdapter;
 use wirken_adapter_teams::TeamsAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
@@ -104,8 +105,32 @@ pub async fn run(channel: &str) -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("Teams adapter error: {e}"))?;
         }
+        "matrix" => {
+            // Matrix needs homeserver URL and username from vault
+            let hs_name = format!("{channel}-homeserver");
+            let (hs_secret, _) = store
+                .retrieve(&hs_name)
+                .context("No homeserver URL for 'matrix'. Run `wirken channel add matrix`.")?;
+            let homeserver = hs_secret.expose().to_string();
+
+            let user_name = format!("{channel}-username");
+            let (user_secret, _) = store
+                .retrieve(&user_name)
+                .context("No username for 'matrix'.")?;
+            let username = user_secret.expose().to_string();
+
+            let state_dir = data_dir.join("matrix-state");
+
+            let adapter = MatrixAdapter::new(identity, homeserver, username, bot_token, state_dir);
+            adapter
+                .run(&socket_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Matrix adapter error: {e}"))?;
+        }
         other => {
-            anyhow::bail!("Unknown adapter: '{other}'. Supported: telegram, discord, slack, teams");
+            anyhow::bail!(
+                "Unknown adapter: '{other}'. Supported: telegram, discord, slack, teams, matrix"
+            );
         }
     }
 
