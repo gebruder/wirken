@@ -100,10 +100,13 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Current status
 
-MVP. 8 crates, 140 tests, single binary.
+MVP. 10 crates, 174 tests, single binary.
 
 **Ships now:**
-- Telegram adapter (teloxide 0.17, long polling, full message flow)
+- Three channel adapters running simultaneously as isolated processes:
+  - Telegram (teloxide 0.17, long polling)
+  - Discord (serenity 0.12, gateway WebSocket, mention-gated in guilds)
+  - Slack (slack-morphism 2.19, Socket Mode, mention-gated in channels)
 - Agent runtime with LLM tool calling (OpenAI, Anthropic, Ollama, custom endpoints)
 - Built-in tools: shell exec, file read/write, directory listing
 - SKILL.md loader (compatible with OpenClaw's 52 bundled skills)
@@ -121,7 +124,6 @@ MVP. 8 crates, 140 tests, single binary.
 - Diagnostics (`wirken doctor`)
 
 **Not yet:**
-- Discord and Slack adapters (IPC contract is ready — adapters are independent crates)
 - Multi-agent routing (gateway supports it, CLI doesn't expose it yet)
 - Voice/TTS
 - Wasm skill sandbox (Wasmtime integration designed, not built)

@@ -16,6 +16,7 @@ wirken-agent = { path = "../agent" }
 wirken-ipc = { path = "../ipc" }
 wirken-adapter-telegram = { path = "../adapter-telegram" }
 wirken-adapter-discord = { path = "../adapter-discord" }
+wirken-adapter-slack = { path = "../adapter-slack" }
 capnp = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
