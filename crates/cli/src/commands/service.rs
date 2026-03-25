@@ -42,8 +42,7 @@ pub fn detect_platform() -> Platform {
 /// Path to the systemd user unit file.
 pub fn systemd_unit_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home)
-        .join(".config/systemd/user/wirken.service")
+    PathBuf::from(home).join(".config/systemd/user/wirken.service")
 }
 
 /// Generate systemd user unit file content.
@@ -74,8 +73,7 @@ pub fn install_systemd(wirken_bin: &Path, data_dir: &Path) -> Result<()> {
 
     // Ensure parent directory exists
     if let Some(parent) = unit_path.parent() {
-        std::fs::create_dir_all(parent)
-            .context("Failed to create systemd user directory")?;
+        std::fs::create_dir_all(parent).context("Failed to create systemd user directory")?;
     }
 
     let content = generate_systemd_unit(wirken_bin, data_dir);
@@ -86,7 +84,10 @@ pub fn install_systemd(wirken_bin: &Path, data_dir: &Path) -> Result<()> {
 
     // Reload, enable, start
     run_cmd("systemctl", &["--user", "daemon-reload"])?;
-    run_cmd("systemctl", &["--user", "enable", "--now", "wirken.service"])?;
+    run_cmd(
+        "systemctl",
+        &["--user", "enable", "--now", "wirken.service"],
+    )?;
 
     println!("  Service enabled and started.");
     println!();
@@ -121,8 +122,7 @@ pub fn uninstall_systemd() -> Result<()> {
 /// Path to the launchd plist.
 pub fn launchd_plist_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home)
-        .join("Library/LaunchAgents/app.ottenheimer.wirken.plist")
+    PathBuf::from(home).join("Library/LaunchAgents/app.ottenheimer.wirken.plist")
 }
 
 /// Generate launchd plist content.
@@ -171,13 +171,11 @@ pub fn install_launchd(wirken_bin: &Path, data_dir: &Path) -> Result<()> {
 
     // Ensure log directory exists
     let log_dir = data_dir.join("logs");
-    std::fs::create_dir_all(&log_dir)
-        .context("Failed to create log directory")?;
+    std::fs::create_dir_all(&log_dir).context("Failed to create log directory")?;
 
     // Ensure LaunchAgents directory exists
     if let Some(parent) = plist_path.parent() {
-        std::fs::create_dir_all(parent)
-            .context("Failed to create LaunchAgents directory")?;
+        std::fs::create_dir_all(parent).context("Failed to create LaunchAgents directory")?;
     }
 
     let content = generate_launchd_plist(wirken_bin, data_dir);

@@ -10,8 +10,8 @@ pub fn discord_to_inbound(
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut inbound = frame_builder.init_inbound();
 
-    inbound.set_id(&msg.id.to_string());
-    inbound.set_sender_id(&msg.author.id.to_string());
+    inbound.set_id(msg.id.to_string());
+    inbound.set_sender_id(msg.author.id.to_string());
 
     let sender_name = if let Some(ref nick) = msg.member.as_ref().and_then(|m| m.nick.as_ref()) {
         nick.to_string()
@@ -21,7 +21,7 @@ pub fn discord_to_inbound(
     inbound.set_sender_name(&sender_name);
 
     inbound.set_channel("discord");
-    inbound.set_conversation_id(&msg.channel_id.to_string());
+    inbound.set_conversation_id(msg.channel_id.to_string());
 
     inbound.set_text(&msg.content);
     inbound.set_timestamp(msg.timestamp.unix_timestamp() * 1000);
@@ -53,7 +53,7 @@ pub fn discord_to_inbound(
     let bot_mentioned = msg.mentions.iter().any(|u| u.id.get() == bot_id);
     meta["bot_mentioned"] = serde_json::json!(bot_mentioned);
 
-    inbound.set_metadata(&meta.to_string());
+    inbound.set_metadata(meta.to_string());
 }
 
 /// Check if a guild message should be processed (mention-gating).

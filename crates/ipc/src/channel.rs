@@ -79,35 +79,47 @@ impl<C: Channel> Clone for SessionHandle<C> {
 /// Telegram channel marker.
 pub struct Telegram;
 impl Channel for Telegram {
-    fn id() -> &'static str { "telegram" }
+    fn id() -> &'static str {
+        "telegram"
+    }
 }
 
 /// Discord channel marker.
 pub struct Discord;
 impl Channel for Discord {
-    fn id() -> &'static str { "discord" }
+    fn id() -> &'static str {
+        "discord"
+    }
 }
 
 /// Slack channel marker.
 pub struct Slack;
 impl Channel for Slack {
-    fn id() -> &'static str { "slack" }
+    fn id() -> &'static str {
+        "slack"
+    }
 }
 
 /// Matrix channel marker.
 pub struct Matrix;
 impl Channel for Matrix {
-    fn id() -> &'static str { "matrix" }
+    fn id() -> &'static str {
+        "matrix"
+    }
 }
 
 /// Microsoft Teams channel marker.
 pub struct Teams;
 impl Channel for Teams {
-    fn id() -> &'static str { "teams" }
+    fn id() -> &'static str {
+        "teams"
+    }
 }
 
 /// Generic channel marker for testing and dynamic dispatch.
 pub struct Generic;
 impl Channel for Generic {
-    fn id() -> &'static str { "generic" }
+    fn id() -> &'static str {
+        "generic"
+    }
 }

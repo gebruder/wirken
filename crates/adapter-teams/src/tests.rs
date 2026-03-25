@@ -1,5 +1,5 @@
-use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::transport::split_stream;
+use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
 use crate::convert::{self, Activity, ChannelAccount, ConversationAccount};
@@ -87,11 +87,15 @@ fn personal_message_to_inbound() {
             assert_eq!(m.get_sender_id().unwrap().to_str().unwrap(), "user-123");
             assert_eq!(m.get_sender_name().unwrap().to_str().unwrap(), "Alice");
             assert_eq!(m.get_channel().unwrap().to_str().unwrap(), "teams");
-            assert_eq!(m.get_conversation_id().unwrap().to_str().unwrap(), "conv-789");
+            assert_eq!(
+                m.get_conversation_id().unwrap().to_str().unwrap(),
+                "conv-789"
+            );
             assert_eq!(m.get_text().unwrap().to_str().unwrap(), "Hello from Teams");
             // 2026-03-25T10:30:00Z
             let expected_ts = chrono::DateTime::parse_from_rfc3339("2026-03-25T10:30:00Z")
-                .unwrap().timestamp_millis();
+                .unwrap()
+                .timestamp_millis();
             assert_eq!(m.get_timestamp(), expected_ts);
             assert!(!m.get_is_group());
         }
@@ -112,9 +116,8 @@ fn group_message_with_mention_to_inbound() {
             // Mention text should be stripped
             assert_eq!(m.get_text().unwrap().to_str().unwrap(), "what time is it?");
             assert!(m.get_is_group());
-            let meta: serde_json::Value = serde_json::from_str(
-                m.get_metadata().unwrap().to_str().unwrap()
-            ).unwrap();
+            let meta: serde_json::Value =
+                serde_json::from_str(m.get_metadata().unwrap().to_str().unwrap()).unwrap();
             assert_eq!(meta["bot_mentioned"], true);
             assert_eq!(meta["conversation_type"], "groupChat");
             assert_eq!(meta["tenant_id"], "tenant-abc");
@@ -133,10 +136,14 @@ fn group_message_metadata_contains_service_url() {
     match reader.which().unwrap() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();
-            let meta: serde_json::Value = serde_json::from_str(
-                m.get_metadata().unwrap().to_str().unwrap()
-            ).unwrap();
-            assert!(meta["service_url"].as_str().unwrap().contains("trafficmanager"));
+            let meta: serde_json::Value =
+                serde_json::from_str(m.get_metadata().unwrap().to_str().unwrap()).unwrap();
+            assert!(
+                meta["service_url"]
+                    .as_str()
+                    .unwrap()
+                    .contains("trafficmanager")
+            );
         }
         _ => panic!("expected Inbound"),
     }
@@ -205,7 +212,8 @@ fn serialize_and_read(
     capnp::serialize::read_message(
         std::io::Cursor::new(buf),
         capnp::message::ReaderOptions::default(),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[test]
@@ -237,7 +245,10 @@ fn build_outbound_result_success() {
         frame::OutboundResult(r) => {
             let r = r.unwrap();
             assert!(r.get_success());
-            assert_eq!(r.get_message_id().unwrap().to_str().unwrap(), "teams-msg-42");
+            assert_eq!(
+                r.get_message_id().unwrap().to_str().unwrap(),
+                "teams-msg-42"
+            );
         }
         _ => panic!("expected OutboundResult"),
     }
@@ -268,16 +279,16 @@ async fn adapter_handshake_with_gateway() {
     let (mut cr, mut cw) = split_stream(client);
     let (mut sr, mut sw) = split_stream(server);
 
-    let adapter_side = tokio::spawn(async move {
-        perform_adapter_handshake(&mut cr, &mut cw, &identity).await
-    });
+    let adapter_side =
+        tokio::spawn(async move { perform_adapter_handshake(&mut cr, &mut cw, &identity).await });
 
     let gateway_side = tokio::spawn(async move {
         perform_gateway_handshake(&mut sr, &mut sw, |id, pk| {
             assert_eq!(id, "teams");
             assert_eq!(pk, &expected_pk);
             Ok(())
-        }).await
+        })
+        .await
     });
 
     let (ar, gr) = tokio::join!(adapter_side, gateway_side);
@@ -303,7 +314,9 @@ async fn full_message_flow_simulation() {
 
     // Phase 1: Handshake
     let adapter_hs = tokio::spawn(async move {
-        perform_adapter_handshake(&mut ar, &mut aw, &identity).await.unwrap();
+        perform_adapter_handshake(&mut ar, &mut aw, &identity)
+            .await
+            .unwrap();
         (ar, aw)
     });
     let gateway_hs = tokio::spawn(async move {
@@ -311,7 +324,9 @@ async fn full_message_flow_simulation() {
             assert_eq!(id, "teams");
             assert_eq!(pk, &expected_pk);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         (gr, gw)
     });
 
@@ -370,7 +385,10 @@ async fn full_message_flow_simulation() {
         frame::OutboundResult(r) => {
             let r = r.unwrap();
             assert!(r.get_success());
-            assert_eq!(r.get_message_id().unwrap().to_str().unwrap(), "teams-reply-99");
+            assert_eq!(
+                r.get_message_id().unwrap().to_str().unwrap(),
+                "teams-reply-99"
+            );
         }
         _ => panic!("expected OutboundResult"),
     }
@@ -382,8 +400,8 @@ async fn full_message_flow_simulation() {
 
 #[test]
 fn five_channel_types_are_distinct() {
+    use wirken_ipc::channels::{Discord, Slack, Teams, Telegram};
     use wirken_ipc::{SessionHandle, SessionId};
-    use wirken_ipc::channels::{Telegram, Discord, Slack, Teams};
 
     let tg: SessionHandle<Telegram> = SessionHandle::new(SessionId("s1".into()));
     let dc: SessionHandle<Discord> = SessionHandle::new(SessionId("s1".into()));

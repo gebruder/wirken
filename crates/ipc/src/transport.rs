@@ -24,21 +24,25 @@ impl FrameReader {
 
     /// Read one Cap'n Proto message from the stream.
     /// Returns the deserialized message with default traversal limits.
-    pub async fn read_message(&mut self) -> Result<capnp::message::Reader<capnp::serialize::OwnedSegments>, IpcError> {
+    pub async fn read_message(
+        &mut self,
+    ) -> Result<capnp::message::Reader<capnp::serialize::OwnedSegments>, IpcError> {
         // Read 4-byte length prefix
         let mut len_buf = [0u8; 4];
-        self.reader.read_exact(&mut len_buf).await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    IpcError::ConnectionClosed
-                } else {
-                    IpcError::Io(e)
-                }
-            })?;
+        self.reader.read_exact(&mut len_buf).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                IpcError::ConnectionClosed
+            } else {
+                IpcError::Io(e)
+            }
+        })?;
 
         let len = u32::from_be_bytes(len_buf) as u64;
         if len > MAX_FRAME_SIZE {
-            return Err(IpcError::FrameTooLarge { size: len, max: MAX_FRAME_SIZE });
+            return Err(IpcError::FrameTooLarge {
+                size: len,
+                max: MAX_FRAME_SIZE,
+            });
         }
 
         // Read message bytes

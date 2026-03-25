@@ -41,7 +41,7 @@ impl SessionStore {
              CREATE INDEX IF NOT EXISTS idx_sessions_channel
                  ON sessions(channel);
              CREATE INDEX IF NOT EXISTS idx_sessions_conversation
-                 ON sessions(channel, conversation_id);"
+                 ON sessions(channel, conversation_id);",
         )?;
 
         Ok(Self { conn, expiry_secs })
@@ -79,12 +79,11 @@ impl SessionStore {
                 let now = Utc::now();
 
                 // Check if session has expired by inactivity
-                if now.signed_duration_since(last_activity).num_seconds() as u64 >= self.expiry_secs {
+                if now.signed_duration_since(last_activity).num_seconds() as u64 >= self.expiry_secs
+                {
                     // Mark as expired and create new
-                    self.conn.execute(
-                        "UPDATE sessions SET expired = 1 WHERE id = ?1",
-                        params![id],
-                    )?;
+                    self.conn
+                        .execute("UPDATE sessions SET expired = 1 WHERE id = ?1", params![id])?;
                     return self.create_session(channel, conversation_id);
                 }
 

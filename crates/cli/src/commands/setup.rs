@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Input, Password, Select};
 
-use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
-use super::{config, data_dir};
 use super::channel::register_channel;
+use super::{config, data_dir};
+use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
 pub async fn run(install_service: bool) -> Result<()> {
     println!();
@@ -36,14 +36,24 @@ pub async fn run(install_service: bool) -> Result<()> {
                 .with_prompt("  Model")
                 .default("gpt-4o".into())
                 .interact_text()?;
-            ("openai".to_string(), model, "https://api.openai.com/v1".to_string(), true)
+            (
+                "openai".to_string(),
+                model,
+                "https://api.openai.com/v1".to_string(),
+                true,
+            )
         }
         1 => {
             let model: String = Input::new()
                 .with_prompt("  Model")
                 .default("claude-sonnet-4-20250514".into())
                 .interact_text()?;
-            ("anthropic".to_string(), model, "https://api.anthropic.com/v1".to_string(), true)
+            (
+                "anthropic".to_string(),
+                model,
+                "https://api.anthropic.com/v1".to_string(),
+                true,
+            )
         }
         2 => {
             let model: String = Input::new()
@@ -57,12 +67,8 @@ pub async fn run(install_service: bool) -> Result<()> {
             ("ollama".to_string(), model, url, false)
         }
         3 => {
-            let url: String = Input::new()
-                .with_prompt("  API base URL")
-                .interact_text()?;
-            let model: String = Input::new()
-                .with_prompt("  Model ID")
-                .interact_text()?;
+            let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
+            let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
             let has_key = Confirm::new()
                 .with_prompt("  Requires API key?")
                 .default(true)
@@ -74,9 +80,7 @@ pub async fn run(install_service: bool) -> Result<()> {
 
     // Store API key in vault
     if needs_key {
-        let api_key = Password::new()
-            .with_prompt("  API key")
-            .interact()?;
+        let api_key = Password::new().with_prompt("  API key").interact()?;
 
         println!("  Encrypting API key...");
 
@@ -92,13 +96,15 @@ pub async fn run(install_service: bool) -> Result<()> {
 
         let secret = VaultSecret::new(api_key);
         let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-        store.store(
-            &format!("{provider_name}-api-key"),
-            &provider_name,
-            &secret,
-            None,
-            Some(rotation_due),
-        ).context("Failed to store API key")?;
+        store
+            .store(
+                &format!("{provider_name}-api-key"),
+                &provider_name,
+                &secret,
+                None,
+                Some(rotation_due),
+            )
+            .context("Failed to store API key")?;
 
         println!("  API key encrypted and stored.");
     }
@@ -110,7 +116,10 @@ pub async fn run(install_service: bool) -> Result<()> {
         "base_url": base_url,
     });
     let config_path = data.join("provider.json");
-    std::fs::write(&config_path, serde_json::to_string_pretty(&provider_config)?)?;
+    std::fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&provider_config)?,
+    )?;
 
     println!();
 
@@ -119,7 +128,13 @@ pub async fn run(install_service: bool) -> Result<()> {
     println!("  Step 2: Pick your channels");
     println!();
 
-    let channels = &["Telegram", "Discord", "Slack", "Microsoft Teams", "Skip for now"];
+    let channels = &[
+        "Telegram",
+        "Discord",
+        "Slack",
+        "Microsoft Teams",
+        "Skip for now",
+    ];
     let mut selected_channels = Vec::new();
 
     loop {
@@ -193,7 +208,10 @@ pub async fn run(install_service: bool) -> Result<()> {
         println!("  Channels: {}", selected_channels.join(", "));
     }
     println!();
-    println!("  Your credentials are encrypted in {}", cfg.vault_db_path().display());
+    println!(
+        "  Your credentials are encrypted in {}",
+        cfg.vault_db_path().display()
+    );
     println!("  Audit log at {}", cfg.audit_db_path().display());
     println!();
     if should_install {
@@ -245,11 +263,12 @@ async fn setup_slack_channel(
     register_channel("slack", &bot_token, cfg, data).await?;
 
     // Store the app token separately (Socket Mode needs both)
-    let keychain = wirken_vault::probe_keychain(data, || String::new());
+    let keychain = wirken_vault::probe_keychain(data, String::new);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
     let secret = wirken_vault::VaultSecret::new(app_token);
-    store.store("slack-app-token", "slack", &secret, None, None)
+    store
+        .store("slack-app-token", "slack", &secret, None, None)
         .context("Failed to store Slack app token")?;
 
     println!("  slack: both tokens encrypted.");
@@ -272,11 +291,12 @@ async fn setup_teams_channel(
     register_channel("teams", &app_password, cfg, data).await?;
 
     // Store the app ID separately
-    let keychain = wirken_vault::probe_keychain(data, || String::new());
+    let keychain = wirken_vault::probe_keychain(data, String::new);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
     let secret = wirken_vault::VaultSecret::new(app_id);
-    store.store("teams-app-id", "teams", &secret, None, None)
+    store
+        .store("teams-app-id", "teams", &secret, None, None)
         .context("Failed to store Teams app ID")?;
 
     println!("  teams: app ID and password encrypted.");

@@ -263,7 +263,9 @@ fn tier1_always_allowed() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    let check = perms.check(&Action::WorkspaceFileAccess, "agent-1").unwrap();
+    let check = perms
+        .check(&Action::WorkspaceFileAccess, "agent-1")
+        .unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 
     let check = perms.check(&Action::WebSearch, "agent-1").unwrap();
@@ -275,9 +277,16 @@ fn tier2_needs_approval_first_time() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    let action = Action::ShellExec { pattern: "git *".into() };
+    let action = Action::ShellExec {
+        pattern: "git *".into(),
+    };
     let check = perms.check(&action, "agent-1").unwrap();
-    assert_eq!(check, PermissionCheck::NeedsApproval { tier: PermissionTier::Tier2 });
+    assert_eq!(
+        check,
+        PermissionCheck::NeedsApproval {
+            tier: PermissionTier::Tier2
+        }
+    );
 }
 
 #[test]
@@ -285,7 +294,9 @@ fn tier2_allowed_after_approval() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    let action = Action::ShellExec { pattern: "git *".into() };
+    let action = Action::ShellExec {
+        pattern: "git *".into(),
+    };
     perms.approve(&action, "agent-1", "telegram").unwrap();
 
     let check = perms.check(&action, "agent-1").unwrap();
@@ -297,12 +308,19 @@ fn tier2_approval_scoped_to_agent() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    let action = Action::ShellExec { pattern: "git *".into() };
+    let action = Action::ShellExec {
+        pattern: "git *".into(),
+    };
     perms.approve(&action, "agent-1", "telegram").unwrap();
 
     // Different agent — not approved
     let check = perms.check(&action, "agent-2").unwrap();
-    assert_eq!(check, PermissionCheck::NeedsApproval { tier: PermissionTier::Tier2 });
+    assert_eq!(
+        check,
+        PermissionCheck::NeedsApproval {
+            tier: PermissionTier::Tier2
+        }
+    );
 }
 
 #[test]
@@ -311,10 +329,20 @@ fn tier3_always_needs_approval() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let check = perms.check(&Action::CredentialAccess, "agent-1").unwrap();
-    assert_eq!(check, PermissionCheck::NeedsApproval { tier: PermissionTier::Tier3 });
+    assert_eq!(
+        check,
+        PermissionCheck::NeedsApproval {
+            tier: PermissionTier::Tier3
+        }
+    );
 
     let check = perms.check(&Action::DestructiveFileOp, "agent-1").unwrap();
-    assert_eq!(check, PermissionCheck::NeedsApproval { tier: PermissionTier::Tier3 });
+    assert_eq!(
+        check,
+        PermissionCheck::NeedsApproval {
+            tier: PermissionTier::Tier3
+        }
+    );
 }
 
 #[test]
@@ -322,13 +350,20 @@ fn revoke_approval() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    let action = Action::ShellExec { pattern: "npm *".into() };
+    let action = Action::ShellExec {
+        pattern: "npm *".into(),
+    };
     perms.approve(&action, "agent-1", "slack").unwrap();
 
     perms.revoke(&action.approval_key(), "agent-1").unwrap();
 
     let check = perms.check(&action, "agent-1").unwrap();
-    assert_eq!(check, PermissionCheck::NeedsApproval { tier: PermissionTier::Tier2 });
+    assert_eq!(
+        check,
+        PermissionCheck::NeedsApproval {
+            tier: PermissionTier::Tier2
+        }
+    );
 }
 
 #[test]
@@ -336,9 +371,33 @@ fn list_approvals() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    perms.approve(&Action::ShellExec { pattern: "git *".into() }, "agent-1", "tg").unwrap();
-    perms.approve(&Action::ShellExec { pattern: "npm *".into() }, "agent-1", "tg").unwrap();
-    perms.approve(&Action::ExternalFileAccess { path: "/tmp/*".into() }, "agent-1", "dc").unwrap();
+    perms
+        .approve(
+            &Action::ShellExec {
+                pattern: "git *".into(),
+            },
+            "agent-1",
+            "tg",
+        )
+        .unwrap();
+    perms
+        .approve(
+            &Action::ShellExec {
+                pattern: "npm *".into(),
+            },
+            "agent-1",
+            "tg",
+        )
+        .unwrap();
+    perms
+        .approve(
+            &Action::ExternalFileAccess {
+                path: "/tmp/*".into(),
+            },
+            "agent-1",
+            "dc",
+        )
+        .unwrap();
 
     let approvals = perms.list("agent-1").unwrap();
     assert_eq!(approvals.len(), 3);
@@ -465,7 +524,10 @@ fn route_exact_takes_priority_over_wildcard() {
     });
 
     assert_eq!(router.resolve("telegram", "vip-chat").unwrap(), "agent-vip");
-    assert_eq!(router.resolve("telegram", "other-chat").unwrap(), "agent-default");
+    assert_eq!(
+        router.resolve("telegram", "other-chat").unwrap(),
+        "agent-default"
+    );
 }
 
 #[test]

@@ -20,27 +20,31 @@ pub async fn run(channel: &str) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| data_dir.join("sockets/gateway.sock"));
 
-    tracing::info!("Adapter '{channel}' starting, connecting to {}", socket_path.display());
+    tracing::info!(
+        "Adapter '{channel}' starting, connecting to {}",
+        socket_path.display()
+    );
 
     // Load credentials from vault
-    let keychain = probe_keychain(&data_dir, || String::new());
+    let keychain = probe_keychain(&data_dir, String::new);
     let store = CredentialStore::open(&data_dir.join("vault.db"), keychain.as_ref())
         .context("Failed to open credential store")?;
 
     // Get bot token
     let token_name = format!("{channel}-token");
-    let (token_secret, _) = store.retrieve(&token_name)
-        .context(format!("No token found for '{channel}'. Run `wirken channel add {channel}`."))?;
+    let (token_secret, _) = store.retrieve(&token_name).context(format!(
+        "No token found for '{channel}'. Run `wirken channel add {channel}`."
+    ))?;
     let bot_token = token_secret.expose().to_string();
 
     // Get adapter secret key
     let key_name = format!("{channel}-adapter-key");
-    let (key_secret, _) = store.retrieve(&key_name)
+    let (key_secret, _) = store
+        .retrieve(&key_name)
         .context(format!("No adapter key found for '{channel}'."))?;
 
     let key_hex = key_secret.expose();
-    let key_bytes = hex_decode(key_hex)
-        .context("Invalid adapter key")?;
+    let key_bytes = hex_decode(key_hex).context("Invalid adapter key")?;
 
     let mut secret = [0u8; 32];
     if key_bytes.len() != 32 {
@@ -55,29 +59,37 @@ pub async fn run(channel: &str) -> Result<()> {
     match channel {
         "telegram" => {
             let adapter = TelegramAdapter::new(identity, bot_token);
-            adapter.run(&socket_path).await
+            adapter
+                .run(&socket_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Telegram adapter error: {e}"))?;
         }
         "discord" => {
             let adapter = DiscordAdapter::new(identity, bot_token);
-            adapter.run(&socket_path).await
+            adapter
+                .run(&socket_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Discord adapter error: {e}"))?;
         }
         "slack" => {
             // Slack Socket Mode requires an app token in addition to the bot token
             let app_token_name = format!("{channel}-app-token");
-            let (app_token_secret, _) = store.retrieve(&app_token_name)
+            let (app_token_secret, _) = store
+                .retrieve(&app_token_name)
                 .context("No app token found for 'slack'. Run `wirken channel add slack`.")?;
             let app_token = app_token_secret.expose().to_string();
 
             let adapter = SlackAdapter::new(identity, bot_token, app_token);
-            adapter.run(&socket_path).await
+            adapter
+                .run(&socket_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Slack adapter error: {e}"))?;
         }
         "teams" => {
             // Teams needs App ID in addition to App Password (bot token)
             let app_id_name = format!("{channel}-app-id");
-            let (app_id_secret, _) = store.retrieve(&app_id_name)
+            let (app_id_secret, _) = store
+                .retrieve(&app_id_name)
                 .context("No app ID found for 'teams'. Run `wirken channel add teams`.")?;
             let app_id = app_id_secret.expose().to_string();
 
@@ -87,7 +99,9 @@ pub async fn run(channel: &str) -> Result<()> {
                 .unwrap_or(3978);
 
             let adapter = TeamsAdapter::new(identity, app_id, bot_token, listen_port);
-            adapter.run(&socket_path).await
+            adapter
+                .run(&socket_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Teams adapter error: {e}"))?;
         }
         other => {
@@ -99,14 +113,13 @@ pub async fn run(channel: &str) -> Result<()> {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         anyhow::bail!("odd-length hex string");
     }
     (0..hex.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|e| anyhow::anyhow!("hex decode: {e}"))
+            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| anyhow::anyhow!("hex decode: {e}"))
         })
         .collect()
 }

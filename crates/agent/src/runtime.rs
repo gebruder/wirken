@@ -75,16 +75,19 @@ impl Agent {
         loop {
             rounds += 1;
             if rounds > MAX_TOOL_ROUNDS {
-                return Err(AgentError::Tool(
-                    format!("exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop")
-                ));
+                return Err(AgentError::Tool(format!(
+                    "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
+                )));
             }
 
-            let response = self.llm.complete(
-                self.conversation.messages(),
-                &tool_defs,
-                self.api_key.as_deref(),
-            ).await?;
+            let response = self
+                .llm
+                .complete(
+                    self.conversation.messages(),
+                    &tool_defs,
+                    self.api_key.as_deref(),
+                )
+                .await?;
 
             match response {
                 LlmResponse::Text(text) => {
@@ -99,7 +102,8 @@ impl Agent {
                     for call in &calls {
                         tracing::info!(
                             "Agent {} executing tool: {}({})",
-                            self.id, call.name,
+                            self.id,
+                            call.name,
                             truncate(&call.arguments, 100)
                         );
 
@@ -107,7 +111,8 @@ impl Agent {
 
                         tracing::debug!(
                             "Tool {} result (success={}): {}",
-                            call.name, result.success,
+                            call.name,
+                            result.success,
                             truncate(&result.output, 200)
                         );
 

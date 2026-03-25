@@ -9,7 +9,7 @@ pub fn telegram_to_inbound(
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut inbound = frame_builder.init_inbound();
 
-    inbound.set_id(&msg.id.0.to_string());
+    inbound.set_id(msg.id.0.to_string());
 
     let sender_id = msg
         .from
@@ -33,7 +33,7 @@ pub fn telegram_to_inbound(
     inbound.set_sender_name(&sender_name);
 
     inbound.set_channel("telegram");
-    inbound.set_conversation_id(&msg.chat.id.0.to_string());
+    inbound.set_conversation_id(msg.chat.id.0.to_string());
 
     let text = msg.text().unwrap_or("");
     inbound.set_text(text);
@@ -55,7 +55,7 @@ pub fn telegram_to_inbound(
     if let Some(username) = msg.from.as_ref().and_then(|u| u.username.as_ref()) {
         meta["username"] = serde_json::Value::String(username.clone());
     }
-    inbound.set_metadata(&meta.to_string());
+    inbound.set_metadata(meta.to_string());
 }
 
 /// Parse a Cap'n Proto OutboundMessage frame into fields for sending via Telegram.

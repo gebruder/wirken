@@ -1,5 +1,5 @@
+use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::transport::{split_stream, FrameReader, FrameWriter};
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
 use crate::convert;
@@ -68,7 +68,8 @@ fn serialize_and_read(
     capnp::serialize::read_message(
         std::io::Cursor::new(buf),
         capnp::message::ReaderOptions::default(),
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[test]
@@ -121,16 +122,16 @@ async fn adapter_handshake_with_gateway() {
     let (mut cr, mut cw) = split_stream(client);
     let (mut sr, mut sw) = split_stream(server);
 
-    let adapter_side = tokio::spawn(async move {
-        perform_adapter_handshake(&mut cr, &mut cw, &identity).await
-    });
+    let adapter_side =
+        tokio::spawn(async move { perform_adapter_handshake(&mut cr, &mut cw, &identity).await });
 
     let gateway_side = tokio::spawn(async move {
         perform_gateway_handshake(&mut sr, &mut sw, |id, pk| {
             assert_eq!(id, "discord");
             assert_eq!(pk, &expected_pk);
             Ok(())
-        }).await
+        })
+        .await
     });
 
     let (ar, gr) = tokio::join!(adapter_side, gateway_side);
@@ -178,7 +179,10 @@ async fn inbound_frame_roundtrip_over_uds() {
             let m = inbound.unwrap();
             assert_eq!(m.get_id().unwrap().to_str().unwrap(), "1234567890123");
             assert_eq!(m.get_channel().unwrap().to_str().unwrap(), "discord");
-            assert_eq!(m.get_text().unwrap().to_str().unwrap(), "Hello from Discord!");
+            assert_eq!(
+                m.get_text().unwrap().to_str().unwrap(),
+                "Hello from Discord!"
+            );
             assert!(m.get_is_group());
 
             // Verify metadata contains guild_id
@@ -233,7 +237,9 @@ async fn full_message_flow_simulation() {
 
     // Phase 1: Handshake
     let adapter_hs = tokio::spawn(async move {
-        perform_adapter_handshake(&mut ar, &mut aw, &identity).await.unwrap();
+        perform_adapter_handshake(&mut ar, &mut aw, &identity)
+            .await
+            .unwrap();
         (ar, aw)
     });
     let gateway_hs = tokio::spawn(async move {
@@ -241,7 +247,9 @@ async fn full_message_flow_simulation() {
             assert_eq!(id, "discord");
             assert_eq!(pk, &expected_pk);
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         (gr, gw)
     });
 
@@ -274,7 +282,10 @@ async fn full_message_flow_simulation() {
     match fr.which().unwrap() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();
-            assert_eq!(m.get_text().unwrap().to_str().unwrap(), "@WirkenBot what time is it?");
+            assert_eq!(
+                m.get_text().unwrap().to_str().unwrap(),
+                "@WirkenBot what time is it?"
+            );
             assert_eq!(m.get_channel().unwrap().to_str().unwrap(), "discord");
         }
         _ => panic!("expected Inbound"),
@@ -323,8 +334,8 @@ async fn full_message_flow_simulation() {
 
 #[test]
 fn discord_and_telegram_sessions_are_distinct() {
-    use wirken_ipc::{SessionHandle, SessionId};
     use wirken_ipc::channels::{Discord, Telegram};
+    use wirken_ipc::{SessionHandle, SessionId};
 
     let dc: SessionHandle<Discord> = SessionHandle::new(SessionId("s1".into()));
     let tg: SessionHandle<Telegram> = SessionHandle::new(SessionId("s1".into()));

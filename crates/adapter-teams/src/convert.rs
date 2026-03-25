@@ -51,19 +51,25 @@ pub fn activity_to_inbound(
     let msg_id = activity.id.as_deref().unwrap_or("");
     inbound.set_id(msg_id);
 
-    let sender_id = activity.from.as_ref()
+    let sender_id = activity
+        .from
+        .as_ref()
         .and_then(|f| f.id.as_deref())
         .unwrap_or("");
     inbound.set_sender_id(sender_id);
 
-    let sender_name = activity.from.as_ref()
+    let sender_name = activity
+        .from
+        .as_ref()
         .and_then(|f| f.name.as_deref())
         .unwrap_or("");
     inbound.set_sender_name(sender_name);
 
     inbound.set_channel("teams");
 
-    let conversation_id = activity.conversation.as_ref()
+    let conversation_id = activity
+        .conversation
+        .as_ref()
         .and_then(|c| c.id.as_deref())
         .unwrap_or("");
     inbound.set_conversation_id(conversation_id);
@@ -75,13 +81,17 @@ pub fn activity_to_inbound(
     );
     inbound.set_text(&text);
 
-    let ts_millis = activity.timestamp.as_deref()
+    let ts_millis = activity
+        .timestamp
+        .as_deref()
         .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
         .map(|dt| dt.timestamp_millis())
         .unwrap_or(0);
     inbound.set_timestamp(ts_millis);
 
-    let is_group = activity.conversation.as_ref()
+    let is_group = activity
+        .conversation
+        .as_ref()
         .and_then(|c| c.is_group)
         .unwrap_or(false);
     inbound.set_is_group(is_group);
@@ -104,7 +114,7 @@ pub fn activity_to_inbound(
     let bot_mentioned = is_bot_mentioned(&activity.entities, bot_id);
     meta["bot_mentioned"] = serde_json::json!(bot_mentioned);
 
-    inbound.set_metadata(&meta.to_string());
+    inbound.set_metadata(meta.to_string());
 }
 
 /// Check if a message should be processed (mention-gating).
@@ -115,11 +125,15 @@ pub fn should_process(activity: &Activity, bot_id: &str) -> bool {
         return false;
     }
 
-    let is_group = activity.conversation.as_ref()
+    let is_group = activity
+        .conversation
+        .as_ref()
         .and_then(|c| c.is_group)
         .unwrap_or(false);
 
-    let conv_type = activity.conversation.as_ref()
+    let conv_type = activity
+        .conversation
+        .as_ref()
         .and_then(|c| c.conversation_type.as_deref())
         .unwrap_or("");
 
@@ -134,7 +148,8 @@ pub fn should_process(activity: &Activity, bot_id: &str) -> bool {
 
 /// Check if the bot is mentioned in the entities list.
 fn is_bot_mentioned(entities: &Option<Vec<serde_json::Value>>, bot_id: &str) -> bool {
-    entities.as_ref()
+    entities
+        .as_ref()
         .map(|ents| {
             ents.iter().any(|e| {
                 e.get("type").and_then(|t| t.as_str()) == Some("mention")
@@ -156,7 +171,8 @@ fn strip_mention(text: &str, bot_id: &str, entities: &Option<Vec<serde_json::Val
             if entity.get("type").and_then(|t| t.as_str()) != Some("mention") {
                 continue;
             }
-            let mentioned_id = entity.get("mentioned")
+            let mentioned_id = entity
+                .get("mentioned")
                 .and_then(|m| m.get("id"))
                 .and_then(|id| id.as_str())
                 .unwrap_or("");
@@ -188,15 +204,18 @@ pub fn parse_outbound(
     match frame_reader.which()? {
         frame::Outbound(outbound) => {
             let o = outbound?;
-            let conversation_id = o.get_conversation_id()?
+            let conversation_id = o
+                .get_conversation_id()?
                 .to_str()
                 .map_err(|e| capnp::Error::failed(format!("conversation_id not utf8: {e}")))?
                 .to_string();
-            let text = o.get_text()?
+            let text = o
+                .get_text()?
                 .to_str()
                 .map_err(|e| capnp::Error::failed(format!("text not utf8: {e}")))?
                 .to_string();
-            let reply_to_str = o.get_reply_to_id()?
+            let reply_to_str = o
+                .get_reply_to_id()?
                 .to_str()
                 .map_err(|e| capnp::Error::failed(format!("reply_to_id not utf8: {e}")))?;
             let reply_to_id = if reply_to_str.is_empty() {
@@ -205,7 +224,11 @@ pub fn parse_outbound(
                 Some(reply_to_str.to_string())
             };
 
-            Ok(OutboundFields { conversation_id, text, reply_to_id })
+            Ok(OutboundFields {
+                conversation_id,
+                text,
+                reply_to_id,
+            })
         }
         _ => Err(capnp::Error::failed("expected Outbound frame".to_string())),
     }

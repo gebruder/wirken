@@ -30,7 +30,7 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
-            session_expiry_secs: 86400,      // 24 hours
+            session_expiry_secs: 86400, // 24 hours
             audit_retention_days: 90,
             auth_rate_limit_max: 5,
             auth_rate_limit_window_secs: 60,

@@ -6,7 +6,7 @@ mod store;
 
 pub use crypto::{decrypt, encrypt};
 pub use error::VaultError;
-pub use keychain::{probe_keychain, Keychain, KeychainKind};
+pub use keychain::{Keychain, KeychainKind, probe_keychain};
 pub use secret::VaultSecret;
 pub use store::{CredentialMetadata, CredentialStore};
 

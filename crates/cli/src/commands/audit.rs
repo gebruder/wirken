@@ -6,8 +6,7 @@ use super::config;
 
 pub async fn log(action: Option<String>, channel: Option<String>, limit: usize) -> Result<()> {
     let cfg = config();
-    let audit = AuditLog::open(&cfg.audit_db_path())
-        .context("Failed to open audit log")?;
+    let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;
 
     let query = AuditQuery {
         action,
@@ -16,16 +15,25 @@ pub async fn log(action: Option<String>, channel: Option<String>, limit: usize) 
         ..Default::default()
     };
 
-    let events = audit.query(&query)
-        .context("Failed to query audit log")?;
+    let events = audit.query(&query).context("Failed to query audit log")?;
 
     if events.is_empty() {
         println!("  No audit events found.");
         return Ok(());
     }
 
-    println!("  {:>6}  {:20}  {:16}  {:20}  {}", "ID", "TIMESTAMP", "ACTOR", "ACTION", "TARGET");
-    println!("  {}  {}  {}  {}  {}", "─".repeat(6), "─".repeat(20), "─".repeat(16), "─".repeat(20), "─".repeat(30));
+    println!(
+        "  {:>6}  {:20}  {:16}  {:20}  TARGET",
+        "ID", "TIMESTAMP", "ACTOR", "ACTION"
+    );
+    println!(
+        "  {}  {}  {}  {}  {}",
+        "─".repeat(6),
+        "─".repeat(20),
+        "─".repeat(16),
+        "─".repeat(20),
+        "─".repeat(30)
+    );
 
     for event in &events {
         println!(
@@ -44,15 +52,18 @@ pub async fn log(action: Option<String>, channel: Option<String>, limit: usize) 
 
 pub async fn verify() -> Result<()> {
     let cfg = config();
-    let audit = AuditLog::open(&cfg.audit_db_path())
-        .context("Failed to open audit log")?;
+    let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;
 
     match audit.verify()? {
         VerifyResult::Ok { rows_verified } => {
             println!("  Audit log integrity: OK");
             println!("  {} rows verified, hash chain intact.", rows_verified);
         }
-        VerifyResult::Broken { row_id, expected, found } => {
+        VerifyResult::Broken {
+            row_id,
+            expected,
+            found,
+        } => {
             println!("  Audit log integrity: BROKEN");
             println!("  Hash chain broken at row {row_id}.");
             println!("  Expected: {expected}");

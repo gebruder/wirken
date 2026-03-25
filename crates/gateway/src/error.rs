@@ -33,7 +33,10 @@ pub enum GatewayError {
     RateLimited(String),
 
     #[error("no route for channel {channel} conversation {conversation}")]
-    NoRoute { channel: String, conversation: String },
+    NoRoute {
+        channel: String,
+        conversation: String,
+    },
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

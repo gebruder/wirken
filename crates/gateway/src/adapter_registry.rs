@@ -35,14 +35,12 @@ impl AdapterRegistry {
                  adapter_id TEXT PRIMARY KEY,
                  public_key BLOB NOT NULL,
                  channel TEXT NOT NULL
-             );"
+             );",
         )?;
 
         let mut cache = HashMap::new();
         {
-            let mut stmt = conn.prepare(
-                "SELECT adapter_id, public_key, channel FROM adapters"
-            )?;
+            let mut stmt = conn.prepare("SELECT adapter_id, public_key, channel FROM adapters")?;
             let rows = stmt.query_map([], |row| {
                 let id: String = row.get(0)?;
                 let pk_blob: Vec<u8> = row.get(1)?;
@@ -56,12 +54,15 @@ impl AdapterRegistry {
                 if pk_blob.len() == 32 {
                     pk.copy_from_slice(&pk_blob);
                 }
-                cache.insert(id.clone(), AdapterEntry {
-                    adapter_id: id,
-                    public_key: pk,
-                    channel,
-                    connected: false,
-                });
+                cache.insert(
+                    id.clone(),
+                    AdapterEntry {
+                        adapter_id: id,
+                        public_key: pk,
+                        channel,
+                        connected: false,
+                    },
+                );
             }
         }
 
@@ -81,7 +82,9 @@ impl AdapterRegistry {
         {
             let cache = self.cache.read().unwrap();
             if cache.contains_key(adapter_id) {
-                return Err(GatewayError::AdapterAlreadyRegistered(adapter_id.to_string()));
+                return Err(GatewayError::AdapterAlreadyRegistered(
+                    adapter_id.to_string(),
+                ));
             }
         }
 
@@ -96,7 +99,10 @@ impl AdapterRegistry {
             channel: channel.to_string(),
             connected: false,
         };
-        self.cache.write().unwrap().insert(adapter_id.to_string(), entry);
+        self.cache
+            .write()
+            .unwrap()
+            .insert(adapter_id.to_string(), entry);
         Ok(())
     }
 
@@ -122,10 +128,16 @@ impl AdapterRegistry {
 
     /// Verify an adapter's identity during handshake.
     /// Returns Ok(()) if the adapter is registered and the public key matches.
-    pub fn verify(&self, adapter_id: &str, public_key: &[u8; 32]) -> Result<(), wirken_ipc::HandshakeError> {
+    pub fn verify(
+        &self,
+        adapter_id: &str,
+        public_key: &[u8; 32],
+    ) -> Result<(), wirken_ipc::HandshakeError> {
         let cache = self.cache.read().unwrap();
         match cache.get(adapter_id) {
-            None => Err(wirken_ipc::HandshakeError::UnknownAdapter(adapter_id.to_string())),
+            None => Err(wirken_ipc::HandshakeError::UnknownAdapter(
+                adapter_id.to_string(),
+            )),
             Some(entry) => {
                 if &entry.public_key == public_key {
                     Ok(())

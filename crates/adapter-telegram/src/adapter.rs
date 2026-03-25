@@ -6,7 +6,7 @@ use teloxide::types::{ChatId, MessageId, ReplyParameters};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{split_stream, FrameReader, FrameWriter};
+use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
@@ -22,7 +22,10 @@ pub struct TelegramAdapter {
 impl TelegramAdapter {
     /// Create a new Telegram adapter.
     pub fn new(identity: AdapterIdentity, bot_token: String) -> Self {
-        Self { identity, bot_token }
+        Self {
+            identity,
+            bot_token,
+        }
     }
 
     /// Connect to the gateway, authenticate, then run the message loop.
@@ -65,24 +68,22 @@ impl TelegramAdapter {
 
 /// Handle inbound Telegram messages and forward to gateway via IPC.
 async fn run_inbound(bot: Bot, writer: Arc<Mutex<FrameWriter>>) {
-    let handler = Update::filter_message().endpoint(
-        move |msg: Message, _bot: Bot| {
-            let writer = writer.clone();
-            async move {
-                let mut capnp_msg = capnp::message::Builder::new_default();
-                convert::telegram_to_inbound(&msg, &mut capnp_msg);
+    let handler = Update::filter_message().endpoint(move |msg: Message, _bot: Bot| {
+        let writer = writer.clone();
+        async move {
+            let mut capnp_msg = capnp::message::Builder::new_default();
+            convert::telegram_to_inbound(&msg, &mut capnp_msg);
 
-                let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
-                if let Err(e) = w.write_message(&capnp_msg).await {
-                    tracing::error!("Failed to send inbound to gateway: {e}");
-                } else {
-                    tracing::debug!("Forwarded msg {} from {}", msg.id.0, msg.chat.id.0);
-                }
-
-                Ok::<(), teloxide::RequestError>(())
+            let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
+            if let Err(e) = w.write_message(&capnp_msg).await {
+                tracing::error!("Failed to send inbound to gateway: {e}");
+            } else {
+                tracing::debug!("Forwarded msg {} from {}", msg.id.0, msg.chat.id.0);
             }
-        },
-    );
+
+            Ok::<(), teloxide::RequestError>(())
+        }
+    });
 
     Dispatcher::builder(bot, handler)
         .enable_ctrlc_handler()
@@ -92,11 +93,7 @@ async fn run_inbound(bot: Bot, writer: Arc<Mutex<FrameWriter>>) {
 }
 
 /// Handle outbound messages from gateway and send via Telegram.
-async fn handle_outbound(
-    mut reader: FrameReader,
-    bot: Bot,
-    writer: Arc<Mutex<FrameWriter>>,
-) {
+async fn handle_outbound(mut reader: FrameReader, bot: Bot, writer: Arc<Mutex<FrameWriter>>) {
     loop {
         // Read frame from gateway
         let msg = match reader.read_message().await {
@@ -123,15 +120,13 @@ async fn handle_outbound(
             };
 
             match frame_reader.which() {
-                Ok(frame::Outbound(_)) => {
-                    match convert::parse_outbound(&msg) {
-                        Ok(fields) => FrameAction::SendMessage(fields),
-                        Err(e) => {
-                            tracing::error!("Failed to parse outbound: {e}");
-                            FrameAction::Skip
-                        }
+                Ok(frame::Outbound(_)) => match convert::parse_outbound(&msg) {
+                    Ok(fields) => FrameAction::SendMessage(fields),
+                    Err(e) => {
+                        tracing::error!("Failed to parse outbound: {e}");
+                        FrameAction::Skip
                     }
-                }
+                },
                 Ok(frame::Heartbeat(_)) => {
                     tracing::trace!("Received heartbeat from gateway");
                     FrameAction::Skip
@@ -154,9 +149,7 @@ async fn handle_outbound(
                 let mut request = bot.send_message(chat_id, &fields.text);
 
                 if let Some(reply_id) = fields.reply_to_id {
-                    request = request.reply_parameters(
-                        ReplyParameters::new(MessageId(reply_id))
-                    );
+                    request = request.reply_parameters(ReplyParameters::new(MessageId(reply_id)));
                 }
 
                 let (success, msg_id, error) = match request.await {

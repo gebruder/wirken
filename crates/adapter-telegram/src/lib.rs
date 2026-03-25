@@ -1,6 +1,6 @@
 pub mod adapter;
-pub mod error;
 pub mod convert;
+pub mod error;
 
 pub use adapter::TelegramAdapter;
 pub use error::TelegramError;

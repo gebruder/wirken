@@ -32,7 +32,10 @@ impl Router {
 
     /// Remove all bindings for a channel.
     pub fn unbind_channel(&self, channel: &str) {
-        self.bindings.write().unwrap().retain(|b| b.channel != channel);
+        self.bindings
+            .write()
+            .unwrap()
+            .retain(|b| b.channel != channel);
     }
 
     /// Resolve which agent should handle a message from a given channel + conversation.
@@ -42,18 +45,14 @@ impl Router {
 
         // First pass: exact conversation match
         for binding in bindings.iter() {
-            if binding.channel == channel
-                && binding.conversation_pattern == conversation_id
-            {
+            if binding.channel == channel && binding.conversation_pattern == conversation_id {
                 return Ok(binding.agent_id.clone());
             }
         }
 
         // Second pass: wildcard match
         for binding in bindings.iter() {
-            if binding.channel == channel
-                && binding.conversation_pattern == "*"
-            {
+            if binding.channel == channel && binding.conversation_pattern == "*" {
                 return Ok(binding.agent_id.clone());
             }
         }

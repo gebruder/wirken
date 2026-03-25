@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
-use wirken_agent::llm::LlmConfig;
 use wirken_agent::Agent;
+use wirken_agent::llm::LlmConfig;
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -12,18 +12,17 @@ pub async fn send(message: &str) -> Result<()> {
     // Load provider config
     let provider_path = cfg.data_dir.join("provider.json");
     if !provider_path.exists() {
-        anyhow::bail!(
-            "No AI provider configured. Run `wirken setup` first."
-        );
+        anyhow::bail!("No AI provider configured. Run `wirken setup` first.");
     }
 
-    let provider_json: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&provider_path)?
-    )?;
+    let provider_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&provider_path)?)?;
 
     let provider = provider_json["provider"].as_str().unwrap_or("ollama");
     let model = provider_json["model"].as_str().unwrap_or("llama3");
-    let base_url = provider_json["base_url"].as_str().unwrap_or("http://localhost:11434/v1");
+    let base_url = provider_json["base_url"]
+        .as_str()
+        .unwrap_or("http://localhost:11434/v1");
 
     let llm_config = LlmConfig::custom(base_url, model);
 
@@ -55,12 +54,7 @@ pub async fn send(message: &str) -> Result<()> {
     let workspace = cfg.data_dir.join("workspace");
     std::fs::create_dir_all(&workspace)?;
 
-    let mut agent = Agent::new(
-        "default".into(),
-        workspace.clone(),
-        llm_config,
-        api_key,
-    );
+    let mut agent = Agent::new("default".into(), workspace.clone(), llm_config, api_key);
 
     // Load skills if directory exists
     let skills_dir = cfg.data_dir.join("skills");
