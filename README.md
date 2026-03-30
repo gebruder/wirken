@@ -115,7 +115,7 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | AG05 | Identity spoofing | Per-adapter Ed25519 challenge-response handshake over Unix domain sockets. Compile-time channel isolation — `SessionHandle<Telegram>` and `SessionHandle<Discord>` are different types; the compiler rejects cross-channel access. |
 | AG07 | Multi-agent manipulation | Each channel adapter runs as a separate OS process. If an adapter is compromised, the blast radius is one channel. IPC boundary prevents lateral movement. |
 | AG08 | Runaway loops | Agent tool call loop capped at 20 rounds per turn. Shell exec timeout at 300s. Rate limiting on all sources including loopback — no localhost exemption. |
-| AG09 | Insufficient logging | Every agent action logged to an append-only SQLite log before execution. SHA-256 hash chain for tamper detection. 90-day retention with configurable pruning. |
+| AG09 | Insufficient logging | Every agent action logged to an append-only SQLite log before execution. SHA-256 hash chain for tamper detection. 90-day retention with configurable pruning. Real-time SIEM forwarding to Datadog, Splunk, or webhook for centralized enterprise monitoring. |
 | — | Credential security | XChaCha20-Poly1305 encryption at rest, keyed from OS keychain (macOS Keychain / libsecret / age fallback). Per-credential expiry and rotation. `secrecy` + `zeroize` — logging or serializing a secret is a compile error. Key material zeroed after use. |
 | — | Transport security | HTTPS enforced at transport level for all LLM and Matrix connections (non-localhost). Cap'n Proto IPC with 16MB frame limit, 512M word traversal limit, 64-level nesting limit. |
 | — | Supply chain | Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push. |
@@ -143,6 +143,7 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 - Per-channel process isolation with Ed25519 handshake
 - MCP client (Model Context Protocol) — connect to any MCP server via stdio, discover and call tools
 - Streaming LLM responses (SSE) for OpenAI and Anthropic
+- SIEM log forwarding — audit events forwarded to Datadog, Splunk, or any webhook in real time
 - Cron job scheduling (`wirken cron create/list/delete/pause/resume`)
 - Docker sandbox for tool execution (optional, per-command ephemeral containers)
 - Cap'n Proto IPC with traversal limits
