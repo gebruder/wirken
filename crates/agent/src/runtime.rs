@@ -116,7 +116,8 @@ impl Agent {
                             truncate(&result.output, 200)
                         );
 
-                        self.conversation.add_tool_result(&call.id, &result.output);
+                        self.conversation
+                            .add_tool_result(&call.id, &call.name, &result.output);
                     }
 
                     // Continue loop — LLM will see tool results and respond

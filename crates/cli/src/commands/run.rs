@@ -121,7 +121,18 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 None
             };
 
-            let llm = LlmConfig::custom(&agent_cfg.base_url, &agent_cfg.model);
+            let mut llm = LlmConfig::from_provider(
+                &agent_cfg.provider,
+                &agent_cfg.base_url,
+                &agent_cfg.model,
+            );
+            if agent_cfg.provider == "bedrock" {
+                llm.region = agent_cfg
+                    .base_url
+                    .strip_prefix("https://bedrock-runtime.")
+                    .and_then(|s| s.strip_suffix(".amazonaws.com"))
+                    .map(String::from);
+            }
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 
@@ -156,7 +167,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // Create default agent for any unbound channels (backward compat with wirken setup)
     if !agents_map.contains_key("default") {
-        let llm_config = LlmConfig::custom(base_url, model);
+        let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
+        // Bedrock: extract region from provider.json or base_url
+        if provider == "bedrock" {
+            llm_config.region = provider_json["region"]
+                .as_str()
+                .map(String::from)
+                .or_else(|| {
+                    base_url
+                        .strip_prefix("https://bedrock-runtime.")
+                        .and_then(|s| s.strip_suffix(".amazonaws.com"))
+                        .map(String::from)
+                });
+        }
         let workspace = cfg.data_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
 

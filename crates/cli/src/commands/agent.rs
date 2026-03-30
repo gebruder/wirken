@@ -40,7 +40,18 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         .as_str()
         .unwrap_or("http://localhost:11434/v1");
 
-    let llm_config = LlmConfig::custom(base_url, model);
+    let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
+    if provider == "bedrock" {
+        llm_config.region = provider_json["region"]
+            .as_str()
+            .map(String::from)
+            .or_else(|| {
+                base_url
+                    .strip_prefix("https://bedrock-runtime.")
+                    .and_then(|s| s.strip_suffix(".amazonaws.com"))
+                    .map(String::from)
+            });
+    }
 
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
@@ -87,7 +98,15 @@ async fn send_with_agent_config(
     agent_cfg: &wirken_gateway::agent_config::AgentConfig,
     cfg: &wirken_gateway::config::GatewayConfig,
 ) -> Result<()> {
-    let llm_config = LlmConfig::custom(&agent_cfg.base_url, &agent_cfg.model);
+    let mut llm_config =
+        LlmConfig::from_provider(&agent_cfg.provider, &agent_cfg.base_url, &agent_cfg.model);
+    if agent_cfg.provider == "bedrock" {
+        llm_config.region = agent_cfg
+            .base_url
+            .strip_prefix("https://bedrock-runtime.")
+            .and_then(|s| s.strip_suffix(".amazonaws.com"))
+            .map(String::from);
+    }
 
     let api_key = if !agent_cfg.api_key_credential.is_empty() {
         let keychain = probe_keychain(&cfg.data_dir, || {

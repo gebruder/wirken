@@ -7,9 +7,9 @@ use crate::tool::ToolDef;
 /// LLM provider configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// Provider name: "openai", "anthropic", "ollama", "custom"
+    /// Provider name: "openai", "anthropic", "gemini", "bedrock", "ollama", "custom"
     pub provider: String,
-    /// Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514", "llama3")
+    /// Model ID (e.g., "gpt-4o", "claude-sonnet-4-20250514", "gemini-2.0-flash")
     pub model: String,
     /// API base URL
     pub base_url: String,
@@ -17,6 +17,9 @@ pub struct LlmConfig {
     pub max_tokens: u32,
     /// Temperature (0.0 - 2.0)
     pub temperature: f32,
+    /// AWS region for Bedrock. Ignored for other providers.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 impl LlmConfig {
@@ -28,6 +31,7 @@ impl LlmConfig {
             base_url: "https://api.openai.com/v1".into(),
             max_tokens: 4096,
             temperature: 0.7,
+            region: None,
         }
     }
 
@@ -39,6 +43,31 @@ impl LlmConfig {
             base_url: "https://api.anthropic.com/v1".into(),
             max_tokens: 4096,
             temperature: 0.7,
+            region: None,
+        }
+    }
+
+    /// Google Gemini defaults
+    pub fn gemini(model: &str) -> Self {
+        Self {
+            provider: "gemini".into(),
+            model: model.into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            region: None,
+        }
+    }
+
+    /// AWS Bedrock defaults
+    pub fn bedrock(model: &str, region: &str) -> Self {
+        Self {
+            provider: "bedrock".into(),
+            model: model.into(),
+            base_url: format!("https://bedrock-runtime.{region}.amazonaws.com"),
+            max_tokens: 4096,
+            temperature: 0.7,
+            region: Some(region.into()),
         }
     }
 
@@ -50,6 +79,7 @@ impl LlmConfig {
             base_url: "http://localhost:11434/v1".into(),
             max_tokens: 4096,
             temperature: 0.7,
+            region: None,
         }
     }
 
@@ -61,6 +91,20 @@ impl LlmConfig {
             base_url: base_url.into(),
             max_tokens: 4096,
             temperature: 0.7,
+            region: None,
+        }
+    }
+
+    /// Construct from explicit provider, base_url, and model.
+    /// Preserves the provider name for correct dispatch.
+    pub fn from_provider(provider: &str, base_url: &str, model: &str) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            base_url: base_url.into(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            region: None,
         }
     }
 }
@@ -77,7 +121,6 @@ pub enum LlmResponse {
 }
 
 /// LLM client that makes completion requests.
-/// Currently supports OpenAI-compatible APIs (OpenAI, Ollama, custom).
 pub struct LlmClient {
     config: LlmConfig,
     http: reqwest::Client,
@@ -114,10 +157,12 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
     ) -> Result<LlmResponse, AgentError> {
-        if self.config.provider == "anthropic" {
-            return self.complete_anthropic(messages, tools, api_key).await;
+        match self.config.provider.as_str() {
+            "anthropic" => self.complete_anthropic(messages, tools, api_key).await,
+            "gemini" => self.complete_gemini(messages, tools, api_key).await,
+            "bedrock" => self.complete_bedrock(messages, tools, api_key).await,
+            _ => self.complete_openai(messages, tools, api_key).await,
         }
-        self.complete_openai(messages, tools, api_key).await
     }
 
     /// OpenAI-compatible completion (OpenAI, Ollama, custom endpoints).
@@ -287,6 +332,286 @@ impl LlmClient {
         parse_anthropic_response(&response_body)
     }
 
+    /// Google Gemini generateContent API.
+    async fn complete_gemini(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        api_key: Option<&str>,
+    ) -> Result<LlmResponse, AgentError> {
+        let key = api_key.ok_or_else(|| AgentError::Llm("Gemini requires an API key".into()))?;
+        let url = format!(
+            "{}/models/{}:generateContent?key={}",
+            self.config.base_url, self.config.model, key
+        );
+
+        // Extract system prompt
+        let system_text: String = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Build contents array
+        let contents: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| {
+                let role = match m.role {
+                    Role::User => "user",
+                    Role::Assistant => "model",
+                    Role::Tool => "user",
+                    Role::System => unreachable!(),
+                };
+                let parts = if m.role == Role::Tool
+                    && m.tool_call_id.is_some()
+                    && let Some(ref name) = m.tool_name
+                {
+                    // Tool result -> functionResponse
+                    let response_val: serde_json::Value =
+                        serde_json::from_str(&m.content).unwrap_or_else(|_| {
+                            serde_json::json!({"result": m.content})
+                        });
+                    serde_json::json!([{
+                        "functionResponse": {
+                            "name": name,
+                            "response": response_val,
+                        }
+                    }])
+                } else if m.role == Role::Tool {
+                    // Tool result without structured info — use tool_name or call ID
+                    let fn_name = m.tool_name.as_deref()
+                        .or(m.tool_call_id.as_deref())
+                        .unwrap_or("unknown");
+                    let response_val: serde_json::Value =
+                        serde_json::from_str(&m.content).unwrap_or_else(|_| {
+                            serde_json::json!({"result": m.content})
+                        });
+                    serde_json::json!([{
+                        "functionResponse": {
+                            "name": fn_name,
+                            "response": response_val,
+                        }
+                    }])
+                } else {
+                    serde_json::json!([{"text": m.content}])
+                };
+                serde_json::json!({
+                    "role": role,
+                    "parts": parts,
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": self.config.max_tokens,
+                "temperature": self.config.temperature,
+            },
+        });
+
+        if !system_text.is_empty() {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{"text": system_text}]
+            });
+        }
+
+        if !tools.is_empty() {
+            let decls: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::json!([{
+                "functionDeclarations": decls,
+            }]);
+        }
+
+        let response = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| AgentError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
+        }
+
+        let response_body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        parse_gemini_response(&response_body)
+    }
+
+    /// AWS Bedrock Converse API.
+    async fn complete_bedrock(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        api_key: Option<&str>,
+    ) -> Result<LlmResponse, AgentError> {
+        let credentials = api_key
+            .ok_or_else(|| AgentError::Llm("Bedrock requires AWS credentials".into()))?;
+
+        // Parse access_key_id:secret_access_key[:session_token]
+        let parts: Vec<&str> = credentials.splitn(3, ':').collect();
+        if parts.len() < 2 {
+            return Err(AgentError::Llm(
+                "Bedrock credentials must be access_key_id:secret_access_key".into(),
+            ));
+        }
+        let access_key = parts[0];
+        let secret_key = parts[1];
+        let session_token = parts.get(2).copied();
+
+        let region = self
+            .config
+            .region
+            .as_deref()
+            .or_else(|| {
+                // Extract region from base_url
+                self.config
+                    .base_url
+                    .strip_prefix("https://bedrock-runtime.")
+                    .and_then(|s| s.strip_suffix(".amazonaws.com"))
+            })
+            .ok_or_else(|| AgentError::Llm("Bedrock requires a region".into()))?;
+
+        let url = format!(
+            "{}/model/{}/converse",
+            self.config.base_url, self.config.model
+        );
+
+        // Extract system prompt
+        let system_blocks: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| serde_json::json!({"text": m.content}))
+            .collect();
+
+        // Build messages array
+        let bedrock_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .map(|m| {
+                let role = match m.role {
+                    Role::User | Role::Tool => "user",
+                    Role::Assistant => "assistant",
+                    Role::System => unreachable!(),
+                };
+                let content = if m.role == Role::Tool
+                    && let Some(ref id) = m.tool_call_id
+                {
+                    let result_val: serde_json::Value =
+                        serde_json::from_str(&m.content).unwrap_or_else(|_| {
+                            serde_json::json!({"result": m.content})
+                        });
+                    serde_json::json!([{
+                        "toolResult": {
+                            "toolUseId": id,
+                            "content": [{"json": result_val}],
+                        }
+                    }])
+                } else {
+                    serde_json::json!([{"text": m.content}])
+                };
+                serde_json::json!({
+                    "role": role,
+                    "content": content,
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "messages": bedrock_messages,
+            "inferenceConfig": {
+                "maxTokens": self.config.max_tokens,
+                "temperature": self.config.temperature,
+            },
+        });
+
+        if !system_blocks.is_empty() {
+            body["system"] = serde_json::Value::Array(system_blocks);
+        }
+
+        if !tools.is_empty() {
+            let tool_specs: Vec<serde_json::Value> = tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "toolSpec": {
+                            "name": t.name,
+                            "description": t.description,
+                            "inputSchema": {"json": t.parameters},
+                        }
+                    })
+                })
+                .collect();
+            body["toolConfig"] = serde_json::json!({
+                "tools": tool_specs,
+            });
+        }
+
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| AgentError::Llm(format!("serialize request: {e}")))?;
+
+        let parsed_url = url::Url::parse(&url)
+            .map_err(|e| AgentError::Llm(format!("invalid URL: {e}")))?;
+
+        let auth_headers = crate::sigv4::sign(
+            access_key,
+            secret_key,
+            session_token,
+            region,
+            "bedrock",
+            "POST",
+            &parsed_url,
+            &body_bytes,
+        );
+
+        let mut request = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json");
+
+        for (name, value) in &auth_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+
+        let response = request
+            .body(body_bytes)
+            .send()
+            .await
+            .map_err(|e| AgentError::Http(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
+        }
+
+        let response_body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        parse_bedrock_response(&response_body)
+    }
+
     /// Get the current config.
     pub fn config(&self) -> &LlmConfig {
         &self.config
@@ -407,6 +732,107 @@ pub fn parse_anthropic_response(body: &serde_json::Value) -> Result<LlmResponse,
                 });
             }
             _ => {}
+        }
+    }
+
+    if !tool_calls.is_empty() {
+        return Ok(LlmResponse::ToolCalls(tool_calls));
+    }
+
+    if !text_parts.is_empty() {
+        return Ok(LlmResponse::Text(text_parts.join("")));
+    }
+
+    Ok(LlmResponse::Empty)
+}
+
+/// Parse a Google Gemini generateContent response.
+pub fn parse_gemini_response(body: &serde_json::Value) -> Result<LlmResponse, AgentError> {
+    let parts = body
+        .get("candidates")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| AgentError::Llm("no candidates/content/parts in Gemini response".into()))?;
+
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    for part in parts {
+        if let Some(text) = part.get("text").and_then(|t| t.as_str())
+            && !text.is_empty()
+        {
+            text_parts.push(text.to_string());
+        }
+
+        if let Some(fc) = part.get("functionCall") {
+            let name = fc
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = fc.get("args").unwrap_or(&serde_json::Value::Null);
+            // Gemini doesn't return tool call IDs — generate one
+            let id = format!("gemini_{}", uuid::Uuid::new_v4());
+            tool_calls.push(ToolCallRequest {
+                id,
+                name,
+                arguments: args.to_string(),
+            });
+        }
+    }
+
+    if !tool_calls.is_empty() {
+        return Ok(LlmResponse::ToolCalls(tool_calls));
+    }
+
+    if !text_parts.is_empty() {
+        return Ok(LlmResponse::Text(text_parts.join("")));
+    }
+
+    Ok(LlmResponse::Empty)
+}
+
+/// Parse an AWS Bedrock Converse API response.
+pub fn parse_bedrock_response(body: &serde_json::Value) -> Result<LlmResponse, AgentError> {
+    let content = body
+        .get("output")
+        .and_then(|o| o.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| {
+            AgentError::Llm("no output/message/content in Bedrock response".into())
+        })?;
+
+    let mut text_parts = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    for block in content {
+        if let Some(text) = block.get("text").and_then(|t| t.as_str())
+            && !text.is_empty()
+        {
+            text_parts.push(text.to_string());
+        }
+
+        if let Some(tu) = block.get("toolUse") {
+            let id = tu
+                .get("toolUseId")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = tu
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let input = tu.get("input").unwrap_or(&serde_json::Value::Null);
+            tool_calls.push(ToolCallRequest {
+                id,
+                name,
+                arguments: input.to_string(),
+            });
         }
     }
 
