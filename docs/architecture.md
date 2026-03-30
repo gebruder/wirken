@@ -77,7 +77,7 @@ This is not a runtime permission check that can be bypassed — it is a type con
 
 **Process management:** Gateway spawns adapters via `tokio::process::Command`. Each adapter is a separate Rust binary (compiled from the same workspace). Dead adapters detected by UDS EOF + heartbeat timeout, restarted with exponential backoff.
 
-**Tradeoff:** More processes than OpenClaw's monolith. Acceptable: a personal gateway runs 3-5 adapters, not 500. Memory overhead ~3-8MB per adapter (Rust, not Node).
+**Tradeoff:** More processes than a monolith. Acceptable: a personal gateway runs 3-5 adapters, not 500. Memory overhead ~3-8MB per adapter.
 
 ---
 
@@ -196,14 +196,14 @@ Three skill categories, each with a different execution model:
 
 ### Category 1: Markdown skills (the majority — drop in, they work)
 
-OpenClaw's 52 bundled skills are not code. They are `SKILL.md` files — structured natural-language instructions with YAML frontmatter that the LLM reads as system prompt context. The agent interprets the instructions at runtime and uses built-in tools (exec, web search, file read/write) to carry them out.
+Most agent gateway skills are not code. They are `SKILL.md` files — structured natural-language instructions with YAML frontmatter that the LLM reads as system prompt context. The agent interprets the instructions at runtime and uses built-in tools (exec, web search, file read/write) to carry them out.
 
 Examples:
 - `weather/SKILL.md`: "Use `curl wttr.in/{city}` for current weather." Requires: `curl` binary on host.
 - `github/SKILL.md`: "Use `gh` CLI for issues, PRs, CI runs." Requires: `gh` binary on host.
 - `tmux/SKILL.md`: "Send keystrokes to tmux sessions, scrape pane output." Requires: `tmux` binary on host.
 
-These skills have zero compilation, zero sandboxing, and zero migration cost. If Wirken's agent runtime reads `SKILL.md` files from a skill directory and injects them into the system prompt — which it does — then every OpenClaw markdown skill works on day one by copying the folder.
+These skills have zero compilation and zero migration cost. Wirken's agent runtime reads `SKILL.md` files from a skill directory and injects them into the system prompt.
 
 **Frontmatter contract to match:**
 ```yaml
@@ -263,7 +263,7 @@ Skills with only a `SKILL.md` and no `skill.toml` are markdown skills. No sandbo
 - Local/workspace skills are unsigned but sandboxed. The user sees a one-time "trust this skill?" prompt on first load.
 - No unsigned skill can request network access without explicit approval.
 
-**Why three categories:** Because the skill ecosystem is not one thing. The majority of OpenClaw skills are markdown (system prompt instructions) — they need no sandbox, no compilation, and no migration. The minority are code — they need containerization. And the future is Wasm — deterministic, fast, cross-platform. Treating all three the same would either over-sandbox markdown skills (adding latency for no security gain) or under-sandbox code skills (the actual risk). The three-category model matches reality.
+**Why three categories:** Because the skill ecosystem is not one thing. The majority of skills are markdown (system prompt instructions) that need no sandbox, no compilation, and no migration. Some are code that needs containerization. And Wasm provides a deterministic, fast, cross-platform alternative. The three-category model matches these realities.
 
 ---
 
@@ -384,7 +384,7 @@ The `.capnp` schema files become the canonical IPC contract. Adapters and the ga
 
 ## 10. Onboarding
 
-**Must match or beat OpenClaw's two-command install.**
+**Two commands to a running gateway.**
 
 ```bash
 curl -fsSL https://wirken.dev/install.sh | sh
