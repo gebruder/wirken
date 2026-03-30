@@ -643,8 +643,7 @@ fn parse_ddg_html(html: &str, max: usize) -> Vec<SearchResult> {
 
             if !title.is_empty() && !url.is_empty() {
                 // DuckDuckGo wraps URLs in a redirect — extract the actual URL
-                let actual_url = if let Some(rest) = url.strip_prefix("//duckduckgo.com/l/?uddg=")
-                {
+                let actual_url = if let Some(rest) = url.strip_prefix("//duckduckgo.com/l/?uddg=") {
                     urlencoding_decode(rest.split('&').next().unwrap_or(rest))
                 } else {
                     url.to_string()
@@ -710,10 +709,8 @@ fn urlencoding_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            )
+            && let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
         {
             result.push(byte);
             i += 3;

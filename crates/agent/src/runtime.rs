@@ -141,17 +141,16 @@ impl Agent {
                             truncate(&call.arguments, 100)
                         );
 
-                        let result =
-                            match self.tools.execute(&call.name, &call.arguments).await {
-                                Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
-                                    self.mcp
-                                        .as_mut()
-                                        .unwrap()
-                                        .execute(&call.name, &call.arguments)
-                                        .await?
-                                }
-                                other => other?,
-                            };
+                        let result = match self.tools.execute(&call.name, &call.arguments).await {
+                            Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
+                                self.mcp
+                                    .as_mut()
+                                    .unwrap()
+                                    .execute(&call.name, &call.arguments)
+                                    .await?
+                            }
+                            other => other?,
+                        };
 
                         tracing::debug!(
                             "Tool {} result (success={}): {}",
@@ -233,7 +232,9 @@ impl Agent {
             match response {
                 LlmResponse::Text(text) => {
                     self.conversation.add_assistant_message(&text);
-                    let _ = tx.send(StreamEvent::Done(LlmResponse::Text(text.clone()))).await;
+                    let _ = tx
+                        .send(StreamEvent::Done(LlmResponse::Text(text.clone())))
+                        .await;
                     return Ok(text);
                 }
                 LlmResponse::ToolCalls(calls) => {
@@ -242,17 +243,16 @@ impl Agent {
                     for call in &calls {
                         tracing::info!("Agent {} executing tool: {}", self.id, call.name);
 
-                        let result =
-                            match self.tools.execute(&call.name, &call.arguments).await {
-                                Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
-                                    self.mcp
-                                        .as_mut()
-                                        .unwrap()
-                                        .execute(&call.name, &call.arguments)
-                                        .await?
-                                }
-                                other => other?,
-                            };
+                        let result = match self.tools.execute(&call.name, &call.arguments).await {
+                            Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
+                                self.mcp
+                                    .as_mut()
+                                    .unwrap()
+                                    .execute(&call.name, &call.arguments)
+                                    .await?
+                            }
+                            other => other?,
+                        };
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);

@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
+use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
 use bollard::models::HostConfig;
 use bollard::query_parameters::{
     CreateContainerOptions, LogsOptions, RemoveContainerOptions, WaitContainerOptions,
 };
-use bollard::Docker;
 use futures_util::StreamExt;
 
 use crate::error::AgentError;

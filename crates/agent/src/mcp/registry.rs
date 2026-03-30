@@ -55,9 +55,7 @@ impl McpRegistry {
                                     );
                                 }
                                 Err(e) => {
-                                    tracing::warn!(
-                                        "MCP server '{name}' tools/list failed: {e}"
-                                    );
+                                    tracing::warn!("MCP server '{name}' tools/list failed: {e}");
                                     client.shutdown().await;
                                     continue;
                                 }

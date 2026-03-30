@@ -369,10 +369,8 @@ impl LlmClient {
                     && let Some(ref name) = m.tool_name
                 {
                     // Tool result -> functionResponse
-                    let response_val: serde_json::Value =
-                        serde_json::from_str(&m.content).unwrap_or_else(|_| {
-                            serde_json::json!({"result": m.content})
-                        });
+                    let response_val: serde_json::Value = serde_json::from_str(&m.content)
+                        .unwrap_or_else(|_| serde_json::json!({"result": m.content}));
                     serde_json::json!([{
                         "functionResponse": {
                             "name": name,
@@ -381,13 +379,13 @@ impl LlmClient {
                     }])
                 } else if m.role == Role::Tool {
                     // Tool result without structured info — use tool_name or call ID
-                    let fn_name = m.tool_name.as_deref()
+                    let fn_name = m
+                        .tool_name
+                        .as_deref()
                         .or(m.tool_call_id.as_deref())
                         .unwrap_or("unknown");
-                    let response_val: serde_json::Value =
-                        serde_json::from_str(&m.content).unwrap_or_else(|_| {
-                            serde_json::json!({"result": m.content})
-                        });
+                    let response_val: serde_json::Value = serde_json::from_str(&m.content)
+                        .unwrap_or_else(|_| serde_json::json!({"result": m.content}));
                     serde_json::json!([{
                         "functionResponse": {
                             "name": fn_name,
@@ -464,8 +462,8 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
     ) -> Result<LlmResponse, AgentError> {
-        let credentials = api_key
-            .ok_or_else(|| AgentError::Llm("Bedrock requires AWS credentials".into()))?;
+        let credentials =
+            api_key.ok_or_else(|| AgentError::Llm("Bedrock requires AWS credentials".into()))?;
 
         // Parse access_key_id:secret_access_key[:session_token]
         let parts: Vec<&str> = credentials.splitn(3, ':').collect();
@@ -516,10 +514,8 @@ impl LlmClient {
                 let content = if m.role == Role::Tool
                     && let Some(ref id) = m.tool_call_id
                 {
-                    let result_val: serde_json::Value =
-                        serde_json::from_str(&m.content).unwrap_or_else(|_| {
-                            serde_json::json!({"result": m.content})
-                        });
+                    let result_val: serde_json::Value = serde_json::from_str(&m.content)
+                        .unwrap_or_else(|_| serde_json::json!({"result": m.content}));
                     serde_json::json!([{
                         "toolResult": {
                             "toolUseId": id,
@@ -569,8 +565,8 @@ impl LlmClient {
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| AgentError::Llm(format!("serialize request: {e}")))?;
 
-        let parsed_url = url::Url::parse(&url)
-            .map_err(|e| AgentError::Llm(format!("invalid URL: {e}")))?;
+        let parsed_url =
+            url::Url::parse(&url).map_err(|e| AgentError::Llm(format!("invalid URL: {e}")))?;
 
         let auth_headers = crate::sigv4::sign(
             access_key,
@@ -807,9 +803,7 @@ pub fn parse_bedrock_response(body: &serde_json::Value) -> Result<LlmResponse, A
         .and_then(|o| o.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_array())
-        .ok_or_else(|| {
-            AgentError::Llm("no output/message/content in Bedrock response".into())
-        })?;
+        .ok_or_else(|| AgentError::Llm("no output/message/content in Bedrock response".into()))?;
 
     let mut text_parts = Vec::new();
     let mut tool_calls = Vec::new();

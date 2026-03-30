@@ -61,7 +61,10 @@ pub async fn create(
     println!("  Created cron job: {}", job.id);
     println!("  Schedule: {}", job.schedule);
     println!("  Agent: {}", job.agent_id);
-    println!("  Next run: {}", job.next_run_at.format("%Y-%m-%d %H:%M UTC"));
+    println!(
+        "  Next run: {}",
+        job.next_run_at.format("%Y-%m-%d %H:%M UTC")
+    );
     println!("  Message: {}", job.message);
     Ok(())
 }

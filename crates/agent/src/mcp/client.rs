@@ -41,7 +41,9 @@ impl McpClient {
         }
 
         // Send initialized notification
-        self.transport.notify("notifications/initialized", None).await?;
+        self.transport
+            .notify("notifications/initialized", None)
+            .await?;
 
         Ok(())
     }
