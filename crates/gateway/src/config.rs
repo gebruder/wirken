@@ -84,11 +84,7 @@ impl GatewayConfig {
 
     /// MCP config path for an agent (per-agent or shared).
     pub fn mcp_config_path(&self, agent_id: &str) -> PathBuf {
-        let per_agent = self
-            .data_dir
-            .join("agents")
-            .join(agent_id)
-            .join("mcp.json");
+        let per_agent = self.data_dir.join("agents").join(agent_id).join("mcp.json");
         if per_agent.exists() {
             per_agent
         } else {

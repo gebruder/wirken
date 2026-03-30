@@ -60,10 +60,7 @@ pub fn sign(
         .collect::<Vec<_>>()
         .join(";");
 
-    let canonical_headers: String = headers
-        .iter()
-        .map(|(k, v)| format!("{k}:{v}\n"))
-        .collect();
+    let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
 
     let canonical_request = format!(
         "{method}\n{path}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
@@ -133,7 +130,9 @@ mod tests {
 
     #[test]
     fn sigv4_produces_valid_structure() {
-        let url = url::Url::parse("https://bedrock-runtime.us-east-1.amazonaws.com/model/test/converse").unwrap();
+        let url =
+            url::Url::parse("https://bedrock-runtime.us-east-1.amazonaws.com/model/test/converse")
+                .unwrap();
         let body = b"{\"messages\":[]}";
 
         let headers = sign(
@@ -148,9 +147,15 @@ mod tests {
         );
 
         let auth = headers.iter().find(|(k, _)| k == "Authorization").unwrap();
-        assert!(auth.1.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"));
+        assert!(
+            auth.1
+                .starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/")
+        );
         assert!(auth.1.contains("us-east-1/bedrock/aws4_request"));
-        assert!(auth.1.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
+        assert!(
+            auth.1
+                .contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date")
+        );
 
         let date = headers.iter().find(|(k, _)| k == "x-amz-date").unwrap();
         assert_eq!(date.1.len(), 16); // YYYYMMDDTHHmmSSZ
@@ -158,7 +163,9 @@ mod tests {
 
     #[test]
     fn sigv4_with_session_token() {
-        let url = url::Url::parse("https://bedrock-runtime.us-west-2.amazonaws.com/model/test/converse").unwrap();
+        let url =
+            url::Url::parse("https://bedrock-runtime.us-west-2.amazonaws.com/model/test/converse")
+                .unwrap();
 
         let headers = sign(
             "AKID",

@@ -737,7 +737,11 @@ fn llm_config_gemini() {
     let config = LlmConfig::gemini("gemini-2.0-flash");
     assert_eq!(config.provider, "gemini");
     assert_eq!(config.model, "gemini-2.0-flash");
-    assert!(config.base_url.contains("generativelanguage.googleapis.com"));
+    assert!(
+        config
+            .base_url
+            .contains("generativelanguage.googleapis.com")
+    );
     assert!(config.region.is_none());
 }
 
@@ -752,7 +756,11 @@ fn llm_config_bedrock() {
 
 #[test]
 fn llm_config_from_provider_preserves_name() {
-    let config = LlmConfig::from_provider("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514");
+    let config = LlmConfig::from_provider(
+        "anthropic",
+        "https://api.anthropic.com/v1",
+        "claude-sonnet-4-20250514",
+    );
     assert_eq!(config.provider, "anthropic");
     assert_eq!(config.base_url, "https://api.anthropic.com/v1");
 }

@@ -281,7 +281,13 @@ mod tests {
         let store = CronStore::open(&tmp.path().join("cron.db")).unwrap();
 
         let job = store
-            .create("default", "0 0 9 * * *", "check email", "morning check", "user")
+            .create(
+                "default",
+                "0 0 9 * * *",
+                "check email",
+                "morning check",
+                "user",
+            )
             .unwrap();
 
         assert!(job.id.starts_with("cron_"));

@@ -122,25 +122,20 @@ impl LlmClient {
                             .and_then(|a| a.first())
                             .and_then(|c| c.get("delta"))
                         {
-                            if let Some(content) =
-                                delta.get("content").and_then(|c| c.as_str())
+                            if let Some(content) = delta.get("content").and_then(|c| c.as_str())
                                 && !content.is_empty()
                             {
                                 full_text.push_str(content);
-                                let _ = tx
-                                    .send(StreamEvent::TextDelta(content.to_string()))
-                                    .await;
+                                let _ = tx.send(StreamEvent::TextDelta(content.to_string())).await;
                             }
 
                             if let Some(tc_array) =
                                 delta.get("tool_calls").and_then(|t| t.as_array())
                             {
                                 for tc in tc_array {
-                                    let index = tc
-                                        .get("index")
-                                        .and_then(|i| i.as_u64())
-                                        .unwrap_or(0)
-                                        as usize;
+                                    let index =
+                                        tc.get("index").and_then(|i| i.as_u64()).unwrap_or(0)
+                                            as usize;
 
                                     while tool_calls.len() <= index {
                                         tool_calls.push(PartialToolCall::default());
@@ -355,9 +350,7 @@ impl LlmClient {
                                 && !text.is_empty()
                             {
                                 text_parts.push(text.to_string());
-                                let _ = tx
-                                    .send(StreamEvent::TextDelta(text.to_string()))
-                                    .await;
+                                let _ = tx.send(StreamEvent::TextDelta(text.to_string())).await;
                             } else if dt == "input_json_delta"
                                 && let Some(partial) =
                                     delta.get("partial_json").and_then(|p| p.as_str())
