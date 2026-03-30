@@ -1,3 +1,4 @@
+pub mod bundled_skills;
 pub mod conversation;
 pub mod error;
 pub mod llm;
