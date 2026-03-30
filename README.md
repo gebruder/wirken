@@ -133,49 +133,9 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - **Encrypted credentials.** XChaCha20-Poly1305 vault keyed from the OS keychain. Per-credential expiry and rotation. No plaintext export.
 - **Centralized policy.** `wirken setup --org https://wirken.corp.example.com` pulls provider, SIEM, MCP, and permission config from a company endpoint. Developers get grab-and-go setup. IT manages one config. Policy refreshes on every `wirken run`.
 
-## Current status
+## Status
 
-14 crates, 238 tests, CI on every push, release binaries for four platforms.
-
-**Ships now:**
-- Five channel adapters running simultaneously as isolated processes:
-  - Telegram (teloxide 0.17, long polling)
-  - Discord (serenity 0.12, gateway WebSocket, mention-gated in guilds)
-  - Slack (slack-morphism 2.19, Socket Mode, mention-gated in channels)
-  - Microsoft Teams (Bot Framework REST API, HTTP webhook, mention-gated)
-  - Matrix (Client-Server API, rooms + DMs, mention-gated in rooms)
-- Multi-agent routing (work agent on Slack/Teams, personal on Telegram/Discord, each with its own model, API key, workspace, and skills)
-- Skill registry with Ed25519 signing (`wirken skills search/install/sign/verify`)
-- Agent runtime with LLM tool calling (OpenAI, Anthropic, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, Ollama, custom endpoints)
-- Built-in tools: shell exec, file read/write, directory listing, web search, image generation
-- 15 bundled skills (weather, github, git, tmux, system-info, web-fetch, docker, notes, calculator, file-search, disk-usage, process-manager, ssh, json-tools, csv-tools)
-- SKILL.md loader (compatible with OpenClaw's 52 bundled skills)
-- Encrypted credential vault with OS keychain integration
-- Append-only hash-chained audit log
-- Per-channel process isolation with Ed25519 handshake
-- MCP client (Model Context Protocol) — connect to any MCP server via stdio, discover and call tools
-- Streaming LLM responses (SSE) for OpenAI and Anthropic
-- SIEM log forwarding — audit events forwarded to Datadog, Splunk, or any webhook in real time
-- Cron job scheduling (`wirken cron create/list/delete/pause/resume`)
-- Docker sandbox for tool execution (optional, per-command ephemeral containers)
-- Wasm skill sandbox (Wasmtime): run compiled .wasm modules as tools with fuel-based CPU limits, no filesystem, no network
-- Cap'n Proto IPC with traversal limits
-- Session management with expiry
-- Three-tier permission model
-- Rate limiting (no loopback exemption)
-- Interactive setup wizard (`wirken setup`)
-- Gateway daemon with adapter lifecycle management (`wirken run`)
-- WebChat UI at localhost
-- Service installation (systemd / launchd)
-- Diagnostics (`wirken doctor`)
-- CI: cargo test + clippy + fmt on every push
-- Release binaries: Linux x86_64/aarch64 (static musl), macOS x86_64/aarch64
-- Install script: `curl | sh`
-
-**Not yet:**
-- Voice/TTS
-- Mobile companion apps
-- Matrix E2EE (blocked by matrix-sdk sqlite version conflict)
+14 crates, 238 tests, 8 LLM providers, 5 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
 
 ## Migrating from OpenClaw
 
