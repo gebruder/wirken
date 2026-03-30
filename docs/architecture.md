@@ -2,7 +2,7 @@
 
 Codename: **Wirken**
 
-A replacement for OpenClaw that delivers the same user capabilities — multi-channel personal AI assistant with skills, voice, and local-first operation — with none of the security failures.
+A secure, model-agnostic AI agent gateway. Multi-channel personal AI assistant with skills, tool execution, and local-first operation.
 
 Wirken — from the Old English *wyrcan*, to work, to make, to build. The thing that does the work.
 
@@ -23,7 +23,7 @@ Written in Rust. Not because Rust is fashionable, but because the security prope
 
 ## 1. Channel Isolation Model
 
-**OpenClaw's failure:** Single static gateway token controls all channels. One compromised channel means full gateway access.
+**Threat (CWE-250, Execution with Unnecessary Privileges):** A single static gateway token controlling all channels means one compromised channel grants full gateway access.
 
 **Fix:**
 
@@ -83,7 +83,7 @@ This is not a runtime permission check that can be bypassed — it is a type con
 
 ## 2. Credential Lifecycle
 
-**OpenClaw's failure:** Plaintext credential files on disk (`~/.openclaw/credentials/`). No rotation. No expiry. Symlink checks are the only protection.
+**Threat (CWE-256, Plaintext Storage of a Password):** Credentials stored in plaintext config files with no rotation or expiry. Any process with filesystem read access can extract them.
 
 **Fix:**
 
@@ -130,7 +130,7 @@ impl VaultEntry {
 
 ## 3. Agent Permission Model
 
-**OpenClaw's failure:** Authenticated gateway callers are trusted operators. Session IDs are routing controls, not auth boundaries. No granular permission model for what agents can do.
+**Threat (OWASP AG01, Excessive Agency):** Without a granular permission model, authenticated agents have unrestricted access to all tools and resources. Session IDs used as routing controls rather than authorization boundaries.
 
 **Fix:**
 
@@ -161,7 +161,7 @@ Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `a
 
 ## 4. Audit System
 
-**OpenClaw's failure:** Only slash command logging. No audit trail for agent actions. `control-plane-audit.ts` is 41 lines that format an actor string — no persistence, no search, no alerting.
+**Threat (OWASP AG09, Insufficient Logging and Monitoring):** Without a persistent audit trail for agent actions, there is no way to detect, investigate, or respond to incidents. Logging only control-plane commands misses tool invocations, credential access, and file operations.
 
 **Fix:**
 
@@ -188,7 +188,7 @@ wirken audit verify                 # verify hash chain integrity
 
 ## 5. Skill Execution
 
-**OpenClaw's failure:** Skills run in-process with full OS privileges. Security scanner is 8 regex rules — no signing, no sandbox. A malicious skill has complete access to the host.
+**Threat (OWASP AG02, Unexpected Code Execution):** Skills running in-process with full OS privileges and no sandbox. A malicious or compromised skill has complete access to the host filesystem, network, and credentials.
 
 **Fix:**
 
@@ -269,7 +269,7 @@ Skills with only a `SKILL.md` and no `skill.toml` are markdown skills. No sandbo
 
 ## 6. LLM Integration
 
-**OpenClaw's failure:** API keys stored in plaintext config and env vars. Single key per provider shared across all agents and channels. No scoping.
+**Threat (CWE-312, Cleartext Storage of Sensitive Information):** API keys in plaintext config files and environment variables. A single key shared across all agents and channels means one leak exposes everything.
 
 **Fix:**
 
@@ -331,7 +331,7 @@ Backpressure is handled by tokio's cooperative task scheduling + TCP window mana
 
 ## 7. Rate Limiting
 
-**OpenClaw's failure:** Localhost is exempt from auth rate limiting. The gateway binds to localhost by default. The exact attack surface exploited by CVE-2026-25253 (local privilege escalation via unlimited auth attempts from loopback) is unprotected.
+**Threat (CWE-307, Improper Restriction of Excessive Authentication Attempts):** Exempting localhost from rate limiting when the gateway binds to localhost by default leaves the primary attack surface unprotected against brute-force attempts.
 
 **Fix:**
 
@@ -348,7 +348,7 @@ No loopback exemption. Rate limiting applies uniformly.
 
 ## 8. Session Management
 
-**OpenClaw's failure:** No session expiry. Sessions persist indefinitely. Session IDs are routing controls, not auth boundaries.
+**Threat (CWE-613, Insufficient Session Expiration):** Sessions that persist indefinitely without expiry or inactivity timeout. Session IDs used as routing controls rather than security boundaries.
 
 **Fix:**
 
@@ -452,18 +452,16 @@ The install script downloads a precompiled binary for the user's platform (Linux
 
 ---
 
-## What This Fixes
+## Threat Model Summary
 
-| OpenClaw Failure | Wirken Fix |
-|------------------|-------------|
-| Single static token for all channels | Per-adapter mTLS identity, per-channel credentials |
-| No credential rotation or expiry | Encrypted vault with rotation policy and expiry tracking |
-| No per-channel isolation | Separate adapter processes with compile-time-enforced scoped permissions |
-| No audit trail | Append-only hash-chained audit log for every action |
-| Localhost rate limit exemption | Uniform rate limiting, no exemptions |
-| Skills run in-process, no sandbox | Markdown skills need no sandbox; code skills in gVisor containers; new skills in Wasmtime |
-| 8-regex security scanner | Sandboxing makes scanning irrelevant (defense in depth, not perimeter) |
-| Plaintext credentials on disk | XChaCha20-Poly1305 encryption, OS keychain for master key |
-| No session management or expiry | JWT sessions with 24h expiry, encrypted transcripts |
-| Runtime memory unsafety (prototype pollution, deser exploits) | Rust: memory safety at compile time, no GC, no dynamic dispatch exploits |
-| 29 GHSAs in three months | Architecture eliminates entire vulnerability classes |
+| Threat | CWE/OWASP | Mitigation |
+|--------|-----------|------------|
+| Single token controls all channels | CWE-250 | Per-adapter Ed25519 identity, per-channel credentials |
+| Plaintext credentials on disk | CWE-256, CWE-312 | XChaCha20-Poly1305 vault, OS keychain for master key |
+| No per-channel isolation | CWE-653 | Separate adapter processes with compile-time type-safe scoping |
+| Excessive agent privileges | OWASP AG01 | Three-tier permission model with expiring approvals |
+| Unsandboxed code execution | OWASP AG02 | Docker sandbox, Wasm sandbox (Wasmtime), workspace confinement |
+| No audit trail | OWASP AG09 | Append-only hash-chained audit log, SIEM forwarding |
+| Localhost rate limit exemption | CWE-307 | Uniform rate limiting, no loopback exemption |
+| No session expiry | CWE-613 | JWT sessions with 24h inactivity expiry |
+| Runtime memory unsafety | CWE-119 | Rust: memory safety at compile time |
