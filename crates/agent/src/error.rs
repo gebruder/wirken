@@ -28,4 +28,7 @@ pub enum AgentError {
 
     #[error("http error: {0}")]
     Http(String),
+
+    #[error("mcp error: {0}")]
+    Mcp(String),
 }

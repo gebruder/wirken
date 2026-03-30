@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::conversation::Conversation;
 use crate::error::AgentError;
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
+use crate::mcp::{McpConfig, McpRegistry};
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry};
 
@@ -16,6 +17,7 @@ pub struct Agent {
     conversation: Conversation,
     llm: LlmClient,
     tools: ToolRegistry,
+    mcp: Option<McpRegistry>,
     skills: Vec<Skill>,
     system_prompt: String,
     /// API key passed per-request — agent never stores it long-term.
@@ -47,10 +49,32 @@ impl Agent {
             conversation,
             llm: LlmClient::new(llm_config)?,
             tools,
+            mcp: None,
             skills: Vec::new(),
             system_prompt,
             api_key,
         })
+    }
+
+    /// Load MCP servers from a config file.
+    /// The `resolve_secret` function resolves `vault:` prefixed values.
+    pub async fn load_mcp<F>(
+        &mut self,
+        config_path: &std::path::Path,
+        resolve_secret: F,
+    ) -> Result<usize, AgentError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let config = McpConfig::load(config_path)?;
+        if config.servers.is_empty() {
+            return Ok(0);
+        }
+
+        let registry = McpRegistry::load(&config, resolve_secret).await?;
+        let count = registry.server_count();
+        self.mcp = Some(registry);
+        Ok(count)
     }
 
     /// Load skills from a directory and rebuild the system prompt.
@@ -74,7 +98,10 @@ impl Agent {
             self.conversation.compact();
         }
 
-        let tool_defs = self.tools.definitions();
+        let mut tool_defs = self.tools.definitions();
+        if let Some(ref mcp) = self.mcp {
+            tool_defs.extend(mcp.definitions());
+        }
         let mut rounds = 0;
 
         loop {
@@ -112,7 +139,17 @@ impl Agent {
                             truncate(&call.arguments, 100)
                         );
 
-                        let result = self.tools.execute(&call.name, &call.arguments).await?;
+                        let result =
+                            match self.tools.execute(&call.name, &call.arguments).await {
+                                Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
+                                    self.mcp
+                                        .as_mut()
+                                        .unwrap()
+                                        .execute(&call.name, &call.arguments)
+                                        .await?
+                                }
+                                other => other?,
+                            };
 
                         tracing::debug!(
                             "Tool {} result (success={}): {}",
