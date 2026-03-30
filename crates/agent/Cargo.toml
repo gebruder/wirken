@@ -23,6 +23,7 @@ hmac = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 base64 = "0.22"
+futures-util = "0.3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

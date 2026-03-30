@@ -1,6 +1,7 @@
 pub mod conversation;
 pub mod error;
 pub mod llm;
+pub mod llm_stream;
 pub mod mcp;
 pub mod runtime;
 pub(crate) mod sigv4;

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crate::conversation::Conversation;
 use crate::error::AgentError;
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
+use crate::llm_stream::StreamEvent;
 use crate::mcp::{McpConfig, McpRegistry};
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry};
@@ -167,6 +168,99 @@ impl Agent {
                 LlmResponse::Empty => {
                     let fallback = "(no response)".to_string();
                     self.conversation.add_assistant_message(&fallback);
+                    return Ok(fallback);
+                }
+            }
+        }
+    }
+
+    /// Process a message with streaming. Text deltas are sent via `tx` as they arrive.
+    /// Tool call rounds still execute synchronously within the loop.
+    /// Returns the final response text.
+    pub async fn process_message_stream(
+        &mut self,
+        user_message: &str,
+        tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<String, AgentError> {
+        self.conversation.add_user_message(user_message);
+
+        if self.conversation.over_budget() {
+            self.conversation.compact();
+        }
+
+        let mut tool_defs = self.tools.definitions();
+        if let Some(ref mcp) = self.mcp {
+            tool_defs.extend(mcp.definitions());
+        }
+
+        let mut rounds = 0;
+
+        loop {
+            rounds += 1;
+            if rounds > MAX_TOOL_ROUNDS {
+                return Err(AgentError::Tool(format!(
+                    "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
+                )));
+            }
+
+            // Create a per-round channel for streaming events
+            let (round_tx, mut round_rx) = tokio::sync::mpsc::channel(64);
+
+            // Spawn streaming in background, forward text deltas to caller
+            let response = {
+                let stream_future = self.llm.complete_stream(
+                    self.conversation.messages(),
+                    &tool_defs,
+                    self.api_key.as_deref(),
+                    round_tx,
+                );
+
+                let forward_tx = tx.clone();
+                let forward_handle = tokio::spawn(async move {
+                    while let Some(event) = round_rx.recv().await {
+                        if let StreamEvent::TextDelta(_) = &event {
+                            let _ = forward_tx.send(event).await;
+                        }
+                    }
+                });
+
+                let result = stream_future.await;
+                let _ = forward_handle.await;
+                result?
+            };
+
+            match response {
+                LlmResponse::Text(text) => {
+                    self.conversation.add_assistant_message(&text);
+                    let _ = tx.send(StreamEvent::Done(LlmResponse::Text(text.clone()))).await;
+                    return Ok(text);
+                }
+                LlmResponse::ToolCalls(calls) => {
+                    self.conversation.add_assistant_tool_calls(calls.clone());
+
+                    for call in &calls {
+                        tracing::info!("Agent {} executing tool: {}", self.id, call.name);
+
+                        let result =
+                            match self.tools.execute(&call.name, &call.arguments).await {
+                                Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
+                                    self.mcp
+                                        .as_mut()
+                                        .unwrap()
+                                        .execute(&call.name, &call.arguments)
+                                        .await?
+                                }
+                                other => other?,
+                            };
+
+                        self.conversation
+                            .add_tool_result(&call.id, &call.name, &result.output);
+                    }
+                }
+                LlmResponse::Empty => {
+                    let fallback = "(no response)".to_string();
+                    self.conversation.add_assistant_message(&fallback);
+                    let _ = tx.send(StreamEvent::Done(LlmResponse::Empty)).await;
                     return Ok(fallback);
                 }
             }

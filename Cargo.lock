@@ -4410,6 +4410,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "futures-util",
  "hmac",
  "reqwest 0.13.2",
  "serde",

@@ -616,9 +616,14 @@ impl LlmClient {
     pub fn config(&self) -> &LlmConfig {
         &self.config
     }
+
+    /// Get the HTTP client (for streaming).
+    pub(crate) fn http_client(&self) -> &reqwest::Client {
+        &self.http
+    }
 }
 
-fn message_to_json(msg: &Message) -> serde_json::Value {
+pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "role": msg.role,
         "content": msg.content,
