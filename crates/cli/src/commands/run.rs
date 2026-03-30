@@ -8,7 +8,7 @@ use tokio::sync::Mutex;
 
 use wirken_agent::Agent;
 use wirken_agent::llm::LlmConfig;
-use wirken_audit::{AuditEvent, AuditWriter};
+use wirken_audit::{AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::router::{RouteBinding, Router};
@@ -67,9 +67,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         None
     };
 
-    // --- Start audit writer ---
-    let (audit_writer, audit_handle) =
-        AuditWriter::new(&cfg.audit_db_path()).context("Failed to start audit writer")?;
+    // --- Start audit writer (with optional SIEM forwarding) ---
+    let siem_config = load_siem_config(&cfg);
+    let (audit_writer, audit_handle) = AuditWriter::with_siem(&cfg.audit_db_path(), siem_config)
+        .context("Failed to start audit writer")?;
     let audit = Arc::new(audit_writer);
 
     audit
@@ -696,4 +697,61 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max])
     }
+}
+
+/// Load SIEM forwarding config from ~/.wirken/siem.json.
+/// Returns None if the file doesn't exist (SIEM forwarding disabled).
+///
+/// Example siem.json:
+/// ```json
+/// {
+///     "target": "datadog",
+///     "endpoint": "https://http-intake.logs.datadoghq.com/api/v2/logs",
+///     "api_key": "your-dd-api-key",
+///     "service": "wirken",
+///     "environment": "production"
+/// }
+/// ```
+fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemConfig> {
+    let path = cfg.siem_config_path();
+    if !path.exists() {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let target_str = json.get("target")?.as_str()?;
+    let target = match target_str {
+        "datadog" => SiemTarget::Datadog,
+        "splunk" => SiemTarget::Splunk,
+        _ => SiemTarget::Webhook,
+    };
+
+    let endpoint = json.get("endpoint")?.as_str()?.to_string();
+    let api_key = json
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let service = json
+        .get("service")
+        .and_then(|v| v.as_str())
+        .unwrap_or("wirken")
+        .to_string();
+    let environment = json
+        .get("environment")
+        .and_then(|v| v.as_str())
+        .unwrap_or("production")
+        .to_string();
+
+    println!("  SIEM: forwarding to {target_str} at {endpoint}");
+
+    Some(SiemConfig {
+        target,
+        endpoint,
+        api_key,
+        service,
+        environment,
+    })
 }

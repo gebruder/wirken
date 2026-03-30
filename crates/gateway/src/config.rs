@@ -61,6 +61,10 @@ impl GatewayConfig {
         self.data_dir.join("adapters.db")
     }
 
+    pub fn siem_config_path(&self) -> PathBuf {
+        self.data_dir.join("siem.json")
+    }
+
     pub fn cron_db_path(&self) -> PathBuf {
         self.data_dir.join("cron.db")
     }
