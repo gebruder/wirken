@@ -94,24 +94,25 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Security properties
 
-| Property | Implementation |
-|----------|---------------|
-| Per-channel credential isolation | Separate adapter processes, per-channel Ed25519 identity |
-| Credential encryption at rest | XChaCha20-Poly1305 vault, OS keychain (macOS Keychain / libsecret / age fallback) |
-| Credential rotation and expiry | Per-credential `expires_at` and `rotation_due_at`, CLI rotation command |
-| Compile-time channel isolation | PhantomData channel markers, generic adapter trait |
-| Workspace path confinement | Tool file operations canonicalized and rejected if outside workspace boundary |
-| HTTPS enforcement | LLM client and Matrix adapter reject non-HTTPS non-localhost endpoints at transport level |
-| Shell exec timeout | 300s timeout on tool command execution; process killed on expiry |
-| Docker sandbox | Optional per-command ephemeral containers with no-network, memory/PID limits, non-root user |
-| Audit trail for every action | Append-only SQLite log, SHA-256 hash chain, tamper detection |
-| No loopback rate limit exemption | Uniform rate limiting on all sources including 127.0.0.1 |
-| Session management with expiry | JWT sessions, 24h inactivity expiry, encrypted transcripts |
-| Memory safety | Rust: no prototype pollution, no deserialization exploits, no GC |
-| Secret handling | `secrecy` 0.10 + `zeroize` 1.8: logging/serializing a secret is a compile error, key material zeroed after use |
-| Skill signature verification | Registry installs verified against registry-provided Ed25519 key, not bundled key |
-| Install integrity | Release binaries include SHA-256 checksums; installer verifies before installing |
-| Confidential AI inference | Tinfoil and Privatemode providers run LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC) — prompts encrypted end-to-end, inaccessible to the service provider |
+Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resource/agentic-ai-threats-and-mitigations/).
+
+**Least privilege (AG01):** Three-tier permission model. Tier 1 (always allowed): workspace file access, web search. Tier 2 (first-use approval, remembered 30 days): shell exec, external file access. Tier 3 (always prompt): destructive ops, credential access, network requests, skill install.
+
+**Tool execution safety (AG02, AG04):** Tool inputs validated against JSON schema before execution. Workspace path confinement — file operations canonicalized and rejected if outside workspace boundary. Shell exec has 300s timeout; process killed on expiry. Optional Docker sandbox runs commands in ephemeral containers with no-network, 512MB memory limit, 256 PID limit, non-root user.
+
+**Agent isolation (AG05, AG07):** Each channel adapter runs as a separate OS process with its own Ed25519 identity. Adapters authenticate via challenge-response handshake over Unix domain sockets. Compile-time channel isolation — `SessionHandle<Telegram>` and `SessionHandle<Discord>` are different types; the compiler rejects cross-channel access. If an adapter is compromised, the blast radius is one channel.
+
+**Runaway prevention (AG08):** Agent tool call loop capped at 20 rounds per turn. Shell exec timeout at 300s. Rate limiting on all sources including loopback — no localhost exemption.
+
+**Audit trail (AG09):** Every agent action — every tool call, message, credential access — logged to an append-only SQLite log before execution. SHA-256 hash chain for tamper detection. 90-day retention with configurable pruning.
+
+**Credential security:** XChaCha20-Poly1305 encryption at rest, keyed from OS keychain (macOS Keychain / libsecret / age fallback). Per-credential expiry and rotation tracking. `secrecy` + `zeroize` types — logging or serializing a secret is a compile error. Key material zeroed after use.
+
+**Transport security:** HTTPS enforced at transport level for all LLM and Matrix connections (non-localhost). Cap'n Proto IPC with 16MB frame limit, 512M word traversal limit, 64-level nesting limit.
+
+**Supply chain:** Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push.
+
+**Confidential inference:** Tinfoil and Privatemode providers run open-source LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC). Prompts encrypted end-to-end, inaccessible to the service provider.
 
 ## Current status
 
