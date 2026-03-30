@@ -5,205 +5,263 @@ use super::channel::register_channel;
 use super::{config, data_dir};
 use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
-pub async fn run(install_service: bool) -> Result<()> {
+pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     println!();
     println!("  wirken setup");
     println!("  ────────────");
-    println!();
-    println!("  Secure personal AI agent gateway.");
-    println!("  This wizard configures your AI provider and messaging channels.");
-    println!("  Credentials are encrypted immediately — never stored in plaintext.");
     println!();
 
     let cfg = config();
     let data = data_dir()?;
 
-    // --- Step 1: AI Provider ---
+    // --- Org config (if provided) ---
 
-    println!("  Step 1: Pick your AI");
-    println!();
-
-    let providers = &[
-        "OpenAI",
-        "Anthropic",
-        "Google Gemini",
-        "AWS Bedrock",
-        "Tinfoil (confidential)",
-        "Privatemode (confidential)",
-        "Ollama (local)",
-        "Custom endpoint",
-    ];
-    let provider_idx = Select::new()
-        .with_prompt("  Provider")
-        .items(providers)
-        .default(0)
-        .interact()?;
-
-    let mut region: Option<String> = None;
-
-    let (provider_name, model, base_url, needs_key) = match provider_idx {
-        0 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("gpt-4o".into())
-                .interact_text()?;
-            (
-                "openai".to_string(),
-                model,
-                "https://api.openai.com/v1".to_string(),
-                true,
-            )
+    let org_applied = if let Some(ref url) = org_url {
+        println!("  Fetching organization config from {url}...");
+        match wirken_gateway::org::fetch_org_config(url).await {
+            Ok(org) => {
+                wirken_gateway::org::save_org_url(&data, url).context("Failed to save org URL")?;
+                match wirken_gateway::org::apply_org_config(&data, &org, false) {
+                    Ok(applied) => {
+                        for item in &applied {
+                            println!("  Applied org {item} config.");
+                        }
+                        if let Some(ref key_name) = org.api_key_name {
+                            // Check if the API key credential already exists
+                            let keychain = probe_keychain(&data, || {
+                                Password::new()
+                                    .with_prompt("  Vault passphrase (for encrypting credentials)")
+                                    .interact()
+                                    .unwrap_or_default()
+                            });
+                            let store =
+                                CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                                    .context("Failed to open credential store")?;
+                            if store.retrieve(key_name).is_err() {
+                                let api_key =
+                                    Password::new().with_prompt("  API key").interact()?;
+                                let secret = VaultSecret::new(api_key);
+                                let provider = org
+                                    .provider
+                                    .as_ref()
+                                    .and_then(|p| p.get("provider"))
+                                    .and_then(|p| p.as_str())
+                                    .unwrap_or("default");
+                                store.store(key_name, provider, &secret, None, None)?;
+                                println!("  API key encrypted and stored.");
+                            }
+                        }
+                        true
+                    }
+                    Err(e) => {
+                        println!("  Warning: failed to apply org config: {e}");
+                        false
+                    }
+                }
+            }
+            Err(e) => {
+                println!("  Warning: failed to fetch org config: {e}");
+                println!("  Continuing with manual setup.");
+                false
+            }
         }
-        1 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("claude-sonnet-4-20250514".into())
-                .interact_text()?;
-            (
-                "anthropic".to_string(),
-                model,
-                "https://api.anthropic.com/v1".to_string(),
-                true,
-            )
-        }
-        2 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("gemini-2.0-flash".into())
-                .interact_text()?;
-            (
-                "gemini".to_string(),
-                model,
-                "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                true,
-            )
-        }
-        3 => {
-            let model: String = Input::new()
-                .with_prompt("  Model ID")
-                .default("anthropic.claude-sonnet-4-20250514-v2:0".into())
-                .interact_text()?;
-            let r: String = Input::new()
-                .with_prompt("  AWS region")
-                .default("us-east-1".into())
-                .interact_text()?;
-            let base = format!("https://bedrock-runtime.{r}.amazonaws.com");
-            println!("  Bedrock uses AWS credentials (access key ID : secret access key).");
-            region = Some(r);
-            ("bedrock".to_string(), model, base, true)
-        }
-        4 => {
-            println!(
-                "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
-            );
-            println!("  Get an API key at https://dash.tinfoil.sh");
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("llama3-3-70b".into())
-                .interact_text()?;
-            (
-                "openai".to_string(), // OpenAI-compatible API
-                model,
-                "https://inference.tinfoil.sh/v1".to_string(),
-                true,
-            )
-        }
-        5 => {
-            println!(
-                "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
-            );
-            println!("  Get an API key at https://www.privatemode.ai");
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("gpt-oss-120b".into())
-                .interact_text()?;
-            (
-                "openai".to_string(), // OpenAI-compatible API
-                model,
-                "https://api.privatemode.ai/v1".to_string(),
-                true,
-            )
-        }
-        6 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("llama3".into())
-                .interact_text()?;
-            let url: String = Input::new()
-                .with_prompt("  Ollama URL")
-                .default("http://localhost:11434/v1".into())
-                .interact_text()?;
-            ("ollama".to_string(), model, url, false)
-        }
-        7 => {
-            let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
-            let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
-            let has_key = Confirm::new()
-                .with_prompt("  Requires API key?")
-                .default(true)
-                .interact()?;
-            ("custom".to_string(), model, url, has_key)
-        }
-        _ => unreachable!(),
+    } else {
+        false
     };
 
-    // Store API key in vault
-    if needs_key {
-        let api_key = if provider_name == "bedrock" {
-            let access_key: String = Input::new()
-                .with_prompt("  AWS Access Key ID")
-                .interact_text()?;
-            let secret_key = Password::new()
-                .with_prompt("  AWS Secret Access Key")
-                .interact()?;
-            format!("{access_key}:{secret_key}")
-        } else {
-            Password::new().with_prompt("  API key").interact()?
+    println!("  Credentials are encrypted immediately. Never stored in plaintext.");
+    println!();
+
+    // --- Step 1: AI Provider (skip if org config provided it) ---
+
+    if org_applied && data.join("provider.json").exists() {
+        println!("  Step 1: AI provider configured by organization.");
+    } else {
+        println!("  Step 1: Pick your AI");
+        println!();
+
+        let providers = &[
+            "OpenAI",
+            "Anthropic",
+            "Google Gemini",
+            "AWS Bedrock",
+            "Tinfoil (confidential)",
+            "Privatemode (confidential)",
+            "Ollama (local)",
+            "Custom endpoint",
+        ];
+        let provider_idx = Select::new()
+            .with_prompt("  Provider")
+            .items(providers)
+            .default(0)
+            .interact()?;
+
+        let mut region: Option<String> = None;
+
+        let (provider_name, model, base_url, needs_key) = match provider_idx {
+            0 => {
+                let model: String = Input::new()
+                    .with_prompt("  Model")
+                    .default("gpt-4o".into())
+                    .interact_text()?;
+                (
+                    "openai".to_string(),
+                    model,
+                    "https://api.openai.com/v1".to_string(),
+                    true,
+                )
+            }
+            1 => {
+                let model: String = Input::new()
+                    .with_prompt("  Model")
+                    .default("claude-sonnet-4-20250514".into())
+                    .interact_text()?;
+                (
+                    "anthropic".to_string(),
+                    model,
+                    "https://api.anthropic.com/v1".to_string(),
+                    true,
+                )
+            }
+            2 => {
+                let model: String = Input::new()
+                    .with_prompt("  Model")
+                    .default("gemini-2.0-flash".into())
+                    .interact_text()?;
+                (
+                    "gemini".to_string(),
+                    model,
+                    "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                    true,
+                )
+            }
+            3 => {
+                let model: String = Input::new()
+                    .with_prompt("  Model ID")
+                    .default("anthropic.claude-sonnet-4-20250514-v2:0".into())
+                    .interact_text()?;
+                let r: String = Input::new()
+                    .with_prompt("  AWS region")
+                    .default("us-east-1".into())
+                    .interact_text()?;
+                let base = format!("https://bedrock-runtime.{r}.amazonaws.com");
+                println!("  Bedrock uses AWS credentials (access key ID : secret access key).");
+                region = Some(r);
+                ("bedrock".to_string(), model, base, true)
+            }
+            4 => {
+                println!(
+                    "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
+                );
+                println!("  Get an API key at https://dash.tinfoil.sh");
+                let model: String = Input::new()
+                    .with_prompt("  Model")
+                    .default("llama3-3-70b".into())
+                    .interact_text()?;
+                (
+                    "openai".to_string(), // OpenAI-compatible API
+                    model,
+                    "https://inference.tinfoil.sh/v1".to_string(),
+                    true,
+                )
+            }
+            5 => {
+                println!(
+                    "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
+                );
+                println!("  Get an API key at https://www.privatemode.ai");
+                let model: String = Input::new()
+                    .with_prompt("  Model")
+                    .default("gpt-oss-120b".into())
+                    .interact_text()?;
+                (
+                    "openai".to_string(), // OpenAI-compatible API
+                    model,
+                    "https://api.privatemode.ai/v1".to_string(),
+                    true,
+                )
+            }
+            6 => {
+                let model: String = Input::new()
+                    .with_prompt("  Model")
+                    .default("llama3".into())
+                    .interact_text()?;
+                let url: String = Input::new()
+                    .with_prompt("  Ollama URL")
+                    .default("http://localhost:11434/v1".into())
+                    .interact_text()?;
+                ("ollama".to_string(), model, url, false)
+            }
+            7 => {
+                let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
+                let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
+                let has_key = Confirm::new()
+                    .with_prompt("  Requires API key?")
+                    .default(true)
+                    .interact()?;
+                ("custom".to_string(), model, url, has_key)
+            }
+            _ => unreachable!(),
         };
 
-        println!("  Encrypting API key...");
+        // Store API key in vault
+        if needs_key {
+            let api_key = if provider_name == "bedrock" {
+                let access_key: String = Input::new()
+                    .with_prompt("  AWS Access Key ID")
+                    .interact_text()?;
+                let secret_key = Password::new()
+                    .with_prompt("  AWS Secret Access Key")
+                    .interact()?;
+                format!("{access_key}:{secret_key}")
+            } else {
+                Password::new().with_prompt("  API key").interact()?
+            };
 
-        let keychain = probe_keychain(&data, || {
-            Password::new()
-                .with_prompt("  Vault passphrase (for encrypting credentials)")
-                .interact()
-                .unwrap_or_default()
+            println!("  Encrypting API key...");
+
+            let keychain = probe_keychain(&data, || {
+                Password::new()
+                    .with_prompt("  Vault passphrase (for encrypting credentials)")
+                    .interact()
+                    .unwrap_or_default()
+            });
+
+            let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                .context("Failed to open credential store")?;
+
+            let secret = VaultSecret::new(api_key);
+            let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+            store
+                .store(
+                    &format!("{provider_name}-api-key"),
+                    &provider_name,
+                    &secret,
+                    None,
+                    Some(rotation_due),
+                )
+                .context("Failed to store API key")?;
+
+            println!("  API key encrypted and stored.");
+        }
+
+        // Save provider config
+        let mut provider_config = serde_json::json!({
+            "provider": provider_name,
+            "model": model,
+            "base_url": base_url,
         });
+        if let Some(ref r) = region {
+            provider_config["region"] = serde_json::Value::String(r.clone());
+        }
+        let config_path = data.join("provider.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&provider_config)?,
+        )?;
+    } // end of else (manual provider setup)
 
-        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
-            .context("Failed to open credential store")?;
-
-        let secret = VaultSecret::new(api_key);
-        let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-        store
-            .store(
-                &format!("{provider_name}-api-key"),
-                &provider_name,
-                &secret,
-                None,
-                Some(rotation_due),
-            )
-            .context("Failed to store API key")?;
-
-        println!("  API key encrypted and stored.");
-    }
-
-    // Save provider config
-    let mut provider_config = serde_json::json!({
-        "provider": provider_name,
-        "model": model,
-        "base_url": base_url,
-    });
-    if let Some(ref r) = region {
-        provider_config["region"] = serde_json::Value::String(r.clone());
-    }
-    let config_path = data.join("provider.json");
-    std::fs::write(
-        &config_path,
-        serde_json::to_string_pretty(&provider_config)?,
-    )?;
-
-    // Install bundled skills
+    // Install bundled skills (always, regardless of org config)
     let skills_dir = data.join("skills");
     match wirken_agent::bundled_skills::install_bundled_skills(&skills_dir) {
         Ok(n) if n > 0 => println!("  Installed {n} bundled skills."),
@@ -296,7 +354,19 @@ pub async fn run(install_service: bool) -> Result<()> {
     println!();
     println!("  Setup complete!");
     println!();
-    println!("  Provider: {} ({})", provider_name, model);
+    // Read provider info from the saved config (works for both org and manual setup)
+    let provider_summary = std::fs::read_to_string(data.join("provider.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .map(|v| {
+            format!(
+                "{} ({})",
+                v["provider"].as_str().unwrap_or("unknown"),
+                v["model"].as_str().unwrap_or("unknown")
+            )
+        })
+        .unwrap_or_else(|| "not configured".into());
+    println!("  Provider: {provider_summary}");
     if selected_channels.is_empty() {
         println!("  Channels: none (add later with `wirken channel add`)");
     } else {
