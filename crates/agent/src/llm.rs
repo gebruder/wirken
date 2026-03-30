@@ -83,6 +83,30 @@ impl LlmConfig {
         }
     }
 
+    /// Tinfoil confidential inference (OpenAI-compatible, hardware enclaves)
+    pub fn tinfoil(model: &str) -> Self {
+        Self {
+            provider: "openai".into(), // OpenAI-compatible API
+            model: model.into(),
+            base_url: "https://inference.tinfoil.sh/v1".into(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            region: None,
+        }
+    }
+
+    /// Privatemode confidential inference (OpenAI-compatible, hardware enclaves)
+    pub fn privatemode(model: &str) -> Self {
+        Self {
+            provider: "openai".into(), // OpenAI-compatible API
+            model: model.into(),
+            base_url: "https://api.privatemode.ai/v1".into(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            region: None,
+        }
+    }
+
     /// Custom OpenAI-compatible endpoint
     pub fn custom(base_url: &str, model: &str) -> Self {
         Self {

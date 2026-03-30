@@ -28,7 +28,7 @@ cargo install --path crates/cli
   ────────────
 
   Step 1: Pick your AI
-  Provider: OpenAI / Anthropic / Google Gemini / AWS Bedrock / Ollama (local) / Custom endpoint
+  Provider: OpenAI / Anthropic / Google Gemini / AWS Bedrock / Tinfoil / Privatemode / Ollama (local) / Custom endpoint
   Model: gpt-4o
   API key: ********
   Encrypting API key...
@@ -125,7 +125,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
   - Matrix (Client-Server API, rooms + DMs, mention-gated in rooms)
 - Multi-agent routing (work agent on Slack/Teams, personal on Telegram/Discord, each with its own model, API key, workspace, and skills)
 - Skill registry with Ed25519 signing (`wirken skills search/install/sign/verify`)
-- Agent runtime with LLM tool calling (OpenAI, Anthropic, Google Gemini, AWS Bedrock, Ollama, custom endpoints)
+- Agent runtime with LLM tool calling (OpenAI, Anthropic, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, Ollama, custom endpoints)
 - Built-in tools: shell exec, file read/write, directory listing, web search, image generation
 - 15 bundled skills (weather, github, git, tmux, system-info, web-fetch, docker, notes, calculator, file-search, disk-usage, process-manager, ssh, json-tools, csv-tools)
 - SKILL.md loader (compatible with OpenClaw's 52 bundled skills)

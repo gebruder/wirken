@@ -28,6 +28,8 @@ pub async fn run(install_service: bool) -> Result<()> {
         "Anthropic",
         "Google Gemini",
         "AWS Bedrock",
+        "Tinfoil (confidential)",
+        "Privatemode (confidential)",
         "Ollama (local)",
         "Custom endpoint",
     ];
@@ -91,6 +93,38 @@ pub async fn run(install_service: bool) -> Result<()> {
             ("bedrock".to_string(), model, base, true)
         }
         4 => {
+            println!(
+                "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
+            );
+            println!("  Get an API key at https://dash.tinfoil.sh");
+            let model: String = Input::new()
+                .with_prompt("  Model")
+                .default("llama3-3-70b".into())
+                .interact_text()?;
+            (
+                "openai".to_string(), // OpenAI-compatible API
+                model,
+                "https://inference.tinfoil.sh/v1".to_string(),
+                true,
+            )
+        }
+        5 => {
+            println!(
+                "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
+            );
+            println!("  Get an API key at https://www.privatemode.ai");
+            let model: String = Input::new()
+                .with_prompt("  Model")
+                .default("gpt-oss-120b".into())
+                .interact_text()?;
+            (
+                "openai".to_string(), // OpenAI-compatible API
+                model,
+                "https://api.privatemode.ai/v1".to_string(),
+                true,
+            )
+        }
+        6 => {
             let model: String = Input::new()
                 .with_prompt("  Model")
                 .default("llama3".into())
@@ -101,7 +135,7 @@ pub async fn run(install_service: bool) -> Result<()> {
                 .interact_text()?;
             ("ollama".to_string(), model, url, false)
         }
-        5 => {
+        7 => {
             let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
             let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
             let has_key = Confirm::new()
