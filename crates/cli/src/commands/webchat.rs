@@ -34,7 +34,6 @@ const HTML: &str = r#"<!DOCTYPE html>
   #send { background: #238636; color: #fff; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }
   #send:hover { background: #2ea043; }
   #send:disabled { opacity: 0.5; cursor: default; }
-  .typing { color: #8b949e; font-style: italic; }
 </style>
 </head>
 <body>
@@ -57,12 +56,12 @@ function addMsg(role, text, isError) {
   roleSpan.textContent = role;
   const contentSpan = document.createElement('span');
   contentSpan.className = 'content' + (isError ? ' error' : '');
-  contentSpan.textContent = text;
+  contentSpan.textContent = text || '';
   div.appendChild(roleSpan);
   div.appendChild(contentSpan);
   messages.appendChild(div);
   messages.scrollTop = messages.scrollHeight;
-  return div;
+  return contentSpan;
 }
 
 async function send() {
@@ -71,24 +70,59 @@ async function send() {
   input.value = '';
   sendBtn.disabled = true;
   addMsg('user', text);
-  const typing = addMsg('assistant', 'thinking...');
-  typing.querySelector('.content').className = 'content typing';
+
+  const contentSpan = addMsg('assistant', '');
+
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
     });
-    const data = await res.json();
-    messages.removeChild(typing);
-    if (data.error) {
-      addMsg('assistant', data.error, true);
-    } else {
-      addMsg('assistant', data.response);
+
+    if (!res.ok) {
+      const data = await res.json();
+      contentSpan.textContent = data.error || 'Request failed';
+      contentSpan.classList.add('error');
+      sendBtn.disabled = false;
+      input.focus();
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let boundary;
+      while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.substring(0, boundary);
+        buffer = buffer.substring(boundary + 2);
+
+        for (const line of block.split('\n')) {
+          if (line.startsWith('data: ')) {
+            const json = line.substring(6);
+            try {
+              const event = JSON.parse(json);
+              if (event.type === 'delta') {
+                contentSpan.textContent += event.text;
+                messages.scrollTop = messages.scrollHeight;
+              } else if (event.type === 'error') {
+                contentSpan.textContent += event.text;
+                contentSpan.classList.add('error');
+              }
+            } catch(e) {}
+          }
+        }
+      }
     }
   } catch (e) {
-    messages.removeChild(typing);
-    addMsg('assistant', 'Connection error: ' + e.message, true);
+    contentSpan.textContent = 'Connection error: ' + e.message;
+    contentSpan.classList.add('error');
   }
   sendBtn.disabled = false;
   input.focus();
@@ -138,7 +172,7 @@ pub async fn serve(
                 // Extract JSON body
                 let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
                 let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-                let message = json["message"].as_str().unwrap_or("");
+                let message = json["message"].as_str().unwrap_or("").to_string();
 
                 if message.is_empty() {
                     let resp = r#"{"error":"empty message"}"#;
@@ -154,7 +188,7 @@ pub async fn serve(
                 // Audit
                 let _ = audit
                     .log(
-                        AuditEvent::new("webchat-user", "message.inbound", message)
+                        AuditEvent::new("webchat-user", "message.inbound", &message)
                             .with_channel("webchat"),
                     )
                     .await;
@@ -165,39 +199,69 @@ pub async fn serve(
                     .await
                     .get_or_create("webchat", "webchat-default");
 
-                // Process with default agent (webchat always uses default)
-                let result = match agents.get("default") {
+                // SSE headers — stream tokens as they arrive
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+                if stream.write_all(header.as_bytes()).await.is_err() {
+                    return;
+                }
+
+                // Process with streaming
+                match agents.get("default") {
                     Some(agent_mutex) => {
+                        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+                        // Run agent streaming and SSE forwarding concurrently
                         let mut ag = agent_mutex.lock().await;
-                        ag.process_message(message).await
-                    }
-                    None => Err(wirken_agent::AgentError::Llm(
-                        "no default agent configured".into(),
-                    )),
-                };
+                        let stream_future = ag.process_message_stream(&message, tx);
 
-                let resp_json = match result {
-                    Ok(response) => {
-                        let _ = audit
-                            .log(
-                                AuditEvent::new("default", "message.outbound", &response)
-                                    .with_channel("webchat"),
-                            )
-                            .await;
-                        serde_json::json!({ "response": response })
-                    }
-                    Err(e) => {
-                        serde_json::json!({ "error": e.to_string() })
-                    }
-                };
+                        // Forward stream events to the HTTP response as SSE
+                        let write_stream = &mut stream;
+                        let forward_future = async {
+                            while let Some(event) = rx.recv().await {
+                                let sse_data = match event {
+                                    wirken_agent::llm_stream::StreamEvent::TextDelta(text) => {
+                                        format!(
+                                            "data: {}\n\n",
+                                            serde_json::json!({"type": "delta", "text": text})
+                                        )
+                                    }
+                                    wirken_agent::llm_stream::StreamEvent::Done(_) => break,
+                                    wirken_agent::llm_stream::StreamEvent::Error(e) => {
+                                        format!(
+                                            "data: {}\n\n",
+                                            serde_json::json!({"type": "error", "text": e})
+                                        )
+                                    }
+                                };
+                                if write_stream
+                                    .write_all(sse_data.as_bytes())
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        };
 
-                let resp_body = resp_json.to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp_body.len(),
-                    resp_body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
+                        let (result, _) = tokio::join!(stream_future, forward_future);
+
+                        if let Ok(response) = result {
+                            let _ = audit
+                                .log(
+                                    AuditEvent::new("default", "message.outbound", &response)
+                                        .with_channel("webchat"),
+                                )
+                                .await;
+                        }
+                    }
+                    None => {
+                        let err = format!(
+                            "data: {}\n\n",
+                            serde_json::json!({"type": "error", "text": "no default agent configured"})
+                        );
+                        let _ = stream.write_all(err.as_bytes()).await;
+                    }
+                }
             } else {
                 let response =
                     "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
