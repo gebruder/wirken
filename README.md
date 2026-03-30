@@ -143,6 +143,7 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - [CLI reference](docs/cli.md)
 - [Configuration reference](docs/configuration.md)
 - [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix)
+- [Multi-agent setup](docs/multi-agent.md)
 - [Skills guide](docs/skills.md) (markdown skills, Wasm skills, registry)
 - [MCP setup](docs/mcp.md)
 - [Enterprise deployment](docs/enterprise.md) (org config, SIEM, sandbox)
