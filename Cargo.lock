@@ -4579,6 +4579,7 @@ dependencies = [
  "ed25519-dalek",
  "governor",
  "rand 0.8.5",
+ "reqwest 0.13.2",
  "rusqlite",
  "serde",
  "serde_json",

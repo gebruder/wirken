@@ -20,6 +20,9 @@ enum Commands {
         /// Uninstall the Wirken system service
         #[arg(long)]
         uninstall_service: bool,
+        /// Organization config endpoint (pulls provider, SIEM, MCP, and policy from a central URL)
+        #[arg(long)]
+        org: Option<String>,
     },
 
     /// Start the gateway daemon
@@ -260,11 +263,12 @@ async fn main() -> Result<()> {
         Commands::Setup {
             install_service,
             uninstall_service,
+            org,
         } => {
             if uninstall_service {
                 return commands::service::uninstall_service();
             }
-            commands::setup::run(install_service).await
+            commands::setup::run(install_service, org).await
         }
         Commands::Run { port } => commands::run::run(port).await,
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,

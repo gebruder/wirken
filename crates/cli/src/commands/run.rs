@@ -30,6 +30,21 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!("  ──────────────");
     println!();
 
+    // --- Refresh org config if configured ---
+    if let Some(org_url) = wirken_gateway::org::load_org_url(&cfg.data_dir) {
+        match wirken_gateway::org::fetch_org_config(&org_url).await {
+            Ok(org) => match wirken_gateway::org::apply_org_config(&cfg.data_dir, &org, true) {
+                Ok(applied) if !applied.is_empty() => {
+                    println!("  Org config refreshed: {}", applied.join(", "));
+                }
+                _ => {}
+            },
+            Err(e) => {
+                tracing::warn!("Org config refresh failed: {e}");
+            }
+        }
+    }
+
     // --- Load provider config ---
     let provider_path = cfg.data_dir.join("provider.json");
     if !provider_path.exists() {
