@@ -203,7 +203,7 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md). 
 
 ## The name
 
-Wirken: German, *to work*, *to weave*, *to have effect*. Named for [Gebruder Ottenheimer](https://gebruder.ottenheimer.app), a weaving mill in Wurttemberg, 1862-1937.
+Wirken: German, *to work*, *to weave*, *to have effect*. Named for [Gebruder Ottenheimer](https://gebruder.ottenheimer.app/briefs/wirken.html), a weaving mill in Wurttemberg, 1862-1937.
 
 ## License
 
