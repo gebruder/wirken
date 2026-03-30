@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use crate::conversation::{Conversation, Role};
 use crate::llm::{LlmConfig, LlmResponse};
 use crate::skill::{Skill, SkillLoader};
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolConfig, ToolRegistry};
 
 // ---------------------------------------------------------------------------
 // Conversation
@@ -271,7 +271,7 @@ fn skill_prompt_generation() {
 #[tokio::test]
 async fn tool_exec_command() {
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf());
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
 
     let result = tools
         .execute("exec", r#"{"command":"echo hello world"}"#)
@@ -284,7 +284,7 @@ async fn tool_exec_command() {
 #[tokio::test]
 async fn tool_exec_failing_command() {
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf());
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
 
     let result = tools
         .execute("exec", r#"{"command":"false"}"#)
@@ -296,7 +296,7 @@ async fn tool_exec_failing_command() {
 #[tokio::test]
 async fn tool_read_write_file() {
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf());
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
 
     // Write
     let write_result = tools
@@ -321,7 +321,7 @@ async fn tool_read_write_file() {
 #[tokio::test]
 async fn tool_read_nonexistent() {
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf());
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
 
     let result = tools
         .execute("read_file", r#"{"path":"nope.txt"}"#)
@@ -338,7 +338,7 @@ async fn tool_list_files() {
     std::fs::write(tmp.path().join("b.txt"), "").unwrap();
     std::fs::create_dir(tmp.path().join("subdir")).unwrap();
 
-    let tools = ToolRegistry::new(tmp.path().to_path_buf());
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
     let result = tools
         .execute("list_files", r#"{"path":"."}"#)
         .await
@@ -352,7 +352,7 @@ async fn tool_list_files() {
 #[tokio::test]
 async fn tool_not_found() {
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf());
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
 
     let result = tools.execute("nonexistent_tool", "{}").await;
     assert!(result.is_err());
@@ -360,7 +360,7 @@ async fn tool_not_found() {
 
 #[test]
 fn tool_definitions_include_all_builtins() {
-    let tools = ToolRegistry::new(PathBuf::from("/tmp"));
+    let tools = ToolRegistry::new(PathBuf::from("/tmp"), ToolConfig::default());
     let defs = tools.definitions();
 
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
@@ -368,6 +368,44 @@ fn tool_definitions_include_all_builtins() {
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
     assert!(names.contains(&"list_files"));
+    assert!(names.contains(&"web_search"));
+    assert!(names.contains(&"generate_image"));
+}
+
+#[tokio::test]
+async fn generate_image_requires_api_key() {
+    let tmp = TempDir::new().unwrap();
+    let config = ToolConfig {
+        api_key: None,
+        provider: Some("openai".into()),
+        base_url: Some("https://api.openai.com/v1".into()),
+    };
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
+
+    let result = tools
+        .execute("generate_image", r#"{"prompt":"a cat"}"#)
+        .await
+        .unwrap();
+    assert!(!result.success);
+    assert!(result.output.contains("API key"));
+}
+
+#[tokio::test]
+async fn generate_image_requires_openai_provider() {
+    let tmp = TempDir::new().unwrap();
+    let config = ToolConfig {
+        api_key: Some("test-key".into()),
+        provider: Some("anthropic".into()),
+        base_url: Some("https://api.anthropic.com/v1".into()),
+    };
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
+
+    let result = tools
+        .execute("generate_image", r#"{"prompt":"a cat"}"#)
+        .await
+        .unwrap();
+    assert!(!result.success);
+    assert!(result.output.contains("not supported"));
 }
 
 // ---------------------------------------------------------------------------

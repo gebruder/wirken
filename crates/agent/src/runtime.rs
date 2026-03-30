@@ -4,7 +4,7 @@ use crate::conversation::Conversation;
 use crate::error::AgentError;
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
 use crate::skill::{Skill, SkillLoader};
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolConfig, ToolRegistry};
 
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
@@ -31,7 +31,12 @@ impl Agent {
         llm_config: LlmConfig,
         api_key: Option<String>,
     ) -> Result<Self, AgentError> {
-        let tools = ToolRegistry::new(workspace);
+        let tool_config = ToolConfig {
+            api_key: api_key.clone(),
+            provider: Some(llm_config.provider.clone()),
+            base_url: Some(llm_config.base_url.clone()),
+        };
+        let tools = ToolRegistry::new(workspace, tool_config);
 
         let system_prompt = default_system_prompt();
         let mut conversation = Conversation::new(100_000); // ~100k token budget
@@ -162,6 +167,7 @@ impl Agent {
 fn default_system_prompt() -> String {
     "You are a helpful personal AI assistant. \
      You can execute shell commands, read and write files, \
+     search the web, generate images, \
      and use available skills to help the user. \
      Be concise and direct in your responses."
         .to_string()
