@@ -134,15 +134,26 @@ impl ToolRegistry {
             .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'command' argument".into()))?;
 
-        let output = tokio::process::Command::new("sh")
+        let child = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
             .current_dir(&self.workspace)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .await
+            .spawn()
             .map_err(|e| AgentError::Tool(format!("exec failed: {e}")))?;
+
+        let timeout = std::time::Duration::from_secs(300);
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(result) => result.map_err(|e| AgentError::Tool(format!("exec failed: {e}")))?,
+            Err(_) => {
+                // Timeout — child is dropped here which sends SIGKILL
+                return Ok(ToolResult {
+                    output: format!("Command timed out after {}s", timeout.as_secs()),
+                    success: false,
+                });
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -179,7 +190,7 @@ impl ToolRegistry {
             .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?;
 
-        let path = self.resolve_path(path_str);
+        let path = self.resolve_path(path_str)?;
 
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
@@ -208,7 +219,7 @@ impl ToolRegistry {
             .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'content' argument".into()))?;
 
-        let path = self.resolve_path(path_str);
+        let path = self.resolve_path_for_write(path_str)?;
 
         // Ensure parent directory exists
         if let Some(parent) = path.parent()
@@ -234,7 +245,7 @@ impl ToolRegistry {
 
     async fn list_files(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
         let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let path = self.resolve_path(path_str);
+        let path = self.resolve_path(path_str)?;
 
         let mut entries = match tokio::fs::read_dir(&path).await {
             Ok(rd) => rd,
@@ -264,13 +275,83 @@ impl ToolRegistry {
         })
     }
 
-    /// Resolve a path relative to the workspace.
-    fn resolve_path(&self, path: &str) -> PathBuf {
-        let p = Path::new(path);
-        if p.is_absolute() {
-            p.to_path_buf()
+    /// Resolve a path and verify it is within the workspace boundary.
+    /// Rejects paths that escape the workspace via `..` or absolute references.
+    fn resolve_path(&self, path: &str) -> Result<PathBuf, AgentError> {
+        let joined = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
         } else {
-            self.workspace.join(p)
+            self.workspace.join(path)
+        };
+
+        let workspace = self.workspace.canonicalize().map_err(|e| {
+            AgentError::Tool(format!("workspace resolution failed: {e}"))
+        })?;
+
+        // If the path exists, canonicalize it fully (resolves symlinks + ..)
+        if joined.exists() {
+            let canonical = joined.canonicalize().map_err(|e| {
+                AgentError::Tool(format!("path resolution failed for '{}': {e}", path))
+            })?;
+            if !canonical.starts_with(&workspace) {
+                return Err(AgentError::Tool(format!(
+                    "access denied: '{}' is outside the workspace",
+                    path
+                )));
+            }
+            return Ok(canonical);
         }
+
+        // Path doesn't exist — validate via nearest existing ancestor
+        self.check_ancestor_in_workspace(&joined, &workspace, path)?;
+        Ok(joined)
+    }
+
+    /// Resolve a path for write operations where the target may not exist yet.
+    /// Validates the parent directory is within the workspace boundary.
+    fn resolve_path_for_write(&self, path: &str) -> Result<PathBuf, AgentError> {
+        let joined = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            self.workspace.join(path)
+        };
+
+        let workspace = self.workspace.canonicalize().map_err(|e| {
+            AgentError::Tool(format!("workspace resolution failed: {e}"))
+        })?;
+
+        self.check_ancestor_in_workspace(&joined, &workspace, path)?;
+        Ok(joined)
+    }
+
+    /// Walk up from `target` to find the nearest existing ancestor directory,
+    /// canonicalize it, and verify it is within the workspace.
+    fn check_ancestor_in_workspace(
+        &self,
+        target: &Path,
+        workspace: &Path,
+        original_path: &str,
+    ) -> Result<(), AgentError> {
+        let mut existing_ancestor = target.to_path_buf();
+        while !existing_ancestor.exists() {
+            if !existing_ancestor.pop() {
+                return Err(AgentError::Tool(format!(
+                    "no valid ancestor for '{}'", original_path
+                )));
+            }
+        }
+
+        let canonical_ancestor = existing_ancestor.canonicalize().map_err(|e| {
+            AgentError::Tool(format!("path resolution failed: {e}"))
+        })?;
+
+        if !canonical_ancestor.starts_with(workspace) {
+            return Err(AgentError::Tool(format!(
+                "access denied: '{}' is outside the workspace",
+                original_path
+            )));
+        }
+
+        Ok(())
     }
 }

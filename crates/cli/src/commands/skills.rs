@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 
 use wirken_agent::skill::SkillLoader;
-use wirken_gateway::skill_registry::{self, SkillIndex, VerifyResult, generate_signing_keypair};
+use wirken_gateway::skill_registry::{
+    self, SkillIndex, VerifyResult, generate_signing_keypair, verify_skill_with_expected_key,
+};
 
 use super::config;
 
@@ -88,15 +90,14 @@ pub async fn install(name: &str) -> Result<()> {
     let skill_path = skill_dir.join("SKILL.md");
     std::fs::write(&skill_path, &content)?;
 
-    // Verify signature if present
+    // Verify signature against the registry's expected key (not a bundled SKILL.pub).
+    // This prevents an attacker from signing a tampered skill with their own key.
     if let (Some(sig_hex), Some(key_hex)) = (&entry.signature, &entry.signer_key) {
-        let sig_path = skill_dir.join("SKILL.sig");
-        let key_path = skill_dir.join("SKILL.pub");
-        std::fs::write(&sig_path, sig_hex)?;
-        std::fs::write(&key_path, key_hex)?;
-
-        match skill_registry::verify_skill(&skill_dir)? {
+        match verify_skill_with_expected_key(&skill_dir, sig_hex, key_hex)? {
             VerifyResult::Valid { signer } => {
+                // Write sig/pub files for future local verification
+                std::fs::write(skill_dir.join("SKILL.sig"), sig_hex)?;
+                std::fs::write(skill_dir.join("SKILL.pub"), key_hex)?;
                 println!("  Signature valid (signer: {}...)", &signer[..16]);
             }
             VerifyResult::Invalid => {

@@ -125,7 +125,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 
-            let mut agent = Agent::new(agent_cfg.id.clone(), workspace, llm, agent_api_key);
+            let mut agent = Agent::new(agent_cfg.id.clone(), workspace, llm, agent_api_key)?;
 
             // Load per-agent skills + shared skills
             let agent_skills = cfg.agent_skills_dir(&agent_cfg.id);
@@ -160,7 +160,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let workspace = cfg.data_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
 
-        let mut default_agent = Agent::new("default".into(), workspace, llm_config, api_key);
+        let mut default_agent = Agent::new("default".into(), workspace, llm_config, api_key)?;
 
         let skills_dir = cfg.data_dir.join("skills");
         if skills_dir.is_dir() {

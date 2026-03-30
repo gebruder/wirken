@@ -5,6 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
 };
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 /// Nonce size for XChaCha20-Poly1305 (24 bytes).
 const NONCE_SIZE: usize = 24;
@@ -13,8 +14,10 @@ const NONCE_SIZE: usize = 24;
 /// Returns nonce || ciphertext.
 /// The key must be a 64-char hex string (encoding 32 bytes).
 pub fn encrypt(plaintext: &VaultSecret, key: &VaultSecret) -> Result<Vec<u8>, VaultError> {
-    let key_bytes = hex_decode(key.expose())
-        .map_err(|e| VaultError::Encryption(format!("invalid hex key: {e}")))?;
+    let key_bytes = Zeroizing::new(
+        hex_decode(key.expose())
+            .map_err(|e| VaultError::Encryption(format!("invalid hex key: {e}")))?,
+    );
     if key_bytes.len() != 32 {
         return Err(VaultError::Encryption(format!(
             "key must be 32 bytes (64 hex chars), got {} bytes",
@@ -50,8 +53,10 @@ pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, Vault
         ));
     }
 
-    let key_bytes = hex_decode(key.expose())
-        .map_err(|e| VaultError::Decryption(format!("invalid hex key: {e}")))?;
+    let key_bytes = Zeroizing::new(
+        hex_decode(key.expose())
+            .map_err(|e| VaultError::Decryption(format!("invalid hex key: {e}")))?,
+    );
     if key_bytes.len() != 32 {
         return Err(VaultError::Decryption(format!(
             "key must be 32 bytes (64 hex chars), got {} bytes",

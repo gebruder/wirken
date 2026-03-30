@@ -30,22 +30,22 @@ impl Agent {
         workspace: PathBuf,
         llm_config: LlmConfig,
         api_key: Option<String>,
-    ) -> Self {
+    ) -> Result<Self, AgentError> {
         let tools = ToolRegistry::new(workspace);
 
         let system_prompt = default_system_prompt();
         let mut conversation = Conversation::new(100_000); // ~100k token budget
         conversation.set_system_prompt(&system_prompt);
 
-        Self {
+        Ok(Self {
             id,
             conversation,
-            llm: LlmClient::new(llm_config),
+            llm: LlmClient::new(llm_config)?,
             tools,
             skills: Vec::new(),
             system_prompt,
             api_key,
-        }
+        })
     }
 
     /// Load skills from a directory and rebuild the system prompt.
