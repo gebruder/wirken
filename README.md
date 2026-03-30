@@ -170,7 +170,7 @@ cargo build -p wirken-cli     # build the binary
 
 Building from source requires the Cap'n Proto compiler (`capnproto` package on Ubuntu, `capnp` via Homebrew on macOS).
 
-The architecture is documented in [docs/architecture.md](docs/architecture.md). The build plan and sequencing are in [docs/build-plan.md](docs/build-plan.md).
+The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 **Adapter contributions are especially welcome.** Each adapter is an independent crate (`crates/adapter-<channel>/`) that implements the same IPC contract: connect to the gateway UDS, perform Ed25519 handshake, convert platform messages to/from Cap'n Proto frames. See any existing adapter for the pattern — Telegram is the simplest, Teams shows the HTTP webhook variant.
 
