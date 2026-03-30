@@ -233,11 +233,7 @@ pub async fn serve(
                                         )
                                     }
                                 };
-                                if write_stream
-                                    .write_all(sse_data.as_bytes())
-                                    .await
-                                    .is_err()
-                                {
+                                if write_stream.write_all(sse_data.as_bytes()).await.is_err() {
                                     break;
                                 }
                             }
