@@ -111,6 +111,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 | Secret handling | `secrecy` 0.10 + `zeroize` 1.8: logging/serializing a secret is a compile error, key material zeroed after use |
 | Skill signature verification | Registry installs verified against registry-provided Ed25519 key, not bundled key |
 | Install integrity | Release binaries include SHA-256 checksums; installer verifies before installing |
+| Confidential AI inference | Tinfoil and Privatemode providers run LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC) — prompts encrypted end-to-end, inaccessible to the service provider |
 
 ## Current status
 
