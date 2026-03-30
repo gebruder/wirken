@@ -1,6 +1,6 @@
 # Wirken
 
-Wirken is a secure, model-agnostic personal AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. Every agent action — every tool invocation, every message sent, every credential access — is logged to an append-only hash-chained audit trail before execution. Ships as a single static binary.
+Wirken is a secure, model-agnostic AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. Every agent action — every tool invocation, every message sent, every credential access — is logged to an append-only hash-chained audit trail before execution. Ships as a single static binary.
 
 ## Install and run
 
@@ -120,6 +120,18 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | — | Transport security | HTTPS enforced at transport level for all LLM and Matrix connections (non-localhost). Cap'n Proto IPC with 16MB frame limit, 512M word traversal limit, 64-level nesting limit. |
 | — | Supply chain | Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push. |
 | — | Confidential inference | Tinfoil and Privatemode providers run open-source LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC). Prompts encrypted end-to-end, inaccessible to the service provider. |
+
+## Enterprise deployment
+
+Wirken is designed so that organizations can deploy AI agents to employees with the same governance controls they apply to any other system with access to sensitive data.
+
+**Identity.** Every action is attributable. Each agent runs in its own workspace with its own credentials. Each channel adapter has a unique Ed25519 identity. Sessions track which user, on which channel, in which conversation, triggered which action. The audit log records the full chain: user → channel → session → agent → tool → target.
+
+**Accountability.** Every agent action — every tool call, every file read, every shell command, every credential access — is logged to a tamper-evident audit trail *before execution*. The SHA-256 hash chain means a deleted or modified row is detectable. For centralized visibility, audit events forward in real time to Datadog, Splunk, or any SIEM via HTTP webhook. An enterprise SOC sees every agent action across every employee in one place.
+
+**Responsibility.** The three-tier permission model controls what agents can do without human approval. Destructive operations, credential access, network requests, and skill installs always require explicit approval (Tier 3). Shell exec and external file access require first-use approval per pattern (Tier 2). Approvals expire after 30 days. The Docker sandbox adds a hard boundary: agent-executed commands run in ephemeral containers with no network, memory limits, and non-root users.
+
+**Confidentiality.** For regulated environments where prompts cannot leave a trust boundary, Tinfoil and Privatemode providers run LLMs inside hardware enclaves (AMD SEV-SNP, Intel TDX). Prompts are encrypted end-to-end and inaccessible to the service provider. Credentials are encrypted at rest with XChaCha20-Poly1305 and never exported in plaintext.
 
 ## Current status
 
