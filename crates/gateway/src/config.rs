@@ -78,6 +78,20 @@ impl GatewayConfig {
         self.data_dir.join("agents").join(agent_id).join("skills")
     }
 
+    /// MCP config path for an agent (per-agent or shared).
+    pub fn mcp_config_path(&self, agent_id: &str) -> PathBuf {
+        let per_agent = self
+            .data_dir
+            .join("agents")
+            .join(agent_id)
+            .join("mcp.json");
+        if per_agent.exists() {
+            per_agent
+        } else {
+            self.data_dir.join("mcp.json")
+        }
+    }
+
     pub fn socket_dir(&self) -> PathBuf {
         self.data_dir.join("sockets")
     }

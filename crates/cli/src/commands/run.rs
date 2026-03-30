@@ -148,6 +148,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 let _ = agent.load_skills(&shared_skills);
             }
 
+            // Load MCP servers
+            let mcp_path = cfg.mcp_config_path(&agent_cfg.id);
+            if mcp_path.exists() {
+                match agent.load_mcp(&mcp_path, |_| None).await {
+                    Ok(n) if n > 0 => println!("  MCP: {n} servers for agent:{}", agent_cfg.id),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("MCP load failed for {}: {e}", agent_cfg.id),
+                }
+            }
+
             // Bind channels to this agent
             for channel in &agent_cfg.channels {
                 router.bind(RouteBinding {
@@ -188,6 +198,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let skills_dir = cfg.data_dir.join("skills");
         if skills_dir.is_dir() {
             let _ = default_agent.load_skills(&skills_dir);
+        }
+
+        // Load MCP servers
+        let mcp_path = cfg.mcp_config_path("default");
+        if mcp_path.exists() {
+            match default_agent.load_mcp(&mcp_path, |_| None).await {
+                Ok(n) if n > 0 => println!("  MCP: {n} servers for agent:default"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("MCP load failed for default: {e}"),
+            }
         }
 
         // Bind any channels not already routed

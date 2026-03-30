@@ -1,6 +1,7 @@
 pub mod conversation;
 pub mod error;
 pub mod llm;
+pub mod mcp;
 pub mod runtime;
 pub(crate) mod sigv4;
 pub mod skill;
