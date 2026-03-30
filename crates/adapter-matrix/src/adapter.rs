@@ -49,18 +49,24 @@ impl MatrixAdapter {
         tracing::info!("Handshake complete");
 
         let writer = Arc::new(Mutex::new(writer));
-        let http = reqwest::Client::new();
 
         // Validate HTTPS — refuse to send credentials over plaintext HTTP
-        if !self.homeserver_url.starts_with("https://")
-            && !self.homeserver_url.starts_with("http://localhost")
-            && !self.homeserver_url.starts_with("http://127.0.0.1")
-        {
+        let is_localhost = self.homeserver_url.starts_with("http://localhost")
+            || self.homeserver_url.starts_with("http://127.0.0.1");
+
+        if !self.homeserver_url.starts_with("https://") && !is_localhost {
             return Err(MatrixError::Matrix(format!(
                 "Homeserver URL must use HTTPS: {}",
                 self.homeserver_url
             )));
         }
+
+        // Enforce HTTPS at transport level — reqwest will reject any http:// request
+        // unless the homeserver is localhost (development/testing).
+        let http = reqwest::Client::builder()
+            .https_only(!is_localhost)
+            .build()
+            .map_err(|e| MatrixError::Matrix(format!("HTTP client: {e}")))?;
 
         // Login to Matrix
         tracing::info!("Logging in to {} as {}", self.homeserver_url, self.username);
