@@ -1,6 +1,6 @@
 # Wirken
 
-Wirken is a secure, model-agnostic personal AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. Every agent action — every tool invocation, every message sent, every credential access — is logged to an append-only hash-chained audit trail before execution. Ships as a single static binary.
+Wirken is a secure, model-agnostic personal AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. Every agent action — every tool invocation, every message sent, every credential access — is logged to an append-only hash-chained audit trail before execution. Ships as a single static binary.
 
 ## Install and run
 
@@ -100,11 +100,16 @@ This isolation is enforced at the type level. Session handles are parameterized 
 | Credential encryption at rest | XChaCha20-Poly1305 vault, OS keychain (macOS Keychain / libsecret / age fallback) |
 | Credential rotation and expiry | Per-credential `expires_at` and `rotation_due_at`, CLI rotation command |
 | Compile-time channel isolation | PhantomData channel markers, generic adapter trait |
+| Workspace path confinement | Tool file operations canonicalized and rejected if outside workspace boundary |
+| HTTPS enforcement | LLM client and Matrix adapter reject non-HTTPS non-localhost endpoints at transport level |
+| Shell exec timeout | 300s timeout on tool command execution; process killed on expiry |
 | Audit trail for every action | Append-only SQLite log, SHA-256 hash chain, tamper detection |
 | No loopback rate limit exemption | Uniform rate limiting on all sources including 127.0.0.1 |
 | Session management with expiry | JWT sessions, 24h inactivity expiry, encrypted transcripts |
 | Memory safety | Rust: no prototype pollution, no deserialization exploits, no GC |
-| Secret handling | `secrecy` 0.10 + `zeroize` 1.8: logging/serializing a secret is a compile error |
+| Secret handling | `secrecy` 0.10 + `zeroize` 1.8: logging/serializing a secret is a compile error, key material zeroed after use |
+| Skill signature verification | Registry installs verified against registry-provided Ed25519 key, not bundled key |
+| Install integrity | Release binaries include SHA-256 checksums; installer verifies before installing |
 
 ## Current status
 
