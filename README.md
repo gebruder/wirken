@@ -123,15 +123,14 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 
 ## Enterprise deployment
 
-Wirken is designed so that organizations can deploy AI agents to employees with the same governance controls they apply to any other system with access to sensitive data.
+Wirken gives organizations the controls they need to deploy AI agents without bypassing existing security, compliance, and audit requirements.
 
-**Identity.** Every action is attributable. Each agent runs in its own workspace with its own credentials. Each channel adapter has a unique Ed25519 identity. Sessions track which user, on which channel, in which conversation, triggered which action. The audit log records the full chain: user → channel → session → agent → tool → target.
-
-**Accountability.** Every agent action — every tool call, every file read, every shell command, every credential access — is logged to a tamper-evident audit trail *before execution*. The SHA-256 hash chain means a deleted or modified row is detectable. For centralized visibility, audit events forward in real time to Datadog, Splunk, or any SIEM via HTTP webhook. An enterprise SOC sees every agent action across every employee in one place.
-
-**Responsibility.** The three-tier permission model controls what agents can do without human approval. Destructive operations, credential access, network requests, and skill installs always require explicit approval (Tier 3). Shell exec and external file access require first-use approval per pattern (Tier 2). Approvals expire after 30 days. The Docker sandbox adds a hard boundary: agent-executed commands run in ephemeral containers with no network, memory limits, and non-root users.
-
-**Confidentiality.** For regulated environments where prompts cannot leave a trust boundary, Tinfoil and Privatemode providers run LLMs inside hardware enclaves (AMD SEV-SNP, Intel TDX). Prompts are encrypted end-to-end and inaccessible to the service provider. Credentials are encrypted at rest with XChaCha20-Poly1305 and never exported in plaintext.
+- **Full attribution.** Every agent action is tied to a user, channel, session, and agent. The audit log records who triggered what, when, and on which target.
+- **Tamper-evident audit trail.** All actions logged before execution. SHA-256 hash chain detects modification or deletion. SIEM forwarding sends events to Datadog, Splunk, or any webhook in real time for centralized monitoring.
+- **Graduated permissions.** Three-tier model. Workspace file access and web search are always allowed. Shell exec and external file access require first-use approval. Destructive operations, credential access, and skill installs always require explicit approval. Approvals expire after 30 days.
+- **Sandboxed execution.** Optional Docker sandbox runs agent commands in ephemeral containers with no network access, memory and PID limits, and a non-root user.
+- **Confidential inference.** Tinfoil and Privatemode providers run LLMs inside hardware enclaves (AMD SEV-SNP, Intel TDX). Prompts are encrypted end-to-end and inaccessible to the inference provider.
+- **Encrypted credentials.** XChaCha20-Poly1305 vault keyed from the OS keychain. Per-credential expiry and rotation. No plaintext export.
 
 ## Current status
 
