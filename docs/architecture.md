@@ -320,7 +320,7 @@ Backpressure is handled by tokio's cooperative task scheduling + TCP window mana
 **Supported providers:**
 - OpenAI (API key, Bearer token)
 - Anthropic (API key, x-api-key header)
-- Google Gemini (API key in query string, generateContent API)
+- Google Gemini (API key via `x-goog-api-key` header, generateContent API)
 - AWS Bedrock (SigV4 signed requests, Converse API)
 - Ollama (local, no key needed)
 - Any OpenAI-compatible endpoint (custom URL + key)
