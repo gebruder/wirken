@@ -137,6 +137,16 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 
 14 crates, 238 tests, 8 LLM providers, 5 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
 
+## Documentation
+
+- [Getting started](docs/getting-started.md)
+- [Configuration reference](docs/configuration.md)
+- [Skills guide](docs/skills.md) (markdown skills, Wasm skills, registry)
+- [MCP setup](docs/mcp.md)
+- [Enterprise deployment](docs/enterprise.md) (org config, SIEM, sandbox)
+- [Architecture](docs/architecture.md)
+- [Migration from OpenClaw](docs/migration.md)
+
 ## Migrating from OpenClaw
 
 Most OpenClaw skills are `SKILL.md` files — markdown with YAML frontmatter that the LLM reads as system prompt context. These copy directly into `~/.wirken/skills/` and work without modification. Wirken reads the same frontmatter contract: `name`, `description`, `metadata.openclaw.requires.bins`.
