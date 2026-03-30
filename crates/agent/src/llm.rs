@@ -365,8 +365,8 @@ impl LlmClient {
     ) -> Result<LlmResponse, AgentError> {
         let key = api_key.ok_or_else(|| AgentError::Llm("Gemini requires an API key".into()))?;
         let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            self.config.base_url, self.config.model, key
+            "{}/models/{}:generateContent",
+            self.config.base_url, self.config.model
         );
 
         // Extract system prompt
@@ -460,6 +460,7 @@ impl LlmClient {
             .http
             .post(&url)
             .header("Content-Type", "application/json")
+            .header("x-goog-api-key", key)
             .json(&body)
             .send()
             .await

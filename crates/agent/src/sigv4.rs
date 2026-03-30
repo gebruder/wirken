@@ -128,6 +128,11 @@ fn uri_encode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    // AWS's published example credentials for SigV4 test vectors.
+    // See: https://docs.aws.amazon.com/general/latest/gr/sigv4-calculate-signature.html
+    const TEST_ACCESS_KEY: &str = "AKIAIOSFODNN7EXAMPLE";
+    const TEST_SECRET_KEY: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
     #[test]
     fn sigv4_produces_valid_structure() {
         let url =
@@ -136,8 +141,8 @@ mod tests {
         let body = b"{\"messages\":[]}";
 
         let headers = sign(
-            "AKIAIOSFODNN7EXAMPLE",
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
             None,
             "us-east-1",
             "bedrock",
@@ -149,7 +154,7 @@ mod tests {
         let auth = headers.iter().find(|(k, _)| k == "Authorization").unwrap();
         assert!(
             auth.1
-                .starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/")
+                .starts_with(&format!("AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY}/"))
         );
         assert!(auth.1.contains("us-east-1/bedrock/aws4_request"));
         assert!(
@@ -168,9 +173,9 @@ mod tests {
                 .unwrap();
 
         let headers = sign(
-            "AKID",
-            "SECRET",
-            Some("SESSION_TOKEN"),
+            "AKIDEXAMPLE",
+            "SKEXAMPLEKEY",
+            Some("SESSION_TOKEN_EXAMPLE"),
             "us-west-2",
             "bedrock",
             "POST",
@@ -180,7 +185,7 @@ mod tests {
 
         let token = headers.iter().find(|(k, _)| k == "x-amz-security-token");
         assert!(token.is_some());
-        assert_eq!(token.unwrap().1, "SESSION_TOKEN");
+        assert_eq!(token.unwrap().1, "SESSION_TOKEN_EXAMPLE");
 
         let auth = headers.iter().find(|(k, _)| k == "Authorization").unwrap();
         assert!(auth.1.contains("x-amz-security-token"));
@@ -190,8 +195,26 @@ mod tests {
     fn sigv4_deterministic_for_same_inputs() {
         // Signing should be deterministic within the same second
         let url = url::Url::parse("https://example.com/path").unwrap();
-        let h1 = sign("AK", "SK", None, "us-east-1", "s3", "GET", &url, b"");
-        let h2 = sign("AK", "SK", None, "us-east-1", "s3", "GET", &url, b"");
+        let h1 = sign(
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            None,
+            "us-east-1",
+            "s3",
+            "GET",
+            &url,
+            b"",
+        );
+        let h2 = sign(
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            None,
+            "us-east-1",
+            "s3",
+            "GET",
+            &url,
+            b"",
+        );
         assert_eq!(h1, h2);
     }
 }
