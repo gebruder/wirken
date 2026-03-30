@@ -4408,6 +4408,7 @@ name = "wirken-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "hmac",
  "reqwest 0.13.2",
