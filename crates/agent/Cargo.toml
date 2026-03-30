@@ -24,6 +24,8 @@ uuid = { version = "1", features = ["v4"] }
 url = "2"
 base64 = "0.22"
 bollard = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = "43.0"
 futures-util = "0.3"
 
 [dev-dependencies]
