@@ -103,6 +103,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 | Workspace path confinement | Tool file operations canonicalized and rejected if outside workspace boundary |
 | HTTPS enforcement | LLM client and Matrix adapter reject non-HTTPS non-localhost endpoints at transport level |
 | Shell exec timeout | 300s timeout on tool command execution; process killed on expiry |
+| Docker sandbox | Optional per-command ephemeral containers with no-network, memory/PID limits, non-root user |
 | Audit trail for every action | Append-only SQLite log, SHA-256 hash chain, tamper detection |
 | No loopback rate limit exemption | Uniform rate limiting on all sources including 127.0.0.1 |
 | Session management with expiry | JWT sessions, 24h inactivity expiry, encrypted transcripts |
@@ -113,7 +114,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Current status
 
-14 crates, 232 tests, CI on every push, release binaries for four platforms.
+14 crates, 238 tests, CI on every push, release binaries for four platforms.
 
 **Ships now:**
 - Five channel adapters running simultaneously as isolated processes:
@@ -132,6 +133,8 @@ This isolation is enforced at the type level. Session handles are parameterized 
 - Per-channel process isolation with Ed25519 handshake
 - MCP client (Model Context Protocol) — connect to any MCP server via stdio, discover and call tools
 - Streaming LLM responses (SSE) for OpenAI and Anthropic
+- Cron job scheduling (`wirken cron create/list/delete/pause/resume`)
+- Docker sandbox for tool execution (optional, per-command ephemeral containers)
 - Cap'n Proto IPC with traversal limits
 - Session management with expiry
 - Three-tier permission model
@@ -148,7 +151,6 @@ This isolation is enforced at the type level. Session handles are parameterized 
 **Not yet:**
 - Voice/TTS
 - Wasm skill sandbox (Wasmtime integration designed, not built)
-- gVisor container sandbox for code skills
 - Mobile companion apps
 - Matrix E2EE (blocked by matrix-sdk sqlite version conflict)
 
@@ -165,7 +167,7 @@ See [docs/migration.md](docs/migration.md) for a detailed migration guide.
 Wirken is a Rust workspace. All crates compile and test independently:
 
 ```bash
-cargo test              # run all 232 tests
+cargo test              # run all 238 tests
 cargo test -p wirken-vault    # test one crate
 cargo build -p wirken-cli     # build the binary
 ```

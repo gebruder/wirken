@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use crate::error::AgentError;
+use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
 
 /// Tool definition for the LLM (OpenAI function calling format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +28,7 @@ pub struct ToolConfig {
     pub api_key: Option<String>,
     pub provider: Option<String>,
     pub base_url: Option<String>,
+    pub sandbox: SandboxConfig,
 }
 
 /// Built-in tool implementations.
@@ -35,6 +37,7 @@ pub struct ToolRegistry {
     tools: HashMap<String, ToolDef>,
     http: reqwest::Client,
     config: ToolConfig,
+    sandbox: Option<DockerSandbox>,
 }
 
 impl ToolRegistry {
@@ -169,11 +172,24 @@ impl ToolRegistry {
             },
         );
 
+        let sandbox = if config.sandbox.mode != SandboxMode::Off {
+            match DockerSandbox::new(config.sandbox.clone()) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("Sandbox unavailable: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             workspace,
             tools,
             http: reqwest::Client::new(),
             config,
+            sandbox,
         }
     }
 
@@ -202,6 +218,11 @@ impl ToolRegistry {
         let command = args["command"]
             .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'command' argument".into()))?;
+
+        // Use sandbox if available
+        if let Some(ref sandbox) = self.sandbox {
+            return sandbox.exec(command, &self.workspace).await;
+        }
 
         let child = tokio::process::Command::new("sh")
             .arg("-c")

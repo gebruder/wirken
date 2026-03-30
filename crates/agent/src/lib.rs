@@ -4,6 +4,7 @@ pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
 pub mod runtime;
+pub mod sandbox;
 pub(crate) mod sigv4;
 pub mod skill;
 pub mod tool;
