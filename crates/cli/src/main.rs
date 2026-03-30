@@ -64,6 +64,10 @@ enum Commands {
     #[command(subcommand)]
     Skills(SkillCommands),
 
+    /// Manage scheduled cron jobs
+    #[command(subcommand)]
+    Cron(CronCommands),
+
     /// Send a message to an agent
     #[command(name = "ask")]
     Ask {
@@ -193,6 +197,44 @@ enum SkillCommands {
 }
 
 #[derive(Subcommand)]
+enum CronCommands {
+    /// List scheduled cron jobs
+    List {
+        /// Filter by agent ID
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Create a new cron job
+    Create {
+        /// Cron schedule (e.g., "0 0 9 * * *" for 9am daily)
+        schedule: String,
+        /// Message to send to the agent
+        message: String,
+        /// Agent ID
+        #[arg(long, default_value = "default")]
+        agent: String,
+        /// Description
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// Delete a cron job
+    Delete {
+        /// Job ID
+        id: String,
+    },
+    /// Pause a cron job
+    Pause {
+        /// Job ID
+        id: String,
+    },
+    /// Resume a paused cron job
+    Resume {
+        /// Job ID
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum CredentialCommands {
     /// List stored credentials (metadata only — no secrets shown)
     List,
@@ -267,6 +309,18 @@ async fn main() -> Result<()> {
             AgentCommands::Bind { agent, channel } => {
                 commands::agents::bind(&agent, &channel).await
             }
+        },
+        Commands::Cron(cmd) => match cmd {
+            CronCommands::List { agent } => commands::cron::list(agent.as_deref()).await,
+            CronCommands::Create {
+                schedule,
+                message,
+                agent,
+                description,
+            } => commands::cron::create(&schedule, &message, &agent, &description).await,
+            CronCommands::Delete { id } => commands::cron::delete(&id).await,
+            CronCommands::Pause { id } => commands::cron::pause(&id).await,
+            CronCommands::Resume { id } => commands::cron::resume(&id).await,
         },
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
         Commands::Doctor => commands::doctor::run().await,

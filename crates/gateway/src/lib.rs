@@ -1,10 +1,12 @@
 pub mod adapter_registry;
 pub mod agent_config;
 pub mod config;
+pub mod cron;
 pub mod error;
 pub mod permissions;
 pub mod rate_limit;
 pub mod router;
+pub mod scheduler;
 pub mod session;
 pub mod skill_registry;
 

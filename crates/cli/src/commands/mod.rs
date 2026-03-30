@@ -4,6 +4,7 @@ pub mod agents;
 pub mod audit;
 pub mod channel;
 pub mod credential;
+pub mod cron;
 pub mod doctor;
 pub mod permission;
 pub mod run;

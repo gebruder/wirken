@@ -61,6 +61,10 @@ impl GatewayConfig {
         self.data_dir.join("adapters.db")
     }
 
+    pub fn cron_db_path(&self) -> PathBuf {
+        self.data_dir.join("cron.db")
+    }
+
     pub fn agent_config_db_path(&self) -> PathBuf {
         self.data_dir.join("agent_config.db")
     }
