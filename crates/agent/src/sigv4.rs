@@ -172,10 +172,11 @@ mod tests {
             url::Url::parse("https://bedrock-runtime.us-west-2.amazonaws.com/model/test/converse")
                 .unwrap();
 
+        const TEST_SESSION_TOKEN: &str = "SESSION_TOKEN_EXAMPLE";
         let headers = sign(
-            "AKIDEXAMPLE",
-            "SKEXAMPLEKEY",
-            Some("SESSION_TOKEN_EXAMPLE"),
+            TEST_ACCESS_KEY,
+            TEST_SECRET_KEY,
+            Some(TEST_SESSION_TOKEN),
             "us-west-2",
             "bedrock",
             "POST",
@@ -185,7 +186,7 @@ mod tests {
 
         let token = headers.iter().find(|(k, _)| k == "x-amz-security-token");
         assert!(token.is_some());
-        assert_eq!(token.unwrap().1, "SESSION_TOKEN_EXAMPLE");
+        assert_eq!(token.unwrap().1, TEST_SESSION_TOKEN);
 
         let auth = headers.iter().find(|(k, _)| k == "Authorization").unwrap();
         assert!(auth.1.contains("x-amz-security-token"));
