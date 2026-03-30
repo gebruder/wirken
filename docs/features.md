@@ -80,11 +80,9 @@ Skills are metadata-gated (required binaries, env vars, config keys). A regex-ba
 
 ## LLM Providers
 
-Core built-in: **OpenAI**, **Anthropic**, **Google Gemini**.
+Built-in: **OpenAI**, **Anthropic**, **Google Gemini**, **AWS Bedrock**, **Ollama** (local), and any **OpenAI-compatible endpoint**.
 
-25+ plugin providers: Ollama (local), OpenRouter, Together, NVIDIA, GitHub Copilot, custom OpenAI-compatible endpoints, Qwen, Moonshot, Volcengine, and others.
-
-Model specified as `provider/model` (e.g. `openai/gpt-5.4`). Per-agent model config. OAuth or API key auth. Key rotation and failover supported.
+Bedrock uses AWS SigV4 request signing (access key + secret key, optional session token). Gemini uses the generateContent API with API key auth. Per-agent model config. Key rotation supported.
 
 ## Onboarding
 

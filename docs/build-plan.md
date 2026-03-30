@@ -160,7 +160,7 @@ WebChat UI (embedded HTTP server for browser-based testing)
 - 1 agent with workspace
 - Encrypted credential vault (OS keychain + age fallback)
 - Adapter process isolation (even with 1 channel — the architecture is in place)
-- LLM proxy with OpenAI + Ollama support (SSE streaming via `reqwest-eventsource`)
+- LLM proxy with OpenAI, Anthropic, Gemini, Bedrock, Ollama support
 - Built-in tools: shell exec (with approval), file read/write/edit, web search
 - Audit log (all actions, hash-chained)
 - Skill loading via SKILL.md (markdown skills — the majority of the OpenClaw ecosystem, zero compilation)
