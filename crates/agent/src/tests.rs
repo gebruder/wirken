@@ -379,6 +379,7 @@ async fn generate_image_requires_api_key() {
         api_key: None,
         provider: Some("openai".into()),
         base_url: Some("https://api.openai.com/v1".into()),
+        sandbox: Default::default(),
     };
     let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
 
@@ -397,6 +398,7 @@ async fn generate_image_requires_openai_provider() {
         api_key: Some("test-key".into()),
         provider: Some("anthropic".into()),
         base_url: Some("https://api.anthropic.com/v1".into()),
+        sandbox: Default::default(),
     };
     let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
 

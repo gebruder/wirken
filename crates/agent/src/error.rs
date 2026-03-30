@@ -31,4 +31,7 @@ pub enum AgentError {
 
     #[error("mcp error: {0}")]
     Mcp(String),
+
+    #[error("sandbox error: {0}")]
+    Sandbox(String),
 }

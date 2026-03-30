@@ -38,6 +38,7 @@ impl Agent {
             api_key: api_key.clone(),
             provider: Some(llm_config.provider.clone()),
             base_url: Some(llm_config.base_url.clone()),
+            sandbox: Default::default(),
         };
         let tools = ToolRegistry::new(workspace, tool_config);
 
