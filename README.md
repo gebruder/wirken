@@ -149,7 +149,6 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - [Enterprise deployment](docs/enterprise.md) (org config, SIEM, sandbox)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
-- [Migration from OpenClaw](docs/migration.md)
 
 ## Migrating from OpenClaw
 
