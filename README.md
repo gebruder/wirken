@@ -75,7 +75,7 @@ wirken setup --install-service
 │ Telegram Adapter │──UDS──│    │     Agent Runtime      │      ┌─────────┐
 │  (separate proc) │  Ed25519  │      │       │          │      │   LLM   │
 │  teloxide 0.17   │  Cap'n P  │    Tools   Skills       │──────│ Provider│
-└──────────────────┘      │    │      │       │          │ HTTP  └─────────┘
+└──────────────────┘      │    │      │       │          │ HTTPS └─────────┘
                           │    │    Audit    Vault        │
 ┌──────────────────┐      │    │      │       │          │
 │ Discord Adapter  │──UDS──│    │      │    Keychain      │
