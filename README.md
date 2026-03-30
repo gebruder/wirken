@@ -113,7 +113,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 
 ## Current status
 
-14 crates, 230 tests, CI on every push, release binaries for four platforms.
+14 crates, 232 tests, CI on every push, release binaries for four platforms.
 
 **Ships now:**
 - Five channel adapters running simultaneously as isolated processes:
@@ -125,11 +125,13 @@ This isolation is enforced at the type level. Session handles are parameterized 
 - Multi-agent routing (work agent on Slack/Teams, personal on Telegram/Discord, each with its own model, API key, workspace, and skills)
 - Skill registry with Ed25519 signing (`wirken skills search/install/sign/verify`)
 - Agent runtime with LLM tool calling (OpenAI, Anthropic, Google Gemini, AWS Bedrock, Ollama, custom endpoints)
-- Built-in tools: shell exec, file read/write, directory listing
+- Built-in tools: shell exec, file read/write, directory listing, web search, image generation
 - SKILL.md loader (compatible with OpenClaw's 52 bundled skills)
 - Encrypted credential vault with OS keychain integration
 - Append-only hash-chained audit log
 - Per-channel process isolation with Ed25519 handshake
+- MCP client (Model Context Protocol) — connect to any MCP server via stdio, discover and call tools
+- Streaming LLM responses (SSE) for OpenAI and Anthropic
 - Cap'n Proto IPC with traversal limits
 - Session management with expiry
 - Three-tier permission model
@@ -148,7 +150,6 @@ This isolation is enforced at the type level. Session handles are parameterized 
 - Wasm skill sandbox (Wasmtime integration designed, not built)
 - gVisor container sandbox for code skills
 - Mobile companion apps
-- MCP server support
 - Matrix E2EE (blocked by matrix-sdk sqlite version conflict)
 
 ## Migrating from OpenClaw
@@ -164,7 +165,7 @@ See [docs/migration.md](docs/migration.md) for a detailed migration guide.
 Wirken is a Rust workspace. All crates compile and test independently:
 
 ```bash
-cargo test              # run all 230 tests
+cargo test              # run all 232 tests
 cargo test -p wirken-vault    # test one crate
 cargo build -p wirken-cli     # build the binary
 ```
