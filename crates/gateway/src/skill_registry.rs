@@ -144,6 +144,51 @@ pub fn generate_signing_keypair() -> (String, String) {
     (secret_hex, public_hex)
 }
 
+/// Verify a skill's signature against an expected public key from the registry.
+/// This prevents an attacker from bundling their own key with a tampered skill.
+pub fn verify_skill_with_expected_key(
+    skill_dir: &Path,
+    expected_sig_hex: &str,
+    expected_key_hex: &str,
+) -> Result<VerifyResult, GatewayError> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let hash = hash_skill_file(&skill_md)?;
+
+    let sig_bytes = hex_decode(expected_sig_hex.trim())
+        .map_err(|e| GatewayError::Config(format!("decode sig: {e}")))?;
+    if sig_bytes.len() != 64 {
+        return Err(GatewayError::Config(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        )));
+    }
+
+    let key_bytes = hex_decode(expected_key_hex.trim())
+        .map_err(|e| GatewayError::Config(format!("decode pub key: {e}")))?;
+    if key_bytes.len() != 32 {
+        return Err(GatewayError::Config(format!(
+            "public key must be 32 bytes, got {}",
+            key_bytes.len()
+        )));
+    }
+
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let signature = Signature::from_bytes(&sig_arr);
+
+    let mut key_arr = [0u8; 32];
+    key_arr.copy_from_slice(&key_bytes);
+    let verifying_key = VerifyingKey::from_bytes(&key_arr)
+        .map_err(|e| GatewayError::Config(format!("invalid pub key: {e}")))?;
+
+    match verifying_key.verify(&hash, &signature) {
+        Ok(()) => Ok(VerifyResult::Valid {
+            signer: expected_key_hex.trim().to_string(),
+        }),
+        Err(_) => Ok(VerifyResult::Invalid),
+    }
+}
+
 /// Result of signature verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyResult {

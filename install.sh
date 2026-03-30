@@ -58,11 +58,43 @@ get_latest_version() {
 download_binary() {
     BINARY_NAME="wirken-${TARGET}"
     URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}"
+    CHECKSUM_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.sha256"
     TMPDIR=$(mktemp -d)
     TMPFILE="${TMPDIR}/wirken"
 
     echo "Downloading ${URL}"
     curl -fsSL -o "$TMPFILE" "$URL"
+
+    # Verify SHA256 checksum if available
+    CHECKSUM_FILE="${TMPDIR}/checksums.sha256"
+    if curl -fsSL -o "$CHECKSUM_FILE" "$CHECKSUM_URL" 2>/dev/null; then
+        EXPECTED=$(grep "${BINARY_NAME}$" "$CHECKSUM_FILE" | awk '{print $1}')
+        if [ -n "$EXPECTED" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+                ACTUAL=$(sha256sum "$TMPFILE" | awk '{print $1}')
+            elif command -v shasum >/dev/null 2>&1; then
+                ACTUAL=$(shasum -a 256 "$TMPFILE" | awk '{print $1}')
+            else
+                echo "Warning: no sha256sum or shasum found, skipping checksum verification" >&2
+                ACTUAL=""
+            fi
+            if [ -n "$ACTUAL" ]; then
+                if [ "$EXPECTED" != "$ACTUAL" ]; then
+                    echo "Error: checksum mismatch!" >&2
+                    echo "  Expected: ${EXPECTED}" >&2
+                    echo "  Actual:   ${ACTUAL}" >&2
+                    rm -rf "$TMPDIR"
+                    exit 1
+                fi
+                echo "Checksum verified: ${EXPECTED}"
+            fi
+        else
+            echo "Warning: binary not found in checksums file, skipping verification" >&2
+        fi
+    else
+        echo "Warning: checksums file not available, skipping verification" >&2
+    fi
+
     chmod +x "$TMPFILE"
 }
 

@@ -63,7 +63,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     let workspace = cfg.data_dir.join("workspace");
     std::fs::create_dir_all(&workspace)?;
 
-    let mut agent = Agent::new("default".into(), workspace.clone(), llm_config, api_key);
+    let mut agent = Agent::new("default".into(), workspace.clone(), llm_config, api_key)?;
 
     let skills_dir = cfg.data_dir.join("skills");
     if skills_dir.is_dir() {
@@ -109,7 +109,7 @@ async fn send_with_agent_config(
     let workspace = cfg.agent_workspace(&agent_cfg.id);
     std::fs::create_dir_all(&workspace)?;
 
-    let mut agent = Agent::new(agent_cfg.id.clone(), workspace.clone(), llm_config, api_key);
+    let mut agent = Agent::new(agent_cfg.id.clone(), workspace.clone(), llm_config, api_key)?;
 
     let skills_dir = cfg.agent_skills_dir(&agent_cfg.id);
     if skills_dir.is_dir() {

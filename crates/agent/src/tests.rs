@@ -561,7 +561,8 @@ fn agent_loads_skills() {
         workspace,
         LlmConfig::ollama("test"),
         None,
-    );
+    )
+    .unwrap();
 
     let count = agent.load_skills(&skills_dir).unwrap();
     assert_eq!(count, 1);
@@ -578,7 +579,8 @@ fn agent_conversation_tracking() {
         tmp.path().to_path_buf(),
         LlmConfig::ollama("test"),
         None,
-    );
+    )
+    .unwrap();
 
     // System prompt is set on creation
     assert!(agent.conversation_len() > 0);

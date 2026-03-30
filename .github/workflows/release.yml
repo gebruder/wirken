@@ -119,12 +119,16 @@ jobs:
         with:
           path: artifacts
 
-      - name: Collect binaries
+      - name: Collect binaries and generate checksums
         run: |
           mkdir -p release
           for dir in artifacts/wirken-*/; do
             cp "$dir"wirken-* release/
           done
+          cd release
+          sha256sum wirken-* > checksums.sha256
+          cat checksums.sha256
+          cd ..
           ls -la release/
 
       - name: Create GitHub Release

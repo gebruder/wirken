@@ -85,11 +85,25 @@ pub struct LlmClient {
 
 impl LlmClient {
     /// Create a new LLM client.
-    pub fn new(config: LlmConfig) -> Self {
-        Self {
-            config,
-            http: reqwest::Client::new(),
+    /// Enforces HTTPS for non-localhost endpoints to prevent API key leakage.
+    pub fn new(config: LlmConfig) -> Result<Self, AgentError> {
+        let is_localhost = config.base_url.starts_with("http://localhost")
+            || config.base_url.starts_with("http://127.0.0.1")
+            || config.base_url.starts_with("http://[::1]");
+
+        if !config.base_url.starts_with("https://") && !is_localhost {
+            return Err(AgentError::Http(format!(
+                "LLM endpoint must use HTTPS (got {}). Use HTTPS or localhost.",
+                config.base_url
+            )));
         }
+
+        let http = reqwest::Client::builder()
+            .https_only(!is_localhost)
+            .build()
+            .map_err(|e| AgentError::Http(format!("HTTP client: {e}")))?;
+
+        Ok(Self { config, http })
     }
 
     /// Send a chat completion request.
