@@ -296,6 +296,45 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     });
 
+    // --- Cron scheduler ---
+    let cron_store = Arc::new(std::sync::Mutex::new(
+        wirken_gateway::cron::CronStore::open(&cfg.cron_db_path())
+            .context("Failed to open cron store")?,
+    ));
+    let scheduler_agents = agents.clone();
+    let scheduler_cron = cron_store.clone();
+    let scheduler_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+
+            let due = match scheduler_cron.lock().unwrap().due_jobs() {
+                Ok(jobs) => jobs,
+                Err(e) => {
+                    tracing::error!("Cron query failed: {e}");
+                    continue;
+                }
+            };
+
+            for job in due {
+                tracing::info!("Cron firing: {} -> agent:{}", job.id, job.agent_id);
+                let _ = scheduler_cron.lock().unwrap().mark_run(&job.id);
+
+                if let Some(agent_mutex) = scheduler_agents.get(&job.agent_id) {
+                    let mut agent = agent_mutex.lock().await;
+                    match agent.process_message(&job.message).await {
+                        Ok(resp) => {
+                            tracing::info!("Cron response: {}", truncate(&resp, 100))
+                        }
+                        Err(e) => tracing::error!("Cron job failed: {e}"),
+                    }
+                } else {
+                    tracing::warn!("Cron: agent '{}' not found", job.agent_id);
+                }
+            }
+        }
+    });
+
     println!("  WebChat: http://localhost:{webchat_port}");
     println!();
     println!("  Gateway running. Press Ctrl+C to stop.");
@@ -348,6 +387,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     accept_handle.abort();
     webchat_handle.abort();
+    scheduler_handle.abort();
 
     // Drop audit writer to flush remaining events
     drop(audit);
