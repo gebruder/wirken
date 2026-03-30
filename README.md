@@ -66,26 +66,36 @@ wirken setup --install-service
 
 ## Architecture
 
-```
-                          ┌──────────────────────────────┐
-                          │        Gateway Core          │
-                          │                              │
-                          │  Router ─── Session Store    │
-┌──────────────────┐      │    │          │              │
-│ Telegram Adapter │──UDS──│    │     Agent Runtime      │      ┌─────────┐
-│  (separate proc) │  Ed25519  │      │       │          │      │   LLM   │
-│  teloxide 0.17   │  Cap'n P  │    Tools   Skills       │──────│ Provider│
-└──────────────────┘      │    │      │       │          │ HTTPS └─────────┘
-                          │    │    Audit    Vault        │
-┌──────────────────┐      │    │      │       │          │
-│ Discord Adapter  │──UDS──│    │      │    Keychain      │
-│  (separate proc) │      │    │      │       │          │
-└──────────────────┘      │  Permissions  Rate Limiter   │
-                          │                              │
-┌──────────────────┐      │  Adapter Registry            │
-│  Slack Adapter   │──UDS──│  (Ed25519 public keys)       │
-│  (separate proc) │      │                              │
-└──────────────────┘      └──────────────────────────────┘
+```mermaid
+graph LR
+    subgraph Adapters["Channel Adapters (separate processes)"]
+        T["Telegram<br/><small>teloxide 0.17</small>"]
+        D["Discord<br/><small>serenity 0.12</small>"]
+        S["Slack<br/><small>slack-morphism 2.19</small>"]
+        TM["Teams<br/><small>Bot Framework</small>"]
+        M["Matrix<br/><small>CS API</small>"]
+    end
+
+    subgraph Gateway["Gateway Core"]
+        Router --> Session["Session Store"]
+        Router --> Agent["Agent Runtime"]
+        Agent --> Tools
+        Agent --> Skills
+        Tools --> Audit
+        Agent --> Vault
+        Vault --> Keychain
+        Permissions
+        RateLimit["Rate Limiter"]
+        Registry["Adapter Registry<br/><small>Ed25519 public keys</small>"]
+    end
+
+    T -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
+    D -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
+    S -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
+    TM -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
+    M -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
+
+    Agent -- HTTPS --> LLM["LLM Provider"]
 ```
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
