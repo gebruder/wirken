@@ -68,34 +68,35 @@ wirken setup --install-service
 
 ```mermaid
 graph LR
-    subgraph Adapters["Channel Adapters (separate processes)"]
-        T["Telegram<br/><small>teloxide 0.17</small>"]
-        D["Discord<br/><small>serenity 0.12</small>"]
-        S["Slack<br/><small>slack-morphism 2.19</small>"]
-        TM["Teams<br/><small>Bot Framework</small>"]
-        M["Matrix<br/><small>CS API</small>"]
+    subgraph Adapters["Channel Adapters · separate processes"]
+        T[Telegram]
+        D[Discord]
+        S[Slack]
+        TM[Teams]
+        M[Matrix]
     end
 
     subgraph Gateway["Gateway Core"]
-        Router --> Session["Session Store"]
-        Router --> Agent["Agent Runtime"]
+        Registry[Adapter Registry] --> Router
+        Router --> Sessions
+        Router --> Permissions
+        Router --> RateLimit[Rate Limiter]
+        Router --> Agent[Agent Runtime]
         Agent --> Tools
         Agent --> Skills
-        Tools --> Audit
-        Agent --> Vault
+        Agent --> MCP[MCP Servers]
+        Tools --> Audit[Audit Log]
         Vault --> Keychain
-        Permissions
-        RateLimit["Rate Limiter"]
-        Registry["Adapter Registry<br/><small>Ed25519 public keys</small>"]
     end
 
-    T -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
-    D -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
-    S -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
-    TM -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
-    M -- "UDS + Ed25519<br/>Cap'n Proto" --> Router
+    T -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    D -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    S -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    TM -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    M -- "UDS · Ed25519 · Cap'n Proto" --> Registry
 
-    Agent -- HTTPS --> LLM["LLM Provider"]
+    Agent -- HTTPS --> LLM[LLM Providers]
+    Vault -- encrypt/decrypt --> Agent
 ```
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
