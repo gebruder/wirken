@@ -66,9 +66,7 @@ OpenClaw's agent uses bootstrap files: `AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER
 
 ## What's not yet available
 
-- Multi-agent routing
 - Voice/TTS
 - Mobile companion apps
-- Canvas
-- Skill marketplace (ClawHub equivalent)
 - Code skill sandboxing (gVisor/Wasmtime)
+- Matrix E2EE

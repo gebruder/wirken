@@ -317,10 +317,11 @@ audit.log(LlmCallCompleted { model, tokens_in, tokens_out, duration }).await;
 
 Backpressure is handled by tokio's cooperative task scheduling + TCP window management. If the agent is slow to consume IPC messages, the `ipc_tx.send().await` suspends, which stops reading from the SSE stream, which causes the TCP receive buffer to fill, which causes the sender (LLM provider) to slow down. No explicit backpressure mechanism needed — the async runtime and TCP stack handle it.
 
-**Supported providers (MVP):**
-- OpenAI (API key)
-- Anthropic (API key)
-- Google Gemini (API key)
+**Supported providers:**
+- OpenAI (API key, Bearer token)
+- Anthropic (API key, x-api-key header)
+- Google Gemini (API key in query string, generateContent API)
+- AWS Bedrock (SigV4 signed requests, Converse API)
 - Ollama (local, no key needed)
 - Any OpenAI-compatible endpoint (custom URL + key)
 
@@ -394,8 +395,8 @@ The install script downloads a precompiled binary for the user's platform (Linux
 
 `wirken setup` is a single interactive flow powered by `dialoguer` 0.12:
 
-1. **"Pick your AI"** — select provider (OpenAI / Anthropic / Gemini / Ollama / custom). Enter API key. Key immediately encrypted into vault.
-2. **"Pick your channels"** — select from Telegram / Discord / Slack. Enter bot token per channel. Each token encrypted separately.
+1. **"Pick your AI"** — select provider (OpenAI / Anthropic / Google Gemini / AWS Bedrock / Ollama / custom). Enter API key (or AWS credentials for Bedrock). Key immediately encrypted into vault.
+2. **"Pick your channels"** — select from Telegram / Discord / Slack / Microsoft Teams / Matrix. Enter bot token per channel. Each token encrypted separately.
 3. **Done.** Gateway starts as a system service. User gets a message on their chosen channel: "I'm ready. Send me a message."
 
 **What the user never has to see or decide:**
