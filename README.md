@@ -110,7 +110,7 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | OWASP | Threat | Mitigation |
 |-------|--------|------------|
 | AG01 | Excessive agency | Three-tier permission model. Tier 1 (always allowed): workspace file access, web search. Tier 2 (first-use approval, remembered 30 days): shell exec, external file access. Tier 3 (always prompt): destructive ops, credential access, network requests, skill install. |
-| AG02 | Code execution | Optional Docker sandbox: ephemeral containers, no-network, 512MB memory, 256 PID limit, non-root user. Shell exec timeout at 300s; process killed on expiry. |
+| AG02 | Code execution | Docker sandbox: ephemeral containers, no-network, 512MB memory, 256 PID limit, non-root user. Wasm sandbox: compiled skill modules run in Wasmtime with fuel-based CPU limits, no filesystem, no network. Shell exec timeout at 300s. |
 | AG04 | Tool misuse | Tool inputs validated against JSON schema. Workspace path confinement — file operations canonicalized and rejected if outside workspace boundary. |
 | AG05 | Identity spoofing | Per-adapter Ed25519 challenge-response handshake over Unix domain sockets. Compile-time channel isolation — `SessionHandle<Telegram>` and `SessionHandle<Discord>` are different types; the compiler rejects cross-channel access. |
 | AG07 | Multi-agent manipulation | Each channel adapter runs as a separate OS process. If an adapter is compromised, the blast radius is one channel. IPC boundary prevents lateral movement. |
@@ -158,6 +158,7 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - SIEM log forwarding — audit events forwarded to Datadog, Splunk, or any webhook in real time
 - Cron job scheduling (`wirken cron create/list/delete/pause/resume`)
 - Docker sandbox for tool execution (optional, per-command ephemeral containers)
+- Wasm skill sandbox (Wasmtime): run compiled .wasm modules as tools with fuel-based CPU limits, no filesystem, no network
 - Cap'n Proto IPC with traversal limits
 - Session management with expiry
 - Three-tier permission model
@@ -173,7 +174,6 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 
 **Not yet:**
 - Voice/TTS
-- Wasm skill sandbox (Wasmtime integration designed, not built)
 - Mobile companion apps
 - Matrix E2EE (blocked by matrix-sdk sqlite version conflict)
 

@@ -7,6 +7,7 @@ use crate::llm_stream::StreamEvent;
 use crate::mcp::{McpConfig, McpRegistry};
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry};
+use crate::wasm_sandbox::WasmSkill;
 
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
@@ -20,6 +21,7 @@ pub struct Agent {
     tools: ToolRegistry,
     mcp: Option<McpRegistry>,
     skills: Vec<Skill>,
+    wasm_skills: Vec<WasmSkill>,
     system_prompt: String,
     /// API key passed per-request — agent never stores it long-term.
     /// In production, the gateway's LLM proxy handles this.
@@ -53,6 +55,7 @@ impl Agent {
             tools,
             mcp: None,
             skills: Vec::new(),
+            wasm_skills: Vec::new(),
             system_prompt,
             api_key,
         })
@@ -104,6 +107,7 @@ impl Agent {
         if let Some(ref mcp) = self.mcp {
             tool_defs.extend(mcp.definitions());
         }
+        tool_defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
         let mut rounds = 0;
 
         loop {
@@ -141,16 +145,7 @@ impl Agent {
                             truncate(&call.arguments, 100)
                         );
 
-                        let result = match self.tools.execute(&call.name, &call.arguments).await {
-                            Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
-                                self.mcp
-                                    .as_mut()
-                                    .unwrap()
-                                    .execute(&call.name, &call.arguments)
-                                    .await?
-                            }
-                            other => other?,
-                        };
+                        let result = self.execute_tool(&call.name, &call.arguments).await?;
 
                         tracing::debug!(
                             "Tool {} result (success={}): {}",
@@ -243,16 +238,7 @@ impl Agent {
                     for call in &calls {
                         tracing::info!("Agent {} executing tool: {}", self.id, call.name);
 
-                        let result = match self.tools.execute(&call.name, &call.arguments).await {
-                            Err(AgentError::ToolNotFound(_)) if self.mcp.is_some() => {
-                                self.mcp
-                                    .as_mut()
-                                    .unwrap()
-                                    .execute(&call.name, &call.arguments)
-                                    .await?
-                            }
-                            other => other?,
-                        };
+                        let result = self.execute_tool(&call.name, &call.arguments).await?;
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
@@ -282,6 +268,45 @@ impl Agent {
     pub fn reset_conversation(&mut self) {
         self.conversation.clear();
         self.rebuild_system_prompt();
+    }
+
+    /// Load Wasm skills from a directory.
+    pub fn load_wasm_skills(&mut self, dir: &std::path::Path) -> usize {
+        let skills = crate::wasm_sandbox::load_wasm_skills(dir);
+        let count = skills.len();
+        self.wasm_skills.extend(skills);
+        count
+    }
+
+    /// Execute a tool call, trying built-in tools, then MCP, then Wasm skills.
+    async fn execute_tool(
+        &mut self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        // Try built-in tools first
+        match self.tools.execute(name, arguments).await {
+            Err(AgentError::ToolNotFound(_)) => {}
+            other => return other,
+        }
+
+        // Try MCP
+        if let Some(ref mut mcp) = self.mcp {
+            match mcp.execute(name, arguments).await {
+                Err(AgentError::ToolNotFound(_)) => {}
+                other => return other,
+            }
+        }
+
+        // Try Wasm skills
+        let wasm_name = name.strip_prefix("wasm_").unwrap_or(name);
+        for skill in &self.wasm_skills {
+            if skill.name == wasm_name || format!("wasm_{}", skill.name) == name {
+                return skill.execute(arguments);
+            }
+        }
+
+        Err(AgentError::ToolNotFound(name.to_string()))
     }
 
     fn rebuild_system_prompt(&mut self) {
