@@ -23,12 +23,21 @@ pub async fn run(install_service: bool) -> Result<()> {
     println!("  Step 1: Pick your AI");
     println!();
 
-    let providers = &["OpenAI", "Anthropic", "Ollama (local)", "Custom endpoint"];
+    let providers = &[
+        "OpenAI",
+        "Anthropic",
+        "Google Gemini",
+        "AWS Bedrock",
+        "Ollama (local)",
+        "Custom endpoint",
+    ];
     let provider_idx = Select::new()
         .with_prompt("  Provider")
         .items(providers)
         .default(0)
         .interact()?;
+
+    let mut region: Option<String> = None;
 
     let (provider_name, model, base_url, needs_key) = match provider_idx {
         0 => {
@@ -58,6 +67,32 @@ pub async fn run(install_service: bool) -> Result<()> {
         2 => {
             let model: String = Input::new()
                 .with_prompt("  Model")
+                .default("gemini-2.0-flash".into())
+                .interact_text()?;
+            (
+                "gemini".to_string(),
+                model,
+                "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                true,
+            )
+        }
+        3 => {
+            let model: String = Input::new()
+                .with_prompt("  Model ID")
+                .default("anthropic.claude-sonnet-4-20250514-v2:0".into())
+                .interact_text()?;
+            let r: String = Input::new()
+                .with_prompt("  AWS region")
+                .default("us-east-1".into())
+                .interact_text()?;
+            let base = format!("https://bedrock-runtime.{r}.amazonaws.com");
+            println!("  Bedrock uses AWS credentials (access key ID : secret access key).");
+            region = Some(r);
+            ("bedrock".to_string(), model, base, true)
+        }
+        4 => {
+            let model: String = Input::new()
+                .with_prompt("  Model")
                 .default("llama3".into())
                 .interact_text()?;
             let url: String = Input::new()
@@ -66,7 +101,7 @@ pub async fn run(install_service: bool) -> Result<()> {
                 .interact_text()?;
             ("ollama".to_string(), model, url, false)
         }
-        3 => {
+        5 => {
             let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
             let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
             let has_key = Confirm::new()
@@ -80,7 +115,17 @@ pub async fn run(install_service: bool) -> Result<()> {
 
     // Store API key in vault
     if needs_key {
-        let api_key = Password::new().with_prompt("  API key").interact()?;
+        let api_key = if provider_name == "bedrock" {
+            let access_key: String = Input::new()
+                .with_prompt("  AWS Access Key ID")
+                .interact_text()?;
+            let secret_key = Password::new()
+                .with_prompt("  AWS Secret Access Key")
+                .interact()?;
+            format!("{access_key}:{secret_key}")
+        } else {
+            Password::new().with_prompt("  API key").interact()?
+        };
 
         println!("  Encrypting API key...");
 
@@ -110,11 +155,14 @@ pub async fn run(install_service: bool) -> Result<()> {
     }
 
     // Save provider config
-    let provider_config = serde_json::json!({
+    let mut provider_config = serde_json::json!({
         "provider": provider_name,
         "model": model,
         "base_url": base_url,
     });
+    if let Some(ref r) = region {
+        provider_config["region"] = serde_json::Value::String(r.clone());
+    }
     let config_path = data.join("provider.json");
     std::fs::write(
         &config_path,

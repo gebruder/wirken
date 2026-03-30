@@ -58,7 +58,7 @@ fn conversation_tool_calls() {
         arguments: r#"{"command":"curl wttr.in/London"}"#.into(),
     }]);
 
-    conv.add_tool_result("call_1", "Sunny, 22°C");
+    conv.add_tool_result("call_1", "exec", "Sunny, 22°C");
 
     assert_eq!(conv.len(), 3);
     assert_eq!(conv.messages()[2].role, Role::Tool);
@@ -531,6 +531,190 @@ fn parse_anthropic_mixed_response() {
     // Tool calls take priority over text
     let response = crate::llm::parse_anthropic_response(&body).unwrap();
     assert!(matches!(response, LlmResponse::ToolCalls(_)));
+}
+
+// ---------------------------------------------------------------------------
+// Gemini response parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_gemini_text_response() {
+    let body = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [{"text": "Hello from Gemini!"}],
+                "role": "model"
+            }
+        }]
+    });
+
+    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    match response {
+        LlmResponse::Text(text) => assert_eq!(text, "Hello from Gemini!"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_gemini_function_call_response() {
+    let body = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [{
+                    "functionCall": {
+                        "name": "exec",
+                        "args": {"command": "date"}
+                    }
+                }],
+                "role": "model"
+            }
+        }]
+    });
+
+    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    match response {
+        LlmResponse::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert!(calls[0].id.starts_with("gemini_"));
+            assert_eq!(calls[0].name, "exec");
+            assert!(calls[0].arguments.contains("date"));
+        }
+        other => panic!("expected ToolCalls, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_gemini_mixed_response() {
+    let body = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [
+                    {"text": "Let me run that."},
+                    {"functionCall": {"name": "exec", "args": {"command": "ls"}}}
+                ],
+                "role": "model"
+            }
+        }]
+    });
+
+    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    assert!(matches!(response, LlmResponse::ToolCalls(_)));
+}
+
+#[test]
+fn parse_gemini_empty_response() {
+    let body = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [{"text": ""}],
+                "role": "model"
+            }
+        }]
+    });
+
+    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    assert!(matches!(response, LlmResponse::Empty));
+}
+
+// ---------------------------------------------------------------------------
+// Bedrock response parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_bedrock_text_response() {
+    let body = serde_json::json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{"text": "Hello from Bedrock!"}]
+            }
+        },
+        "stopReason": "end_turn"
+    });
+
+    let response = crate::llm::parse_bedrock_response(&body).unwrap();
+    match response {
+        LlmResponse::Text(text) => assert_eq!(text, "Hello from Bedrock!"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_bedrock_tool_use_response() {
+    let body = serde_json::json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "toolUse": {
+                        "toolUseId": "tooluse_abc123",
+                        "name": "exec",
+                        "input": {"command": "date"}
+                    }
+                }]
+            }
+        },
+        "stopReason": "tool_use"
+    });
+
+    let response = crate::llm::parse_bedrock_response(&body).unwrap();
+    match response {
+        LlmResponse::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, "tooluse_abc123");
+            assert_eq!(calls[0].name, "exec");
+            assert!(calls[0].arguments.contains("date"));
+        }
+        other => panic!("expected ToolCalls, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_bedrock_mixed_response() {
+    let body = serde_json::json!({
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"text": "Let me check."},
+                    {"toolUse": {"toolUseId": "tu_1", "name": "exec", "input": {"command": "ls"}}}
+                ]
+            }
+        },
+        "stopReason": "tool_use"
+    });
+
+    let response = crate::llm::parse_bedrock_response(&body).unwrap();
+    assert!(matches!(response, LlmResponse::ToolCalls(_)));
+}
+
+// ---------------------------------------------------------------------------
+// LlmConfig constructors for new providers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn llm_config_gemini() {
+    let config = LlmConfig::gemini("gemini-2.0-flash");
+    assert_eq!(config.provider, "gemini");
+    assert_eq!(config.model, "gemini-2.0-flash");
+    assert!(config.base_url.contains("generativelanguage.googleapis.com"));
+    assert!(config.region.is_none());
+}
+
+#[test]
+fn llm_config_bedrock() {
+    let config = LlmConfig::bedrock("anthropic.claude-sonnet-4-20250514-v2:0", "us-west-2");
+    assert_eq!(config.provider, "bedrock");
+    assert_eq!(config.model, "anthropic.claude-sonnet-4-20250514-v2:0");
+    assert!(config.base_url.contains("us-west-2"));
+    assert_eq!(config.region.as_deref(), Some("us-west-2"));
+}
+
+#[test]
+fn llm_config_from_provider_preserves_name() {
+    let config = LlmConfig::from_provider("anthropic", "https://api.anthropic.com/v1", "claude-sonnet-4-20250514");
+    assert_eq!(config.provider, "anthropic");
+    assert_eq!(config.base_url, "https://api.anthropic.com/v1");
 }
 
 // ---------------------------------------------------------------------------

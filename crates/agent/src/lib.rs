@@ -2,6 +2,7 @@ pub mod conversation;
 pub mod error;
 pub mod llm;
 pub mod runtime;
+pub(crate) mod sigv4;
 pub mod skill;
 pub mod tool;
 

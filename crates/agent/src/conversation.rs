@@ -8,6 +8,9 @@ pub struct Message {
     /// Tool call ID (for tool results)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Tool name (for tool results — needed by Gemini's functionResponse)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     /// Tool calls requested by the assistant
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallRequest>>,
@@ -56,6 +59,7 @@ impl Conversation {
                 role: Role::System,
                 content: prompt.to_string(),
                 tool_call_id: None,
+                tool_name: None,
                 tool_calls: None,
             },
         );
@@ -67,6 +71,7 @@ impl Conversation {
             role: Role::User,
             content: content.to_string(),
             tool_call_id: None,
+            tool_name: None,
             tool_calls: None,
         });
     }
@@ -77,6 +82,7 @@ impl Conversation {
             role: Role::Assistant,
             content: content.to_string(),
             tool_call_id: None,
+            tool_name: None,
             tool_calls: None,
         });
     }
@@ -87,16 +93,18 @@ impl Conversation {
             role: Role::Assistant,
             content: String::new(),
             tool_call_id: None,
+            tool_name: None,
             tool_calls: Some(tool_calls),
         });
     }
 
     /// Add a tool result.
-    pub fn add_tool_result(&mut self, tool_call_id: &str, result: &str) {
+    pub fn add_tool_result(&mut self, tool_call_id: &str, tool_name: &str, result: &str) {
         self.messages.push(Message {
             role: Role::Tool,
             content: result.to_string(),
             tool_call_id: Some(tool_call_id.to_string()),
+            tool_name: Some(tool_name.to_string()),
             tool_calls: None,
         });
     }
