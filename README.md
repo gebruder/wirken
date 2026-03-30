@@ -127,6 +127,7 @@ This isolation is enforced at the type level. Session handles are parameterized 
 - Skill registry with Ed25519 signing (`wirken skills search/install/sign/verify`)
 - Agent runtime with LLM tool calling (OpenAI, Anthropic, Google Gemini, AWS Bedrock, Ollama, custom endpoints)
 - Built-in tools: shell exec, file read/write, directory listing, web search, image generation
+- 15 bundled skills (weather, github, git, tmux, system-info, web-fetch, docker, notes, calculator, file-search, disk-usage, process-manager, ssh, json-tools, csv-tools)
 - SKILL.md loader (compatible with OpenClaw's 52 bundled skills)
 - Encrypted credential vault with OS keychain integration
 - Append-only hash-chained audit log

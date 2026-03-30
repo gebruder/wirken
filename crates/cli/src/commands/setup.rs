@@ -169,6 +169,14 @@ pub async fn run(install_service: bool) -> Result<()> {
         serde_json::to_string_pretty(&provider_config)?,
     )?;
 
+    // Install bundled skills
+    let skills_dir = data.join("skills");
+    match wirken_agent::bundled_skills::install_bundled_skills(&skills_dir) {
+        Ok(n) if n > 0 => println!("  Installed {n} bundled skills."),
+        Ok(_) => {}
+        Err(e) => println!("  Warning: could not install bundled skills: {e}"),
+    }
+
     println!();
 
     // --- Step 2: Channels ---
