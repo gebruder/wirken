@@ -1,16 +1,30 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::conversation::Conversation;
-use crate::error::AgentError;
+use crate::error::{AgentError, PermissionDenialContext};
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
 use crate::llm_stream::StreamEvent;
 use crate::mcp::{McpConfig, McpRegistry};
 use crate::skill::{Skill, SkillLoader};
-use crate::tool::{ToolConfig, ToolRegistry};
+use crate::tool::{ToolConfig, ToolRegistry, tool_to_action};
 use crate::wasm_sandbox::WasmSkill;
+use wirken_gateway::permissions::{PermissionCheck, PermissionStore};
 
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
+
+/// Result of processing a message, containing the response and any
+/// permission denials that occurred during tool execution.
+pub struct ProcessResult {
+    /// The agent's final text response.
+    pub response: String,
+    /// Permission denials collected during this processing round.
+    /// Each denial corresponds to a tool call the LLM attempted that
+    /// was blocked by the permission model. The caller should log these
+    /// to the audit trail.
+    pub denials: Vec<PermissionDenialContext>,
+}
 
 /// The agent runtime. Processes inbound messages, calls the LLM,
 /// executes tools, and produces responses.
@@ -26,6 +40,12 @@ pub struct Agent {
     /// API key passed per-request — agent never stores it long-term.
     /// In production, the gateway's LLM proxy handles this.
     api_key: Option<String>,
+    /// Optional permission store for checking tool execution permissions.
+    /// When None, all tools execute without permission checks (standalone mode).
+    permissions: Option<Arc<std::sync::Mutex<PermissionStore>>>,
+    /// The current user message that triggered this processing round.
+    /// Captured in process_message() for inclusion in denial audit events.
+    current_trigger: Option<String>,
 }
 
 impl Agent {
@@ -58,7 +78,16 @@ impl Agent {
             wasm_skills: Vec::new(),
             system_prompt,
             api_key,
+            permissions: None,
+            current_trigger: None,
         })
+    }
+
+    /// Set the permission store for tool execution permission checks.
+    /// When set, tool calls are checked against the three-tier permission model
+    /// before execution. Denials are collected in the `ProcessResult`.
+    pub fn set_permissions(&mut self, store: Arc<std::sync::Mutex<PermissionStore>>) {
+        self.permissions = Some(store);
     }
 
     /// Load MCP servers from a config file.
@@ -94,8 +123,12 @@ impl Agent {
     /// 1. Add user message to conversation
     /// 2. Call LLM
     /// 3. If LLM requests tool calls, execute them and loop
-    /// 4. Return the final text response
-    pub async fn process_message(&mut self, user_message: &str) -> Result<String, AgentError> {
+    /// 4. Return the final text response and any permission denials
+    pub async fn process_message(
+        &mut self,
+        user_message: &str,
+    ) -> Result<ProcessResult, AgentError> {
+        self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
 
         // Compact if over budget
@@ -109,6 +142,7 @@ impl Agent {
         }
         tool_defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
         let mut rounds = 0;
+        let mut denials = Vec::new();
 
         loop {
             rounds += 1;
@@ -130,7 +164,10 @@ impl Agent {
             match response {
                 LlmResponse::Text(text) => {
                     self.conversation.add_assistant_message(&text);
-                    return Ok(text);
+                    return Ok(ProcessResult {
+                        response: text,
+                        denials,
+                    });
                 }
                 LlmResponse::ToolCalls(calls) => {
                     // Record the tool call request in conversation
@@ -145,7 +182,32 @@ impl Agent {
                             truncate(&call.arguments, 100)
                         );
 
-                        let result = self.execute_tool(&call.name, &call.arguments).await?;
+                        let result = match self
+                            .execute_tool(&call.name, &call.arguments)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(AgentError::PermissionDeniedCtx(ctx)) => {
+                                tracing::warn!(
+                                    "Permission denied: agent '{}' tool '{}' requires {}",
+                                    ctx.agent_id,
+                                    ctx.tool_name,
+                                    ctx.requested_tier.label(),
+                                );
+                                let output = format!(
+                                    "Permission denied: '{}' requires {} approval. \
+                                     This action was not executed.",
+                                    ctx.tool_name,
+                                    ctx.requested_tier.label(),
+                                );
+                                denials.push(ctx);
+                                crate::tool::ToolResult {
+                                    output,
+                                    success: false,
+                                }
+                            }
+                            Err(e) => return Err(e),
+                        };
 
                         tracing::debug!(
                             "Tool {} result (success={}): {}",
@@ -163,7 +225,10 @@ impl Agent {
                 LlmResponse::Empty => {
                     let fallback = "(no response)".to_string();
                     self.conversation.add_assistant_message(&fallback);
-                    return Ok(fallback);
+                    return Ok(ProcessResult {
+                        response: fallback,
+                        denials,
+                    });
                 }
             }
         }
@@ -171,12 +236,13 @@ impl Agent {
 
     /// Process a message with streaming. Text deltas are sent via `tx` as they arrive.
     /// Tool call rounds still execute synchronously within the loop.
-    /// Returns the final response text.
+    /// Returns the final response text and any permission denials.
     pub async fn process_message_stream(
         &mut self,
         user_message: &str,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<String, AgentError> {
+    ) -> Result<ProcessResult, AgentError> {
+        self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
 
         if self.conversation.over_budget() {
@@ -189,6 +255,7 @@ impl Agent {
         }
 
         let mut rounds = 0;
+        let mut denials = Vec::new();
 
         loop {
             rounds += 1;
@@ -230,7 +297,10 @@ impl Agent {
                     let _ = tx
                         .send(StreamEvent::Done(LlmResponse::Text(text.clone())))
                         .await;
-                    return Ok(text);
+                    return Ok(ProcessResult {
+                        response: text,
+                        denials,
+                    });
                 }
                 LlmResponse::ToolCalls(calls) => {
                     self.conversation.add_assistant_tool_calls(calls.clone());
@@ -238,7 +308,26 @@ impl Agent {
                     for call in &calls {
                         tracing::info!("Agent {} executing tool: {}", self.id, call.name);
 
-                        let result = self.execute_tool(&call.name, &call.arguments).await?;
+                        let result = match self
+                            .execute_tool(&call.name, &call.arguments)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(AgentError::PermissionDeniedCtx(ctx)) => {
+                                let output = format!(
+                                    "Permission denied: '{}' requires {} approval. \
+                                     This action was not executed.",
+                                    ctx.tool_name,
+                                    ctx.requested_tier.label(),
+                                );
+                                denials.push(ctx);
+                                crate::tool::ToolResult {
+                                    output,
+                                    success: false,
+                                }
+                            }
+                            Err(e) => return Err(e),
+                        };
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
@@ -248,7 +337,10 @@ impl Agent {
                     let fallback = "(no response)".to_string();
                     self.conversation.add_assistant_message(&fallback);
                     let _ = tx.send(StreamEvent::Done(LlmResponse::Empty)).await;
-                    return Ok(fallback);
+                    return Ok(ProcessResult {
+                        response: fallback,
+                        denials,
+                    });
                 }
             }
         }
@@ -279,11 +371,37 @@ impl Agent {
     }
 
     /// Execute a tool call, trying built-in tools, then MCP, then Wasm skills.
+    /// Permission checks are applied when a PermissionStore is configured.
     async fn execute_tool(
         &mut self,
         name: &str,
         arguments: &str,
     ) -> Result<crate::tool::ToolResult, AgentError> {
+        // Permission check before execution
+        if let Some(ref perms) = self.permissions {
+            let args: serde_json::Value =
+                serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+            if let Some(action) = tool_to_action(name, &args) {
+                let check = {
+                    let store = perms.lock().map_err(|e| {
+                        AgentError::PermissionDenied(format!("permission store lock: {e}"))
+                    })?;
+                    store.check(&action, &self.id).map_err(|e| {
+                        AgentError::PermissionDenied(format!("permission check failed: {e}"))
+                    })?
+                };
+                if let PermissionCheck::NeedsApproval { tier } = check {
+                    return Err(AgentError::PermissionDeniedCtx(PermissionDenialContext {
+                        tool_name: name.to_string(),
+                        action,
+                        requested_tier: tier,
+                        agent_id: self.id.clone(),
+                        trigger_message: self.current_trigger.clone(),
+                    }));
+                }
+            }
+        }
+
         // Try built-in tools first
         match self.tools.execute(name, arguments).await {
             Err(AgentError::ToolNotFound(_)) => {}

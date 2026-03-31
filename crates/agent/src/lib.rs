@@ -11,8 +11,8 @@ pub mod skill;
 pub mod tool;
 pub mod wasm_sandbox;
 
-pub use error::AgentError;
-pub use runtime::Agent;
+pub use error::{AgentError, PermissionDenialContext};
+pub use runtime::{Agent, ProcessResult};
 pub use skill::SkillLoader;
 
 #[cfg(test)]

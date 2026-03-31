@@ -24,8 +24,35 @@ pub enum SandboxMode {
     /// No sandboxing — direct host execution.
     #[default]
     Off,
-    /// Only the `exec` tool runs in a container.
+    /// Only the `exec` tool runs in a Docker container (default runc runtime).
     ExecOnly,
+    /// Only the `exec` tool runs in a gVisor container (runsc runtime).
+    /// Provides kernel attack surface reduction: syscalls are intercepted by
+    /// gVisor's Sentry rather than reaching the host kernel.
+    GVisor,
+}
+
+impl SandboxMode {
+    /// Parse a sandbox mode from a config string.
+    pub fn from_str_config(s: &str) -> Self {
+        match s {
+            "exec-only" => Self::ExecOnly,
+            "gvisor" => Self::GVisor,
+            "off" | "" => Self::Off,
+            _ => {
+                tracing::warn!("Unknown sandbox_mode '{s}', defaulting to off");
+                Self::Off
+            }
+        }
+    }
+
+    /// The OCI runtime name to pass to Docker, or None for the default (runc).
+    pub(crate) fn runtime_name(self) -> Option<String> {
+        match self {
+            Self::GVisor => Some("runsc".to_string()),
+            _ => None,
+        }
+    }
 }
 
 /// Configuration for the sandbox.
@@ -89,6 +116,7 @@ impl DockerSandbox {
                 memory: Some(MEMORY_LIMIT),
                 pids_limit: Some(PIDS_LIMIT),
                 auto_remove: Some(true),
+                runtime: self.config.mode.runtime_name(),
                 ..Default::default()
             }),
             ..Default::default()
@@ -238,6 +266,22 @@ pub async fn detect_runtime() -> Option<String> {
         return Some("docker".into());
     }
     None
+}
+
+/// Detect if gVisor (runsc) is available as a Docker runtime.
+/// Checks both that Docker is running and that `runsc` is listed in its runtimes.
+pub async fn detect_gvisor() -> bool {
+    let Ok(docker) = Docker::connect_with_local_defaults() else {
+        return false;
+    };
+    let Ok(info) = docker.info().await else {
+        return false;
+    };
+    // Docker info returns runtimes as a map. Check if "runsc" is a key.
+    if let Some(runtimes) = info.runtimes {
+        return runtimes.contains_key("runsc");
+    }
+    false
 }
 
 fn short_id() -> String {

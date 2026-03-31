@@ -16,6 +16,17 @@ pub enum PermissionTier {
     Tier3,
 }
 
+impl PermissionTier {
+    /// Human-readable label for the tier.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Tier1 => "tier1",
+            Self::Tier2 => "tier2",
+            Self::Tier3 => "tier3",
+        }
+    }
+}
+
 /// An action that requires permission checking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {

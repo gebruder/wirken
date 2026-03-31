@@ -107,6 +107,29 @@ pub async fn run() -> Result<()> {
         println!("    Not created yet (starts on first event).");
     }
 
+    // Check sandbox runtimes
+    print_check("Docker runtime", "sandbox");
+    match wirken_agent::sandbox::detect_runtime().await {
+        Some(rt) => {
+            print_ok();
+            println!("    {rt}");
+
+            // Check gVisor
+            print_check("gVisor (runsc)", "sandbox");
+            if wirken_agent::sandbox::detect_gvisor().await {
+                print_ok();
+                println!("    Available as Docker runtime");
+            } else {
+                print_ok();
+                println!("    Not installed (optional)");
+            }
+        }
+        None => {
+            print_ok();
+            println!("    Not available (sandbox features disabled)");
+        }
+    }
+
     println!();
     if issues == 0 {
         println!("  All checks passed.");

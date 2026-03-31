@@ -6,6 +6,7 @@ use std::process::Stdio;
 
 use crate::error::AgentError;
 use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
+use wirken_gateway::permissions::Action;
 
 /// Tool definition for the LLM (OpenAI function calling format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -720,4 +721,31 @@ fn urlencoding_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&result).into_owned()
+}
+
+/// Map a built-in tool invocation to a permission Action for tier checking.
+/// Returns None for tools that don't map to a permission-checkable action
+/// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
+pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Action> {
+    match tool_name {
+        "exec" => {
+            let cmd = args
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            let pattern = cmd
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            Some(Action::ShellExec { pattern })
+        }
+        "read_file" | "list_files" => Some(Action::WorkspaceFileAccess),
+        "write_file" => Some(Action::WorkspaceFileAccess),
+        "web_search" => Some(Action::WebSearch),
+        "generate_image" => Some(Action::NetworkRequest {
+            domain: "api.openai.com".to_string(),
+        }),
+        _ => None,
+    }
 }

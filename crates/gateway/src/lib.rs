@@ -3,6 +3,7 @@ pub mod agent_config;
 pub mod config;
 pub mod cron;
 pub mod error;
+pub mod injection_detect;
 pub mod org;
 pub mod permissions;
 pub mod rate_limit;

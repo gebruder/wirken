@@ -5833,6 +5833,7 @@ name = "wirken-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "cron",
  "ed25519-dalek",

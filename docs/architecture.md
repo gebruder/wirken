@@ -73,6 +73,8 @@ pub trait Adapter<C: Channel> {
 
 This is not a runtime permission check that can be bypassed — it is a type constraint that the compiler enforces. A Telegram adapter binary physically cannot construct a `SessionHandle<Discord>` because the type parameter is sealed.
 
+> For a complete mapping of which guarantees are compile-time vs. runtime, see [Enforcement Model](enforcement-model.md).
+
 **IPC transport:** Unix domain sockets via `tokio::net::UnixStream` (tokio 1.50). No TCP, no HTTP between adapter and gateway — eliminates network attack surface.
 
 **Process management:** Gateway spawns adapters via `tokio::process::Command`. Each adapter is a separate Rust binary (compiled from the same workspace). Dead adapters detected by UDS EOF + heartbeat timeout, restarted with exponential backoff.

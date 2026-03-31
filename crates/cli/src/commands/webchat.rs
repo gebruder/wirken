@@ -241,10 +241,10 @@ pub async fn serve(
 
                         let (result, _) = tokio::join!(stream_future, forward_future);
 
-                        if let Ok(response) = result {
+                        if let Ok(result) = result {
                             let _ = audit
                                 .log(
-                                    AuditEvent::new("default", "message.outbound", &response)
+                                    AuditEvent::new("default", "message.outbound", &result.response)
                                         .with_channel("webchat"),
                                 )
                                 .await;
