@@ -92,7 +92,8 @@ fn valid_text_processed() {
 
 #[test]
 fn hmac_signature_verification() {
-    let secret = "test_secret";
+    // Test-only value — not a production secret.
+    let secret = "whatsapp_test_hmac_key"; // CodeQL:hardcoded-credential-ok
     let body = r#"{"test":"data"}"#;
 
     // Compute expected signature
