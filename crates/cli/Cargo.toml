@@ -28,6 +28,7 @@ ed25519-dalek = { workspace = true }
 reqwest = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
+console = "0.16"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

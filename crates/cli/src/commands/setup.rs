@@ -39,7 +39,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                                     .context("Failed to open credential store")?;
                             if store.retrieve(key_name).is_err() {
                                 let api_key =
-                                    Password::new().with_prompt("  API key").interact()?;
+                                    super::read_secret("  API key: ")?;
                                 let secret = VaultSecret::new(api_key);
                                 let provider = org
                                     .provider
@@ -210,12 +210,10 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 let access_key: String = Input::new()
                     .with_prompt("  AWS Access Key ID")
                     .interact_text()?;
-                let secret_key = Password::new()
-                    .with_prompt("  AWS Secret Access Key")
-                    .interact()?;
+                let secret_key = super::read_secret("  AWS Secret Access Key: ")?;
                 format!("{access_key}:{secret_key}")
             } else {
-                Password::new().with_prompt("  API key").interact()?
+                super::read_secret("  API key: ")?
             };
 
             println!("  Encrypting API key...");
@@ -409,9 +407,7 @@ async fn setup_telegram_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
-    let bot_token = Password::new()
-        .with_prompt("  Telegram bot token")
-        .interact()?;
+    let bot_token = super::read_secret("  Telegram bot token: ")?;
 
     register_channel("telegram", &bot_token, cfg, data).await
 }
@@ -420,9 +416,7 @@ async fn setup_discord_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
-    let bot_token = Password::new()
-        .with_prompt("  Discord bot token")
-        .interact()?;
+    let bot_token = super::read_secret("  Discord bot token: ")?;
 
     register_channel("discord", &bot_token, cfg, data).await
 }
@@ -431,13 +425,9 @@ async fn setup_slack_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
-    let bot_token = Password::new()
-        .with_prompt("  Slack bot token (xoxb-...)")
-        .interact()?;
+    let bot_token = super::read_secret("  Slack bot token (xoxb-...): ")?;
 
-    let app_token = Password::new()
-        .with_prompt("  Slack app token (xapp-...)")
-        .interact()?;
+    let app_token = super::read_secret("  Slack app token (xapp-...): ")?;
 
     // Register with the bot token as the primary
     register_channel("slack", &bot_token, cfg, data).await?;
@@ -463,9 +453,7 @@ async fn setup_teams_channel(
         .with_prompt("  Microsoft App ID")
         .interact_text()?;
 
-    let app_password = Password::new()
-        .with_prompt("  Microsoft App Password")
-        .interact()?;
+    let app_password = super::read_secret("  Microsoft App Password: ")?;
 
     // Register with the app password as the primary token
     register_channel("teams", &app_password, cfg, data).await?;
@@ -495,7 +483,7 @@ async fn setup_matrix_channel(
         .with_prompt("  Username (e.g., @wirken:matrix.org)")
         .interact_text()?;
 
-    let password = Password::new().with_prompt("  Password").interact()?;
+    let password = super::read_secret("  Password: ")?;
 
     // Store password as the primary token
     register_channel("matrix", &password, cfg, data).await?;
@@ -563,9 +551,7 @@ async fn setup_google_chat_channel(
     println!("  Google Chat bots use a service account for API access.");
     println!("  Create a bot at https://developers.google.com/workspace/chat");
 
-    let token = Password::new()
-        .with_prompt("  Service account bearer token")
-        .interact()?;
+    let token = super::read_secret("  Service account bearer token: ")?;
 
     register_channel("google-chat", &token, cfg, data).await?;
 
@@ -580,9 +566,7 @@ async fn setup_imessage_channel(
     println!("  iMessage requires BlueBubbles Server running on a Mac.");
     println!("  See https://bluebubbles.app for setup.");
 
-    let server_password = Password::new()
-        .with_prompt("  BlueBubbles server password")
-        .interact()?;
+    let server_password = super::read_secret("  BlueBubbles server password: ")?;
 
     let bb_url: String = dialoguer::Input::new()
         .with_prompt("  BlueBubbles server URL")
