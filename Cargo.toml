@@ -41,7 +41,7 @@ ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 argon2 = "0.5"
 sha2 = "0.10"
 hmac = "0.12"
-rand = "0.8"
+rand = "0.10"
 
 # Keychain
 security-framework = "3.7"
