@@ -1,6 +1,6 @@
 # Wirken
 
-Wirken is a secure, model-agnostic AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to an append-only, hash-chained audit trail before execution. Ships as a single static binary.
+Wirken is a secure, model-agnostic AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to an append-only, hash-chained audit trail before execution. Ships as a single static binary.
 
 ## Install and run
 
@@ -74,6 +74,7 @@ graph LR
         S[Slack]
         TM[Teams]
         M[Matrix]
+        W[WhatsApp]
     end
 
     subgraph Gateway["Gateway Core"]
@@ -94,6 +95,7 @@ graph LR
     S -- "UDS · Ed25519 · Cap'n Proto" --> Registry
     TM -- "UDS · Ed25519 · Cap'n Proto" --> Registry
     M -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    W -- "UDS · Ed25519 · Cap'n Proto" --> Registry
 
     Agent -- HTTPS --> LLM[LLM Providers]
     Vault -- encrypt/decrypt --> Agent
@@ -119,7 +121,7 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | — | Credential security | XChaCha20-Poly1305 encryption at rest, keyed from OS keychain (macOS Keychain / libsecret / age fallback). Per-credential expiry and rotation. `secrecy` + `zeroize` — logging or serializing a secret is a compile error. Key material zeroed after use. |
 | — | Transport security | HTTPS enforced at transport level for all LLM and Matrix connections (non-localhost). Cap'n Proto IPC with 16MB frame limit, 512M word traversal limit, 64-level nesting limit. |
 | — | Supply chain | Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push. |
-| — | Confidential inference | Tinfoil and Privatemode providers run open-source LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC). Prompts encrypted end-to-end, inaccessible to the service provider. |
+| — | Confidential inference | Tinfoil and Privatemode providers run open-source LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC). Prompts encrypted end-to-end, protected against software attacks on infrastructure. |
 
 ## Enterprise deployment
 
@@ -129,13 +131,13 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - **Tamper-evident audit trail.** All actions logged before execution. SHA-256 hash chain detects modification or deletion. SIEM forwarding sends events to Datadog, Splunk, or any webhook in real time for centralized monitoring.
 - **Graduated permissions.** Three-tier model. Workspace file access and web search are always allowed. Shell exec and external file access require first-use approval. Destructive operations, credential access, and skill installs always require explicit approval. Approvals expire after 30 days.
 - **Sandboxed execution.** Optional Docker sandbox runs agent commands in ephemeral containers with no network access, memory and PID limits, and a non-root user.
-- **Confidential inference.** Tinfoil and Privatemode providers run LLMs inside hardware enclaves (AMD SEV-SNP, Intel TDX). Prompts are encrypted end-to-end and inaccessible to the inference provider.
+- **Confidential inference.** Tinfoil and Privatemode providers run LLMs inside hardware enclaves (AMD SEV-SNP, Intel TDX). Prompts are encrypted end-to-end and protected against software attacks on infrastructure.
 - **Encrypted credentials.** XChaCha20-Poly1305 vault keyed from the OS keychain. Per-credential expiry and rotation. No plaintext export.
 - **Centralized policy.** `wirken setup --org https://wirken.corp.example.com` pulls provider, SIEM, MCP, and permission config from a company endpoint. Developers get grab-and-go setup. IT manages one config. Policy refreshes on every `wirken run`.
 
 ## Status
 
-14 crates, 238 tests, 8 LLM providers, 5 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
+14 crates, 238 tests, 8 LLM providers, 6 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
 
 ## Documentation
 
