@@ -40,7 +40,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 argon2 = "0.5"
 sha2 = "0.10"
-hmac = "0.12"
+hmac = "0.13"
 rand = "0.8"
 
 # Keychain
