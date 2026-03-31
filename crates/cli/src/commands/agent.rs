@@ -83,7 +83,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
 
     println!();
     match agent.process_message(message).await {
-        Ok(response) => println!("{response}"),
+        Ok(result) => println!("{}", result.response),
         Err(e) => {
             eprintln!("  Error: {e}");
             std::process::exit(1);
@@ -142,7 +142,7 @@ async fn send_with_agent_config(
 
     println!();
     match agent.process_message(message).await {
-        Ok(response) => println!("{response}"),
+        Ok(result) => println!("{}", result.response),
         Err(e) => {
             eprintln!("  Error: {e}");
             std::process::exit(1);

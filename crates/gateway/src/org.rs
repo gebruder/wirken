@@ -76,7 +76,7 @@ pub struct OrgConfig {
 /// Organization-level permission controls.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OrgPermissions {
-    /// Sandbox mode: "off", "exec-only"
+    /// Sandbox mode: "off", "exec-only", "gvisor"
     #[serde(default)]
     pub sandbox_mode: Option<String>,
 

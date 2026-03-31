@@ -178,7 +178,11 @@ impl SiemForwarder {
 fn action_to_severity(action: &str) -> &'static str {
     if action.contains("error") || action.contains("fail") {
         "error"
-    } else if action.contains("auth") || action.contains("credential") {
+    } else if action.contains("permission.denied")
+        || action.contains("threat_flagged")
+        || action.contains("auth")
+        || action.contains("credential")
+    {
         "warn"
     } else {
         "info"

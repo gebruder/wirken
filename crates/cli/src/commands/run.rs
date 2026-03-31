@@ -11,6 +11,7 @@ use wirken_agent::llm::LlmConfig;
 use wirken_audit::{AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
+use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
 use wirken_ipc::perform_gateway_handshake;
@@ -339,8 +340,15 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 if let Some(agent_mutex) = scheduler_agents.get(&job.agent_id) {
                     let mut agent = agent_mutex.lock().await;
                     match agent.process_message(&job.message).await {
-                        Ok(resp) => {
-                            tracing::info!("Cron response: {}", truncate(&resp, 100))
+                        Ok(result) => {
+                            tracing::info!("Cron response: {}", truncate(&result.response, 100));
+                            for denial in &result.denials {
+                                tracing::warn!(
+                                    "Cron permission denied: agent '{}' tool '{}'",
+                                    denial.agent_id,
+                                    denial.tool_name,
+                                );
+                            }
                         }
                         Err(e) => tracing::error!("Cron job failed: {e}"),
                     }
@@ -356,12 +364,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!("  Gateway running. Press Ctrl+C to stop.");
     println!();
 
+    // --- Injection detector (shared, stateless) ---
+    let detector = Arc::new(InjectionDetector::new());
+
     // --- Accept adapter connections ---
     let accept_registry = registry.clone();
     let accept_agents = agents.clone();
     let accept_audit = audit.clone();
     let accept_sessions = sessions.clone();
     let accept_router = router.clone();
+    let accept_detector = detector.clone();
 
     let accept_handle = tokio::spawn(async move {
         loop {
@@ -372,10 +384,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let au = accept_audit.clone();
                     let sess = accept_sessions.clone();
                     let rtr = accept_router.clone();
+                    let det = accept_detector.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_adapter_connection(stream, reg, ag, au, sess, rtr).await
+                            handle_adapter_connection(stream, reg, ag, au, sess, rtr, det).await
                         {
                             tracing::error!("Adapter connection error: {e}");
                         }
@@ -424,6 +437,7 @@ async fn handle_adapter_connection(
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
+    detector: Arc<InjectionDetector>,
 ) -> Result<()> {
     let (mut reader, mut writer) = split_stream(stream);
 
@@ -466,6 +480,7 @@ async fn handle_adapter_connection(
         audit.clone(),
         sessions,
         router,
+        detector,
     )
     .await;
 
@@ -489,6 +504,7 @@ async fn message_loop(
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
+    detector: Arc<InjectionDetector>,
 ) -> Result<()> {
     loop {
         let msg = match reader.read_message().await {
@@ -585,13 +601,27 @@ async fn message_loop(
                 );
 
                 // Audit inbound
-                audit
-                    .log(
-                        AuditEvent::new(&sender_id, "message.inbound", &text)
-                            .with_channel(&channel)
-                            .with_session(&conversation_id),
-                    )
-                    .await?;
+                let mut inbound_event = AuditEvent::new(&sender_id, "message.inbound", &text)
+                    .with_channel(&channel)
+                    .with_session(&conversation_id);
+
+                // Scan for prompt injection patterns
+                if let Some(threat) = detector.scan(&text) {
+                    let detail = threat.to_detail_json();
+                    inbound_event = inbound_event.with_detail(detail.clone());
+
+                    // Emit a separate threat event for SIEM visibility
+                    let _ = audit
+                        .log(
+                            AuditEvent::new(&sender_id, "message.threat_flagged", &text)
+                                .with_channel(&channel)
+                                .with_session(&conversation_id)
+                                .with_detail(detail),
+                        )
+                        .await;
+                }
+
+                audit.log(inbound_event).await?;
 
                 // Resolve session
                 let session = {
@@ -609,14 +639,14 @@ async fn message_loop(
                     .unwrap_or_else(|_| "default".into());
 
                 // Process with the routed agent
-                let response = match agents.get(&agent_id) {
+                let (response, denials) = match agents.get(&agent_id) {
                     Some(agent_mutex) => {
                         let mut ag = agent_mutex.lock().await;
                         match ag.process_message(&text).await {
-                            Ok(response) => response,
+                            Ok(result) => (result.response, result.denials),
                             Err(e) => {
                                 tracing::error!("Agent '{agent_id}' error: {e}");
-                                format!("Error processing message: {e}")
+                                (format!("Error processing message: {e}"), Vec::new())
                             }
                         }
                     }
@@ -625,14 +655,37 @@ async fn message_loop(
                         match agents.get("default") {
                             Some(default_mutex) => {
                                 let mut ag = default_mutex.lock().await;
-                                ag.process_message(&text)
-                                    .await
-                                    .unwrap_or_else(|e| format!("Error: {e}"))
+                                match ag.process_message(&text).await {
+                                    Ok(result) => (result.response, result.denials),
+                                    Err(e) => (format!("Error: {e}"), Vec::new()),
+                                }
                             }
-                            None => "No agent available to process this message.".into(),
+                            None => (
+                                "No agent available to process this message.".into(),
+                                Vec::new(),
+                            ),
                         }
                     }
                 };
+
+                // Log permission denials to audit
+                for denial in &denials {
+                    let detail = serde_json::json!({
+                        "tool": denial.tool_name,
+                        "action": format!("{:?}", denial.action),
+                        "requested_tier": denial.requested_tier.label(),
+                        "agent_id": denial.agent_id,
+                        "trigger_message": denial.trigger_message,
+                    });
+                    let _ = audit
+                        .log(
+                            AuditEvent::new(&denial.agent_id, "permission.denied", &denial.tool_name)
+                                .with_channel(&channel)
+                                .with_session(&conversation_id)
+                                .with_detail(detail),
+                        )
+                        .await;
+                }
 
                 tracing::info!("[{}] -> {}", channel, truncate(&response, 80));
 

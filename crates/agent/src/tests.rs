@@ -817,3 +817,178 @@ fn agent_conversation_tracking() {
     // System prompt is set on creation
     assert!(agent.conversation_len() > 0);
 }
+
+// ---------------------------------------------------------------------------
+// Sandbox modes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sandbox_mode_from_str_config() {
+    use crate::sandbox::SandboxMode;
+
+    assert_eq!(SandboxMode::from_str_config("off"), SandboxMode::Off);
+    assert_eq!(SandboxMode::from_str_config(""), SandboxMode::Off);
+    assert_eq!(
+        SandboxMode::from_str_config("exec-only"),
+        SandboxMode::ExecOnly
+    );
+    assert_eq!(SandboxMode::from_str_config("gvisor"), SandboxMode::GVisor);
+    // Unknown falls back to Off
+    assert_eq!(SandboxMode::from_str_config("invalid"), SandboxMode::Off);
+}
+
+#[test]
+fn sandbox_mode_gvisor_runtime_name() {
+    use crate::sandbox::SandboxMode;
+
+    // Off and ExecOnly use default Docker runtime (runc)
+    assert_eq!(SandboxMode::Off.runtime_name(), None);
+    assert_eq!(SandboxMode::ExecOnly.runtime_name(), None);
+    // GVisor uses runsc
+    assert_eq!(
+        SandboxMode::GVisor.runtime_name(),
+        Some("runsc".to_string())
+    );
+}
+
+#[test]
+fn sandbox_config_defaults() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+
+    let config = SandboxConfig::default();
+    assert_eq!(config.mode, SandboxMode::Off);
+    assert!(!config.network);
+    assert_eq!(config.timeout_secs, 300);
+}
+
+#[test]
+fn sandbox_gvisor_constraints_match_docker() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+
+    // Both ExecOnly and GVisor should use the same resource limits.
+    // The difference is only the OCI runtime — limits are constants in sandbox.rs.
+    let docker_config = SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        ..Default::default()
+    };
+    let gvisor_config = SandboxConfig {
+        mode: SandboxMode::GVisor,
+        ..Default::default()
+    };
+
+    assert_eq!(docker_config.image, gvisor_config.image);
+    assert_eq!(docker_config.timeout_secs, gvisor_config.timeout_secs);
+    assert_eq!(docker_config.network, gvisor_config.network);
+}
+
+// ---------------------------------------------------------------------------
+// tool_to_action mapping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tool_to_action_exec() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::Action;
+
+    let args = serde_json::json!({"command": "curl https://example.com"});
+    let action = tool_to_action("exec", &args).unwrap();
+    assert!(matches!(action, Action::ShellExec { pattern } if pattern == "curl"));
+}
+
+#[test]
+fn tool_to_action_exec_empty_command() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::Action;
+
+    let args = serde_json::json!({"command": ""});
+    let action = tool_to_action("exec", &args).unwrap();
+    assert!(matches!(action, Action::ShellExec { pattern } if pattern.is_empty()));
+}
+
+#[test]
+fn tool_to_action_read_file() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::Action;
+
+    let args = serde_json::json!({"path": "README.md"});
+    let action = tool_to_action("read_file", &args).unwrap();
+    assert!(matches!(action, Action::WorkspaceFileAccess));
+}
+
+#[test]
+fn tool_to_action_web_search() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::Action;
+
+    let args = serde_json::json!({"query": "rust async"});
+    let action = tool_to_action("web_search", &args).unwrap();
+    assert!(matches!(action, Action::WebSearch));
+}
+
+#[test]
+fn tool_to_action_generate_image() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::Action;
+
+    let args = serde_json::json!({"prompt": "a cat"});
+    let action = tool_to_action("generate_image", &args).unwrap();
+    assert!(matches!(action, Action::NetworkRequest { .. }));
+}
+
+#[test]
+fn tool_to_action_unknown_returns_none() {
+    use crate::tool::tool_to_action;
+
+    let args = serde_json::json!({});
+    assert!(tool_to_action("some_mcp_tool", &args).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Permission tier labels
+// ---------------------------------------------------------------------------
+
+#[test]
+fn permission_tier_labels() {
+    use wirken_gateway::permissions::PermissionTier;
+
+    assert_eq!(PermissionTier::Tier1.label(), "tier1");
+    assert_eq!(PermissionTier::Tier2.label(), "tier2");
+    assert_eq!(PermissionTier::Tier3.label(), "tier3");
+}
+
+// ---------------------------------------------------------------------------
+// Permission denial context
+// ---------------------------------------------------------------------------
+
+#[test]
+fn denial_context_display() {
+    use crate::error::PermissionDenialContext;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let ctx = PermissionDenialContext {
+        tool_name: "exec".into(),
+        action: Action::ShellExec {
+            pattern: "curl".into(),
+        },
+        requested_tier: PermissionTier::Tier2,
+        agent_id: "default".into(),
+        trigger_message: Some("fetch that URL".into()),
+    };
+
+    let display = format!("{ctx}");
+    assert!(display.contains("exec"));
+    assert!(display.contains("tier2"));
+    assert!(display.contains("ShellExec"));
+}
+
+#[test]
+fn process_result_empty_denials() {
+    use crate::runtime::ProcessResult;
+
+    let result = ProcessResult {
+        response: "hello".into(),
+        denials: Vec::new(),
+    };
+    assert_eq!(result.response, "hello");
+    assert!(result.denials.is_empty());
+}
