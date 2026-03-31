@@ -405,9 +405,10 @@ fn extract_header(request: &str, name: &str) -> String {
     let lower = name.to_lowercase();
     for line in request.lines() {
         if let Some((key, value)) = line.split_once(':')
-            && key.trim().to_lowercase() == lower {
-                return value.trim().to_string();
-            }
+            && key.trim().to_lowercase() == lower
+        {
+            return value.trim().to_string();
+        }
     }
     String::new()
 }
