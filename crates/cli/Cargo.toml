@@ -19,6 +19,10 @@ wirken-adapter-discord = { path = "../adapter-discord" }
 wirken-adapter-slack = { path = "../adapter-slack" }
 wirken-adapter-teams = { path = "../adapter-teams" }
 wirken-adapter-matrix = { path = "../adapter-matrix" }
+wirken-adapter-whatsapp = { path = "../adapter-whatsapp" }
+wirken-adapter-signal = { path = "../adapter-signal" }
+wirken-adapter-google-chat = { path = "../adapter-google-chat" }
+wirken-adapter-imessage = { path = "../adapter-imessage" }
 capnp = { workspace = true }
 ed25519-dalek = { workspace = true }
 reqwest = { workspace = true }

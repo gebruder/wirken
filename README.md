@@ -1,6 +1,6 @@
 # Wirken
 
-Wirken is a secure, model-agnostic AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to an append-only, hash-chained audit trail before execution. Ships as a single static binary.
+Wirken is a secure, model-agnostic AI agent gateway. It connects to the messaging platforms you already use — Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage — and routes conversations to an LLM agent that can execute tools on your behalf. Written in Rust. Each channel runs as an isolated process with its own Ed25519 identity, communicating with the gateway over Unix domain sockets using Cap'n Proto. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to an append-only, hash-chained audit trail before execution. Ships as a single static binary.
 
 ## Install and run
 
@@ -76,6 +76,9 @@ graph LR
         TM[Teams]
         M[Matrix]
         W[WhatsApp]
+        SG[Signal]
+        GC[Google Chat]
+        IM[iMessage]
     end
 
     Adapters -- "UDS · Ed25519 · Cap'n Proto" --> Registry
@@ -139,14 +142,14 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 
 ## Status
 
-14 crates, 280 tests, 8 LLM providers, 6 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
+17 crates, 316 tests, 8 LLM providers, 9 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
 
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
 - [CLI reference](docs/cli.md)
 - [Configuration reference](docs/configuration.md)
-- [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix)
+- [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage)
 - [Multi-agent setup](docs/multi-agent.md)
 - [Skills guide](docs/skills.md) (markdown skills, Wasm skills, registry)
 - [MCP setup](docs/mcp.md)
@@ -168,7 +171,7 @@ See [docs/migration.md](docs/migration.md) for a detailed migration guide.
 Wirken is a Rust workspace. All crates compile and test independently:
 
 ```bash
-cargo test              # run all 280 tests
+cargo test              # run all 316 tests
 cargo test -p wirken-vault    # test one crate
 cargo build -p wirken-cli     # build the binary
 ```

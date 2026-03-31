@@ -116,6 +116,30 @@ impl Channel for Teams {
     }
 }
 
+/// Signal channel marker.
+pub struct Signal;
+impl Channel for Signal {
+    fn id() -> &'static str {
+        "signal"
+    }
+}
+
+/// iMessage channel marker.
+pub struct IMessage;
+impl Channel for IMessage {
+    fn id() -> &'static str {
+        "imessage"
+    }
+}
+
+/// Google Chat channel marker.
+pub struct GoogleChat;
+impl Channel for GoogleChat {
+    fn id() -> &'static str {
+        "google-chat"
+    }
+}
+
 /// Generic channel marker for testing and dynamic dispatch.
 pub struct Generic;
 impl Channel for Generic {
