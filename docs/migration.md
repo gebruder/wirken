@@ -16,7 +16,7 @@ No compilation step. No conversion. The files are identical.
 
 ### Code skills
 
-A minority of skills on ClawHub are actual JavaScript/TypeScript that runs as a custom tool. These are not yet supported in Wirken's MVP. When gVisor container support ships, they will run in sandboxed containers with the same JSON-RPC interface.
+A minority of skills on ClawHub are actual JavaScript/TypeScript that runs as a custom tool. These run in sandboxed Docker or gVisor containers with the same JSON-RPC interface. Set `sandbox_mode` to `"exec-only"` or `"gvisor"` in the org config to enable.
 
 ## Credentials
 
@@ -68,5 +68,4 @@ OpenClaw's agent uses bootstrap files: `AGENTS.md`, `SOUL.md`, `TOOLS.md`, `USER
 
 - Voice/TTS
 - Mobile companion apps
-- Code skill sandboxing (gVisor/Wasmtime)
 - Matrix E2EE
