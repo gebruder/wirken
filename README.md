@@ -80,13 +80,17 @@ graph LR
     subgraph Gateway["Gateway Core"]
         Registry[Adapter Registry] --> Router
         Router --> Sessions
-        Router --> Permissions
         Router --> RateLimit[Rate Limiter]
-        Router --> Agent[Agent Runtime]
+        Router --> Detect[Injection Detector]
+        Detect --> Agent[Agent Runtime]
+        Agent -- check --> Permissions
         Agent --> Tools
         Agent --> Skills
         Agent --> MCP[MCP Servers]
-        Tools --> Audit[Audit Log]
+        Tools --> Sandbox[Docker / gVisor]
+        Detect -.-> Audit[Audit Log]
+        Permissions -.-> Audit
+        Tools -.-> Audit
         Vault --> Keychain
     end
 
@@ -99,6 +103,7 @@ graph LR
 
     Agent -- HTTPS --> LLM[LLM Providers]
     Vault -- encrypt/decrypt --> Agent
+    Audit -.-> SIEM[SIEM / Webhook]
 ```
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
