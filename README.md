@@ -69,6 +69,7 @@ wirken setup --install-service
 ```mermaid
 graph LR
     subgraph Adapters["Channel Adapters · separate processes"]
+        direction TB
         T[Telegram]
         D[Discord]
         S[Slack]
