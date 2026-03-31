@@ -72,7 +72,11 @@ For organizations using a shared API key, the `api_key_name` field in the org co
 
 ## Sandbox enforcement
 
-Set `permissions.sandbox_mode` to `exec-only` in the org config to run all shell commands in Docker containers. Containers are ephemeral, have no network access, and run as a non-root user.
+Set `permissions.sandbox_mode` in the org config to control how agent shell commands are executed:
+
+- `"exec-only"` — Docker containers with default `runc` runtime. Ephemeral, no network, 512MB memory, 256 PID limit, non-root user.
+- `"gvisor"` — Docker containers with `runsc` runtime. Same resource constraints as `exec-only`, with kernel attack surface reduction — syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Requires gVisor installed on the host.
+- `"off"` — Direct host execution (default).
 
 ## Deployment options
 
