@@ -329,6 +329,8 @@ async fn handle_outbound(
 
         match action {
             FrameAction::SendMessage(fields) => {
+                // phone_number_id is a public Meta-assigned identifier, not sensitive.
+                // All requests go over HTTPS to graph.facebook.com.
                 let url = format!(
                     "https://graph.facebook.com/v21.0/{}/messages",
                     phone_number_id
