@@ -104,6 +104,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open session store")?,
     ));
 
+    // --- Open permission store ---
+    let permissions = Arc::new(std::sync::Mutex::new(
+        wirken_gateway::permissions::PermissionStore::open(&cfg.permissions_db_path())
+            .context("Failed to open permission store")?,
+    ));
+
     // --- Setup router and create agents ---
     let router = Arc::new(Router::new());
     let mut agents_map: HashMap<String, Mutex<Agent>> = HashMap::new();
@@ -154,6 +160,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             std::fs::create_dir_all(&workspace)?;
 
             let mut agent = Agent::new(agent_cfg.id.clone(), workspace, llm, agent_api_key)?;
+            agent.set_permissions(permissions.clone());
 
             // Load per-agent skills + shared skills
             let agent_skills = cfg.agent_skills_dir(&agent_cfg.id);
@@ -211,6 +218,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         std::fs::create_dir_all(&workspace)?;
 
         let mut default_agent = Agent::new("default".into(), workspace, llm_config, api_key)?;
+        default_agent.set_permissions(permissions.clone());
 
         let skills_dir = cfg.data_dir.join("skills");
         if skills_dir.is_dir() {
