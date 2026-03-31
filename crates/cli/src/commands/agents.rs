@@ -76,7 +76,7 @@ pub async fn add() -> Result<()> {
 
     // Store API key in vault with agent-specific credential name
     let api_key_credential = if needs_key {
-        let api_key = Password::new().with_prompt("  API key").interact()?;
+        let api_key = super::read_secret("  API key: ")?;
 
         let cred_name = format!("{id}-{provider}-key");
         let keychain = probe_keychain(&cfg.data_dir, || {

@@ -12,9 +12,7 @@ pub async fn add(channel: &str) -> Result<()> {
     let cfg = config();
     let data = data_dir()?;
 
-    let token = Password::new()
-        .with_prompt(format!("  {channel} bot token"))
-        .interact()?;
+    let token = super::read_secret(&format!("  {channel} bot token: "))?;
 
     register_channel(channel, &token, &cfg, &data).await?;
 

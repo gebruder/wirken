@@ -66,9 +66,7 @@ pub async fn list() -> Result<()> {
 pub async fn rotate(name: &str) -> Result<()> {
     let cfg = config();
 
-    let new_value = Password::new()
-        .with_prompt(format!("  New value for '{name}'"))
-        .interact()?;
+    let new_value = super::read_secret(&format!("  New value for '{name}': "))?;
 
     let keychain = probe_keychain(&cfg.data_dir, || {
         Password::new()
