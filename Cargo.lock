@@ -5694,6 +5694,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "wirken-adapter-whatsapp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "capnp",
+ "chrono",
+ "hmac",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wirken-ipc",
+]
+
+[[package]]
 name = "wirken-agent"
 version = "0.1.0"
 dependencies = [

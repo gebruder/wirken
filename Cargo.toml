@@ -10,6 +10,7 @@ members = [
     "crates/adapter-slack",
     "crates/adapter-teams",
     "crates/adapter-matrix",
+    "crates/adapter-whatsapp",
     "crates/agent",
     "crates/cli",
     "crates/webchat",
