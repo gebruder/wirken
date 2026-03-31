@@ -88,6 +88,49 @@ In rooms, the bot responds when mentioned by display name or MXID. In DMs, it re
 
 E2EE is not yet supported (blocked by a dependency version conflict).
 
+## Signal
+
+```bash
+wirken channel add signal
+```
+
+Signal requires [signal-cli](https://github.com/AsamK/signal-cli) running as a JSON-RPC daemon on the same machine.
+
+1. Install signal-cli and register a phone number
+2. Start signal-cli in daemon mode: `signal-cli -u +15551234567 daemon --json-rpc`
+3. Enter the registered phone number and signal-cli endpoint when prompted
+
+The adapter polls signal-cli's JSON-RPC interface for incoming messages and sends outbound messages via the `send` method.
+
+## Google Chat
+
+```bash
+wirken channel add google-chat
+```
+
+You need a Google Workspace service account with the Chat API enabled.
+
+1. Create a Chat bot at [developers.google.com/workspace/chat](https://developers.google.com/workspace/chat)
+2. Configure the bot's connection settings to use an HTTP endpoint
+3. Create a service account and generate a bearer token
+4. Enter the token when prompted
+
+The adapter listens on `127.0.0.1:3980` for webhook POSTs from Google Chat and sends replies via the Chat REST API.
+
+## iMessage (BlueBubbles)
+
+```bash
+wirken channel add imessage
+```
+
+iMessage requires [BlueBubbles Server](https://bluebubbles.app) running on a Mac with iMessage configured.
+
+1. Install and configure BlueBubbles Server on a Mac
+2. Note the server password and URL (default: `http://localhost:1234`)
+3. Enter the server password and URL when prompted
+
+The adapter registers a webhook with BlueBubbles for incoming messages and sends replies via the BlueBubbles REST API. Messages from yourself (`isFromMe`) are filtered out.
+
 ## Managing channels
 
 ```bash

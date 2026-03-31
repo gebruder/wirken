@@ -18,7 +18,9 @@ pub use transport::{FrameReader, FrameWriter};
 
 // Re-export channel markers for use by adapter crates
 pub mod channels {
-    pub use super::channel::{Discord, Generic, Matrix, Slack, Teams, Telegram};
+    pub use super::channel::{
+        Discord, Generic, GoogleChat, IMessage, Matrix, Signal, Slack, Teams, Telegram,
+    };
 }
 
 #[cfg(test)]

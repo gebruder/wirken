@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use wirken_adapter_discord::DiscordAdapter;
+use wirken_adapter_google_chat::GoogleChatAdapter;
+use wirken_adapter_imessage::IMessageAdapter;
 use wirken_adapter_matrix::MatrixAdapter;
+use wirken_adapter_signal::SignalAdapter;
 use wirken_adapter_slack::SlackAdapter;
 use wirken_adapter_teams::TeamsAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
@@ -127,9 +130,101 @@ pub async fn run(channel: &str) -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("Matrix adapter error: {e}"))?;
         }
+        "whatsapp" => {
+            let app_secret_name = format!("{channel}-app-secret");
+            let (app_secret_val, _) = store
+                .retrieve(&app_secret_name)
+                .context("No app secret found for 'whatsapp'.")?;
+            let app_secret = app_secret_val.expose().to_string();
+
+            let phone_id_name = format!("{channel}-phone-number-id");
+            let (phone_id_val, _) = store
+                .retrieve(&phone_id_name)
+                .context("No phone number ID found for 'whatsapp'.")?;
+            let phone_number_id = phone_id_val.expose().to_string();
+
+            let verify_token_name = format!("{channel}-verify-token");
+            let (verify_val, _) = store
+                .retrieve(&verify_token_name)
+                .context("No verify token found for 'whatsapp'.")?;
+            let verify_token = verify_val.expose().to_string();
+
+            let listen_port: u16 = std::env::var("WIRKEN_WHATSAPP_PORT")
+                .unwrap_or_else(|_| "3979".into())
+                .parse()
+                .unwrap_or(3979);
+
+            let adapter = wirken_adapter_whatsapp::WhatsAppAdapter::new(
+                identity,
+                bot_token,
+                phone_number_id,
+                verify_token,
+                app_secret,
+                listen_port,
+            );
+            adapter
+                .run(&socket_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("WhatsApp adapter error: {e}"))?;
+        }
+        "signal" => {
+            let endpoint_name = format!("{channel}-endpoint");
+            let endpoint = store
+                .retrieve(&endpoint_name)
+                .map(|(s, _)| s.expose().to_string())
+                .unwrap_or_else(|_| "http://localhost:8080/api/v1/rpc".into());
+
+            let phone_name = format!("{channel}-phone-number");
+            let (phone_val, _) = store
+                .retrieve(&phone_name)
+                .context("No phone number found for 'signal'.")?;
+            let phone_number = phone_val.expose().to_string();
+
+            let adapter = SignalAdapter::new(identity, endpoint, phone_number);
+            adapter
+                .run(&socket_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
+        }
+        "google-chat" => {
+            let listen_port: u16 = std::env::var("WIRKEN_GOOGLE_CHAT_PORT")
+                .unwrap_or_else(|_| "3980".into())
+                .parse()
+                .unwrap_or(3980);
+
+            let adapter = GoogleChatAdapter::new(identity, bot_token, listen_port);
+            adapter
+                .run(&socket_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Google Chat adapter error: {e}"))?;
+        }
+        "imessage" => {
+            let url_name = format!("{channel}-bluebubbles-url");
+            let bb_url = store
+                .retrieve(&url_name)
+                .map(|(s, _)| s.expose().to_string())
+                .unwrap_or_else(|_| "http://localhost:1234".into());
+
+            let pw_name = format!("{channel}-server-password");
+            let (pw_val, _) = store
+                .retrieve(&pw_name)
+                .context("No BlueBubbles server password found for 'imessage'.")?;
+            let server_password = pw_val.expose().to_string();
+
+            let listen_port: u16 = std::env::var("WIRKEN_IMESSAGE_PORT")
+                .unwrap_or_else(|_| "3981".into())
+                .parse()
+                .unwrap_or(3981);
+
+            let adapter = IMessageAdapter::new(identity, bb_url, server_password, listen_port);
+            adapter
+                .run(&socket_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("iMessage adapter error: {e}"))?;
+        }
         other => {
             anyhow::bail!(
-                "Unknown adapter: '{other}'. Supported: telegram, discord, slack, teams, matrix"
+                "Unknown adapter: '{other}'. Supported: telegram, discord, slack, teams, matrix, whatsapp, signal, google-chat, imessage"
             );
         }
     }

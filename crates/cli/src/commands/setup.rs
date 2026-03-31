@@ -282,6 +282,9 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         "Slack",
         "Microsoft Teams",
         "Matrix",
+        "Signal",
+        "Google Chat",
+        "iMessage (BlueBubbles)",
         "Skip for now",
     ];
     let mut selected_channels = Vec::new();
@@ -314,7 +317,19 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 setup_matrix_channel(&cfg, &data).await?;
                 selected_channels.push("matrix");
             }
-            5 => break,
+            5 => {
+                setup_signal_channel(&cfg, &data).await?;
+                selected_channels.push("signal");
+            }
+            6 => {
+                setup_google_chat_channel(&cfg, &data).await?;
+                selected_channels.push("google-chat");
+            }
+            7 => {
+                setup_imessage_channel(&cfg, &data).await?;
+                selected_channels.push("imessage");
+            }
+            8 => break,
             _ => unreachable!(),
         }
 
@@ -501,5 +516,108 @@ async fn setup_matrix_channel(
         .context("Failed to store username")?;
 
     println!("  matrix: credentials encrypted, E2EE enabled.");
+    Ok(())
+}
+
+async fn setup_signal_channel(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+) -> Result<()> {
+    println!("  Signal requires signal-cli running as a JSON-RPC daemon.");
+    println!("  See https://github.com/AsamK/signal-cli for setup.");
+
+    let phone: String = dialoguer::Input::new()
+        .with_prompt("  Registered phone number (e.g., +15551234567)")
+        .interact_text()?;
+
+    let endpoint: String = dialoguer::Input::new()
+        .with_prompt("  signal-cli JSON-RPC endpoint")
+        .default("http://localhost:8080/api/v1/rpc".into())
+        .interact_text()?;
+
+    // Use endpoint as the primary "token" for registration
+    register_channel("signal", &endpoint, cfg, data).await?;
+
+    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    let phone_secret = wirken_vault::VaultSecret::new(phone);
+    store
+        .store("signal-phone-number", "signal", &phone_secret, None, None)
+        .context("Failed to store phone number")?;
+
+    let endpoint_secret = wirken_vault::VaultSecret::new(endpoint);
+    store
+        .store("signal-endpoint", "signal", &endpoint_secret, None, None)
+        .context("Failed to store endpoint")?;
+
+    println!("  signal: credentials encrypted.");
+    Ok(())
+}
+
+async fn setup_google_chat_channel(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+) -> Result<()> {
+    println!("  Google Chat bots use a service account for API access.");
+    println!("  Create a bot at https://developers.google.com/workspace/chat");
+
+    let token = Password::new()
+        .with_prompt("  Service account bearer token")
+        .interact()?;
+
+    register_channel("google-chat", &token, cfg, data).await?;
+
+    println!("  google-chat: token encrypted.");
+    Ok(())
+}
+
+async fn setup_imessage_channel(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+) -> Result<()> {
+    println!("  iMessage requires BlueBubbles Server running on a Mac.");
+    println!("  See https://bluebubbles.app for setup.");
+
+    let server_password = Password::new()
+        .with_prompt("  BlueBubbles server password")
+        .interact()?;
+
+    let bb_url: String = dialoguer::Input::new()
+        .with_prompt("  BlueBubbles server URL")
+        .default("http://localhost:1234".into())
+        .interact_text()?;
+
+    // Use server password as primary token
+    register_channel("imessage", &server_password, cfg, data).await?;
+
+    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    let url_secret = wirken_vault::VaultSecret::new(bb_url);
+    store
+        .store(
+            "imessage-bluebubbles-url",
+            "imessage",
+            &url_secret,
+            None,
+            None,
+        )
+        .context("Failed to store BlueBubbles URL")?;
+
+    let pw_secret = wirken_vault::VaultSecret::new(server_password);
+    store
+        .store(
+            "imessage-server-password",
+            "imessage",
+            &pw_secret,
+            None,
+            None,
+        )
+        .context("Failed to store server password")?;
+
+    println!("  imessage: credentials encrypted.");
     Ok(())
 }
