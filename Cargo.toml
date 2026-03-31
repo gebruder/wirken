@@ -83,7 +83,7 @@ tempfile = "3"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
-cron = "0.15"
+cron = "0.16"
 
 # Error handling
 thiserror = "2"
