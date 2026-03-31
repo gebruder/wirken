@@ -77,33 +77,28 @@ graph LR
         W[WhatsApp]
     end
 
+    Adapters -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+
     subgraph Gateway["Gateway Core"]
         Registry[Adapter Registry] --> Router
-        Router --> Sessions
-        Router --> RateLimit[Rate Limiter]
         Router --> Detect[Injection Detector]
         Detect --> Agent[Agent Runtime]
         Agent -- check --> Permissions
         Agent --> Tools
         Agent --> Skills
         Agent --> MCP[MCP Servers]
-        Tools --> Sandbox[Docker / gVisor]
-        Detect -.-> Audit[Audit Log]
-        Permissions -.-> Audit
-        Tools -.-> Audit
+        Tools --> Sandbox[Docker / gVisor / Wasm]
         Vault --> Keychain
     end
 
-    T -- "UDS · Ed25519 · Cap'n Proto" --> Registry
-    D -- "UDS · Ed25519 · Cap'n Proto" --> Registry
-    S -- "UDS · Ed25519 · Cap'n Proto" --> Registry
-    TM -- "UDS · Ed25519 · Cap'n Proto" --> Registry
-    M -- "UDS · Ed25519 · Cap'n Proto" --> Registry
-    W -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    subgraph Audit Trail
+        Audit[Audit Log] -.-> SIEM[SIEM / Webhook]
+    end
 
     Agent -- HTTPS --> LLM[LLM Providers]
-    Vault -- encrypt/decrypt --> Agent
-    Audit -.-> SIEM[SIEM / Webhook]
+    Detect -.-> Audit
+    Permissions -.-> Audit
+    Tools -.-> Audit
 ```
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
