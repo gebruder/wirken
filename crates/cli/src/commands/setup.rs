@@ -80,13 +80,13 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         println!();
 
         let providers = &[
-            "OpenAI",
+            "Ollama (local)",
             "Anthropic",
+            "OpenAI",
             "Google Gemini",
             "AWS Bedrock",
             "Tinfoil (confidential)",
             "Privatemode (confidential)",
-            "Ollama (local)",
             "Custom endpoint",
         ];
         let provider_idx = Select::new()
@@ -97,121 +97,54 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
         let mut region: Option<String> = None;
 
+        // Helper: ask for key, list models, store key, return (provider, model, url)
+        // Used by all cloud providers for a consistent key → model → encrypt flow.
+        let store_key_and_pick_model = |api_key: String,
+                                        provider_name: &str,
+                                        _base_url: &str,
+                                        default_model: &str,
+                                        models: Vec<String>,
+                                        cfg: &wirken_gateway::config::GatewayConfig,
+                                        data: &std::path::Path|
+         -> Result<String> {
+            println!("  Encrypting API key...");
+            let keychain = probe_keychain(data, || {
+                Password::new()
+                    .with_prompt("  Vault passphrase (for encrypting credentials)")
+                    .interact()
+                    .unwrap_or_default()
+            });
+            let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                .context("Failed to open credential store")?;
+            let secret = VaultSecret::new(api_key);
+            let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+            store.store(
+                &format!("{provider_name}-api-key"),
+                provider_name,
+                &secret,
+                None,
+                Some(rotation_due),
+            )?;
+            println!("  API key encrypted and stored.");
+            let model = if models.is_empty() {
+                Input::new()
+                    .with_prompt("  Model")
+                    .default(default_model.into())
+                    .interact_text()?
+            } else {
+                let idx = Select::new()
+                    .with_prompt("  Model")
+                    .items(&models)
+                    .default(0)
+                    .interact()?;
+                models[idx].clone()
+            };
+            Ok(model)
+        };
+
         let (provider_name, model, base_url, needs_key) = match provider_idx {
             0 => {
-                let model: String = Input::new()
-                    .with_prompt("  Model")
-                    .default("gpt-4o".into())
-                    .interact_text()?;
-                (
-                    "openai".to_string(),
-                    model,
-                    "https://api.openai.com/v1".to_string(),
-                    true,
-                )
-            }
-            1 => {
-                let api_key = super::read_secret("  API key: ")?;
-                let models = super::list_anthropic_models(&api_key).await;
-                let model = if models.is_empty() {
-                    Input::new()
-                        .with_prompt("  Model")
-                        .default("claude-sonnet-4-20250514".into())
-                        .interact_text()?
-                } else {
-                    let idx = Select::new()
-                        .with_prompt("  Model")
-                        .items(&models)
-                        .default(0)
-                        .interact()?;
-                    models[idx].clone()
-                };
-                // Store key early so it's not asked again below
-                println!("  Encrypting API key...");
-                let keychain = probe_keychain(&data, || {
-                    Password::new()
-                        .with_prompt("  Vault passphrase (for encrypting credentials)")
-                        .interact()
-                        .unwrap_or_default()
-                });
-                let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
-                    .context("Failed to open credential store")?;
-                let secret = VaultSecret::new(api_key);
-                let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
-                store.store(
-                    "anthropic-api-key",
-                    "anthropic",
-                    &secret,
-                    None,
-                    Some(rotation_due),
-                )?;
-                println!("  API key encrypted and stored.");
-                (
-                    "anthropic".to_string(),
-                    model,
-                    "https://api.anthropic.com/v1".to_string(),
-                    false, // key already stored
-                )
-            }
-            2 => {
-                let model: String = Input::new()
-                    .with_prompt("  Model")
-                    .default("gemini-2.0-flash".into())
-                    .interact_text()?;
-                (
-                    "gemini".to_string(),
-                    model,
-                    "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                    true,
-                )
-            }
-            3 => {
-                let model: String = Input::new()
-                    .with_prompt("  Model ID")
-                    .default("anthropic.claude-sonnet-4-20250514-v2:0".into())
-                    .interact_text()?;
-                let r: String = Input::new()
-                    .with_prompt("  AWS region")
-                    .default("us-east-1".into())
-                    .interact_text()?;
-                let base = format!("https://bedrock-runtime.{r}.amazonaws.com");
-                println!("  Bedrock uses AWS credentials (access key ID : secret access key).");
-                region = Some(r);
-                ("bedrock".to_string(), model, base, true)
-            }
-            4 => {
-                println!(
-                    "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
-                );
-                println!("  Get an API key at https://dash.tinfoil.sh");
-                let model: String = Input::new()
-                    .with_prompt("  Model")
-                    .default("llama3-3-70b".into())
-                    .interact_text()?;
-                (
-                    "openai".to_string(), // OpenAI-compatible API
-                    model,
-                    "https://inference.tinfoil.sh/v1".to_string(),
-                    true,
-                )
-            }
-            5 => {
-                println!(
-                    "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
-                );
-                println!("  Get an API key at https://www.privatemode.ai");
-                let model: String = Input::new()
-                    .with_prompt("  Model")
-                    .default("gpt-oss-120b".into())
-                    .interact_text()?;
-                (
-                    "openai".to_string(), // OpenAI-compatible API
-                    model,
-                    "https://api.privatemode.ai/v1".to_string(),
-                    true,
-                )
-            }
-            6 => {
+                // Ollama
                 let url = "http://localhost:11434/v1".to_string();
                 match super::probe_ollama_version(&url).await {
                     Some(version) => println!("  Ollama {version} detected."),
@@ -238,14 +171,148 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 };
                 ("ollama".to_string(), model, url, false)
             }
+            1 => {
+                // Anthropic
+                let api_key = super::read_secret("  API key: ")?;
+                let models = super::list_anthropic_models(&api_key).await;
+                let model = store_key_and_pick_model(
+                    api_key,
+                    "anthropic",
+                    "https://api.anthropic.com/v1",
+                    "claude-sonnet-4-20250514",
+                    models,
+                    &cfg,
+                    &data,
+                )?;
+                (
+                    "anthropic".to_string(),
+                    model,
+                    "https://api.anthropic.com/v1".to_string(),
+                    false,
+                )
+            }
+            2 => {
+                // OpenAI
+                let api_key = super::read_secret("  API key: ")?;
+                let models = super::list_openai_models("https://api.openai.com/v1", &api_key).await;
+                let model = store_key_and_pick_model(
+                    api_key,
+                    "openai",
+                    "https://api.openai.com/v1",
+                    "gpt-4o",
+                    models,
+                    &cfg,
+                    &data,
+                )?;
+                (
+                    "openai".to_string(),
+                    model,
+                    "https://api.openai.com/v1".to_string(),
+                    false,
+                )
+            }
+            3 => {
+                // Google Gemini
+                let api_key = super::read_secret("  API key: ")?;
+                let models = super::list_gemini_models(&api_key).await;
+                let model = store_key_and_pick_model(
+                    api_key,
+                    "gemini",
+                    "https://generativelanguage.googleapis.com/v1beta",
+                    "gemini-2.0-flash",
+                    models,
+                    &cfg,
+                    &data,
+                )?;
+                (
+                    "gemini".to_string(),
+                    model,
+                    "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                    false,
+                )
+            }
+            4 => {
+                // AWS Bedrock
+                let r: String = Input::new()
+                    .with_prompt("  AWS region")
+                    .default("us-east-1".into())
+                    .interact_text()?;
+                let base = format!("https://bedrock-runtime.{r}.amazonaws.com");
+                println!("  Bedrock uses AWS credentials (access key ID : secret access key).");
+                let model: String = Input::new()
+                    .with_prompt("  Model ID")
+                    .default("anthropic.claude-sonnet-4-20250514-v2:0".into())
+                    .interact_text()?;
+                region = Some(r);
+                ("bedrock".to_string(), model, base, true)
+            }
+            5 => {
+                // Tinfoil
+                println!(
+                    "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
+                );
+                println!("  Get an API key at https://dash.tinfoil.sh");
+                let api_key = super::read_secret("  API key: ")?;
+                let models =
+                    super::list_openai_models("https://inference.tinfoil.sh/v1", &api_key).await;
+                let model = store_key_and_pick_model(
+                    api_key,
+                    "openai",
+                    "https://inference.tinfoil.sh/v1",
+                    "llama3-3-70b",
+                    models,
+                    &cfg,
+                    &data,
+                )?;
+                (
+                    "openai".to_string(),
+                    model,
+                    "https://inference.tinfoil.sh/v1".to_string(),
+                    false,
+                )
+            }
+            6 => {
+                // Privatemode
+                println!(
+                    "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
+                );
+                println!("  Get an API key at https://www.privatemode.ai");
+                let api_key = super::read_secret("  API key: ")?;
+                let models =
+                    super::list_openai_models("https://api.privatemode.ai/v1", &api_key).await;
+                let model = store_key_and_pick_model(
+                    api_key,
+                    "openai",
+                    "https://api.privatemode.ai/v1",
+                    "gpt-oss-120b",
+                    models,
+                    &cfg,
+                    &data,
+                )?;
+                (
+                    "openai".to_string(),
+                    model,
+                    "https://api.privatemode.ai/v1".to_string(),
+                    false,
+                )
+            }
             7 => {
+                // Custom
                 let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
-                let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
                 let has_key = Confirm::new()
                     .with_prompt("  Requires API key?")
                     .default(true)
                     .interact()?;
-                ("custom".to_string(), model, url, has_key)
+                let model = if has_key {
+                    let api_key = super::read_secret("  API key: ")?;
+                    let models = super::list_openai_models(&url, &api_key).await;
+                    store_key_and_pick_model(
+                        api_key, "custom", &url, "default", models, &cfg, &data,
+                    )?
+                } else {
+                    Input::new().with_prompt("  Model ID").interact_text()?
+                };
+                ("custom".to_string(), model, url, false)
             }
             _ => unreachable!(),
         };

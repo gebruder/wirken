@@ -131,6 +131,80 @@ pub async fn list_anthropic_models(api_key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// List models available from an OpenAI-compatible API.
+pub async fn list_openai_models(base_url: &str, api_key: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let url = format!("{base_url}/models");
+    let resp = match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut models: Vec<String> = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models
+}
+
+/// List models available from the Google Gemini API.
+pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={api_key}");
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    m.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read a secret value (API key, token) with asterisk masking.
 /// Unlike dialoguer's Password which shows nothing, this prints one
 /// asterisk per character so the user can see that paste/typing worked.
