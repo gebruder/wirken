@@ -46,6 +46,26 @@ An adapter process crashed. Check the logs with `RUST_LOG=wirken=debug wirken ru
 - Check provider connectivity: `wirken doctor`
 - Try with debug logging: `RUST_LOG=wirken=debug wirken ask -m "hello"`
 
+**With Ollama:**
+- Small local models (e.g., llama3.2) may hallucinate tool calls, causing the agent to loop without producing a response. Tools are disabled by default for Ollama to avoid this.
+- Non-streaming requests (used by channel adapters) wait for the full response before replying. This can take 10-30 seconds depending on your hardware. WebChat uses streaming and feels faster.
+- Verify Ollama is running: the gateway prints the detected version at startup (e.g., `Ollama version: 0.19.0`).
+
+## Vault passphrase mismatch
+
+**"decryption failed: aead::Error"**
+
+Credentials were stored with a different vault passphrase than the one currently being used. This happens when `wirken setup`, `wirken channel add`, and `wirken run` are run with different passphrases.
+
+Fix: re-add the affected channel or credential using the same passphrase you use for `wirken run`:
+
+```bash
+wirken channel remove slack
+wirken channel add slack
+```
+
+Use the same passphrase consistently across all commands.
+
 ## Tool execution fails
 
 **"access denied: path is outside the workspace"**

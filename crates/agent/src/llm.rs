@@ -184,6 +184,7 @@ impl LlmClient {
 
         let http = reqwest::Client::builder()
             .https_only(!is_localhost)
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| AgentError::Http(format!("HTTP client: {e}")))?;
 
@@ -222,6 +223,7 @@ impl LlmClient {
             "messages": messages_json,
             "max_tokens": self.config.max_tokens,
             "temperature": self.config.temperature,
+            "stream": false,
         });
 
         if !tools.is_empty() {
