@@ -30,7 +30,7 @@ repository = "https://github.com/gebruder/wirken"
 tokio = { version = "1.50", features = ["full"] }
 
 # HTTP
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 reqwest-eventsource = "0.6"
 
 # SQLite

@@ -65,11 +65,18 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         let cred_name = format!("{provider}-api-key");
         match store.retrieve(&cred_name) {
             Ok((secret, _)) => Some(secret.expose().to_string()),
-            Err(_) => None,
+            Err(e) => {
+                tracing::warn!("Failed to retrieve API key '{cred_name}': {e}");
+                None
+            }
         }
     } else {
         None
     };
+
+    if api_key.is_none() && provider != "ollama" {
+        anyhow::bail!("No API key available for '{provider}'. Run `wirken setup` to configure.");
+    }
 
     let workspace = cfg.data_dir.join("workspace");
     std::fs::create_dir_all(&workspace)?;
