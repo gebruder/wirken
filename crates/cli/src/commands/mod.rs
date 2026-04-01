@@ -132,9 +132,11 @@ pub async fn list_anthropic_models(api_key: &str) -> Vec<String> {
 }
 
 /// List models available from an OpenAI-compatible API.
+/// Filters to chat-capable models (gpt-*, o1-*, o3-*, o4-*) and excludes
+/// legacy/embedding/audio models to keep the picker manageable.
 pub async fn list_openai_models(base_url: &str, api_key: &str) -> Vec<String> {
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
         .build()
     {
         Ok(c) => c,
@@ -163,10 +165,28 @@ pub async fn list_openai_models(base_url: &str, api_key: &str) -> Vec<String> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                .filter(|id| {
+                    (id.starts_with("gpt-")
+                        || id.starts_with("o1")
+                        || id.starts_with("o3")
+                        || id.starts_with("o4"))
+                        && !id.contains("audio")
+                        && !id.contains("realtime")
+                        && !id.contains("transcribe")
+                        && !id.contains("tts")
+                        && !id.contains("instruct")
+                        && !id.contains("search")
+                        && !id.contains("codex")
+                        && !id.contains("-202") // drop dated snapshots like gpt-4o-2024-08-06
+                        && !id.starts_with("gpt-3.5")
+                        && !id.contains("-16k")
+                        && !id.contains("-chat-latest")
+                })
                 .collect()
         })
         .unwrap_or_default();
     models.sort();
+    models.dedup();
     models
 }
 
