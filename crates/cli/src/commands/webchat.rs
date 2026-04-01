@@ -201,7 +201,9 @@ pub async fn serve(
 
                 // SSE headers — stream tokens as they arrive
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
-                if stream.write_all(header.as_bytes()).await.is_err() {
+                if stream.write_all(header.as_bytes()).await.is_err()
+                    || stream.flush().await.is_err()
+                {
                     return;
                 }
 
@@ -243,13 +245,27 @@ pub async fn serve(
 
                         let (result, _) = tokio::join!(stream_future, forward_future);
 
-                        if let Ok(result) = result {
-                            let _ = audit
-                                .log(
-                                    AuditEvent::new("default", "message.outbound", &result.response)
+                        match result {
+                            Ok(result) => {
+                                let _ = audit
+                                    .log(
+                                        AuditEvent::new(
+                                            "default",
+                                            "message.outbound",
+                                            &result.response,
+                                        )
                                         .with_channel("webchat"),
-                                )
-                                .await;
+                                    )
+                                    .await;
+                            }
+                            Err(e) => {
+                                let err = format!(
+                                    "data: {}\n\n",
+                                    serde_json::json!({"type": "error", "text": e.to_string()})
+                                );
+                                let _ = stream.write_all(err.as_bytes()).await;
+                                let _ = stream.flush().await;
+                            }
                         }
                     }
                     None => {
