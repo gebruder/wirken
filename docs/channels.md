@@ -45,10 +45,10 @@ You need two tokens: a bot token (`xoxb-...`) and an app token (`xapp-...`).
 
 1. Create a new app at [api.slack.com/apps](https://api.slack.com/apps) (choose "From scratch")
 2. Go to **OAuth & Permissions**, add bot scopes: `chat:write`, `app_mentions:read`, `im:history`, `im:read`, `im:write`
-3. Go to **Socket Mode** and enable it
+3. Go to **Socket Mode** and enable it (must be enabled before configuring Event Subscriptions)
 4. Go to **Basic Information** > **App-Level Tokens**, create a token with `connections:write` scope, copy it (`xapp-...`)
 5. Go to **App Home** > **Messages Tab**, check "Allow users to send Slash commands and messages from the messages tab" (required for DMs)
-6. Go to **Event Subscriptions**, enable events, and subscribe to bot events: `message.im`, `app_mention`
+6. Go to **Event Subscriptions**, enable events, and subscribe to bot events: `message.im`, `app_mention`. Socket Mode must be on first or this page will require a Request URL and won't save.
 7. Install the app to your workspace, copy the **Bot User OAuth Token** from OAuth & Permissions (`xoxb-...`)
 8. Run `wirken channel add slack` and paste both tokens when prompted
 
