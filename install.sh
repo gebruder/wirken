@@ -102,6 +102,19 @@ install_binary() {
     # Try user directory first
     mkdir -p "$INSTALL_DIR" 2>/dev/null || true
 
+    # Check for existing install and compare versions
+    EXISTING="${INSTALL_DIR}/wirken"
+    if [ -x "$EXISTING" ]; then
+        CURRENT=$("$EXISTING" --version 2>/dev/null | awk '{print $NF}')
+        TAG_VERSION=$(echo "$VERSION" | sed 's/^v//')
+        if [ "$CURRENT" = "$TAG_VERSION" ]; then
+            echo "wirken ${CURRENT} is already installed."
+            rm -rf "$TMPDIR"
+            return
+        fi
+        echo "Upgrading wirken ${CURRENT} -> ${TAG_VERSION}"
+    fi
+
     if [ -w "$INSTALL_DIR" ]; then
         mv "$TMPFILE" "${INSTALL_DIR}/wirken"
         echo "Installed to ${INSTALL_DIR}/wirken"
