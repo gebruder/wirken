@@ -36,7 +36,10 @@ impl AuditWriter {
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let path = db_path.to_path_buf();
-        let forwarder = siem_config.map(SiemForwarder::new);
+        let forwarder = match siem_config {
+            Some(cfg) => Some(SiemForwarder::new(cfg).map_err(AuditError::SiemConfig)?),
+            None => None,
+        };
         let handle = tokio::spawn(flush_loop(rx, path, forwarder));
 
         Ok((Self { tx }, handle))
