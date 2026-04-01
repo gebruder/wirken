@@ -27,21 +27,24 @@ impl Router {
 
     /// Add a routing binding.
     pub fn bind(&self, binding: RouteBinding) {
-        self.bindings.write().unwrap().push(binding);
+        self.bindings
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(binding);
     }
 
     /// Remove all bindings for a channel.
     pub fn unbind_channel(&self, channel: &str) {
         self.bindings
             .write()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .retain(|b| b.channel != channel);
     }
 
     /// Resolve which agent should handle a message from a given channel + conversation.
     /// Checks specific conversation matches first, then wildcard "*" bindings.
     pub fn resolve(&self, channel: &str, conversation_id: &str) -> Result<String, GatewayError> {
-        let bindings = self.bindings.read().unwrap();
+        let bindings = self.bindings.read().unwrap_or_else(|e| e.into_inner());
 
         // First pass: exact conversation match
         for binding in bindings.iter() {
@@ -65,7 +68,10 @@ impl Router {
 
     /// List all current bindings.
     pub fn list_bindings(&self) -> Vec<RouteBinding> {
-        self.bindings.read().unwrap().clone()
+        self.bindings
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
