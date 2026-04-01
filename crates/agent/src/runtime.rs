@@ -136,11 +136,16 @@ impl Agent {
             self.conversation.compact();
         }
 
-        let mut tool_defs = self.tools.definitions();
-        if let Some(ref mcp) = self.mcp {
-            tool_defs.extend(mcp.definitions());
-        }
-        tool_defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
+        let tool_defs = if self.llm.config().tools_enabled {
+            let mut defs = self.tools.definitions();
+            if let Some(ref mcp) = self.mcp {
+                defs.extend(mcp.definitions());
+            }
+            defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
+            defs
+        } else {
+            Vec::new()
+        };
         let mut rounds = 0;
         let mut denials = Vec::new();
 
@@ -182,10 +187,7 @@ impl Agent {
                             truncate(&call.arguments, 100)
                         );
 
-                        let result = match self
-                            .execute_tool(&call.name, &call.arguments)
-                            .await
-                        {
+                        let result = match self.execute_tool(&call.name, &call.arguments).await {
                             Ok(result) => result,
                             Err(AgentError::PermissionDeniedCtx(ctx)) => {
                                 tracing::warn!(
@@ -249,10 +251,15 @@ impl Agent {
             self.conversation.compact();
         }
 
-        let mut tool_defs = self.tools.definitions();
-        if let Some(ref mcp) = self.mcp {
-            tool_defs.extend(mcp.definitions());
-        }
+        let tool_defs = if self.llm.config().tools_enabled {
+            let mut defs = self.tools.definitions();
+            if let Some(ref mcp) = self.mcp {
+                defs.extend(mcp.definitions());
+            }
+            defs
+        } else {
+            Vec::new()
+        };
 
         let mut rounds = 0;
         let mut denials = Vec::new();
@@ -308,10 +315,7 @@ impl Agent {
                     for call in &calls {
                         tracing::info!("Agent {} executing tool: {}", self.id, call.name);
 
-                        let result = match self
-                            .execute_tool(&call.name, &call.arguments)
-                            .await
-                        {
+                        let result = match self.execute_tool(&call.name, &call.arguments).await {
                             Ok(result) => result,
                             Err(AgentError::PermissionDeniedCtx(ctx)) => {
                                 let output = format!(

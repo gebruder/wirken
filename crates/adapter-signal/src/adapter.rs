@@ -125,9 +125,7 @@ pub(crate) fn extract_messages(json: &serde_json::Value) -> Option<Vec<SignalInb
     let mut messages = Vec::new();
 
     for envelope_wrapper in envelopes {
-        let envelope = envelope_wrapper
-            .get("envelope")
-            .unwrap_or(envelope_wrapper);
+        let envelope = envelope_wrapper.get("envelope").unwrap_or(envelope_wrapper);
 
         let source = envelope
             .get("source")
@@ -244,11 +242,7 @@ async fn handle_outbound(
                     "id": 1
                 });
 
-                let resp = http
-                    .post(&signal_cli_endpoint)
-                    .json(&body)
-                    .send()
-                    .await;
+                let resp = http.post(&signal_cli_endpoint).json(&body).send().await;
 
                 let (success, msg_id, error) = match resp {
                     Ok(r) if r.status().is_success() => {

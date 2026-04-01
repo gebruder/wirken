@@ -97,9 +97,10 @@ impl IMessageAdapter {
         });
 
         let http = reqwest::Client::new();
-        let resp = http.post(&url).json(&body).send().await.map_err(|e| {
-            IMessageError::BlueBubbles(format!("Failed to register webhook: {e}"))
-        })?;
+        let resp =
+            http.post(&url).json(&body).send().await.map_err(|e| {
+                IMessageError::BlueBubbles(format!("Failed to register webhook: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -221,10 +222,7 @@ async fn handle_outbound(
                 let (success, msg_id, error) = match resp {
                     Ok(r) if r.status().is_success() => {
                         let body: serde_json::Value = r.json().await.unwrap_or_default();
-                        let mid = body["data"]["guid"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
+                        let mid = body["data"]["guid"].as_str().unwrap_or("").to_string();
                         (true, mid, String::new())
                     }
                     Ok(r) => {

@@ -117,7 +117,11 @@ pub fn extract_message(json: &serde_json::Value) -> Option<IMessageInbound> {
     let data = json.get("data")?;
 
     // Skip messages sent by the local user
-    if data.get("isFromMe").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if data
+        .get("isFromMe")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
 

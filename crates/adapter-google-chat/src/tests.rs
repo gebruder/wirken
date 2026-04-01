@@ -125,16 +125,11 @@ fn google_chat_to_inbound_frame() {
     let mut builder = capnp::message::Builder::new_default();
     convert::google_chat_to_inbound(&msg, &mut builder);
 
-    let reader = builder
-        .get_root_as_reader::<frame::Reader<'_>>()
-        .unwrap();
+    let reader = builder.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();
-            assert_eq!(
-                m.get_id().unwrap().to_str().unwrap(),
-                "spaces/S/messages/M"
-            );
+            assert_eq!(m.get_id().unwrap().to_str().unwrap(), "spaces/S/messages/M");
             assert_eq!(
                 m.get_sender_id().unwrap().to_str().unwrap(),
                 "alice@example.com"
@@ -171,9 +166,7 @@ fn room_message_sets_is_group() {
     let mut builder = capnp::message::Builder::new_default();
     convert::google_chat_to_inbound(&msg, &mut builder);
 
-    let reader = builder
-        .get_root_as_reader::<frame::Reader<'_>>()
-        .unwrap();
+    let reader = builder.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();

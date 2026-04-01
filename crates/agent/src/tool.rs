@@ -729,15 +729,8 @@ fn urlencoding_decode(s: &str) -> String {
 pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Action> {
     match tool_name {
         "exec" => {
-            let cmd = args
-                .get("command")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            let pattern = cmd
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            let pattern = cmd.split_whitespace().next().unwrap_or("").to_string();
             Some(Action::ShellExec { pattern })
         }
         "read_file" | "list_files" => Some(Action::WorkspaceFileAccess),
