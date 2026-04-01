@@ -111,15 +111,46 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 )
             }
             1 => {
-                let model: String = Input::new()
-                    .with_prompt("  Model")
-                    .default("claude-sonnet-4-20250514".into())
-                    .interact_text()?;
+                let api_key = super::read_secret("  API key: ")?;
+                let models = super::list_anthropic_models(&api_key).await;
+                let model = if models.is_empty() {
+                    Input::new()
+                        .with_prompt("  Model")
+                        .default("claude-sonnet-4-20250514".into())
+                        .interact_text()?
+                } else {
+                    let idx = Select::new()
+                        .with_prompt("  Model")
+                        .items(&models)
+                        .default(0)
+                        .interact()?;
+                    models[idx].clone()
+                };
+                // Store key early so it's not asked again below
+                println!("  Encrypting API key...");
+                let keychain = probe_keychain(&data, || {
+                    Password::new()
+                        .with_prompt("  Vault passphrase (for encrypting credentials)")
+                        .interact()
+                        .unwrap_or_default()
+                });
+                let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                    .context("Failed to open credential store")?;
+                let secret = VaultSecret::new(api_key);
+                let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+                store.store(
+                    "anthropic-api-key",
+                    "anthropic",
+                    &secret,
+                    None,
+                    Some(rotation_due),
+                )?;
+                println!("  API key encrypted and stored.");
                 (
                     "anthropic".to_string(),
                     model,
                     "https://api.anthropic.com/v1".to_string(),
-                    true,
+                    false, // key already stored
                 )
             }
             2 => {
