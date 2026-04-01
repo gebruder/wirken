@@ -74,42 +74,28 @@ wirken setup --install-service
 ## Architecture
 
 ```mermaid
-graph LR
-    subgraph Adapters["Channel Adapters · separate processes"]
-        direction TB
-        T[Telegram]
-        D[Discord]
-        S[Slack]
-        TM[Teams]
-        M[Matrix]
-        W[WhatsApp]
-        SG[Signal]
-        GC[Google Chat]
-        IM[iMessage]
-    end
-
-    Adapters -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+graph TD
+    Channels["Telegram · Discord · Slack · Teams · Matrix · WhatsApp · Signal · Google Chat · iMessage"]
+    Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry
 
     subgraph Gateway["Gateway Core"]
         Registry[Adapter Registry] --> Router
         Router --> Detect[Injection Detector]
         Detect --> Agent[Agent Runtime]
-        Agent -- check --> Permissions
         Agent --> Tools
         Agent --> Skills
         Agent --> MCP[MCP Servers]
+        Agent -- check --> Permissions
         Tools --> Sandbox[Docker / gVisor / Wasm]
         Vault --> Keychain
     end
 
-    subgraph Audit Trail
-        Audit[Audit Log] -.-> SIEM[SIEM / Webhook]
-    end
-
     Agent -- HTTPS --> LLM[LLM Providers]
+
     Detect -.-> Audit
     Permissions -.-> Audit
     Tools -.-> Audit
+    Audit[Audit Log] -.-> SIEM[SIEM / Webhook]
 ```
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
