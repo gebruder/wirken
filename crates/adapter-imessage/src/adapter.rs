@@ -135,14 +135,14 @@ async fn handle_webhook(
 
         let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
 
-        if let Some(msg) = convert::extract_message(&json) {
-            if convert::should_process(&msg) {
-                let mut capnp_msg = capnp::message::Builder::new_default();
-                convert::imessage_to_inbound(&msg, &mut capnp_msg);
-                let mut w = writer.lock().await;
-                if let Err(e) = w.write_message(&capnp_msg).await {
-                    tracing::error!("Failed to forward to gateway: {e}");
-                }
+        if let Some(msg) = convert::extract_message(&json)
+            && convert::should_process(&msg)
+        {
+            let mut capnp_msg = capnp::message::Builder::new_default();
+            convert::imessage_to_inbound(&msg, &mut capnp_msg);
+            let mut w = writer.lock().await;
+            if let Err(e) = w.write_message(&capnp_msg).await {
+                tracing::error!("Failed to forward to gateway: {e}");
             }
         }
 
