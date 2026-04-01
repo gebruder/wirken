@@ -94,9 +94,15 @@ pub struct InjectionDetector {
     _private: (),
 }
 
+impl Default for InjectionDetector {
+    fn default() -> Self {
+        Self { _private: () }
+    }
+}
+
 impl InjectionDetector {
     pub fn new() -> Self {
-        Self { _private: () }
+        Self::default()
     }
 
     /// Scan a message for injection patterns. Returns None if no patterns
@@ -223,21 +229,21 @@ impl InjectionDetector {
                 // Only check blobs >= 24 chars (18 decoded bytes)
                 if len >= 24 {
                     let candidate = &text[start..i];
-                    if let Some(decoded) = try_decode_base64(candidate) {
-                        if contains_suspicious_content(&decoded) {
-                            let display = if candidate.len() > 60 {
-                                format!("{}...", &candidate[..60])
-                            } else {
-                                candidate.to_string()
-                            };
-                            out.push(ThreatIndicator {
-                                pattern: ThreatPattern::Base64Command,
-                                severity: ThreatSeverity::Medium,
-                                matched_text: display,
-                                position: start,
-                            });
-                            return; // one base64 indicator is enough
-                        }
+                    if let Some(decoded) = try_decode_base64(candidate)
+                        && contains_suspicious_content(&decoded)
+                    {
+                        let display = if candidate.len() > 60 {
+                            format!("{}...", &candidate[..60])
+                        } else {
+                            candidate.to_string()
+                        };
+                        out.push(ThreatIndicator {
+                            pattern: ThreatPattern::Base64Command,
+                            severity: ThreatSeverity::Medium,
+                            matched_text: display,
+                            position: start,
+                        });
+                        return; // one base64 indicator is enough
                     }
                 }
             } else {
