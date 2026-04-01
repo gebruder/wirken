@@ -1,7 +1,5 @@
 [advisories]
 vulnerability = "deny"
-unmaintained = "warn"
-yanked = "warn"
 
 [licenses]
 unlicensed = "deny"
@@ -15,14 +13,11 @@ allow = [
     "Unicode-DFS-2016",
     "Zlib",
     "OpenSSL",
-    "Ring",
 ]
 confidence-threshold = 0.8
-
-[[licenses.clarify]]
-name = "ring"
-expression = "Ring"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+exceptions = [
+    { allow = ["ISC", "MIT", "OpenSSL"], name = "ring" },
+]
 
 [bans]
 multiple-versions = "warn"
