@@ -17,4 +17,7 @@ pub enum AuditError {
 
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+
+    #[error("SIEM configuration error: {0}")]
+    SiemConfig(String),
 }
