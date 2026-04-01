@@ -80,7 +80,7 @@ graph TD
 
     subgraph Gateway["Gateway Core"]
         Registry[Adapter Registry] --> Router
-        Router --> Detect[Injection Detector]
+        Router --> Detect[Injection Detection]
         Detect --> Agent[Agent Runtime]
         Agent --> Permissions
         Agent --> Skills
