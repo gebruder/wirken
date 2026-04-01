@@ -90,11 +90,14 @@ impl SlackAdapter {
 
         let callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(
             |event: SlackPushEventCallback, _client: Arc<SlackHyperClient>, states| async move {
+                tracing::info!("Slack push event received");
                 let tx_lock = states.read().await;
                 if let Some(tx) =
                     tx_lock.get_user_state::<tokio::sync::mpsc::Sender<convert::SlackInbound>>()
                 {
                     process_push_event(event, tx).await;
+                } else {
+                    tracing::warn!("No event_tx in user state");
                 }
                 Ok(())
             },
@@ -111,6 +114,8 @@ impl SlackAdapter {
             .listen_for(&app_token)
             .await
             .map_err(|e| SlackError::Slack(format!("socket mode: {e}")))?;
+
+        tracing::info!("Slack Socket Mode connected and listening");
 
         // Wait for shutdown
         tokio::signal::ctrl_c().await.ok();
