@@ -199,7 +199,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     api_key,
                     "openai",
                     "https://api.openai.com/v1",
-                    "gpt-4o",
+                    "gpt-4.1-mini",
                     models,
                     &cfg,
                     &data,
