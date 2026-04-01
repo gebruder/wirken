@@ -82,12 +82,10 @@ pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, Vault
 
 /// Generate a random 32-byte key as a VaultSecret.
 pub fn generate_key() -> VaultSecret {
-    let mut key_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
-    // Encode as hex string (64 chars = 32 bytes of entropy)
-    let hex = hex_encode(&key_bytes);
-    // Zero the raw bytes
-    key_bytes.fill(0);
+    let mut key_bytes = Zeroizing::new([0u8; 32]);
+    rand::thread_rng().fill_bytes(&mut *key_bytes);
+    let hex = hex_encode(&*key_bytes);
+    // key_bytes zeroed on drop by Zeroizing
     VaultSecret::new(hex)
 }
 
@@ -118,12 +116,12 @@ pub fn derive_key_from_passphrase(
         Params::new(65536, 3, 1, Some(32)).map_err(|e| VaultError::Derivation(e.to_string()))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-    let mut output = [0u8; 32];
+    let mut output = Zeroizing::new([0u8; 32]);
     argon2
-        .hash_password_into(passphrase.as_bytes(), salt, &mut output)
+        .hash_password_into(passphrase.as_bytes(), salt, &mut *output)
         .map_err(|e| VaultError::Derivation(e.to_string()))?;
 
-    let hex = hex_encode(&output);
-    output.fill(0);
+    let hex = hex_encode(&*output);
+    // output zeroed on drop by Zeroizing
     Ok(VaultSecret::new(hex))
 }

@@ -301,10 +301,11 @@ impl CredentialStore {
 
         // Safety: caller guarantees fd is valid and open for writing
         let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        file.write_all(&encrypted)?;
-        // Prevent File from closing the fd on drop — caller owns it
+        let result = file.write_all(&encrypted);
+        // Always prevent File from closing the fd — caller owns it.
+        // Must run even on write error to avoid double-close.
         std::mem::forget(file);
-        Ok(())
+        result.map_err(Into::into)
     }
 }
 
