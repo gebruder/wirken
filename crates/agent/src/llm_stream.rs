@@ -96,7 +96,7 @@ impl LlmClient {
         let mut full_text = String::new();
         let mut tool_calls: Vec<PartialToolCall> = Vec::new();
 
-        while let Some(chunk) = stream.next().await {
+        'stream: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -108,7 +108,7 @@ impl LlmClient {
                 for line in event_block.lines() {
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
-                            break;
+                            break 'stream;
                         }
 
                         let parsed: serde_json::Value = match serde_json::from_str(data) {
@@ -286,7 +286,7 @@ impl LlmClient {
         let mut current_tool_name = String::new();
         let mut in_tool_block = false;
 
-        while let Some(chunk) = stream.next().await {
+        'stream: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -369,7 +369,7 @@ impl LlmClient {
                             in_tool_block = false;
                         }
                     }
-                    "message_stop" => break,
+                    "message_stop" => break 'stream,
                     _ => {}
                 }
             }

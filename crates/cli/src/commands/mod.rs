@@ -30,6 +30,33 @@ pub fn config() -> GatewayConfig {
     GatewayConfig::default()
 }
 
+/// Probe a running Ollama instance for its version.
+///
+/// Derives the Ollama root URL from the configured base URL (stripping `/v1`)
+/// and hits `GET /api/version`.  Returns `Some("0.5.4")` on success, or `None`
+/// if Ollama is unreachable / returns an unexpected response.
+pub async fn probe_ollama_version(base_url: &str) -> Option<String> {
+    // base_url is typically "http://localhost:11434/v1"
+    let root = base_url
+        .strip_suffix("/v1")
+        .or_else(|| base_url.strip_suffix("/v1/"))
+        .unwrap_or(base_url);
+    let url = format!("{root}/api/version");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("version")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 /// Read a secret value (API key, token) with asterisk masking.
 /// Unlike dialoguer's Password which shows nothing, this prints one
 /// asterisk per character so the user can see that paste/typing worked.

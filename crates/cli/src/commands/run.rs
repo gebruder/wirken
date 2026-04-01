@@ -61,6 +61,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     println!("  Provider: {provider}/{model}");
 
+    if provider == "ollama" {
+        match super::probe_ollama_version(base_url).await {
+            Some(version) => println!("  Ollama version: {version}"),
+            None => {
+                tracing::warn!("Could not reach Ollama at {base_url}");
+                println!("  Warning: Ollama not reachable at {base_url}. Is it running?");
+            }
+        }
+    }
+
     // --- Load API key from vault ---
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
