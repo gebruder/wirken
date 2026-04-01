@@ -90,14 +90,9 @@ impl DetectionResult {
 ///
 /// Stateless — no configuration, no mutable state. Patterns are evaluated
 /// on each call. Create once at gateway startup and reuse.
+#[derive(Default)]
 pub struct InjectionDetector {
     _private: (),
-}
-
-impl Default for InjectionDetector {
-    fn default() -> Self {
-        Self { _private: () }
-    }
 }
 
 impl InjectionDetector {
