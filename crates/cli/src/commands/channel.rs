@@ -12,9 +12,64 @@ pub async fn add(channel: &str) -> Result<()> {
     let cfg = config();
     let data = data_dir()?;
 
+    // Collect all tokens upfront before prompting for passphrase
     let token = super::read_secret(&format!("  {channel} bot token: "))?;
+    let app_token = if channel == "slack" {
+        Some(super::read_secret("  Slack app token (xapp-...): ")?)
+    } else {
+        None
+    };
 
-    register_channel(channel, &token, &cfg, &data).await?;
+    // Open vault once
+    let keychain = probe_keychain(&data, || {
+        Password::new()
+            .with_prompt("  Vault passphrase")
+            .interact()
+            .unwrap_or_default()
+    });
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    // Store bot token
+    let secret = VaultSecret::new(token);
+    store
+        .store(&format!("{channel}-token"), channel, &secret, None, None)
+        .context("Failed to store channel token")?;
+
+    // Store app token for Slack
+    if let Some(app_token) = app_token {
+        let secret = VaultSecret::new(app_token);
+        store
+            .store("slack-app-token", "slack", &secret, None, None)
+            .context("Failed to store Slack app token")?;
+    }
+
+    // Generate adapter keypair
+    let identity = AdapterIdentity::generate(channel);
+    let pub_key = identity.public_key_bytes();
+
+    let secret_key_hex: String = identity
+        .secret_key_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let sk_secret = VaultSecret::new(secret_key_hex);
+    store
+        .store(
+            &format!("{channel}-adapter-key"),
+            channel,
+            &sk_secret,
+            None,
+            None,
+        )
+        .context("Failed to store adapter key")?;
+
+    // Register in adapter registry
+    let registry = AdapterRegistry::open(&cfg.adapters_db_path())
+        .context("Failed to open adapter registry")?;
+    registry.register(channel, &pub_key, channel)?;
+
+    println!("  {channel}: token encrypted, adapter keypair generated, registered.");
 
     println!("  Channel '{channel}' added.");
     println!("  Start the adapter with: wirken adapter {channel}");

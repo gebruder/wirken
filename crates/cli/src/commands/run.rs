@@ -72,12 +72,15 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
 
     // --- Load API key from vault ---
+    let mut vault_passphrase = String::new();
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
-            dialoguer::Password::new()
+            let pp = dialoguer::Password::new()
                 .with_prompt("  Vault passphrase")
                 .interact()
-                .unwrap_or_default()
+                .unwrap_or_default();
+            vault_passphrase = pp.clone();
+            pp
         });
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
@@ -92,6 +95,27 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     } else {
         None
     };
+
+    // Prompt for vault passphrase if adapters are registered but we haven't prompted yet
+    if vault_passphrase.is_empty() {
+        let has_adapters = {
+            let reg_path = cfg.adapters_db_path();
+            reg_path.exists()
+                && AdapterRegistry::open(&reg_path)
+                    .map(|r| !r.list().is_empty())
+                    .unwrap_or(false)
+        };
+        if has_adapters {
+            let _ = probe_keychain(&cfg.data_dir, || {
+                let pp = dialoguer::Password::new()
+                    .with_prompt("  Vault passphrase")
+                    .interact()
+                    .unwrap_or_default();
+                vault_passphrase = pp.clone();
+                pp
+            });
+        }
+    }
 
     // --- Start audit writer (with optional SIEM forwarding) ---
     let siem_config = load_siem_config(&cfg);
@@ -136,10 +160,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open agent config store")?;
 
         let keychain = probe_keychain(&cfg.data_dir, || {
-            dialoguer::Password::new()
+            let pp = dialoguer::Password::new()
                 .with_prompt("  Vault passphrase")
                 .interact()
-                .unwrap_or_default()
+                .unwrap_or_default();
+            vault_passphrase = pp.clone();
+            pp
         });
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
 
@@ -286,6 +312,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let sock = socket_path.clone();
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
+        let vp = vault_passphrase.clone();
 
         let handle = tokio::spawn(async move {
             // Small delay to let the listener start
@@ -297,6 +324,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 .arg(&adapter_id)
                 .env("WIRKEN_DATA_DIR", &data_dir)
                 .env("WIRKEN_SOCKET", &sock)
+                .env("WIRKEN_VAULT_PASSPHRASE", &vp)
                 .kill_on_drop(true)
                 .spawn();
 
