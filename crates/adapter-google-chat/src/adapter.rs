@@ -20,11 +20,7 @@ pub struct GoogleChatAdapter {
 }
 
 impl GoogleChatAdapter {
-    pub fn new(
-        identity: AdapterIdentity,
-        service_account_token: String,
-        listen_port: u16,
-    ) -> Self {
+    pub fn new(identity: AdapterIdentity, service_account_token: String, listen_port: u16) -> Self {
         Self {
             identity,
             service_account_token,
@@ -184,10 +180,7 @@ async fn handle_outbound(
 
                 let resp = http
                     .post(&url)
-                    .header(
-                        "Authorization",
-                        format!("Bearer {service_account_token}"),
-                    )
+                    .header("Authorization", format!("Bearer {service_account_token}"))
                     .json(&body)
                     .send()
                     .await;

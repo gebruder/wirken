@@ -35,10 +35,7 @@ pub fn signal_to_inbound(
     inbound.set_sender_name(&msg.sender_name);
     inbound.set_channel("signal");
     // Group messages use the group ID as conversation; DMs use the sender phone number.
-    let conversation_id = msg
-        .group_id
-        .as_deref()
-        .unwrap_or(&msg.sender);
+    let conversation_id = msg.group_id.as_deref().unwrap_or(&msg.sender);
     inbound.set_conversation_id(conversation_id);
     inbound.set_text(&msg.text);
     inbound.set_timestamp(msg.timestamp);

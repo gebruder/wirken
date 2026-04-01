@@ -20,6 +20,14 @@ pub struct LlmConfig {
     /// AWS region for Bedrock. Ignored for other providers.
     #[serde(default)]
     pub region: Option<String>,
+    /// Whether to send tool definitions to the LLM. Defaults to true for
+    /// providers with reliable tool support, false for local models.
+    #[serde(default = "default_tools_enabled")]
+    pub tools_enabled: bool,
+}
+
+fn default_tools_enabled() -> bool {
+    true
 }
 
 impl LlmConfig {
@@ -32,6 +40,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: true,
         }
     }
 
@@ -44,6 +53,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: true,
         }
     }
 
@@ -56,6 +66,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: true,
         }
     }
 
@@ -68,6 +79,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: Some(region.into()),
+            tools_enabled: true,
         }
     }
 
@@ -80,30 +92,33 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: false,
         }
     }
 
     /// Tinfoil confidential inference (OpenAI-compatible, hardware enclaves)
     pub fn tinfoil(model: &str) -> Self {
         Self {
-            provider: "openai".into(), // OpenAI-compatible API
+            provider: "openai".into(),
             model: model.into(),
             base_url: "https://inference.tinfoil.sh/v1".into(),
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: true,
         }
     }
 
     /// Privatemode confidential inference (OpenAI-compatible, hardware enclaves)
     pub fn privatemode(model: &str) -> Self {
         Self {
-            provider: "openai".into(), // OpenAI-compatible API
+            provider: "openai".into(),
             model: model.into(),
             base_url: "https://api.privatemode.ai/v1".into(),
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: true,
         }
     }
 
@@ -116,6 +131,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: true,
         }
     }
 
@@ -129,6 +145,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
+            tools_enabled: provider != "ollama",
         }
     }
 }

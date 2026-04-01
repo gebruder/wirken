@@ -38,8 +38,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                                 CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                                     .context("Failed to open credential store")?;
                             if store.retrieve(key_name).is_err() {
-                                let api_key =
-                                    super::read_secret("  API key: ")?;
+                                let api_key = super::read_secret("  API key: ")?;
                                 let secret = VaultSecret::new(api_key);
                                 let provider = org
                                     .provider

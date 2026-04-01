@@ -697,10 +697,14 @@ async fn message_loop(
                     });
                     let _ = audit
                         .log(
-                            AuditEvent::new(&denial.agent_id, "permission.denied", &denial.tool_name)
-                                .with_channel(&channel)
-                                .with_session(&conversation_id)
-                                .with_detail(detail),
+                            AuditEvent::new(
+                                &denial.agent_id,
+                                "permission.denied",
+                                &denial.tool_name,
+                            )
+                            .with_channel(&channel)
+                            .with_session(&conversation_id)
+                            .with_detail(detail),
                         )
                         .await;
                 }
