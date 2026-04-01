@@ -8,9 +8,15 @@ Download the binary:
 curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
 ```
 
-Or build from source (requires Rust 1.85+ and the `capnp` compiler):
+Or build from source (requires Rust 1.85+, the `capnp` compiler, and OpenSSL headers):
 
 ```bash
+# Ubuntu/Debian
+sudo apt-get install -y capnproto
+
+# macOS
+brew install capnp
+
 cargo install --path crates/cli
 ```
 
