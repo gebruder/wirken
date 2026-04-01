@@ -18,6 +18,12 @@ Prebuilt binaries are available for Linux (x86_64, aarch64) and macOS (x86_64, A
 Or build from source (requires Rust 1.85+ and the `capnp` compiler):
 
 ```bash
+# Ubuntu/Debian
+sudo apt-get install -y capnproto
+
+# macOS
+brew install capnp
+
 cargo install --path crates/cli
 ```
 
@@ -29,7 +35,7 @@ cargo install --path crates/cli
 
   Step 1: Pick your AI
   Provider: OpenAI / Anthropic / Google Gemini / AWS Bedrock / Tinfoil / Privatemode / Ollama (local) / Custom endpoint
-  Model: gpt-4o
+  Model: claude-sonnet-4-6          ← auto-detected from provider API
   API key: ********
   Encrypting API key...
   API key encrypted and stored.
@@ -50,7 +56,8 @@ cargo install --path crates/cli
   wirken gateway
   ──────────────
 
-  Provider: openai/gpt-4o
+  Provider: ollama/llama3.2
+  Ollama version: 0.19.0
   Route: telegram -> agent:default
   Socket: ~/.wirken/sockets/gateway.sock
   WebChat: http://localhost:18790
