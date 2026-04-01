@@ -34,11 +34,11 @@ cargo install --path crates/cli
   ────────────
 
   Step 1: Pick your AI
-  Provider: OpenAI / Anthropic / Google Gemini / AWS Bedrock / Tinfoil / Privatemode / Ollama (local) / Custom endpoint
-  Model: claude-sonnet-4-6          ← auto-detected from provider API
+  Provider: Ollama (local) / Anthropic / OpenAI / Google Gemini / AWS Bedrock / Tinfoil / Privatemode / Custom endpoint
   API key: ********
   Encrypting API key...
   API key encrypted and stored.
+  Model: gpt-4.1-mini               ← auto-detected from provider API
 
   Step 2: Pick your channels
   Add a channel: Telegram
