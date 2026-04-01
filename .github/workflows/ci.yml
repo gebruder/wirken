@@ -14,6 +14,13 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  deny:
+    name: Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   fmt:
     name: Format
     runs-on: ubuntu-latest

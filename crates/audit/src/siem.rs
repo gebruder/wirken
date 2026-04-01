@@ -38,11 +38,26 @@ pub struct SiemForwarder {
 }
 
 impl SiemForwarder {
-    pub fn new(config: SiemConfig) -> Self {
-        Self {
+    /// Create a new SIEM forwarder.
+    /// Returns an error if the endpoint uses plaintext HTTP (credential leakage risk).
+    /// Localhost endpoints are exempt for development use.
+    pub fn new(config: SiemConfig) -> Result<Self, String> {
+        let is_localhost = config.endpoint.starts_with("http://localhost")
+            || config.endpoint.starts_with("http://127.0.0.1")
+            || config.endpoint.starts_with("http://[::1]");
+
+        if !config.endpoint.starts_with("https://") && !is_localhost {
+            return Err(format!(
+                "SIEM endpoint must use HTTPS (got {}). \
+                 API keys would be sent in plaintext over HTTP.",
+                config.endpoint
+            ));
+        }
+
+        Ok(Self {
             config,
             http: reqwest::Client::new(),
-        }
+        })
     }
 
     /// Forward a batch of audit events. Errors are logged, not propagated —

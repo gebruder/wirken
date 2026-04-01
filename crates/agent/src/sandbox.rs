@@ -285,12 +285,5 @@ pub async fn detect_gvisor() -> bool {
 }
 
 fn short_id() -> String {
-    let mut bytes = [0u8; 6];
-    // Simple counter-based ID since we don't need crypto randomness here
-    let ns = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    bytes[0..4].copy_from_slice(&ns.to_le_bytes());
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
