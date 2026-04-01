@@ -5859,7 +5859,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-discord"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -5877,7 +5877,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-google-chat"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "capnp",
  "chrono",
@@ -5894,7 +5894,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-imessage"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "capnp",
  "reqwest 0.13.2",
@@ -5910,7 +5910,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-matrix"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -5928,7 +5928,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-signal"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "capnp",
  "reqwest 0.13.2",
@@ -5944,7 +5944,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-slack"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -5962,7 +5962,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-teams"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -5980,7 +5980,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-telegram"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -5998,7 +5998,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-adapter-whatsapp"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -6018,7 +6018,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-agent"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -6047,7 +6047,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-audit"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "reqwest 0.13.2",
@@ -6063,7 +6063,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-cli"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "capnp",
@@ -6099,7 +6099,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -6124,7 +6124,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "capnp",
  "capnpc",
@@ -6140,7 +6140,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -6161,7 +6161,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-webchat"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "thiserror 2.0.18",
  "tokio",

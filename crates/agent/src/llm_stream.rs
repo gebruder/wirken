@@ -221,6 +221,27 @@ impl LlmClient {
                             "content": m.content,
                         }]
                     })
+                } else if m.role == Role::Assistant
+                    && let Some(ref tool_calls) = m.tool_calls
+                {
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if !m.content.is_empty() {
+                        blocks.push(serde_json::json!({"type": "text", "text": m.content}));
+                    }
+                    for tc in tool_calls {
+                        let input: serde_json::Value =
+                            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
+                        blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": input,
+                        }));
+                    }
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    })
                 } else {
                     serde_json::json!({
                         "role": role,
