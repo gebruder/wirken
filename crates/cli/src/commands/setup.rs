@@ -182,14 +182,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 )
             }
             6 => {
-                let url: String = Input::new()
-                    .with_prompt("  Ollama URL")
-                    .default("http://localhost:11434/v1".into())
-                    .interact_text()?;
+                let url = "http://localhost:11434/v1".to_string();
                 match super::probe_ollama_version(&url).await {
                     Some(version) => println!("  Ollama {version} detected."),
                     None => {
-                        println!("  Warning: could not reach Ollama at {url}. Is it running?");
+                        println!("  Warning: could not reach Ollama. Is it running?");
                     }
                 }
                 let models = super::list_ollama_models(&url).await;
@@ -204,7 +201,6 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                         .items(&models)
                         .default(0)
                         .interact()?;
-                    // Strip :latest tag since Ollama defaults to it
                     models[idx]
                         .strip_suffix(":latest")
                         .unwrap_or(&models[idx])
