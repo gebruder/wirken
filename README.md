@@ -78,7 +78,7 @@ graph TD
     Channels["Telegram · Discord · Slack · Teams · Matrix · WhatsApp · Signal · Google Chat · iMessage"]
     Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry
 
-    subgraph Gateway["Gateway Core"]
+    subgraph Gateway["Wirken"]
         Registry[Adapter Registry] --> Router
         Router --> Detect[Injection Detection]
         Detect --> Agent[Agent Runtime]
