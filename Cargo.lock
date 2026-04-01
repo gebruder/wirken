@@ -459,9 +459,9 @@ dependencies = [
 
 [[package]]
 name = "capnpc"
-version = "0.25.0"
+version = "0.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d6cdfa6b0df161a71201367910265b97180541ecdb48bd08e05ef8694c295d1f"
+checksum = "ae6129005bd7585265e5e6fd9fb5a0f9cbc13db106fb05aef5a1d681981773b0"
 dependencies = [
  "capnp",
 ]
@@ -3553,7 +3553,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
