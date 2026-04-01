@@ -57,6 +57,44 @@ pub async fn probe_ollama_version(base_url: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// List models installed in a running Ollama instance.
+///
+/// Hits `GET /api/tags` and returns model names (e.g. `["llama3.2:latest"]`).
+pub async fn list_ollama_models(base_url: &str) -> Vec<String> {
+    let root = base_url
+        .strip_suffix("/v1")
+        .or_else(|| base_url.strip_suffix("/v1/"))
+        .unwrap_or(base_url);
+    let url = format!("{root}/api/tags");
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read a secret value (API key, token) with asterisk masking.
 /// Unlike dialoguer's Password which shows nothing, this prints one
 /// asterisk per character so the user can see that paste/typing worked.
