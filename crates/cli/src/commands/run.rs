@@ -514,6 +514,7 @@ async fn handle_adapter_connection(
 }
 
 /// Main message loop: read inbound from adapter, route to agent, send response back.
+#[allow(clippy::too_many_arguments)]
 async fn message_loop(
     adapter_id: &str,
     reader: &mut FrameReader,
