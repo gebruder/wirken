@@ -14,40 +14,52 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-clippy-
+      - run: cargo clippy --workspace -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Install Cap'n Proto compiler
-        run: sudo apt-get update && sudo apt-get install -y capnproto
-
-      - name: Cache cargo
-        uses: actions/cache@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+      - uses: actions/cache@v5
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build
-        run: cargo build --workspace
-
-      - name: Test
-        run: cargo test --workspace
-
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-
-      - name: Format check
-        run: cargo fmt --check
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-test-
+      - run: cargo test --workspace
