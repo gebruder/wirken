@@ -82,11 +82,15 @@ graph TD
         Registry[Adapter Registry] --> Router
         Router --> Detect[Injection Detector]
         Detect --> Agent[Agent Runtime]
-        Agent -- check --> Permissions
+        Agent --> Permissions
         Agent --> Skills
         Agent --> MCP[MCP Servers]
-        Agent --> Tools --> Sandbox[Docker / gVisor / Wasm]
+        Agent --> Tools
         Agent --> Vault --> Keychain
+
+        subgraph Execution
+            Tools --> Sandbox[Docker / gVisor / Wasm]
+        end
     end
 
     Agent -- HTTPS --> LLM[LLM Providers]
