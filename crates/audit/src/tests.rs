@@ -209,10 +209,12 @@ fn prune_old_events() {
 
     let log2 = AuditLog::open(&db_path).unwrap();
     let deleted = log2.prune(90).unwrap();
-    assert_eq!(deleted, 5);
+    // 4 deleted: the last old event is kept as a hash chain checkpoint
+    assert_eq!(deleted, 4);
 
     let remaining = log.query(&AuditQuery::default()).unwrap();
-    assert_eq!(remaining.len(), 3);
+    // 3 recent + 1 checkpoint = 4
+    assert_eq!(remaining.len(), 4);
 }
 
 #[test]

@@ -175,7 +175,7 @@ impl AuditLog {
     /// Verify the hash chain integrity.
     pub fn verify(&self) -> Result<VerifyResult, AuditError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, ts, actor, action, target, detail, hash
+            "SELECT id, ts, actor, action, target, channel, session, detail, hash
              FROM audit_events ORDER BY id ASC",
         )?;
 
@@ -188,6 +188,8 @@ impl AuditLog {
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })?;
 
@@ -195,7 +197,8 @@ impl AuditLog {
         let mut count = 0usize;
 
         for row in rows {
-            let (id, ts_str, actor, action, target, detail_str, stored_hash) = row?;
+            let (id, ts_str, actor, action, target, channel, session, detail_str, stored_hash) =
+                row?;
 
             let ts = chrono::DateTime::parse_from_rfc3339(&ts_str)
                 .unwrap_or_default()
@@ -207,8 +210,8 @@ impl AuditLog {
                 actor,
                 action,
                 target,
-                channel: String::new(), // not used in hash
-                session: String::new(), // not used in hash
+                channel,
+                session,
                 detail,
             };
 
@@ -236,15 +239,31 @@ impl AuditLog {
     }
 
     /// Prune events older than the given number of days.
-    /// Preserves the hash chain by keeping a checkpoint hash.
+    /// Preserves the hash chain by keeping the last event before the cutoff
+    /// as a checkpoint so that `verify()` can still validate the remaining chain.
     pub fn prune(&self, retention_days: u32) -> Result<usize, AuditError> {
         let cutoff = Utc::now() - chrono::Duration::days(retention_days as i64);
         let cutoff_str = cutoff.to_rfc3339();
 
-        let deleted = self.conn.execute(
-            "DELETE FROM audit_events WHERE ts < ?1",
-            params![cutoff_str],
-        )?;
+        // Find the last event before the cutoff to use as the chain checkpoint.
+        // We keep this row so the first retained event can still be verified
+        // against its predecessor's hash.
+        let checkpoint_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM audit_events WHERE ts < ?1 ORDER BY id DESC LIMIT 1",
+                params![&cutoff_str],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let deleted = match checkpoint_id {
+            Some(keep_id) => self.conn.execute(
+                "DELETE FROM audit_events WHERE ts < ?1 AND id < ?2",
+                params![cutoff_str, keep_id],
+            )?,
+            None => 0, // nothing to prune
+        };
 
         Ok(deleted)
     }
@@ -265,13 +284,16 @@ impl AuditLog {
     }
 }
 
-/// Compute SHA-256(previous_hash || ts || actor || action || detail)
+/// Compute SHA-256(previous_hash || ts || actor || action || target || channel || session || detail)
 fn compute_hash(previous_hash: &str, event: &AuditEvent) -> String {
     let mut hasher = Sha256::new();
     hasher.update(previous_hash.as_bytes());
     hasher.update(event.ts.to_rfc3339().as_bytes());
     hasher.update(event.actor.as_bytes());
     hasher.update(event.action.as_bytes());
+    hasher.update(event.target.as_bytes());
+    hasher.update(event.channel.as_bytes());
+    hasher.update(event.session.as_bytes());
     hasher.update(event.detail.to_string().as_bytes());
     format!("{:x}", hasher.finalize())
 }
