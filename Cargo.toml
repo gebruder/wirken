@@ -42,7 +42,7 @@ secrecy = "0.10"
 zeroize = { version = "1.8", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 argon2 = "0.5"
-sha2 = "0.10"
+sha2 = "0.11"
 hmac = "0.12"
 rand = "0.8"
 
