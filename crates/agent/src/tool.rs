@@ -201,7 +201,12 @@ impl ToolRegistry {
 
     /// Execute a tool by name with the given JSON arguments.
     pub async fn execute(&self, name: &str, arguments: &str) -> Result<ToolResult, AgentError> {
-        let args: serde_json::Value = serde_json::from_str(arguments)
+        let arg_str = if arguments.is_empty() {
+            "{}"
+        } else {
+            arguments
+        };
+        let args: serde_json::Value = serde_json::from_str(arg_str)
             .map_err(|e| AgentError::Tool(format!("invalid arguments: {e}")))?;
 
         match name {

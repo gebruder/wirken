@@ -299,24 +299,44 @@ impl LlmClient {
                     Role::Tool => "user", // Anthropic: tool results go in user messages
                     Role::System => unreachable!(),
                 };
-                let mut obj = serde_json::json!({
-                    "role": role,
-                    "content": m.content,
-                });
-                // Tool results: wrap in tool_result content block
                 if m.role == Role::Tool
                     && let Some(ref id) = m.tool_call_id
                 {
-                    obj = serde_json::json!({
+                    serde_json::json!({
                         "role": "user",
                         "content": [{
                             "type": "tool_result",
                             "tool_use_id": id,
                             "content": m.content,
                         }]
-                    });
+                    })
+                } else if m.role == Role::Assistant
+                    && let Some(ref tool_calls) = m.tool_calls
+                {
+                    let mut blocks: Vec<serde_json::Value> = Vec::new();
+                    if !m.content.is_empty() {
+                        blocks.push(serde_json::json!({"type": "text", "text": m.content}));
+                    }
+                    for tc in tool_calls {
+                        let input: serde_json::Value =
+                            serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
+                        blocks.push(serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": input,
+                        }));
+                    }
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    })
+                } else {
+                    serde_json::json!({
+                        "role": role,
+                        "content": m.content,
+                    })
                 }
-                obj
             })
             .collect();
 
