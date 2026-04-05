@@ -251,6 +251,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 println!(
                     "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
                 );
+                println!("  Direct HTTPS mode (no Rust SDK). Attestation is verifiable via");
+                println!("  transparency logs but not checked client-side.");
                 println!("  Get an API key at https://dash.tinfoil.sh");
                 let api_key = super::read_secret("  API key: ")?;
                 let models =
@@ -276,25 +278,31 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 println!(
                     "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
                 );
+                println!("  The local proxy handles attestation and end-to-end encryption.");
+                println!("  Start it first:");
+                println!("    docker run -p 8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>");
                 println!("  Get an API key at https://www.privatemode.ai");
-                let api_key = super::read_secret("  API key: ")?;
-                let models =
-                    super::list_openai_models("https://api.privatemode.ai/v1", &api_key).await;
-                let model = store_key_and_pick_model(
-                    api_key,
-                    "openai",
-                    "https://api.privatemode.ai/v1",
-                    "gpt-oss-120b",
-                    models,
-                    &cfg,
-                    &data,
-                )?;
-                (
-                    "openai".to_string(),
-                    model,
-                    "https://api.privatemode.ai/v1".to_string(),
-                    false,
-                )
+                println!();
+                let proxy_url: String = Input::new()
+                    .with_prompt("  Proxy URL")
+                    .default("http://localhost:8080".into())
+                    .interact_text()?;
+                let base_url = format!("{}/v1", proxy_url.trim_end_matches('/'));
+                let models = super::list_openai_models(&base_url, "").await;
+                let model = if models.is_empty() {
+                    Input::new()
+                        .with_prompt("  Model")
+                        .default("gpt-oss-120b".into())
+                        .interact_text()?
+                } else {
+                    let idx = Select::new()
+                        .with_prompt("  Model")
+                        .items(&models)
+                        .default(0)
+                        .interact()?;
+                    models[idx].clone()
+                };
+                ("openai".to_string(), model, base_url, false)
             }
             7 => {
                 // Custom

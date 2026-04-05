@@ -109,12 +109,12 @@ impl LlmConfig {
         }
     }
 
-    /// Privatemode confidential inference (OpenAI-compatible, hardware enclaves)
+    /// Privatemode confidential inference (OpenAI-compatible via local proxy)
     pub fn privatemode(model: &str) -> Self {
         Self {
             provider: "openai".into(),
             model: model.into(),
-            base_url: "https://api.privatemode.ai/v1".into(),
+            base_url: "http://localhost:8080/v1".into(),
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
