@@ -1,5 +1,11 @@
 [advisories]
 version = 2
+ignore = [
+    # rustls-webpki CRL distribution point matching issue (low impact,
+    # requires CA compromise). Pinned by serenity 0.12 via rustls 0.22;
+    # no upstream fix available yet.
+    "RUSTSEC-2026-0049",
+]
 
 [licenses]
 version = 2
