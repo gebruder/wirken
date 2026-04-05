@@ -280,7 +280,9 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 );
                 println!("  The local proxy handles attestation and end-to-end encryption.");
                 println!("  Start it first:");
-                println!("    docker run -p 8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>");
+                println!(
+                    "    docker run -p 8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>"
+                );
                 println!("  Get an API key at https://www.privatemode.ai");
                 println!();
                 let proxy_url: String = Input::new()
