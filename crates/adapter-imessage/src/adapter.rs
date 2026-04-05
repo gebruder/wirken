@@ -86,14 +86,12 @@ impl IMessageAdapter {
 
     /// Register a webhook URL with BlueBubbles Server.
     async fn register_webhook(&self, webhook_url: &str) -> Result<(), IMessageError> {
-        let url = format!(
-            "{}/api/v1/server/webhooks?password={}",
-            self.bluebubbles_url, self.server_password
-        );
+        let url = format!("{}/api/v1/server/webhooks", self.bluebubbles_url);
 
         let body = serde_json::json!({
             "url": webhook_url,
-            "events": ["new-message"]
+            "events": ["new-message"],
+            "password": self.server_password
         });
 
         let http = reqwest::Client::new();
@@ -207,14 +205,12 @@ async fn handle_outbound(
 
         match action {
             FrameAction::SendMessage(fields) => {
-                let url = format!(
-                    "{}/api/v1/message/text?password={}",
-                    bluebubbles_url, server_password
-                );
+                let url = format!("{}/api/v1/message/text", bluebubbles_url);
 
                 let body = serde_json::json!({
                     "chatGuid": fields.conversation_id,
                     "message": fields.text,
+                    "password": server_password,
                 });
 
                 let resp = http.post(&url).json(&body).send().await;
