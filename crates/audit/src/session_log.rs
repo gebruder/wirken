@@ -252,6 +252,20 @@ pub enum SessionEvent {
         output: String,
         status: String,
     },
+    /// Backward-compatibility wrapper for the pre-slice-2 audit
+    /// log. Carries the legacy `(actor, action, target, channel,
+    /// detail)` tuple verbatim. Slice 2 of item 1 makes this the
+    /// only kind that the legacy `AuditWriter` writes; the existing
+    /// `audit_events` table becomes a SQL view that COALESCEs the
+    /// `action` field out of legacy events and the `kind` field out
+    /// of typed events so SIEM consumers see both.
+    AuditLegacy {
+        actor: String,
+        action: String,
+        target: String,
+        channel: String,
+        detail: serde_json::Value,
+    },
 }
 
 /// A single tool call request from the assistant.
@@ -354,20 +368,13 @@ pub trait SessionLog: Send + Sync {
 
     /// The highest sequence number in this session, or `None` if
     /// the session has no events.
-    fn last_index(
-        &self,
-        handle: &SessionHandle<OwnSession>,
-    ) -> Result<Option<u64>, AuditError>;
+    fn last_index(&self, handle: &SessionHandle<OwnSession>) -> Result<Option<u64>, AuditError>;
 
     /// Delete the most recent `n_before` events from this session
     /// and return the count actually deleted. Used by item 2's
     /// `wake()` to drop a half-completed tool round and resume from
     /// a known-good prefix.
-    fn rewind(
-        &self,
-        handle: &SessionHandle<OwnSession>,
-        n_before: u64,
-    ) -> Result<u64, AuditError>;
+    fn rewind(&self, handle: &SessionHandle<OwnSession>, n_before: u64) -> Result<u64, AuditError>;
 
     /// Walk the per-session hash chain and verify every row's
     /// `leaf_hash` matches its payload and every row's chain `hash`
@@ -375,10 +382,8 @@ pub trait SessionLog: Send + Sync {
     /// [`SessionVerifyResult::Ok`] for an intact chain,
     /// [`SessionVerifyResult::Broken`] at the first mismatch, or
     /// [`SessionVerifyResult::Empty`] for a session with no events.
-    fn verify(
-        &self,
-        handle: &SessionHandle<OwnSession>,
-    ) -> Result<SessionVerifyResult, AuditError>;
+    fn verify(&self, handle: &SessionHandle<OwnSession>)
+    -> Result<SessionVerifyResult, AuditError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +424,35 @@ impl SqliteSessionLog {
         &self.conn
     }
 
+    /// Crate-private accessor for code that needs raw SQL access to
+    /// the same underlying connection. Used by `legacy_compat` to
+    /// run the SIEM view query, the global verify, and the prune.
+    /// External crates have no business calling this — every
+    /// supported operation goes through the [`SessionLog`] trait.
+    pub(crate) fn with_conn<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Connection) -> R,
+    {
+        let conn = self.conn.lock().expect("session log mutex");
+        f(&conn)
+    }
+
+    /// Append an event with a caller-supplied timestamp. Used by the
+    /// migration code in [`crate::legacy_compat`] to preserve the
+    /// original `audit_events.ts` values when copying legacy rows
+    /// into `session_events`. Production callers should use
+    /// [`SessionLog::append`] which stamps `Utc::now()`.
+    pub(crate) fn append_with_ts(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+        trust: TrustLevel,
+        event: SessionEvent,
+        ts: DateTime<Utc>,
+    ) -> Result<u64, AuditError> {
+        let conn = self.conn.lock().expect("session log mutex");
+        append_inner(&conn, handle, trust, event, Some(ts))
+    }
+
     fn init_schema(conn: &Connection) -> Result<(), AuditError> {
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -455,67 +489,7 @@ impl SessionLog for SqliteSessionLog {
         event: SessionEvent,
     ) -> Result<u64, AuditError> {
         let conn = self.conn.lock().expect("session log mutex");
-        let tx = conn.unchecked_transaction()?;
-
-        // Compute next seq atomically inside the transaction. SQLite
-        // serializes writers in WAL mode so the read-then-insert is
-        // safe against concurrent appenders to the same session.
-        let next_seq: u64 = {
-            let max: Option<i64> = tx
-                .query_row(
-                    "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
-                    params![handle.id.as_str()],
-                    |row| row.get(0),
-                )
-                .ok()
-                .flatten();
-            match max {
-                Some(n) => (n as u64) + 1,
-                None => 0,
-            }
-        };
-
-        // Previous chain hash for this session, or empty for the
-        // first event.
-        let prev_hash: String = tx
-            .query_row(
-                "SELECT hash FROM session_events
-                 WHERE session_id = ?1
-                 ORDER BY seq DESC LIMIT 1",
-                params![handle.id.as_str()],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_default();
-
-        let payload_bytes = canonicalize_payload(&event)?;
-        let leaf_hash = sha256_hex(&payload_bytes);
-        let row_hash = chain_hex(&prev_hash, &leaf_hash);
-
-        let payload_str = String::from_utf8(payload_bytes)
-            .expect("serde_json output is always valid utf-8");
-
-        let now = Utc::now();
-        let ts = now.to_rfc3339();
-        let trust_str = trust_to_str(trust);
-
-        tx.execute(
-            "INSERT INTO session_events
-                 (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                handle.id.as_str(),
-                next_seq as i64,
-                ts,
-                trust_str,
-                payload_str,
-                leaf_hash,
-                prev_hash,
-                row_hash,
-            ],
-        )?;
-
-        tx.commit()?;
-        Ok(next_seq)
+        append_inner(&conn, handle, trust, event, None)
     }
 
     fn get_range(
@@ -533,11 +507,7 @@ impl SessionLog for SqliteSessionLog {
              FROM session_events
              WHERE session_id = ?1 AND seq >= ?2 AND seq < ?3
              ORDER BY seq ASC",
-            params![
-                handle.id.as_str(),
-                range.start as i64,
-                range.end as i64
-            ],
+            params![handle.id.as_str(), range.start as i64, range.end as i64],
         )?;
         raw.into_iter().map(parse_row).collect()
     }
@@ -559,10 +529,7 @@ impl SessionLog for SqliteSessionLog {
         raw.into_iter().map(parse_row).collect()
     }
 
-    fn last_index(
-        &self,
-        handle: &SessionHandle<OwnSession>,
-    ) -> Result<Option<u64>, AuditError> {
+    fn last_index(&self, handle: &SessionHandle<OwnSession>) -> Result<Option<u64>, AuditError> {
         let conn = self.conn.lock().expect("session log mutex");
         let result: Option<i64> = conn
             .query_row(
@@ -575,11 +542,7 @@ impl SessionLog for SqliteSessionLog {
         Ok(result.map(|n| n as u64))
     }
 
-    fn rewind(
-        &self,
-        handle: &SessionHandle<OwnSession>,
-        n_before: u64,
-    ) -> Result<u64, AuditError> {
+    fn rewind(&self, handle: &SessionHandle<OwnSession>, n_before: u64) -> Result<u64, AuditError> {
         if n_before == 0 {
             return Ok(0);
         }
@@ -722,9 +685,7 @@ fn parse_row(row: RawRow) -> Result<StoredSessionEvent, AuditError> {
     let event: SessionEvent = serde_json::from_str(&payload)?;
     let trust = trust_from_str(&trust_str)?;
     let ts = DateTime::parse_from_rfc3339(&ts_str)
-        .map_err(|e| {
-            AuditError::SiemConfig(format!("invalid timestamp in session_events: {e}"))
-        })?
+        .map_err(|e| AuditError::SiemConfig(format!("invalid timestamp in session_events: {e}")))?
         .with_timezone(&Utc);
     Ok(StoredSessionEvent {
         id,
@@ -743,6 +704,79 @@ fn parse_row(row: RawRow) -> Result<StoredSessionEvent, AuditError> {
 /// "whatever `serde_json::to_vec` produces from the [`SessionEvent`]
 /// definition in this module." Adding fields to existing variants is
 /// a wire-incompatible change because old hashes will not match.
+/// Internal append shared by [`SessionLog::append`] (which stamps
+/// `Utc::now()`) and [`SqliteSessionLog::append_with_ts`] (which
+/// preserves the caller's timestamp for migration use). The
+/// transaction is opened on `conn` directly so the caller controls
+/// the lock.
+fn append_inner(
+    conn: &Connection,
+    handle: &SessionHandle<OwnSession>,
+    trust: TrustLevel,
+    event: SessionEvent,
+    ts_override: Option<DateTime<Utc>>,
+) -> Result<u64, AuditError> {
+    let tx = conn.unchecked_transaction()?;
+
+    // Compute next seq atomically inside the transaction. SQLite
+    // serializes writers in WAL mode so the read-then-insert is
+    // safe against concurrent appenders to the same session.
+    let next_seq: u64 = {
+        let max: Option<i64> = tx
+            .query_row(
+                "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
+                params![handle.id.as_str()],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        match max {
+            Some(n) => (n as u64) + 1,
+            None => 0,
+        }
+    };
+
+    // Previous chain hash for this session, or empty for the first
+    // event.
+    let prev_hash: String = tx
+        .query_row(
+            "SELECT hash FROM session_events
+             WHERE session_id = ?1
+             ORDER BY seq DESC LIMIT 1",
+            params![handle.id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_default();
+
+    let payload_bytes = canonicalize_payload(&event)?;
+    let leaf_hash = sha256_hex(&payload_bytes);
+    let row_hash = chain_hex(&prev_hash, &leaf_hash);
+    let payload_str =
+        String::from_utf8(payload_bytes).expect("serde_json output is always valid utf-8");
+
+    let ts = ts_override.unwrap_or_else(Utc::now).to_rfc3339();
+    let trust_str = trust_to_str(trust);
+
+    tx.execute(
+        "INSERT INTO session_events
+             (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            handle.id.as_str(),
+            next_seq as i64,
+            ts,
+            trust_str,
+            payload_str,
+            leaf_hash,
+            prev_hash,
+            row_hash,
+        ],
+    )?;
+
+    tx.commit()?;
+    Ok(next_seq)
+}
+
 fn canonicalize_payload(event: &SessionEvent) -> Result<Vec<u8>, AuditError> {
     Ok(serde_json::to_vec(event)?)
 }
