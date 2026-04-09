@@ -5,6 +5,7 @@ use wirken_audit::{
     OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog, ToolCallRecord, TrustLevel,
 };
 
+use crate::context::ContextEngine;
 use crate::conversation::{Conversation, ToolCallRequest};
 use crate::error::{AgentError, PermissionDenialContext};
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
@@ -70,6 +71,11 @@ pub struct Agent {
     /// all channels). Slice 2 introduces per-conversation session
     /// ids.
     session_handle: SessionHandle<OwnSession>,
+    /// Per-model context-window engine. Item 4 slice 1: trims the
+    /// conversation in place before each LLM call so context
+    /// blowups stop killing sessions. Sized from the agent's
+    /// [`LlmConfig::context_window`] at construction time.
+    context_engine: ContextEngine,
 }
 
 impl Agent {
@@ -90,10 +96,11 @@ impl Agent {
         let tools = ToolRegistry::new(workspace, tool_config);
 
         let system_prompt = default_system_prompt();
-        let mut conversation = Conversation::new(100_000); // ~100k token budget
+        let mut conversation = Conversation::new(100_000); // legacy compaction is now a no-op; ContextEngine handles trimming
         conversation.set_system_prompt(&system_prompt);
 
         let session_handle = session_log.handle_for(SessionId::new(id.clone()));
+        let context_engine = ContextEngine::for_model(&llm_config);
 
         Ok(Self {
             id,
@@ -109,6 +116,7 @@ impl Agent {
             current_trigger: None,
             session_log,
             session_handle,
+            context_engine,
         })
     }
 
@@ -160,6 +168,8 @@ impl Agent {
             .replay_from_log(&*session_log, &session_handle)
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
 
+        let context_engine = ContextEngine::for_model(&llm_config);
+
         Ok(Self {
             id,
             conversation,
@@ -174,6 +184,7 @@ impl Agent {
             current_trigger: None,
             session_log,
             session_handle,
+            context_engine,
         })
     }
 
@@ -438,11 +449,6 @@ impl Agent {
             },
         )?;
 
-        // Compact if over budget
-        if self.conversation.over_budget() {
-            self.conversation.compact();
-        }
-
         // MCP definitions are cached on the proxy client; lock briefly
         // to read them. The shared Mutex is held only across the
         // synchronous .definitions() copy, never across an LLM call.
@@ -451,7 +457,7 @@ impl Agent {
             None => Vec::new(),
         };
 
-        let tool_defs = if self.llm.config().tools_enabled {
+        let mut tool_defs = if self.llm.config().tools_enabled {
             let mut defs = self.tools.definitions();
             defs.extend(mcp_defs);
             defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
@@ -459,6 +465,18 @@ impl Agent {
         } else {
             Vec::new()
         };
+        // Stable tool def ordering — prompt-cache friendly even
+        // before slice 3 adds provider-specific cache markers.
+        tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Initial fit before the first LLM call.
+        self.context_engine.fit(
+            &mut self.conversation,
+            &tool_defs,
+            &*self.session_log,
+            &self.session_handle,
+        )?;
+
         let mut rounds = 0;
         let mut denials = Vec::new();
 
@@ -469,6 +487,16 @@ impl Agent {
                     "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
                 )));
             }
+
+            // Refit before every LLM call inside the tool loop. A
+            // single large tool result can push us over budget after
+            // a successful initial fit; this catches it.
+            self.context_engine.fit(
+                &mut self.conversation,
+                &tool_defs,
+                &*self.session_log,
+                &self.session_handle,
+            )?;
 
             let response = self
                 .llm
@@ -618,22 +646,30 @@ impl Agent {
             },
         )?;
 
-        if self.conversation.over_budget() {
-            self.conversation.compact();
-        }
-
         let mcp_defs = match &self.mcp {
             Some(mcp) => mcp.lock().await.definitions(),
             None => Vec::new(),
         };
 
-        let tool_defs = if self.llm.config().tools_enabled {
+        let mut tool_defs = if self.llm.config().tools_enabled {
             let mut defs = self.tools.definitions();
             defs.extend(mcp_defs);
             defs
         } else {
             Vec::new()
         };
+        // Stable tool def ordering — see process_message for the
+        // reasoning. Slice 3 of item 4 layers provider-specific
+        // cache_control on top of this stable prefix.
+        tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Initial fit before the first LLM call.
+        self.context_engine.fit(
+            &mut self.conversation,
+            &tool_defs,
+            &*self.session_log,
+            &self.session_handle,
+        )?;
 
         let mut rounds = 0;
         let mut denials = Vec::new();
@@ -645,6 +681,14 @@ impl Agent {
                     "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
                 )));
             }
+
+            // Refit before every LLM call inside the tool loop.
+            self.context_engine.fit(
+                &mut self.conversation,
+                &tool_defs,
+                &*self.session_log,
+                &self.session_handle,
+            )?;
 
             // Create a per-round channel for streaming events
             let (round_tx, mut round_rx) = tokio::sync::mpsc::channel(64);

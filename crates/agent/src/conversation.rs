@@ -176,6 +176,17 @@ impl Conversation {
         self.messages.clear();
     }
 
+    /// Replace the `content` of one message in place. Used by
+    /// [`crate::context::ContextEngine::fit`] to swap a trimmed-out
+    /// message body for a `[trimmed: N bytes]` placeholder while
+    /// preserving the message's role, tool_call_id, tool_name, and
+    /// tool_calls fields. Out-of-range indices are silently ignored.
+    pub fn replace_content(&mut self, idx: usize, new_content: String) {
+        if let Some(msg) = self.messages.get_mut(idx) {
+            msg.content = new_content;
+        }
+    }
+
     /// Replay session events into the conversation. Used by
     /// `Agent::wake` (item 2 slice 2) to reconstruct an in-memory
     /// conversation from a durable session log.

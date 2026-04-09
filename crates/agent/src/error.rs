@@ -72,4 +72,12 @@ pub enum AgentError {
 
     #[error("session log error: {0}")]
     SessionLog(String),
+
+    #[error(
+        "context overflow: conversation requires {current_tokens} tokens but the model budget is {budget_tokens}"
+    )]
+    ContextOverflow {
+        current_tokens: usize,
+        budget_tokens: usize,
+    },
 }

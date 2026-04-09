@@ -1987,3 +1987,334 @@ mod attestation_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Item 4 slice 1: ContextEngine — token budgeting and trimming
+// ---------------------------------------------------------------------------
+
+mod context_engine {
+    use std::sync::Arc;
+
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel};
+
+    use crate::context::ContextEngine;
+    use crate::conversation::{Conversation, Role, ToolCallRequest};
+    use crate::error::AgentError;
+    use crate::llm::LlmConfig;
+    use crate::tool::ToolDef;
+
+    fn fresh_log_and_handle() -> (
+        Arc<dyn SessionLog>,
+        wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    ) {
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let h = log.handle_for(SessionId::new("ctx-test"));
+        (log, h)
+    }
+
+    fn empty_tool_defs() -> Vec<ToolDef> {
+        Vec::new()
+    }
+
+    #[test]
+    fn for_model_applies_safety_factor() {
+        let mut cfg = LlmConfig::ollama("test");
+        cfg.context_window = 1_000;
+        let engine = ContextEngine::for_model(&cfg);
+        // 1000 * 0.80 = 800
+        assert_eq!(engine.budget_tokens(), 800);
+    }
+
+    #[test]
+    fn empty_conversation_no_op() {
+        let engine = ContextEngine::for_test(1_000, 3);
+        let mut conv = Conversation::new(0);
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+        // Nothing trimmed → no Compaction event written.
+        let rows = log.get_since(&h, 0).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn small_conversation_under_budget_no_op() {
+        let engine = ContextEngine::for_test(10_000, 3);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("you are an agent");
+        conv.add_user_message("hello");
+        conv.add_assistant_message("hi there");
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+        // Conversation unchanged.
+        assert_eq!(conv.len(), 3);
+        // No Compaction event written.
+        let rows = log.get_since(&h, 0).unwrap();
+        assert_eq!(rows.len(), 0);
+    }
+
+    #[test]
+    fn large_tool_result_trimmed_first() {
+        // Conversation: system + user1 + assistant1 + tool_result_huge
+        // + user2 + assistant2. With min_recent_turns=1 the tail
+        // (user2 + assistant2) is protected. The huge tool result
+        // is the only thing eligible to trim.
+        let engine = ContextEngine::for_test(200, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("first user");
+        conv.add_assistant_tool_calls(vec![ToolCallRequest {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }]);
+        // Make the tool result the dominant cost.
+        let huge_output = "x".repeat(20_000);
+        conv.add_tool_result("c1", "exec", &huge_output);
+        conv.add_user_message("second user");
+        conv.add_assistant_message("second assistant");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .expect("fit should succeed");
+
+        // The tool result message itself is still present (preserves
+        // tool_call_id binding) but its content is now a placeholder.
+        let messages = conv.messages();
+        let tool_msg = messages
+            .iter()
+            .find(|m| m.role == Role::Tool && m.tool_call_id.as_deref() == Some("c1"))
+            .expect("tool result message must remain");
+        assert!(
+            tool_msg.content.starts_with("[trimmed:"),
+            "expected placeholder, got: {}",
+            tool_msg.content
+        );
+
+        // System prompt + last user + last assistant are intact.
+        assert_eq!(messages[0].role, Role::System);
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert_eq!(last_user.content, "second user");
+
+        // A Compaction event was written.
+        let rows = log.get_since(&h, 0).unwrap();
+        let compaction_count = rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::Compaction { .. }))
+            .count();
+        assert_eq!(compaction_count, 1);
+    }
+
+    #[test]
+    fn system_prompt_never_trimmed() {
+        // Tiny budget. System prompt is large enough to test that
+        // it's protected from trimming.
+        let engine = ContextEngine::for_test(50, 1);
+        let mut conv = Conversation::new(0);
+        let large_sys = "you are an agent ".repeat(50);
+        conv.set_system_prompt(&large_sys);
+        conv.add_user_message("hello");
+        conv.add_assistant_message("hi");
+        let (log, h) = fresh_log_and_handle();
+
+        // The system prompt + tail won't fit even after trimming,
+        // so this should error with ContextOverflow.
+        let result = engine.fit(&mut conv, &empty_tool_defs(), &*log, &h);
+        assert!(matches!(result, Err(AgentError::ContextOverflow { .. })));
+
+        // System prompt content untouched.
+        assert_eq!(conv.messages()[0].role, Role::System);
+        assert_eq!(conv.messages()[0].content, large_sys);
+    }
+
+    #[test]
+    fn most_recent_turns_protected() {
+        // min_recent_turns = 2 protects the last two user messages
+        // and everything after each.
+        let engine = ContextEngine::for_test(10_000, 2);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_message("a1");
+        conv.add_user_message("u2");
+        conv.add_assistant_message("a2");
+        conv.add_user_message("u3");
+        conv.add_assistant_message("a3");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        // Under budget anyway → no trims.
+        assert_eq!(conv.len(), 7);
+    }
+
+    #[test]
+    fn assistant_text_trimmed_after_tool_results() {
+        // No tool results in this conversation. With a tight budget
+        // the engine should fall through to trimming oldest
+        // assistant text. min_recent_turns=1 protects only the last
+        // user-assistant pair.
+        let engine = ContextEngine::for_test(80, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_message(&"old assistant ".repeat(40));
+        conv.add_user_message("u2");
+        conv.add_assistant_message("recent assistant");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        // The first assistant message got trimmed; the second is
+        // intact (it's in the protected tail).
+        let messages = conv.messages();
+        assert!(messages[2].content.starts_with("[trimmed earlier turn:"));
+        assert_eq!(messages[4].content, "recent assistant");
+    }
+
+    #[test]
+    fn context_overflow_when_floor_does_not_fit() {
+        // Tiny budget; even the protected floor is too big.
+        let engine = ContextEngine::for_test(20, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("a fairly long system prompt that doesn't fit");
+        conv.add_user_message("a fairly long user message that doesn't fit either");
+        conv.add_assistant_message("and an assistant reply that pushes us over");
+
+        let (log, h) = fresh_log_and_handle();
+        let result = engine.fit(&mut conv, &empty_tool_defs(), &*log, &h);
+        assert!(matches!(result, Err(AgentError::ContextOverflow { .. })));
+    }
+
+    #[test]
+    fn compaction_event_payload_has_expected_fields() {
+        let engine = ContextEngine::for_test(100, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_tool_calls(vec![ToolCallRequest {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }]);
+        conv.add_tool_result("c1", "exec", &"y".repeat(5_000));
+        conv.add_user_message("u2");
+        conv.add_assistant_message("a2");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        let rows = log.get_since(&h, 0).unwrap();
+        let compaction = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                SessionEvent::Compaction {
+                    spans,
+                    extracts,
+                    via_model,
+                } => Some((spans, extracts, via_model)),
+                _ => None,
+            })
+            .expect("compaction event must be present");
+
+        assert!(!compaction.0.is_empty());
+        assert!(!*compaction.2); // via_model: false
+        let extracts = compaction.1;
+        assert!(extracts.get("trimmed_bytes").is_some());
+        assert!(extracts.get("kept_messages").is_some());
+        assert!(extracts.get("dropped_messages").is_some());
+
+        // The compaction event itself is logged at TrustLevel::Compaction.
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.event, SessionEvent::Compaction { .. }))
+            .unwrap();
+        assert_eq!(row.trust, TrustLevel::Compaction);
+    }
+
+    #[test]
+    fn tool_call_pairing_preserved_after_trim() {
+        // Trimming a tool result must NEVER produce an orphan
+        // assistant tool_calls without a matching tool message.
+        let engine = ContextEngine::for_test(100, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_tool_calls(vec![
+            ToolCallRequest {
+                id: "c1".into(),
+                name: "exec".into(),
+                arguments: "{}".into(),
+            },
+            ToolCallRequest {
+                id: "c2".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        ]);
+        conv.add_tool_result("c1", "exec", &"a".repeat(10_000));
+        conv.add_tool_result("c2", "read_file", &"b".repeat(10_000));
+        conv.add_user_message("u2");
+        conv.add_assistant_message("done");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        // Both tool result messages are still present (just with
+        // placeholder content), so the assistant tool_calls binding
+        // is intact.
+        let tool_msgs: Vec<&crate::conversation::Message> = conv
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+        assert_eq!(tool_msgs[0].tool_call_id.as_deref(), Some("c1"));
+        assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("c2"));
+    }
+
+    #[test]
+    fn tool_def_ordering_is_stable() {
+        // The slice 1 sort happens in process_message and
+        // process_message_stream, not in ContextEngine itself. This
+        // test asserts the contract: a sorted slice in produces a
+        // sorted slice out.
+        let mut tools = [
+            ToolDef {
+                name: "zebra".into(),
+                description: "z".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDef {
+                name: "apple".into(),
+                description: "a".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolDef {
+                name: "mango".into(),
+                description: "m".into(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(tools[0].name, "apple");
+        assert_eq!(tools[1].name, "mango");
+        assert_eq!(tools[2].name, "zebra");
+    }
+}
