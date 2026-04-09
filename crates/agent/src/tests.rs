@@ -1091,3 +1091,258 @@ fn process_result_empty_denials() {
     assert_eq!(result.response, "hello");
     assert!(result.denials.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Identity (item 8)
+// ---------------------------------------------------------------------------
+
+mod identity_tests {
+    use super::TempDir;
+    use crate::identity::{AgentIdentity, identity_dir, verify};
+
+    #[test]
+    fn generate_produces_distinct_keys() {
+        let a = AgentIdentity::generate("a");
+        let b = AgentIdentity::generate("b");
+        assert_ne!(a.public_key_bytes(), b.public_key_bytes());
+    }
+
+    #[test]
+    fn sign_and_verify_round_trip() {
+        let id = AgentIdentity::generate("test");
+        let msg = b"hello, world";
+        let sig = id.sign(msg);
+        verify(&id.verifying_key(), msg, &sig).expect("verify");
+    }
+
+    #[test]
+    fn verify_rejects_wrong_message() {
+        let id = AgentIdentity::generate("test");
+        let sig = id.sign(b"first");
+        assert!(verify(&id.verifying_key(), b"second", &sig).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_wrong_key() {
+        let signer = AgentIdentity::generate("signer");
+        let other = AgentIdentity::generate("other");
+        let sig = signer.sign(b"msg");
+        assert!(verify(&other.verifying_key(), b"msg", &sig).is_err());
+    }
+
+    #[test]
+    fn load_or_create_persists_and_reloads_same_key() {
+        let tmp = TempDir::new().unwrap();
+        let dir = identity_dir(tmp.path(), "agent-A");
+
+        let first = AgentIdentity::load_or_create("agent-A", &dir).unwrap();
+        let pk1 = first.public_key_bytes();
+        // Sign the same message twice — Ed25519 is deterministic so
+        // signatures should be identical across reloads.
+        let sig1 = first.sign(b"determinism check");
+        drop(first);
+
+        let second = AgentIdentity::load_or_create("agent-A", &dir).unwrap();
+        let pk2 = second.public_key_bytes();
+        let sig2 = second.sign(b"determinism check");
+
+        assert_eq!(pk1, pk2);
+        assert_eq!(sig1.to_bytes(), sig2.to_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let dir = identity_dir(tmp.path(), "perms");
+        AgentIdentity::load_or_create("perms", &dir).unwrap();
+
+        let secret_path = dir.join("identity.key");
+        let meta = std::fs::metadata(&secret_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    #[test]
+    fn load_from_rejects_wrong_length() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bad.key");
+        // 31 bytes hex-encoded, one short.
+        std::fs::write(&path, "00".repeat(31)).unwrap();
+        assert!(AgentIdentity::load_from("a", &path).is_err());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attestation (item 8)
+// ---------------------------------------------------------------------------
+
+mod attestation_tests {
+    use wirken_audit::{
+        SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel,
+    };
+
+    use crate::attestation::{
+        AttestationVerifyResult, attest_session, verify_session_attestations,
+    };
+    use crate::identity::AgentIdentity;
+
+    fn user_msg(s: &str) -> SessionEvent {
+        SessionEvent::UserMessage {
+            content: s.into(),
+        }
+    }
+
+    fn fresh_log_with_events(n: usize) -> (SqliteSessionLog, wirken_audit::SessionHandle<wirken_audit::OwnSession>) {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let h = log.handle_for(SessionId::new("sess-T"));
+        for i in 0..n {
+            log.append(&h, TrustLevel::User, user_msg(&format!("e{i}")))
+                .unwrap();
+        }
+        (log, h)
+    }
+
+    #[test]
+    fn attest_empty_session_returns_none() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let h = log.handle_for(SessionId::new("empty"));
+        let id = AgentIdentity::generate("a");
+        let result = attest_session(&log, &h, &id).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn attest_then_verify_round_trip() {
+        let (log, h) = fresh_log_with_events(5);
+        let id = AgentIdentity::generate("a");
+
+        let attest_seq = attest_session(&log, &h, &id).unwrap().unwrap();
+        // Attestation event becomes seq 5 (0..=4 user messages, then 5).
+        assert_eq!(attest_seq, 5);
+
+        let result = verify_session_attestations(&log, &h, &id.verifying_key()).unwrap();
+        match result {
+            AttestationVerifyResult::Ok {
+                attestations_verified,
+                chain_rows_verified,
+            } => {
+                assert_eq!(attestations_verified, 1);
+                assert_eq!(chain_rows_verified, 6); // 5 user msgs + 1 attestation
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_session_verifies_with_zero_attestations() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let h = log.handle_for(SessionId::new("empty"));
+        let id = AgentIdentity::generate("a");
+        let result = verify_session_attestations(&log, &h, &id.verifying_key()).unwrap();
+        assert_eq!(
+            result,
+            AttestationVerifyResult::Ok {
+                attestations_verified: 0,
+                chain_rows_verified: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn session_with_no_attestations_verifies_with_zero() {
+        let (log, h) = fresh_log_with_events(3);
+        let id = AgentIdentity::generate("a");
+        let result = verify_session_attestations(&log, &h, &id.verifying_key()).unwrap();
+        assert_eq!(
+            result,
+            AttestationVerifyResult::Ok {
+                attestations_verified: 0,
+                chain_rows_verified: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn multiple_attestations_all_verify() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let h = log.handle_for(SessionId::new("multi"));
+        let id = AgentIdentity::generate("a");
+
+        for i in 0..3 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("a{i}")))
+                .unwrap();
+            attest_session(&log, &h, &id).unwrap();
+        }
+
+        let result = verify_session_attestations(&log, &h, &id.verifying_key()).unwrap();
+        assert_eq!(
+            result,
+            AttestationVerifyResult::Ok {
+                attestations_verified: 3,
+                chain_rows_verified: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn verify_with_wrong_key_fails() {
+        let (log, h) = fresh_log_with_events(2);
+        let signer = AgentIdentity::generate("signer");
+        let other = AgentIdentity::generate("other");
+
+        attest_session(&log, &h, &signer).unwrap();
+
+        let result =
+            verify_session_attestations(&log, &h, &other.verifying_key()).unwrap();
+        match result {
+            AttestationVerifyResult::Broken { reason, .. } => {
+                assert!(
+                    reason.contains("pubkey mismatch"),
+                    "expected pubkey mismatch, got {reason}"
+                );
+            }
+            other => panic!("expected Broken, got {other:?}"),
+        }
+    }
+
+    // Note: chain tampering detection is exercised exhaustively in
+    // crates/audit/src/tests.rs::session::verify_detects_payload_tampering
+    // and verify_detects_chain_hash_tampering. verify_session_attestations
+    // forwards SessionLog::verify's result transparently, so we don't
+    // duplicate the corruption-via-raw-connection tests at this layer
+    // — wirken-agent doesn't depend on rusqlite and shouldn't.
+
+    #[test]
+    fn attestation_event_participates_in_chain() {
+        // After attesting, the chain head moves to the attestation
+        // event. A subsequent regular append builds on top of it,
+        // and the whole chain (including the attestation) verifies.
+        let (log, h) = fresh_log_with_events(2);
+        let id = AgentIdentity::generate("a");
+
+        attest_session(&log, &h, &id).unwrap();
+        log.append(&h, TrustLevel::User, user_msg("after attest"))
+            .unwrap();
+
+        // Underlying chain is still intact.
+        match log.verify(&h).unwrap() {
+            wirken_audit::SessionVerifyResult::Ok { rows_verified } => {
+                assert_eq!(rows_verified, 4); // 2 + 1 attest + 1 user
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Attestation still verifies.
+        let result = verify_session_attestations(&log, &h, &id.verifying_key()).unwrap();
+        assert_eq!(
+            result,
+            AttestationVerifyResult::Ok {
+                attestations_verified: 1,
+                chain_rows_verified: 4,
+            }
+        );
+    }
+}
