@@ -3,7 +3,7 @@
 //! Called by the CLI's hidden `wirken mcp-proxy` subcommand.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::Mutex;
 
@@ -13,7 +13,7 @@ use wirken_vault::{CredentialStore, probe_keychain};
 
 use crate::error::ProxyError;
 use crate::mcp_config::McpConfig;
-use crate::mcp_registry::ProxyRegistry;
+use crate::mcp_registry::{ProxyRegistry, SharedVault};
 use crate::server;
 
 /// Run the MCP proxy. Reads configuration from the standard wirken
@@ -42,10 +42,13 @@ pub async fn run() -> Result<(), ProxyError> {
 
     // Open the credential vault. The vault handle stays in this process
     // for the lifetime of the proxy and is never sent to the agent.
-    let vault = open_vault(&data_dir);
-    if vault.is_none() {
+    // Wrapped in `Arc<Mutex<Option<_>>>` so the auth providers (item 7
+    // slice 2 — BearerAuth, OAuth2Auth) can hold a long-lived
+    // reference and refresh tokens on the request path.
+    let vault: SharedVault = Arc::new(StdMutex::new(open_vault(&data_dir)));
+    if vault.lock().expect("vault mutex").is_none() {
         tracing::warn!(
-            "credential vault unavailable; vault:-prefixed env values will not be resolved"
+            "credential vault unavailable; vault:-prefixed env values and auth credentials will not be resolved"
         );
     }
 
@@ -55,14 +58,14 @@ pub async fn run() -> Result<(), ProxyError> {
     let agent_ids = list_agent_ids(&data_dir);
     if agent_ids.is_empty() {
         // No multi-agent setup. Load the shared mcp.json under "default".
-        load_for_agent(&mut registry, "default", &data_dir, vault.as_ref()).await;
+        load_for_agent(&mut registry, "default", &data_dir, vault.clone()).await;
     } else {
         for agent_id in &agent_ids {
-            load_for_agent(&mut registry, agent_id, &data_dir, vault.as_ref()).await;
+            load_for_agent(&mut registry, agent_id, &data_dir, vault.clone()).await;
         }
         // Also load the shared config under "default" for unbound channels.
         if !agent_ids.iter().any(|id| id == "default") {
-            load_for_agent(&mut registry, "default", &data_dir, vault.as_ref()).await;
+            load_for_agent(&mut registry, "default", &data_dir, vault.clone()).await;
         }
     }
 
@@ -99,7 +102,7 @@ async fn load_for_agent(
     registry: &mut ProxyRegistry,
     agent_id: &str,
     data_dir: &Path,
-    vault: Option<&CredentialStore>,
+    vault: SharedVault,
 ) {
     let per_agent = data_dir.join("agents").join(agent_id).join("mcp.json");
     let shared = data_dir.join("mcp.json");

@@ -199,3 +199,163 @@ impl StdioTransport {
         let _ = self.child.kill().await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// HTTP transport (item 7 slice 2)
+// ---------------------------------------------------------------------------
+
+/// HTTP JSON-RPC transport. Sends MCP requests as POST bodies to a
+/// remote URL and reads JSON-RPC responses from the response body.
+/// Auth headers come from a pluggable [`crate::auth::AuthProvider`]
+/// so OAuth refresh and bearer-token resolution stay outside the
+/// transport itself.
+pub struct HttpTransport {
+    client: reqwest::Client,
+    url: String,
+    auth: Box<dyn crate::auth::AuthProvider>,
+    next_id: u64,
+}
+
+impl HttpTransport {
+    /// Construct an HTTP transport for `url` with the given auth
+    /// provider. The reqwest client is configured with HTTPS-only
+    /// for non-localhost URLs and a 30s request timeout.
+    pub fn new(url: String, auth: Box<dyn crate::auth::AuthProvider>) -> Result<Self, ProxyError> {
+        let is_localhost = url.starts_with("http://localhost")
+            || url.starts_with("http://127.0.0.1")
+            || url.starts_with("http://[::1]");
+        if !url.starts_with("https://") && !is_localhost {
+            return Err(ProxyError::Mcp(format!(
+                "MCP HTTP endpoint must use HTTPS (got {url}); only localhost may use http://"
+            )));
+        }
+        let client = reqwest::Client::builder()
+            .https_only(!is_localhost)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| ProxyError::Mcp(format!("HTTP client: {e}")))?;
+        Ok(Self {
+            client,
+            url,
+            auth,
+            next_id: 1,
+        })
+    }
+
+    /// Send a JSON-RPC request and parse the response.
+    pub async fn request(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<JsonRpcResponse, ProxyError> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let payload = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: Some(id),
+            method: method.to_string(),
+            params,
+        };
+
+        let mut req = self.client.post(&self.url).json(&payload);
+        if let Some(header) = self.auth.authorization_header().await? {
+            req = req.header(reqwest::header::AUTHORIZATION, header);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProxyError::Mcp(format!("MCP HTTP {method}: {e}")))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProxyError::Mcp(format!(
+                "MCP HTTP {method} returned {status}: {body}"
+            )));
+        }
+
+        let parsed: JsonRpcResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProxyError::Mcp(format!("MCP HTTP {method} body parse: {e}")))?;
+        Ok(parsed)
+    }
+
+    /// Send a notification. HTTP MCP servers may or may not honor
+    /// notifications; we POST and ignore the response body.
+    pub async fn notify(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(), ProxyError> {
+        let payload = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: None,
+            method: method.to_string(),
+            params,
+        };
+        let mut req = self.client.post(&self.url).json(&payload);
+        if let Some(header) = self.auth.authorization_header().await? {
+            req = req.header(reqwest::header::AUTHORIZATION, header);
+        }
+        let _ = req
+            .send()
+            .await
+            .map_err(|e| ProxyError::Mcp(format!("MCP HTTP notify {method}: {e}")))?;
+        Ok(())
+    }
+
+    /// HTTP transports have no persistent connection; shutdown is a no-op.
+    pub async fn shutdown(&mut self) {}
+}
+
+// ---------------------------------------------------------------------------
+// Unified Transport enum
+// ---------------------------------------------------------------------------
+
+/// Either of the two MCP transport flavors. The proxy holds one of
+/// these per server and dispatches `request` / `notify` / `shutdown`
+/// to the right variant. An enum (rather than `Box<dyn Transport>`)
+/// avoids needing async-trait on the transport itself.
+///
+/// `StdioTransport` is heap-boxed to keep the enum size balanced
+/// between variants — `StdioTransport` carries a `Child` and
+/// `BufReader<ChildStdout>` which together are several hundred
+/// bytes, while `HttpTransport` is much smaller.
+pub enum Transport {
+    Stdio(Box<StdioTransport>),
+    Http(HttpTransport),
+}
+
+impl Transport {
+    pub async fn request(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<JsonRpcResponse, ProxyError> {
+        match self {
+            Transport::Stdio(t) => t.request(method, params).await,
+            Transport::Http(t) => t.request(method, params).await,
+        }
+    }
+
+    pub async fn notify(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(), ProxyError> {
+        match self {
+            Transport::Stdio(t) => t.notify(method, params).await,
+            Transport::Http(t) => t.notify(method, params).await,
+        }
+    }
+
+    pub async fn shutdown(&mut self) {
+        match self {
+            Transport::Stdio(t) => t.shutdown().await,
+            Transport::Http(t) => t.shutdown().await,
+        }
+    }
+}

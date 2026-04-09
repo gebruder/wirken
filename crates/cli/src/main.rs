@@ -63,6 +63,10 @@ enum Commands {
     #[command(subcommand)]
     Credentials(CredentialCommands),
 
+    /// Manage MCP integrations (OAuth bootstrap, …)
+    #[command(subcommand)]
+    Mcp(McpCommands),
+
     /// Manage agents
     #[command(subcommand)]
     Agents(AgentCommands),
@@ -256,10 +260,43 @@ enum CronCommands {
 enum CredentialCommands {
     /// List stored credentials (metadata only — no secrets shown)
     List,
+    /// Add a new credential. Prompts for the value on stderr; the
+    /// value is encrypted with the device key before being written
+    /// to the vault.
+    Add {
+        /// Credential name (referenced by `vault:NAME` in mcp.json
+        /// auth blocks and other config)
+        name: String,
+        /// Optional channel/category tag for `wirken credentials list`
+        #[arg(long)]
+        channel: Option<String>,
+    },
     /// Rotate a credential
     Rotate {
         /// Credential name
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Run the OAuth2 authorization code flow for an HTTP MCP
+    /// server with `auth.type = "oauth2"`. Opens the user's browser
+    /// to the provider's authorization URL, spins up a localhost
+    /// callback listener, exchanges the code for tokens, and stores
+    /// the tokens in the vault under the credential name from the
+    /// server's auth block.
+    ///
+    /// Slice 2 supports providers: linear, notion, github, google.
+    /// Operators must register their own OAuth app at the provider
+    /// and supply WIRKEN_<PROVIDER>_CLIENT_ID (and CLIENT_SECRET if
+    /// the provider is confidential) before running this command.
+    Authorize {
+        /// MCP server name from mcp.json
+        server: String,
+        /// Per-agent mcp.json (default: shared ~/.wirken/mcp.json)
+        #[arg(long)]
+        agent: Option<String>,
     },
 }
 
@@ -318,7 +355,15 @@ async fn main() -> Result<()> {
         },
         Commands::Credentials(cmd) => match cmd {
             CredentialCommands::List => commands::credential::list().await,
+            CredentialCommands::Add { name, channel } => {
+                commands::credential::add(&name, channel.as_deref()).await
+            }
             CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
+        },
+        Commands::Mcp(cmd) => match cmd {
+            McpCommands::Authorize { server, agent } => {
+                commands::mcp::authorize(&server, agent.as_deref()).await
+            }
         },
         Commands::Skills(cmd) => match cmd {
             SkillCommands::Search { query } => commands::skills::search(&query).await,
