@@ -123,6 +123,24 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | — | Supply chain | Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push. |
 | — | Confidential inference | Tinfoil and Privatemode providers run open-source LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC). Prompts encrypted end-to-end, protected against software attacks on infrastructure. |
 
+The OWASP table above maps Wirken's mitigations against specific agentic-AI threats. The [NIST AI Risk Management Framework (AI 100-1)](https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf) takes the complementary view: how an organization governs, maps, measures, and manages AI risk across its lifecycle. The mapping below lists only RMF subcategories where Wirken ships a code-verifiable capability today.
+
+| RMF Function | Subcategory | Wirken Capability | Implementation |
+|--------------|-------------|-------------------|----------------|
+| GOVERN | GOVERN 1.1 — policies and procedures defined | Three-tier permission model with first-use approval, expiry, and revocation | `wirken-gateway::permissions` (`PermissionStore`, `PermissionCheck::NeedsApproval`) |
+| GOVERN | GOVERN 1.6 — inventory and lifecycle of AI systems | Per-credential lifecycle metadata: `created_at`, `expires_at`, `last_used_at`, `rotation_due_at`; `rotate()` API | `wirken-vault::store` (`CredentialStore::rotate`, `is_expired`, `is_rotation_due`) |
+| GOVERN | GOVERN 2.1 — roles and responsibilities centrally managed | Centralized org policy endpoint: provider, SIEM, MCP servers, sandbox mode pulled from a company URL and applied locally | `wirken-gateway::org` (`OrgConfig`, `fetch_org_config`, `apply_org_config`) |
+| MAP | MAP 1.1 — context and use cases enumerated | Model-agnostic provider routing across OpenAI, Anthropic, Gemini, Bedrock, Ollama, Tinfoil, Privatemode, and OpenAI-compatible endpoints | `wirken-agent::llm` (`LlmConfig`, `LlmClient::complete`) |
+| MAP | MAP 4.1 — third-party component risks identified | Per-adapter Ed25519 challenge-response handshake; gateway maintains an adapter registry and rejects unknown public keys | `wirken-ipc::auth` (`AdapterIdentity`, `perform_gateway_handshake`), `wirken-gateway::adapter_registry` |
+| MAP | MAP 5.1 — impact and blast radius characterized | Compile-time channel isolation: `SessionHandle<C: Channel>` is parameterized by a sealed marker type, so cross-channel access is a type error | `wirken-ipc::channel` (`Channel` trait, `SessionHandle<C>`) |
+| MEASURE | MEASURE 2.7 — model and system logging captured | Append-only SQLite audit log with SHA-256 hash chain over `previous_hash \|\| ts \|\| actor \|\| action \|\| target \|\| channel \|\| session \|\| detail`; `verify()` re-checks the chain | `wirken-audit::log` (`AuditLog::write_batch`, `AuditLog::verify`) |
+| MEASURE | MEASURE 3.3 — feedback and incident reporting channels | Real-time SIEM forwarding to Datadog Log Intake, Splunk HEC, or generic webhook, in addition to the local audit log | `wirken-audit::siem` (`SiemForwarder`, `SiemTarget`) |
+| MEASURE | MEASURE 2.6 — security and resilience evaluated | Prompt injection detector flags inbound messages with threat metadata (role-switching, instruction overrides, base64 commands, tool-call injection) — events tagged in audit, not blocked | `wirken-gateway::injection_detect` (`InjectionDetector::scan`, `DetectionResult`) |
+| MANAGE | MANAGE 1.3 — risks treated by mitigation or removal | Sandboxed shell execution: Docker (default `runc`) or gVisor (`runsc`) with no-network default, 512 MB memory cap, 256 PID cap, non-root UID, configurable timeout (default 300 s) | `wirken-agent::sandbox` (`DockerSandbox`, `SandboxMode::GVisor`) |
+| MANAGE | MANAGE 1.3 — risks treated by mitigation or removal | Wasm skill sandbox: `wasmtime` 43 with WASI p1, fuel-based CPU limit, no preopened filesystem, no network linker | `wirken-agent::wasm_sandbox` (`WasmSkill::execute`) |
+| MANAGE | MANAGE 2.2 — input validation enforced | Tool inputs declared as JSON Schema; filesystem tools canonicalize paths and reject anything outside the workspace boundary | `wirken-agent::tool` (`ToolDef.parameters`, `ToolRegistry::resolve_path`, `check_ancestor_in_workspace`) |
+| MANAGE | MANAGE 2.4 — abuse and overuse limited | Auth rate limiter with no loopback exemption (5 failures / 60 s / 10-minute lockout) and a control-plane GCRA limiter via `governor` | `wirken-gateway::rate_limit` (`AuthRateLimiter`, `ControlPlaneRateLimiter`) |
+
 ## Enterprise deployment
 
 Wirken gives organizations the controls they need to deploy AI agents without bypassing existing security, compliance, and audit requirements.
