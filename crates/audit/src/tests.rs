@@ -65,12 +65,16 @@ fn tampered_row_detected() {
         .collect();
     log.write_batch(&events).unwrap();
 
-    // Tamper with row 5's hash
+    // Tamper with row 5's hash. After slice 2 of item 1, audit_events
+    // is a SQL view over session_events — UPDATE the underlying table.
     drop(log);
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute("UPDATE audit_events SET hash = 'tampered' WHERE id = 5", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE session_events SET hash = 'tampered' WHERE id = 5",
+            [],
+        )
+        .unwrap();
     }
 
     let log = AuditLog::open(&db_path).unwrap();
@@ -91,12 +95,26 @@ fn tampered_row_data_detected() {
         .collect();
     log.write_batch(&events).unwrap();
 
-    // Tamper with row 3's action (but leave the hash unchanged)
+    // Tamper with row 3's payload — rewrite the AuditLegacy variant
+    // so the leaf_hash no longer matches the stored value. After
+    // slice 2, the underlying table is session_events.
     drop(log);
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute("UPDATE audit_events SET action = 'HACKED' WHERE id = 3", [])
-            .unwrap();
+        let new_payload = serde_json::to_string(&serde_json::json!({
+            "kind": "audit_legacy",
+            "actor": "actor",
+            "action": "HACKED",
+            "target": "target",
+            "channel": "",
+            "detail": null
+        }))
+        .unwrap();
+        conn.execute(
+            "UPDATE session_events SET payload = ?1 WHERE id = 3",
+            rusqlite::params![new_payload],
+        )
+        .unwrap();
     }
 
     let log = AuditLog::open(&db_path).unwrap();
@@ -184,24 +202,31 @@ fn prune_old_events() {
     let db_path = tmp.path().join("audit.db");
     let log = AuditLog::open(&db_path).unwrap();
 
-    // Insert events with timestamps in the past
+    // Insert events with backdated timestamps directly into
+    // session_events. After slice 2, audit_events is a view and
+    // cannot be inserted into. Hash chain values are dummy strings
+    // — the prune logic filters by ts only and the test never calls
+    // verify() afterwards.
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let old_ts = (Utc::now() - Duration::days(100)).to_rfc3339();
     let recent_ts = Utc::now().to_rfc3339();
 
-    for i in 0..5 {
+    for i in 0..5u64 {
         conn.execute(
-            "INSERT INTO audit_events (ts, actor, action, target, channel, session, detail, hash)
-             VALUES (?1, 'actor', ?2, 'target', '', '', 'null', ?3)",
-            rusqlite::params![old_ts, format!("old-{i}"), format!("hash-old-{i}")],
+            "INSERT INTO session_events
+                 (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
+             VALUES ('__system__', ?1, ?2, 'system', '{}', '', '', ?3)",
+            rusqlite::params![i as i64, old_ts, format!("hash-old-{i}")],
         )
         .unwrap();
     }
-    for i in 0..3 {
+    for i in 0..3u64 {
+        let seq = (i + 5) as i64;
         conn.execute(
-            "INSERT INTO audit_events (ts, actor, action, target, channel, session, detail, hash)
-             VALUES (?1, 'actor', ?2, 'target', '', '', 'null', ?3)",
-            rusqlite::params![recent_ts, format!("new-{i}"), format!("hash-new-{i}")],
+            "INSERT INTO session_events
+                 (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
+             VALUES ('__system__', ?1, ?2, 'system', '{}', '', '', ?3)",
+            rusqlite::params![seq, recent_ts, format!("hash-new-{i}")],
         )
         .unwrap();
     }
@@ -209,12 +234,162 @@ fn prune_old_events() {
 
     let log2 = AuditLog::open(&db_path).unwrap();
     let deleted = log2.prune(90).unwrap();
-    // 4 deleted: the last old event is kept as a hash chain checkpoint
+    // 4 deleted: the last old event is kept as a per-session
+    // checkpoint so the chain (hypothetically) stays valid.
     assert_eq!(deleted, 4);
 
     let remaining = log.query(&AuditQuery::default()).unwrap();
     // 3 recent + 1 checkpoint = 4
     assert_eq!(remaining.len(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 of item 1: migration from legacy audit_events table to
+// session_events + view.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn migration_on_fresh_db_is_a_noop() {
+    // Fresh in-memory DB has no audit_events table. Open should
+    // create the view directly without complaint.
+    let log = AuditLog::open_in_memory().unwrap();
+    let results = log.query(&AuditQuery::default()).unwrap();
+    assert!(results.is_empty());
+}
+
+#[test]
+fn migration_of_legacy_table_copies_rows_under_sentinel() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("audit.db");
+
+    // Create the pre-slice-2 schema by hand and insert some rows.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 ts TEXT NOT NULL,
+                 actor TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 target TEXT NOT NULL,
+                 channel TEXT NOT NULL DEFAULT '',
+                 session TEXT NOT NULL DEFAULT '',
+                 detail JSON NOT NULL DEFAULT 'null',
+                 hash TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let ts = Utc::now().to_rfc3339();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO audit_events
+                     (ts, actor, action, target, channel, session, detail, hash)
+                 VALUES (?1, 'legacy-actor', ?2, 'legacy-target', '', '', 'null', ?3)",
+                rusqlite::params![ts, format!("legacy-action-{i}"), format!("h{i}")],
+            )
+            .unwrap();
+        }
+    }
+
+    // First open runs migration: copy → drop table → create view.
+    let log = AuditLog::open(&db_path).unwrap();
+
+    let results = log.query(&AuditQuery::default()).unwrap();
+    assert_eq!(results.len(), 3);
+    // Migrated rows landed under the pre-migration sentinel.
+    assert!(
+        results
+            .iter()
+            .all(|r| r.event.session == "__pre_migration__")
+    );
+    assert!(results.iter().all(|r| r.event.actor == "legacy-actor"));
+
+    // Verify still works on the migrated chain.
+    match log.verify().unwrap() {
+        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 3),
+        other => panic!("expected Ok(3), got {other:?}"),
+    }
+
+    // The audit_events table no longer exists as a table.
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let kind: String = conn
+        .query_row(
+            "SELECT type FROM sqlite_master WHERE name = 'audit_events'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kind, "view");
+}
+
+#[test]
+fn migration_is_idempotent_across_repeated_opens() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("audit.db");
+
+    // Create legacy table with one row.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE audit_events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 ts TEXT NOT NULL,
+                 actor TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 target TEXT NOT NULL,
+                 channel TEXT NOT NULL DEFAULT '',
+                 session TEXT NOT NULL DEFAULT '',
+                 detail JSON NOT NULL DEFAULT 'null',
+                 hash TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audit_events
+                 (ts, actor, action, target, channel, session, detail, hash)
+             VALUES (?1, 'a', 'x', 't', '', '', 'null', 'h')",
+            rusqlite::params![Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    // First open: migration runs.
+    let log1 = AuditLog::open(&db_path).unwrap();
+    assert_eq!(log1.query(&AuditQuery::default()).unwrap().len(), 1);
+    drop(log1);
+
+    // Second open: migration is a no-op. No rows added, no errors.
+    let log2 = AuditLog::open(&db_path).unwrap();
+    assert_eq!(log2.query(&AuditQuery::default()).unwrap().len(), 1);
+
+    // Third open through write_batch path: migration still no-op.
+    let log3 = AuditLog::open(&db_path).unwrap();
+    log3.write_batch(&[AuditEvent::new("new", "post-migration", "t")])
+        .unwrap();
+    assert_eq!(log3.query(&AuditQuery::default()).unwrap().len(), 2);
+}
+
+#[test]
+fn audit_event_with_session_routes_to_named_session() {
+    let log = AuditLog::open_in_memory().unwrap();
+
+    // Two events: one with a session field, one without.
+    log.write_batch(&[
+        AuditEvent::new("u", "send", "msg").with_session("conv-42"),
+        AuditEvent::new("u", "system.start", "daemon"),
+    ])
+    .unwrap();
+
+    let results = log.query(&AuditQuery::default()).unwrap();
+    assert_eq!(results.len(), 2);
+
+    let by_action: std::collections::HashMap<&str, &str> = results
+        .iter()
+        .map(|r| (r.event.action.as_str(), r.event.session.as_str()))
+        .collect();
+
+    assert_eq!(by_action.get("send"), Some(&"conv-42"));
+    assert_eq!(by_action.get("system.start"), Some(&"__system__"));
 }
 
 #[test]
@@ -360,20 +535,16 @@ async fn writer_1000_events_hash_chain_intact() {
 mod session {
     use super::*;
     use crate::session_log::{
-        SessionEvent, SessionHandle, SessionId, SessionLog, SessionVerifyResult,
-        SqliteSessionLog, ToolCallRecord, TrustLevel,
+        SessionEvent, SessionHandle, SessionId, SessionLog, SessionVerifyResult, SqliteSessionLog,
+        ToolCallRecord, TrustLevel,
     };
 
     fn user_msg(s: &str) -> SessionEvent {
-        SessionEvent::UserMessage {
-            content: s.into(),
-        }
+        SessionEvent::UserMessage { content: s.into() }
     }
 
     fn assistant_msg(s: &str) -> SessionEvent {
-        SessionEvent::AssistantMessage {
-            content: s.into(),
-        }
+        SessionEvent::AssistantMessage { content: s.into() }
     }
 
     fn tool_result(call_id: &str, name: &str, output: &str) -> SessionEvent {
@@ -385,7 +556,10 @@ mod session {
         }
     }
 
-    fn fresh() -> (SqliteSessionLog, SessionHandle<crate::session_log::OwnSession>) {
+    fn fresh() -> (
+        SqliteSessionLog,
+        SessionHandle<crate::session_log::OwnSession>,
+    ) {
         let log = SqliteSessionLog::open_in_memory().unwrap();
         let h = log.handle_for(SessionId::new("sess-A"));
         (log, h)
@@ -547,12 +721,8 @@ mod session {
     fn verify_intact_chain() {
         let (log, h) = fresh();
         for i in 0..50 {
-            log.append(
-                &h,
-                TrustLevel::User,
-                user_msg(&format!("event {i}")),
-            )
-            .unwrap();
+            log.append(&h, TrustLevel::User, user_msg(&format!("event {i}")))
+                .unwrap();
         }
         match log.verify(&h).unwrap() {
             SessionVerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 50),
@@ -564,7 +734,8 @@ mod session {
     fn verify_detects_payload_tampering() {
         let (log, h) = fresh();
         log.append(&h, TrustLevel::User, user_msg("first")).unwrap();
-        log.append(&h, TrustLevel::User, user_msg("second")).unwrap();
+        log.append(&h, TrustLevel::User, user_msg("second"))
+            .unwrap();
         log.append(&h, TrustLevel::User, user_msg("third")).unwrap();
 
         // Tamper: rewrite the payload of seq=1 directly via the
@@ -575,9 +746,7 @@ mod session {
             conn.execute(
                 "UPDATE session_events SET payload = ?1
                  WHERE session_id = 'sess-A' AND seq = 1",
-                rusqlite::params![
-                    serde_json::to_string(&user_msg("EVIL")).unwrap()
-                ],
+                rusqlite::params![serde_json::to_string(&user_msg("EVIL")).unwrap()],
             )
             .unwrap();
         }
@@ -595,7 +764,8 @@ mod session {
     fn verify_detects_chain_hash_tampering() {
         let (log, h) = fresh();
         log.append(&h, TrustLevel::User, user_msg("first")).unwrap();
-        log.append(&h, TrustLevel::User, user_msg("second")).unwrap();
+        log.append(&h, TrustLevel::User, user_msg("second"))
+            .unwrap();
 
         // Corrupt the chain hash of seq=0 — leaves leaf_hash and
         // payload intact, but breaks the link to seq=1.
@@ -686,12 +856,8 @@ mod session {
                     provider: "anthropic".into(),
                     model: "claude-sonnet-4-20250514".into(),
                     request_id: "req-1".into(),
-                    tools_hash: crate::session_log::HashHex(
-                        "deadbeef".repeat(8),
-                    ),
-                    messages_hash: crate::session_log::HashHex(
-                        "cafebabe".repeat(8),
-                    ),
+                    tools_hash: crate::session_log::HashHex("deadbeef".repeat(8)),
+                    messages_hash: crate::session_log::HashHex("cafebabe".repeat(8)),
                 },
             ),
             (
@@ -735,15 +901,9 @@ mod session {
                 TrustLevel::System,
                 SessionEvent::Attestation {
                     chain_head_seq: 8,
-                    chain_head_hash: crate::session_log::HashHex(
-                        "1234".repeat(16),
-                    ),
-                    signature: crate::session_log::HexBytes(
-                        "5678".repeat(32),
-                    ),
-                    signer_pubkey: crate::session_log::HashHex(
-                        "9abc".repeat(16),
-                    ),
+                    chain_head_hash: crate::session_log::HashHex("1234".repeat(16)),
+                    signature: crate::session_log::HexBytes("5678".repeat(32)),
+                    signer_pubkey: crate::session_log::HashHex("9abc".repeat(16)),
                 },
             ),
             (

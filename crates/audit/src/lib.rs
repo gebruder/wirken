@@ -1,5 +1,6 @@
 mod error;
 mod event;
+mod legacy_compat;
 mod log;
 mod session_log;
 pub mod siem;
