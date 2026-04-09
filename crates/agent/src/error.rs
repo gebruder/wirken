@@ -69,4 +69,7 @@ pub enum AgentError {
 
     #[error("identity error: {0}")]
     Identity(String),
+
+    #[error("session log error: {0}")]
+    SessionLog(String),
 }

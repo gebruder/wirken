@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::conversation::Conversation;
+use wirken_audit::{
+    OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog, ToolCallRecord, TrustLevel,
+};
+
+use crate::conversation::{Conversation, ToolCallRequest};
 use crate::error::{AgentError, PermissionDenialContext};
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
 use crate::llm_stream::StreamEvent;
@@ -46,6 +50,17 @@ pub struct Agent {
     /// The current user message that triggered this processing round.
     /// Captured in process_message() for inclusion in denial audit events.
     current_trigger: Option<String>,
+    /// Session log this agent writes durability events to. Slice 1
+    /// of item 2 in `docs/managed-agents-parity.md` makes every
+    /// interaction in process_message a typed session event written
+    /// before the next LLM call. Item 2 slice 2 will add wake() and
+    /// make the agent stateless.
+    session_log: Arc<dyn SessionLog>,
+    /// Capability handle for this agent's session. Slice 1 uses
+    /// `agent_id` as the session id (one big chain per agent across
+    /// all channels). Slice 2 introduces per-conversation session
+    /// ids.
+    session_handle: SessionHandle<OwnSession>,
 }
 
 impl Agent {
@@ -55,6 +70,7 @@ impl Agent {
         workspace: PathBuf,
         llm_config: LlmConfig,
         api_key: Option<String>,
+        session_log: Arc<dyn SessionLog>,
     ) -> Result<Self, AgentError> {
         let tool_config = ToolConfig {
             api_key: api_key.clone(),
@@ -68,6 +84,8 @@ impl Agent {
         let mut conversation = Conversation::new(100_000); // ~100k token budget
         conversation.set_system_prompt(&system_prompt);
 
+        let session_handle = session_log.handle_for(SessionId::new(id.clone()));
+
         Ok(Self {
             id,
             conversation,
@@ -80,6 +98,8 @@ impl Agent {
             api_key,
             permissions: None,
             current_trigger: None,
+            session_log,
+            session_handle,
         })
     }
 
@@ -113,6 +133,44 @@ impl Agent {
         Ok(self.skills.len())
     }
 
+    /// Append a typed event to this agent's session log. Errors
+    /// from the underlying log are wrapped as `SessionLog` so the
+    /// agent loop fails closed if durability writes break — partial
+    /// state is worse than no state.
+    ///
+    /// Crate-private so tests can drive the session writes without
+    /// needing an LLM mock.
+    pub(crate) fn log_event(
+        &self,
+        trust: TrustLevel,
+        event: SessionEvent,
+    ) -> Result<(), AgentError> {
+        self.session_log
+            .append(&self.session_handle, trust, event)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Borrow this agent's session log. Crate-private; used by tests
+    /// to read back what `log_event` wrote.
+    #[cfg(test)]
+    pub(crate) fn session_log_for_test(&self) -> &Arc<dyn SessionLog> {
+        &self.session_log
+    }
+
+    /// Convert in-process tool call requests into the wire format
+    /// the session log uses.
+    pub(crate) fn calls_to_records(calls: &[ToolCallRequest]) -> Vec<ToolCallRecord> {
+        calls
+            .iter()
+            .map(|c| ToolCallRecord {
+                id: c.id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+            })
+            .collect()
+    }
+
     /// Process an inbound message and produce a response.
     /// This is the core agent loop:
     /// 1. Add user message to conversation
@@ -125,6 +183,12 @@ impl Agent {
     ) -> Result<ProcessResult, AgentError> {
         self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
+        self.log_event(
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: user_message.to_string(),
+            },
+        )?;
 
         // Compact if over budget
         if self.conversation.over_budget() {
@@ -164,14 +228,31 @@ impl Agent {
             match response {
                 LlmResponse::Text(text) => {
                     self.conversation.add_assistant_message(&text);
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::AssistantMessage {
+                            content: text.clone(),
+                        },
+                    )?;
                     return Ok(ProcessResult {
                         response: text,
                         denials,
                     });
                 }
                 LlmResponse::ToolCalls(calls) => {
-                    // Record the tool call request in conversation
+                    // Record the tool call request in the conversation AND
+                    // in the session log BEFORE executing any tools. The
+                    // ordering is load-bearing for item 2 slice 2's wake():
+                    // an interruption between "LLM emitted tool calls" and
+                    // "tools executed" must be detectable as
+                    // AssistantToolCalls with no matching ToolResult events.
                     self.conversation.add_assistant_tool_calls(calls.clone());
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::AssistantToolCalls {
+                            calls: Self::calls_to_records(&calls),
+                        },
+                    )?;
 
                     // Execute each tool call
                     for call in &calls {
@@ -191,6 +272,15 @@ impl Agent {
                                     ctx.tool_name,
                                     ctx.requested_tier.label(),
                                 );
+                                self.log_event(
+                                    TrustLevel::System,
+                                    SessionEvent::PermissionDenied {
+                                        tool: ctx.tool_name.clone(),
+                                        tier: ctx.requested_tier.label().to_string(),
+                                        agent_id: ctx.agent_id.clone(),
+                                        trigger: ctx.trigger_message.clone(),
+                                    },
+                                )?;
                                 let output = format!(
                                     "Permission denied: '{}' requires {} approval. \
                                      This action was not executed.",
@@ -215,6 +305,15 @@ impl Agent {
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
+                        self.log_event(
+                            TrustLevel::Tool,
+                            SessionEvent::ToolResult {
+                                call_id: call.id.clone(),
+                                tool_name: call.name.clone(),
+                                output: result.output.clone(),
+                                success: result.success,
+                            },
+                        )?;
                     }
 
                     // Continue loop — LLM will see tool results and respond
@@ -222,6 +321,12 @@ impl Agent {
                 LlmResponse::Empty => {
                     let fallback = "(no response)".to_string();
                     self.conversation.add_assistant_message(&fallback);
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::AssistantMessage {
+                            content: fallback.clone(),
+                        },
+                    )?;
                     return Ok(ProcessResult {
                         response: fallback,
                         denials,
@@ -241,6 +346,12 @@ impl Agent {
     ) -> Result<ProcessResult, AgentError> {
         self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
+        self.log_event(
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: user_message.to_string(),
+            },
+        )?;
 
         if self.conversation.over_budget() {
             self.conversation.compact();
@@ -296,6 +407,12 @@ impl Agent {
             match response {
                 LlmResponse::Text(text) => {
                     self.conversation.add_assistant_message(&text);
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::AssistantMessage {
+                            content: text.clone(),
+                        },
+                    )?;
                     let _ = tx
                         .send(StreamEvent::Done(LlmResponse::Text(text.clone())))
                         .await;
@@ -306,6 +423,12 @@ impl Agent {
                 }
                 LlmResponse::ToolCalls(calls) => {
                     self.conversation.add_assistant_tool_calls(calls.clone());
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::AssistantToolCalls {
+                            calls: Self::calls_to_records(&calls),
+                        },
+                    )?;
 
                     for call in &calls {
                         tracing::info!("Agent {} executing tool: {}", self.id, call.name);
@@ -313,6 +436,15 @@ impl Agent {
                         let result = match self.execute_tool(&call.name, &call.arguments).await {
                             Ok(result) => result,
                             Err(AgentError::PermissionDeniedCtx(ctx)) => {
+                                self.log_event(
+                                    TrustLevel::System,
+                                    SessionEvent::PermissionDenied {
+                                        tool: ctx.tool_name.clone(),
+                                        tier: ctx.requested_tier.label().to_string(),
+                                        agent_id: ctx.agent_id.clone(),
+                                        trigger: ctx.trigger_message.clone(),
+                                    },
+                                )?;
                                 let output = format!(
                                     "Permission denied: '{}' requires {} approval. \
                                      This action was not executed.",
@@ -330,11 +462,26 @@ impl Agent {
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
+                        self.log_event(
+                            TrustLevel::Tool,
+                            SessionEvent::ToolResult {
+                                call_id: call.id.clone(),
+                                tool_name: call.name.clone(),
+                                output: result.output.clone(),
+                                success: result.success,
+                            },
+                        )?;
                     }
                 }
                 LlmResponse::Empty => {
                     let fallback = "(no response)".to_string();
                     self.conversation.add_assistant_message(&fallback);
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::AssistantMessage {
+                            content: fallback.clone(),
+                        },
+                    )?;
                     let _ = tx.send(StreamEvent::Done(LlmResponse::Empty)).await;
                     return Ok(ProcessResult {
                         response: fallback,

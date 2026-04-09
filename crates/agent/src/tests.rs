@@ -1,10 +1,20 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 use crate::conversation::{Conversation, Role};
 use crate::llm::{LlmConfig, LlmResponse};
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry};
+use wirken_audit::{SessionLog, SqliteSessionLog};
+
+/// Test helper: in-memory session log shared by every test that
+/// constructs an Agent. Item 2 slice 1 made the session log a
+/// required dependency of `Agent::new`. Tests that don't care about
+/// the log just hand the agent a fresh in-memory store.
+fn test_session_log() -> Arc<dyn SessionLog> {
+    Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"))
+}
 
 // ---------------------------------------------------------------------------
 // Conversation
@@ -793,6 +803,7 @@ fn agent_loads_skills() {
         workspace,
         LlmConfig::ollama("test"),
         None,
+        test_session_log(),
     )
     .unwrap();
 
@@ -811,11 +822,247 @@ fn agent_conversation_tracking() {
         tmp.path().to_path_buf(),
         LlmConfig::ollama("test"),
         None,
+        test_session_log(),
     )
     .unwrap();
 
     // System prompt is set on creation
     assert!(agent.conversation_len() > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Item 2 slice 1: durability writes to the session log
+// ---------------------------------------------------------------------------
+
+mod durability {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{
+        SessionEvent, SessionId, SessionLog, SessionVerifyResult, SqliteSessionLog, ToolCallRecord,
+        TrustLevel,
+    };
+
+    use crate::conversation::ToolCallRequest;
+    use crate::llm::LlmConfig;
+
+    fn fresh_agent_with_log() -> (crate::runtime::Agent, Arc<dyn SessionLog>) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let agent = crate::runtime::Agent::new(
+            "durability-test".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log.clone(),
+        )
+        .unwrap();
+        (agent, log)
+    }
+
+    #[test]
+    fn agent_creates_handle_for_its_own_id() {
+        let (agent, log) = fresh_agent_with_log();
+        // The agent's session id is its own id. Mint an independent
+        // handle from the same log and verify the session is empty
+        // before we write anything.
+        let h = log.handle_for(SessionId::new(agent.id.clone()));
+        assert_eq!(log.last_index(&h).unwrap(), None);
+    }
+
+    #[test]
+    fn log_event_appends_to_agent_session() {
+        let (agent, log) = fresh_agent_with_log();
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "hello".into(),
+                },
+            )
+            .unwrap();
+
+        let h = log.handle_for(SessionId::new(agent.id.clone()));
+        assert_eq!(log.last_index(&h).unwrap(), Some(0));
+        let rows = log.get_since(&h, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        match &rows[0].event {
+            SessionEvent::UserMessage { content } => assert_eq!(content, "hello"),
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+        assert_eq!(rows[0].trust, TrustLevel::User);
+    }
+
+    #[test]
+    fn full_turn_event_sequence_round_trips_in_order() {
+        // Simulate the exact sequence process_message would write
+        // for one user turn that triggers a single tool call round.
+        let (agent, log) = fresh_agent_with_log();
+
+        let calls = vec![ToolCallRequest {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: r#"{"command":"ls"}"#.into(),
+        }];
+
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "list files".into(),
+                },
+            )
+            .unwrap();
+        agent
+            .log_event(
+                TrustLevel::System,
+                SessionEvent::AssistantToolCalls {
+                    calls: crate::runtime::Agent::calls_to_records(&calls),
+                },
+            )
+            .unwrap();
+        agent
+            .log_event(
+                TrustLevel::Tool,
+                SessionEvent::ToolResult {
+                    call_id: "c1".into(),
+                    tool_name: "exec".into(),
+                    output: "a.txt\nb.txt".into(),
+                    success: true,
+                },
+            )
+            .unwrap();
+        agent
+            .log_event(
+                TrustLevel::System,
+                SessionEvent::AssistantMessage {
+                    content: "two files".into(),
+                },
+            )
+            .unwrap();
+
+        let h = log.handle_for(SessionId::new(agent.id.clone()));
+        let rows = log.get_since(&h, 0).unwrap();
+        assert_eq!(rows.len(), 4);
+
+        assert!(matches!(rows[0].event, SessionEvent::UserMessage { .. }));
+        assert!(matches!(
+            rows[1].event,
+            SessionEvent::AssistantToolCalls { .. }
+        ));
+        assert!(matches!(rows[2].event, SessionEvent::ToolResult { .. }));
+        assert!(matches!(
+            rows[3].event,
+            SessionEvent::AssistantMessage { .. }
+        ));
+
+        // Whole chain verifies.
+        assert_eq!(
+            log.verify(&h).unwrap(),
+            SessionVerifyResult::Ok { rows_verified: 4 }
+        );
+    }
+
+    #[test]
+    fn calls_to_records_preserves_fields() {
+        let calls = vec![
+            ToolCallRequest {
+                id: "c1".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            },
+            ToolCallRequest {
+                id: "c2".into(),
+                name: "exec".into(),
+                arguments: r#"{"command":"ls"}"#.into(),
+            },
+        ];
+        let records = crate::runtime::Agent::calls_to_records(&calls);
+        assert_eq!(
+            records,
+            vec![
+                ToolCallRecord {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a"}"#.into(),
+                },
+                ToolCallRecord {
+                    id: "c2".into(),
+                    name: "exec".into(),
+                    arguments: r#"{"command":"ls"}"#.into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn two_agents_have_isolated_sessions() {
+        // Two agents share the same session log but have different
+        // ids. Their session events are kept apart by the per-session
+        // partitioning.
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+
+        let a = crate::runtime::Agent::new(
+            "alpha".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log.clone(),
+        )
+        .unwrap();
+        let b = crate::runtime::Agent::new(
+            "beta".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log.clone(),
+        )
+        .unwrap();
+
+        a.log_event(
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "from alpha".into(),
+            },
+        )
+        .unwrap();
+        b.log_event(
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "from beta".into(),
+            },
+        )
+        .unwrap();
+
+        let ha = log.handle_for(SessionId::new("alpha"));
+        let hb = log.handle_for(SessionId::new("beta"));
+
+        let rows_a = log.get_since(&ha, 0).unwrap();
+        let rows_b = log.get_since(&hb, 0).unwrap();
+        assert_eq!(rows_a.len(), 1);
+        assert_eq!(rows_b.len(), 1);
+
+        match (&rows_a[0].event, &rows_b[0].event) {
+            (
+                SessionEvent::UserMessage { content: ca },
+                SessionEvent::UserMessage { content: cb },
+            ) => {
+                assert_eq!(ca, "from alpha");
+                assert_eq!(cb, "from beta");
+            }
+            _ => panic!("expected user messages on both"),
+        }
+    }
+
+    #[test]
+    fn session_log_for_test_returns_same_arc() {
+        // Sanity: the test accessor returns the same Arc the agent
+        // was constructed with, not a clone of the inner data.
+        let (agent, log) = fresh_agent_with_log();
+        let inner = agent.session_log_for_test();
+        assert!(Arc::ptr_eq(inner, &log));
+    }
 }
 
 // ---------------------------------------------------------------------------
