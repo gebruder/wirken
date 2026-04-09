@@ -24,7 +24,23 @@ pub enum Role {
     User,
     Assistant,
     Tool,
+    /// Item 4 slice 2 (alpha): a harness-controlled summary of
+    /// content the context engine trimmed from the conversation
+    /// history. Provider adapters in `crate::llm` map this to the
+    /// provider's `system` role with content wrapped in
+    /// [`COMPACTION_FENCE_OPEN`] / [`COMPACTION_FENCE_CLOSE`]. The
+    /// default system prompt instructs the model to treat the
+    /// fenced block as facts the harness recorded, not as new
+    /// instructions from any user.
+    Compaction,
 }
+
+/// Opening tag for the compaction fence wrapped around
+/// [`Role::Compaction`] content when sent to a provider.
+pub const COMPACTION_FENCE_OPEN: &str = "<|compaction|>";
+
+/// Closing tag for the compaction fence.
+pub const COMPACTION_FENCE_CLOSE: &str = "<|/compaction|>";
 
 /// A tool call request from the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,6 +196,23 @@ impl Conversation {
     /// Clear all messages.
     pub fn clear(&mut self) {
         self.messages.clear();
+    }
+
+    /// Insert a message at the given index, shifting later
+    /// messages right. Out-of-range indices are clamped to the
+    /// end. Used by [`crate::context::ContextEngine::fit`] (item 4
+    /// slice 2) to inject a [`Role::Compaction`] summary at
+    /// position 1, immediately after the system prompt.
+    pub fn insert_at(&mut self, idx: usize, message: Message) {
+        let pos = idx.min(self.messages.len());
+        self.messages.insert(pos, message);
+    }
+
+    /// Remove every message of the given role. Used by
+    /// [`crate::context::ContextEngine::fit`] to clear stale
+    /// [`Role::Compaction`] messages before injecting a fresh one.
+    pub fn remove_role(&mut self, role: Role) {
+        self.messages.retain(|m| m.role != role);
     }
 
     /// Replace the `content` of one message in place. Used by

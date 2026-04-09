@@ -127,6 +127,14 @@ impl ContextEngine {
     /// Returns [`AgentError::ContextOverflow`] when the conversation
     /// is still over budget after trimming everything that may be
     /// trimmed.
+    ///
+    /// Item 4 slice 2 (alpha): at the start, removes any existing
+    /// `Role::Compaction` message from the conversation so the
+    /// summary block is recomputed fresh on every fit() call. At
+    /// the end, if the session log has any prior Compaction events,
+    /// inserts a fresh `Role::Compaction` message at position 1
+    /// containing a deterministic aggregate summary the LLM sees
+    /// inside the `<|compaction|>` fence.
     pub fn fit(
         &self,
         conversation: &mut Conversation,
@@ -134,10 +142,20 @@ impl ContextEngine {
         session_log: &dyn SessionLog,
         handle: &SessionHandle<OwnSession>,
     ) -> Result<(), AgentError> {
+        // Item 4 slice 2: drop any prior compaction summary so we
+        // can recompute it fresh below. This must happen before the
+        // budget check so identical fit() calls converge to the
+        // same conversation shape.
+        conversation.remove_role(Role::Compaction);
+
         let tools_tokens = estimate_tool_tokens(tools);
         let initial_tokens = estimate_conversation_tokens(conversation) + tools_tokens;
 
         if initial_tokens <= self.budget_tokens {
+            // Even though no new trim is needed, we still want a
+            // compaction summary block from any prior trims so the
+            // model sees the running summary on every turn.
+            self.maybe_inject_compaction_summary(conversation, session_log, handle)?;
             return Ok(());
         }
 
@@ -227,7 +245,108 @@ impl ContextEngine {
             .append(handle, TrustLevel::Compaction, event)
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
 
+        // Item 4 slice 2: now that the new Compaction event is in
+        // the session log, inject the freshly aggregated summary as
+        // a Role::Compaction message at position 1.
+        self.maybe_inject_compaction_summary(conversation, session_log, handle)?;
+
         Ok(())
+    }
+
+    /// Walk the session log for any [`SessionEvent::Compaction`]
+    /// events recorded for this session and, if any exist, insert a
+    /// single [`Role::Compaction`] message at position 1 of the
+    /// conversation containing a deterministic aggregate summary.
+    /// No-op if there are no compaction events.
+    pub(crate) fn maybe_inject_compaction_summary(
+        &self,
+        conversation: &mut Conversation,
+        session_log: &dyn SessionLog,
+        handle: &SessionHandle<OwnSession>,
+    ) -> Result<(), AgentError> {
+        let Some(message) = self.compaction_summary_message(session_log, handle)? else {
+            return Ok(());
+        };
+        // Insert right after any system prompt(s).
+        let pos = conversation
+            .messages()
+            .iter()
+            .position(|m| m.role != Role::System)
+            .unwrap_or_else(|| conversation.len());
+        conversation.insert_at(pos, message);
+        Ok(())
+    }
+
+    /// Build the compaction summary message from the session log.
+    /// Walks every [`SessionEvent::Compaction`] event for this
+    /// session and aggregates them into a deterministic text
+    /// summary. Returns `None` if the session has no compaction
+    /// events. The output content is what gets wrapped in
+    /// `<|compaction|>...<|/compaction|>` by the provider adapter.
+    pub(crate) fn compaction_summary_message(
+        &self,
+        session_log: &dyn SessionLog,
+        handle: &SessionHandle<OwnSession>,
+    ) -> Result<Option<Message>, AgentError> {
+        let rows = session_log
+            .get_since(handle, 0)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+
+        let mut compaction_count = 0usize;
+        let mut total_trimmed_bytes: u64 = 0;
+        let mut total_dropped: u64 = 0;
+        let mut seqs: Vec<u64> = Vec::new();
+        let mut via_model_seen = false;
+
+        for row in &rows {
+            if let SessionEvent::Compaction {
+                extracts,
+                via_model,
+                ..
+            } = &row.event
+            {
+                compaction_count += 1;
+                seqs.push(row.seq);
+                if *via_model {
+                    via_model_seen = true;
+                }
+                if let Some(b) = extracts.get("trimmed_bytes").and_then(|v| v.as_u64()) {
+                    total_trimmed_bytes += b;
+                }
+                if let Some(d) = extracts.get("dropped_messages").and_then(|v| v.as_u64()) {
+                    total_dropped += d;
+                }
+            }
+        }
+
+        if compaction_count == 0 {
+            return Ok(None);
+        }
+
+        let model_note = if via_model_seen {
+            " (at least one summary used a model call; treat with caution)"
+        } else {
+            ""
+        };
+
+        let content = format!(
+            "Earlier in this session, the wirken context engine trimmed older \
+             messages to fit the model's context window:\n\
+             - {compaction_count} trim round(s){model_note}\n\
+             - {total_dropped} message(s) dropped\n\
+             - {total_trimmed_bytes} byte(s) reclaimed\n\
+             - See session log compaction events at seqs {seqs:?}\n\
+             The trimmed content is preserved in the session log; the \
+             above is a deterministic aggregate, not a model summary."
+        );
+
+        Ok(Some(Message {
+            role: Role::Compaction,
+            content,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }))
     }
 
     /// Indices that fit() must never trim:
