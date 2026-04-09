@@ -57,3 +57,185 @@ pub async fn close(id: &str) -> Result<()> {
     println!("  Session '{id}' closed.");
     Ok(())
 }
+
+/// `wirken session verify <session_id> [--strict]` — item 10 slice 1.
+///
+/// Walks the session log for `session_id` and verifies what can be
+/// verified: chain integrity, LlmRequest input hashes (against the
+/// conversation projection at each point with the same `fit()`
+/// applied), and deterministic tool re-execution. Prints a structured
+/// report.
+///
+/// Exit codes:
+///   0  fully verified clean
+///   1  at least one divergence
+///   2  --strict and at least one unverifiable event with no divergences
+///   3  underlying chain broken
+///   4  command setup failure (agent_id not found, log unreachable, …)
+pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use wirken_agent::factory::CacheMode;
+    use wirken_agent::llm::LlmConfig;
+    use wirken_agent::{AgentFactory, AgentStaticConfig};
+    use wirken_audit::SqliteSessionLog;
+    use wirken_gateway::agent_config::AgentConfigStore;
+
+    let cfg = config();
+
+    // Parse agent_id from session_id. Slice 2 of item 2 fixed the
+    // format as `{agent_id}/{channel}/{conversation_id}`. Older
+    // (slice-1-of-item-2) sessions used the bare agent_id; if we
+    // can't split, treat the whole thing as the agent_id.
+    let agent_id = match session_id.split_once('/') {
+        Some((aid, _)) => aid.to_string(),
+        None => session_id.to_string(),
+    };
+
+    // Look up the agent's static config. Falls back to the default
+    // provider config if no per-agent record exists.
+    let agent_config_path = cfg.agent_config_db_path();
+    let (workspace, llm_config) = if agent_config_path.exists()
+        && let Ok(store) = AgentConfigStore::open(&agent_config_path)
+        && let Ok(agent_cfg) = store.get(&agent_id)
+    {
+        let mut llm =
+            LlmConfig::from_provider(&agent_cfg.provider, &agent_cfg.base_url, &agent_cfg.model);
+        if agent_cfg.provider == "bedrock" {
+            llm.region = agent_cfg
+                .base_url
+                .strip_prefix("https://bedrock-runtime.")
+                .and_then(|s| s.strip_suffix(".amazonaws.com"))
+                .map(String::from);
+        }
+        (cfg.agent_workspace(&agent_cfg.id), llm)
+    } else {
+        // Fall back to provider.json (the default agent's config).
+        let provider_path = cfg.data_dir.join("provider.json");
+        if !provider_path.exists() {
+            eprintln!("  No agent '{agent_id}' configured. Run `wirken setup` first.");
+            std::process::exit(4);
+        }
+        let provider_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&provider_path)?)?;
+        let provider = provider_json["provider"].as_str().unwrap_or("ollama");
+        let model = provider_json["model"].as_str().unwrap_or("llama3");
+        let base_url = provider_json["base_url"]
+            .as_str()
+            .unwrap_or("http://localhost:11434/v1");
+        (
+            cfg.data_dir.join("workspace"),
+            LlmConfig::from_provider(provider, base_url, model),
+        )
+    };
+
+    // Open the session log.
+    let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
+        SqliteSessionLog::open(&cfg.audit_db_path()).context("Failed to open session log")?,
+    );
+
+    // Verify the session has events at all.
+    let probe_handle = session_log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    let event_count = session_log
+        .last_index(&probe_handle)
+        .context("session log query failed")?;
+    if event_count.is_none() {
+        eprintln!("  No events for session '{session_id}'.");
+        std::process::exit(4);
+    }
+
+    // Build a one-shot factory and wake the agent. The factory is
+    // the only public path to `Agent::from_session_log` (which
+    // replays + heals partial tool rounds).
+    let mut configs: HashMap<String, AgentStaticConfig> = HashMap::new();
+    configs.insert(
+        agent_id.clone(),
+        AgentStaticConfig {
+            agent_id: agent_id.clone(),
+            workspace,
+            llm_config,
+            api_key: None, // verify never calls the LLM
+            skills: Vec::new(),
+            wasm_skills: Vec::new(),
+            mcp_client: None,
+        },
+    );
+    let factory =
+        AgentFactory::with_options(configs, session_log.clone(), None, CacheMode::Drop, 1);
+
+    let agent_arc = factory
+        .wake(&agent_id, session_id)
+        .map_err(|e| anyhow::anyhow!("factory.wake('{agent_id}', '{session_id}') failed: {e}"))?;
+    let agent = agent_arc.lock().await;
+
+    println!();
+    println!("  wirken session verify {session_id}");
+    println!("  ──────────────────────");
+    println!("  agent: {agent_id}");
+    println!("  Note: deterministic tools (read_file, list_files) are re-executed against the");
+    println!("        CURRENT workspace, not the workspace state at the time of execution.");
+    println!();
+
+    let report = agent.verify().await.context("verify failed")?;
+
+    // Print the report.
+    println!("  events_total:        {}", report.events_total);
+    println!("  events_verified:     {}", report.events_verified);
+    println!("  events_unverifiable: {}", report.events_unverifiable);
+    println!("  events_divergent:    {}", report.events_divergent.len());
+    match &report.chain_status {
+        wirken_audit::SessionVerifyResult::Ok { rows_verified } => {
+            println!("  chain:               OK ({rows_verified} rows)");
+        }
+        wirken_audit::SessionVerifyResult::Empty => {
+            println!("  chain:               EMPTY");
+        }
+        wirken_audit::SessionVerifyResult::Broken { seq, reason } => {
+            println!("  chain:               BROKEN at seq {seq}: {reason}");
+        }
+    }
+
+    if !report.events_divergent.is_empty() {
+        println!();
+        println!("  Divergences:");
+        for d in &report.events_divergent {
+            println!(
+                "    seq {} [{}]: expected {} found {}",
+                d.seq,
+                d.kind,
+                truncate_for_display(&d.expected, 64),
+                truncate_for_display(&d.found, 64),
+            );
+        }
+    }
+
+    println!();
+
+    // Determine exit code.
+    if matches!(
+        report.chain_status,
+        wirken_audit::SessionVerifyResult::Broken { .. }
+    ) {
+        std::process::exit(3);
+    }
+    if !report.events_divergent.is_empty() {
+        std::process::exit(1);
+    }
+    if strict && report.events_unverifiable > 0 {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn truncate_for_display(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}

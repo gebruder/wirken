@@ -498,6 +498,25 @@ impl Agent {
                 &self.session_handle,
             )?;
 
+            // Item 10 slice 1: durably log the LLM call inputs and
+            // outputs so `Agent::verify` can reproduce them. The hash
+            // is computed AFTER fit() so it captures what was
+            // actually sent to the model.
+            let request_id = format!("req-{}", uuid::Uuid::new_v4());
+            let messages_hash = compute_messages_hash(self.conversation.messages());
+            let tools_hash = compute_tools_hash(&tool_defs);
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::LlmRequest {
+                    provider: self.llm.config().provider.clone(),
+                    model: self.llm.config().model.clone(),
+                    request_id: request_id.clone(),
+                    tools_hash,
+                    messages_hash,
+                },
+            )?;
+
+            let started = std::time::Instant::now();
             let response = self
                 .llm
                 .complete(
@@ -506,6 +525,17 @@ impl Agent {
                     self.api_key.as_deref(),
                 )
                 .await?;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::LlmResponse {
+                    request_id,
+                    finish_reason: finish_reason_for(&response).to_string(),
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    latency_ms,
+                },
+            )?;
 
             match response {
                 LlmResponse::Text(text) => {
@@ -690,10 +720,28 @@ impl Agent {
                 &self.session_handle,
             )?;
 
+            // Item 10 slice 1: log LlmRequest after fit() so the
+            // hash captures what was actually sent. Same as the
+            // non-streaming path.
+            let request_id = format!("req-{}", uuid::Uuid::new_v4());
+            let messages_hash = compute_messages_hash(self.conversation.messages());
+            let tools_hash = compute_tools_hash(&tool_defs);
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::LlmRequest {
+                    provider: self.llm.config().provider.clone(),
+                    model: self.llm.config().model.clone(),
+                    request_id: request_id.clone(),
+                    tools_hash,
+                    messages_hash,
+                },
+            )?;
+
             // Create a per-round channel for streaming events
             let (round_tx, mut round_rx) = tokio::sync::mpsc::channel(64);
 
             // Spawn streaming in background, forward text deltas to caller
+            let started = std::time::Instant::now();
             let response = {
                 let stream_future = self.llm.complete_stream(
                     self.conversation.messages(),
@@ -715,6 +763,17 @@ impl Agent {
                 let _ = forward_handle.await;
                 result?
             };
+            let latency_ms = started.elapsed().as_millis() as u64;
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::LlmResponse {
+                    request_id,
+                    finish_reason: finish_reason_for(&response).to_string(),
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    latency_ms,
+                },
+            )?;
 
             match response {
                 LlmResponse::Text(text) => {
@@ -900,6 +959,254 @@ impl Agent {
 
         self.conversation.set_system_prompt(&prompt);
     }
+
+    /// Walk this agent's session log and verify what can be
+    /// verified. Item 10 slice 1 of `docs/managed-agents-parity.md`.
+    ///
+    /// Three checks:
+    ///
+    /// 1. **Chain integrity** via the underlying [`SessionLog::verify`].
+    ///    A broken chain short-circuits the rest of the report.
+    /// 2. **`LlmRequest` hashes**: replay the conversation
+    ///    incrementally, and at each `LlmRequest` event clone the
+    ///    current conversation, run the same `ContextEngine::fit`
+    ///    the original call did (per decision C1 — verify must
+    ///    reproduce what was actually sent), recompute
+    ///    `messages_hash` and `tools_hash`, compare. The dry-run
+    ///    fit happens against an in-memory throwaway session log so
+    ///    no Compaction events leak into the real log.
+    /// 3. **Deterministic tool re-execution**: for every
+    ///    `ToolResult` whose `tool_name` returns `true` from
+    ///    [`crate::tool::is_deterministic_tool`], re-execute via
+    ///    the agent's `ToolRegistry` and compare the output
+    ///    byte-for-byte.
+    ///
+    /// `LlmResponse` events are always counted as
+    /// `events_unverifiable` — we never re-call the model.
+    pub async fn verify(&self) -> Result<VerifyReport, AgentError> {
+        // 1. Chain integrity.
+        let chain_status = self
+            .session_log
+            .verify(&self.session_handle)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        if let wirken_audit::SessionVerifyResult::Broken { .. } = &chain_status {
+            return Ok(VerifyReport {
+                events_total: 0,
+                events_verified: 0,
+                events_unverifiable: 0,
+                events_divergent: Vec::new(),
+                chain_status,
+            });
+        }
+
+        // 2. Walk events forward.
+        let rows = self
+            .session_log
+            .get_since(&self.session_handle, 0)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        let events_total = rows.len();
+
+        // Build a fresh conversation that we'll mutate in lockstep
+        // with the replay so each LlmRequest sees the same
+        // conversation state the original call did. This is
+        // separate from `self.conversation` (which was already
+        // populated by `from_session_log`) so we can rebuild it
+        // from scratch and run dry-run fit() at each LlmRequest.
+        let mut conv = crate::conversation::Conversation::new(100_000);
+        conv.set_system_prompt(&self.system_prompt);
+
+        // Snapshot the agent's CURRENT tool defs. tools_hash
+        // divergence means the agent's tool surface has changed
+        // between the original execution and now (skills
+        // installed/removed, MCP servers reconfigured). This is a
+        // meaningful signal — verify only succeeds when the agent
+        // can still produce the same tool surface.
+        let current_tool_defs = self.snapshot_tool_defs().await;
+
+        // Throwaway session log for dry-run fit() calls. Compaction
+        // events go here and are discarded; the real session log
+        // remains untouched.
+        let dryrun_log: std::sync::Arc<dyn wirken_audit::SessionLog> = std::sync::Arc::new(
+            wirken_audit::SqliteSessionLog::open_in_memory()
+                .map_err(|e| AgentError::SessionLog(e.to_string()))?,
+        );
+        let dryrun_handle = dryrun_log.handle_for(wirken_audit::SessionId::new("dryrun"));
+
+        let mut events_verified = 0usize;
+        let mut events_unverifiable = 0usize;
+        let mut divergences: Vec<DivergenceRecord> = Vec::new();
+
+        for row in &rows {
+            match &row.event {
+                wirken_audit::SessionEvent::UserMessage { content, .. } => {
+                    conv.add_user_message(content);
+                    events_verified += 1;
+                }
+                wirken_audit::SessionEvent::AssistantMessage { content } => {
+                    conv.add_assistant_message(content);
+                    events_verified += 1;
+                }
+                wirken_audit::SessionEvent::AssistantToolCalls { calls } => {
+                    let in_proc: Vec<crate::conversation::ToolCallRequest> = calls
+                        .iter()
+                        .map(|c| crate::conversation::ToolCallRequest {
+                            id: c.id.clone(),
+                            name: c.name.clone(),
+                            arguments: c.arguments.clone(),
+                        })
+                        .collect();
+                    conv.add_assistant_tool_calls(in_proc);
+                    events_verified += 1;
+                }
+                wirken_audit::SessionEvent::ToolResult {
+                    call_id,
+                    tool_name,
+                    output,
+                    ..
+                } => {
+                    conv.add_tool_result(call_id, tool_name, output);
+                    if crate::tool::is_deterministic_tool(tool_name) {
+                        // Re-execute and compare. The arguments live
+                        // on the prior AssistantToolCalls event; we
+                        // need to find them.
+                        if let Some(args) = find_call_arguments(&rows, call_id) {
+                            match self.tools.execute(tool_name, &args).await {
+                                Ok(result) => {
+                                    if &result.output == output {
+                                        events_verified += 1;
+                                    } else {
+                                        divergences.push(DivergenceRecord {
+                                            seq: row.seq,
+                                            kind: "tool_result".into(),
+                                            expected: output.clone(),
+                                            found: result.output,
+                                        });
+                                    }
+                                }
+                                Err(_) => {
+                                    events_unverifiable += 1;
+                                }
+                            }
+                        } else {
+                            // Couldn't find the matching call —
+                            // unusual but defensive.
+                            events_unverifiable += 1;
+                        }
+                    } else {
+                        events_unverifiable += 1;
+                    }
+                }
+                wirken_audit::SessionEvent::LlmRequest {
+                    tools_hash,
+                    messages_hash,
+                    ..
+                } => {
+                    // C1: clone the conversation, run the same
+                    // fit() the original call did, hash the result.
+                    let mut conv_copy = conv.clone();
+                    if let Err(e) = self.context_engine.fit(
+                        &mut conv_copy,
+                        &current_tool_defs,
+                        &*dryrun_log,
+                        &dryrun_handle,
+                    ) {
+                        // ContextOverflow during verify is itself a
+                        // divergence — the conversation no longer
+                        // fits even at the budget the original call
+                        // used.
+                        divergences.push(DivergenceRecord {
+                            seq: row.seq,
+                            kind: "context_overflow_during_verify".into(),
+                            expected: messages_hash.0.clone(),
+                            found: format!("{e}"),
+                        });
+                        continue;
+                    }
+                    let recomputed_messages = compute_messages_hash(conv_copy.messages());
+                    let recomputed_tools = compute_tools_hash(&current_tool_defs);
+
+                    let mut event_ok = true;
+                    if &recomputed_messages != messages_hash {
+                        divergences.push(DivergenceRecord {
+                            seq: row.seq,
+                            kind: "messages_hash".into(),
+                            expected: messages_hash.0.clone(),
+                            found: recomputed_messages.0.clone(),
+                        });
+                        event_ok = false;
+                    }
+                    if &recomputed_tools != tools_hash {
+                        divergences.push(DivergenceRecord {
+                            seq: row.seq,
+                            kind: "tools_hash".into(),
+                            expected: tools_hash.0.clone(),
+                            found: recomputed_tools.0.clone(),
+                        });
+                        event_ok = false;
+                    }
+                    if event_ok {
+                        events_verified += 1;
+                    }
+                }
+                wirken_audit::SessionEvent::LlmResponse { .. } => {
+                    // We never re-call the model. Always
+                    // unverifiable.
+                    events_unverifiable += 1;
+                }
+                // Structural events (Compaction, PermissionDenied,
+                // SandboxProvisioned, Attestation, Subagent*,
+                // AuditLegacy) are not part of the LLM-visible
+                // projection but they pass the chain check and
+                // require no further verification work.
+                _ => {
+                    events_verified += 1;
+                }
+            }
+        }
+
+        Ok(VerifyReport {
+            events_total,
+            events_verified,
+            events_unverifiable,
+            events_divergent: divergences,
+            chain_status,
+        })
+    }
+
+    /// Snapshot the agent's current tool defs in the same shape
+    /// `process_message` builds for an LLM call. Used by
+    /// [`Self::verify`] to recompute `tools_hash`. Tool defs are
+    /// sorted by name for stable hashing (matches the slice 1 sort
+    /// in `process_message`).
+    async fn snapshot_tool_defs(&self) -> Vec<crate::tool::ToolDef> {
+        let mcp_defs = match &self.mcp {
+            Some(mcp) => mcp.lock().await.definitions(),
+            None => Vec::new(),
+        };
+        let mut defs = if self.llm.config().tools_enabled {
+            let mut d = self.tools.definitions();
+            d.extend(mcp_defs);
+            d.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
+            d
+        } else {
+            Vec::new()
+        };
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
+    }
+}
+
+/// Look up the arguments JSON for a tool call by `call_id` from
+/// any prior `AssistantToolCalls` event in the session.
+fn find_call_arguments(rows: &[wirken_audit::StoredSessionEvent], call_id: &str) -> Option<String> {
+    for row in rows {
+        if let wirken_audit::SessionEvent::AssistantToolCalls { calls } = &row.event
+            && let Some(c) = calls.iter().find(|c| c.id == call_id)
+        {
+            return Some(c.arguments.clone());
+        }
+    }
+    None
 }
 
 fn default_system_prompt() -> String {
@@ -922,4 +1229,109 @@ fn truncate(s: &str, max: usize) -> String {
         }
         format!("{}...", &s[..end])
     }
+}
+
+// ---------------------------------------------------------------------------
+// Item 10 slice 1: hashing helpers and finish-reason classification
+// ---------------------------------------------------------------------------
+
+/// Canonical SHA-256 of the conversation messages slice as a
+/// HashHex. Used for `LlmRequest.messages_hash` so the verifier can
+/// reproduce what was actually sent to the model.
+///
+/// The canonical form is `serde_json::to_vec` over the message
+/// slice. Same pinning approach as the session log: byte-stability
+/// is asserted by the round-trip tests in
+/// `crates/audit/src/tests.rs::session::leaf_hash_is_deterministic_for_same_event`.
+pub(crate) fn compute_messages_hash(
+    messages: &[crate::conversation::Message],
+) -> wirken_audit::HashHex {
+    let bytes = serde_json::to_vec(messages).unwrap_or_default();
+    sha256_hex(&bytes)
+}
+
+/// Canonical SHA-256 of the (already-sorted-by-name from item 4
+/// slice 1) tool defs slice. Used for `LlmRequest.tools_hash`.
+pub(crate) fn compute_tools_hash(tools: &[crate::tool::ToolDef]) -> wirken_audit::HashHex {
+    let bytes = serde_json::to_vec(tools).unwrap_or_default();
+    sha256_hex(&bytes)
+}
+
+fn sha256_hex(bytes: &[u8]) -> wirken_audit::HashHex {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&digest);
+    wirken_audit::HashHex::from_bytes(&arr)
+}
+
+fn finish_reason_for(response: &LlmResponse) -> &'static str {
+    match response {
+        LlmResponse::Text(_) => "text",
+        LlmResponse::ToolCalls(_) => "tool_calls",
+        LlmResponse::Empty => "empty",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item 10 slice 1: VerifyReport types
+// ---------------------------------------------------------------------------
+
+/// Result of [`Agent::verify`].
+#[derive(Debug, Clone)]
+pub struct VerifyReport {
+    /// Total events walked from the session log.
+    pub events_total: usize,
+    /// Events that successfully passed every applicable check.
+    pub events_verified: usize,
+    /// Events that the verifier could not check (LLM responses,
+    /// non-deterministic tool results, MCP tools, Wasm skills,
+    /// failed re-execution attempts).
+    pub events_unverifiable: usize,
+    /// Events whose recomputed hash or re-executed output diverged
+    /// from the recorded value. Empty on a clean verify.
+    pub events_divergent: Vec<DivergenceRecord>,
+    /// Result of the underlying [`SessionLog::verify`] call. If
+    /// this is `Broken`, no further per-event checks were
+    /// performed.
+    pub chain_status: wirken_audit::SessionVerifyResult,
+}
+
+impl VerifyReport {
+    /// Whether everything fully verified — no divergences and no
+    /// unverifiable events. Useful for `--strict` mode.
+    pub fn is_fully_clean(&self) -> bool {
+        self.events_divergent.is_empty()
+            && self.events_unverifiable == 0
+            && matches!(
+                self.chain_status,
+                wirken_audit::SessionVerifyResult::Ok { .. }
+                    | wirken_audit::SessionVerifyResult::Empty
+            )
+    }
+
+    /// Whether the chain integrity check passed and there are no
+    /// divergences (unverifiable events allowed).
+    pub fn is_consistent(&self) -> bool {
+        self.events_divergent.is_empty()
+            && matches!(
+                self.chain_status,
+                wirken_audit::SessionVerifyResult::Ok { .. }
+                    | wirken_audit::SessionVerifyResult::Empty
+            )
+    }
+}
+
+/// One mismatch encountered by [`Agent::verify`].
+#[derive(Debug, Clone)]
+pub struct DivergenceRecord {
+    /// Sequence number of the offending session event.
+    pub seq: u64,
+    /// What kind of check failed: `"messages_hash"`, `"tools_hash"`,
+    /// or `"tool_result"`.
+    pub kind: String,
+    /// The value the session log recorded.
+    pub expected: String,
+    /// The value the verifier computed (or re-executed).
+    pub found: String,
 }

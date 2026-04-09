@@ -19,7 +19,9 @@ pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};
 pub use factory::{AgentFactory, AgentStaticConfig, session_id_for};
 pub use identity::AgentIdentity;
-pub use runtime::{Agent, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult};
+pub use runtime::{
+    Agent, DivergenceRecord, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult, VerifyReport,
+};
 pub use skill::SkillLoader;
 
 #[cfg(test)]
