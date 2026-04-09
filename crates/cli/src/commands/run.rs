@@ -128,6 +128,20 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .await?;
     println!("  Audit log: {}", cfg.audit_db_path().display());
 
+    // --- Open the session log alongside the audit log ---
+    //
+    // Item 1 slice 2 made the audit DB the home of session_events.
+    // Item 2 slice 1 has the agent write durability events
+    // (UserMessage, AssistantMessage, AssistantToolCalls, ToolResult,
+    // PermissionDenied) into the same store. Slice 2 will introduce
+    // wake() which reads them back. Each agent gets its own session
+    // id of `agent_id` for now; per-conversation session ids land
+    // with wake().
+    let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
+        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("Failed to open session log")?,
+    );
+
     // --- Open stores ---
     let registry = Arc::new(Mutex::new(
         AdapterRegistry::open(&cfg.adapters_db_path())
@@ -195,7 +209,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 
-            let mut agent = Agent::new(agent_cfg.id.clone(), workspace, llm, agent_api_key)?;
+            let mut agent = Agent::new(
+                agent_cfg.id.clone(),
+                workspace,
+                llm,
+                agent_api_key,
+                session_log.clone(),
+            )?;
             agent.set_permissions(permissions.clone());
 
             // Load per-agent skills + shared skills
@@ -246,7 +266,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let workspace = cfg.data_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
 
-        let mut default_agent = Agent::new("default".into(), workspace, llm_config, api_key)?;
+        let mut default_agent = Agent::new(
+            "default".into(),
+            workspace,
+            llm_config,
+            api_key,
+            session_log.clone(),
+        )?;
         default_agent.set_permissions(permissions.clone());
 
         let skills_dir = cfg.data_dir.join("skills");
