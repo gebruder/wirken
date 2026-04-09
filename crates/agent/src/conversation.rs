@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use wirken_audit::{OwnSession, SessionEvent, SessionHandle, SessionLog, ToolCallRecord};
 
 /// A message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,4 +175,71 @@ impl Conversation {
     pub fn clear(&mut self) {
         self.messages.clear();
     }
+
+    /// Replay session events into the conversation. Used by
+    /// `Agent::wake` (item 2 slice 2) to reconstruct an in-memory
+    /// conversation from a durable session log.
+    ///
+    /// Only the variants that participate in the LLM-visible
+    /// conversation projection are replayed:
+    ///
+    /// - [`SessionEvent::UserMessage`] → [`Role::User`]
+    /// - [`SessionEvent::AssistantMessage`] → [`Role::Assistant`]
+    /// - [`SessionEvent::AssistantToolCalls`] → [`Role::Assistant`] with `tool_calls`
+    /// - [`SessionEvent::ToolResult`] → [`Role::Tool`]
+    ///
+    /// Other variants (LlmRequest, LlmResponse, PermissionDenied,
+    /// SandboxProvisioned, Compaction, Attestation, SubagentSpawned,
+    /// SubagentResult, AuditLegacy) are skipped — they're not part
+    /// of the LLM context, just the audit trail.
+    ///
+    /// Does NOT set the system prompt. Callers should call
+    /// [`Self::set_system_prompt`] either before or after replay,
+    /// then optionally rebuild the prompt with skill instructions.
+    pub fn replay_from_log(
+        &mut self,
+        log: &dyn SessionLog,
+        handle: &SessionHandle<OwnSession>,
+    ) -> Result<(), wirken_audit::AuditError> {
+        let rows = log.get_since(handle, 0)?;
+        for row in rows {
+            match row.event {
+                SessionEvent::UserMessage { content, .. } => {
+                    self.add_user_message(&content);
+                }
+                SessionEvent::AssistantMessage { content } => {
+                    self.add_assistant_message(&content);
+                }
+                SessionEvent::AssistantToolCalls { calls } => {
+                    self.add_assistant_tool_calls(records_to_calls(calls));
+                }
+                SessionEvent::ToolResult {
+                    call_id,
+                    tool_name,
+                    output,
+                    ..
+                } => {
+                    self.add_tool_result(&call_id, &tool_name, &output);
+                }
+                _ => {
+                    // Other variants are not part of the LLM-visible
+                    // conversation projection.
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Convert wire-format tool call records back into in-process
+/// requests. Inverse of `Agent::calls_to_records`.
+fn records_to_calls(records: Vec<ToolCallRecord>) -> Vec<ToolCallRequest> {
+    records
+        .into_iter()
+        .map(|r| ToolCallRequest {
+            id: r.id,
+            name: r.name,
+            arguments: r.arguments,
+        })
+        .collect()
 }

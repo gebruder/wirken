@@ -182,7 +182,22 @@ pub enum TrustLevel {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEvent {
     /// Inbound user message that triggered an agent turn.
-    UserMessage { content: String },
+    ///
+    /// `inbound_id` carries the platform-supplied message identifier
+    /// (Telegram `message_id`, Slack `ts`, Discord `id`, etc.) when
+    /// the source has one, or a UUID synthesized at the gateway
+    /// boundary for sources that don't (`webchat`, `cron`,
+    /// `wirken ask`). The harness uses this for crash-recovery
+    /// dedup: if the most recent UserMessage in the session has the
+    /// same inbound_id as a fresh delivery, it's a re-delivery and
+    /// process_message returns the prior assistant response without
+    /// re-running the LLM. `Option` is for wire-format flexibility —
+    /// production callers always supply Some.
+    UserMessage {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inbound_id: Option<String>,
+    },
     /// Final assistant text response for a turn.
     AssistantMessage { content: String },
     /// Assistant requested one or more tool calls.

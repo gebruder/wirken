@@ -1,0 +1,244 @@
+//! `AgentFactory` — the only public way to construct an [`Agent`]
+//! after item 2 slice 2.
+//!
+//! The factory holds per-agent static configuration (workspace,
+//! LLM config, API key, skills, MCP client, permissions) plus a
+//! shared session log. Inbound messages are routed by the gateway
+//! to `factory.wake(agent_id, session_id)`, which returns an
+//! `Arc<Mutex<Agent>>` whose conversation has been reconstructed
+//! from the session log via [`Agent::from_session_log`].
+//!
+//! ## Per-conversation isolation
+//!
+//! The session id format is `{agent_id}/{channel}/{conversation_id}`.
+//! [`session_id_for`] is the canonical helper. Two channels routed
+//! to the same agent get separate sessions and separate conversation
+//! state — slice 2 fixes the slice 1 / pre-slice-1 bug where multi-
+//! channel agents mashed all conversations into one history.
+//!
+//! ## Cache contract
+//!
+//! An LRU cache (default 64 entries) keyed by session id holds the
+//! `Arc<Mutex<Agent>>` for hot sessions. The cache is a pure
+//! optimization: cache-hit and cache-miss MUST produce identical
+//! session log output. The `WIRKEN_CACHE_MODE=drop` env var bypasses
+//! the cache for the entire factory lifetime; the CI test uses it
+//! to assert behavioral equivalence.
+//!
+//! ## Concurrency
+//!
+//! The cache uses double-checked locking. Construction (replay from
+//! the session log) happens outside the cache mutex so other threads
+//! waking different sessions are not blocked. Two threads racing on
+//! the same session id may both construct, but only one inserts —
+//! the second discards its build and returns the cached entry.
+//! Subsequent callers serialize through the inner `Mutex<Agent>` on
+//! the cached entry, which is the existing single-writer guarantee.
+
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
+
+use lru::LruCache;
+use tokio::sync::Mutex as AsyncMutex;
+use wirken_audit::SessionLog;
+use wirken_gateway::permissions::PermissionStore;
+
+use crate::error::AgentError;
+use crate::llm::LlmConfig;
+use crate::mcp::McpProxyClient;
+use crate::runtime::Agent;
+use crate::skill::Skill;
+use crate::wasm_sandbox::WasmSkill;
+
+/// Default LRU capacity. 64 hot sessions per process — covers
+/// chatty Slack DM bots and most expected workloads. Override with
+/// `WIRKEN_AGENT_CACHE_SIZE`.
+const DEFAULT_CACHE_CAPACITY: usize = 64;
+
+/// Build the canonical session id for `(agent_id, channel,
+/// conversation_id)`. Format is human-readable for debugging:
+/// `{agent_id}/{channel}/{conversation_id}`. None of the supported
+/// channel conversation_ids contain `/`, so collisions are not a
+/// concern in practice. Reserved sentinels `__system__` and
+/// `__pre_migration__` from item 1 slice 2 are unaffected — they
+/// don't go through this helper.
+pub fn session_id_for(agent_id: &str, channel: &str, conversation_id: &str) -> String {
+    format!("{agent_id}/{channel}/{conversation_id}")
+}
+
+/// Per-agent static configuration held by the factory and injected
+/// into every waked Agent.
+pub struct AgentStaticConfig {
+    pub agent_id: String,
+    pub workspace: PathBuf,
+    pub llm_config: LlmConfig,
+    pub api_key: Option<String>,
+    pub skills: Vec<Skill>,
+    pub wasm_skills: Vec<WasmSkill>,
+    /// Long-lived MCP proxy connection shared across every waked
+    /// Agent for this agent_id. Concurrent waked Agents serialize
+    /// through this Mutex on each MCP call. The contention is
+    /// bounded by MCP call latency which already dwarfs lock
+    /// acquisition; per-wake fresh MCP connections are a future
+    /// optimization if profiling shows it.
+    pub mcp_client: Option<Arc<AsyncMutex<McpProxyClient>>>,
+}
+
+/// Cache mode resolved at factory construction time. Tests pass it
+/// explicitly; production code reads `WIRKEN_CACHE_MODE` via
+/// [`CacheMode::from_env`] and forwards the result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheMode {
+    /// Standard production mode: LRU cache active.
+    Cached,
+    /// Drop mode: bypass the cache, wake on every call. Used by the
+    /// CI test that asserts behavioral equivalence between cached
+    /// and uncached operation. Set via `WIRKEN_CACHE_MODE=drop` in
+    /// production; passed directly in tests to avoid env-var leakage
+    /// across parallel tests.
+    Drop,
+}
+
+impl CacheMode {
+    pub fn from_env() -> Self {
+        match std::env::var("WIRKEN_CACHE_MODE").as_deref() {
+            Ok("drop") => Self::Drop,
+            _ => Self::Cached,
+        }
+    }
+}
+
+/// The agent factory.
+pub struct AgentFactory {
+    static_configs: HashMap<String, AgentStaticConfig>,
+    session_log: Arc<dyn SessionLog>,
+    permissions: Option<Arc<StdMutex<PermissionStore>>>,
+    cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
+    cache_mode: CacheMode,
+}
+
+impl AgentFactory {
+    /// Create a new factory with the given static configs and
+    /// session log, in cached mode with the default capacity.
+    /// Convenience for tests and the common production path; the
+    /// CLI uses [`Self::with_options`] to wire up `WIRKEN_CACHE_MODE`
+    /// and `WIRKEN_AGENT_CACHE_SIZE`.
+    pub fn new(
+        static_configs: HashMap<String, AgentStaticConfig>,
+        session_log: Arc<dyn SessionLog>,
+        permissions: Option<Arc<StdMutex<PermissionStore>>>,
+    ) -> Self {
+        Self::with_options(
+            static_configs,
+            session_log,
+            permissions,
+            CacheMode::Cached,
+            DEFAULT_CACHE_CAPACITY,
+        )
+    }
+
+    /// Construct with explicit cache mode and capacity. The CLI
+    /// reads the env vars (`WIRKEN_CACHE_MODE`,
+    /// `WIRKEN_AGENT_CACHE_SIZE`) and forwards them. Tests pass the
+    /// mode directly so parallel test runs don't fight over env
+    /// state.
+    pub fn with_options(
+        static_configs: HashMap<String, AgentStaticConfig>,
+        session_log: Arc<dyn SessionLog>,
+        permissions: Option<Arc<StdMutex<PermissionStore>>>,
+        cache_mode: CacheMode,
+        cache_capacity: usize,
+    ) -> Self {
+        if cache_mode == CacheMode::Drop {
+            tracing::info!("AgentFactory: cache disabled (drop mode)");
+        }
+        let capacity = NonZeroUsize::new(cache_capacity)
+            .unwrap_or_else(|| NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap());
+        Self {
+            static_configs,
+            session_log,
+            permissions,
+            cache: StdMutex::new(LruCache::new(capacity)),
+            cache_mode,
+        }
+    }
+
+    /// List the agent ids known to this factory.
+    pub fn known_agent_ids(&self) -> Vec<String> {
+        self.static_configs.keys().cloned().collect()
+    }
+
+    /// Whether this factory has a static config for `agent_id`.
+    pub fn has_agent(&self, agent_id: &str) -> bool {
+        self.static_configs.contains_key(agent_id)
+    }
+
+    /// Wake the agent that owns `session_id`. Returns the cached
+    /// `Arc<Mutex<Agent>>` if present (cache mode), or a fresh Agent
+    /// reconstructed by replaying the session log (cache miss or
+    /// drop mode).
+    ///
+    /// `agent_id` must be a known static config; otherwise returns
+    /// `AgentError::ToolNotFound` (slightly abusive but the closest
+    /// existing variant; a dedicated `UnknownAgent` would be a
+    /// future cleanup).
+    pub fn wake(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+    ) -> Result<Arc<AsyncMutex<Agent>>, AgentError> {
+        // Cache lookup (cached mode only).
+        if self.cache_mode == CacheMode::Cached
+            && let Some(cached) = self.cache.lock().unwrap().get(session_id).cloned()
+        {
+            return Ok(cached);
+        }
+
+        // Build a fresh Agent for this session id.
+        let cfg = self
+            .static_configs
+            .get(agent_id)
+            .ok_or_else(|| AgentError::ToolNotFound(format!("unknown agent_id '{agent_id}'")))?;
+        let mut agent = Agent::from_session_log(
+            session_id.to_string(),
+            cfg.workspace.clone(),
+            cfg.llm_config.clone(),
+            cfg.api_key.clone(),
+            self.session_log.clone(),
+        )?;
+        // Inject the per-agent shared resources.
+        agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone());
+        if let Some(perms) = &self.permissions {
+            agent.set_permissions(perms.clone());
+        }
+        if let Some(mcp) = &cfg.mcp_client {
+            agent.attach_mcp(mcp.clone());
+        }
+
+        let arc = Arc::new(AsyncMutex::new(agent));
+
+        // Insert into cache (cached mode only). Double-checked: if
+        // another thread inserted between our lookup and now, return
+        // theirs and discard ours.
+        if self.cache_mode == CacheMode::Cached {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(existing) = cache.get(session_id).cloned() {
+                return Ok(existing);
+            }
+            cache.put(session_id.to_string(), arc.clone());
+        }
+
+        Ok(arc)
+    }
+
+    /// Drop a session from the cache. Used by callers that know the
+    /// session is finished (e.g., after a `wirken sessions close`).
+    /// No-op in drop mode.
+    pub fn evict(&self, session_id: &str) {
+        if self.cache_mode == CacheMode::Cached {
+            self.cache.lock().unwrap().pop(session_id);
+        }
+    }
+}

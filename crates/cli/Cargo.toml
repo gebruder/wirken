@@ -26,6 +26,7 @@ wirken-adapter-google-chat = { path = "../adapter-google-chat" }
 wirken-adapter-imessage = { path = "../adapter-imessage" }
 capnp = { workspace = true }
 ed25519-dalek = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 reqwest = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }

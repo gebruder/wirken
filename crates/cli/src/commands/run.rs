@@ -6,8 +6,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use wirken_agent::Agent;
+use wirken_agent::factory::CacheMode;
 use wirken_agent::llm::LlmConfig;
+use wirken_agent::{AgentFactory, AgentStaticConfig, SkillLoader, session_id_for};
 use wirken_audit::{AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
@@ -158,9 +159,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open permission store")?,
     ));
 
-    // --- Setup router and create agents ---
+    // --- Setup router and gather per-agent static configs ---
+    //
+    // Item 2 slice 2: agents are no longer long-lived `Mutex<Agent>`
+    // instances. The gateway holds an `AgentFactory` that wakes a
+    // per-conversation Agent on every inbound message, replaying its
+    // session log to reconstruct conversation state. Skills, MCP,
+    // and permissions are loaded once into the factory and injected
+    // into every waked Agent.
     let router = Arc::new(Router::new());
-    let mut agents_map: HashMap<String, Mutex<Agent>> = HashMap::new();
+    let mut static_configs: HashMap<String, AgentStaticConfig> = HashMap::new();
 
     // Load multi-agent configs if available
     let agent_config_path = cfg.agent_config_db_path();
@@ -209,27 +217,20 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 
-            let mut agent = Agent::new(
-                agent_cfg.id.clone(),
-                workspace,
-                llm,
-                agent_api_key,
-                session_log.clone(),
-            )?;
-            agent.set_permissions(permissions.clone());
-
-            // Load per-agent skills + shared skills
+            // Load per-agent skills + shared skills.
+            let mut skills = Vec::new();
             let agent_skills = cfg.agent_skills_dir(&agent_cfg.id);
-            if agent_skills.is_dir() {
-                let _ = agent.load_skills(&agent_skills);
+            if agent_skills.is_dir()
+                && let Ok(s) = SkillLoader::load_dir(&agent_skills)
+            {
+                skills.extend(s);
             }
             let shared_skills = cfg.data_dir.join("skills");
-            if shared_skills.is_dir() {
-                let _ = agent.load_skills(&shared_skills);
+            if shared_skills.is_dir()
+                && let Ok(s) = SkillLoader::load_dir(&shared_skills)
+            {
+                skills.extend(s);
             }
-
-            // MCP loading is deferred — the gateway connects each agent to
-            // the proxy after the proxy process has started (see below).
 
             // Bind channels to this agent
             for channel in &agent_cfg.channels {
@@ -244,12 +245,23 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 );
             }
 
-            agents_map.insert(agent_cfg.id.clone(), Mutex::new(agent));
+            static_configs.insert(
+                agent_cfg.id.clone(),
+                AgentStaticConfig {
+                    agent_id: agent_cfg.id.clone(),
+                    workspace,
+                    llm_config: llm,
+                    api_key: agent_api_key,
+                    skills,
+                    wasm_skills: Vec::new(),
+                    mcp_client: None, // populated below after the proxy starts
+                },
+            );
         }
     }
 
     // Create default agent for any unbound channels (backward compat with wirken setup)
-    if !agents_map.contains_key("default") {
+    if !static_configs.contains_key("default") {
         let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
         // Bedrock: extract region from provider.json or base_url
         if provider == "bedrock" {
@@ -266,21 +278,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let workspace = cfg.data_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
 
-        let mut default_agent = Agent::new(
-            "default".into(),
-            workspace,
-            llm_config,
-            api_key,
-            session_log.clone(),
-        )?;
-        default_agent.set_permissions(permissions.clone());
-
+        let mut skills = Vec::new();
         let skills_dir = cfg.data_dir.join("skills");
-        if skills_dir.is_dir() {
-            let _ = default_agent.load_skills(&skills_dir);
+        if skills_dir.is_dir()
+            && let Ok(s) = SkillLoader::load_dir(&skills_dir)
+        {
+            skills.extend(s);
         }
-
-        // MCP loading is deferred — see the proxy spawn block below.
 
         // Bind any channels not already routed
         for adapter in registry.lock().await.list() {
@@ -295,15 +299,28 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             }
         }
 
-        agents_map.insert("default".into(), Mutex::new(default_agent));
+        static_configs.insert(
+            "default".into(),
+            AgentStaticConfig {
+                agent_id: "default".into(),
+                workspace,
+                llm_config,
+                api_key,
+                skills,
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+            },
+        );
     }
 
     println!(
         "  Agents: {}",
-        agents_map.keys().cloned().collect::<Vec<_>>().join(", ")
+        static_configs
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
     );
-
-    let agents: Arc<HashMap<String, Mutex<Agent>>> = Arc::new(agents_map);
 
     // --- Setup UDS listener ---
     let socket_path = cfg.socket_dir().join("gateway.sock");
@@ -399,25 +416,57 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    // Connect each agent to the proxy and load its tools.
-    for (agent_id, agent_mutex) in agents.iter() {
-        let mut ag = agent_mutex.lock().await;
-        match ag.load_mcp(&mcp_proxy_socket).await {
-            Ok(0) => {}
-            Ok(n) => println!("  MCP: {n} tools for agent:{agent_id}"),
-            Err(e) => tracing::warn!("MCP load failed for agent '{agent_id}': {e}"),
+    // Connect each agent to the MCP proxy. The proxy client is held
+    // in the AgentStaticConfig and shared across every waked Agent
+    // for that agent_id (slice 2 design — see crates/agent/src/factory.rs).
+    for (agent_id, cfg) in static_configs.iter_mut() {
+        match wirken_agent::mcp::McpProxyClient::connect(&mcp_proxy_socket, agent_id).await {
+            Ok(mut client) => {
+                if !client.has_servers() {
+                    client.shutdown().await;
+                    continue;
+                }
+                match client.load_tools().await {
+                    Ok(n) if n > 0 => {
+                        println!("  MCP: {n} tools for agent:{agent_id}");
+                        cfg.mcp_client = Some(Arc::new(tokio::sync::Mutex::new(client)));
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("MCP load_tools failed for agent '{agent_id}': {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("MCP connect failed for agent '{agent_id}': {e}");
+            }
         }
     }
 
+    // Build the AgentFactory now that all per-agent state is loaded.
+    let cache_mode = CacheMode::from_env();
+    let cache_capacity = std::env::var("WIRKEN_AGENT_CACHE_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(64);
+    let factory = Arc::new(AgentFactory::with_options(
+        static_configs,
+        session_log.clone(),
+        Some(permissions.clone()),
+        cache_mode,
+        cache_capacity,
+    ));
+
     // --- Webchat ---
     let webchat_port = port.unwrap_or(18790);
-    let webchat_agents = agents.clone();
+    let webchat_factory = factory.clone();
     let webchat_audit = audit.clone();
     let webchat_sessions = sessions.clone();
     let webchat_handle = tokio::spawn(async move {
         if let Err(e) = super::webchat::serve(
             webchat_port,
-            webchat_agents,
+            webchat_factory,
             webchat_audit,
             webchat_sessions,
         )
@@ -432,7 +481,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         wirken_gateway::cron::CronStore::open(&cfg.cron_db_path())
             .context("Failed to open cron store")?,
     ));
-    let scheduler_agents = agents.clone();
+    let scheduler_factory = factory.clone();
     let scheduler_cron = cron_store.clone();
     let scheduler_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -451,23 +500,34 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 tracing::info!("Cron firing: {} -> agent:{}", job.id, job.agent_id);
                 let _ = scheduler_cron.lock().unwrap().mark_run(&job.id);
 
-                if let Some(agent_mutex) = scheduler_agents.get(&job.agent_id) {
-                    let mut agent = agent_mutex.lock().await;
-                    match agent.process_message(&job.message).await {
-                        Ok(result) => {
-                            tracing::info!("Cron response: {}", truncate(&result.response, 100));
-                            for denial in &result.denials {
-                                tracing::warn!(
-                                    "Cron permission denied: agent '{}' tool '{}'",
-                                    denial.agent_id,
-                                    denial.tool_name,
+                // Cron has no platform message id; synthesize one per
+                // firing so dedup works.
+                let inbound_id = format!("cron-{}", uuid::Uuid::new_v4());
+                let session_id = session_id_for(&job.agent_id, "cron", &job.id);
+
+                match scheduler_factory.wake(&job.agent_id, &session_id) {
+                    Ok(agent_mutex) => {
+                        let mut agent = agent_mutex.lock().await;
+                        match agent.process_message(&job.message, inbound_id).await {
+                            Ok(result) => {
+                                tracing::info!(
+                                    "Cron response: {}",
+                                    truncate(&result.response, 100)
                                 );
+                                for denial in &result.denials {
+                                    tracing::warn!(
+                                        "Cron permission denied: agent '{}' tool '{}'",
+                                        denial.agent_id,
+                                        denial.tool_name,
+                                    );
+                                }
                             }
+                            Err(e) => tracing::error!("Cron job failed: {e}"),
                         }
-                        Err(e) => tracing::error!("Cron job failed: {e}"),
                     }
-                } else {
-                    tracing::warn!("Cron: agent '{}' not found", job.agent_id);
+                    Err(e) => {
+                        tracing::warn!("Cron: factory.wake failed for '{}': {e}", job.agent_id);
+                    }
                 }
             }
         }
@@ -483,7 +543,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Accept adapter connections ---
     let accept_registry = registry.clone();
-    let accept_agents = agents.clone();
+    let accept_factory = factory.clone();
     let accept_audit = audit.clone();
     let accept_sessions = sessions.clone();
     let accept_router = router.clone();
@@ -494,7 +554,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let reg = accept_registry.clone();
-                    let ag = accept_agents.clone();
+                    let fact = accept_factory.clone();
                     let au = accept_audit.clone();
                     let sess = accept_sessions.clone();
                     let rtr = accept_router.clone();
@@ -502,7 +562,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_adapter_connection(stream, reg, ag, au, sess, rtr, det).await
+                            handle_adapter_connection(stream, reg, fact, au, sess, rtr, det).await
                         {
                             tracing::error!("Adapter connection error: {e}");
                         }
@@ -549,7 +609,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 async fn handle_adapter_connection(
     stream: UnixStream,
     registry: Arc<Mutex<AdapterRegistry>>,
-    agents: Arc<HashMap<String, Mutex<Agent>>>,
+    factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
@@ -592,7 +652,7 @@ async fn handle_adapter_connection(
         &adapter_id,
         &mut reader,
         writer.clone(),
-        agents,
+        factory,
         audit.clone(),
         sessions,
         router,
@@ -617,7 +677,7 @@ async fn message_loop(
     adapter_id: &str,
     reader: &mut FrameReader,
     writer: Arc<Mutex<FrameWriter>>,
-    agents: Arc<HashMap<String, Mutex<Agent>>>,
+    factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
@@ -755,35 +815,39 @@ async fn message_loop(
                     .resolve(&channel, &conversation_id)
                     .unwrap_or_else(|_| "default".into());
 
-                // Process with the routed agent
-                let (response, denials) = match agents.get(&agent_id) {
-                    Some(agent_mutex) => {
+                // Wake the agent for THIS conversation. Per-conversation
+                // session ids land in slice 2: each (agent, channel,
+                // conversation_id) gets its own session. The platform
+                // message id (msg `id` field on the capnp frame) is the
+                // inbound_id used for crash-recovery dedup.
+                let resolved_agent = if factory.has_agent(&agent_id) {
+                    agent_id.clone()
+                } else {
+                    tracing::error!("No agent '{agent_id}' found, trying default");
+                    "default".into()
+                };
+                let session_id = session_id_for(&resolved_agent, &channel, &conversation_id);
+
+                let (response, denials) = match factory.wake(&resolved_agent, &session_id) {
+                    Ok(agent_mutex) => {
                         let mut ag = agent_mutex.lock().await;
-                        match ag.process_message(&text).await {
+                        match ag.process_message(&text, id.clone()).await {
                             Ok(result) => (result.response, result.denials),
                             Err(e) => {
-                                tracing::error!("Agent '{agent_id}' error: {e}");
+                                tracing::error!("Agent '{resolved_agent}' error: {e}");
                                 (format!("Error processing message: {e}"), Vec::new())
                             }
                         }
                     }
-                    None => {
-                        tracing::error!("No agent '{agent_id}' found, trying default");
-                        match agents.get("default") {
-                            Some(default_mutex) => {
-                                let mut ag = default_mutex.lock().await;
-                                match ag.process_message(&text).await {
-                                    Ok(result) => (result.response, result.denials),
-                                    Err(e) => (format!("Error: {e}"), Vec::new()),
-                                }
-                            }
-                            None => (
-                                "No agent available to process this message.".into(),
-                                Vec::new(),
-                            ),
-                        }
+                    Err(e) => {
+                        tracing::error!("factory.wake('{resolved_agent}') failed: {e}");
+                        (
+                            "No agent available to process this message.".into(),
+                            Vec::new(),
+                        )
                     }
                 };
+                let agent_id = resolved_agent;
 
                 // Log permission denials to audit
                 for denial in &denials {

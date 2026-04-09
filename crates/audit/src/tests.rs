@@ -540,7 +540,10 @@ mod session {
     };
 
     fn user_msg(s: &str) -> SessionEvent {
-        SessionEvent::UserMessage { content: s.into() }
+        SessionEvent::UserMessage {
+            content: s.into(),
+            inbound_id: None,
+        }
     }
 
     fn assistant_msg(s: &str) -> SessionEvent {
