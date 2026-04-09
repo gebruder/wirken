@@ -782,3 +782,23 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         _ => None,
     }
 }
+
+/// Whether a built-in tool produces deterministic output for
+/// deterministic input. Used by [`crate::runtime::Agent::verify`]
+/// (item 10) to decide which tools may be re-executed during a
+/// reproducible-replay verification.
+///
+/// Slice 1 hardcodes the list rather than introducing a marker
+/// trait. The set is conservative: only tools whose output is a
+/// pure function of their arguments and the workspace state belong
+/// here.
+///
+/// - `read_file` — bytes of a file in the workspace
+/// - `list_files` — sorted directory listing
+/// - `web_search` — `false` because the search index is not pinned
+///   in time; results drift across runs even with stable inputs
+/// - `exec` — `false` (side-effecting)
+/// - `write_file`, `generate_image` — `false` (side-effecting)
+pub fn is_deterministic_tool(name: &str) -> bool {
+    matches!(name, "read_file" | "list_files")
+}

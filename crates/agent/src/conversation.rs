@@ -35,6 +35,12 @@ pub struct ToolCallRequest {
 }
 
 /// Manages conversation history for an agent session.
+///
+/// `Clone` is used by [`crate::runtime::Agent::verify`] to take a
+/// snapshot of the conversation at a particular point in the
+/// session-log replay so the verifier can run a dry-run fit() over
+/// the snapshot without mutating the live conversation.
+#[derive(Clone)]
 pub struct Conversation {
     messages: Vec<Message>,
     /// Approximate token budget. When exceeded, older messages are compacted.

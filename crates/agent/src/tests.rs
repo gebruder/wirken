@@ -2289,6 +2289,8 @@ mod context_engine {
         assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("c2"));
     }
 
+    // Slice 1 of item 10 tests live in their own module below.
+
     #[test]
     fn tool_def_ordering_is_stable() {
         // The slice 1 sort happens in process_message and
@@ -2317,4 +2319,392 @@ mod context_engine {
         assert_eq!(tools[1].name, "mango");
         assert_eq!(tools[2].name, "zebra");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Item 10 slice 1: reproducible replay / verify
+// ---------------------------------------------------------------------------
+
+mod verify {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{
+        HashHex, SessionEvent, SessionId, SessionLog, SqliteSessionLog, ToolCallRecord, TrustLevel,
+    };
+
+    use crate::context::ContextEngine;
+    use crate::conversation::Conversation;
+    use crate::llm::LlmConfig;
+    use crate::runtime::{Agent, compute_messages_hash, compute_tools_hash};
+    use crate::tool::is_deterministic_tool;
+
+    fn fresh_agent_and_log() -> (Agent, Arc<dyn SessionLog>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let agent = Agent::new(
+            "verify-test".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log.clone(),
+        )
+        .unwrap();
+        (agent, log, tmp)
+    }
+
+    /// Build a hash that matches what the engine would produce for
+    /// a given conversation snapshot, AFTER fit() has been applied.
+    fn hash_after_fit(
+        engine: &ContextEngine,
+        conv: &Conversation,
+        tools: &[crate::tool::ToolDef],
+    ) -> HashHex {
+        let mut copy = conv.clone();
+        let dryrun_log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let dryrun_handle = dryrun_log.handle_for(SessionId::new("dryrun"));
+        engine
+            .fit(&mut copy, tools, &*dryrun_log, &dryrun_handle)
+            .unwrap();
+        compute_messages_hash(copy.messages())
+    }
+
+    fn seed_user_message(log: &dyn SessionLog, session: &str, content: &str) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: content.into(),
+                inbound_id: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_assistant_message(log: &dyn SessionLog, session: &str, content: &str) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::AssistantMessage {
+                content: content.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_llm_request(
+        log: &dyn SessionLog,
+        session: &str,
+        request_id: &str,
+        messages_hash: HashHex,
+        tools_hash: HashHex,
+    ) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::LlmRequest {
+                provider: "ollama".into(),
+                model: "test".into(),
+                request_id: request_id.into(),
+                tools_hash,
+                messages_hash,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_llm_response(log: &dyn SessionLog, session: &str, request_id: &str) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::LlmResponse {
+                request_id: request_id.into(),
+                finish_reason: "text".into(),
+                tokens_in: 0,
+                tokens_out: 0,
+                latency_ms: 1,
+            },
+        )
+        .unwrap();
+    }
+
+    // ---- helper sanity ---------------------------------------------
+
+    #[test]
+    fn deterministic_tool_set() {
+        assert!(is_deterministic_tool("read_file"));
+        assert!(is_deterministic_tool("list_files"));
+        assert!(!is_deterministic_tool("exec"));
+        assert!(!is_deterministic_tool("write_file"));
+        assert!(!is_deterministic_tool("web_search"));
+        assert!(!is_deterministic_tool("generate_image"));
+        assert!(!is_deterministic_tool("mcp_anything"));
+    }
+
+    #[test]
+    fn empty_session_verifies_clean() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, _log, _tmp) = fresh_agent_and_log();
+            let report = agent.verify().await.unwrap();
+            assert!(report.is_fully_clean());
+            assert_eq!(report.events_total, 0);
+            assert_eq!(report.events_verified, 0);
+            assert_eq!(report.events_unverifiable, 0);
+        });
+    }
+
+    #[test]
+    fn user_assistant_only_session_verifies_clean() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+            seed_user_message(&*log, "verify-test", "hi");
+            seed_assistant_message(&*log, "verify-test", "hello back");
+
+            let report = agent.verify().await.unwrap();
+            assert!(report.is_consistent());
+            assert_eq!(report.events_total, 2);
+            assert_eq!(report.events_verified, 2);
+            assert_eq!(report.events_unverifiable, 0);
+            assert!(report.events_divergent.is_empty());
+        });
+    }
+
+    #[test]
+    fn llm_request_with_correct_hashes_verifies() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+
+            // Simulate one full turn: user → LlmRequest → LlmResponse → assistant
+            seed_user_message(&*log, "verify-test", "hi");
+
+            // Reproduce the messages_hash the verifier will compute:
+            // build the same conversation, run fit(), hash it.
+            let mut conv = Conversation::new(100_000);
+            conv.set_system_prompt(
+                "You are a helpful personal AI assistant. \
+                 You can execute shell commands, read and write files, \
+                 search the web, generate images, \
+                 and use available skills to help the user. \
+                 Be concise and direct in your responses.",
+            );
+            conv.add_user_message("hi");
+
+            let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));
+            let tools = agent_snapshot_tools(&agent).await;
+            let messages_hash = hash_after_fit(&engine, &conv, &tools);
+            let tools_hash = compute_tools_hash(&tools);
+
+            seed_llm_request(&*log, "verify-test", "req-1", messages_hash, tools_hash);
+            seed_llm_response(&*log, "verify-test", "req-1");
+            seed_assistant_message(&*log, "verify-test", "hello back");
+
+            let report = agent.verify().await.unwrap();
+            assert!(report.is_consistent(), "report: {report:?}");
+            // 4 events: user + LlmRequest + LlmResponse + assistant
+            assert_eq!(report.events_total, 4);
+            // LlmResponse is always unverifiable.
+            assert_eq!(report.events_unverifiable, 1);
+            // user + LlmRequest + assistant verified
+            assert_eq!(report.events_verified, 3);
+        });
+    }
+
+    async fn agent_snapshot_tools(_agent: &Agent) -> Vec<crate::tool::ToolDef> {
+        // Match Agent::snapshot_tool_defs exactly: when the LLM
+        // config has tools_enabled = false (e.g., Ollama), the
+        // agent sends no tool defs to the model and the tools_hash
+        // is the hash of an empty Vec. This test uses Ollama, so
+        // return empty.
+        Vec::new()
+    }
+
+    #[test]
+    fn llm_request_with_wrong_messages_hash_diverges() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+            seed_user_message(&*log, "verify-test", "hi");
+            // Deliberately wrong hash.
+            seed_llm_request(
+                &*log,
+                "verify-test",
+                "req-1",
+                HashHex("0".repeat(64)),
+                HashHex("0".repeat(64)),
+            );
+
+            let report = agent.verify().await.unwrap();
+            assert!(!report.is_consistent());
+            // At least one divergence on the LlmRequest event.
+            assert!(
+                report
+                    .events_divergent
+                    .iter()
+                    .any(|d| d.kind == "messages_hash")
+            );
+        });
+    }
+
+    #[test]
+    fn llm_response_always_unverifiable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+            // Just one LlmResponse with no surrounding events.
+            seed_llm_response(&*log, "verify-test", "req-orphan");
+
+            let report = agent.verify().await.unwrap();
+            assert_eq!(report.events_total, 1);
+            assert_eq!(report.events_unverifiable, 1);
+            assert!(report.events_divergent.is_empty());
+            // is_consistent() — chain ok, no divergences.
+            assert!(report.is_consistent());
+            // is_fully_clean() — no, because there's an
+            // unverifiable event.
+            assert!(!report.is_fully_clean());
+        });
+    }
+
+    #[test]
+    fn deterministic_tool_re_executes_and_matches() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, tmp) = fresh_agent_and_log();
+            // Create a file the read_file tool will inspect.
+            let path = tmp.path().join("note.txt");
+            std::fs::write(&path, "hello from disk").unwrap();
+
+            // Seed a conversation that read it. The conversation
+            // structure must include AssistantToolCalls before
+            // ToolResult so the verifier can find the arguments.
+            seed_user_message(&*log, "verify-test", "read note");
+            let h = log.handle_for(SessionId::new("verify-test"));
+            log.append(
+                &h,
+                TrustLevel::System,
+                SessionEvent::AssistantToolCalls {
+                    calls: vec![ToolCallRecord {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
+                    }],
+                },
+            )
+            .unwrap();
+            log.append(
+                &h,
+                TrustLevel::Tool,
+                SessionEvent::ToolResult {
+                    call_id: "c1".into(),
+                    tool_name: "read_file".into(),
+                    output: "hello from disk".into(),
+                    success: true,
+                },
+            )
+            .unwrap();
+
+            let report = agent.verify().await.unwrap();
+            assert!(report.is_consistent(), "report: {report:?}");
+            assert!(report.events_divergent.is_empty());
+            // user + tool_calls + tool_result all verified
+            assert_eq!(report.events_verified, 3);
+        });
+    }
+
+    #[test]
+    fn deterministic_tool_diverges_when_workspace_changed() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, tmp) = fresh_agent_and_log();
+            // The recorded output is "OLD" but the workspace now
+            // says "NEW".
+            std::fs::write(tmp.path().join("note.txt"), "NEW").unwrap();
+
+            seed_user_message(&*log, "verify-test", "read note");
+            let h = log.handle_for(SessionId::new("verify-test"));
+            log.append(
+                &h,
+                TrustLevel::System,
+                SessionEvent::AssistantToolCalls {
+                    calls: vec![ToolCallRecord {
+                        id: "c1".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
+                    }],
+                },
+            )
+            .unwrap();
+            log.append(
+                &h,
+                TrustLevel::Tool,
+                SessionEvent::ToolResult {
+                    call_id: "c1".into(),
+                    tool_name: "read_file".into(),
+                    output: "OLD".into(),
+                    success: true,
+                },
+            )
+            .unwrap();
+
+            let report = agent.verify().await.unwrap();
+            assert_eq!(report.events_divergent.len(), 1);
+            let div = &report.events_divergent[0];
+            assert_eq!(div.kind, "tool_result");
+            assert_eq!(div.expected, "OLD");
+            assert!(div.found.contains("NEW"));
+        });
+    }
+
+    #[test]
+    fn non_deterministic_tool_is_unverifiable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+            seed_user_message(&*log, "verify-test", "run something");
+            let h = log.handle_for(SessionId::new("verify-test"));
+            log.append(
+                &h,
+                TrustLevel::System,
+                SessionEvent::AssistantToolCalls {
+                    calls: vec![ToolCallRecord {
+                        id: "c1".into(),
+                        name: "exec".into(),
+                        arguments: serde_json::json!({"command":"date"}).to_string(),
+                    }],
+                },
+            )
+            .unwrap();
+            log.append(
+                &h,
+                TrustLevel::Tool,
+                SessionEvent::ToolResult {
+                    call_id: "c1".into(),
+                    tool_name: "exec".into(),
+                    output: "Wed Apr 9 12:34:56 UTC 2026".into(),
+                    success: true,
+                },
+            )
+            .unwrap();
+
+            let report = agent.verify().await.unwrap();
+            // exec is non-deterministic → unverifiable, not divergent.
+            assert!(report.events_divergent.is_empty());
+            assert!(report.events_unverifiable >= 1);
+        });
+    }
+
+    // Chain-break short-circuit is tested through Agent::verify's
+    // forwarding behavior — the underlying SessionLog::verify is
+    // exhaustively tested in crates/audit/src/tests.rs::session::
+    // verify_detects_payload_tampering and
+    // verify_detects_chain_hash_tampering. We don't duplicate the
+    // raw-connection corruption tests at this layer because
+    // wirken-agent doesn't depend on rusqlite.
 }

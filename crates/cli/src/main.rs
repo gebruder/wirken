@@ -137,6 +137,17 @@ enum SessionCommands {
         /// Session ID
         id: String,
     },
+    /// Reproducibly verify a session log: chain integrity, LLM
+    /// input hashes, and deterministic tool re-execution.
+    Verify {
+        /// Session ID (format: `agent_id/channel/conversation_id`,
+        /// or bare `agent_id` for legacy slice-1 sessions).
+        id: String,
+        /// Strict mode: exit non-zero on any unverifiable event,
+        /// not just divergences.
+        #[arg(long)]
+        strict: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -297,6 +308,7 @@ async fn main() -> Result<()> {
         Commands::Sessions(cmd) => match cmd {
             SessionCommands::List { channel } => commands::session::list(channel).await,
             SessionCommands::Close { id } => commands::session::close(&id).await,
+            SessionCommands::Verify { id, strict } => commands::session::verify(&id, strict).await,
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,

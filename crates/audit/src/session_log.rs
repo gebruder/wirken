@@ -335,7 +335,7 @@ pub struct StoredSessionEvent {
 // Verify result
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionVerifyResult {
     Ok { rows_verified: usize },
     Empty,
