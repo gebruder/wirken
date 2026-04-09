@@ -66,4 +66,7 @@ pub enum AgentError {
 
     #[error("sandbox error: {0}")]
     Sandbox(String),
+
+    #[error("identity error: {0}")]
+    Identity(String),
 }

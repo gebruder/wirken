@@ -1,6 +1,8 @@
+pub mod attestation;
 pub mod bundled_skills;
 pub mod conversation;
 pub mod error;
+pub mod identity;
 pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
@@ -12,6 +14,7 @@ pub mod tool;
 pub mod wasm_sandbox;
 
 pub use error::{AgentError, PermissionDenialContext};
+pub use identity::AgentIdentity;
 pub use runtime::{Agent, ProcessResult};
 pub use skill::SkillLoader;
 
