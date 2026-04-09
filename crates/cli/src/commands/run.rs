@@ -28,7 +28,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     cfg.ensure_dirs()?;
 
     println!();
-    println!("  wirken gateway");
+    println!("  wirken gateway v{}", env!("CARGO_PKG_VERSION"));
     println!("  ──────────────");
     println!();
 
