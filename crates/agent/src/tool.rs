@@ -38,7 +38,12 @@ pub struct ToolRegistry {
     tools: HashMap<String, ToolDef>,
     http: reqwest::Client,
     config: ToolConfig,
-    sandbox: Option<DockerSandbox>,
+    /// Lazily provisioned on first use of a sandboxed tool. The outer
+    /// `OnceCell` is set exactly once; the inner `Option` records whether
+    /// provisioning succeeded. A failed first attempt stays failed for the
+    /// lifetime of this registry — restart `wirken run` to retry.
+    sandbox: tokio::sync::OnceCell<Option<DockerSandbox>>,
+    sandbox_config: SandboxConfig,
 }
 
 impl ToolRegistry {
@@ -173,25 +178,55 @@ impl ToolRegistry {
             },
         );
 
-        let sandbox = if config.sandbox.mode != SandboxMode::Off {
-            match DockerSandbox::new(config.sandbox.clone()) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    tracing::warn!("Sandbox unavailable: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let sandbox_config = config.sandbox.clone();
 
         Self {
             workspace,
             tools,
             http: reqwest::Client::new(),
             config,
-            sandbox,
+            sandbox: tokio::sync::OnceCell::new(),
+            sandbox_config,
         }
+    }
+
+    /// Whether the sandbox `OnceCell` has been initialized. Test-only helper
+    /// used to assert lazy provisioning.
+    #[cfg(test)]
+    pub(crate) fn sandbox_initialized(&self) -> bool {
+        self.sandbox.initialized()
+    }
+
+    /// Provision the sandbox on first call, then return the cached result on
+    /// every subsequent call. Returns `None` when sandbox mode is `Off` or
+    /// when provisioning failed on the first attempt — failures are sticky
+    /// for the lifetime of this registry.
+    async fn sandbox(&self) -> Option<&DockerSandbox> {
+        self.sandbox
+            .get_or_init(|| async {
+                if self.sandbox_config.mode == SandboxMode::Off {
+                    return None;
+                }
+                match DockerSandbox::new(self.sandbox_config.clone()) {
+                    Ok(s) => {
+                        tracing::info!(
+                            "sandbox provisioned: mode={:?} image={}",
+                            self.sandbox_config.mode,
+                            self.sandbox_config.image,
+                        );
+                        Some(s)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Sandbox unavailable: {e} — falling back to host execution \
+                             for the lifetime of this agent"
+                        );
+                        None
+                    }
+                }
+            })
+            .await
+            .as_ref()
     }
 
     /// Get all tool definitions (for sending to the LLM).
@@ -225,8 +260,8 @@ impl ToolRegistry {
             .as_str()
             .ok_or_else(|| AgentError::Tool("missing 'command' argument".into()))?;
 
-        // Use sandbox if available
-        if let Some(ref sandbox) = self.sandbox {
+        // Use sandbox if available (provisioned lazily on first call)
+        if let Some(sandbox) = self.sandbox().await {
             return sandbox.exec(command, &self.workspace).await;
         }
 
