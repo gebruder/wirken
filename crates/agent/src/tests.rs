@@ -861,6 +861,67 @@ fn sandbox_config_defaults() {
     assert_eq!(config.timeout_secs, 300);
 }
 
+#[tokio::test]
+async fn sandbox_construction_is_lazy() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+
+    // Constructing a registry with a non-Off sandbox mode must not touch
+    // Docker. The OnceCell stays uninitialized until the first sandboxed
+    // tool call. This holds even when Docker is reachable on the host.
+    let tmp = TempDir::new().unwrap();
+    let config = ToolConfig {
+        sandbox: SandboxConfig {
+            mode: SandboxMode::GVisor,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
+    assert!(
+        !tools.sandbox_initialized(),
+        "sandbox must not be provisioned at construction time"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_falls_through_to_host_when_unavailable() {
+    use crate::sandbox::{SandboxConfig, SandboxMode, detect_runtime};
+
+    // This test asserts the fall-through behaviour when Docker is not
+    // available: the first exec attempt provisions (and fails), and
+    // subsequent calls reuse the failed cell without retrying. We can only
+    // observe this on a host without Docker; on hosts with Docker the call
+    // would succeed in the sandbox and the assertion below would not apply.
+    if detect_runtime().await.is_some() {
+        eprintln!("skipping: Docker is available on this host");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let config = ToolConfig {
+        sandbox: SandboxConfig {
+            mode: SandboxMode::ExecOnly,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
+    assert!(!tools.sandbox_initialized());
+
+    // First exec — sandbox provisioning is attempted, fails (no Docker),
+    // and falls through to host execution. The OnceCell is now set to None.
+    let r1 = tools.execute("exec", r#"{"command": "echo first"}"#).await.unwrap();
+    assert!(r1.success);
+    assert!(r1.output.contains("first"));
+    assert!(tools.sandbox_initialized(), "first exec must initialize the cell");
+
+    // Second exec — the cell is already set to None, no retry, host exec.
+    let r2 = tools.execute("exec", r#"{"command": "echo second"}"#).await.unwrap();
+    assert!(r2.success);
+    assert!(r2.output.contains("second"));
+    assert!(tools.sandbox_initialized());
+}
+
 #[test]
 fn sandbox_gvisor_constraints_match_docker() {
     use crate::sandbox::{SandboxConfig, SandboxMode};
