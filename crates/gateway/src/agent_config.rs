@@ -1,8 +1,35 @@
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::GatewayError;
+use crate::permissions::PermissionTier;
+
+/// Per-child ceiling for [`AgentConfig::allowed_subagents`]. Item 6
+/// slice 1 of `docs/managed-agents-parity.md`. The parent harness
+/// uses these caps to clamp anything the LLM passes to
+/// `spawn_subagent` — the LLM cannot widen the child's tools or
+/// permission tier, only narrow within the ceiling.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentCeiling {
+    /// Hard tool allowlist. Tools the parent's LLM passes are
+    /// intersected with this list; anything outside is silently
+    /// dropped (and logged at debug level).
+    pub tool_allowlist: Vec<String>,
+    /// Hard permission tier cap. Any tool inside the child whose
+    /// action exceeds this tier is auto-denied at the child's
+    /// session level — children run headless, no interactive
+    /// approvals.
+    pub max_permission_tier: PermissionTier,
+    /// Maximum number of LLM rounds the child may run before the
+    /// parent gives up and reports `status: "rounds_exceeded"`.
+    pub max_rounds: usize,
+    /// Wall-clock timeout for the entire child invocation. On
+    /// elapse the parent reports `status: "timeout"` and the child's
+    /// session log is preserved for offline inspection.
+    pub max_runtime_secs: u64,
+}
 
 /// Persistent configuration for a registered agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +48,13 @@ pub struct AgentConfig {
     pub api_key_credential: String,
     /// Channels bound to this agent (wildcard routing).
     pub channels: Vec<String>,
+    /// Item 6 slice 1: child agents this agent is allowed to spawn
+    /// via the built-in `spawn_subagent` tool, keyed by child agent
+    /// id, with a per-child capability ceiling. Empty by default —
+    /// when empty, the harness omits the `spawn_subagent` tool from
+    /// the LLM's tool list entirely.
+    #[serde(default)]
+    pub allowed_subagents: BTreeMap<String, SubagentCeiling>,
 }
 
 /// Persistent registry of agent configurations.
@@ -49,14 +83,28 @@ impl AgentConfigStore {
              );",
         )?;
 
+        // Item 6 slice 1: additive migration for the
+        // `allowed_subagents` JSON column. SQLite has no IF NOT
+        // EXISTS for ALTER TABLE; ignore the duplicate-column error
+        // when the column is already present.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agents ADD COLUMN allowed_subagents TEXT NOT NULL DEFAULT '{}'",
+            [],
+        ) && !e.to_string().contains("duplicate column")
+        {
+            return Err(e.into());
+        }
+
         Ok(Self { conn })
     }
 
     /// Register a new agent.
     pub fn register(&self, config: &AgentConfig) -> Result<(), GatewayError> {
+        let allowed_subagents_json = serde_json::to_string(&config.allowed_subagents)
+            .map_err(|e| GatewayError::Config(format!("serialize allowed_subagents: {e}")))?;
         self.conn.execute(
-            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 config.id,
                 config.name,
@@ -64,6 +112,7 @@ impl AgentConfigStore {
                 config.model,
                 config.base_url,
                 config.api_key_credential,
+                allowed_subagents_json,
             ],
         )?;
 
@@ -122,7 +171,7 @@ impl AgentConfigStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, provider, model, base_url, api_key_credential
+                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents
                  FROM agents WHERE id = ?1",
                 params![agent_id],
                 |row| {
@@ -133,12 +182,14 @@ impl AgentConfigStore {
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .map_err(|_| GatewayError::Config(format!("agent '{agent_id}' not found")))?;
 
         let channels = self.get_channels(agent_id)?;
+        let allowed_subagents = parse_allowed_subagents(&row.6)?;
 
         Ok(AgentConfig {
             id: row.0,
@@ -148,13 +199,15 @@ impl AgentConfigStore {
             base_url: row.4,
             api_key_credential: row.5,
             channels,
+            allowed_subagents,
         })
     }
 
     /// List all agent configs.
     pub fn list(&self) -> Result<Vec<AgentConfig>, GatewayError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, model, base_url, api_key_credential FROM agents ORDER BY id",
+            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents
+             FROM agents ORDER BY id",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -165,13 +218,16 @@ impl AgentConfigStore {
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
             ))
         })?;
 
         let mut agents = Vec::new();
         for row in rows {
-            let (id, name, provider, model, base_url, api_key_credential) = row?;
+            let (id, name, provider, model, base_url, api_key_credential, allowed_subagents_json) =
+                row?;
             let channels = self.get_channels(&id)?;
+            let allowed_subagents = parse_allowed_subagents(&allowed_subagents_json)?;
             agents.push(AgentConfig {
                 id,
                 name,
@@ -180,10 +236,33 @@ impl AgentConfigStore {
                 base_url,
                 api_key_credential,
                 channels,
+                allowed_subagents,
             });
         }
 
         Ok(agents)
+    }
+
+    /// Replace the `allowed_subagents` ceilings for an existing
+    /// agent. Used by tests today; CLI plumbing for editing
+    /// ceilings is slice 2 work.
+    pub fn set_allowed_subagents(
+        &self,
+        agent_id: &str,
+        allowed_subagents: &BTreeMap<String, SubagentCeiling>,
+    ) -> Result<(), GatewayError> {
+        let json = serde_json::to_string(allowed_subagents)
+            .map_err(|e| GatewayError::Config(format!("serialize allowed_subagents: {e}")))?;
+        let changes = self.conn.execute(
+            "UPDATE agents SET allowed_subagents = ?1 WHERE id = ?2",
+            params![json, agent_id],
+        )?;
+        if changes == 0 {
+            return Err(GatewayError::Config(format!(
+                "agent '{agent_id}' not found"
+            )));
+        }
+        Ok(())
     }
 
     fn get_channels(&self, agent_id: &str) -> Result<Vec<String>, GatewayError> {
@@ -197,6 +276,16 @@ impl AgentConfigStore {
         }
         Ok(channels)
     }
+}
+
+/// Decode the `allowed_subagents` column. Empty / NULL / `'{}'` all
+/// map to an empty map without error.
+fn parse_allowed_subagents(raw: &str) -> Result<BTreeMap<String, SubagentCeiling>, GatewayError> {
+    if raw.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_str(raw)
+        .map_err(|e| GatewayError::Config(format!("decode allowed_subagents: {e}")))
 }
 
 #[cfg(test)]
@@ -217,6 +306,7 @@ mod tests {
             base_url: "https://api.openai.com/v1".into(),
             api_key_credential: "work-openai-key".into(),
             channels: vec!["slack".into(), "teams".into()],
+            allowed_subagents: Default::default(),
         };
 
         store.register(&config).unwrap();
@@ -242,6 +332,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1".into(),
                 api_key_credential: "personal-anthropic-key".into(),
                 channels: vec!["telegram".into(), "discord".into()],
+                allowed_subagents: Default::default(),
             })
             .unwrap();
 
@@ -254,6 +345,7 @@ mod tests {
                 base_url: "https://api.openai.com/v1".into(),
                 api_key_credential: "work-openai-key".into(),
                 channels: vec!["slack".into()],
+                allowed_subagents: Default::default(),
             })
             .unwrap();
 
@@ -277,6 +369,7 @@ mod tests {
                 base_url: "http://localhost:11434/v1".into(),
                 api_key_credential: String::new(),
                 channels: vec!["telegram".into()],
+                allowed_subagents: Default::default(),
             })
             .unwrap();
 
@@ -299,6 +392,7 @@ mod tests {
                 base_url: "u".into(),
                 api_key_credential: String::new(),
                 channels: vec!["telegram".into()],
+                allowed_subagents: Default::default(),
             })
             .unwrap();
         store
@@ -310,6 +404,7 @@ mod tests {
                 base_url: "u".into(),
                 api_key_credential: String::new(),
                 channels: vec![],
+                allowed_subagents: Default::default(),
             })
             .unwrap();
 
@@ -338,6 +433,7 @@ mod tests {
                     base_url: "u".into(),
                     api_key_credential: String::new(),
                     channels: vec!["discord".into()],
+                    allowed_subagents: Default::default(),
                 })
                 .unwrap();
         }
@@ -345,5 +441,98 @@ mod tests {
         let store = AgentConfigStore::open(&path).unwrap();
         let got = store.get("persist").unwrap();
         assert_eq!(got.channels, vec!["discord"]);
+    }
+
+    // Item 6 slice 1: allowed_subagents column / round-trip.
+
+    #[test]
+    fn allowed_subagents_round_trip_through_store() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+
+        let mut ceilings = BTreeMap::new();
+        ceilings.insert(
+            "researcher".to_string(),
+            SubagentCeiling {
+                tool_allowlist: vec!["read_file".into(), "web_search".into()],
+                max_permission_tier: PermissionTier::Tier2,
+                max_rounds: 8,
+                max_runtime_secs: 60,
+            },
+        );
+        let cfg = AgentConfig {
+            id: "boss".into(),
+            name: "Boss".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_credential: "boss-key".into(),
+            channels: vec!["slack".into()],
+            allowed_subagents: ceilings,
+        };
+        store.register(&cfg).unwrap();
+
+        let got = store.get("boss").unwrap();
+        assert_eq!(got.allowed_subagents.len(), 1);
+        let r = got.allowed_subagents.get("researcher").unwrap();
+        assert_eq!(r.tool_allowlist, vec!["read_file", "web_search"]);
+        assert_eq!(r.max_permission_tier, PermissionTier::Tier2);
+        assert_eq!(r.max_rounds, 8);
+        assert_eq!(r.max_runtime_secs, 60);
+    }
+
+    #[test]
+    fn allowed_subagents_default_empty_for_legacy_rows() {
+        // A pre-item-6 row written before the migration column was
+        // added; the additive ALTER preserves it with the default
+        // empty JSON.
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        store
+            .register(&AgentConfig {
+                id: "legacy".into(),
+                name: "Legacy".into(),
+                provider: "ollama".into(),
+                model: "m".into(),
+                base_url: "u".into(),
+                api_key_credential: String::new(),
+                channels: vec![],
+                allowed_subagents: Default::default(),
+            })
+            .unwrap();
+        let got = store.get("legacy").unwrap();
+        assert!(got.allowed_subagents.is_empty());
+    }
+
+    #[test]
+    fn set_allowed_subagents_replaces_existing() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        store
+            .register(&AgentConfig {
+                id: "boss".into(),
+                name: "Boss".into(),
+                provider: "ollama".into(),
+                model: "m".into(),
+                base_url: "u".into(),
+                api_key_credential: String::new(),
+                channels: vec![],
+                allowed_subagents: Default::default(),
+            })
+            .unwrap();
+        let mut ceilings = BTreeMap::new();
+        ceilings.insert(
+            "child".into(),
+            SubagentCeiling {
+                tool_allowlist: vec!["read_file".into()],
+                max_permission_tier: PermissionTier::Tier1,
+                max_rounds: 3,
+                max_runtime_secs: 10,
+            },
+        );
+        store.set_allowed_subagents("boss", &ceilings).unwrap();
+        let got = store.get("boss").unwrap();
+        assert_eq!(got.allowed_subagents.len(), 1);
+        assert!(got.allowed_subagents.contains_key("child"));
     }
 }

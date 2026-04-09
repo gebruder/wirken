@@ -138,6 +138,7 @@ pub async fn add() -> Result<()> {
         base_url,
         api_key_credential,
         channels: channels.clone(),
+        allowed_subagents: Default::default(),
     };
 
     agent_store

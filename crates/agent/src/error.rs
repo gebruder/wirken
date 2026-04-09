@@ -80,4 +80,11 @@ pub enum AgentError {
         current_tokens: usize,
         budget_tokens: usize,
     },
+
+    /// Item 6 slice 1: a child agent invocation hit its
+    /// `max_rounds` budget before producing a final assistant
+    /// message. The parent harness catches this and reports
+    /// `status: "rounds_exceeded"` in the `SubagentResult` envelope.
+    #[error("subagent rounds budget exceeded after {rounds} rounds")]
+    RoundsExceeded { rounds: usize },
 }

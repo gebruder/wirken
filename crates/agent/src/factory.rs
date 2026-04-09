@@ -35,14 +35,15 @@
 //! Subsequent callers serialize through the inner `Mutex<Agent>` on
 //! the cached entry, which is the existing single-writer guarantee.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use lru::LruCache;
 use tokio::sync::Mutex as AsyncMutex;
 use wirken_audit::SessionLog;
+use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::permissions::PermissionStore;
 
 use crate::error::AgentError;
@@ -89,6 +90,12 @@ pub struct AgentStaticConfig {
     /// chain head after every turn that crosses the trigger
     /// threshold. The factory clones this into every waked Agent.
     pub identity: Option<crate::identity::AgentIdentity>,
+    /// Item 6 slice 1: child agents this agent may spawn via the
+    /// built-in `spawn_subagent` tool, with per-child capability
+    /// ceilings. Empty by default. The factory injects a clone into
+    /// every waked Agent so the harness can read the ceiling
+    /// without re-querying the gateway config store.
+    pub allowed_subagents: BTreeMap<String, SubagentCeiling>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -122,6 +129,12 @@ pub struct AgentFactory {
     permissions: Option<Arc<StdMutex<PermissionStore>>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
+    /// `Weak<Self>` of this very factory, captured at construction
+    /// via [`Arc::new_cyclic`]. Item 6 slice 1: the harness uses
+    /// this to re-enter the factory from inside `spawn_subagent`
+    /// without leaking the strong Arc into every waked Agent (which
+    /// would form an unbreakable cycle through the LRU cache).
+    self_weak: Weak<AgentFactory>,
 }
 
 impl AgentFactory {
@@ -134,7 +147,7 @@ impl AgentFactory {
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
         permissions: Option<Arc<StdMutex<PermissionStore>>>,
-    ) -> Self {
+    ) -> Arc<Self> {
         Self::with_options(
             static_configs,
             session_log,
@@ -149,25 +162,37 @@ impl AgentFactory {
     /// `WIRKEN_AGENT_CACHE_SIZE`) and forwards them. Tests pass the
     /// mode directly so parallel test runs don't fight over env
     /// state.
+    ///
+    /// Returns `Arc<Self>` so [`Arc::new_cyclic`] can capture a
+    /// `Weak<Self>` reference for the spawn_subagent re-entry path.
     pub fn with_options(
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
         permissions: Option<Arc<StdMutex<PermissionStore>>>,
         cache_mode: CacheMode,
         cache_capacity: usize,
-    ) -> Self {
+    ) -> Arc<Self> {
         if cache_mode == CacheMode::Drop {
             tracing::info!("AgentFactory: cache disabled (drop mode)");
         }
         let capacity = NonZeroUsize::new(cache_capacity)
             .unwrap_or_else(|| NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap());
-        Self {
+        Arc::new_cyclic(|weak| Self {
             static_configs,
             session_log,
             permissions,
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
-        }
+            self_weak: weak.clone(),
+        })
+    }
+
+    /// A `Weak<Self>` reference to this factory. Used internally by
+    /// `wake` to inject the back-pointer into newly constructed
+    /// Agents so they can re-enter the factory from
+    /// `spawn_subagent`.
+    pub(crate) fn weak(&self) -> Weak<AgentFactory> {
+        self.self_weak.clone()
     }
 
     /// List the agent ids known to this factory.
@@ -224,6 +249,13 @@ impl AgentFactory {
         if let Some(identity) = &cfg.identity {
             agent.attach_identity(identity.clone());
         }
+        // Item 6 slice 1: hand the freshly built Agent its own
+        // factory back-pointer plus the per-agent subagent ceilings
+        // so the spawn_subagent intercept inside the harness loop
+        // can validate and dispatch a child without re-querying
+        // the gateway config store.
+        agent.attach_factory(self.weak());
+        agent.attach_subagent_ceilings(cfg.allowed_subagents.clone());
 
         let arc = Arc::new(AsyncMutex::new(agent));
 

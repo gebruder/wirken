@@ -277,6 +277,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     wasm_skills: Vec::new(),
                     mcp_client: None, // populated below after the proxy starts
                     identity,
+                    allowed_subagents: agent_cfg.allowed_subagents.clone(),
                 },
             );
         }
@@ -347,6 +348,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: default_identity,
+                allowed_subagents: Default::default(),
             },
         );
     }
@@ -488,13 +490,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(64);
-    let factory = Arc::new(AgentFactory::with_options(
+    let factory = AgentFactory::with_options(
         static_configs,
         session_log.clone(),
         Some(permissions.clone()),
         cache_mode,
         cache_capacity,
-    ));
+    );
 
     // --- Webchat ---
     let webchat_port = port.unwrap_or(18790);

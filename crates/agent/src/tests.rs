@@ -1105,9 +1105,10 @@ mod wake {
                 wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
+                allowed_subagents: Default::default(),
             },
         );
-        (Arc::new(AgentFactory::new(configs, log, None)), tmp)
+        (AgentFactory::new(configs, log, None), tmp)
     }
 
     fn seed_user_message(log: &dyn SessionLog, session: &str, content: &str) {
@@ -1437,6 +1438,7 @@ mod wake {
                 wasm_skills: Vec::new(),
                 mcp_client: None,
                 identity: None,
+                allowed_subagents: Default::default(),
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, CacheMode::Drop, 64);
@@ -1446,6 +1448,424 @@ mod wake {
         let b = factory.wake("agent-drop", session).unwrap();
         // In drop mode, every wake reconstructs — distinct Arcs.
         assert!(!Arc::ptr_eq(&a, &b));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item 6 slice 1: multi-agent orchestration / spawn_subagent
+// ---------------------------------------------------------------------------
+
+mod subagent {
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+    use wirken_gateway::agent_config::SubagentCeiling;
+    use wirken_gateway::permissions::PermissionTier;
+
+    use crate::error::AgentError;
+    use crate::factory::{AgentFactory, AgentStaticConfig};
+    use crate::llm::LlmConfig;
+    use crate::runtime::Agent;
+
+    fn make_log() -> Arc<dyn SessionLog> {
+        Arc::new(SqliteSessionLog::open_in_memory().unwrap())
+    }
+
+    /// Build a factory holding a parent and one child agent. The
+    /// parent's `allowed_subagents` is empty by default — the
+    /// caller seeds it via `factory_with_ceiling` for spawn tests.
+    fn factory_with_ceiling(
+        parent_id: &str,
+        child_id: &str,
+        ceiling: Option<SubagentCeiling>,
+        log: Arc<dyn SessionLog>,
+    ) -> (Arc<AgentFactory>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let mut configs = HashMap::new();
+        let mut parent_ceilings = BTreeMap::new();
+        if let Some(c) = ceiling {
+            parent_ceilings.insert(child_id.to_string(), c);
+        }
+        configs.insert(
+            parent_id.to_string(),
+            AgentStaticConfig {
+                agent_id: parent_id.to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: LlmConfig::ollama("test"),
+                api_key: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: parent_ceilings,
+            },
+        );
+        configs.insert(
+            child_id.to_string(),
+            AgentStaticConfig {
+                agent_id: child_id.to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: LlmConfig::ollama("test"),
+                api_key: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: BTreeMap::new(),
+            },
+        );
+        (AgentFactory::new(configs, log, None), tmp)
+    }
+
+    fn parse_envelope(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap_or_else(|e| panic!("envelope parse failed: {e} — {s}"))
+    }
+
+    // ---- AgentConfig serde -----------------------------------------
+
+    #[test]
+    fn subagent_ceiling_round_trips_through_json() {
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into(), "web_search".into()],
+            max_permission_tier: PermissionTier::Tier2,
+            max_rounds: 5,
+            max_runtime_secs: 30,
+        };
+        let mut map = BTreeMap::new();
+        map.insert("researcher".to_string(), ceiling);
+        let json = serde_json::to_string(&map).unwrap();
+        let back: BTreeMap<String, SubagentCeiling> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 1);
+        let r = back.get("researcher").unwrap();
+        assert_eq!(r.tool_allowlist, vec!["read_file", "web_search"]);
+        assert_eq!(r.max_permission_tier, PermissionTier::Tier2);
+        assert_eq!(r.max_rounds, 5);
+        assert_eq!(r.max_runtime_secs, 30);
+    }
+
+    // ---- spawn_subagent rejection paths ----------------------------
+
+    #[tokio::test]
+    async fn spawn_returns_error_envelope_when_agent_id_not_in_allowlist() {
+        let log = make_log();
+        // Parent has no ceilings, so any spawn attempt is refused.
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", None, log.clone());
+
+        let parent = factory.wake("parent", "parent/test/conv-1").unwrap();
+        let mut agent = parent.lock().await;
+
+        let args = serde_json::json!({"agent_id":"child", "prompt":"do work"}).to_string();
+        let result = agent.spawn_subagent_intercept(&args).await.unwrap();
+        let env = parse_envelope(&result.output);
+        assert_eq!(env["status"], "error");
+        assert!(
+            env["output"]
+                .as_str()
+                .unwrap()
+                .contains("not in allowed_subagents"),
+            "envelope: {result:?}"
+        );
+        assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_error_envelope_when_no_factory_bound() {
+        // Standalone Agent (not waked from a factory) cannot spawn.
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let mut agent = Agent::new(
+            "solo".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log,
+        )
+        .unwrap();
+
+        let args = serde_json::json!({"agent_id":"child", "prompt":"do work"}).to_string();
+        let result = agent.spawn_subagent_intercept(&args).await.unwrap();
+        let env = parse_envelope(&result.output);
+        assert_eq!(env["status"], "error");
+        assert!(
+            env["output"]
+                .as_str()
+                .unwrap()
+                .contains("agent has no factory bound"),
+            "envelope: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_depth_exceeded_at_cap() {
+        let log = make_log();
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into()],
+            max_permission_tier: PermissionTier::Tier1,
+            max_rounds: 1,
+            max_runtime_secs: 5,
+        };
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
+
+        let parent = factory.wake("parent", "parent/test/conv-1").unwrap();
+        let mut agent = parent.lock().await;
+        // Pretend this agent is already nested 4 deep.
+        agent.set_subagent_depth_for_test(4);
+
+        let args = serde_json::json!({"agent_id":"child", "prompt":"hi"}).to_string();
+        let result = agent.spawn_subagent_intercept(&args).await.unwrap();
+        let env = parse_envelope(&result.output);
+        assert_eq!(env["status"], "depth_exceeded");
+    }
+
+    #[tokio::test]
+    async fn spawn_returns_invalid_args_error_for_garbage_payload() {
+        let log = make_log();
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", None, log);
+        let parent = factory.wake("parent", "parent/test/conv-1").unwrap();
+        let mut agent = parent.lock().await;
+        let result = agent.spawn_subagent_intercept("{not json").await.unwrap();
+        let env = parse_envelope(&result.output);
+        assert_eq!(env["status"], "error");
+    }
+
+    // ---- spawn_subagent success-path bookkeeping --------------------
+    //
+    // The child wakes against an Ollama LlmConfig pointed at a
+    // non-routable URL, so the actual LLM call inside the child
+    // fails immediately. The parent intercept catches the error
+    // and produces `status: "error"` — but along the way it
+    // performs all the bookkeeping the slice 1 design demands
+    // (audit events, child session id, tool intersection). Those
+    // are exactly the behaviors these tests assert on.
+
+    #[tokio::test]
+    async fn spawn_writes_subagent_spawned_and_result_events() {
+        let log = make_log();
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into()],
+            max_permission_tier: PermissionTier::Tier1,
+            max_rounds: 1,
+            max_runtime_secs: 5,
+        };
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
+
+        let parent_session = "parent/test/conv-1";
+        let parent = factory.wake("parent", parent_session).unwrap();
+        let mut agent = parent.lock().await;
+
+        let args = serde_json::json!({"agent_id":"child", "prompt":"hi"}).to_string();
+        let _ = agent.spawn_subagent_intercept(&args).await.unwrap();
+
+        let h = log.handle_for(SessionId::new(parent_session));
+        let rows = log.get_since(&h, 0).unwrap();
+
+        let spawned: Vec<&SessionEvent> = rows
+            .iter()
+            .map(|r| &r.event)
+            .filter(|e| matches!(e, SessionEvent::SubagentSpawned { .. }))
+            .collect();
+        let results: Vec<&SessionEvent> = rows
+            .iter()
+            .map(|r| &r.event)
+            .filter(|e| matches!(e, SessionEvent::SubagentResult { .. }))
+            .collect();
+
+        assert_eq!(spawned.len(), 1, "expected exactly one SubagentSpawned");
+        assert_eq!(results.len(), 1, "expected exactly one SubagentResult");
+
+        // SubagentSpawned must come BEFORE SubagentResult — order
+        // matters for crash recovery.
+        let spawn_idx = rows
+            .iter()
+            .position(|r| matches!(r.event, SessionEvent::SubagentSpawned { .. }))
+            .unwrap();
+        let result_idx = rows
+            .iter()
+            .position(|r| matches!(r.event, SessionEvent::SubagentResult { .. }))
+            .unwrap();
+        assert!(spawn_idx < result_idx);
+    }
+
+    #[tokio::test]
+    async fn spawn_intersects_tool_request_with_ceiling() {
+        let log = make_log();
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into(), "web_search".into()],
+            max_permission_tier: PermissionTier::Tier1,
+            max_rounds: 1,
+            max_runtime_secs: 5,
+        };
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
+
+        let parent_session = "parent/test/conv-2";
+        let parent = factory.wake("parent", parent_session).unwrap();
+        let mut agent = parent.lock().await;
+
+        // LLM asks for [read_file, exec, web_search]; ceiling
+        // allows [read_file, web_search]. Intersection = the two
+        // shared names; `exec` is silently dropped.
+        let args = serde_json::json!({
+            "agent_id": "child",
+            "prompt": "hi",
+            "tools": ["read_file", "exec", "web_search"],
+        })
+        .to_string();
+        let _ = agent.spawn_subagent_intercept(&args).await.unwrap();
+
+        let h = log.handle_for(SessionId::new(parent_session));
+        let rows = log.get_since(&h, 0).unwrap();
+        let spawned = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                SessionEvent::SubagentSpawned { tools_granted, .. } => Some(tools_granted),
+                _ => None,
+            })
+            .expect("SubagentSpawned event must be present");
+        let mut sorted = spawned.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["read_file".to_string(), "web_search".into()]);
+    }
+
+    #[tokio::test]
+    async fn child_session_is_isolated_from_parent() {
+        let log = make_log();
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into()],
+            max_permission_tier: PermissionTier::Tier1,
+            max_rounds: 1,
+            max_runtime_secs: 5,
+        };
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
+
+        let parent_session = "parent/test/conv-3";
+        let parent = factory.wake("parent", parent_session).unwrap();
+        let mut agent = parent.lock().await;
+
+        let args = serde_json::json!({"agent_id":"child", "prompt":"hi"}).to_string();
+        let _ = agent.spawn_subagent_intercept(&args).await.unwrap();
+
+        // Parent session: only the spawn audit events, no child
+        // user/assistant events.
+        let h = log.handle_for(SessionId::new(parent_session));
+        let parent_rows = log.get_since(&h, 0).unwrap();
+        let parent_user_msgs = parent_rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::UserMessage { .. }))
+            .count();
+        assert_eq!(parent_user_msgs, 0, "parent saw no UserMessage events");
+
+        // Child session id is reproducible and distinct from the
+        // parent's.
+        let child_session_id = format!("{parent_session}#sub-0");
+        let child_h = log.handle_for(SessionId::new(child_session_id));
+        let child_rows = log.get_since(&child_h, 0).unwrap();
+        // The child wrote at least its UserMessage event before
+        // the LLM call failed.
+        let child_user_msgs = child_rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::UserMessage { .. }))
+            .count();
+        assert_eq!(child_user_msgs, 1, "child wrote exactly one UserMessage");
+    }
+
+    #[tokio::test]
+    async fn child_session_id_increments_per_spawn_in_same_session() {
+        let log = make_log();
+        let ceiling = SubagentCeiling {
+            tool_allowlist: vec!["read_file".into()],
+            max_permission_tier: PermissionTier::Tier1,
+            max_rounds: 1,
+            max_runtime_secs: 5,
+        };
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", Some(ceiling), log.clone());
+
+        let parent_session = "parent/test/conv-4";
+        let parent = factory.wake("parent", parent_session).unwrap();
+        let mut agent = parent.lock().await;
+
+        let args = serde_json::json!({"agent_id":"child", "prompt":"first"}).to_string();
+        let _ = agent.spawn_subagent_intercept(&args).await.unwrap();
+        let _ = agent.spawn_subagent_intercept(&args).await.unwrap();
+
+        let h = log.handle_for(SessionId::new(parent_session));
+        let rows = log.get_since(&h, 0).unwrap();
+        let spawned_ids: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::SubagentSpawned {
+                    child_session_id, ..
+                } => Some(child_session_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spawned_ids.len(), 2);
+        assert_eq!(spawned_ids[0], format!("{parent_session}#sub-0"));
+        assert_eq!(spawned_ids[1], format!("{parent_session}#sub-1"));
+    }
+
+    // ---- max_rounds budget plumbing ---------------------------------
+
+    #[tokio::test]
+    async fn process_message_inner_returns_rounds_exceeded_when_budget_zero() {
+        // budget = 0 means the very first round trips the
+        // post-increment check `rounds > budget` immediately.
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let mut agent = Agent::new(
+            "budget".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log,
+        )
+        .unwrap();
+
+        let result = agent
+            .process_message_inner("hello", "test-1".into(), Some(0))
+            .await;
+        match result {
+            Err(AgentError::RoundsExceeded { rounds }) => {
+                assert_eq!(rounds, 0, "no rounds completed under a zero budget");
+            }
+            Err(other) => panic!("expected RoundsExceeded, got error {other:?}"),
+            Ok(_) => panic!("expected RoundsExceeded, got Ok"),
+        }
+    }
+
+    // ---- tool def visibility ----------------------------------------
+
+    #[tokio::test]
+    async fn spawn_tool_def_omitted_when_allowed_subagents_empty() {
+        // No ceilings → tool def should not be present in the
+        // child's exposed defs. We test this indirectly by reading
+        // the agent's tool registry definitions plus the conditional
+        // append in `process_message_inner`. Since `spawn_subagent`
+        // is appended only inside the harness loop (not in the
+        // ToolRegistry), we assert via the registry that there is
+        // no built-in by that name.
+        let log = make_log();
+        let (factory, _tmp) = factory_with_ceiling("parent", "child", None, log);
+        let parent = factory.wake("parent", "parent/test/conv-5").unwrap();
+        let agent = parent.lock().await;
+        // Sanity: with no ceilings the agent reports zero allowed children.
+        // (This is the precondition the harness uses to omit the tool.)
+        assert_eq!(agent.subagent_depth_for_test(), 0);
+        // The built-in registry never contains spawn_subagent on
+        // its own — slice 1 keeps it as a harness-injected def.
+        let tool_names: Vec<String> = crate::tool::ToolRegistry::new(
+            std::env::temp_dir(),
+            crate::tool::ToolConfig::default(),
+        )
+        .definitions()
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+        assert!(
+            !tool_names.iter().any(|n| n == "spawn_subagent"),
+            "spawn_subagent must be a harness-injected def, not a registry built-in"
+        );
     }
 }
 

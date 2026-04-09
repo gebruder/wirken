@@ -1,5 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use wirken_audit::{
     OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog, ToolCallRecord, TrustLevel,
@@ -8,16 +9,27 @@ use wirken_audit::{
 use crate::context::ContextEngine;
 use crate::conversation::{Conversation, ToolCallRequest};
 use crate::error::{AgentError, PermissionDenialContext};
+use crate::factory::AgentFactory;
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
 use crate::llm_stream::StreamEvent;
 use crate::mcp::McpProxyClient;
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry, tool_to_action};
 use crate::wasm_sandbox::WasmSkill;
-use wirken_gateway::permissions::{PermissionCheck, PermissionStore};
+use wirken_gateway::agent_config::SubagentCeiling;
+use wirken_gateway::permissions::{PermissionCheck, PermissionStore, PermissionTier};
 
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
+
+/// Item 6 slice 1 — hard cap on the depth of `spawn_subagent` calls,
+/// independent of any per-ceiling configuration. Even with badly
+/// configured ceilings the harness refuses to nest deeper than this.
+/// Cheap insurance against `A → B → A → B → …` cycles.
+const MAX_SUBAGENT_DEPTH: usize = 4;
+
+/// The built-in tool name for spawning a child agent. Item 6 slice 1.
+pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
 /// Prefix on the synthetic `ToolResult` output that
 /// [`Agent::from_session_log`] writes for tool calls whose results
@@ -108,6 +120,36 @@ pub struct Agent {
     /// the next call to `maybe_attest` discovers an existing
     /// attestation in the session log.
     last_attestation: Option<(u64, std::time::SystemTime)>,
+    /// Item 6 slice 1: weak back-pointer to the [`AgentFactory`]
+    /// that woke this Agent. The harness uses it inside the
+    /// `spawn_subagent` intercept to wake a child Agent for the
+    /// requested `child_agent_id`. `None` for standalone agents
+    /// constructed via [`Agent::new`] (test fixtures, the legacy
+    /// non-factory entry point) — those agents simply cannot
+    /// spawn children and the spawn intercept returns
+    /// `{status:"error"}`.
+    factory: Option<Weak<AgentFactory>>,
+    /// Item 6 slice 1: per-child capability ceilings injected by
+    /// the factory at wake time. Empty by default — when empty,
+    /// the harness omits `spawn_subagent` from the LLM's tool list
+    /// entirely so the LLM never tries to call it.
+    allowed_subagents: BTreeMap<String, SubagentCeiling>,
+    /// Item 6 slice 1: spawn-call depth, set on a freshly woken
+    /// child by the parent's spawn intercept (parent depth + 1).
+    /// 0 for the top-level agent. Capped at [`MAX_SUBAGENT_DEPTH`].
+    subagent_depth: usize,
+    /// Item 6 slice 1: when `Some`, the harness auto-denies any
+    /// tool whose [`Action::tier`] exceeds this cap, with no
+    /// interactive prompt. Children run headless. `None` means
+    /// no extra clamp beyond the regular [`PermissionStore`].
+    auto_deny_above_tier: Option<PermissionTier>,
+    /// Item 6 slice 1: when `Some`, only tool definitions whose
+    /// names appear in this set are exposed to the LLM, and any
+    /// tool call whose name is not in the set is denied. Used by
+    /// the parent to narrow a child's tools to the intersection
+    /// of the spawn call's `tools` field and the ceiling's
+    /// `tool_allowlist`. `None` means no narrowing.
+    restrict_tools: Option<BTreeSet<String>>,
 }
 
 impl Agent {
@@ -151,6 +193,11 @@ impl Agent {
             context_engine,
             identity: None,
             last_attestation: None,
+            factory: None,
+            allowed_subagents: BTreeMap::new(),
+            subagent_depth: 0,
+            auto_deny_above_tier: None,
+            restrict_tools: None,
         })
     }
 
@@ -221,6 +268,11 @@ impl Agent {
             context_engine,
             identity: None,
             last_attestation: None,
+            factory: None,
+            allowed_subagents: BTreeMap::new(),
+            subagent_depth: 0,
+            auto_deny_above_tier: None,
+            restrict_tools: None,
         })
     }
 
@@ -337,6 +389,54 @@ impl Agent {
     /// gets signed). When None, attestation is skipped.
     pub fn attach_identity(&mut self, identity: crate::identity::AgentIdentity) {
         self.identity = Some(identity);
+    }
+
+    /// Item 6 slice 1 — inject the back-pointer to the
+    /// [`AgentFactory`] that woke this Agent. The harness uses it
+    /// inside [`Self::spawn_subagent_intercept`] to wake the
+    /// requested child.
+    pub(crate) fn attach_factory(&mut self, factory: Weak<AgentFactory>) {
+        self.factory = Some(factory);
+    }
+
+    /// Item 6 slice 1 — inject the per-child capability ceilings
+    /// the factory loaded from this agent's persistent config.
+    /// Read-only after attach; spawn_subagent reads them on every
+    /// call.
+    pub(crate) fn attach_subagent_ceilings(&mut self, ceilings: BTreeMap<String, SubagentCeiling>) {
+        self.allowed_subagents = ceilings;
+    }
+
+    /// Item 6 slice 1 — set this child Agent's nesting depth and
+    /// headless ceilings before its `process_message` is invoked.
+    /// Called by the parent's spawn intercept on the freshly woken
+    /// child Agent. The values are sticky for the lifetime of the
+    /// child Arc — wake() returns a fresh Arc per session id, so
+    /// this state never bleeds back into a sibling that happens
+    /// to be cached under the same key.
+    pub(crate) fn set_subagent_runtime(
+        &mut self,
+        depth: usize,
+        max_tier: PermissionTier,
+        restrict_tools: BTreeSet<String>,
+    ) {
+        self.subagent_depth = depth;
+        self.auto_deny_above_tier = Some(max_tier);
+        self.restrict_tools = Some(restrict_tools);
+    }
+
+    /// Test-only access to the depth counter for assertions.
+    #[cfg(test)]
+    pub(crate) fn subagent_depth_for_test(&self) -> usize {
+        self.subagent_depth
+    }
+
+    /// Test-only setter for the depth counter, used to drive the
+    /// MAX_SUBAGENT_DEPTH cap test without spinning up a real
+    /// nested factory chain.
+    #[cfg(test)]
+    pub(crate) fn set_subagent_depth_for_test(&mut self, depth: usize) {
+        self.subagent_depth = depth;
     }
 
     /// Auto-attest the current chain head if the trigger fires.
@@ -558,6 +658,25 @@ impl Agent {
         user_message: &str,
         inbound_id: String,
     ) -> Result<ProcessResult, AgentError> {
+        self.process_message_inner(user_message, inbound_id, None)
+            .await
+    }
+
+    /// Item 6 slice 1 — `process_message` with an optional
+    /// `max_rounds_budget`. The public [`Self::process_message`] is
+    /// a thin wrapper that passes `None`. The `spawn_subagent`
+    /// intercept calls this with `Some(ceiling.max_rounds)` so a
+    /// child cannot run forever inside the parent's turn. When the
+    /// budget is exceeded the call returns
+    /// [`AgentError::RoundsExceeded`] which the spawn intercept
+    /// turns into `status: "rounds_exceeded"` in the
+    /// `SubagentResult` envelope.
+    pub(crate) async fn process_message_inner(
+        &mut self,
+        user_message: &str,
+        inbound_id: String,
+        max_rounds_budget: Option<usize>,
+    ) -> Result<ProcessResult, AgentError> {
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             return Ok(replay);
         }
@@ -584,10 +703,25 @@ impl Agent {
             let mut defs = self.tools.definitions();
             defs.extend(mcp_defs);
             defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
+            // Item 6 slice 1: expose `spawn_subagent` to the LLM
+            // only when the agent has at least one allowed child.
+            // Empty allowed_subagents → never offer the tool.
+            if !self.allowed_subagents.is_empty() && self.subagent_depth < MAX_SUBAGENT_DEPTH {
+                defs.push(spawn_subagent_tool_def());
+            }
             defs
         } else {
             Vec::new()
         };
+        // Item 6 slice 1: when this agent is running as a child
+        // with a `restrict_tools` clamp, drop every tool the parent
+        // didn't grant. The clamp is applied AFTER the spawn tool
+        // is appended so a child cannot accidentally inherit
+        // spawn_subagent unless its own ceiling explicitly grants
+        // it via the same name.
+        if let Some(ref allowed) = self.restrict_tools {
+            tool_defs.retain(|t| allowed.contains(&t.name));
+        }
         // Stable tool def ordering — prompt-cache friendly even
         // before slice 3 adds provider-specific cache markers.
         tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -609,6 +743,11 @@ impl Agent {
                 return Err(AgentError::Tool(format!(
                     "exceeded {MAX_TOOL_ROUNDS} tool call rounds — possible loop"
                 )));
+            }
+            if let Some(budget) = max_rounds_budget
+                && rounds > budget
+            {
+                return Err(AgentError::RoundsExceeded { rounds: rounds - 1 });
             }
 
             // Refit before every LLM call inside the tool loop. A
@@ -1021,11 +1160,62 @@ impl Agent {
         name: &str,
         arguments: &str,
     ) -> Result<crate::tool::ToolResult, AgentError> {
+        // Item 6 slice 1: spawn_subagent runs through a dedicated
+        // intercept that re-enters the factory; it never goes
+        // through the sandbox/permission/MCP routing below.
+        if name == SPAWN_SUBAGENT_TOOL {
+            return self.spawn_subagent_intercept(arguments).await;
+        }
+
+        // Item 6 slice 1: when this Agent runs as a child, the
+        // parent passes a `restrict_tools` clamp. Any call whose
+        // name is not in the clamp is auto-denied here, before any
+        // sandbox or permission work. This catches an LLM that
+        // tries to call a tool the parent dropped from the
+        // intersection — the tool wouldn't appear in `tool_defs`
+        // but we don't trust the LLM to honor that.
+        if let Some(ref allowed) = self.restrict_tools
+            && !allowed.contains(name)
+        {
+            return Ok(crate::tool::ToolResult {
+                output: format!("tool '{name}' is not in this subagent's allowed tool set"),
+                success: false,
+            });
+        }
+
         // Permission check before execution
         if let Some(ref perms) = self.permissions {
             let args: serde_json::Value =
                 serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
             if let Some(action) = tool_to_action(name, &args) {
+                // Item 6 slice 1: in headless child mode the
+                // auto_deny_above_tier clamp short-circuits before
+                // the regular permission store. Children never
+                // prompt for approval — anything beyond the cap is
+                // a fail-closed error result.
+                if let Some(cap) = self.auto_deny_above_tier
+                    && tier_exceeds(action.tier(), cap)
+                {
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::PermissionDenied {
+                            tool: name.to_string(),
+                            tier: action.tier().label().to_string(),
+                            agent_id: self.id.clone(),
+                            trigger: self.current_trigger.clone(),
+                        },
+                    )?;
+                    return Ok(crate::tool::ToolResult {
+                        output: format!(
+                            "tool '{}' requires {} which exceeds this subagent's \
+                             clamped permission tier of {}",
+                            name,
+                            action.tier().label(),
+                            cap.label(),
+                        ),
+                        success: false,
+                    });
+                }
                 let check = {
                     let store = perms.lock().map_err(|e| {
                         AgentError::PermissionDenied(format!("permission store lock: {e}"))
@@ -1074,6 +1264,204 @@ impl Agent {
 
         // Otherwise, built-in tools.
         self.tools.execute(name, arguments).await
+    }
+
+    /// Item 6 slice 1 — built-in `spawn_subagent` intercept. Routed
+    /// from [`Self::execute_tool`] before any sandbox/permission
+    /// dispatch. Validates the request against this agent's
+    /// `allowed_subagents` ceiling, wakes a child Agent through the
+    /// factory, runs the child's `process_message_inner` under a
+    /// timeout and round budget, writes structured `SubagentSpawned`
+    /// and `SubagentResult` events to this agent's session log, and
+    /// returns a JSON envelope as the tool result so the parent's
+    /// LLM sees a stable summary of what happened. The child's own
+    /// session log holds the full transcript for offline inspection.
+    ///
+    /// Crate-private so the test suite can drive it without needing
+    /// an LLM mock.
+    pub(crate) async fn spawn_subagent_intercept(
+        &mut self,
+        arguments: &str,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        let parsed: SpawnSubagentArgs = match serde_json::from_str(arguments) {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(envelope_result(
+                    "",
+                    "error",
+                    &format!("invalid spawn_subagent arguments: {e}"),
+                ));
+            }
+        };
+
+        // Depth cap is enforced even before factory lookup. Cheap
+        // insurance against badly configured ceilings letting an
+        // LLM nest spawns indefinitely.
+        if self.subagent_depth >= MAX_SUBAGENT_DEPTH {
+            return Ok(envelope_result(
+                "",
+                "depth_exceeded",
+                &format!("subagent nesting depth cap of {MAX_SUBAGENT_DEPTH} reached"),
+            ));
+        }
+
+        // Factory back-pointer must be live. Standalone agents
+        // (Agent::new without a factory) cannot spawn children.
+        let factory = match self.factory.as_ref().and_then(|w| w.upgrade()) {
+            Some(f) => f,
+            None => {
+                return Ok(envelope_result("", "error", "agent has no factory bound"));
+            }
+        };
+
+        // Ceiling lookup. Anything not in `allowed_subagents` is a
+        // hard refusal — the LLM cannot ask for an agent that the
+        // operator hasn't pre-approved.
+        let ceiling = match self.allowed_subagents.get(&parsed.agent_id) {
+            Some(c) => c.clone(),
+            None => {
+                return Ok(envelope_result(
+                    "",
+                    "error",
+                    &format!(
+                        "child agent_id '{}' is not in allowed_subagents",
+                        parsed.agent_id
+                    ),
+                ));
+            }
+        };
+
+        // Tool narrowing: intersect the LLM-requested tool list
+        // with the ceiling allowlist. When the LLM didn't pass a
+        // list, the child gets the full ceiling allowlist.
+        let allowlist: BTreeSet<String> = ceiling.tool_allowlist.iter().cloned().collect();
+        let intersected: BTreeSet<String> = if let Some(req) = parsed.tools.as_ref() {
+            let req_set: BTreeSet<String> = req.iter().cloned().collect();
+            for dropped in req_set.difference(&allowlist) {
+                tracing::debug!(
+                    "spawn_subagent: dropping tool '{dropped}' for child '{}' \
+                     (not in ceiling allowlist)",
+                    parsed.agent_id,
+                );
+            }
+            req_set.intersection(&allowlist).cloned().collect()
+        } else {
+            allowlist.clone()
+        };
+
+        // Compute the child session id. The slot is the count of
+        // SubagentSpawned events already written to this parent
+        // session — that makes the id reproducible from the log
+        // (item 10's verify cares).
+        let parent_session_id = self.session_handle.id().to_string();
+        let prior_spawns = self.count_subagent_spawns()?;
+        let child_session_id = format!("{parent_session_id}#sub-{prior_spawns}");
+
+        // Audit the spawn BEFORE waking the child so a crash
+        // between this point and the result write surfaces the
+        // dangling spawn to operators.
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::SubagentSpawned {
+                child_session_id: child_session_id.clone(),
+                child_agent_id: parsed.agent_id.clone(),
+                tools_granted: intersected.iter().cloned().collect(),
+            },
+        )?;
+
+        // Wake the child via the factory. The factory uses the
+        // child session id as the cache key, so even when the
+        // child agent_id matches the parent agent_id the lock is
+        // distinct — no deadlock through the AsyncMutex.
+        let child_arc = match factory.wake(&parsed.agent_id, &child_session_id) {
+            Ok(arc) => arc,
+            Err(e) => {
+                let envelope = envelope_result(
+                    &child_session_id,
+                    "error",
+                    &format!("factory.wake failed: {e}"),
+                );
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SubagentResult {
+                        child_session_id: child_session_id.clone(),
+                        output: envelope.output.clone(),
+                        status: "error".into(),
+                    },
+                )?;
+                return Ok(envelope);
+            }
+        };
+
+        let max_runtime = std::time::Duration::from_secs(ceiling.max_runtime_secs);
+        let max_rounds = ceiling.max_rounds;
+        let depth = self.subagent_depth + 1;
+        let max_tier = ceiling.max_permission_tier;
+        let inbound_id = format!("subagent-{}", uuid::Uuid::new_v4());
+
+        // Lock the child for the entire run. The child's lock is
+        // distinct from this parent's lock (different session id),
+        // so no deadlock.
+        let mut child = child_arc.lock().await;
+        child.set_subagent_runtime(depth, max_tier, intersected);
+
+        // Run the child under a wall-clock timeout AND a round
+        // budget. Either limit produces a structured envelope
+        // status; the child's session log preserves whatever it
+        // managed to write before the cancel. The Box::pin breaks
+        // the recursive `async fn` size cycle:
+        // process_message_inner → execute_tool → spawn_subagent_intercept
+        // → child.process_message_inner.
+        let run =
+            Box::pin(child.process_message_inner(&parsed.prompt, inbound_id, Some(max_rounds)));
+        let envelope = match tokio::time::timeout(max_runtime, run).await {
+            Ok(Ok(result)) => envelope_result(&child_session_id, "ok", &result.response),
+            Ok(Err(AgentError::RoundsExceeded { rounds })) => envelope_result(
+                &child_session_id,
+                "rounds_exceeded",
+                &format!("child stopped after {rounds} rounds without producing a final response"),
+            ),
+            Ok(Err(e)) => envelope_result(&child_session_id, "error", &format!("{e}")),
+            Err(_) => envelope_result(
+                &child_session_id,
+                "timeout",
+                &format!(
+                    "child exceeded the {}s wall-clock budget",
+                    ceiling.max_runtime_secs
+                ),
+            ),
+        };
+
+        // Drop the child lock before writing back to the parent's
+        // session log so the parent never holds two AsyncMutex
+        // guards across an await point.
+        drop(child);
+
+        let status_str = envelope_status(&envelope.output).unwrap_or_else(|| "ok".to_string());
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::SubagentResult {
+                child_session_id,
+                output: envelope.output.clone(),
+                status: status_str,
+            },
+        )?;
+
+        Ok(envelope)
+    }
+
+    /// Count `SessionEvent::SubagentSpawned` rows already written
+    /// to this agent's session. Used by the spawn intercept to
+    /// build a unique, reproducible child session id.
+    fn count_subagent_spawns(&self) -> Result<usize, AgentError> {
+        let rows = self
+            .session_log
+            .get_since(&self.session_handle, 0)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::SubagentSpawned { .. }))
+            .count())
     }
 
     fn rebuild_system_prompt(&mut self) {
@@ -1321,6 +1709,106 @@ impl Agent {
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }
+}
+
+/// Item 6 slice 1 — JSON schema for the built-in `spawn_subagent`
+/// tool. Exposed to the LLM only when `allowed_subagents` is
+/// non-empty AND the agent's `subagent_depth` is below
+/// [`MAX_SUBAGENT_DEPTH`].
+fn spawn_subagent_tool_def() -> crate::tool::ToolDef {
+    crate::tool::ToolDef {
+        name: SPAWN_SUBAGENT_TOOL.to_string(),
+        description: "Delegate a bounded subtask to a child agent. The child runs headless under \
+             a per-call capability ceiling configured by the operator (no interactive \
+             approvals, capped permission tier, capped tools, capped rounds and runtime). \
+             Returns a JSON envelope: {\"child_session_id\":..., \"status\":\"ok|error|\
+             timeout|rounds_exceeded|depth_exceeded\", \"output\":...}."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Identifier of the child agent. Must appear in this \
+                                    agent's allowed_subagents config."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "The instruction passed to the child as its first \
+                                    user message."
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional further narrowing of the child's tool set. \
+                                    Tools outside the ceiling allowlist are silently \
+                                    dropped."
+                }
+            },
+            "required": ["agent_id", "prompt"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// Item 6 slice 1 — wire-format arguments for `spawn_subagent`.
+#[derive(serde::Deserialize)]
+struct SpawnSubagentArgs {
+    agent_id: String,
+    prompt: String,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+}
+
+/// Item 6 slice 1 — wire-format envelope returned to the parent's
+/// LLM as the tool result for a `spawn_subagent` call.
+#[derive(serde::Serialize)]
+struct SubagentEnvelope<'a> {
+    child_session_id: &'a str,
+    status: &'a str,
+    output: &'a str,
+}
+
+/// Build a [`crate::tool::ToolResult`] whose `output` is the
+/// JSON-encoded [`SubagentEnvelope`]. The `success` flag tracks the
+/// status — anything other than `"ok"` is `success = false`, which
+/// keeps the LLM informed via the existing tool-result UI.
+fn envelope_result(child_session_id: &str, status: &str, output: &str) -> crate::tool::ToolResult {
+    let env = SubagentEnvelope {
+        child_session_id,
+        status,
+        output,
+    };
+    crate::tool::ToolResult {
+        output: serde_json::to_string(&env).unwrap_or_else(|_| {
+            format!("{{\"child_session_id\":\"{child_session_id}\",\"status\":\"{status}\"}}")
+        }),
+        success: status == "ok",
+    }
+}
+
+/// Re-extract the `status` field out of an envelope JSON string.
+/// Used by the spawn intercept to populate the `SubagentResult`
+/// event so the audit row's status string matches the envelope the
+/// LLM saw.
+fn envelope_status(envelope_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(envelope_json)
+        .ok()
+        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(String::from))
+}
+
+/// Item 6 slice 1 — strict ordering on [`PermissionTier`].
+/// `Tier1 < Tier2 < Tier3`. Returns true when `actual` is strictly
+/// above `cap` and the action must be auto-denied.
+fn tier_exceeds(actual: PermissionTier, cap: PermissionTier) -> bool {
+    fn rank(t: PermissionTier) -> u8 {
+        match t {
+            PermissionTier::Tier1 => 1,
+            PermissionTier::Tier2 => 2,
+            PermissionTier::Tier3 => 3,
+        }
+    }
+    rank(actual) > rank(cap)
 }
 
 /// Look up the arguments JSON for a tool call by `call_id` from
