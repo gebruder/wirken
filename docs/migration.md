@@ -2,7 +2,7 @@
 
 ## Skills
 
-OpenClaw's 52 bundled skills are `SKILL.md` files — structured markdown with YAML frontmatter. They are not code. Wirken reads the same format.
+OpenClaw's bundled skills are `SKILL.md` files — structured markdown with YAML frontmatter. They are not code. Wirken reads the same format.
 
 **To migrate:** Copy your skill directories into `~/.wirken/skills/`.
 

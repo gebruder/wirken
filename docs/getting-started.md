@@ -8,7 +8,7 @@ Download the binary:
 curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
 ```
 
-Or build from source (requires Rust 1.85+, the `capnp` compiler, and OpenSSL headers):
+Or build from source (requires Rust 1.85+ and the `capnp` compiler):
 
 ```bash
 # Ubuntu/Debian
@@ -19,6 +19,8 @@ brew install capnp
 
 cargo install --path crates/cli
 ```
+
+OpenSSL is pulled in as a transitive dependency of some channel SDKs but is built with the `vendored` feature, so it compiles from source — no system OpenSSL headers are needed and the resulting binary does not link against the host OpenSSL. Outbound HTTPS uses `rustls`.
 
 ## Setup
 

@@ -10,6 +10,7 @@ Each channel runs as a separate OS process with its own Ed25519 identity. Add ch
 - [Signal](channels/signal.md)
 - [Google Chat](channels/google-chat.md)
 - [iMessage (BlueBubbles)](channels/imessage.md)
+- [WhatsApp](channels/whatsapp.md)
 
 ## Managing channels
 
