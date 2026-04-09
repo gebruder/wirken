@@ -254,6 +254,19 @@ pub enum SessionEvent {
         signature: HexBytes,
         signer_pubkey: HashHex,
     },
+    /// Item 10 follow-up — the harness records its current effective
+    /// system prompt as a session event before the first
+    /// `LlmRequest` of every session, and again whenever the prompt
+    /// drifts (e.g., a skill is installed or the default prompt
+    /// changes between binary versions). The verifier uses the most
+    /// recent `SystemPromptSet` at or before each `LlmRequest` to
+    /// reconstruct the exact conversation prefix that was hashed,
+    /// so a future system-prompt update does not silently invalidate
+    /// every historical session's verification. Sessions whose
+    /// `LlmRequest` events have no preceding `SystemPromptSet`
+    /// (legacy sessions written before this variant existed) are
+    /// reported as `events_unverifiable` rather than divergent.
+    SystemPromptSet { content: String },
     /// Sub-agent spawned by the harness (item 6).
     SubagentSpawned {
         child_session_id: String,
