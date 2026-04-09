@@ -1,10 +1,8 @@
 # Architecture: Secure Personal AI Gateway
 
-Codename: **Wirken**
+**Wirken** — from the Old English *wyrcan*, to work, to make, to build. The thing that does the work.
 
 A secure, model-agnostic AI agent gateway. Multi-channel personal AI assistant with skills, tool execution, and local-first operation.
-
-Wirken — from the Old English *wyrcan*, to work, to make, to build. The thing that does the work.
 
 Written in Rust. Not because Rust is fashionable, but because the security properties this architecture requires — memory safety, no prototype pollution, no deserialization exploits, no dynamic property access, compile-time enforcement of isolation boundaries — are properties that Rust provides at compile time and garbage-collected runtimes cannot.
 
@@ -27,7 +25,7 @@ Written in Rust. Not because Rust is fashionable, but because the security prope
 
 **Fix:**
 
-Each channel connector runs as an isolated **adapter process** communicating with the gateway over a Unix domain socket with a per-adapter mTLS identity.
+Each channel connector runs as an isolated **adapter process** communicating with the gateway over a Unix domain socket. Each adapter authenticates with a per-adapter Ed25519 identity via a challenge-response handshake (`crates/ipc/src/auth.rs`).
 
 ```
 [Telegram Adapter] --UDS+Cap'n Proto--> [Gateway Core] <--UDS+Cap'n Proto-- [Discord Adapter]
@@ -124,7 +122,7 @@ impl VaultEntry {
 }
 ```
 
-**Adapter credential access:** Each adapter receives its channel credentials via a one-time file descriptor pass at process spawn time (`SCM_RIGHTS` on Linux, inherited FD on macOS). The FD contains the encrypted credential; the adapter decrypts it in-memory using a session key derived during the mTLS handshake. Credentials never written to environment variables or command-line arguments.
+**Adapter credential access:** Each adapter binary opens the encrypted vault directly at startup, using the same OS keychain (or passphrase fallback) as the gateway, and retrieves its channel credentials through `CredentialStore::retrieve()`. Decrypted credentials are passed to the adapter's runtime constructor and never written to environment variables or command-line arguments.
 
 **Tradeoff:** Requires OS keychain access. Headless servers without a desktop session need the age-file fallback with a passphrase. Documented in onboarding.
 
@@ -173,7 +171,7 @@ Append-only structured audit log.
 - SQLite WAL-mode database at `~/.wirken/audit.db` via `rusqlite` 0.39 (bundled).
 - Every gateway action (tool invocation, message send/receive, credential access, permission grant, config change, adapter connect/disconnect) produces an audit event before the action executes.
 - Schema: `(id INTEGER PRIMARY KEY, ts TEXT, actor TEXT, action TEXT, target TEXT, channel TEXT, session TEXT, detail JSON, hash TEXT)`.
-- Each row includes a SHA-256 hash (`sha2` 0.10) of `(previous_hash || ts || actor || action || detail)` creating a hash chain. Tampering with the log breaks the chain.
+- Each row includes a SHA-256 hash (`sha2` 0.10) of `(previous_hash || ts || actor || action || target || channel || session || detail)` creating a hash chain. Tampering with the log breaks the chain.
 - Retention: 90 days default, configurable. Pruning preserves the hash chain by keeping a checkpoint hash.
 
 **Performance:** Audit writes go through a `tokio::sync::mpsc` channel. A dedicated task flushes to SQLite in batches (every 50ms or 100 events, whichever comes first). Events are held in memory with monotonic sequence numbers. Crash recovery: un-flushed events are lost (acceptable — the alternative is fsync on every event, which is 5-10ms each). Hash chain computed at flush time over the batch.
@@ -218,47 +216,30 @@ metadata: { "openclaw": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
 
 Wirken reads the `name`, `description`, and `requires.bins` fields. The emoji and other metadata are optional. The markdown body is injected verbatim into the agent's system prompt when the skill is active.
 
-### Category 2: Code skills (minority — gVisor container)
+### Category 2: Sandboxed shell execution (Docker / gVisor)
 
-A small number of skills on ClawHub are actual JavaScript/TypeScript code that executes outside the LLM — custom tool implementations that do things the built-in tools can't. These are the skills that shell out, run native tools, make HTTP calls, or do filesystem operations.
+The agent's `exec` tool can run in a Docker container instead of directly on the host (`crates/agent/src/sandbox.rs`). This is the mechanism that confines skills which shell out to commands like `git`, `curl`, or `jq`.
 
-These run in gVisor containers:
+- Runtime: Docker via `bollard` 0.20. The OCI runtime is the default `runc`, or `runsc` (gVisor) when `permissions.sandbox_mode = "gvisor"` is set in the org config.
+- Default image: `debian:bookworm-slim`. The workspace is bind-mounted read-write at `/workspace`; nothing else from the host is mounted.
+- Container runs as UID 1000:1000 with `auto_remove`, a 512 MB memory limit, a 256-PID limit, and a configurable command timeout (default 300 s).
+- **Network:** Off by default (`network_mode = "none"`). A single boolean (`SandboxConfig.network`) toggles it on; there is no per-skill or per-call network policy.
+- **gVisor:** When `runsc` is selected, syscalls from the container are intercepted by gVisor's Sentry rather than reaching the host kernel. Other resource constraints are unchanged.
 
-- Runtime: gVisor (`runsc`) with OCI images via `bollard` 0.20 (Docker API client).
-- Container includes Node.js for JS/TS skill execution, plus common tools (curl, git, jq, python3).
-- Skill directory mounted read-only, workspace mounted read-write. No host filesystem access outside these mounts.
-- **Network:** Denied by default. Skills that declare `"network": true` in `skill.toml` get outbound-only network with DNS, logged to audit.
-- **Resource limits:** 512MB memory, 30-second timeout, no capability escalation.
-- **Cold start:** ~200ms from pre-warmed pool (3 containers at gateway start). ~800ms cold.
-- macOS fallback: Docker Desktop with seccomp-bpf profiles (gVisor is Linux-only).
-- Skills communicate with the gateway via stdin/stdout JSON-RPC.
+`wirken doctor` reports whether Docker and gVisor are available on the host.
 
-### Category 3: Wasm skills (new skills, Wirken-native)
+### Category 3: Wasm skills
 
-For skills written against Wirken's SDK in any language that compiles to WebAssembly. This is the long-term path — 5ms startup, deterministic resource limits, no container dependency.
+For skills compiled to WebAssembly. A Wasm skill is a directory containing a `SKILL.md` (frontmatter with name/description/parameters) and a `skill.wasm` module.
 
-- Runtime: `wasmtime` 43.0 with WASI preview 2 (component model).
-- **CPU limiting:** Fuel metering via `Store::set_fuel()`. Default budget: 10 billion fuel units (~10 seconds of computation). Skills that exhaust fuel are terminated.
-- **Memory limiting:** `ResourceLimiter` trait caps memory at 256MB and table elements at 10,000.
-- **Filesystem:** WASI preopened directories grant read-only access to the skill's own directory and read-write access to a per-skill temp directory.
-- **Network:** Denied by default. Skills that declare `"network": true` in `skill.toml` get outbound-only TCP/UDP via WASI sockets, logged to audit.
-- **Startup:** ~5ms cold start for a precompiled module (`Module::deserialize`). Cached in `~/.wirken/cache/`.
-- Skills communicate with the gateway via WASI stdin/stdout using JSON-RPC.
-- **Gateway-proxied capabilities (post-MVP):** Wasm skills can request filesystem and network access through the JSON-RPC interface. The gateway serves these requests with per-request permission checks, keeping the skill sandboxed while making it useful.
+- Runtime: `wasmtime` 43.0 with WASI preview 1 (`crates/agent/src/wasm_sandbox.rs`).
+- **CPU limiting:** Fuel metering via `Store::set_fuel()`. Default budget: 500 million fuel units. Skills that exhaust fuel are terminated.
+- **Memory:** Stdout buffer capped at 64 MB; stderr at 4 KB.
+- **Filesystem:** No preopened directories — the module has no filesystem access.
+- **Network:** None. WASI sockets are not added to the linker.
+- I/O contract: arguments are written to the module's stdin as a JSON line; the module writes its JSON result to stdout.
 
-### Path selection
-
-```toml
-# skill.toml — only needed for code skills and wasm skills
-[runtime]
-type = "container" # gVisor/Docker for JS/TS code skills
-# type = "wasm"    # Wasmtime for Rust/Go/compiled skills
-
-[permissions]
-network = false
-```
-
-Skills with only a `SKILL.md` and no `skill.toml` are markdown skills. No sandbox needed — the LLM reads the instructions and uses the agent's existing tools, which are already subject to the permission model (Section 3).
+Wasm skills are exposed to the LLM as tools named `wasm_<skill_name>`. Gateway-proxied filesystem and network access for Wasm skills is on the roadmap.
 
 **Signing:**
 - Skills from the official registry are signed with Ed25519 (`ed25519-dalek` 2.2). The gateway verifies signatures before loading.
@@ -277,47 +258,11 @@ Skills with only a `SKILL.md` and no `skill.toml` are markdown skills. No sandbo
 
 **Key storage:** All API keys in the encrypted credential vault (Section 2). Never in environment variables, never in config files.
 
-**Per-agent scoping:** Each agent has its own LLM auth profile. Agent A can use `openai/gpt-5.4` and Agent B can use `anthropic/claude-4.6`, each with separate API keys. The gateway proxies LLM requests on behalf of agents — agents never see raw API keys.
+**Per-agent scoping:** Each agent has its own LLM auth profile. Agent A can use `openai/gpt-4o` and Agent B can use `anthropic/claude-sonnet-4-20250514`, each with separate API keys.
 
-**LLM proxy architecture:**
-```
-[Agent Runtime] --Cap'n Proto/UDS--> [Gateway LLM Proxy] --HTTPS/SSE--> [OpenAI/Anthropic/etc]
-```
+**Direct LLM calls:**
 
-The agent sends a structured completion request to the gateway via IPC. The gateway resolves the provider, decrypts the API key from the vault (via `SecretString::expose_secret()` — key exists as cleartext only in the HTTP Authorization header buffer), opens a streaming connection to the provider, and pipes the response back.
-
-**SSE streaming without buffering:**
-
-HTTP client: `reqwest` 0.13 + `reqwest-eventsource` 0.8. Async runtime: `tokio` 1.50.
-
-```rust
-// Streaming SSE events from LLM provider back to agent over IPC.
-// No buffering — each SSE event is forwarded as it arrives.
-let mut es = EventSource::new(reqwest_client.post(url).headers(headers).body(body));
-
-while let Some(event) = es.next().await {
-    match event {
-        Ok(Event::Message(msg)) => {
-            // Forward immediately to agent via IPC.
-            // Backpressure: if the IPC write blocks (agent slow),
-            // tokio's cooperative scheduling suspends this task.
-            // The TCP window to the LLM provider shrinks naturally.
-            // No explicit buffering or flow control needed.
-            ipc_tx.send(LlmChunk::Data(msg.data)).await?;
-        }
-        Ok(Event::Open) => {},
-        Err(e) => {
-            ipc_tx.send(LlmChunk::Error(e.to_string())).await?;
-            break;
-        }
-    }
-}
-
-// Audit: log metadata at stream completion, not during streaming
-audit.log(LlmCallCompleted { model, tokens_in, tokens_out, duration }).await;
-```
-
-Backpressure is handled by tokio's cooperative task scheduling + TCP window management. If the agent is slow to consume IPC messages, the `ipc_tx.send().await` suspends, which stops reading from the SSE stream, which causes the TCP receive buffer to fill, which causes the sender (LLM provider) to slow down. No explicit backpressure mechanism needed — the async runtime and TCP stack handle it.
+The agent's `LlmClient` (`crates/agent/src/llm.rs`) calls providers directly over HTTPS using `reqwest` + `rustls`. Streaming responses use `reqwest-eventsource`. API keys are decrypted from the vault on gateway startup and held in memory by the owning agent for the lifetime of the process. A separate gateway-side LLM proxy (so that agent processes never see raw keys) is on the roadmap but not yet implemented.
 
 **Supported providers:**
 - OpenAI (API key, Bearer token)
@@ -327,7 +272,7 @@ Backpressure is handled by tokio's cooperative task scheduling + TCP window mana
 - Ollama (local, no key needed)
 - Any OpenAI-compatible endpoint (custom URL + key)
 
-**Usage tracking:** Every LLM call logged to audit with token counts, model ID, and cost estimate. No prompt content in audit log (privacy). Monthly usage summary via `wirken usage`.
+**Usage tracking:** Every LLM call logged to audit with token counts, model ID, and cost estimate. No prompt content in audit log (privacy).
 
 ---
 
@@ -355,9 +300,9 @@ No loopback exemption. Rate limiting applies uniformly.
 **Fix:**
 
 - Sessions expire after 24 hours of inactivity (configurable).
-- Session tokens are JWTs signed with a gateway-local Ed25519 key (`jsonwebtoken` 10.3 with `rust_crypto` backend), with `exp` claim.
-- Session creation logged to audit.
-- Session content (transcripts) encrypted at rest in SQLite with per-session derived keys.
+- The session store (`crates/gateway/src/session.rs`) is a SQLite table holding metadata only: `id`, `channel`, `conversation_id`, `created_at`, `last_activity`, `message_count`, `expired`. Session IDs are 16 random bytes generated per session.
+- Session creation and expiry are logged to audit.
+- Conversation transcripts are currently held in memory by the running agent process and are not persisted between restarts. Persistent transcript storage is on the roadmap.
 - CLI command: `wirken sessions list`, `wirken sessions close <id>`.
 
 ---
@@ -413,7 +358,8 @@ The install script downloads a precompiled binary for the user's platform (Linux
 
 **What the user can customize later:**
 - Add more channels: `wirken channel add matrix`
-- Add more agents: `wirken agent add work --model anthropic/claude-4.6 --channels slack`
+- Add more agents: `wirken agents add` (interactive — prompts for agent ID, provider, model, and API key)
+- Bind a channel to an agent: `wirken agents bind work slack`
 - Adjust permissions: `wirken permissions list`, `wirken permissions revoke`
 - Review audit: `wirken audit log`
 
@@ -424,8 +370,8 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Component | Crate | Version | Why |
 |-----------|-------|---------|-----|
 | Async runtime | `tokio` | 1.50 | De facto standard. Full-featured (timers, IO, process, signal). |
-| HTTP client | `reqwest` | 0.13 | Built on hyper. UDS support. SSE via `reqwest-eventsource` 0.8. |
-| SSE streaming | `reqwest-eventsource` | 0.8 | Async SSE event iterator over reqwest responses. |
+| HTTP client | `reqwest` | 0.13 | Built on hyper. UDS support. SSE via `reqwest-eventsource`. |
+| SSE streaming | `reqwest-eventsource` | 0.6 | Async SSE event iterator over reqwest responses. |
 | SQLite | `rusqlite` | 0.39 | `bundled` feature compiles SQLite from source. No system dependency. |
 | macOS Keychain | `security-framework` | 3.7 | Direct bindings to Apple Security.framework. |
 | Linux keychain | `secret-service` | 5.1 | D-Bus to GNOME Keyring / KDE Wallet. |
@@ -442,13 +388,12 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Interactive prompts | `dialoguer` | 0.12 | Setup wizard (Select, Input, Password, Confirm). |
 | Rate limiting | `governor` | 0.10 | GCRA, lock-free atomics, zero-alloc hot path. |
 | Structured logging | `tracing` | 0.1 | Span-based, async-aware. Subscribers via `tracing-subscriber` 0.3. |
-| JWT | `jsonwebtoken` | 10.3 | Session tokens. `rust_crypto` backend (no OpenSSL dependency). |
 | Telegram Bot API | `teloxide` | 0.17 | Full Bot API v9.1. Long polling + webhooks. Media support. |
 | Discord Bot API | `serenity` | 0.12 | Gateway + REST. Guilds, DMs, threads, slash commands. |
 | Slack API | `slack-morphism` | 2.19 | Socket Mode + Events API. Block Kit typed models. |
 | Serialization | `serde` / `serde_json` | 1.x | JSON for config, skill manifest, LLM payloads. |
 
-**Zero OpenSSL dependency.** TLS via `rustls` (pulled in by reqwest with `rustls-tls` feature). The entire binary links against pure-Rust crypto. No system OpenSSL version mismatches, no dynamic linking surprises.
+**TLS via `rustls`.** Outbound HTTPS uses `rustls` (pulled in by `reqwest` with the `rustls` feature). OpenSSL is also present in the build as a transitive dependency of some channel SDKs, configured with the `vendored` feature so it compiles from source — no system OpenSSL headers are needed at build time and no dynamic linking against the host OpenSSL.
 
 **Single static binary.** The gateway, all built-in adapters, and the CLI compile to one binary with subcommands. Adapter processes are the same binary invoked with `wirken adapter telegram` etc. — a single `cargo build --release` produces everything.
 
@@ -465,5 +410,5 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Unsandboxed code execution | OWASP AG02 | Docker sandbox, Wasm sandbox (Wasmtime), workspace confinement |
 | No audit trail | OWASP AG09 | Append-only hash-chained audit log, SIEM forwarding |
 | Localhost rate limit exemption | CWE-307 | Uniform rate limiting, no loopback exemption |
-| No session expiry | CWE-613 | JWT sessions with 24h inactivity expiry |
+| No session expiry | CWE-613 | 24h inactivity expiry on the SQLite session store |
 | Runtime memory unsafety | CWE-119 | Rust: memory safety at compile time |

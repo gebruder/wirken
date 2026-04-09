@@ -44,12 +44,13 @@ wirken ask -m "your message"
 Manage messaging channels.
 
 ```
-wirken channel add <CHANNEL>     # telegram, discord, slack, teams, matrix
+wirken channel add <CHANNEL>     # telegram, discord, slack, teams, matrix,
+                                 # signal, google-chat, imessage, whatsapp
 wirken channel list
 wirken channel remove <CHANNEL>
 ```
 
-The `add` command prompts for credentials (bot token, app ID, homeserver URL, etc.) depending on the channel type.
+The `add` command prompts for the channel's primary token (and Slack's app token). Channels that need additional fields — Teams app ID, Matrix homeserver/username, Signal phone, BlueBubbles password, WhatsApp phone-number-id/verify-token/app-secret — are wired up by `wirken setup`'s per-channel sub-flows. WhatsApp's setup flow is on the roadmap; see [channels.md](channels.md#whatsapp) for the vault entries it expects in the meantime.
 
 ## wirken agents
 

@@ -45,9 +45,7 @@ On every `wirken run`, the org config refreshes automatically.
         }
     },
     "permissions": {
-        "sandbox_mode": "exec-only",
-        "allowed_tools": ["exec", "read_file", "write_file", "list_files", "web_search"],
-        "blocked_tools": ["generate_image"]
+        "sandbox_mode": "exec-only"
     },
     "skills": {
         "auto_install": ["github", "git", "web-fetch"],
@@ -56,7 +54,7 @@ On every `wirken run`, the org config refreshes automatically.
 }
 ```
 
-All fields are optional. Only provided fields are applied.
+All fields are optional. Only provided fields are applied. The `permissions.sandbox_mode` field is honored today; org-level allow/deny lists for individual tools are on the roadmap and currently parse but do not enforce.
 
 ## SIEM integration
 

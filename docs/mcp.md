@@ -38,11 +38,7 @@ Prefix environment variable values with `vault:` to resolve them from the encryp
 }
 ```
 
-Store the secret first:
-
-```bash
-wirken credentials add github-token
-```
+The vault entry referenced by `vault:github-token` must already exist. Vault entries are populated by `wirken setup` (provider API key) and `wirken channel add` (per-channel tokens); a generic `credentials add` command for arbitrary MCP secrets is on the roadmap. In the meantime, an MCP server that needs its own credential can read it from a regular environment variable in the `env` block instead.
 
 ## How it works
 
