@@ -24,10 +24,21 @@ pub struct LlmConfig {
     /// providers with reliable tool support, false for local models.
     #[serde(default = "default_tools_enabled")]
     pub tools_enabled: bool,
+    /// Total context window in tokens. The [`crate::context::ContextEngine`]
+    /// uses this as the budget ceiling for trimming conversations before
+    /// each LLM call. Item 4 slice 1 in `docs/managed-agents-parity.md`.
+    /// Defaults to a conservative 32_000 if missing — existing
+    /// [`LlmConfig`] entries deserialized from older data files get this.
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
 }
 
 fn default_tools_enabled() -> bool {
     true
+}
+
+fn default_context_window() -> usize {
+    32_000
 }
 
 impl LlmConfig {
@@ -41,6 +52,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            context_window: 128_000,
         }
     }
 
@@ -54,6 +66,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            context_window: 200_000,
         }
     }
 
@@ -67,6 +80,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            context_window: 1_000_000,
         }
     }
 
@@ -80,6 +94,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: Some(region.into()),
             tools_enabled: true,
+            context_window: 200_000,
         }
     }
 
@@ -93,6 +108,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: false,
+            context_window: 8_192,
         }
     }
 
@@ -106,6 +122,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            context_window: 128_000,
         }
     }
 
@@ -119,6 +136,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            context_window: 128_000,
         }
     }
 
@@ -132,12 +150,21 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
+            context_window: 32_000,
         }
     }
 
     /// Construct from explicit provider, base_url, and model.
     /// Preserves the provider name for correct dispatch.
     pub fn from_provider(provider: &str, base_url: &str, model: &str) -> Self {
+        let context_window = match provider {
+            "openai" => 128_000,
+            "anthropic" => 200_000,
+            "gemini" => 1_000_000,
+            "bedrock" => 200_000,
+            "ollama" => 8_192,
+            _ => 32_000,
+        };
         Self {
             provider: provider.into(),
             model: model.into(),
@@ -146,6 +173,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: provider != "ollama",
+            context_window,
         }
     }
 }

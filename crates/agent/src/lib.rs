@@ -1,5 +1,6 @@
 pub mod attestation;
 pub mod bundled_skills;
+pub mod context;
 pub mod conversation;
 pub mod error;
 pub mod factory;
@@ -14,6 +15,7 @@ pub mod skill;
 pub mod tool;
 pub mod wasm_sandbox;
 
+pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};
 pub use factory::{AgentFactory, AgentStaticConfig, session_id_for};
 pub use identity::AgentIdentity;
