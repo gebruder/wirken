@@ -160,6 +160,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             wasm_skills: Vec::new(),
             mcp_client: None,
             identity: None, // verify never signs new attestations
+            allowed_subagents: Default::default(),
         },
     );
     let factory =
