@@ -523,6 +523,49 @@ impl Agent {
         Ok(self.skills.len())
     }
 
+    /// Item 10 follow-up — write a [`SessionEvent::SystemPromptSet`]
+    /// for the current effective system prompt, but only if it has
+    /// drifted from the most recently recorded value (or has never
+    /// been recorded for this session). The verifier uses these
+    /// events to reconstruct the exact prompt that was active at
+    /// each `LlmRequest`, so future code-side updates to the
+    /// default prompt cannot silently invalidate historical
+    /// sessions.
+    ///
+    /// Called at the top of every turn before the `UserMessage`
+    /// append. The check costs one `get_since` walk per turn —
+    /// cheap for sessions of any reasonable length, and avoiding
+    /// the walk would require either a per-Agent in-memory cache
+    /// (would not survive `wake()`) or a dedicated index on the
+    /// session_events table.
+    fn maybe_log_system_prompt(&self) -> Result<(), AgentError> {
+        let current = self
+            .conversation
+            .messages()
+            .first()
+            .filter(|m| m.role == crate::conversation::Role::System)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        if current.is_empty() {
+            return Ok(());
+        }
+        let rows = self
+            .session_log
+            .get_since(&self.session_handle, 0)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        let last_recorded = rows.iter().rev().find_map(|r| match &r.event {
+            SessionEvent::SystemPromptSet { content } => Some(content.clone()),
+            _ => None,
+        });
+        if last_recorded.as_deref() == Some(current.as_str()) {
+            return Ok(());
+        }
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::SystemPromptSet { content: current },
+        )
+    }
+
     /// Append a typed event to this agent's session log. Errors
     /// from the underlying log are wrapped as `SessionLog` so the
     /// agent loop fails closed if durability writes break — partial
@@ -680,6 +723,11 @@ impl Agent {
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             return Ok(replay);
         }
+
+        // Item 10 follow-up — record the current system prompt (if
+        // it drifted) so the verifier can later reconstruct the
+        // exact conversation prefix that was hashed into LlmRequest.
+        self.maybe_log_system_prompt()?;
 
         self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
@@ -929,6 +977,9 @@ impl Agent {
                 .await;
             return Ok(replay);
         }
+
+        // Item 10 follow-up — see process_message_inner.
+        self.maybe_log_system_prompt()?;
 
         self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
@@ -1527,8 +1578,17 @@ impl Agent {
         // separate from `self.conversation` (which was already
         // populated by `from_session_log`) so we can rebuild it
         // from scratch and run dry-run fit() at each LlmRequest.
+        //
+        // Item 10 follow-up: do NOT preload the system prompt with
+        // the agent's current `self.system_prompt`. The verifier
+        // tracks the active prompt from `SystemPromptSet` events as
+        // they come in. LlmRequests that have no preceding
+        // `SystemPromptSet` (legacy sessions written before the
+        // variant existed) are reported as `events_unverifiable`,
+        // not divergent — the verifier cannot reconstruct what the
+        // prompt was at hash time.
         let mut conv = crate::conversation::Conversation::new(100_000);
-        conv.set_system_prompt(&self.system_prompt);
+        let mut have_recorded_prompt = false;
 
         // Snapshot the agent's CURRENT tool defs. tools_hash
         // divergence means the agent's tool surface has changed
@@ -1553,6 +1613,14 @@ impl Agent {
 
         for row in &rows {
             match &row.event {
+                wirken_audit::SessionEvent::SystemPromptSet { content } => {
+                    // Item 10 follow-up: apply the recorded prompt
+                    // to the verify-side conversation. set_system_prompt
+                    // replaces any existing system message in place.
+                    conv.set_system_prompt(content);
+                    have_recorded_prompt = true;
+                    events_verified += 1;
+                }
                 wirken_audit::SessionEvent::UserMessage { content, .. } => {
                     conv.add_user_message(content);
                     events_verified += 1;
@@ -1616,6 +1684,16 @@ impl Agent {
                     messages_hash,
                     ..
                 } => {
+                    // Item 10 follow-up: legacy sessions without a
+                    // recorded SystemPromptSet cannot be verified
+                    // because the prompt at hash time is unknown.
+                    // Mark as unverifiable instead of divergent so
+                    // a code-side prompt update doesn't produce
+                    // false positives on historical sessions.
+                    if !have_recorded_prompt {
+                        events_unverifiable += 1;
+                        continue;
+                    }
                     // C1: clone the conversation, run the same
                     // fit() the original call did, hash the result.
                     let mut conv_copy = conv.clone();

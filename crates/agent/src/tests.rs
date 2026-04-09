@@ -3277,6 +3277,18 @@ mod verify {
         .unwrap();
     }
 
+    fn seed_system_prompt(log: &dyn SessionLog, session: &str, content: &str) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::SystemPromptSet {
+                content: content.into(),
+            },
+        )
+        .unwrap();
+    }
+
     fn seed_llm_request(
         log: &dyn SessionLog,
         session: &str,
@@ -3364,15 +3376,18 @@ mod verify {
         rt.block_on(async {
             let (agent, log, _tmp) = fresh_agent_and_log();
 
-            // Simulate one full turn: user → LlmRequest → LlmResponse → assistant
+            // Simulate one full turn: SystemPromptSet → user →
+            // LlmRequest → LlmResponse → assistant. The
+            // SystemPromptSet event is required so the verifier can
+            // reconstruct the prompt that was hashed.
+            let prompt = crate::runtime::default_system_prompt();
+            seed_system_prompt(&*log, "verify-test", &prompt);
             seed_user_message(&*log, "verify-test", "hi");
 
             // Reproduce the messages_hash the verifier will compute:
-            // build the same conversation, run fit(), hash it. Use the
-            // canonical default_system_prompt() so the test stays in
-            // sync with whatever the agent actually loads.
+            // build the same conversation, run fit(), hash it.
             let mut conv = Conversation::new(100_000);
-            conv.set_system_prompt(&crate::runtime::default_system_prompt());
+            conv.set_system_prompt(&prompt);
             conv.add_user_message("hi");
 
             let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));
@@ -3386,12 +3401,12 @@ mod verify {
 
             let report = agent.verify().await.unwrap();
             assert!(report.is_consistent(), "report: {report:?}");
-            // 4 events: user + LlmRequest + LlmResponse + assistant
-            assert_eq!(report.events_total, 4);
+            // 5 events: SystemPromptSet + user + LlmRequest + LlmResponse + assistant
+            assert_eq!(report.events_total, 5);
             // LlmResponse is always unverifiable.
             assert_eq!(report.events_unverifiable, 1);
-            // user + LlmRequest + assistant verified
-            assert_eq!(report.events_verified, 3);
+            // SystemPromptSet + user + LlmRequest + assistant verified
+            assert_eq!(report.events_verified, 4);
         });
     }
 
@@ -3409,6 +3424,14 @@ mod verify {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let (agent, log, _tmp) = fresh_agent_and_log();
+            // Item 10 follow-up: divergence detection requires a
+            // recorded SystemPromptSet — without one the LlmRequest
+            // is unverifiable, not divergent.
+            seed_system_prompt(
+                &*log,
+                "verify-test",
+                &crate::runtime::default_system_prompt(),
+            );
             seed_user_message(&*log, "verify-test", "hi");
             // Deliberately wrong hash.
             seed_llm_request(
@@ -3586,4 +3609,178 @@ mod verify {
     // verify_detects_chain_hash_tampering. We don't duplicate the
     // raw-connection corruption tests at this layer because
     // wirken-agent doesn't depend on rusqlite.
+
+    // -----------------------------------------------------------------
+    // Item 10 follow-up: SystemPromptSet recording and verification
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn legacy_session_without_prompt_event_marks_llm_request_unverifiable() {
+        // A session that has an LlmRequest but no preceding
+        // SystemPromptSet event (the way item 10 slice 1 wrote
+        // sessions before this fix). The verifier cannot reproduce
+        // the prompt that was hashed, so the LlmRequest must be
+        // reported as unverifiable, NOT divergent.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+            seed_user_message(&*log, "verify-test", "hi");
+            seed_llm_request(
+                &*log,
+                "verify-test",
+                "req-1",
+                HashHex("0".repeat(64)),
+                HashHex("0".repeat(64)),
+            );
+
+            let report = agent.verify().await.unwrap();
+            // No divergence — the verifier punts on LlmRequests
+            // without a recorded prompt.
+            assert!(
+                report.events_divergent.is_empty(),
+                "expected no divergences for legacy session, got {:?}",
+                report.events_divergent
+            );
+            // The LlmRequest counts as unverifiable.
+            assert!(report.events_unverifiable >= 1);
+        });
+    }
+
+    #[test]
+    fn drifted_default_prompt_does_not_invalidate_recorded_session() {
+        // Simulate a session recorded under one prompt, then
+        // verified after the agent's own `self.system_prompt` has
+        // moved on. The recorded SystemPromptSet must take
+        // precedence over the agent's current default.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (agent, log, _tmp) = fresh_agent_and_log();
+            // Record under an OLD prompt that does NOT match the
+            // agent's current default_system_prompt.
+            let old_prompt = "you are a small old bot";
+            seed_system_prompt(&*log, "verify-test", old_prompt);
+            seed_user_message(&*log, "verify-test", "hi");
+
+            // Compute the messages_hash the verifier should expect:
+            // it must rebuild the conversation with the OLD prompt,
+            // not the agent's current default.
+            let mut conv = Conversation::new(100_000);
+            conv.set_system_prompt(old_prompt);
+            conv.add_user_message("hi");
+
+            let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));
+            let tools = agent_snapshot_tools(&agent).await;
+            let messages_hash = hash_after_fit(&engine, &conv, &tools);
+            let tools_hash = compute_tools_hash(&tools);
+
+            seed_llm_request(&*log, "verify-test", "req-1", messages_hash, tools_hash);
+
+            let report = agent.verify().await.unwrap();
+            assert!(
+                report.events_divergent.is_empty(),
+                "expected no divergences when verifier uses recorded prompt, got {:?}",
+                report.events_divergent
+            );
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item 10 follow-up: SystemPromptSet write side and replay
+// ---------------------------------------------------------------------------
+
+mod system_prompt_event {
+    use std::sync::Arc;
+
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use crate::conversation::{Conversation, Role};
+
+    fn make_log() -> Arc<dyn SessionLog> {
+        Arc::new(SqliteSessionLog::open_in_memory().unwrap())
+    }
+
+    #[test]
+    fn replay_from_log_applies_recorded_prompt() {
+        // A session log with a SystemPromptSet event followed by a
+        // user message. After replay the conversation's first
+        // message should be the recorded prompt, not whatever
+        // the caller pre-set.
+        let log = make_log();
+        let h = log.handle_for(SessionId::new("test"));
+        log.append(
+            &h,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::SystemPromptSet {
+                content: "harness-recorded prompt".into(),
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            wirken_audit::TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "hi".into(),
+                inbound_id: None,
+            },
+        )
+        .unwrap();
+
+        let mut conv = Conversation::new(100_000);
+        conv.set_system_prompt("stale fallback prompt");
+        conv.replay_from_log(&*log, &h).unwrap();
+
+        let messages = conv.messages();
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, "harness-recorded prompt");
+        assert_eq!(messages[1].role, Role::User);
+    }
+
+    #[test]
+    fn most_recent_recorded_prompt_wins_during_replay() {
+        // Multiple SystemPromptSet events in the same session —
+        // simulates a skill being installed mid-session, or the
+        // default prompt drifting between binary versions. Replay
+        // should reflect the latest one.
+        let log = make_log();
+        let h = log.handle_for(SessionId::new("test"));
+        log.append(
+            &h,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::SystemPromptSet {
+                content: "first".into(),
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            wirken_audit::TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "early".into(),
+                inbound_id: None,
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::SystemPromptSet {
+                content: "second".into(),
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            wirken_audit::TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "later".into(),
+                inbound_id: None,
+            },
+        )
+        .unwrap();
+
+        let mut conv = Conversation::new(100_000);
+        conv.replay_from_log(&*log, &h).unwrap();
+        assert_eq!(conv.messages()[0].content, "second");
+    }
 }

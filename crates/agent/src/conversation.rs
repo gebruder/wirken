@@ -230,9 +230,10 @@ impl Conversation {
     /// `Agent::wake` (item 2 slice 2) to reconstruct an in-memory
     /// conversation from a durable session log.
     ///
-    /// Only the variants that participate in the LLM-visible
-    /// conversation projection are replayed:
+    /// Variants that participate in the LLM-visible conversation
+    /// projection are replayed:
     ///
+    /// - [`SessionEvent::SystemPromptSet`] → replaces [`Role::System`] in place
     /// - [`SessionEvent::UserMessage`] → [`Role::User`]
     /// - [`SessionEvent::AssistantMessage`] → [`Role::Assistant`]
     /// - [`SessionEvent::AssistantToolCalls`] → [`Role::Assistant`] with `tool_calls`
@@ -243,9 +244,10 @@ impl Conversation {
     /// SubagentResult, AuditLegacy) are skipped — they're not part
     /// of the LLM context, just the audit trail.
     ///
-    /// Does NOT set the system prompt. Callers should call
-    /// [`Self::set_system_prompt`] either before or after replay,
-    /// then optionally rebuild the prompt with skill instructions.
+    /// Callers may set an initial system prompt via
+    /// [`Self::set_system_prompt`] before calling this; any
+    /// `SystemPromptSet` event encountered during replay will
+    /// overwrite it. The most recent recorded prompt wins.
     pub fn replay_from_log(
         &mut self,
         log: &dyn SessionLog,
@@ -254,6 +256,9 @@ impl Conversation {
         let rows = log.get_since(handle, 0)?;
         for row in rows {
             match row.event {
+                SessionEvent::SystemPromptSet { content } => {
+                    self.set_system_prompt(&content);
+                }
                 SessionEvent::UserMessage { content, .. } => {
                     self.add_user_message(&content);
                 }
