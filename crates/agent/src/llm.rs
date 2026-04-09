@@ -309,23 +309,36 @@ impl LlmClient {
     ) -> Result<LlmResponse, AgentError> {
         let url = format!("{}/messages", self.config.base_url);
 
-        // Anthropic separates system prompt from messages
+        // Anthropic separates system prompt from messages.
+        // Item 4 slice 2: Role::Compaction is also folded into the
+        // system slot, with content wrapped in the compaction fence.
         let system_prompt: String = messages
             .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
+            .filter(|m| m.role == Role::System || m.role == Role::Compaction)
+            .map(|m| {
+                if m.role == Role::Compaction {
+                    format!(
+                        "{}\n{}\n{}",
+                        crate::conversation::COMPACTION_FENCE_OPEN,
+                        m.content,
+                        crate::conversation::COMPACTION_FENCE_CLOSE,
+                    )
+                } else {
+                    m.content.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
         let messages_json: Vec<serde_json::Value> = messages
             .iter()
-            .filter(|m| m.role != Role::System)
+            .filter(|m| m.role != Role::System && m.role != Role::Compaction)
             .map(|m| {
                 let role = match m.role {
                     Role::User => "user",
                     Role::Assistant => "assistant",
                     Role::Tool => "user", // Anthropic: tool results go in user messages
-                    Role::System => unreachable!(),
+                    Role::System | Role::Compaction => unreachable!(),
                 };
                 if m.role == Role::Tool
                     && let Some(ref id) = m.tool_call_id
@@ -436,24 +449,37 @@ impl LlmClient {
             self.config.base_url, self.config.model
         );
 
-        // Extract system prompt
+        // Extract system prompt. Item 4 slice 2: Role::Compaction
+        // is folded in here with the fence wrapper, same pattern as
+        // Anthropic.
         let system_text: String = messages
             .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
+            .filter(|m| m.role == Role::System || m.role == Role::Compaction)
+            .map(|m| {
+                if m.role == Role::Compaction {
+                    format!(
+                        "{}\n{}\n{}",
+                        crate::conversation::COMPACTION_FENCE_OPEN,
+                        m.content,
+                        crate::conversation::COMPACTION_FENCE_CLOSE,
+                    )
+                } else {
+                    m.content.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
         // Build contents array
         let contents: Vec<serde_json::Value> = messages
             .iter()
-            .filter(|m| m.role != Role::System)
+            .filter(|m| m.role != Role::System && m.role != Role::Compaction)
             .map(|m| {
                 let role = match m.role {
                     Role::User => "user",
                     Role::Assistant => "model",
                     Role::Tool => "user",
-                    Role::System => unreachable!(),
+                    Role::System | Role::Compaction => unreachable!(),
                 };
                 let parts = if m.role == Role::Tool
                     && m.tool_call_id.is_some()
@@ -586,22 +612,37 @@ impl LlmClient {
             self.config.base_url, self.config.model
         );
 
-        // Extract system prompt
+        // Extract system prompt. Item 4 slice 2: Role::Compaction
+        // is folded in here as another system block with the fence
+        // wrapper.
         let system_blocks: Vec<serde_json::Value> = messages
             .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| serde_json::json!({"text": m.content}))
+            .filter(|m| m.role == Role::System || m.role == Role::Compaction)
+            .map(|m| {
+                if m.role == Role::Compaction {
+                    serde_json::json!({
+                        "text": format!(
+                            "{}\n{}\n{}",
+                            crate::conversation::COMPACTION_FENCE_OPEN,
+                            m.content,
+                            crate::conversation::COMPACTION_FENCE_CLOSE,
+                        )
+                    })
+                } else {
+                    serde_json::json!({"text": m.content})
+                }
+            })
             .collect();
 
         // Build messages array
         let bedrock_messages: Vec<serde_json::Value> = messages
             .iter()
-            .filter(|m| m.role != Role::System)
+            .filter(|m| m.role != Role::System && m.role != Role::Compaction)
             .map(|m| {
                 let role = match m.role {
                     Role::User | Role::Tool => "user",
                     Role::Assistant => "assistant",
-                    Role::System => unreachable!(),
+                    Role::System | Role::Compaction => unreachable!(),
                 };
                 let content = if m.role == Role::Tool
                     && let Some(ref id) = m.tool_call_id
@@ -712,9 +753,33 @@ impl LlmClient {
 }
 
 pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {
+    // Item 4 slice 2: Role::Compaction is folded into the
+    // provider's `system` role with the content wrapped in the
+    // compaction fence. The agent's system prompt instructs the
+    // model to treat fenced blocks as harness-controlled facts.
+    let (wire_role, wire_content) = if msg.role == Role::Compaction {
+        (
+            "system".to_string(),
+            format!(
+                "{}\n{}\n{}",
+                crate::conversation::COMPACTION_FENCE_OPEN,
+                msg.content,
+                crate::conversation::COMPACTION_FENCE_CLOSE,
+            ),
+        )
+    } else {
+        (
+            serde_json::to_value(&msg.role)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_else(|| "user".into()),
+            msg.content.clone(),
+        )
+    };
+
     let mut obj = serde_json::json!({
-        "role": msg.role,
-        "content": msg.content,
+        "role": wire_role,
+        "content": wire_content,
     });
 
     if let Some(ref tool_call_id) = msg.tool_call_id {

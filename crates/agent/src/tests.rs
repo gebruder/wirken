@@ -2420,10 +2420,20 @@ mod context_engine {
             .unwrap();
 
         // The first assistant message got trimmed; the second is
-        // intact (it's in the protected tail).
-        let messages = conv.messages();
-        assert!(messages[2].content.starts_with("[trimmed earlier turn:"));
-        assert_eq!(messages[4].content, "recent assistant");
+        // intact (it's in the protected tail). Use role-based lookup
+        // since slice 2α may inject a Compaction message at position 1.
+        let assistant_msgs: Vec<&crate::conversation::Message> = conv
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Assistant)
+            .collect();
+        assert_eq!(assistant_msgs.len(), 2);
+        assert!(
+            assistant_msgs[0]
+                .content
+                .starts_with("[trimmed earlier turn:")
+        );
+        assert_eq!(assistant_msgs[1].content, "recent assistant");
     }
 
     #[test]
@@ -2532,6 +2542,217 @@ mod context_engine {
     }
 
     // Slice 1 of item 10 tests live in their own module below.
+
+    // -----------------------------------------------------------------
+    // Item 4 slice 2 (alpha): Role::Compaction projection
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn compaction_role_serde_roundtrip() {
+        use crate::conversation::Message;
+        let msg = Message {
+            role: Role::Compaction,
+            content: "earlier turns trimmed".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains("\"compaction\""),
+            "expected lowercase 'compaction' role in JSON, got: {json}"
+        );
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role, Role::Compaction);
+        assert_eq!(back.content, "earlier turns trimmed");
+    }
+
+    #[test]
+    fn compaction_summary_returns_none_for_fresh_session() {
+        let engine = ContextEngine::for_test(10_000, 1);
+        let (log, h) = fresh_log_and_handle();
+        let summary = engine.compaction_summary_message(&*log, &h).unwrap();
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn compaction_summary_returns_some_after_trim() {
+        let engine = ContextEngine::for_test(200, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_tool_calls(vec![ToolCallRequest {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }]);
+        conv.add_tool_result("c1", "exec", &"x".repeat(20_000));
+        conv.add_user_message("u2");
+        conv.add_assistant_message("a2");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        let summary = engine
+            .compaction_summary_message(&*log, &h)
+            .unwrap()
+            .expect("expected a summary message after a trim");
+        assert_eq!(summary.role, Role::Compaction);
+        assert!(summary.content.contains("1 trim round"));
+        assert!(summary.content.contains("byte(s) reclaimed"));
+        assert!(
+            !summary
+                .content
+                .contains("at least one summary used a model call"),
+            "via_model: false should not flag the model-note"
+        );
+    }
+
+    #[test]
+    fn fit_injects_compaction_at_position_one() {
+        let engine = ContextEngine::for_test(200, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_tool_calls(vec![ToolCallRequest {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }]);
+        conv.add_tool_result("c1", "exec", &"x".repeat(20_000));
+        conv.add_user_message("u2");
+        conv.add_assistant_message("a2");
+
+        let (log, h) = fresh_log_and_handle();
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        let messages = conv.messages();
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(
+            messages[1].role,
+            Role::Compaction,
+            "Compaction message must sit at position 1, right after system"
+        );
+    }
+
+    #[test]
+    fn fit_does_not_duplicate_compaction_across_calls() {
+        let engine = ContextEngine::for_test(200, 1);
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("u1");
+        conv.add_assistant_tool_calls(vec![ToolCallRequest {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: "{}".into(),
+        }]);
+        conv.add_tool_result("c1", "exec", &"x".repeat(20_000));
+        conv.add_user_message("u2");
+        conv.add_assistant_message("a2");
+
+        let (log, h) = fresh_log_and_handle();
+        // First fit triggers a trim and injects a Compaction.
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+        let after_first = conv
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Compaction)
+            .count();
+        assert_eq!(after_first, 1);
+
+        // Second fit (no new trim needed since the budget is now met)
+        // must still leave exactly one Compaction message in place,
+        // not stack a second one on top.
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+        let after_second = conv
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Compaction)
+            .count();
+        assert_eq!(
+            after_second, 1,
+            "running fit() twice must not duplicate the Compaction summary"
+        );
+    }
+
+    #[test]
+    fn fit_under_budget_still_injects_existing_summary() {
+        // Pre-seed the session log with a Compaction event from a
+        // hypothetical earlier turn. fit() runs under budget and must
+        // still surface the running summary on this turn.
+        let engine = ContextEngine::for_test(10_000, 1);
+        let (log, h) = fresh_log_and_handle();
+        log.append(
+            &h,
+            TrustLevel::Compaction,
+            SessionEvent::Compaction {
+                spans: vec![3, 4],
+                extracts: serde_json::json!({
+                    "trimmed_bytes": 4_242_u64,
+                    "kept_messages": 5_u64,
+                    "dropped_messages": 2_u64,
+                    "via_model": false,
+                }),
+                via_model: false,
+            },
+        )
+        .unwrap();
+
+        let mut conv = Conversation::new(0);
+        conv.set_system_prompt("sys");
+        conv.add_user_message("hello");
+
+        engine
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .unwrap();
+
+        let compaction_msgs: Vec<_> = conv
+            .messages()
+            .iter()
+            .filter(|m| m.role == Role::Compaction)
+            .collect();
+        assert_eq!(compaction_msgs.len(), 1);
+        assert!(compaction_msgs[0].content.contains("4242 byte(s)"));
+        assert!(compaction_msgs[0].content.contains("2 message(s) dropped"));
+    }
+
+    #[test]
+    fn message_to_json_wraps_compaction_in_fence_as_system() {
+        use crate::conversation::Message;
+        use crate::llm::message_to_json;
+
+        let msg = Message {
+            role: Role::Compaction,
+            content: "harness aggregate".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        };
+        let json = message_to_json(&msg);
+        assert_eq!(json["role"], "system");
+        let content = json["content"].as_str().unwrap();
+        assert!(content.starts_with(crate::conversation::COMPACTION_FENCE_OPEN));
+        assert!(content.ends_with(crate::conversation::COMPACTION_FENCE_CLOSE));
+        assert!(content.contains("harness aggregate"));
+    }
+
+    #[test]
+    fn default_system_prompt_explains_compaction_fence() {
+        let prompt = crate::runtime::default_system_prompt();
+        assert!(
+            prompt.contains("<|compaction|>"),
+            "default system prompt must teach the model what the fence is"
+        );
+        assert!(prompt.contains("harness"));
+    }
 
     #[test]
     fn tool_def_ordering_is_stable() {
@@ -2727,15 +2948,11 @@ mod verify {
             seed_user_message(&*log, "verify-test", "hi");
 
             // Reproduce the messages_hash the verifier will compute:
-            // build the same conversation, run fit(), hash it.
+            // build the same conversation, run fit(), hash it. Use the
+            // canonical default_system_prompt() so the test stays in
+            // sync with whatever the agent actually loads.
             let mut conv = Conversation::new(100_000);
-            conv.set_system_prompt(
-                "You are a helpful personal AI assistant. \
-                 You can execute shell commands, read and write files, \
-                 search the web, generate images, \
-                 and use available skills to help the user. \
-                 Be concise and direct in your responses.",
-            );
+            conv.set_system_prompt(&crate::runtime::default_system_prompt());
             conv.add_user_message("hi");
 
             let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));

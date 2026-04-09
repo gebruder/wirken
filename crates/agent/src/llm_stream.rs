@@ -194,21 +194,35 @@ impl LlmClient {
     ) -> Result<LlmResponse, AgentError> {
         let url = format!("{}/messages", self.config().base_url);
 
+        // Item 4 slice 2: Role::Compaction is folded into the
+        // system prompt with the fence wrapper, same as the
+        // non-streaming Anthropic path.
         let system_prompt: String = messages
             .iter()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.content.clone())
+            .filter(|m| m.role == Role::System || m.role == Role::Compaction)
+            .map(|m| {
+                if m.role == Role::Compaction {
+                    format!(
+                        "{}\n{}\n{}",
+                        crate::conversation::COMPACTION_FENCE_OPEN,
+                        m.content,
+                        crate::conversation::COMPACTION_FENCE_CLOSE,
+                    )
+                } else {
+                    m.content.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
 
         let messages_json: Vec<serde_json::Value> = messages
             .iter()
-            .filter(|m| m.role != Role::System)
+            .filter(|m| m.role != Role::System && m.role != Role::Compaction)
             .map(|m| {
                 let role = match m.role {
                     Role::User | Role::Tool => "user",
                     Role::Assistant => "assistant",
-                    Role::System => unreachable!(),
+                    Role::System | Role::Compaction => unreachable!(),
                 };
                 if m.role == Role::Tool
                     && let Some(ref id) = m.tool_call_id
