@@ -84,6 +84,11 @@ pub struct AgentStaticConfig {
     /// acquisition; per-wake fresh MCP connections are a future
     /// optimization if profiling shows it.
     pub mcp_client: Option<Arc<AsyncMutex<McpProxyClient>>>,
+    /// Optional Ed25519 signing identity for session attestation.
+    /// Item 8 slice 2: when set, the harness loop auto-signs the
+    /// chain head after every turn that crosses the trigger
+    /// threshold. The factory clones this into every waked Agent.
+    pub identity: Option<crate::identity::AgentIdentity>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -215,6 +220,9 @@ impl AgentFactory {
         }
         if let Some(mcp) = &cfg.mcp_client {
             agent.attach_mcp(mcp.clone());
+        }
+        if let Some(identity) = &cfg.identity {
+            agent.attach_identity(identity.clone());
         }
 
         let arc = Arc::new(AsyncMutex::new(agent));

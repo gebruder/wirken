@@ -1104,6 +1104,7 @@ mod wake {
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
+                identity: None,
             },
         );
         (Arc::new(AgentFactory::new(configs, log, None)), tmp)
@@ -1435,6 +1436,7 @@ mod wake {
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
+                identity: None,
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, CacheMode::Drop, 64);
@@ -1983,6 +1985,246 @@ mod attestation_tests {
             AttestationVerifyResult::Ok {
                 attestations_verified: 1,
                 chain_rows_verified: 4,
+            }
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item 8 slice 2: auto-attestation trigger from the harness loop
+// ---------------------------------------------------------------------------
+
+mod auto_attest {
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel};
+
+    use crate::attestation::{AttestationVerifyResult, verify_session_attestations};
+    use crate::identity::AgentIdentity;
+    use crate::llm::LlmConfig;
+    use crate::runtime::Agent;
+
+    fn fresh_agent_with_identity() -> (Agent, Arc<dyn SessionLog>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut agent = Agent::new(
+            "auto-attest".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log.clone(),
+        )
+        .unwrap();
+        agent.attach_identity(AgentIdentity::generate("auto-attest"));
+        (agent, log, tmp)
+    }
+
+    fn count_attestations(log: &dyn SessionLog, session: &str) -> usize {
+        let h = log.handle_for(SessionId::new(session));
+        log.get_since(&h, 0)
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::Attestation { .. }))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn maybe_attest_is_noop_without_identity() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut agent = Agent::new(
+            "no-id".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log.clone(),
+        )
+        .unwrap();
+
+        // Seed an event so the session isn't empty.
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "hi".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+
+        let result = agent.maybe_attest().await.unwrap();
+        assert!(result.is_none(), "no identity → maybe_attest is a no-op");
+        assert_eq!(count_attestations(&*log, "no-id"), 0);
+    }
+
+    #[tokio::test]
+    async fn maybe_attest_is_noop_on_empty_session() {
+        let (mut agent, log, _tmp) = fresh_agent_with_identity();
+        let result = agent.maybe_attest().await.unwrap();
+        assert!(result.is_none());
+        assert_eq!(count_attestations(&*log, "auto-attest"), 0);
+    }
+
+    #[tokio::test]
+    async fn first_turn_is_always_attested() {
+        let (mut agent, log, _tmp) = fresh_agent_with_identity();
+        // Seed at least one event so attest_session has something
+        // to sign.
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "first".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+
+        let result = agent.maybe_attest().await.unwrap();
+        assert!(result.is_some(), "first turn must trigger attestation");
+        assert_eq!(count_attestations(&*log, "auto-attest"), 1);
+    }
+
+    #[tokio::test]
+    async fn second_turn_below_threshold_is_not_attested() {
+        let (mut agent, log, _tmp) = fresh_agent_with_identity();
+        // Seed and trigger the first attestation.
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "first".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+        agent.maybe_attest().await.unwrap();
+        assert_eq!(count_attestations(&*log, "auto-attest"), 1);
+
+        // Add a few more events but stay well under the 20-event
+        // threshold and well within the 30-second window.
+        for i in 0..5 {
+            agent
+                .log_event(
+                    TrustLevel::User,
+                    SessionEvent::UserMessage {
+                        content: format!("msg {i}"),
+                        inbound_id: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let result = agent.maybe_attest().await.unwrap();
+        assert!(
+            result.is_none(),
+            "second-turn under both thresholds should not attest"
+        );
+        // Still just the one attestation from the first turn.
+        assert_eq!(count_attestations(&*log, "auto-attest"), 1);
+    }
+
+    #[tokio::test]
+    async fn crossing_event_threshold_triggers_re_attest() {
+        let (mut agent, log, _tmp) = fresh_agent_with_identity();
+        // First turn → first attestation.
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "first".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+        agent.maybe_attest().await.unwrap();
+        assert_eq!(count_attestations(&*log, "auto-attest"), 1);
+
+        // Pump >= ATTEST_EVERY_N_EVENTS new events into the session.
+        for i in 0..25 {
+            agent
+                .log_event(
+                    TrustLevel::User,
+                    SessionEvent::UserMessage {
+                        content: format!("event {i}"),
+                        inbound_id: None,
+                    },
+                )
+                .unwrap();
+        }
+
+        let result = agent.maybe_attest().await.unwrap();
+        assert!(
+            result.is_some(),
+            "crossing the event threshold must re-attest"
+        );
+        assert_eq!(count_attestations(&*log, "auto-attest"), 2);
+    }
+
+    #[tokio::test]
+    async fn crossing_time_threshold_triggers_re_attest() {
+        let (mut agent, log, _tmp) = fresh_agent_with_identity();
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "first".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+        agent.maybe_attest().await.unwrap();
+        assert_eq!(count_attestations(&*log, "auto-attest"), 1);
+
+        // Backdate the cached last_attestation by more than 30s.
+        let stale = SystemTime::now() - Duration::from_secs(60);
+        // The seq from the first attestation is 1 (after the user
+        // message at seq 0). Set both fields explicitly.
+        agent.set_last_attestation_for_test(1, stale);
+
+        // Add one event and check.
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "second".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+
+        let result = agent.maybe_attest().await.unwrap();
+        assert!(
+            result.is_some(),
+            "crossing the time threshold must re-attest"
+        );
+        assert_eq!(count_attestations(&*log, "auto-attest"), 2);
+    }
+
+    #[tokio::test]
+    async fn auto_signed_session_verifies_with_the_attached_key() {
+        let (mut agent, log, _tmp) = fresh_agent_with_identity();
+        let id_clone = agent.identity_for_test().unwrap().clone();
+        agent
+            .log_event(
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "hi".into(),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+        agent.maybe_attest().await.unwrap();
+
+        let h = log.handle_for(SessionId::new("auto-attest"));
+        let result = verify_session_attestations(&*log, &h, &id_clone.verifying_key()).unwrap();
+        assert_eq!(
+            result,
+            AttestationVerifyResult::Ok {
+                attestations_verified: 1,
+                chain_rows_verified: 2,
             }
         );
     }

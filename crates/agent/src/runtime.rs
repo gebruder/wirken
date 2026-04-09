@@ -28,6 +28,26 @@ const MAX_TOOL_ROUNDS: usize = 20;
 /// passes it through verbatim.
 pub const PARTIAL_RESULT_LOST_SENTINEL: &str = "PARTIAL_RESULT_LOST:";
 
+/// Item 8 slice 2 — automatic session attestation triggers.
+///
+/// The harness signs the chain head every time the running agent
+/// processes a turn AND any of these is true:
+///
+/// - There has been no prior attestation (every session gets at
+///   least one signature after its first turn).
+/// - At least [`ATTEST_EVERY_N_EVENTS`] new session events have
+///   been written since the last attestation.
+/// - At least [`ATTEST_EVERY_K_SECONDS`] wall-clock seconds have
+///   elapsed since the last attestation.
+///
+/// Defaults are deliberately tighter than the parity doc proposed
+/// (100 events / 60 seconds) so short conversations still get
+/// attested. Auto-trigger fires inline on the agent loop; the
+/// Ed25519 sign itself is microseconds and the per-session log
+/// append is a single SQLite insert.
+const ATTEST_EVERY_N_EVENTS: u64 = 20;
+const ATTEST_EVERY_K_SECONDS: u64 = 30;
+
 /// Result of processing a message, containing the response and any
 /// permission denials that occurred during tool execution.
 pub struct ProcessResult {
@@ -76,6 +96,18 @@ pub struct Agent {
     /// blowups stop killing sessions. Sized from the agent's
     /// [`LlmConfig::context_window`] at construction time.
     context_engine: ContextEngine,
+    /// Optional Ed25519 signing identity for session attestation.
+    /// Item 8 slice 2: when present, the harness loop auto-signs
+    /// the chain head after every turn that crosses the trigger
+    /// threshold. When None, attestation is silently skipped (the
+    /// session log is still hash-chained for tamper detection;
+    /// only the signed-by-the-operator's-key proof is missing).
+    identity: Option<crate::identity::AgentIdentity>,
+    /// In-memory cache of the last attestation this Agent instance
+    /// wrote. `None` until either the first auto-attest fires or
+    /// the next call to `maybe_attest` discovers an existing
+    /// attestation in the session log.
+    last_attestation: Option<(u64, std::time::SystemTime)>,
 }
 
 impl Agent {
@@ -117,6 +149,8 @@ impl Agent {
             session_log,
             session_handle,
             context_engine,
+            identity: None,
+            last_attestation: None,
         })
     }
 
@@ -185,6 +219,8 @@ impl Agent {
             session_log,
             session_handle,
             context_engine,
+            identity: None,
+            last_attestation: None,
         })
     }
 
@@ -291,6 +327,93 @@ impl Agent {
         self.skills = skills;
         self.wasm_skills = wasm_skills;
         self.rebuild_system_prompt();
+    }
+
+    /// Attach a signing identity for session attestation. Item 8
+    /// slice 2: when set, the harness loop auto-signs the chain
+    /// head after every turn that crosses the
+    /// [`ATTEST_EVERY_N_EVENTS`] / [`ATTEST_EVERY_K_SECONDS`]
+    /// threshold (or after the very first turn, so every session
+    /// gets signed). When None, attestation is skipped.
+    pub fn attach_identity(&mut self, identity: crate::identity::AgentIdentity) {
+        self.identity = Some(identity);
+    }
+
+    /// Auto-attest the current chain head if the trigger fires.
+    /// Crate-private so the test suite can drive it without an
+    /// LLM mock. Called by [`Self::process_message`] and
+    /// [`Self::process_message_stream`] at the end of every turn.
+    pub(crate) async fn maybe_attest(&mut self) -> Result<Option<u64>, AgentError> {
+        let Some(identity) = self.identity.as_ref() else {
+            return Ok(None);
+        };
+        if !self.should_attest()? {
+            return Ok(None);
+        }
+        match crate::attestation::attest_session(
+            &*self.session_log,
+            &self.session_handle,
+            identity,
+        )? {
+            Some(seq) => {
+                self.last_attestation = Some((seq, std::time::SystemTime::now()));
+                tracing::info!(
+                    "agent {} signed session {} at seq {seq}",
+                    self.id,
+                    self.session_handle.id()
+                );
+                Ok(Some(seq))
+            }
+            None => {
+                // Empty session — nothing to attest. Don't update
+                // the cache; the next turn will recheck.
+                Ok(None)
+            }
+        }
+    }
+
+    /// Test-only: directly set the cached `last_attestation`. Used
+    /// to drive `maybe_attest` toward different branches in tests.
+    #[cfg(test)]
+    pub(crate) fn set_last_attestation_for_test(&mut self, seq: u64, when: std::time::SystemTime) {
+        self.last_attestation = Some((seq, when));
+    }
+
+    /// Test-only: borrow the attached identity if any. Used by the
+    /// auto_attest tests to verify-with-the-attached-key.
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> Option<&crate::identity::AgentIdentity> {
+        self.identity.as_ref()
+    }
+
+    /// Decide whether the next attestation should fire. Triggers:
+    ///
+    /// - No prior attestation → fire (every session gets at least
+    ///   one signature after its first turn).
+    /// - Otherwise, fire if at least
+    ///   [`ATTEST_EVERY_N_EVENTS`] new events have been written
+    ///   since the cached last attestation seq, OR at least
+    ///   [`ATTEST_EVERY_K_SECONDS`] wall-clock seconds have passed.
+    fn should_attest(&self) -> Result<bool, AgentError> {
+        let Some((last_seq, last_at)) = self.last_attestation else {
+            // First turn: always attest if there's anything to
+            // attest. The caller (maybe_attest) handles the
+            // empty-session case via attest_session's `None` return.
+            return Ok(true);
+        };
+
+        let current = self
+            .session_log
+            .last_index(&self.session_handle)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?
+            .unwrap_or(0);
+        let events_since = current.saturating_sub(last_seq);
+        let seconds_since = std::time::SystemTime::now()
+            .duration_since(last_at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        Ok(events_since >= ATTEST_EVERY_N_EVENTS || seconds_since >= ATTEST_EVERY_K_SECONDS)
     }
 
     /// Load skills from a directory and rebuild the system prompt.
@@ -546,6 +669,7 @@ impl Agent {
                             content: text.clone(),
                         },
                     )?;
+                    let _ = self.maybe_attest().await?;
                     return Ok(ProcessResult {
                         response: text,
                         denials,
@@ -639,6 +763,7 @@ impl Agent {
                             content: fallback.clone(),
                         },
                     )?;
+                    let _ = self.maybe_attest().await?;
                     return Ok(ProcessResult {
                         response: fallback,
                         denials,
@@ -784,6 +909,7 @@ impl Agent {
                             content: text.clone(),
                         },
                     )?;
+                    let _ = self.maybe_attest().await?;
                     let _ = tx
                         .send(StreamEvent::Done(LlmResponse::Text(text.clone())))
                         .await;
@@ -853,6 +979,7 @@ impl Agent {
                             content: fallback.clone(),
                         },
                     )?;
+                    let _ = self.maybe_attest().await?;
                     let _ = tx.send(StreamEvent::Done(LlmResponse::Empty)).await;
                     return Ok(ProcessResult {
                         response: fallback,

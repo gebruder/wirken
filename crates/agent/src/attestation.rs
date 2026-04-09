@@ -83,7 +83,7 @@ pub enum AttestationVerifyResult {
 ///
 /// Returns the sequence number of the newly appended attestation
 /// event, or `None` if the session is empty (nothing to attest).
-pub fn attest_session<L: SessionLog>(
+pub fn attest_session<L: SessionLog + ?Sized>(
     log: &L,
     session: &SessionHandle<OwnSession>,
     identity: &AgentIdentity,
@@ -131,7 +131,7 @@ pub fn attest_session<L: SessionLog>(
 /// meaningless. If the chain is broken, returns
 /// [`AttestationVerifyResult::ChainBroken`] without checking any
 /// signatures.
-pub fn verify_session_attestations<L: SessionLog>(
+pub fn verify_session_attestations<L: SessionLog + ?Sized>(
     log: &L,
     session: &SessionHandle<OwnSession>,
     verifying_key: &VerifyingKey,
