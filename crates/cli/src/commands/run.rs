@@ -245,6 +245,27 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 );
             }
 
+            // Item 8 slice 2: load (or generate) the agent's
+            // Ed25519 signing identity. The first run creates the
+            // key files at ~/.wirken/agents/{id}/identity.{key,pub};
+            // subsequent runs load them. Failure here is non-fatal —
+            // attestation becomes a no-op for that agent and we log
+            // a warning.
+            let identity_dir = wirken_agent::identity::identity_dir(&cfg.data_dir, &agent_cfg.id);
+            let identity = match wirken_agent::AgentIdentity::load_or_create(
+                &agent_cfg.id,
+                &identity_dir,
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(
+                        "agent identity unavailable for '{}': {e} — session attestation disabled",
+                        agent_cfg.id,
+                    );
+                    None
+                }
+            };
+
             static_configs.insert(
                 agent_cfg.id.clone(),
                 AgentStaticConfig {
@@ -255,6 +276,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     skills,
                     wasm_skills: Vec::new(),
                     mcp_client: None, // populated below after the proxy starts
+                    identity,
                 },
             );
         }
@@ -299,6 +321,21 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             }
         }
 
+        // Item 8 slice 2: identity for the default agent.
+        let default_identity_dir = wirken_agent::identity::identity_dir(&cfg.data_dir, "default");
+        let default_identity = match wirken_agent::AgentIdentity::load_or_create(
+            "default",
+            &default_identity_dir,
+        ) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(
+                    "agent identity unavailable for 'default': {e} — session attestation disabled"
+                );
+                None
+            }
+        };
+
         static_configs.insert(
             "default".into(),
             AgentStaticConfig {
@@ -309,6 +346,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 skills,
                 wasm_skills: Vec::new(),
                 mcp_client: None,
+                identity: default_identity,
             },
         );
     }
