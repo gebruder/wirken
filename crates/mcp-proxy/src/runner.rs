@@ -101,10 +101,7 @@ async fn load_for_agent(
     data_dir: &Path,
     vault: Option<&CredentialStore>,
 ) {
-    let per_agent = data_dir
-        .join("agents")
-        .join(agent_id)
-        .join("mcp.json");
+    let per_agent = data_dir.join("agents").join(agent_id).join("mcp.json");
     let shared = data_dir.join("mcp.json");
 
     let path = if per_agent.exists() {
@@ -116,7 +113,10 @@ async fn load_for_agent(
     let config = match McpConfig::load(&path) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("MCP config load failed for agent '{agent_id}' ({}): {e}", path.display());
+            tracing::warn!(
+                "MCP config load failed for agent '{agent_id}' ({}): {e}",
+                path.display()
+            );
             return;
         }
     };

@@ -93,10 +93,7 @@ impl Agent {
     /// Connect to the out-of-process MCP proxy and load this agent's
     /// tool definitions. Replaces the previous in-process MCP loader.
     /// Returns the number of MCP tools available to this agent.
-    pub async fn load_mcp(
-        &mut self,
-        proxy_socket: &std::path::Path,
-    ) -> Result<usize, AgentError> {
+    pub async fn load_mcp(&mut self, proxy_socket: &std::path::Path) -> Result<usize, AgentError> {
         let mut client = McpProxyClient::connect(proxy_socket, &self.id).await?;
         if !client.has_servers() {
             // The proxy is reachable but has no servers configured for this

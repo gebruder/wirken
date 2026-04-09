@@ -18,8 +18,8 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use wirken_mcp_proxy::wire::{
-    Hello, HelloAck, HelloAckKind, HelloKind, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request,
-    Response, ToolDefWire,
+    Hello, HelloAck, HelloAckKind, HelloKind, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response,
+    ToolDefWire,
 };
 
 use crate::error::AgentError;
@@ -118,11 +118,7 @@ impl McpProxyClient {
     }
 
     /// Execute a tool by its prefixed name (`mcp_{server}_{tool}`).
-    pub async fn execute(
-        &mut self,
-        name: &str,
-        arguments: &str,
-    ) -> Result<ToolResult, AgentError> {
+    pub async fn execute(&mut self, name: &str, arguments: &str) -> Result<ToolResult, AgentError> {
         let id = self.next_request_id();
         let req = Request::CallTool {
             id,
@@ -211,9 +207,7 @@ async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream, AgentError
     )))
 }
 
-async fn read_line(
-    reader: &mut BufReader<OwnedReadHalf>,
-) -> Result<Option<String>, AgentError> {
+async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<String>, AgentError> {
     let mut buf = Vec::with_capacity(256);
     loop {
         let mut byte = [0u8; 1];
@@ -267,4 +261,3 @@ fn wire_to_tool_def(w: ToolDefWire) -> ToolDef {
         parameters: w.parameters,
     }
 }
-

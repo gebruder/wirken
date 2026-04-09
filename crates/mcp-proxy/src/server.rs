@@ -101,7 +101,11 @@ async fn handle_connection(
             }
             hello.agent_id
         }
-        None => return Err(ProxyError::Protocol("connection closed before hello".into())),
+        None => {
+            return Err(ProxyError::Protocol(
+                "connection closed before hello".into(),
+            ));
+        }
     };
 
     let has_servers = registry.lock().await.has_agent(&agent_id);
@@ -217,8 +221,8 @@ async fn write_line<T: serde::Serialize>(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     value: &T,
 ) -> Result<(), ProxyError> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|e| ProxyError::Protocol(format!("serialize: {e}")))?;
+    let mut bytes =
+        serde_json::to_vec(value).map_err(|e| ProxyError::Protocol(format!("serialize: {e}")))?;
     bytes.push(b'\n');
     writer.write_all(&bytes).await?;
     writer.flush().await?;

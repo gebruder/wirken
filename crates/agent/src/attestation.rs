@@ -88,9 +88,7 @@ pub fn attest_session<L: SessionLog>(
     session: &SessionHandle<OwnSession>,
     identity: &AgentIdentity,
 ) -> Result<Option<u64>, AgentError> {
-    let last = log
-        .last_index(session)
-        .map_err(map_audit_err)?;
+    let last = log.last_index(session).map_err(map_audit_err)?;
     let last_seq = match last {
         Some(s) => s,
         None => return Ok(None),
@@ -101,13 +99,12 @@ pub fn attest_session<L: SessionLog>(
     let head_rows = log
         .get_range(session, last_seq..(last_seq + 1))
         .map_err(map_audit_err)?;
-    let head = head_rows
-        .into_iter()
-        .next()
-        .ok_or_else(|| AgentError::Identity(format!(
+    let head = head_rows.into_iter().next().ok_or_else(|| {
+        AgentError::Identity(format!(
             "session {} reports last_seq={last_seq} but row is missing",
             session.id()
-        )))?;
+        ))
+    })?;
     let chain_head_hash = head.hash;
 
     let signed_msg = build_signed_message(session.id().as_str(), last_seq, &chain_head_hash);
@@ -193,9 +190,7 @@ pub fn verify_session_attestations<L: SessionLog>(
                 return Ok(AttestationVerifyResult::Broken {
                     attestation_seq: row.seq,
                     attestations_verified_before: attestations_verified,
-                    reason: format!(
-                        "chain_head_seq {chain_head_seq} not present in session"
-                    ),
+                    reason: format!("chain_head_seq {chain_head_seq} not present in session"),
                 });
             }
         };
@@ -211,11 +206,8 @@ pub fn verify_session_attestations<L: SessionLog>(
         }
 
         // Reconstruct the signed message and verify the signature.
-        let signed_msg = build_signed_message(
-            session.id().as_str(),
-            *chain_head_seq,
-            chain_head_hash,
-        );
+        let signed_msg =
+            build_signed_message(session.id().as_str(), *chain_head_seq, chain_head_hash);
         let sig_bytes = match decode_hex(&signature.0) {
             Ok(b) if b.len() == 64 => b,
             Ok(b) => {
@@ -256,12 +248,14 @@ pub fn verify_session_attestations<L: SessionLog>(
 
 /// Build the canonical signed message. See module-level docs for the
 /// exact byte layout.
-fn build_signed_message(session_id: &str, chain_head_seq: u64, chain_head_hash: &HashHex) -> Vec<u8> {
+fn build_signed_message(
+    session_id: &str,
+    chain_head_seq: u64,
+    chain_head_hash: &HashHex,
+) -> Vec<u8> {
     let id_bytes = session_id.as_bytes();
     let hash_bytes = chain_head_hash.0.as_bytes();
-    let mut out = Vec::with_capacity(
-        DOMAIN.len() + 4 + id_bytes.len() + 8 + hash_bytes.len(),
-    );
+    let mut out = Vec::with_capacity(DOMAIN.len() + 4 + id_bytes.len() + 8 + hash_bytes.len());
     out.extend_from_slice(DOMAIN);
     out.extend_from_slice(&(id_bytes.len() as u32).to_le_bytes());
     out.extend_from_slice(id_bytes);
