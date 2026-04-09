@@ -53,7 +53,11 @@ fn request_call_tool_round_trip() {
     let s = serde_json::to_string(&r).unwrap();
     let parsed: Request = serde_json::from_str(&s).unwrap();
     match parsed {
-        Request::CallTool { id, name, arguments } => {
+        Request::CallTool {
+            id,
+            name,
+            arguments,
+        } => {
             assert_eq!(id, 11);
             assert_eq!(name, "mcp_filesystem_read_file");
             assert!(arguments.contains("\"path\""));
@@ -73,7 +77,9 @@ fn response_call_tool_result_round_trip() {
     let parsed: Response = serde_json::from_str(&s).unwrap();
     assert_eq!(parsed.id(), 12);
     match parsed {
-        Response::CallToolResult { output, success, .. } => {
+        Response::CallToolResult {
+            output, success, ..
+        } => {
             assert_eq!(output, "hello");
             assert!(success);
         }

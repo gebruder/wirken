@@ -68,9 +68,9 @@ pub enum Request {
 impl Request {
     pub fn id(&self) -> u64 {
         match self {
-            Request::ListTools { id }
-            | Request::CallTool { id, .. }
-            | Request::Shutdown { id } => *id,
+            Request::ListTools { id } | Request::CallTool { id, .. } | Request::Shutdown { id } => {
+                *id
+            }
         }
     }
 }

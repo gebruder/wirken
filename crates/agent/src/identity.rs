@@ -56,10 +56,7 @@ impl AgentIdentity {
     /// on Unix; the public file is written with default permissions.
     pub fn load_or_create(agent_id: &str, dir: &Path) -> Result<Self, AgentError> {
         std::fs::create_dir_all(dir).map_err(|e| {
-            AgentError::Identity(format!(
-                "create identity dir {}: {e}",
-                dir.display()
-            ))
+            AgentError::Identity(format!("create identity dir {}: {e}", dir.display()))
         })?;
 
         let secret_path = dir.join("identity.key");
@@ -89,10 +86,7 @@ impl AgentIdentity {
     /// contain exactly 64 hex characters (32 bytes).
     pub fn load_from(agent_id: &str, secret_path: &Path) -> Result<Self, AgentError> {
         let hex = std::fs::read_to_string(secret_path).map_err(|e| {
-            AgentError::Identity(format!(
-                "read identity key {}: {e}",
-                secret_path.display()
-            ))
+            AgentError::Identity(format!("read identity key {}: {e}", secret_path.display()))
         })?;
         let bytes = hex_decode(hex.trim()).map_err(|e| {
             AgentError::Identity(format!(
@@ -197,8 +191,6 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     }
     (0..hex.len())
         .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("hex decode: {e}"))
-        })
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("hex decode: {e}")))
         .collect()
 }

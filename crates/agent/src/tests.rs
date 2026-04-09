@@ -910,13 +910,22 @@ async fn sandbox_falls_through_to_host_when_unavailable() {
 
     // First exec — sandbox provisioning is attempted, fails (no Docker),
     // and falls through to host execution. The OnceCell is now set to None.
-    let r1 = tools.execute("exec", r#"{"command": "echo first"}"#).await.unwrap();
+    let r1 = tools
+        .execute("exec", r#"{"command": "echo first"}"#)
+        .await
+        .unwrap();
     assert!(r1.success);
     assert!(r1.output.contains("first"));
-    assert!(tools.sandbox_initialized(), "first exec must initialize the cell");
+    assert!(
+        tools.sandbox_initialized(),
+        "first exec must initialize the cell"
+    );
 
     // Second exec — the cell is already set to None, no retry, host exec.
-    let r2 = tools.execute("exec", r#"{"command": "echo second"}"#).await.unwrap();
+    let r2 = tools
+        .execute("exec", r#"{"command": "echo second"}"#)
+        .await
+        .unwrap();
     assert!(r2.success);
     assert!(r2.output.contains("second"));
     assert!(tools.sandbox_initialized());
@@ -1180,9 +1189,7 @@ mod identity_tests {
 // ---------------------------------------------------------------------------
 
 mod attestation_tests {
-    use wirken_audit::{
-        SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel,
-    };
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel};
 
     use crate::attestation::{
         AttestationVerifyResult, attest_session, verify_session_attestations,
@@ -1190,12 +1197,15 @@ mod attestation_tests {
     use crate::identity::AgentIdentity;
 
     fn user_msg(s: &str) -> SessionEvent {
-        SessionEvent::UserMessage {
-            content: s.into(),
-        }
+        SessionEvent::UserMessage { content: s.into() }
     }
 
-    fn fresh_log_with_events(n: usize) -> (SqliteSessionLog, wirken_audit::SessionHandle<wirken_audit::OwnSession>) {
+    fn fresh_log_with_events(
+        n: usize,
+    ) -> (
+        SqliteSessionLog,
+        wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    ) {
         let log = SqliteSessionLog::open_in_memory().unwrap();
         let h = log.handle_for(SessionId::new("sess-T"));
         for i in 0..n {
@@ -1295,8 +1305,7 @@ mod attestation_tests {
 
         attest_session(&log, &h, &signer).unwrap();
 
-        let result =
-            verify_session_attestations(&log, &h, &other.verifying_key()).unwrap();
+        let result = verify_session_attestations(&log, &h, &other.verifying_key()).unwrap();
         match result {
             AttestationVerifyResult::Broken { reason, .. } => {
                 assert!(
