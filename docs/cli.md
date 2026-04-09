@@ -50,7 +50,7 @@ wirken channel list
 wirken channel remove <CHANNEL>
 ```
 
-The `add` command prompts for the channel's primary token (and Slack's app token). Channels that need additional fields — Teams app ID, Matrix homeserver/username, Signal phone, BlueBubbles password, WhatsApp phone-number-id/verify-token/app-secret — are wired up by `wirken setup`'s per-channel sub-flows. WhatsApp's setup flow is on the roadmap; see [channels.md](channels.md#whatsapp) for the vault entries it expects in the meantime.
+The `add` command prompts for the channel's primary token (and Slack's app token). Channels that need additional fields — Teams app ID, Matrix homeserver/username, Signal phone, BlueBubbles password, WhatsApp phone-number-id/verify-token/app-secret — are wired up by `wirken setup`'s per-channel sub-flows. WhatsApp's setup flow is on the roadmap; see [WhatsApp channel docs](channels/whatsapp.md) for the vault entries it expects in the meantime.
 
 ## wirken agents
 
