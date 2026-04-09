@@ -208,15 +208,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 let _ = agent.load_skills(&shared_skills);
             }
 
-            // Load MCP servers
-            let mcp_path = cfg.mcp_config_path(&agent_cfg.id);
-            if mcp_path.exists() {
-                match agent.load_mcp(&mcp_path, |_| None).await {
-                    Ok(n) if n > 0 => println!("  MCP: {n} servers for agent:{}", agent_cfg.id),
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("MCP load failed for {}: {e}", agent_cfg.id),
-                }
-            }
+            // MCP loading is deferred — the gateway connects each agent to
+            // the proxy after the proxy process has started (see below).
 
             // Bind channels to this agent
             for channel in &agent_cfg.channels {
@@ -261,15 +254,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let _ = default_agent.load_skills(&skills_dir);
         }
 
-        // Load MCP servers
-        let mcp_path = cfg.mcp_config_path("default");
-        if mcp_path.exists() {
-            match default_agent.load_mcp(&mcp_path, |_| None).await {
-                Ok(n) if n > 0 => println!("  MCP: {n} servers for agent:default"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("MCP load failed for default: {e}"),
-            }
-        }
+        // MCP loading is deferred — see the proxy spawn block below.
 
         // Bind any channels not already routed
         for adapter in registry.lock().await.list() {
@@ -339,6 +324,63 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             }
         });
         adapter_handles.push(handle);
+    }
+
+    // --- Spawn MCP proxy ---
+    //
+    // The proxy runs as a sibling process. The agent process never holds
+    // plaintext MCP credentials — the proxy owns the vault handle for any
+    // `vault:`-prefixed env values in mcp.json and resolves them inside its
+    // own address space. See docs/managed-agents-parity.md item 7.
+    let mcp_proxy_socket = cfg.socket_dir().join("mcp-proxy.sock");
+    if mcp_proxy_socket.exists() {
+        let _ = std::fs::remove_file(&mcp_proxy_socket);
+    }
+    let mcp_proxy_handle = {
+        let exe = exe.clone();
+        let data_dir = cfg.data_dir.clone();
+        let vp = vault_passphrase.clone();
+        let socket = mcp_proxy_socket.clone();
+        tokio::spawn(async move {
+            tracing::info!("Spawning MCP proxy");
+            let result = Command::new(&exe)
+                .arg("mcp-proxy")
+                .env("WIRKEN_DATA_DIR", &data_dir)
+                .env("WIRKEN_MCP_SOCKET", &socket)
+                .env("WIRKEN_VAULT_PASSPHRASE", &vp)
+                .kill_on_drop(true)
+                .spawn();
+            match result {
+                Ok(mut child) => {
+                    let status = child.wait().await;
+                    tracing::info!("MCP proxy exited: {status:?}");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to spawn MCP proxy: {e}");
+                }
+            }
+        })
+    };
+
+    // Wait briefly for the proxy to start listening before connecting agents.
+    // The proxy itself is responsible for creating the socket file with the
+    // right permissions; we just poll for its existence. McpProxyClient::connect
+    // also has its own retry loop, so this is a soft signal, not a hard wait.
+    for _ in 0..50 {
+        if mcp_proxy_socket.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Connect each agent to the proxy and load its tools.
+    for (agent_id, agent_mutex) in agents.iter() {
+        let mut ag = agent_mutex.lock().await;
+        match ag.load_mcp(&mcp_proxy_socket).await {
+            Ok(0) => {}
+            Ok(n) => println!("  MCP: {n} tools for agent:{agent_id}"),
+            Err(e) => tracing::warn!("MCP load failed for agent '{agent_id}': {e}"),
+        }
     }
 
     // --- Webchat ---
@@ -460,6 +502,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     for handle in adapter_handles {
         handle.abort();
     }
+    mcp_proxy_handle.abort();
     accept_handle.abort();
     webchat_handle.abort();
     scheduler_handle.abort();
@@ -468,8 +511,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     drop(audit);
     let _ = audit_handle.await;
 
-    // Cleanup socket
+    // Cleanup sockets
     let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&mcp_proxy_socket);
 
     println!("  Gateway stopped.");
     Ok(())

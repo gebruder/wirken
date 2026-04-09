@@ -5,7 +5,7 @@ use crate::conversation::Conversation;
 use crate::error::{AgentError, PermissionDenialContext};
 use crate::llm::{LlmClient, LlmConfig, LlmResponse};
 use crate::llm_stream::StreamEvent;
-use crate::mcp::{McpConfig, McpRegistry};
+use crate::mcp::McpProxyClient;
 use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry, tool_to_action};
 use crate::wasm_sandbox::WasmSkill;
@@ -33,7 +33,7 @@ pub struct Agent {
     conversation: Conversation,
     llm: LlmClient,
     tools: ToolRegistry,
-    mcp: Option<McpRegistry>,
+    mcp: Option<McpProxyClient>,
     skills: Vec<Skill>,
     wasm_skills: Vec<WasmSkill>,
     system_prompt: String,
@@ -90,24 +90,22 @@ impl Agent {
         self.permissions = Some(store);
     }
 
-    /// Load MCP servers from a config file.
-    /// The `resolve_secret` function resolves `vault:` prefixed values.
-    pub async fn load_mcp<F>(
+    /// Connect to the out-of-process MCP proxy and load this agent's
+    /// tool definitions. Replaces the previous in-process MCP loader.
+    /// Returns the number of MCP tools available to this agent.
+    pub async fn load_mcp(
         &mut self,
-        config_path: &std::path::Path,
-        resolve_secret: F,
-    ) -> Result<usize, AgentError>
-    where
-        F: Fn(&str) -> Option<String>,
-    {
-        let config = McpConfig::load(config_path)?;
-        if config.servers.is_empty() {
+        proxy_socket: &std::path::Path,
+    ) -> Result<usize, AgentError> {
+        let mut client = McpProxyClient::connect(proxy_socket, &self.id).await?;
+        if !client.has_servers() {
+            // The proxy is reachable but has no servers configured for this
+            // agent. Drop the connection to avoid holding an idle FD.
+            client.shutdown().await;
             return Ok(0);
         }
-
-        let registry = McpRegistry::load(&config, resolve_secret).await?;
-        let count = registry.server_count();
-        self.mcp = Some(registry);
+        let count = client.load_tools().await?;
+        self.mcp = Some(client);
         Ok(count)
     }
 
@@ -406,29 +404,34 @@ impl Agent {
             }
         }
 
-        // Try built-in tools first
-        match self.tools.execute(name, arguments).await {
-            Err(AgentError::ToolNotFound(_)) => {}
-            other => return other,
+        // MCP tool names are prefixed `mcp_{server}_{tool}` by the proxy.
+        // Route them straight to the proxy client. Unlike the legacy
+        // in-process registry, the proxy's "tool not found" is a typed
+        // error message rather than `ToolNotFound`, so prefix routing is
+        // the cheap unambiguous way to dispatch.
+        if name.starts_with("mcp_") {
+            return match self.mcp.as_mut() {
+                Some(mcp) => mcp.execute(name, arguments).await,
+                None => Err(AgentError::ToolNotFound(name.to_string())),
+            };
         }
 
-        // Try MCP
-        if let Some(ref mut mcp) = self.mcp {
-            match mcp.execute(name, arguments).await {
-                Err(AgentError::ToolNotFound(_)) => {}
-                other => return other,
+        // Wasm skills carry an explicit `wasm_` prefix.
+        if let Some(wasm_name) = name.strip_prefix("wasm_") {
+            for skill in &self.wasm_skills {
+                if skill.name == wasm_name {
+                    return skill.execute(arguments);
+                }
             }
         }
-
-        // Try Wasm skills
-        let wasm_name = name.strip_prefix("wasm_").unwrap_or(name);
         for skill in &self.wasm_skills {
-            if skill.name == wasm_name || format!("wasm_{}", skill.name) == name {
+            if skill.name == name {
                 return skill.execute(arguments);
             }
         }
 
-        Err(AgentError::ToolNotFound(name.to_string()))
+        // Otherwise, built-in tools.
+        self.tools.execute(name, arguments).await
     }
 
     fn rebuild_system_prompt(&mut self) {

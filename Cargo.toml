@@ -15,6 +15,7 @@ members = [
     "crates/adapter-imessage",
     "crates/adapter-google-chat",
     "crates/agent",
+    "crates/mcp-proxy",
     "crates/cli",
     "crates/webchat",
 ]

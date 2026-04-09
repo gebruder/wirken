@@ -6042,7 +6042,7 @@ dependencies = [
  "wirken-audit",
  "wirken-gateway",
  "wirken-ipc",
- "wirken-vault",
+ "wirken-mcp-proxy",
 ]
 
 [[package]]
@@ -6094,6 +6094,7 @@ dependencies = [
  "wirken-audit",
  "wirken-gateway",
  "wirken-ipc",
+ "wirken-mcp-proxy",
  "wirken-vault",
 ]
 
@@ -6136,6 +6137,21 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "wirken-mcp-proxy"
+version = "0.6.5"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wirken-gateway",
+ "wirken-vault",
 ]
 
 [[package]]

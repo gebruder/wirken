@@ -1,17 +1,30 @@
-use crate::error::AgentError;
-use crate::tool::{ToolDef, ToolResult};
+//! MCP client wrapping a single stdio transport.
+//!
+//! Moved here from `crates/agent/src/mcp/client.rs` as part of the
+//! out-of-process MCP proxy split. Edits: error type and ToolDef
+//! type are now local to this crate so the proxy does not depend on
+//! `wirken-agent`.
 
-use super::transport::StdioTransport;
+use crate::error::ProxyError;
+use crate::mcp_transport::StdioTransport;
+use crate::wire::ToolDefWire;
+
+/// Result of executing an MCP tool. Mirrors `wirken_agent::tool::ToolResult`
+/// but is defined locally so the proxy does not depend on `wirken-agent`.
+#[derive(Debug, Clone)]
+pub struct McpToolResult {
+    pub output: String,
+    pub success: bool,
+}
 
 /// A connected MCP server client.
 pub struct McpClient {
     pub name: String,
     transport: StdioTransport,
-    tools: Vec<ToolDef>,
+    tools: Vec<ToolDefWire>,
 }
 
 impl McpClient {
-    /// Create a new MCP client wrapping a transport.
     pub fn new(name: String, transport: StdioTransport) -> Self {
         Self {
             name,
@@ -21,12 +34,12 @@ impl McpClient {
     }
 
     /// Perform the MCP initialize handshake.
-    pub async fn initialize(&mut self) -> Result<(), AgentError> {
+    pub async fn initialize(&mut self) -> Result<(), ProxyError> {
         let params = serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "wirken",
+                "name": "wirken-mcp-proxy",
                 "version": env!("CARGO_PKG_VERSION"),
             }
         });
@@ -34,13 +47,12 @@ impl McpClient {
         let resp = self.transport.request("initialize", Some(params)).await?;
 
         if let Some(ref err) = resp.error {
-            return Err(AgentError::Mcp(format!(
+            return Err(ProxyError::Mcp(format!(
                 "MCP initialize failed: {} ({})",
                 err.message, err.code
             )));
         }
 
-        // Send initialized notification
         self.transport
             .notify("notifications/initialized", None)
             .await?;
@@ -49,12 +61,12 @@ impl McpClient {
     }
 
     /// Discover tools from the MCP server.
-    /// Tool names are prefixed with `mcp_{server_name}__` to avoid collisions.
-    pub async fn list_tools(&mut self) -> Result<Vec<ToolDef>, AgentError> {
+    /// Tool names are prefixed with `mcp_{server_name}_` to avoid collisions.
+    pub async fn list_tools(&mut self) -> Result<Vec<ToolDefWire>, ProxyError> {
         let resp = self.transport.request("tools/list", None).await?;
 
         if let Some(ref err) = resp.error {
-            return Err(AgentError::Mcp(format!(
+            return Err(ProxyError::Mcp(format!(
                 "MCP tools/list failed: {} ({})",
                 err.message, err.code
             )));
@@ -89,7 +101,7 @@ impl McpClient {
 
             let prefixed_name = format!("mcp_{}_{}", self.name, name);
 
-            self.tools.push(ToolDef {
+            self.tools.push(ToolDefWire {
                 name: prefixed_name,
                 description: format!("[{}] {}", self.name, description),
                 parameters,
@@ -105,7 +117,7 @@ impl McpClient {
         &mut self,
         name: &str,
         arguments: &str,
-    ) -> Result<ToolResult, AgentError> {
+    ) -> Result<McpToolResult, ProxyError> {
         let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
 
         let params = serde_json::json!({
@@ -116,7 +128,7 @@ impl McpClient {
         let resp = self.transport.request("tools/call", Some(params)).await?;
 
         if let Some(ref err) = resp.error {
-            return Ok(ToolResult {
+            return Ok(McpToolResult {
                 output: format!("MCP tool error: {} ({})", err.message, err.code),
                 success: false,
             });
@@ -124,7 +136,6 @@ impl McpClient {
 
         let result = resp.result.unwrap_or_default();
 
-        // MCP tool results have a "content" array with text/image blocks
         let content = result
             .get("content")
             .and_then(|c| c.as_array())
@@ -146,7 +157,7 @@ impl McpClient {
             .and_then(|e| e.as_bool())
             .unwrap_or(false);
 
-        Ok(ToolResult {
+        Ok(McpToolResult {
             output: if output.is_empty() {
                 "(no output)".into()
             } else {
@@ -157,7 +168,7 @@ impl McpClient {
     }
 
     /// Get the discovered tool definitions.
-    pub fn tools(&self) -> &[ToolDef] {
+    pub fn tools(&self) -> &[ToolDefWire] {
         &self.tools
     }
 
