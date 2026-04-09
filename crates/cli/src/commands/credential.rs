@@ -63,6 +63,33 @@ pub async fn list() -> Result<()> {
     Ok(())
 }
 
+pub async fn add(name: &str, channel: Option<&str>) -> Result<()> {
+    let cfg = config();
+
+    let value = super::read_secret(&format!("  Value for '{name}': "))?;
+    if value.is_empty() {
+        anyhow::bail!("empty value");
+    }
+
+    let keychain = probe_keychain(&cfg.data_dir, || {
+        Password::new()
+            .with_prompt("  Vault passphrase")
+            .interact()
+            .unwrap_or_default()
+    });
+
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    let secret = VaultSecret::new(value);
+    store
+        .store(name, channel.unwrap_or(""), &secret, None, None)
+        .context(format!("Failed to store '{name}'"))?;
+
+    println!("  Credential '{name}' stored.");
+    Ok(())
+}
+
 pub async fn rotate(name: &str) -> Result<()> {
     let cfg = config();
 

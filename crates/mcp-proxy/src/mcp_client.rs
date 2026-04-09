@@ -6,7 +6,7 @@
 //! `wirken-agent`.
 
 use crate::error::ProxyError;
-use crate::mcp_transport::StdioTransport;
+use crate::mcp_transport::Transport;
 use crate::wire::ToolDefWire;
 
 /// Result of executing an MCP tool. Mirrors `wirken_agent::tool::ToolResult`
@@ -17,15 +17,18 @@ pub struct McpToolResult {
     pub success: bool,
 }
 
-/// A connected MCP server client.
+/// A connected MCP server client. Holds a [`Transport`] enum so the
+/// same client logic works over stdio (item 7 slice 1) and HTTP
+/// (item 7 slice 2). The MCP protocol itself is identical at the
+/// JSON-RPC layer; the transport is just a byte mover.
 pub struct McpClient {
     pub name: String,
-    transport: StdioTransport,
+    transport: Transport,
     tools: Vec<ToolDefWire>,
 }
 
 impl McpClient {
-    pub fn new(name: String, transport: StdioTransport) -> Self {
+    pub fn new(name: String, transport: Transport) -> Self {
         Self {
             name,
             transport,
