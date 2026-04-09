@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use wirken_agent::Agent;
+use wirken_agent::{AgentFactory, session_id_for};
 use wirken_audit::{AuditEvent, AuditWriter};
 use wirken_gateway::session::SessionStore;
 
@@ -138,7 +137,7 @@ input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 /// Minimal HTTP server — no framework dependency.
 pub async fn serve(
     port: u16,
-    agents: Arc<HashMap<String, Mutex<Agent>>>,
+    factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
 ) -> Result<()> {
@@ -147,7 +146,7 @@ pub async fn serve(
 
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let agents = agents.clone();
+        let factory = factory.clone();
         let audit = audit.clone();
         let sessions = sessions.clone();
 
@@ -207,14 +206,19 @@ pub async fn serve(
                     return;
                 }
 
-                // Process with streaming
-                match agents.get("default") {
-                    Some(agent_mutex) => {
+                // Wake the default agent for the webchat session.
+                // Webchat has a single canonical conversation
+                // ("webchat-default") and synthesizes a UUID per
+                // inbound message for crash-recovery dedup.
+                let session_id = session_id_for("default", "webchat", "webchat-default");
+                let inbound_id = format!("webchat-{}", uuid::Uuid::new_v4());
+                match factory.wake("default", &session_id) {
+                    Ok(agent_mutex) => {
                         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 
                         // Run agent streaming and SSE forwarding concurrently
                         let mut ag = agent_mutex.lock().await;
-                        let stream_future = ag.process_message_stream(&message, tx);
+                        let stream_future = ag.process_message_stream(&message, inbound_id, tx);
 
                         // Forward stream events to the HTTP response as SSE
                         let write_stream = &mut stream;
@@ -268,10 +272,13 @@ pub async fn serve(
                             }
                         }
                     }
-                    None => {
+                    Err(e) => {
                         let err = format!(
                             "data: {}\n\n",
-                            serde_json::json!({"type": "error", "text": "no default agent configured"})
+                            serde_json::json!({
+                                "type": "error",
+                                "text": format!("factory.wake failed: {e}"),
+                            })
                         );
                         let _ = stream.write_all(err.as_bytes()).await;
                     }

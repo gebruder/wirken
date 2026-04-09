@@ -18,6 +18,15 @@ use wirken_gateway::permissions::{PermissionCheck, PermissionStore};
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
 
+/// Prefix on the synthetic `ToolResult` output that
+/// [`Agent::from_session_log`] writes for tool calls whose results
+/// were lost to a crash. The LLM sees a failed tool call with this
+/// recognizable string and can decide what to do (retry, give up,
+/// surface the failure to the user). Item 4's context engine will
+/// strip the sentinel before showing the LLM, but slice 2 just
+/// passes it through verbatim.
+pub const PARTIAL_RESULT_LOST_SENTINEL: &str = "PARTIAL_RESULT_LOST:";
+
 /// Result of processing a message, containing the response and any
 /// permission denials that occurred during tool execution.
 pub struct ProcessResult {
@@ -37,7 +46,7 @@ pub struct Agent {
     conversation: Conversation,
     llm: LlmClient,
     tools: ToolRegistry,
-    mcp: Option<McpProxyClient>,
+    mcp: Option<Arc<tokio::sync::Mutex<McpProxyClient>>>,
     skills: Vec<Skill>,
     wasm_skills: Vec<WasmSkill>,
     system_prompt: String,
@@ -103,6 +112,135 @@ impl Agent {
         })
     }
 
+    /// Reconstruct an `Agent` from a session log. Used by
+    /// [`crate::factory::AgentFactory::wake`] to bring an existing
+    /// session back to its last good state. The conversation is
+    /// rebuilt by replaying every relevant session event for
+    /// `session_id`. Half-completed tool rounds (an
+    /// `AssistantToolCalls` event with one or more missing
+    /// `ToolResult` events) are surfaced by writing synthetic
+    /// failure `ToolResult` events to the session log BEFORE the
+    /// conversation projection is built — the session log is
+    /// self-healing as soon as wake runs.
+    ///
+    /// Skills, MCP, and permissions are NOT replayed — they're
+    /// external state that the caller (the AgentFactory) injects
+    /// after construction.
+    pub(crate) fn from_session_log(
+        id: String,
+        workspace: PathBuf,
+        llm_config: LlmConfig,
+        api_key: Option<String>,
+        session_log: Arc<dyn SessionLog>,
+    ) -> Result<Self, AgentError> {
+        let session_id = SessionId::new(id.clone());
+        let session_handle = session_log.handle_for(session_id);
+
+        // Refuse-and-surface for partial tool rounds. Walk the
+        // session, find every AssistantToolCalls event, check that
+        // each call_id has a matching ToolResult somewhere later in
+        // the session. For any call_id that doesn't, write a
+        // synthetic ToolResult with the PARTIAL_RESULT_LOST sentinel.
+        Self::heal_partial_tool_rounds(&*session_log, &session_handle)?;
+
+        // Build the conversation by replaying the (now-complete)
+        // session log.
+        let tool_config = ToolConfig {
+            api_key: api_key.clone(),
+            provider: Some(llm_config.provider.clone()),
+            base_url: Some(llm_config.base_url.clone()),
+            sandbox: Default::default(),
+        };
+        let tools = ToolRegistry::new(workspace, tool_config);
+
+        let system_prompt = default_system_prompt();
+        let mut conversation = Conversation::new(100_000);
+        conversation.set_system_prompt(&system_prompt);
+        conversation
+            .replay_from_log(&*session_log, &session_handle)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+
+        Ok(Self {
+            id,
+            conversation,
+            llm: LlmClient::new(llm_config)?,
+            tools,
+            mcp: None,
+            skills: Vec::new(),
+            wasm_skills: Vec::new(),
+            system_prompt,
+            api_key,
+            permissions: None,
+            current_trigger: None,
+            session_log,
+            session_handle,
+        })
+    }
+
+    /// Walk the session log for half-completed tool rounds and write
+    /// a synthetic ToolResult for every missing call. Self-heals the
+    /// log so subsequent reads see a consistent state. The synthetic
+    /// result is recognizable by the [`PARTIAL_RESULT_LOST_SENTINEL`]
+    /// prefix in its output.
+    fn heal_partial_tool_rounds(
+        log: &dyn SessionLog,
+        handle: &SessionHandle<OwnSession>,
+    ) -> Result<(), AgentError> {
+        use std::collections::HashSet;
+
+        let rows = log
+            .get_since(handle, 0)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+
+        // Collect all completed call_ids and all expected call_ids.
+        let mut completed: HashSet<String> = HashSet::new();
+        let mut expected: Vec<(String, String)> = Vec::new(); // (call_id, tool_name)
+        for row in &rows {
+            match &row.event {
+                SessionEvent::AssistantToolCalls { calls } => {
+                    for c in calls {
+                        expected.push((c.id.clone(), c.name.clone()));
+                    }
+                }
+                SessionEvent::ToolResult { call_id, .. } => {
+                    completed.insert(call_id.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // Write a synthetic failure for every expected call without a
+        // matching result. Order preserves the original tool-call
+        // order so the conversation projection sees them in sequence.
+        for (call_id, tool_name) in expected {
+            if completed.contains(&call_id) {
+                continue;
+            }
+            tracing::warn!(
+                "wake: synthesizing PARTIAL_RESULT_LOST for tool call {} ({})",
+                call_id,
+                tool_name,
+            );
+            let event = SessionEvent::ToolResult {
+                call_id: call_id.clone(),
+                tool_name,
+                output: format!(
+                    "{PARTIAL_RESULT_LOST_SENTINEL} previous invocation did not complete; \
+                     the tool was not retried"
+                ),
+                success: false,
+            };
+            log.append(handle, TrustLevel::Tool, event)
+                .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+            // Mark as completed so a later AssistantToolCalls with
+            // the same call_id (shouldn't happen, but be safe)
+            // doesn't get a second synthetic result.
+            completed.insert(call_id);
+        }
+
+        Ok(())
+    }
+
     /// Set the permission store for tool execution permission checks.
     /// When set, tool calls are checked against the three-tier permission model
     /// before execution. Denials are collected in the `ProcessResult`.
@@ -122,8 +260,26 @@ impl Agent {
             return Ok(0);
         }
         let count = client.load_tools().await?;
-        self.mcp = Some(client);
+        self.mcp = Some(Arc::new(tokio::sync::Mutex::new(client)));
         Ok(count)
+    }
+
+    /// Attach a shared MCP client. Used by [`crate::factory::AgentFactory`]
+    /// to inject the per-agent long-lived proxy connection into a
+    /// freshly waked Agent. Concurrent waked Agents for the same
+    /// agent_id share the same Arc and serialize through its Mutex.
+    pub fn attach_mcp(&mut self, client: Arc<tokio::sync::Mutex<McpProxyClient>>) {
+        self.mcp = Some(client);
+    }
+
+    /// Attach skill collections. Used by
+    /// [`crate::factory::AgentFactory`] to inject per-agent skills
+    /// loaded once at startup, then rebuild the system prompt to
+    /// include them.
+    pub fn attach_skills(&mut self, skills: Vec<Skill>, wasm_skills: Vec<WasmSkill>) {
+        self.skills = skills;
+        self.wasm_skills = wasm_skills;
+        self.rebuild_system_prompt();
     }
 
     /// Load skills from a directory and rebuild the system prompt.
@@ -158,6 +314,84 @@ impl Agent {
         &self.session_log
     }
 
+    /// Crash-recovery dedup. If the most recent `UserMessage` in
+    /// this agent's session has an `inbound_id` matching the
+    /// incoming one, this is a re-delivery — return the prior
+    /// `AssistantMessage` (the one that followed the matched
+    /// UserMessage) without re-running the LLM. If no assistant
+    /// message follows the matched UserMessage, the previous turn
+    /// was interrupted; return a stable error response so the user
+    /// gets a clear "previous turn did not complete, please retry"
+    /// rather than re-running the side effects.
+    fn dedup_inbound(&self, inbound_id: &str) -> Result<Option<ProcessResult>, AgentError> {
+        let last_idx = self
+            .session_log
+            .last_index(&self.session_handle)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+        let Some(last_idx) = last_idx else {
+            return Ok(None);
+        };
+
+        let rows = self
+            .session_log
+            .get_since(&self.session_handle, 0)
+            .map_err(|e| AgentError::SessionLog(e.to_string()))?;
+
+        // Find the most recent UserMessage and its position.
+        let mut last_user_pos: Option<usize> = None;
+        for (i, row) in rows.iter().enumerate().rev() {
+            if matches!(row.event, SessionEvent::UserMessage { .. }) {
+                last_user_pos = Some(i);
+                break;
+            }
+        }
+        let Some(pos) = last_user_pos else {
+            return Ok(None);
+        };
+
+        // Check the inbound_id matches.
+        let matches = match &rows[pos].event {
+            SessionEvent::UserMessage { inbound_id: id, .. } => id.as_deref() == Some(inbound_id),
+            _ => false,
+        };
+        if !matches {
+            return Ok(None);
+        }
+
+        // Look for an AssistantMessage that follows the matched
+        // UserMessage. If we find one, this is a clean re-delivery
+        // and we replay the prior response.
+        for row in rows.iter().skip(pos + 1) {
+            if let SessionEvent::AssistantMessage { content } = &row.event {
+                tracing::info!(
+                    "agent {} dedup: replaying response for inbound_id {} (idx {})",
+                    self.id,
+                    inbound_id,
+                    last_idx,
+                );
+                return Ok(Some(ProcessResult {
+                    response: content.clone(),
+                    denials: Vec::new(),
+                }));
+            }
+        }
+
+        // The matched UserMessage has no following AssistantMessage —
+        // the previous turn was interrupted (crash, timeout, etc.).
+        // Return a stable error so the user knows to retry rather than
+        // re-running the partially-executed turn.
+        tracing::warn!(
+            "agent {} dedup: matched inbound_id {} but no assistant response — \
+             previous turn was interrupted",
+            self.id,
+            inbound_id,
+        );
+        Ok(Some(ProcessResult {
+            response: "(previous turn did not complete; please retry)".to_string(),
+            denials: Vec::new(),
+        }))
+    }
+
     /// Convert in-process tool call requests into the wire format
     /// the session log uses.
     pub(crate) fn calls_to_records(calls: &[ToolCallRequest]) -> Vec<ToolCallRecord> {
@@ -173,20 +407,34 @@ impl Agent {
 
     /// Process an inbound message and produce a response.
     /// This is the core agent loop:
-    /// 1. Add user message to conversation
-    /// 2. Call LLM
-    /// 3. If LLM requests tool calls, execute them and loop
-    /// 4. Return the final text response and any permission denials
+    /// 1. Dedup against the most recent UserMessage in the session log
+    /// 2. Add user message to conversation
+    /// 3. Call LLM
+    /// 4. If LLM requests tool calls, execute them and loop
+    /// 5. Return the final text response and any permission denials
+    ///
+    /// `inbound_id` is the platform-supplied message id (Telegram
+    /// `message_id`, Slack `ts`, Discord `id`, …) when the source
+    /// has one, or a UUID synthesized at the gateway boundary for
+    /// `webchat`, `cron`, and `wirken ask`. The harness uses it to
+    /// detect re-deliveries after a crash and return the prior
+    /// assistant response without re-running the LLM.
     pub async fn process_message(
         &mut self,
         user_message: &str,
+        inbound_id: String,
     ) -> Result<ProcessResult, AgentError> {
+        if let Some(replay) = self.dedup_inbound(&inbound_id)? {
+            return Ok(replay);
+        }
+
         self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
         self.log_event(
             TrustLevel::User,
             SessionEvent::UserMessage {
                 content: user_message.to_string(),
+                inbound_id: Some(inbound_id),
             },
         )?;
 
@@ -195,11 +443,17 @@ impl Agent {
             self.conversation.compact();
         }
 
+        // MCP definitions are cached on the proxy client; lock briefly
+        // to read them. The shared Mutex is held only across the
+        // synchronous .definitions() copy, never across an LLM call.
+        let mcp_defs = match &self.mcp {
+            Some(mcp) => mcp.lock().await.definitions(),
+            None => Vec::new(),
+        };
+
         let tool_defs = if self.llm.config().tools_enabled {
             let mut defs = self.tools.definitions();
-            if let Some(ref mcp) = self.mcp {
-                defs.extend(mcp.definitions());
-            }
+            defs.extend(mcp_defs);
             defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
             defs
         } else {
@@ -342,14 +596,25 @@ impl Agent {
     pub async fn process_message_stream(
         &mut self,
         user_message: &str,
+        inbound_id: String,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<ProcessResult, AgentError> {
+        if let Some(replay) = self.dedup_inbound(&inbound_id)? {
+            let _ = tx
+                .send(StreamEvent::Done(LlmResponse::Text(
+                    replay.response.clone(),
+                )))
+                .await;
+            return Ok(replay);
+        }
+
         self.current_trigger = Some(user_message.to_string());
         self.conversation.add_user_message(user_message);
         self.log_event(
             TrustLevel::User,
             SessionEvent::UserMessage {
                 content: user_message.to_string(),
+                inbound_id: Some(inbound_id),
             },
         )?;
 
@@ -357,11 +622,14 @@ impl Agent {
             self.conversation.compact();
         }
 
+        let mcp_defs = match &self.mcp {
+            Some(mcp) => mcp.lock().await.definitions(),
+            None => Vec::new(),
+        };
+
         let tool_defs = if self.llm.config().tools_enabled {
             let mut defs = self.tools.definitions();
-            if let Some(ref mcp) = self.mcp {
-                defs.extend(mcp.definitions());
-            }
+            defs.extend(mcp_defs);
             defs
         } else {
             Vec::new()
@@ -554,8 +822,8 @@ impl Agent {
         // error message rather than `ToolNotFound`, so prefix routing is
         // the cheap unambiguous way to dispatch.
         if name.starts_with("mcp_") {
-            return match self.mcp.as_mut() {
-                Some(mcp) => mcp.execute(name, arguments).await,
+            return match &self.mcp {
+                Some(mcp) => mcp.lock().await.execute(name, arguments).await,
                 None => Err(AgentError::ToolNotFound(name.to_string())),
             };
         }

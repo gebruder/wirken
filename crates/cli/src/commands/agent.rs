@@ -100,7 +100,8 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     }
 
     println!();
-    match agent.process_message(message).await {
+    let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
+    match agent.process_message(message, inbound_id).await {
         Ok(result) => println!("{}", result.response),
         Err(e) => {
             eprintln!("  Error: {e}");
@@ -170,7 +171,8 @@ async fn send_with_agent_config(
     }
 
     println!();
-    match agent.process_message(message).await {
+    let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
+    match agent.process_message(message, inbound_id).await {
         Ok(result) => println!("{}", result.response),
         Err(e) => {
             eprintln!("  Error: {e}");

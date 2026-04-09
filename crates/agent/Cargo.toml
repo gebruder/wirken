@@ -11,6 +11,7 @@ wirken-gateway = { path = "../gateway" }
 wirken-mcp-proxy = { path = "../mcp-proxy" }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+lru = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

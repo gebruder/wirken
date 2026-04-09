@@ -878,6 +878,7 @@ mod durability {
                 TrustLevel::User,
                 SessionEvent::UserMessage {
                     content: "hello".into(),
+                    inbound_id: None,
                 },
             )
             .unwrap();
@@ -887,7 +888,7 @@ mod durability {
         let rows = log.get_since(&h, 0).unwrap();
         assert_eq!(rows.len(), 1);
         match &rows[0].event {
-            SessionEvent::UserMessage { content } => assert_eq!(content, "hello"),
+            SessionEvent::UserMessage { content, .. } => assert_eq!(content, "hello"),
             other => panic!("expected UserMessage, got {other:?}"),
         }
         assert_eq!(rows[0].trust, TrustLevel::User);
@@ -910,6 +911,7 @@ mod durability {
                 TrustLevel::User,
                 SessionEvent::UserMessage {
                     content: "list files".into(),
+                    inbound_id: None,
                 },
             )
             .unwrap();
@@ -1024,6 +1026,7 @@ mod durability {
             TrustLevel::User,
             SessionEvent::UserMessage {
                 content: "from alpha".into(),
+                inbound_id: None,
             },
         )
         .unwrap();
@@ -1031,6 +1034,7 @@ mod durability {
             TrustLevel::User,
             SessionEvent::UserMessage {
                 content: "from beta".into(),
+                inbound_id: None,
             },
         )
         .unwrap();
@@ -1045,8 +1049,8 @@ mod durability {
 
         match (&rows_a[0].event, &rows_b[0].event) {
             (
-                SessionEvent::UserMessage { content: ca },
-                SessionEvent::UserMessage { content: cb },
+                SessionEvent::UserMessage { content: ca, .. },
+                SessionEvent::UserMessage { content: cb, .. },
             ) => {
                 assert_eq!(ca, "from alpha");
                 assert_eq!(cb, "from beta");
@@ -1062,6 +1066,384 @@ mod durability {
         let (agent, log) = fresh_agent_with_log();
         let inner = agent.session_log_for_test();
         assert!(Arc::ptr_eq(inner, &log));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Item 2 slice 2: wake / refuse-and-surface / factory
+// ---------------------------------------------------------------------------
+
+mod wake {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{
+        SessionEvent, SessionId, SessionLog, SqliteSessionLog, ToolCallRecord, TrustLevel,
+    };
+
+    use crate::factory::{AgentFactory, AgentStaticConfig, CacheMode, session_id_for};
+    use crate::llm::LlmConfig;
+    use crate::runtime::PARTIAL_RESULT_LOST_SENTINEL;
+
+    fn make_log() -> Arc<dyn SessionLog> {
+        Arc::new(SqliteSessionLog::open_in_memory().unwrap())
+    }
+
+    fn make_factory(agent_id: &str, log: Arc<dyn SessionLog>) -> (Arc<AgentFactory>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let mut configs = HashMap::new();
+        configs.insert(
+            agent_id.to_string(),
+            AgentStaticConfig {
+                agent_id: agent_id.to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: LlmConfig::ollama("test"),
+                api_key: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+            },
+        );
+        (Arc::new(AgentFactory::new(configs, log, None)), tmp)
+    }
+
+    fn seed_user_message(log: &dyn SessionLog, session: &str, content: &str) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: content.into(),
+                inbound_id: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_assistant_message(log: &dyn SessionLog, session: &str, content: &str) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::AssistantMessage {
+                content: content.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_tool_calls(log: &dyn SessionLog, session: &str, calls: Vec<ToolCallRecord>) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::AssistantToolCalls { calls },
+        )
+        .unwrap();
+    }
+
+    fn seed_tool_result(
+        log: &dyn SessionLog,
+        session: &str,
+        call_id: &str,
+        tool_name: &str,
+        output: &str,
+    ) {
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::Tool,
+            SessionEvent::ToolResult {
+                call_id: call_id.into(),
+                tool_name: tool_name.into(),
+                output: output.into(),
+                success: true,
+            },
+        )
+        .unwrap();
+    }
+
+    // ---- session_id_for ----------------------------------------------
+
+    #[test]
+    fn session_id_for_format() {
+        assert_eq!(session_id_for("work", "slack", "C0123"), "work/slack/C0123");
+    }
+
+    // ---- empty session ----------------------------------------------
+
+    #[tokio::test]
+    async fn wake_empty_session_yields_system_prompt_only() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-empty", log.clone());
+
+        let session = "agent-empty/test/conv-1";
+        let agent_arc = factory.wake("agent-empty", session).unwrap();
+        let agent = agent_arc.lock().await;
+        // System prompt is the only message in the conversation.
+        assert_eq!(agent.conversation_len(), 1);
+    }
+
+    // ---- replay round-trip ------------------------------------------
+
+    #[tokio::test]
+    async fn wake_replays_full_turn_into_conversation() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-replay", log.clone());
+
+        let session = "agent-replay/test/conv-1";
+        // Pre-seed a complete turn into the session log.
+        seed_user_message(&*log, session, "list files");
+        seed_tool_calls(
+            &*log,
+            session,
+            vec![ToolCallRecord {
+                id: "c1".into(),
+                name: "exec".into(),
+                arguments: r#"{"command":"ls"}"#.into(),
+            }],
+        );
+        seed_tool_result(&*log, session, "c1", "exec", "a.txt\nb.txt");
+        seed_assistant_message(&*log, session, "two files");
+
+        let agent_arc = factory.wake("agent-replay", session).unwrap();
+        let agent = agent_arc.lock().await;
+        // System prompt + user + assistant tool_calls + tool result + assistant text = 5
+        assert_eq!(agent.conversation_len(), 5);
+    }
+
+    // ---- refuse-and-surface -----------------------------------------
+
+    #[tokio::test]
+    async fn wake_synthesizes_partial_result_for_missing_tool_result() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-partial", log.clone());
+
+        let session = "agent-partial/test/conv-1";
+        // User asked, the LLM emitted two tool calls, only one
+        // returned a result before the (simulated) crash.
+        seed_user_message(&*log, session, "do two things");
+        seed_tool_calls(
+            &*log,
+            session,
+            vec![
+                ToolCallRecord {
+                    id: "c1".into(),
+                    name: "exec".into(),
+                    arguments: r#"{"command":"ls"}"#.into(),
+                },
+                ToolCallRecord {
+                    id: "c2".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a.txt"}"#.into(),
+                },
+            ],
+        );
+        seed_tool_result(&*log, session, "c1", "exec", "ok");
+        // c2 is missing — wake() should synthesize a failure.
+
+        let _agent_arc = factory.wake("agent-partial", session).unwrap();
+
+        // Read the session log directly to confirm the synthetic
+        // ToolResult was written.
+        let h = log.handle_for(SessionId::new(session));
+        let rows = log.get_since(&h, 0).unwrap();
+        let tool_results: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::ToolResult {
+                    call_id,
+                    output,
+                    success,
+                    ..
+                } => Some((call_id.clone(), output.clone(), *success)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_results.len(), 2);
+        // c1 is the original (successful) result.
+        assert_eq!(tool_results[0].0, "c1");
+        assert!(tool_results[0].2);
+        // c2 is the synthesized failure with the sentinel prefix.
+        assert_eq!(tool_results[1].0, "c2");
+        assert!(!tool_results[1].2);
+        assert!(tool_results[1].1.starts_with(PARTIAL_RESULT_LOST_SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn wake_does_nothing_when_all_tool_results_present() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-complete", log.clone());
+
+        let session = "agent-complete/test/conv-1";
+        seed_user_message(&*log, session, "task");
+        seed_tool_calls(
+            &*log,
+            session,
+            vec![ToolCallRecord {
+                id: "c1".into(),
+                name: "exec".into(),
+                arguments: "{}".into(),
+            }],
+        );
+        seed_tool_result(&*log, session, "c1", "exec", "done");
+
+        let _ = factory.wake("agent-complete", session).unwrap();
+
+        let h = log.handle_for(SessionId::new(session));
+        let rows = log.get_since(&h, 0).unwrap();
+        // No synthetic event added.
+        let tool_result_count = rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::ToolResult { .. }))
+            .count();
+        assert_eq!(tool_result_count, 1);
+    }
+
+    // ---- per-session isolation --------------------------------------
+
+    #[tokio::test]
+    async fn two_sessions_for_same_agent_have_isolated_conversations() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("multi-conv", log.clone());
+
+        let s1 = "multi-conv/slack/c-1";
+        let s2 = "multi-conv/slack/c-2";
+
+        seed_user_message(&*log, s1, "from s1");
+        seed_assistant_message(&*log, s1, "reply 1");
+        seed_user_message(&*log, s2, "from s2");
+
+        let a1 = factory.wake("multi-conv", s1).unwrap();
+        let a2 = factory.wake("multi-conv", s2).unwrap();
+        let a1_lock = a1.lock().await;
+        let a2_lock = a2.lock().await;
+        // s1: system + user + assistant = 3
+        assert_eq!(a1_lock.conversation_len(), 3);
+        // s2: system + user = 2
+        assert_eq!(a2_lock.conversation_len(), 2);
+    }
+
+    // ---- LRU cache --------------------------------------------------
+
+    #[tokio::test]
+    async fn factory_returns_same_arc_for_repeated_wakes() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-cache", log);
+
+        let session = "agent-cache/test/conv-1";
+        let a = factory.wake("agent-cache", session).unwrap();
+        let b = factory.wake("agent-cache", session).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn unknown_agent_id_errors() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("known", log);
+        let result = factory.wake("not-known", "x/y/z");
+        assert!(result.is_err());
+    }
+
+    // ---- inbound dedup ----------------------------------------------
+
+    #[tokio::test]
+    async fn dedup_replays_prior_response_for_same_inbound_id() {
+        // Pre-seed a session with one full turn (UserMessage with
+        // inbound_id followed by AssistantMessage), then construct
+        // an Agent against it and call process_message with the
+        // same inbound_id. The dedup path should return the prior
+        // response without invoking the LLM.
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-dedup", log.clone());
+        let session = "agent-dedup/test/conv-1";
+
+        // Seed: UserMessage{inbound_id=msg-1} + AssistantMessage{prior reply}
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "first".into(),
+                inbound_id: Some("msg-1".into()),
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::AssistantMessage {
+                content: "prior reply".into(),
+            },
+        )
+        .unwrap();
+
+        let agent_arc = factory.wake("agent-dedup", session).unwrap();
+        let mut agent = agent_arc.lock().await;
+        let result = agent
+            .process_message("first", "msg-1".into())
+            .await
+            .unwrap();
+        assert_eq!(result.response, "prior reply");
+    }
+
+    #[tokio::test]
+    async fn dedup_returns_interrupted_marker_when_prior_assistant_missing() {
+        let log = make_log();
+        let (factory, _tmp) = make_factory("agent-interrupted", log.clone());
+        let session = "agent-interrupted/test/conv-1";
+
+        // Seed: UserMessage with inbound_id but no following
+        // AssistantMessage — simulates a crash mid-turn.
+        let h = log.handle_for(SessionId::new(session));
+        log.append(
+            &h,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "first".into(),
+                inbound_id: Some("msg-2".into()),
+            },
+        )
+        .unwrap();
+
+        let agent_arc = factory.wake("agent-interrupted", session).unwrap();
+        let mut agent = agent_arc.lock().await;
+        let result = agent
+            .process_message("first", "msg-2".into())
+            .await
+            .unwrap();
+        assert!(result.response.contains("did not complete"));
+    }
+
+    // ---- WIRKEN_CACHE_MODE=drop ------------------------------------
+
+    #[tokio::test]
+    async fn drop_mode_does_not_cache() {
+        // CacheMode::Drop is passed explicitly via with_options so
+        // parallel tests don't fight over a shared env var.
+        let log = make_log();
+        let mut configs = HashMap::new();
+        configs.insert(
+            "agent-drop".to_string(),
+            AgentStaticConfig {
+                agent_id: "agent-drop".to_string(),
+                workspace: PathBuf::from("/tmp"),
+                llm_config: LlmConfig::ollama("test"),
+                api_key: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+            },
+        );
+        let factory = AgentFactory::with_options(configs, log, None, CacheMode::Drop, 64);
+
+        let session = "agent-drop/test/conv-1";
+        let a = factory.wake("agent-drop", session).unwrap();
+        let b = factory.wake("agent-drop", session).unwrap();
+        // In drop mode, every wake reconstructs — distinct Arcs.
+        assert!(!Arc::ptr_eq(&a, &b));
     }
 }
 
@@ -1444,7 +1826,10 @@ mod attestation_tests {
     use crate::identity::AgentIdentity;
 
     fn user_msg(s: &str) -> SessionEvent {
-        SessionEvent::UserMessage { content: s.into() }
+        SessionEvent::UserMessage {
+            content: s.into(),
+            inbound_id: None,
+        }
     }
 
     fn fresh_log_with_events(

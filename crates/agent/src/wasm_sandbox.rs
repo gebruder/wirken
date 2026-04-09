@@ -28,6 +28,12 @@ const DEFAULT_FUEL: u64 = 500_000_000; // ~500M instructions
 const MAX_MEMORY_BYTES: usize = 64 * 1024 * 1024; // 64MB
 
 /// A loaded Wasm skill ready to execute.
+///
+/// `Clone` is cheap: `wasmtime::Engine` and `wasmtime::Module` are
+/// internally `Arc`-like, so cloning a `WasmSkill` is a handful of
+/// reference bumps. Used by `AgentFactory` to inject the same skill
+/// set into every waked Agent.
+#[derive(Clone)]
 pub struct WasmSkill {
     pub name: String,
     pub description: String,

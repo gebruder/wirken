@@ -65,6 +65,9 @@ dialoguer = "0.12"
 # Rate limiting
 governor = "0.10"
 
+# LRU cache (used by the agent factory)
+lru = "0.12"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
