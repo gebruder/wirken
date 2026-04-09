@@ -39,6 +39,10 @@ enum Commands {
         channel: String,
     },
 
+    /// Run the MCP proxy (called by the gateway daemon)
+    #[command(name = "mcp-proxy", hide = true)]
+    McpProxy,
+
     /// Manage messaging channels
     #[command(subcommand)]
     Channel(ChannelCommands),
@@ -276,6 +280,7 @@ async fn main() -> Result<()> {
         }
         Commands::Run { port } => commands::run::run(port).await,
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,
+        Commands::McpProxy => commands::mcp_proxy::run().await,
         Commands::Channel(cmd) => match cmd {
             ChannelCommands::Add { channel } => commands::channel::add(&channel).await,
             ChannelCommands::List => commands::channel::list().await,

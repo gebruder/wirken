@@ -1,0 +1,22 @@
+[package]
+name = "wirken-mcp-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "wirken_mcp_proxy"
+path = "src/lib.rs"
+
+[dependencies]
+wirken-vault = { path = "../vault" }
+wirken-gateway = { path = "../gateway" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

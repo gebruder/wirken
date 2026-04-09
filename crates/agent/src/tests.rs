@@ -1005,6 +1005,44 @@ fn tool_to_action_unknown_returns_none() {
 }
 
 // ---------------------------------------------------------------------------
+// MCP proxy client end-to-end (against the in-process proxy server)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mcp_proxy_client_connects_and_reports_no_servers() {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use wirken_mcp_proxy::mcp_registry::ProxyRegistry;
+    use wirken_mcp_proxy::server;
+
+    use crate::mcp::McpProxyClient;
+
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("mcp-proxy.sock");
+
+    // Start a proxy server in-process with an empty registry. The
+    // server::serve loop binds the socket and accepts connections; we
+    // abort it at the end of the test.
+    let server_socket = socket_path.clone();
+    let registry = Arc::new(Mutex::new(ProxyRegistry::new()));
+    let server_handle = tokio::spawn(async move {
+        let _ = server::serve(server_socket, registry).await;
+    });
+
+    // McpProxyClient::connect already retries the socket, so we don't
+    // need to wait for the file ourselves — it will appear within the
+    // 5s connect window.
+    let mut client = McpProxyClient::connect(&socket_path, "test-agent")
+        .await
+        .expect("connect to in-process proxy");
+    assert!(!client.has_servers());
+    assert_eq!(client.definitions().len(), 0);
+
+    client.shutdown().await;
+    server_handle.abort();
+}
+
+// ---------------------------------------------------------------------------
 // Permission tier labels
 // ---------------------------------------------------------------------------
 
