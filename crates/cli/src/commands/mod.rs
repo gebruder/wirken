@@ -202,8 +202,13 @@ pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={api_key}");
-    let resp = match client.get(&url).send().await {
+    let url = "https://generativelanguage.googleapis.com/v1beta/models";
+    let resp = match client
+        .get(url)
+        .header("x-goog-api-key", api_key)
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => r,
         _ => return Vec::new(),
     };
