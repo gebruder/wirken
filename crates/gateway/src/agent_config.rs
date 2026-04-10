@@ -55,6 +55,12 @@ pub struct AgentConfig {
     /// the LLM's tool list entirely.
     #[serde(default)]
     pub allowed_subagents: BTreeMap<String, SubagentCeiling>,
+    /// Item 6 slice 2: per-agent override for `LlmConfig.tools_enabled`.
+    /// `Some(true)` forces tools on (useful for ollama models that
+    /// support tool calling). `Some(false)` forces off. `None` uses
+    /// the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_enabled: Option<bool>,
 }
 
 /// Persistent registry of agent configurations.
@@ -95,6 +101,16 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
+        // Item 6 slice 2: additive migration for the per-agent
+        // tools_enabled override.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agents ADD COLUMN tools_enabled TEXT DEFAULT NULL",
+            [],
+        ) && !e.to_string().contains("duplicate column")
+        {
+            return Err(e.into());
+        }
+
         Ok(Self { conn })
     }
 
@@ -102,9 +118,12 @@ impl AgentConfigStore {
     pub fn register(&self, config: &AgentConfig) -> Result<(), GatewayError> {
         let allowed_subagents_json = serde_json::to_string(&config.allowed_subagents)
             .map_err(|e| GatewayError::Config(format!("serialize allowed_subagents: {e}")))?;
+        let tools_enabled_str = config
+            .tools_enabled
+            .map(|b| if b { "true" } else { "false" });
         self.conn.execute(
-            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 config.id,
                 config.name,
@@ -113,6 +132,7 @@ impl AgentConfigStore {
                 config.base_url,
                 config.api_key_credential,
                 allowed_subagents_json,
+                tools_enabled_str,
             ],
         )?;
 
@@ -171,7 +191,7 @@ impl AgentConfigStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents
+                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled
                  FROM agents WHERE id = ?1",
                 params![agent_id],
                 |row| {
@@ -183,6 +203,7 @@ impl AgentConfigStore {
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, Option<String>>(7)?,
                     ))
                 },
             )
@@ -190,6 +211,7 @@ impl AgentConfigStore {
 
         let channels = self.get_channels(agent_id)?;
         let allowed_subagents = parse_allowed_subagents(&row.6)?;
+        let tools_enabled = parse_tools_enabled(row.7.as_deref());
 
         Ok(AgentConfig {
             id: row.0,
@@ -200,13 +222,14 @@ impl AgentConfigStore {
             api_key_credential: row.5,
             channels,
             allowed_subagents,
+            tools_enabled,
         })
     }
 
     /// List all agent configs.
     pub fn list(&self) -> Result<Vec<AgentConfig>, GatewayError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents
+            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled
              FROM agents ORDER BY id",
         )?;
 
@@ -219,15 +242,25 @@ impl AgentConfigStore {
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?;
 
         let mut agents = Vec::new();
         for row in rows {
-            let (id, name, provider, model, base_url, api_key_credential, allowed_subagents_json) =
-                row?;
+            let (
+                id,
+                name,
+                provider,
+                model,
+                base_url,
+                api_key_credential,
+                allowed_subagents_json,
+                tools_enabled_raw,
+            ) = row?;
             let channels = self.get_channels(&id)?;
             let allowed_subagents = parse_allowed_subagents(&allowed_subagents_json)?;
+            let tools_enabled = parse_tools_enabled(tools_enabled_raw.as_deref());
             agents.push(AgentConfig {
                 id,
                 name,
@@ -237,6 +270,7 @@ impl AgentConfigStore {
                 api_key_credential,
                 channels,
                 allowed_subagents,
+                tools_enabled,
             });
         }
 
@@ -278,6 +312,15 @@ impl AgentConfigStore {
     }
 }
 
+/// Decode the `tools_enabled` column. NULL → None, "true" → Some(true), "false" → Some(false).
+fn parse_tools_enabled(raw: Option<&str>) -> Option<bool> {
+    match raw {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
+}
+
 /// Decode the `allowed_subagents` column. Empty / NULL / `'{}'` all
 /// map to an empty map without error.
 fn parse_allowed_subagents(raw: &str) -> Result<BTreeMap<String, SubagentCeiling>, GatewayError> {
@@ -307,6 +350,7 @@ mod tests {
             api_key_credential: "work-openai-key".into(),
             channels: vec!["slack".into(), "teams".into()],
             allowed_subagents: Default::default(),
+            tools_enabled: None,
         };
 
         store.register(&config).unwrap();
@@ -333,6 +377,7 @@ mod tests {
                 api_key_credential: "personal-anthropic-key".into(),
                 channels: vec!["telegram".into(), "discord".into()],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
 
@@ -346,6 +391,7 @@ mod tests {
                 api_key_credential: "work-openai-key".into(),
                 channels: vec!["slack".into()],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
 
@@ -370,6 +416,7 @@ mod tests {
                 api_key_credential: String::new(),
                 channels: vec!["telegram".into()],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
 
@@ -393,6 +440,7 @@ mod tests {
                 api_key_credential: String::new(),
                 channels: vec!["telegram".into()],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
         store
@@ -405,6 +453,7 @@ mod tests {
                 api_key_credential: String::new(),
                 channels: vec![],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
 
@@ -434,6 +483,7 @@ mod tests {
                     api_key_credential: String::new(),
                     channels: vec!["discord".into()],
                     allowed_subagents: Default::default(),
+                    tools_enabled: None,
                 })
                 .unwrap();
         }
@@ -469,6 +519,7 @@ mod tests {
             api_key_credential: "boss-key".into(),
             channels: vec!["slack".into()],
             allowed_subagents: ceilings,
+            tools_enabled: None,
         };
         store.register(&cfg).unwrap();
 
@@ -498,6 +549,7 @@ mod tests {
                 api_key_credential: String::new(),
                 channels: vec![],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
         let got = store.get("legacy").unwrap();
@@ -518,6 +570,7 @@ mod tests {
                 api_key_credential: String::new(),
                 channels: vec![],
                 allowed_subagents: Default::default(),
+                tools_enabled: None,
             })
             .unwrap();
         let mut ceilings = BTreeMap::new();

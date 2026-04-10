@@ -135,6 +135,9 @@ enum SessionCommands {
         /// Filter by channel
         #[arg(long)]
         channel: Option<String>,
+        /// Show child sessions spawned by this parent session ID
+        #[arg(long)]
+        parent: Option<String>,
     },
     /// Close a session
     Close {
@@ -189,6 +192,32 @@ enum AgentCommands {
         agent: String,
         /// Channel to bind
         channel: String,
+    },
+    /// Allow a parent agent to spawn a child agent with capability ceilings
+    AllowSubagent {
+        /// Parent agent ID
+        parent: String,
+        /// Child agent ID
+        child: String,
+        /// Comma-separated list of tools the child may use (empty = no tools)
+        #[arg(long, default_value = "")]
+        tools: String,
+        /// Maximum permission tier: tier1, tier2, tier3
+        #[arg(long, default_value = "tier1")]
+        max_tier: String,
+        /// Maximum LLM rounds for the child
+        #[arg(long, default_value = "5")]
+        max_rounds: usize,
+        /// Wall-clock timeout in seconds
+        #[arg(long, default_value = "30")]
+        max_runtime: u64,
+    },
+    /// Remove a child agent from a parent's allowed subagents
+    DenySubagent {
+        /// Parent agent ID
+        parent: String,
+        /// Child agent ID
+        child: String,
     },
 }
 
@@ -343,7 +372,9 @@ async fn main() -> Result<()> {
             AuditCommands::Verify => commands::audit::verify().await,
         },
         Commands::Sessions(cmd) => match cmd {
-            SessionCommands::List { channel } => commands::session::list(channel).await,
+            SessionCommands::List { channel, parent } => {
+                commands::session::list(channel, parent).await
+            }
             SessionCommands::Close { id } => commands::session::close(&id).await,
             SessionCommands::Verify { id, strict } => commands::session::verify(&id, strict).await,
         },
@@ -378,6 +409,27 @@ async fn main() -> Result<()> {
             AgentCommands::Remove { id } => commands::agents::remove(&id).await,
             AgentCommands::Bind { agent, channel } => {
                 commands::agents::bind(&agent, &channel).await
+            }
+            AgentCommands::AllowSubagent {
+                parent,
+                child,
+                tools,
+                max_tier,
+                max_rounds,
+                max_runtime,
+            } => {
+                commands::agents::allow_subagent(
+                    &parent,
+                    &child,
+                    &tools,
+                    &max_tier,
+                    max_rounds,
+                    max_runtime,
+                )
+                .await
+            }
+            AgentCommands::DenySubagent { parent, child } => {
+                commands::agents::deny_subagent(&parent, &child).await
             }
         },
         Commands::Cron(cmd) => match cmd {
