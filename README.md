@@ -53,7 +53,7 @@ cargo install --path crates/cli
 `wirken run` starts the gateway daemon. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken gateway
+  wirken gateway v0.7.0
   ──────────────
 
   Provider: ollama/llama3.2
@@ -81,29 +81,42 @@ graph TD
     subgraph Gateway["Wirken"]
         Registry[Adapter Registry] --> Router
         Router --> Detect[Injection Detection]
-        Detect --> Agent[Agent Runtime]
+        Detect --> Factory[AgentFactory]
+        Factory --> Agent[Agent Runtime]
+        Agent --> Context[Context Engine]
         Agent --> Permissions
         Agent --> Skills
-        Agent --> MCP[MCP Servers]
         Agent --> Tools
         Agent --> Vault --> Keychain
 
         subgraph Execution
             Tools --> Sandbox[Docker / gVisor / Wasm]
         end
+
+        SessionLog["Session Log\n(hash-chained, attested)"]
     end
 
-    Agent -- HTTPS --> LLM[LLM Providers]
+    Agent -- "UDS" --> McpProxy["MCP Proxy\n(separate process)"]
+    McpProxy -- "stdio · HTTP · OAuth2" --> McpServers[MCP Servers]
 
-    Detect -.-> Audit
-    Permissions -.-> Audit
-    Tools -.-> Audit
-    Audit[Audit Log] -.-> SIEM[SIEM / Webhook]
+    Agent -- HTTPS --> LLM[LLM Providers]
+    Agent -- "spawn_subagent" --> Factory
+
+    Detect -.-> SessionLog
+    Permissions -.-> SessionLog
+    Tools -.-> SessionLog
+    SessionLog -.-> SIEM[SIEM / Webhook]
 ```
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
 
 This isolation is enforced at the type level. Session handles are parameterized by a channel marker type (`SessionHandle<Telegram>`), and the Rust compiler rejects any attempt to use a Telegram session handle in a Discord context. If an adapter process is compromised, the blast radius is exactly one channel — the gateway's IPC boundary, running in a separate memory-safe process, prevents lateral movement.
+
+The MCP proxy also runs out-of-process over a Unix domain socket, with the vault handle isolated in the proxy. MCP servers connect via stdio, HTTP, or OAuth2 — the agent process never sees MCP credentials.
+
+Agents are stateless between turns. The `AgentFactory` wakes an agent for each inbound message by replaying its session log. Conversations are durably logged as typed session events (user messages, assistant messages, tool calls, tool results, LLM request/response metadata) in an append-only, per-session hash-chained table. If the agent crashes mid-turn, the harness detects incomplete tool rounds on wake and surfaces them as failures rather than silently re-executing side effects. A context engine trims conversations under each model's token budget before every LLM call, preferring to drop old tool results before touching user or assistant text.
+
+Agents can delegate bounded subtasks to child agents via `spawn_subagent`. The operator configures a per-child capability ceiling (tool allowlist, max permission tier, max rounds, max runtime). Children run headless — no interactive approvals, isolated session logs, hard depth cap of 4.
 
 ## Security properties
 
@@ -115,9 +128,9 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | AG02 | Code execution | Docker sandbox: ephemeral containers, no-network, 512MB memory, 256 PID limit, non-root user. gVisor sandbox: same constraints with kernel attack surface reduction via `runsc` runtime. Wasm sandbox: compiled skill modules run in Wasmtime with fuel-based CPU limits, no filesystem, no network. Shell exec timeout at 300s. |
 | AG04 | Tool misuse | Tool inputs validated against JSON schema. Workspace path confinement — file operations canonicalized and rejected if outside workspace boundary. |
 | AG05 | Identity spoofing | Per-adapter Ed25519 challenge-response handshake over Unix domain sockets. Compile-time channel isolation — `SessionHandle<Telegram>` and `SessionHandle<Discord>` are different types; the compiler rejects cross-channel access. |
-| AG07 | Multi-agent manipulation | Each channel adapter runs as a separate OS process. If an adapter is compromised, the blast radius is one channel. IPC boundary prevents lateral movement. |
-| AG08 | Runaway loops | Agent tool call loop capped at 20 rounds per turn. Shell exec timeout at 300s. Rate limiting on all sources including loopback — no localhost exemption. |
-| AG09 | Insufficient logging | Every agent action logged to an append-only SQLite log before execution. SHA-256 hash chain for tamper detection. 90-day retention with configurable pruning. Real-time SIEM forwarding to Datadog, Splunk, or webhook. Prompt injection detection flags inbound messages with threat indicators. Permission denials logged with full context: tool, tier, agent, trigger message. |
+| AG07 | Multi-agent manipulation | Each channel adapter runs as a separate OS process. If an adapter is compromised, the blast radius is one channel. IPC boundary prevents lateral movement. Child agents spawned via `spawn_subagent` run under capability-attenuated ceilings: tool allowlist intersection, clamped permission tier, max rounds, max runtime, headless (no interactive approvals). Hard depth cap of 4 prevents nesting cycles. |
+| AG08 | Runaway loops | Agent tool call loop capped at 20 rounds per turn. Child agents have a separate per-ceiling `max_rounds` budget. Shell exec timeout at 300s. Rate limiting on all sources including loopback — no localhost exemption. |
+| AG09 | Insufficient logging | Every agent action logged as a typed session event to an append-only, per-session hash-chained SQLite table before execution. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the session log offline and re-checks hashes. 90-day retention with configurable pruning. Real-time SIEM forwarding to Datadog, Splunk, or webhook. Prompt injection detection flags inbound messages with threat indicators. Permission denials logged with full context: tool, tier, agent, trigger message. |
 | — | Credential security | XChaCha20-Poly1305 encryption at rest, keyed from OS keychain (macOS Keychain / libsecret / age fallback). Per-credential expiry and rotation. `secrecy` + `zeroize` — logging or serializing a secret is a compile error. Key material zeroed after use. |
 | — | Transport security | HTTPS enforced at transport level for all LLM and Matrix connections (non-localhost). Cap'n Proto IPC with 16MB frame limit, 512M word traversal limit, 64-level nesting limit. |
 | — | Supply chain | Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push. |
@@ -132,7 +145,7 @@ The OWASP table above maps Wirken's mitigations against specific agentic-AI thre
 | GOVERN | GOVERN 2.1 — roles and responsibilities centrally managed | Centralized org policy endpoint: provider, SIEM, MCP servers, sandbox mode pulled from a company URL and applied locally | `wirken-gateway::org` (`OrgConfig`, `fetch_org_config`, `apply_org_config`) |
 | MAP | MAP 1.1 — context and use cases enumerated | Model-agnostic provider routing across OpenAI, Anthropic, Gemini, Bedrock, Ollama, Tinfoil, Privatemode, and OpenAI-compatible endpoints | `wirken-agent::llm` (`LlmConfig`, `LlmClient::complete`) |
 | MAP | MAP 5.1 — impact and blast radius characterized | Compile-time channel isolation: `SessionHandle<C: Channel>` is parameterized by a sealed marker type, so cross-channel access is a type error | `wirken-ipc::channel` (`Channel` trait, `SessionHandle<C>`) |
-| MEASURE | MEASURE 2.7 — model and system logging captured | Append-only SQLite audit log with SHA-256 hash chain over `previous_hash \|\| ts \|\| actor \|\| action \|\| target \|\| channel \|\| session \|\| detail`; `verify()` re-checks the chain | `wirken-audit::log` (`AuditLog::write_batch`, `AuditLog::verify`) |
+| MEASURE | MEASURE 2.7 — model and system logging captured | Append-only per-session hash-chained session log (`session_events` table). Each event carries a SHA-256 leaf hash and chain hash. Per-agent Ed25519 attestation signs the chain head. `wirken session verify` replays events offline and re-checks message hashes, tool results, and chain integrity | `wirken-audit::session_log` (`SqliteSessionLog`, `SessionEvent`), `wirken-agent::attestation`, `wirken-agent::runtime::Agent::verify` |
 | MEASURE | MEASURE 2.5 — AI system outputs are monitored and evaluated | Real-time SIEM forwarding to Datadog Log Intake, Splunk HEC, or generic webhook, in addition to the local audit log | `wirken-audit::siem` (`SiemForwarder`, `SiemTarget`) |
 | MEASURE | MEASURE 2.6 — security and resilience evaluated | Prompt injection detector flags inbound messages with threat metadata (role-switching, instruction overrides, base64 commands, tool-call injection) — events tagged in audit, not blocked | `wirken-gateway::injection_detect` (`InjectionDetector::scan`, `DetectionResult`) |
 | MANAGE | MANAGE 1.3 — risks treated by mitigation or removal | Three sandbox runtimes for agent execution: Docker (default `runc`) and gVisor (`runsc`) confine the `exec` shell tool (no-network default, 512 MB memory cap, 256 PID cap, non-root UID, 300 s timeout); Wasmtime with WASI p1 runs compiled Wasm skills with fuel-based CPU limits, no preopened filesystem, and no network linker | `wirken-agent::sandbox` (`DockerSandbox`, `SandboxMode::GVisor`), `wirken-agent::wasm_sandbox` (`WasmSkill::execute`) |
@@ -143,18 +156,21 @@ The OWASP table above maps Wirken's mitigations against specific agentic-AI thre
 
 Wirken gives organizations the controls they need to deploy AI agents without bypassing existing security, compliance, and audit requirements.
 
-- **Full attribution.** Every agent action is tied to a user, channel, session, and agent. The audit log records who triggered what, when, and on which target.
-- **Tamper-evident audit trail.** All actions logged before execution. SHA-256 hash chain detects modification or deletion. SIEM forwarding sends events to Datadog, Splunk, or any webhook in real time for centralized monitoring.
+- **Full attribution.** Every agent action is tied to a user, channel, session, and agent. Typed session events record who triggered what, when, and on which target.
+- **Tamper-evident audit trail.** All actions logged as typed session events before execution. Per-session SHA-256 hash chain detects modification or deletion. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the log offline and re-checks hashes. SIEM forwarding sends events to Datadog, Splunk, or any webhook in real time.
+- **Crash recovery.** Agents are stateless between turns. The harness replays the session log on wake. Incomplete tool rounds are detected and surfaced as failures rather than silently re-executed.
 - **Graduated permissions.** Three-tier model. Workspace file access and web search are always allowed. Shell exec and external file access require first-use approval. Destructive operations, credential access, and skill installs always require explicit approval. Approvals expire after 30 days.
-- **Sandboxed execution.** Optional Docker sandbox runs agent commands in ephemeral containers with no network access, memory and PID limits, and a non-root user. gVisor runtime available for kernel attack surface reduction.
-- **Prompt injection detection.** Inbound messages are scanned for role-switching attempts, instruction overrides, base64-encoded commands, tool-call injection, and system prompt extraction. Detected threats are flagged in the audit log and forwarded to SIEM — messages are not blocked.
+- **Capability-attenuated multi-agent.** Parent agents delegate to children via `spawn_subagent` under operator-configured ceilings (tool allowlist, max permission tier, max rounds, max runtime). Children run headless with isolated session logs. Hard depth cap of 4.
+- **Sandboxed execution.** Optional Docker sandbox runs agent commands in ephemeral containers with no network access, memory and PID limits, and a non-root user. gVisor runtime available for kernel attack surface reduction. Sandbox provisioning is lazy — no startup cost when unused.
+- **Context management.** A per-model context engine trims conversations under token budgets before every LLM call, preferring to drop old tool results before touching user or assistant text. Structured compaction events are written to the session log and projected back into the prompt so the model knows what was trimmed.
+- **Prompt injection detection.** Inbound messages are scanned for role-switching attempts, instruction overrides, base64-encoded commands, tool-call injection, and system prompt extraction. Detected threats are flagged in the session log and forwarded to SIEM — messages are not blocked.
 - **Confidential inference.** Tinfoil and Privatemode providers run LLMs inside hardware enclaves (AMD SEV-SNP, Intel TDX). Prompts are encrypted end-to-end and protected against software attacks on infrastructure.
-- **Encrypted credentials.** XChaCha20-Poly1305 vault keyed from the OS keychain. Per-credential expiry and rotation. No plaintext export.
+- **Encrypted credentials.** XChaCha20-Poly1305 vault keyed from the OS keychain. Per-credential expiry and rotation. No plaintext export. MCP credentials are isolated in a separate proxy process.
 - **Centralized policy.** `wirken setup --org https://wirken.corp.example.com` pulls provider, SIEM, MCP, and permission config from a company endpoint. Developers get grab-and-go setup. IT manages one config. Policy refreshes on every `wirken run`.
 
 ## Status
 
-17 crates, 316 tests, 8 LLM providers, 9 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
+19 crates, 442 tests, 8 LLM providers, 9 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
 
 ## Documentation
 
@@ -183,7 +199,7 @@ See [docs/migration.md](docs/migration.md) for a detailed migration guide.
 Wirken is a Rust workspace. All crates compile and test independently:
 
 ```bash
-cargo test              # run all 316 tests
+cargo test              # run all 442 tests
 cargo test -p wirken-vault    # test one crate
 cargo build -p wirken-cli     # build the binary
 ```

@@ -169,12 +169,15 @@ Append-only structured audit log.
 
 **Implementation:**
 - SQLite WAL-mode database at `~/.wirken/audit.db` via `rusqlite` 0.39 (bundled).
-- Every gateway action (tool invocation, message send/receive, credential access, permission grant, config change, adapter connect/disconnect) produces an audit event before the action executes.
-- Schema: `(id INTEGER PRIMARY KEY, ts TEXT, actor TEXT, action TEXT, target TEXT, channel TEXT, session TEXT, detail JSON, hash TEXT)`.
-- Each row includes a SHA-256 hash (`sha2` 0.10) of `(previous_hash || ts || actor || action || target || channel || session || detail)` creating a hash chain. Tampering with the log breaks the chain.
+- Every agent turn writes typed session events (UserMessage, AssistantMessage, AssistantToolCalls, ToolResult, LlmRequest, LlmResponse, PermissionDenied, SystemPromptSet, Compaction, Attestation, SubagentSpawned, SubagentResult) to a `session_events` table before each action executes.
+- Each session has its own per-session SHA-256 hash chain: every row carries a leaf hash, a previous hash, and a chain hash. Tampering with any row breaks the chain for that session.
+- Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the session offline and re-checks message hashes, deterministic tool results, and chain integrity.
+- The legacy `audit_events` table from pre-0.7 is automatically migrated to a SQL view over `session_events` on first open. SIEM consumers see both old and new events through this view.
 - Retention: 90 days default, configurable. Pruning preserves the hash chain by keeping a checkpoint hash.
 
-**Performance:** Audit writes go through a `tokio::sync::mpsc` channel. A dedicated task flushes to SQLite in batches (every 50ms or 100 events, whichever comes first). Events are held in memory with monotonic sequence numbers. Crash recovery: un-flushed events are lost (acceptable — the alternative is fsync on every event, which is 5-10ms each). Hash chain computed at flush time over the batch.
+**Crash recovery:** Agents are stateless between turns. The `AgentFactory` wakes each agent by replaying its session log via `Agent::from_session_log`. Incomplete tool rounds (an AssistantToolCalls event with no matching ToolResult) are detected on wake and surfaced as failures — the harness never silently re-executes non-idempotent tools.
+
+**Performance:** Legacy audit writes go through a `tokio::sync::mpsc` channel with batched flushes. Session events are written synchronously per-turn (one SQLite insert per event). The hash chain is computed inline.
 
 **CLI access:**
 ```bash
@@ -182,6 +185,7 @@ wirken audit log                    # last 50 events
 wirken audit log --action exec      # filter by action type
 wirken audit log --channel telegram  # filter by channel
 wirken audit verify                 # verify hash chain integrity
+wirken sessions verify <session-id> # replay and verify a session
 ```
 
 ---
@@ -302,7 +306,7 @@ No loopback exemption. Rate limiting applies uniformly.
 - Sessions expire after 24 hours of inactivity (configurable).
 - The session store (`crates/gateway/src/session.rs`) is a SQLite table holding metadata only: `id`, `channel`, `conversation_id`, `created_at`, `last_activity`, `message_count`, `expired`. Session IDs are 16 random bytes generated per session.
 - Session creation and expiry are logged to audit.
-- Conversation transcripts are currently held in memory by the running agent process and are not persisted between restarts. Persistent transcript storage is on the roadmap.
+- Conversation transcripts are durably logged as typed session events in `audit.db`. The `AgentFactory` reconstructs any session from its log on wake — agents are stateless between turns.
 - CLI command: `wirken sessions list`, `wirken sessions close <id>`.
 
 ---

@@ -4,9 +4,9 @@
 
 | Version | Supported |
 | ------- | --------- |
+| 0.7.x   | Yes       |
 | 0.6.x   | Yes       |
-| 0.5.x   | Yes       |
-| < 0.5   | No        |
+| < 0.6   | No        |
 
 ## Reporting a Vulnerability
 
@@ -21,14 +21,16 @@ You should receive an initial response within 72 hours. If the vulnerability is 
 The following are in scope for security reports:
 
 - Credential vault (encryption, key derivation, keychain integration)
-- Audit log integrity (hash chain, tamper detection)
+- Session log integrity (per-session hash chain, tamper detection, attestation)
 - Tool execution (path traversal, sandbox escape, command injection)
 - IPC authentication (Ed25519 handshake, adapter isolation)
-- Permission model bypass
+- Permission model bypass (including subagent capability-attenuation escape)
+- MCP proxy isolation (credential leakage through the out-of-process proxy)
 - SIEM log forwarding (credential leakage, injection)
 - Org config endpoint (config injection, MITM)
 - Skill signature verification bypass
 - LLM API key leakage (logs, error messages, URLs)
+- Subagent ceiling bypass (depth cap, permission tier, tool allowlist)
 
 The following are out of scope:
 

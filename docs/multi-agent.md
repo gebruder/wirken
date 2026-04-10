@@ -116,3 +116,19 @@ wirken agents remove code
 ```
 
 This removes the agent configuration and channel bindings. The workspace directory and skills are not deleted.
+
+## Sub-agent orchestration
+
+A parent agent can delegate bounded subtasks to child agents via the built-in `spawn_subagent` tool. The operator configures which children each parent is allowed to spawn, with a per-child capability ceiling.
+
+The ceiling controls:
+- **tool_allowlist** — the child only sees tools in this list (intersection with anything the LLM passes in the spawn call).
+- **max_permission_tier** — the child's permission tier is clamped to this level. Anything above is auto-denied with no interactive prompt.
+- **max_rounds** — maximum LLM rounds before the parent reports `rounds_exceeded`.
+- **max_runtime_secs** — wall-clock timeout for the entire child invocation.
+
+Children run headless — no interactive permission approvals, isolated session logs, and a hard depth cap of 4 to prevent nesting cycles. The parent's LLM sees only a JSON result envelope containing the child's final response and status.
+
+Ceilings are configured in `AgentConfig.allowed_subagents` (stored as JSON in the `agents` table). CLI support for editing ceilings is planned; for now, configure via the library API or directly in the sqlite column.
+
+Each child runs under its own session id (`{parent_session_id}#sub-{n}`) so `wirken session verify` can audit the parent and child independently.
