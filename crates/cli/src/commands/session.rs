@@ -1,11 +1,40 @@
 use anyhow::{Context, Result};
 
+use wirken_audit::SessionLog;
 use wirken_gateway::session::SessionStore;
 
 use super::config;
 
-pub async fn list(channel: Option<String>) -> Result<()> {
+pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()> {
     let cfg = config();
+
+    // Item 6 slice 2: --parent shows child sessions by querying
+    // session_events for session_ids that start with the parent's
+    // id followed by "#sub-".
+    if let Some(ref parent_id) = parent {
+        let log = wirken_audit::SqliteSessionLog::open(&cfg.sessions_db_path())
+            .or_else(|_| wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()))
+            .context("Failed to open session log")?;
+        let children = log.list_child_sessions(parent_id);
+        if children.is_empty() {
+            println!("  No child sessions for '{parent_id}'.");
+        } else {
+            println!("  Child sessions of {parent_id}:");
+            for child_id in &children {
+                let h = log.handle_for(wirken_audit::SessionId::new(child_id.clone()));
+                let count = log
+                    .last_index(&h)
+                    .unwrap_or(None)
+                    .map(|n| n + 1)
+                    .unwrap_or(0);
+                println!("    {child_id}  ({count} events)");
+            }
+            println!();
+            println!("  {} child session(s).", children.len());
+        }
+        return Ok(());
+    }
+
     let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
         .context("Failed to open session store")?;
 

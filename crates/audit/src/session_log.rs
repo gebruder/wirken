@@ -452,6 +452,26 @@ impl SqliteSessionLog {
         &self.conn
     }
 
+    /// Item 6 slice 2: list child session IDs whose session_id
+    /// starts with `{parent_id}#sub-`. Returns distinct session IDs
+    /// in ascending order. Used by `wirken sessions list --parent`.
+    pub fn list_child_sessions(&self, parent_id: &str) -> Vec<String> {
+        let prefix = format!("{parent_id}#sub-");
+        let conn = self.conn.lock().expect("session log mutex");
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT session_id FROM session_events
+                 WHERE session_id LIKE ?1
+                 ORDER BY session_id ASC",
+            )
+            .unwrap_or_else(|e| panic!("prepare list_child_sessions: {e}"));
+        let pattern = format!("{prefix}%");
+        stmt.query_map(params![pattern], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|e| panic!("query list_child_sessions: {e}"))
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
     /// Crate-private accessor for code that needs raw SQL access to
     /// the same underlying connection. Used by `legacy_compat` to
     /// run the SIEM view query, the global verify, and the prune.

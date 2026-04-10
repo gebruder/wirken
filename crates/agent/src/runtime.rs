@@ -877,55 +877,16 @@ impl Agent {
                         },
                     )?;
 
-                    // Execute each tool call
-                    for call in &calls {
-                        tracing::info!(
-                            "Agent {} executing tool: {}({})",
-                            self.id,
-                            call.name,
-                            truncate(&call.arguments, 100)
-                        );
+                    // Item 6 slice 2: partition into regular and spawn
+                    // calls. Regular calls execute sequentially first
+                    // (they may have ordering-dependent side effects).
+                    // Spawn calls fan out in parallel via join_all.
+                    let (spawn_calls, regular_calls): (Vec<_>, Vec<_>) =
+                        calls.iter().partition(|c| c.name == SPAWN_SUBAGENT_TOOL);
 
-                        let result = match self.execute_tool(&call.name, &call.arguments).await {
-                            Ok(result) => result,
-                            Err(AgentError::PermissionDeniedCtx(ctx)) => {
-                                tracing::warn!(
-                                    "Permission denied: agent '{}' tool '{}' requires {}",
-                                    ctx.agent_id,
-                                    ctx.tool_name,
-                                    ctx.requested_tier.label(),
-                                );
-                                self.log_event(
-                                    TrustLevel::System,
-                                    SessionEvent::PermissionDenied {
-                                        tool: ctx.tool_name.clone(),
-                                        tier: ctx.requested_tier.label().to_string(),
-                                        agent_id: ctx.agent_id.clone(),
-                                        trigger: ctx.trigger_message.clone(),
-                                    },
-                                )?;
-                                let output = format!(
-                                    "Permission denied: '{}' requires {} approval. \
-                                     This action was not executed.",
-                                    ctx.tool_name,
-                                    ctx.requested_tier.label(),
-                                );
-                                denials.push(ctx);
-                                crate::tool::ToolResult {
-                                    output,
-                                    success: false,
-                                }
-                            }
-                            Err(e) => return Err(e),
-                        };
-
-                        tracing::debug!(
-                            "Tool {} result (success={}): {}",
-                            call.name,
-                            result.success,
-                            truncate(&result.output, 200)
-                        );
-
+                    // Phase 1: execute regular tool calls sequentially.
+                    for call in &regular_calls {
+                        let result = self.execute_and_record_tool(call, &mut denials).await?;
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
                         self.log_event(
@@ -939,7 +900,27 @@ impl Agent {
                         )?;
                     }
 
-                    // Continue loop — LLM will see tool results and respond
+                    // Phase 2: prepare all spawn calls sequentially
+                    // (validates ceiling, writes SubagentSpawned,
+                    // wakes child), then fan out the child runs.
+                    if !spawn_calls.is_empty() {
+                        let results = self.fan_out_spawns(&spawn_calls).await?;
+                        for (call, result) in spawn_calls.iter().zip(results) {
+                            self.conversation
+                                .add_tool_result(&call.id, &call.name, &result.output);
+                            self.log_event(
+                                TrustLevel::Tool,
+                                SessionEvent::ToolResult {
+                                    call_id: call.id.clone(),
+                                    tool_name: call.name.clone(),
+                                    output: result.output.clone(),
+                                    success: result.success,
+                                },
+                            )?;
+                        }
+                    }
+
+                    // Continue loop
                 }
                 LlmResponse::Empty => {
                     let fallback = "(no response)".to_string();
@@ -1315,6 +1296,275 @@ impl Agent {
 
         // Otherwise, built-in tools.
         self.tools.execute(name, arguments).await
+    }
+
+    /// Execute a single tool call and handle permission denials.
+    /// Shared by both regular-tool and spawn-tool execution paths.
+    async fn execute_and_record_tool(
+        &mut self,
+        call: &crate::conversation::ToolCallRequest,
+        denials: &mut Vec<PermissionDenialContext>,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        tracing::info!(
+            "Agent {} executing tool: {}({})",
+            self.id,
+            call.name,
+            truncate(&call.arguments, 100)
+        );
+        let result = match self.execute_tool(&call.name, &call.arguments).await {
+            Ok(result) => result,
+            Err(AgentError::PermissionDeniedCtx(ctx)) => {
+                tracing::warn!(
+                    "Permission denied: agent '{}' tool '{}' requires {}",
+                    ctx.agent_id,
+                    ctx.tool_name,
+                    ctx.requested_tier.label(),
+                );
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::PermissionDenied {
+                        tool: ctx.tool_name.clone(),
+                        tier: ctx.requested_tier.label().to_string(),
+                        agent_id: ctx.agent_id.clone(),
+                        trigger: ctx.trigger_message.clone(),
+                    },
+                )?;
+                let output = format!(
+                    "Permission denied: '{}' requires {} approval. \
+                     This action was not executed.",
+                    ctx.tool_name,
+                    ctx.requested_tier.label(),
+                );
+                denials.push(ctx);
+                crate::tool::ToolResult {
+                    output,
+                    success: false,
+                }
+            }
+            Err(e) => return Err(e),
+        };
+        tracing::debug!(
+            "Tool {} result (success={}): {}",
+            call.name,
+            result.success,
+            truncate(&result.output, 200)
+        );
+        Ok(result)
+    }
+
+    /// Item 6 slice 2: fan-out for multiple spawn_subagent calls
+    /// in a single tool-call round. Prepares all spawns sequentially
+    /// (validates ceilings, writes SubagentSpawned events, wakes
+    /// children), then runs the children in parallel via join_all,
+    /// then writes SubagentResult events sequentially.
+    async fn fan_out_spawns(
+        &mut self,
+        calls: &[&crate::conversation::ToolCallRequest],
+    ) -> Result<Vec<crate::tool::ToolResult>, AgentError> {
+        // Phase A: sequential prepare. Each call that fails
+        // validation gets an immediate error envelope; successful
+        // ones go into the parallel-run batch.
+        struct Prepared {
+            child_arc: Arc<tokio::sync::Mutex<Agent>>,
+            child_session_id: String,
+            ceiling: SubagentCeiling,
+            prompt: String,
+            inbound_id: String,
+            depth: usize,
+            intersected_tools: BTreeSet<String>,
+        }
+        let mut batch: Vec<Option<Prepared>> = Vec::with_capacity(calls.len());
+        let mut early_results: Vec<Option<crate::tool::ToolResult>> = vec![None; calls.len()];
+
+        for (i, call) in calls.iter().enumerate() {
+            let parsed: SpawnSubagentArgs = match serde_json::from_str(&call.arguments) {
+                Ok(v) => v,
+                Err(e) => {
+                    early_results[i] = Some(envelope_result(
+                        "",
+                        "error",
+                        &format!("invalid spawn_subagent arguments: {e}"),
+                    ));
+                    batch.push(None);
+                    continue;
+                }
+            };
+
+            if self.subagent_depth >= MAX_SUBAGENT_DEPTH {
+                early_results[i] = Some(envelope_result(
+                    "",
+                    "depth_exceeded",
+                    &format!("subagent nesting depth cap of {MAX_SUBAGENT_DEPTH} reached"),
+                ));
+                batch.push(None);
+                continue;
+            }
+
+            let factory = match self.factory.as_ref().and_then(|w| w.upgrade()) {
+                Some(f) => f,
+                None => {
+                    early_results[i] =
+                        Some(envelope_result("", "error", "agent has no factory bound"));
+                    batch.push(None);
+                    continue;
+                }
+            };
+
+            let ceiling = match self.allowed_subagents.get(&parsed.agent_id) {
+                Some(c) => c.clone(),
+                None => {
+                    early_results[i] = Some(envelope_result(
+                        "",
+                        "error",
+                        &format!(
+                            "child agent_id '{}' is not in allowed_subagents",
+                            parsed.agent_id
+                        ),
+                    ));
+                    batch.push(None);
+                    continue;
+                }
+            };
+
+            let allowlist: BTreeSet<String> = ceiling.tool_allowlist.iter().cloned().collect();
+            let intersected: BTreeSet<String> = if let Some(req) = parsed.tools.as_ref() {
+                let req_set: BTreeSet<String> = req.iter().cloned().collect();
+                req_set.intersection(&allowlist).cloned().collect()
+            } else {
+                allowlist
+            };
+
+            let parent_session_id = self.session_handle.id().to_string();
+            let prior_spawns = self.count_subagent_spawns()?;
+            let child_session_id = format!("{parent_session_id}#sub-{prior_spawns}");
+
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::SubagentSpawned {
+                    child_session_id: child_session_id.clone(),
+                    child_agent_id: parsed.agent_id.clone(),
+                    tools_granted: intersected.iter().cloned().collect(),
+                },
+            )?;
+
+            let child_arc = match factory.wake(&parsed.agent_id, &child_session_id) {
+                Ok(arc) => arc,
+                Err(e) => {
+                    let env = envelope_result(
+                        &child_session_id,
+                        "error",
+                        &format!("factory.wake failed: {e}"),
+                    );
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::SubagentResult {
+                            child_session_id,
+                            output: env.output.clone(),
+                            status: "error".into(),
+                        },
+                    )?;
+                    early_results[i] = Some(env);
+                    batch.push(None);
+                    continue;
+                }
+            };
+
+            batch.push(Some(Prepared {
+                child_arc,
+                child_session_id,
+                ceiling,
+                prompt: parsed.prompt,
+                inbound_id: format!("subagent-{}", uuid::Uuid::new_v4()),
+                depth: self.subagent_depth + 1,
+                intersected_tools: intersected,
+            }));
+        }
+
+        // Phase B: fan-out child runs in parallel.
+        let futures: Vec<_> = batch
+            .iter()
+            .enumerate()
+            .filter_map(|(i, prep)| {
+                let p = prep.as_ref()?;
+                let child = p.child_arc.clone();
+                let prompt = p.prompt.clone();
+                let inbound_id = p.inbound_id.clone();
+                let max_rounds = p.ceiling.max_rounds;
+                let max_runtime = std::time::Duration::from_secs(p.ceiling.max_runtime_secs);
+                let depth = p.depth;
+                let max_tier = p.ceiling.max_permission_tier;
+                let tools = p.intersected_tools.clone();
+                Some(async move {
+                    let mut child_guard = child.lock().await;
+                    child_guard.set_subagent_runtime(depth, max_tier, tools);
+                    let run = Box::pin(child_guard.process_message_inner(
+                        &prompt,
+                        inbound_id,
+                        Some(max_rounds),
+                    ));
+                    let result = tokio::time::timeout(max_runtime, run).await;
+                    drop(child_guard);
+                    (i, result)
+                })
+            })
+            .collect();
+
+        let parallel_results = futures_util::future::join_all(futures).await;
+
+        // Phase C: assemble final results in original call order.
+        let mut final_results: Vec<crate::tool::ToolResult> = vec![
+            crate::tool::ToolResult {
+                output: String::new(),
+                success: false,
+            };
+            calls.len()
+        ];
+
+        // Fill in early (error) results.
+        for (i, er) in early_results.into_iter().enumerate() {
+            if let Some(r) = er {
+                final_results[i] = r;
+            }
+        }
+
+        // Fill in parallel results + write SubagentResult events.
+        for (idx, timeout_result) in parallel_results {
+            // Safety: the batch entry at idx is always Some because
+            // the filter_map above only yields entries that have Some.
+            let p: &Prepared = batch[idx].as_ref().unwrap();
+            let envelope = match timeout_result {
+                Ok(Ok(result)) => envelope_result(&p.child_session_id, "ok", &result.response),
+                Ok(Err(AgentError::RoundsExceeded { rounds })) => envelope_result(
+                    &p.child_session_id,
+                    "rounds_exceeded",
+                    &format!(
+                        "child stopped after {rounds} rounds without producing a final response"
+                    ),
+                ),
+                Ok(Err(e)) => envelope_result(&p.child_session_id, "error", &format!("{e}")),
+                Err(_) => envelope_result(
+                    &p.child_session_id,
+                    "timeout",
+                    &format!(
+                        "child exceeded the {}s wall-clock budget",
+                        p.ceiling.max_runtime_secs
+                    ),
+                ),
+            };
+
+            let status_str = envelope_status(&envelope.output).unwrap_or_else(|| "ok".to_string());
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::SubagentResult {
+                    child_session_id: p.child_session_id.clone(),
+                    output: envelope.output.clone(),
+                    status: status_str,
+                },
+            )?;
+            final_results[idx] = envelope;
+        }
+
+        Ok(final_results)
     }
 
     /// Item 6 slice 1 — built-in `spawn_subagent` intercept. Routed

@@ -214,6 +214,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     .and_then(|s| s.strip_suffix(".amazonaws.com"))
                     .map(String::from);
             }
+            // Item 6 slice 2: per-agent tools_enabled override.
+            if let Some(override_val) = agent_cfg.tools_enabled {
+                llm.tools_enabled = override_val;
+            }
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 

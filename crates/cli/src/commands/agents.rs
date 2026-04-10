@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use dialoguer::{Input, Password, Select};
 
-use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore};
+use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, SubagentCeiling};
+use wirken_gateway::permissions::PermissionTier;
 use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
 use super::config;
@@ -139,6 +140,7 @@ pub async fn add() -> Result<()> {
         api_key_credential,
         channels: channels.clone(),
         allowed_subagents: Default::default(),
+        tools_enabled: None,
     };
 
     agent_store
@@ -237,5 +239,89 @@ pub async fn bind(agent_id: &str, channel: &str) -> Result<()> {
         .context(format!("Failed to bind '{channel}' to '{agent_id}'"))?;
 
     println!("  Channel '{channel}' bound to agent '{agent_id}'.");
+    Ok(())
+}
+
+pub async fn allow_subagent(
+    parent: &str,
+    child: &str,
+    tools: &str,
+    max_tier: &str,
+    max_rounds: usize,
+    max_runtime: u64,
+) -> Result<()> {
+    let cfg = config();
+    let store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+
+    let parent_cfg = store
+        .get(parent)
+        .context(format!("Parent agent '{parent}' not found"))?;
+
+    // Verify child agent exists
+    store
+        .get(child)
+        .context(format!("Child agent '{child}' not found"))?;
+
+    let tier = match max_tier {
+        "tier1" => PermissionTier::Tier1,
+        "tier2" => PermissionTier::Tier2,
+        "tier3" => PermissionTier::Tier3,
+        other => anyhow::bail!("unknown tier '{other}'; expected tier1, tier2, or tier3"),
+    };
+
+    let tool_allowlist: Vec<String> = if tools.is_empty() {
+        Vec::new()
+    } else {
+        tools.split(',').map(|s| s.trim().to_string()).collect()
+    };
+
+    let mut ceilings = parent_cfg.allowed_subagents;
+    ceilings.insert(
+        child.to_string(),
+        SubagentCeiling {
+            tool_allowlist: tool_allowlist.clone(),
+            max_permission_tier: tier,
+            max_rounds,
+            max_runtime_secs: max_runtime,
+        },
+    );
+    store
+        .set_allowed_subagents(parent, &ceilings)
+        .context("Failed to update allowed_subagents")?;
+
+    let tools_display = if tool_allowlist.is_empty() {
+        "(none)".to_string()
+    } else {
+        tool_allowlist.join(", ")
+    };
+    println!("  Agent '{parent}' may now spawn '{child}'.");
+    println!("  Tools: {tools_display}");
+    println!("  Max tier: {max_tier}");
+    println!("  Max rounds: {max_rounds}");
+    println!("  Max runtime: {max_runtime}s");
+    Ok(())
+}
+
+pub async fn deny_subagent(parent: &str, child: &str) -> Result<()> {
+    let cfg = config();
+    let store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+
+    let parent_cfg = store
+        .get(parent)
+        .context(format!("Parent agent '{parent}' not found"))?;
+
+    let mut ceilings = parent_cfg.allowed_subagents;
+    if ceilings.remove(child).is_none() {
+        println!("  Agent '{parent}' does not have '{child}' in its allowed subagents.");
+        return Ok(());
+    }
+
+    store
+        .set_allowed_subagents(parent, &ceilings)
+        .context("Failed to update allowed_subagents")?;
+
+    println!("  Removed '{child}' from '{parent}' allowed subagents.");
     Ok(())
 }
