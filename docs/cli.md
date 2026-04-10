@@ -116,12 +116,15 @@ wirken audit verify
 
 ## wirken sessions
 
-Manage active conversation sessions.
+Manage and verify conversation sessions.
 
 ```
 wirken sessions list [--channel <CHANNEL>]
 wirken sessions close <SESSION-ID>
+wirken sessions verify <SESSION-ID>
 ```
+
+`verify` replays the session log, re-checks per-session hash chain integrity, recomputes message hashes at each LlmRequest event, and re-executes deterministic tools (read_file, list_files) against the current workspace. Reports events as verified, unverifiable, or divergent.
 
 ## wirken permissions
 

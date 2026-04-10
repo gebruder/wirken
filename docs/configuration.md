@@ -8,8 +8,9 @@ All configuration lives in `~/.wirken/`. There are no hidden config files or env
 |------|---------|-----------|
 | `provider.json` | LLM provider, model, and base URL | `wirken setup` |
 | `vault.db` | Encrypted credentials (API keys, bot tokens) | `wirken setup` |
-| `audit.db` | Append-only audit log with hash chain | `wirken run` |
-| `sessions.db` | Active conversation sessions | `wirken run` |
+| `audit.db` | Session log (`session_events` table, per-session hash chain) + legacy `audit_events` view for SIEM | `wirken run` |
+| `sessions.db` | Session metadata (id, channel, conversation_id, timestamps, message count) | `wirken run` |
+| `agent_config.db` | Registered agent configs, channel bindings, subagent ceilings | `wirken agents add` |
 | `permissions.db` | Tool approval records | `wirken run` |
 | `adapters.db` | Registered channel adapters and Ed25519 keys | `wirken channel add` |
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |
@@ -114,4 +115,6 @@ The `vault:` prefix resolves values from the encrypted credential vault at runti
 |----------|---------|
 | `WIRKEN_DATA_DIR` | Override the data directory (default: `~/.wirken`) |
 | `WIRKEN_SKILLS_INDEX` | Override the skill registry URL |
+| `WIRKEN_CACHE_MODE` | `drop` bypasses the agent LRU cache — every inbound message wakes a fresh agent from the session log. Used in CI to assert cache equivalence. Default: `cached`. |
+| `WIRKEN_AGENT_CACHE_SIZE` | LRU cache capacity (number of hot sessions). Default: `64`. |
 | `RUST_LOG` | Control log verbosity (e.g., `RUST_LOG=wirken=debug`) |

@@ -76,6 +76,10 @@ Connect the agent to Datadog for querying logs, metrics, and incidents:
 
 ## Supported transports
 
-Currently supported: **stdio** (spawn process, communicate via stdin/stdout).
+- **stdio** — spawn process, communicate via stdin/stdout. Default for local MCP servers.
+- **HTTP** — connect to a remote MCP server over HTTP/HTTPS. Supports three auth modes:
+  - `NoAuth` — no authentication header.
+  - `BearerAuth` — static bearer token from the vault.
+  - `OAuth2Auth` — client credentials flow via the `oauth2` crate. Token refresh is automatic.
 
-SSE transport is planned for connecting to remote MCP servers.
+The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth2 client secrets) are held in the proxy process and never exposed to the agent.
