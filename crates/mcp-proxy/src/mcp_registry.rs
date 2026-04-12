@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use ed25519_dalek::VerifyingKey;
 use wirken_vault::CredentialStore;
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
@@ -44,13 +45,50 @@ pub type SharedVault = Arc<Mutex<Option<CredentialStore>>>;
 pub struct ProxyRegistry {
     /// agent_id → server_name → client
     by_agent: HashMap<String, HashMap<String, McpClient>>,
+    /// agent_id → Ed25519 public key used to authenticate incoming
+    /// proxy connections claiming this agent_id. Populated at proxy
+    /// startup from each agent's `identity.pub` file.
+    identities: HashMap<String, VerifyingKey>,
+    /// Per-credential OAuth refresh mutex. Guarantees that two
+    /// concurrent requests that both need to refresh the same
+    /// credential serialize through one token endpoint call —
+    /// providers that rotate refresh tokens (Google) invalidate the
+    /// second refresh otherwise. Keyed by the vault credential name
+    /// (after stripping the `vault:` prefix).
+    oauth_refresh_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl ProxyRegistry {
     pub fn new() -> Self {
         Self {
             by_agent: HashMap::new(),
+            identities: HashMap::new(),
+            oauth_refresh_locks: HashMap::new(),
         }
+    }
+
+    /// Register an Ed25519 public key as the authoritative identity
+    /// for `agent_id`. Overwrites any existing registration.
+    pub fn register_identity(&mut self, agent_id: &str, pubkey: VerifyingKey) {
+        self.identities.insert(agent_id.to_string(), pubkey);
+    }
+
+    /// Look up the registered Ed25519 public key for `agent_id`.
+    /// Used by the server handshake.
+    pub fn get_identity(&self, agent_id: &str) -> Option<&VerifyingKey> {
+        self.identities.get(agent_id)
+    }
+
+    /// Fetch (or lazily create) the per-credential refresh mutex for
+    /// `credential_name`. The same `Arc` is handed out across every
+    /// [`OAuth2Auth`] instance that references the same credential,
+    /// so two concurrent tool calls through two different MCP servers
+    /// sharing a vault entry still serialize their refreshes.
+    fn oauth_refresh_lock(&mut self, credential_name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.oauth_refresh_locks
+            .entry(credential_name.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Load all MCP servers for one agent. The vault store is shared
@@ -106,11 +144,16 @@ impl ProxyRegistry {
                         Some(McpAuth::Oauth2 {
                             provider,
                             credential,
-                        }) => Box::new(OAuth2Auth::new(
-                            strip_vault_prefix(credential).to_string(),
-                            provider.clone(),
-                            vault.clone(),
-                        )),
+                        }) => {
+                            let cred_name = strip_vault_prefix(credential).to_string();
+                            let refresh_lock = self.oauth_refresh_lock(&cred_name);
+                            Box::new(OAuth2Auth::new(
+                                cred_name,
+                                provider.clone(),
+                                vault.clone(),
+                                refresh_lock,
+                            ))
+                        }
                     };
 
                     let http = match HttpTransport::new(url.clone(), auth_provider) {

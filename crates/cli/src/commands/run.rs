@@ -463,8 +463,24 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // Connect each agent to the MCP proxy. The proxy client is held
     // in the AgentStaticConfig and shared across every waked Agent
     // for that agent_id (slice 2 design — see crates/agent/src/factory.rs).
+    //
+    // The proxy requires Ed25519 authentication. An agent whose
+    // identity file failed to load earlier (cfg.identity is None)
+    // cannot connect; we skip it with a warning rather than using
+    // a throwaway key the proxy would reject anyway.
     for (agent_id, cfg) in static_configs.iter_mut() {
-        match wirken_agent::mcp::McpProxyClient::connect(&mcp_proxy_socket, agent_id).await {
+        let identity = match cfg.identity.as_ref() {
+            Some(i) => i,
+            None => {
+                tracing::warn!(
+                    "skipping MCP proxy connection for agent '{agent_id}': no signing identity"
+                );
+                continue;
+            }
+        };
+        match wirken_agent::mcp::McpProxyClient::connect(&mcp_proxy_socket, agent_id, identity)
+            .await
+        {
             Ok(mut client) => {
                 if !client.has_servers() {
                     client.shutdown().await;

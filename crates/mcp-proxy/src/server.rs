@@ -1,18 +1,17 @@
 //! Unix domain socket server. Listens for agent connections, runs the
 //! NDJSON wire protocol from `wire.rs`, dispatches to `ProxyRegistry`.
 //!
-//! NOTE: this slice does NOT authenticate connecting agents — the
-//! filesystem ACL on the socket file (mode 0600 in the user's data
-//! directory) is the trust boundary. Identity-based auth using the
-//! existing Ed25519 handshake from `wirken-ipc` is planned for a
-//! follow-up commit. The threat we are defending against right now
-//! ("memory bug in the agent process leaks credentials") is solved
-//! by the OS process boundary alone; a sibling-process threat is out
-//! of scope for slice 1.
+//! Protocol version 2 authenticates every connecting agent via an
+//! Ed25519 challenge-response handshake. The filesystem ACL on the
+//! socket file (mode 0600 in the user's data directory) is a second
+//! line of defense — the authoritative trust boundary is the
+//! registered public key for each agent_id in the [`ProxyRegistry`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use rand::RngCore;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
@@ -20,8 +19,8 @@ use tokio::sync::Mutex;
 use crate::error::ProxyError;
 use crate::mcp_registry::ProxyRegistry;
 use crate::wire::{
-    Hello, HelloAck, HelloAckKind, HelloKind, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response,
-    ToolDefWire,
+    AuthChallenge, AuthChallengeKind, AuthResponse, AuthResponseKind, CHALLENGE_NONCE_BYTES,
+    HelloAck, HelloAckKind, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ToolDefWire,
 };
 
 /// Bind a UnixListener at `socket_path` with mode 0600 and run the
@@ -82,29 +81,18 @@ async fn handle_connection(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    // First frame must be Hello.
-    let agent_id = match read_line(&mut reader).await? {
-        Some(line) => {
-            let hello: Hello = serde_json::from_str(&line)
-                .map_err(|e| ProxyError::Protocol(format!("hello parse: {e}")))?;
-            if hello.kind != HelloKind::Hello {
-                return Err(ProxyError::Protocol(format!(
-                    "expected hello, got {:?}",
-                    hello.kind
-                )));
-            }
-            if hello.protocol_version != PROTOCOL_VERSION {
-                return Err(ProxyError::Protocol(format!(
-                    "protocol version mismatch: client {} proxy {}",
-                    hello.protocol_version, PROTOCOL_VERSION
-                )));
-            }
-            hello.agent_id
-        }
-        None => {
-            return Err(ProxyError::Protocol(
-                "connection closed before hello".into(),
-            ));
+    // Ed25519 challenge-response. The server speaks first so every
+    // connection gets a fresh nonce the client must sign — this
+    // prevents an offline attacker from replaying a captured
+    // AuthResponse.
+    let agent_id = match authenticate(&mut reader, &mut writer, &registry).await {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!("MCP proxy auth failed: {e}");
+            // Drop the connection without writing anything further.
+            // Returning here means the client sees a clean EOF with
+            // no HelloAck, which is its signal to disconnect.
+            return Err(e);
         }
     };
 
@@ -117,7 +105,7 @@ async fn handle_connection(
     };
     write_line(&mut writer, &ack).await?;
 
-    tracing::info!("MCP proxy: agent '{agent_id}' connected (has_servers={has_servers})");
+    tracing::info!("MCP proxy: agent '{agent_id}' authenticated (has_servers={has_servers})");
 
     // Request loop.
     loop {
@@ -149,6 +137,76 @@ async fn handle_connection(
             return Ok(());
         }
     }
+}
+
+/// Run the Ed25519 challenge-response handshake. Returns the
+/// authenticated agent_id on success, or a [`ProxyError::Protocol`]
+/// on any failure. Callers drop the connection without writing
+/// anything further on error.
+async fn authenticate(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    registry: &Arc<Mutex<ProxyRegistry>>,
+) -> Result<String, ProxyError> {
+    // 1. Generate and send a fresh challenge.
+    let mut nonce = [0u8; CHALLENGE_NONCE_BYTES];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let nonce_hex = hex_encode(&nonce);
+
+    let challenge = AuthChallenge {
+        kind: AuthChallengeKind::AuthChallenge,
+        protocol_version: PROTOCOL_VERSION,
+        nonce: nonce_hex,
+    };
+    write_line(writer, &challenge).await?;
+
+    // 2. Read the client's AuthResponse.
+    let line = read_line(reader)
+        .await?
+        .ok_or_else(|| ProxyError::Protocol("connection closed before auth response".into()))?;
+    let response: AuthResponse = serde_json::from_str(&line)
+        .map_err(|e| ProxyError::Protocol(format!("auth response parse: {e}")))?;
+    if response.kind != AuthResponseKind::AuthResponse {
+        return Err(ProxyError::Protocol(format!(
+            "expected auth_response, got {:?}",
+            response.kind
+        )));
+    }
+
+    // 3. Decode the public key and signature.
+    let pubkey_bytes = hex_decode_fixed::<32>(&response.public_key)
+        .map_err(|e| ProxyError::Protocol(format!("public key decode: {e}")))?;
+    let sig_bytes = hex_decode_fixed::<64>(&response.signature)
+        .map_err(|e| ProxyError::Protocol(format!("signature decode: {e}")))?;
+
+    // 4. Confirm the agent_id is registered AND the pubkey matches.
+    //    Reject before touching the signature so a bogus agent_id
+    //    does not leak a timing channel against the verifier.
+    {
+        let reg = registry.lock().await;
+        let registered = reg.get_identity(&response.agent_id).ok_or_else(|| {
+            ProxyError::Protocol(format!(
+                "agent '{}' is not registered with the MCP proxy",
+                response.agent_id
+            ))
+        })?;
+        if registered.to_bytes() != pubkey_bytes {
+            return Err(ProxyError::Protocol(format!(
+                "agent '{}' presented a public key that does not match its registered identity",
+                response.agent_id
+            )));
+        }
+    }
+
+    // 5. Verify the signature over the nonce.
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| ProxyError::Protocol(format!("invalid ed25519 public key: {e}")))?;
+    let signature = Signature::from_bytes(&sig_bytes);
+    verifying_key
+        .verify(&nonce, &signature)
+        .map_err(|_| ProxyError::Protocol("ed25519 signature verification failed".into()))?;
+
+    Ok(response.agent_id)
 }
 
 async fn dispatch(
@@ -227,4 +285,25 @@ async fn write_line<T: serde::Serialize>(
     writer.write_all(&bytes).await?;
     writer.flush().await?;
     Ok(())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(&mut s, "{b:02x}").expect("write to String");
+    }
+    s
+}
+
+fn hex_decode_fixed<const N: usize>(hex: &str) -> Result<[u8; N], String> {
+    if hex.len() != N * 2 {
+        return Err(format!("expected {} hex chars, got {}", N * 2, hex.len()));
+    }
+    let mut out = [0u8; N];
+    for i in 0..N {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("hex decode: {e}"))?;
+    }
+    Ok(out)
 }

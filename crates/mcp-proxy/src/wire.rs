@@ -5,10 +5,25 @@
 //! bytes — readers MUST enforce this before allocating, to defend
 //! against a malicious peer sending an unbounded line.
 //!
-//! The protocol is stateful: every connection MUST send a [`Hello`]
-//! frame as its first message and receive a [`HelloAck`] before any
-//! other frame is exchanged. The hello carries the `agent_id` so the
-//! proxy knows which subset of MCP servers to expose to this caller.
+//! ## Handshake
+//!
+//! Protocol version 2 adds an Ed25519 challenge-response handshake
+//! before any other traffic. Ported from `wirken_ipc::auth` — same
+//! primitives, different framing.
+//!
+//! 1. Server → client: [`AuthChallenge`] with a fresh 32-byte nonce.
+//! 2. Client → server: [`AuthResponse`] with `agent_id`, the client's
+//!    Ed25519 public key, and an Ed25519 signature over the nonce.
+//! 3. Server verifies that `agent_id` is registered with a matching
+//!    public key and that the signature is valid. On success the
+//!    server sends [`HelloAck`] with `has_servers`; on failure the
+//!    server closes the connection without sending a frame.
+//!
+//! The handshake is the only authoritative trust boundary. The prior
+//! "filesystem ACL is the trust boundary" model is retired — any
+//! sibling process running as the same user could previously claim an
+//! agent id verbatim and invoke tools under that agent's stored
+//! credentials.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,21 +32,55 @@ use serde::{Deserialize, Serialize};
 /// connection is dropped.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
-/// First frame on every connection. Sent by the agent.
+/// Current protocol version. Bumped to 2 when the Ed25519 handshake
+/// replaced the old self-declared-agent_id `Hello` frame. Old clients
+/// speaking version 1 will fail to parse the server's first frame and
+/// disconnect.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Size of the authentication challenge nonce in bytes.
+pub const CHALLENGE_NONCE_BYTES: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Handshake frames
+// ---------------------------------------------------------------------------
+
+/// First frame on every connection. Sent by the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hello {
-    pub kind: HelloKind,
+pub struct AuthChallenge {
+    pub kind: AuthChallengeKind,
     pub protocol_version: u32,
-    pub agent_id: String,
+    /// 32 bytes hex-encoded (64 ASCII chars).
+    pub nonce: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum HelloKind {
-    Hello,
+pub enum AuthChallengeKind {
+    AuthChallenge,
 }
 
-/// Reply to [`Hello`]. Sent by the proxy.
+/// Reply to [`AuthChallenge`]. Sent by the client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthResponse {
+    pub kind: AuthResponseKind,
+    pub agent_id: String,
+    /// 32-byte Ed25519 public key, hex-encoded (64 chars).
+    pub public_key: String,
+    /// 64-byte Ed25519 signature over the challenge nonce, hex-encoded
+    /// (128 chars).
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthResponseKind {
+    AuthResponse,
+}
+
+/// Sent by the server after a successful handshake. Carries
+/// `has_servers` so the client can short-circuit when no MCP servers
+/// are loaded for this agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloAck {
     pub kind: HelloAckKind,
@@ -46,8 +95,9 @@ pub enum HelloAckKind {
     HelloAck,
 }
 
-/// Current protocol version. Bump on any wire-incompatible change.
-pub const PROTOCOL_VERSION: u32 = 1;
+// ---------------------------------------------------------------------------
+// Post-handshake request/response
+// ---------------------------------------------------------------------------
 
 /// A request from the agent to the proxy. Tagged by `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

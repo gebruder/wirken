@@ -1,14 +1,21 @@
 //! Client for `wirken-mcp-proxy`.
 //!
-//! Connects to the proxy's Unix domain socket, performs the NDJSON
-//! hello handshake, fetches the agent's tool definitions on
-//! `connect_and_load`, and serves `call_tool` requests by sending
+//! Connects to the proxy's Unix domain socket, performs the Ed25519
+//! challenge-response handshake, fetches the agent's tool definitions
+//! on `connect_and_load`, and serves `call_tool` requests by sending
 //! one-shot RPCs over the same connection.
 //!
 //! Single-threaded use is assumed: each `McpProxyClient` instance is
 //! held by exactly one `Agent` and the `Agent` serializes its tool
 //! calls. Concurrent calls on the same client would scramble the
 //! NDJSON request/response stream — wrap in a `Mutex` if shared.
+//!
+//! ## Handshake
+//!
+//! 1. Server sends [`AuthChallenge`] with a fresh nonce.
+//! 2. Client signs the nonce with its [`AgentIdentity`] Ed25519 key.
+//! 3. Client sends [`AuthResponse`] with agent_id, public key, signature.
+//! 4. Server verifies and sends [`HelloAck`] (or drops the connection).
 
 use std::path::Path;
 use std::time::Duration;
@@ -18,11 +25,12 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use wirken_mcp_proxy::wire::{
-    Hello, HelloAck, HelloAckKind, HelloKind, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response,
-    ToolDefWire,
+    AuthChallenge, AuthChallengeKind, AuthResponse, AuthResponseKind, HelloAck, HelloAckKind,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ToolDefWire,
 };
 
 use crate::error::AgentError;
+use crate::identity::AgentIdentity;
 use crate::tool::{ToolDef, ToolResult};
 
 /// Maximum time to wait for the proxy socket to become reachable.
@@ -43,27 +51,65 @@ pub struct McpProxyClient {
 }
 
 impl McpProxyClient {
-    /// Connect to the proxy and perform the hello handshake. Returns a
-    /// client whose tool definitions are not yet loaded — call
-    /// [`Self::load_tools`] to populate them.
-    pub async fn connect(socket_path: &Path, agent_id: &str) -> Result<Self, AgentError> {
+    /// Connect to the proxy and perform the Ed25519 handshake. The
+    /// caller provides an [`AgentIdentity`] whose public key must be
+    /// registered with the proxy at startup (via the agent's
+    /// `identity.pub` file in the data directory) — otherwise the
+    /// proxy drops the connection without a HelloAck.
+    ///
+    /// Returns a client whose tool definitions are not yet loaded —
+    /// call [`Self::load_tools`] to populate them.
+    pub async fn connect(
+        socket_path: &Path,
+        agent_id: &str,
+        identity: &AgentIdentity,
+    ) -> Result<Self, AgentError> {
         let stream = connect_with_retry(socket_path).await?;
         let (read_half, write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
 
-        // Send Hello.
-        let hello = Hello {
-            kind: HelloKind::Hello,
-            protocol_version: PROTOCOL_VERSION,
-            agent_id: agent_id.to_string(),
-        };
-        write_line(&mut writer, &hello).await?;
-
-        // Read HelloAck.
+        // 1. Read the server's AuthChallenge.
         let line = read_line(&mut reader)
             .await?
-            .ok_or_else(|| AgentError::Mcp("proxy closed before hello ack".into()))?;
+            .ok_or_else(|| AgentError::Mcp("proxy closed before auth challenge".into()))?;
+        let challenge: AuthChallenge = serde_json::from_str(&line)
+            .map_err(|e| AgentError::Mcp(format!("auth challenge parse: {e}")))?;
+        if challenge.kind != AuthChallengeKind::AuthChallenge {
+            return Err(AgentError::Mcp(format!(
+                "expected auth_challenge, got {:?}",
+                challenge.kind
+            )));
+        }
+        if challenge.protocol_version != PROTOCOL_VERSION {
+            return Err(AgentError::Mcp(format!(
+                "proxy protocol version mismatch: client {PROTOCOL_VERSION} proxy {}",
+                challenge.protocol_version
+            )));
+        }
+
+        // 2. Sign the nonce with this agent's Ed25519 secret key.
+        let nonce = hex_decode(&challenge.nonce)
+            .map_err(|e| AgentError::Mcp(format!("challenge nonce decode: {e}")))?;
+        let signature = identity.sign(&nonce);
+
+        // 3. Send AuthResponse.
+        let response = AuthResponse {
+            kind: AuthResponseKind::AuthResponse,
+            agent_id: agent_id.to_string(),
+            public_key: hex_encode(&identity.public_key_bytes()),
+            signature: hex_encode(&signature.to_bytes()),
+        };
+        write_line(&mut writer, &response).await?;
+
+        // 4. Read HelloAck (or EOF, meaning the proxy rejected us).
+        let line = read_line(&mut reader).await?.ok_or_else(|| {
+            AgentError::Mcp(
+                "proxy rejected the handshake (no HelloAck) — \
+                     is this agent's identity.pub registered with the proxy?"
+                    .into(),
+            )
+        })?;
         let ack: HelloAck = serde_json::from_str(&line)
             .map_err(|e| AgentError::Mcp(format!("hello ack parse: {e}")))?;
         if ack.kind != HelloAckKind::HelloAck {
@@ -260,4 +306,23 @@ fn wire_to_tool_def(w: ToolDefWire) -> ToolDef {
         description: w.description,
         parameters: w.parameters,
     }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(&mut s, "{b:02x}").expect("write to String");
+    }
+    s
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("odd-length hex string".into());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
 }

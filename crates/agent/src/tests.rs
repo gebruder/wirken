@@ -2075,16 +2075,25 @@ async fn mcp_proxy_client_connects_and_reports_no_servers() {
     use wirken_mcp_proxy::mcp_registry::ProxyRegistry;
     use wirken_mcp_proxy::server;
 
+    use crate::identity::AgentIdentity;
     use crate::mcp::McpProxyClient;
 
     let tmp = TempDir::new().unwrap();
     let socket_path = tmp.path().join("mcp-proxy.sock");
 
-    // Start a proxy server in-process with an empty registry. The
-    // server::serve loop binds the socket and accepts connections; we
-    // abort it at the end of the test.
+    // Generate an identity and register its pubkey with the proxy
+    // before spawning the server. The handshake requires the
+    // server to already know the agent's key.
+    let identity = AgentIdentity::generate("test-agent");
+    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(&identity.public_key_bytes()).unwrap();
+    let mut reg = ProxyRegistry::new();
+    reg.register_identity("test-agent", pubkey);
+
+    // Start a proxy server in-process with the registered identity.
+    // The server::serve loop binds the socket and accepts
+    // connections; we abort it at the end of the test.
     let server_socket = socket_path.clone();
-    let registry = Arc::new(Mutex::new(ProxyRegistry::new()));
+    let registry = Arc::new(Mutex::new(reg));
     let server_handle = tokio::spawn(async move {
         let _ = server::serve(server_socket, registry).await;
     });
@@ -2092,7 +2101,7 @@ async fn mcp_proxy_client_connects_and_reports_no_servers() {
     // McpProxyClient::connect already retries the socket, so we don't
     // need to wait for the file ourselves — it will appear within the
     // 5s connect window.
-    let mut client = McpProxyClient::connect(&socket_path, "test-agent")
+    let mut client = McpProxyClient::connect(&socket_path, "test-agent", &identity)
         .await
         .expect("connect to in-process proxy");
     assert!(!client.has_servers());
