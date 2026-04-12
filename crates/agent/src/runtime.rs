@@ -531,6 +531,92 @@ impl Agent {
         Ok(self.skills.len())
     }
 
+    /// Item 4 slice 2.5 — if fit() just trimmed substantive content,
+    /// call the LLM to produce a free-text summary and replace the
+    /// deterministic aggregate in the Role::Compaction message. The
+    /// summary gives the model actual context about what was
+    /// discussed in the trimmed turns, not just byte counts.
+    ///
+    /// No-op when `trimmed_messages` is empty. Uses the agent's
+    /// primary LLM client (a separate compaction_model config is
+    /// future work).
+    async fn maybe_summarize_trimmed(
+        &mut self,
+        trimmed: &[crate::context::TrimmedMessage],
+    ) -> Result<(), AgentError> {
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        // Build a summarization prompt from the trimmed content.
+        let mut prompt = String::from(
+            "The following earlier conversation messages were trimmed to fit \
+             the context window. Summarize the key facts, decisions, and \
+             context in a concise paragraph. Only state facts from the \
+             messages. Do not add commentary.\n\n",
+        );
+        for tm in trimmed {
+            let role_label = match tm.role {
+                crate::conversation::Role::User => "User",
+                crate::conversation::Role::Assistant => "Assistant",
+                crate::conversation::Role::Tool => "Tool result",
+                crate::conversation::Role::System => continue,
+                crate::conversation::Role::Compaction => continue,
+            };
+            // Cap each message to avoid blowing the summarization
+            // call's own budget. 2000 chars is enough context.
+            let cap = tm.content.chars().take(2000).collect::<String>();
+            prompt.push_str(&format!("[{role_label}]: {cap}\n\n"));
+        }
+
+        let messages = vec![crate::conversation::Message {
+            role: crate::conversation::Role::User,
+            content: prompt,
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+
+        match self
+            .llm
+            .complete(&messages, &[], self.api_key.as_deref())
+            .await
+        {
+            Ok(LlmResponse::Text(summary)) => {
+                // Replace the Compaction message content with the
+                // model summary + a note that it was model-generated.
+                let existing = self
+                    .conversation
+                    .messages()
+                    .iter()
+                    .position(|m| m.role == crate::conversation::Role::Compaction);
+                if let Some(idx) = existing {
+                    let combined = format!(
+                        "{}\n\nModel summary of trimmed content:\n{}",
+                        self.conversation.messages()[idx].content,
+                        summary
+                    );
+                    self.conversation.replace_content(idx, combined);
+                }
+                tracing::debug!("compaction model summary: {} chars", summary.len());
+            }
+            Ok(_) => {
+                // Empty or tool-call response from summarizer. Keep
+                // the deterministic aggregate as-is.
+                tracing::debug!("compaction summarizer returned non-text; keeping aggregate");
+            }
+            Err(e) => {
+                // Summarization failed. Keep the deterministic
+                // aggregate. This is not fatal.
+                tracing::warn!(
+                    "compaction summarizer failed: {e}; keeping deterministic aggregate"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Item 10 follow-up — write a [`SessionEvent::SystemPromptSet`]
     /// for the current effective system prompt, but only if it has
     /// drifted from the most recently recorded value (or has never
@@ -783,12 +869,14 @@ impl Agent {
         tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Initial fit before the first LLM call.
-        self.context_engine.fit(
+        let fit_result = self.context_engine.fit(
             &mut self.conversation,
             &tool_defs,
             &*self.session_log,
             &self.session_handle,
         )?;
+        self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
+            .await?;
 
         let mut rounds = 0;
         let mut denials = Vec::new();
@@ -809,12 +897,14 @@ impl Agent {
             // Refit before every LLM call inside the tool loop. A
             // single large tool result can push us over budget after
             // a successful initial fit; this catches it.
-            self.context_engine.fit(
+            let fit_result = self.context_engine.fit(
                 &mut self.conversation,
                 &tool_defs,
                 &*self.session_log,
                 &self.session_handle,
             )?;
+            self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
+                .await?;
 
             // Item 10 slice 1: durably log the LLM call inputs and
             // outputs so `Agent::verify` can reproduce them. The hash
@@ -998,12 +1088,14 @@ impl Agent {
         tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
 
         // Initial fit before the first LLM call.
-        self.context_engine.fit(
+        let fit_result = self.context_engine.fit(
             &mut self.conversation,
             &tool_defs,
             &*self.session_log,
             &self.session_handle,
         )?;
+        self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
+            .await?;
 
         let mut rounds = 0;
         let mut denials = Vec::new();
@@ -1017,12 +1109,14 @@ impl Agent {
             }
 
             // Refit before every LLM call inside the tool loop.
-            self.context_engine.fit(
+            let fit_result = self.context_engine.fit(
                 &mut self.conversation,
                 &tool_defs,
                 &*self.session_log,
                 &self.session_handle,
             )?;
+            self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
+                .await?;
 
             // Item 10 slice 1: log LlmRequest after fit() so the
             // hash captures what was actually sent. Same as the
