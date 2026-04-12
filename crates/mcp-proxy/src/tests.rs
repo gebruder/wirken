@@ -4,22 +4,122 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use ed25519_dalek::{Signer, SigningKey};
+use rand::RngCore;
+
 use crate::mcp_registry::ProxyRegistry;
 use crate::server;
-use crate::wire::{Hello, HelloAck, HelloAckKind, HelloKind, PROTOCOL_VERSION, Request, Response};
+use crate::wire::{
+    AuthChallenge, AuthChallengeKind, AuthResponse, AuthResponseKind, HelloAck, HelloAckKind,
+    PROTOCOL_VERSION, Request, Response,
+};
+
+/// Hex-encode bytes. Matches the server's implementation.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        write!(&mut s, "{b:02x}").expect("write to String");
+    }
+    s
+}
+
+/// Hex-decode a 32-byte value.
+fn hex_decode_32(hex: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    out
+}
+
+/// Complete a handshake on `stream` against a proxy that has
+/// registered `signing_key.verifying_key()` for `agent_id`. Returns
+/// the parsed HelloAck on success.
+async fn do_handshake(
+    stream: &mut UnixStream,
+    agent_id: &str,
+    signing_key: &SigningKey,
+) -> Result<HelloAck, String> {
+    // Read AuthChallenge.
+    let challenge: AuthChallenge = read_one_line_result(stream)
+        .await
+        .map_err(|e| format!("read challenge: {e}"))?;
+    if challenge.kind != AuthChallengeKind::AuthChallenge {
+        return Err(format!("expected auth_challenge, got {:?}", challenge.kind));
+    }
+
+    // Sign nonce.
+    let nonce = hex_decode_32(&challenge.nonce);
+    let signature = signing_key.sign(&nonce);
+
+    // Send AuthResponse.
+    let response = AuthResponse {
+        kind: AuthResponseKind::AuthResponse,
+        agent_id: agent_id.to_string(),
+        public_key: hex_encode(&signing_key.verifying_key().to_bytes()),
+        signature: hex_encode(&signature.to_bytes()),
+    };
+    let mut bytes = serde_json::to_vec(&response).unwrap();
+    bytes.push(b'\n');
+    stream
+        .write_all(&bytes)
+        .await
+        .map_err(|e| format!("write response: {e}"))?;
+
+    // Read HelloAck.
+    read_one_line_result(stream)
+        .await
+        .map_err(|e| format!("read ack: {e}"))
+}
+
+/// Read one newline-delimited JSON frame, returning an error instead
+/// of panicking. Used by the handshake helper above.
+async fn read_one_line_result<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+) -> Result<T, String> {
+    let mut buf = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let n = stream.read(&mut byte).await.map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("eof".into());
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        buf.push(byte[0]);
+    }
+    let s = String::from_utf8(buf).map_err(|e| e.to_string())?;
+    serde_json::from_str(&s).map_err(|e| format!("parse {s}: {e}"))
+}
 
 #[test]
-fn hello_round_trip() {
-    let h = Hello {
-        kind: HelloKind::Hello,
+fn auth_challenge_round_trip() {
+    let c = AuthChallenge {
+        kind: AuthChallengeKind::AuthChallenge,
         protocol_version: PROTOCOL_VERSION,
-        agent_id: "work".into(),
+        nonce: "a".repeat(64),
     };
-    let s = serde_json::to_string(&h).unwrap();
-    let parsed: Hello = serde_json::from_str(&s).unwrap();
-    assert_eq!(parsed.kind, HelloKind::Hello);
-    assert_eq!(parsed.agent_id, "work");
+    let s = serde_json::to_string(&c).unwrap();
+    let parsed: AuthChallenge = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed.kind, AuthChallengeKind::AuthChallenge);
     assert_eq!(parsed.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(parsed.nonce.len(), 64);
+}
+
+#[test]
+fn auth_response_round_trip() {
+    let r = AuthResponse {
+        kind: AuthResponseKind::AuthResponse,
+        agent_id: "work".into(),
+        public_key: "b".repeat(64),
+        signature: "c".repeat(128),
+    };
+    let s = serde_json::to_string(&r).unwrap();
+    let parsed: AuthResponse = serde_json::from_str(&s).unwrap();
+    assert_eq!(parsed.kind, AuthResponseKind::AuthResponse);
+    assert_eq!(parsed.agent_id, "work");
 }
 
 #[test]
@@ -109,11 +209,17 @@ fn response_error_round_trip() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn server_round_trip_empty_registry() {
+async fn server_round_trip_empty_registry_with_auth() {
     let tmp = TempDir::new().unwrap();
     let socket_path = tmp.path().join("mcp-proxy.sock");
 
-    let registry = Arc::new(Mutex::new(ProxyRegistry::new()));
+    // Generate a signing key and register its public half under
+    // "test-agent" so the handshake succeeds.
+    let signing_key = SigningKey::generate(&mut rand::thread_rng());
+    let mut reg = ProxyRegistry::new();
+    reg.register_identity("test-agent", signing_key.verifying_key());
+    let registry = Arc::new(Mutex::new(reg));
+
     let server_socket = socket_path.clone();
     let server_registry = registry.clone();
     let server_handle = tokio::spawn(async move {
@@ -131,17 +237,9 @@ async fn server_round_trip_empty_registry() {
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
-    // Hello
-    let hello = Hello {
-        kind: HelloKind::Hello,
-        protocol_version: PROTOCOL_VERSION,
-        agent_id: "test-agent".into(),
-    };
-    let mut bytes = serde_json::to_vec(&hello).unwrap();
-    bytes.push(b'\n');
-    stream.write_all(&bytes).await.unwrap();
-
-    let ack: HelloAck = read_one_line(&mut stream).await;
+    let ack = do_handshake(&mut stream, "test-agent", &signing_key)
+        .await
+        .expect("handshake");
     assert_eq!(ack.kind, HelloAckKind::HelloAck);
     assert_eq!(ack.protocol_version, PROTOCOL_VERSION);
     assert!(
@@ -172,6 +270,129 @@ async fn server_round_trip_empty_registry() {
 
     let resp: Response = read_one_line(&mut stream).await;
     assert!(matches!(resp, Response::ShutdownAck { id: 2 }));
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn server_rejects_unknown_agent_id() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("mcp-proxy.sock");
+
+    // Registry has an identity for "work" but not for "evil".
+    let known_key = SigningKey::generate(&mut rand::thread_rng());
+    let mut reg = ProxyRegistry::new();
+    reg.register_identity("work", known_key.verifying_key());
+    let registry = Arc::new(Mutex::new(reg));
+
+    let server_socket = socket_path.clone();
+    let server_registry = registry.clone();
+    let server_handle = tokio::spawn(async move {
+        let _ = server::serve(server_socket, server_registry).await;
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    // Claim "evil" with a valid-but-unregistered key.
+    let evil_key = SigningKey::generate(&mut rand::thread_rng());
+    let result = do_handshake(&mut stream, "evil", &evil_key).await;
+    assert!(
+        result.is_err(),
+        "handshake with unregistered agent_id must fail, got {result:?}"
+    );
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn server_rejects_wrong_signing_key_for_registered_agent() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("mcp-proxy.sock");
+
+    // Registry registers "work"'s real pubkey; the attacker will try
+    // to impersonate "work" with a different key.
+    let real_key = SigningKey::generate(&mut rand::thread_rng());
+    let attacker_key = SigningKey::generate(&mut rand::thread_rng());
+    let mut reg = ProxyRegistry::new();
+    reg.register_identity("work", real_key.verifying_key());
+    let registry = Arc::new(Mutex::new(reg));
+
+    let server_socket = socket_path.clone();
+    let server_registry = registry.clone();
+    let server_handle = tokio::spawn(async move {
+        let _ = server::serve(server_socket, server_registry).await;
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+    let result = do_handshake(&mut stream, "work", &attacker_key).await;
+    assert!(
+        result.is_err(),
+        "handshake with wrong signing key must fail, got {result:?}"
+    );
+
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn server_rejects_tampered_signature() {
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("mcp-proxy.sock");
+
+    let signing_key = SigningKey::generate(&mut rand::thread_rng());
+    let mut reg = ProxyRegistry::new();
+    reg.register_identity("work", signing_key.verifying_key());
+    let registry = Arc::new(Mutex::new(reg));
+
+    let server_socket = socket_path.clone();
+    let server_registry = registry.clone();
+    let server_handle = tokio::spawn(async move {
+        let _ = server::serve(server_socket, server_registry).await;
+    });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut stream = UnixStream::connect(&socket_path).await.unwrap();
+
+    // Read the real challenge but send a signature over a different
+    // nonce — the proxy must reject.
+    let challenge: AuthChallenge = read_one_line(&mut stream).await;
+    let mut wrong_nonce = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut wrong_nonce);
+    assert_ne!(hex_decode_32(&challenge.nonce), wrong_nonce);
+
+    let bad_sig = signing_key.sign(&wrong_nonce);
+    let response = AuthResponse {
+        kind: AuthResponseKind::AuthResponse,
+        agent_id: "work".into(),
+        public_key: hex_encode(&signing_key.verifying_key().to_bytes()),
+        signature: hex_encode(&bad_sig.to_bytes()),
+    };
+    let mut bytes = serde_json::to_vec(&response).unwrap();
+    bytes.push(b'\n');
+    stream.write_all(&bytes).await.unwrap();
+
+    // Expect EOF, not a HelloAck.
+    let mut buf = [0u8; 1];
+    let n = stream.read(&mut buf).await.unwrap_or(0);
+    assert_eq!(
+        n, 0,
+        "expected EOF after signature verify failure, got {n} bytes"
+    );
 
     server_handle.abort();
 }
@@ -368,7 +589,11 @@ mod oauth_test {
 }
 
 #[tokio::test]
-async fn server_rejects_protocol_version_mismatch() {
+async fn server_rejects_garbage_first_frame() {
+    // In version 2 the server speaks first (AuthChallenge), then
+    // reads the client's AuthResponse. If the client sends garbage
+    // instead of a well-formed AuthResponse, the server must drop
+    // the connection without writing a HelloAck.
     let tmp = TempDir::new().unwrap();
     let socket_path = tmp.path().join("mcp-proxy.sock");
     let registry = Arc::new(Mutex::new(ProxyRegistry::new()));
@@ -388,21 +613,18 @@ async fn server_rejects_protocol_version_mismatch() {
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
 
-    let hello = Hello {
-        kind: HelloKind::Hello,
-        protocol_version: 9999, // bogus
-        agent_id: "test-agent".into(),
-    };
-    let mut bytes = serde_json::to_vec(&hello).unwrap();
-    bytes.push(b'\n');
-    stream.write_all(&bytes).await.unwrap();
+    // Read and discard the challenge.
+    let _challenge: AuthChallenge = read_one_line(&mut stream).await;
 
-    // Server should drop the connection without responding.
+    // Send garbage.
+    stream.write_all(b"not json at all\n").await.unwrap();
+
+    // Server should drop the connection without writing a HelloAck.
     let mut buf = [0u8; 1];
     let n = stream.read(&mut buf).await.unwrap_or(0);
     assert_eq!(
         n, 0,
-        "expected EOF after protocol version mismatch, got {n} bytes"
+        "expected EOF after malformed auth response, got {n} bytes"
     );
 
     server_handle.abort();

@@ -22,6 +22,8 @@ oauth2 = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 open = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
