@@ -325,3 +325,36 @@ pub async fn deny_subagent(parent: &str, child: &str) -> Result<()> {
     println!("  Removed '{child}' from '{parent}' allowed subagents.");
     Ok(())
 }
+
+pub async fn set(id: &str, tools_enabled: Option<&str>) -> Result<()> {
+    let cfg = config();
+    let store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+
+    // Verify agent exists.
+    store.get(id).context(format!("Agent '{id}' not found"))?;
+
+    if let Some(val) = tools_enabled {
+        let parsed = match val {
+            "true" => Some(true),
+            "false" => Some(false),
+            "auto" => None,
+            other => anyhow::bail!(
+                "invalid --tools-enabled value '{other}'; expected true, false, or auto"
+            ),
+        };
+        store
+            .set_tools_enabled(id, parsed)
+            .context("Failed to update tools_enabled")?;
+        let display = match parsed {
+            Some(true) => "true (tools always on)",
+            Some(false) => "false (tools always off)",
+            None => "auto (provider default)",
+        };
+        println!("  Agent '{id}' tools_enabled set to {display}.");
+    } else {
+        println!("  No settings to change. Use --tools-enabled <true|false|auto>.");
+    }
+
+    Ok(())
+}

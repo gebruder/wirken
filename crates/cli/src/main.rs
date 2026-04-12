@@ -219,6 +219,14 @@ enum AgentCommands {
         /// Child agent ID
         child: String,
     },
+    /// Update a per-agent setting
+    Set {
+        /// Agent ID
+        id: String,
+        /// Override tool calling: true, false, or auto (provider default)
+        #[arg(long)]
+        tools_enabled: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -430,6 +438,9 @@ async fn main() -> Result<()> {
             }
             AgentCommands::DenySubagent { parent, child } => {
                 commands::agents::deny_subagent(&parent, &child).await
+            }
+            AgentCommands::Set { id, tools_enabled } => {
+                commands::agents::set(&id, tools_enabled.as_deref()).await
             }
         },
         Commands::Cron(cmd) => match cmd {

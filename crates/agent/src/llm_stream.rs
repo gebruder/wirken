@@ -272,12 +272,18 @@ impl LlmClient {
             "stream": true,
         });
 
+        // Item 4 slice 3: same cache_control treatment as the
+        // non-streaming path. See complete_anthropic.
         if !system_prompt.is_empty() {
-            body["system"] = serde_json::Value::String(system_prompt);
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }]);
         }
 
         if !tools.is_empty() {
-            let tools_json: Vec<serde_json::Value> = tools
+            let mut tools_json: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|t| {
                     serde_json::json!({
@@ -287,6 +293,9 @@ impl LlmClient {
                     })
                 })
                 .collect();
+            if let Some(last) = tools_json.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
             body["tools"] = serde_json::Value::Array(tools_json);
         }
 
