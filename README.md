@@ -2,7 +2,7 @@
 
 Wirken is a self-hosted AI agent gateway with cryptographic audit trails, per-channel process isolation, and crash-recoverable sessions. Single static Rust binary. No cloud dependency.
 
-It connects to the messaging platforms you already use (Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage) and routes conversations to an LLM agent that can execute tools on your behalf. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to an append-only, hash-chained session log before execution.
+It connects to the messaging platforms you already use (Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage) and routes conversations to an LLM agent that can execute tools on your behalf. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to a queryable, append-only, hash-chained session log before execution.
 
 ## Install and run
 
