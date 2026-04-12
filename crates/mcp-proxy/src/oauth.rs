@@ -365,21 +365,56 @@ async fn accept_callback(listener: tokio::net::TcpListener) -> Result<CallbackPa
         .map_err(|e| ProxyError::Vault(format!("read callback: {e}")))?;
     let request = String::from_utf8_lossy(&buf[..n]);
     let first_line = request.lines().next().unwrap_or("");
-    // Expecting "GET /callback?code=...&state=... HTTP/1.1"
+    // Expecting "GET /callback?code=...&state=... HTTP/1.1" — or, on
+    // user denial, "GET /callback?error=access_denied&...".
     let path = first_line.split_whitespace().nth(1).unwrap_or("");
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
 
     let mut code = None;
     let mut state = None;
+    let mut error = None;
+    let mut error_description = None;
     for kv in query.split('&') {
         if let Some((k, v)) = kv.split_once('=') {
             let decoded = percent_decode(v);
             match k {
                 "code" => code = Some(decoded),
                 "state" => state = Some(decoded),
+                "error" => error = Some(decoded),
+                "error_description" => error_description = Some(decoded),
                 _ => {}
             }
         }
+    }
+
+    // If the provider returned an error (typically because the user
+    // clicked "deny"), send a friendlier page to the browser and
+    // surface the error to the caller. The CLI shows this message
+    // instead of the confusing "missing `code` parameter".
+    if let Some(err) = error {
+        let desc = error_description.unwrap_or_default();
+        let body = format!(
+            "<html><body><h1>wirken: authorization failed</h1>\
+                 <p>The provider returned <code>error={err}</code>.</p>\
+                 <p>{desc}</p>\
+                 <p>You can close this tab and try again.</p></body></html>"
+        );
+        let response = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body,
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.flush().await;
+
+        let detail = if desc.is_empty() {
+            String::new()
+        } else {
+            format!(": {desc}")
+        };
+        return Err(ProxyError::Vault(format!(
+            "OAuth authorization failed ({err}){detail}"
+        )));
     }
 
     let body = "<html><body><h1>wirken: authorization complete</h1>\

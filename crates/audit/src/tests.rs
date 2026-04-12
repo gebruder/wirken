@@ -625,30 +625,64 @@ mod session {
 
     #[test]
     fn rewind_drops_most_recent_n_events() {
+        use crate::{SessionEvent, SessionVerifyResult};
+
         let (log, h) = fresh();
         for i in 0..5 {
             log.append(&h, TrustLevel::User, user_msg(&format!("m{i}")))
                 .unwrap();
         }
-        // rewind(0) is a no-op
-        assert_eq!(log.rewind(&h, 0).unwrap(), 0);
+        // rewind(0) is a no-op and appends no marker
+        assert_eq!(log.rewind(&h, 0, "test").unwrap(), 0);
         assert_eq!(log.last_index(&h).unwrap(), Some(4));
 
-        // rewind(2) drops seqs 3 and 4
-        let deleted = log.rewind(&h, 2).unwrap();
+        // rewind(2) drops seqs 3 and 4, leaving max=2, then appends
+        // a Rewind marker which `append` slots in at seq=3 (max+1).
+        // The returned count is the delete count, not including the
+        // appended marker.
+        let deleted = log.rewind(&h, 2, "crash_recovery").unwrap();
         assert_eq!(deleted, 2);
-        assert_eq!(log.last_index(&h).unwrap(), Some(2));
+        assert_eq!(log.last_index(&h).unwrap(), Some(3));
 
-        // rewind(big_n) saturates
-        let deleted = log.rewind(&h, 1000).unwrap();
-        assert_eq!(deleted, 3);
-        assert_eq!(log.last_index(&h).unwrap(), None);
+        // The marker records what happened.
+        let rows = log.get_range(&h, 3..4).unwrap();
+        match &rows[0].event {
+            SessionEvent::Rewind {
+                old_last_seq,
+                deleted_count,
+                reason,
+            } => {
+                assert_eq!(*old_last_seq, 4);
+                assert_eq!(*deleted_count, 2);
+                assert_eq!(reason, "crash_recovery");
+            }
+            other => panic!("expected Rewind, got {other:?}"),
+        }
+
+        // The chain is still intact after the delete + marker.
+        match log.verify(&h).unwrap() {
+            SessionVerifyResult::Ok { rows_verified } => {
+                // seqs 0, 1, 2 survive + the Rewind marker at 3 = 4 rows
+                assert_eq!(rows_verified, 4);
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // rewind(big_n) deletes everything still there (seqs 0, 1,
+        // 2, 3 = 4 rows), then appends a fresh Rewind marker as the
+        // new chain head at seq 0 (since the session is now empty
+        // after the DELETE).
+        let deleted = log.rewind(&h, 1000, "wipe").unwrap();
+        assert_eq!(deleted, 4);
+        assert_eq!(log.last_index(&h).unwrap(), Some(0));
     }
 
     #[test]
     fn rewind_on_empty_session_is_safe() {
         let (log, h) = fresh();
-        assert_eq!(log.rewind(&h, 5).unwrap(), 0);
+        // No events in the session, so the rewind is a no-op and
+        // does NOT append a marker. An empty session stays empty.
+        assert_eq!(log.rewind(&h, 5, "nothing").unwrap(), 0);
         assert_eq!(log.last_index(&h).unwrap(), None);
     }
 
