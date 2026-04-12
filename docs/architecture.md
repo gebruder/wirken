@@ -1,6 +1,6 @@
 # Architecture: Secure Personal AI Gateway
 
-**Wirken** — from the Old English *wyrcan*, to work, to make, to build. The thing that does the work.
+**Wirken**: German, *to work*, *to weave*, *to have effect*. Named for [Gebruder Ottenheimer](https://gebruder.ottenheimer.app/briefs/wirken.html), a weaving mill in Wurttemberg, 1862-1937.
 
 A secure, model-agnostic AI agent gateway. Multi-channel personal AI assistant with skills, tool execution, and local-first operation.
 
