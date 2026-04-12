@@ -53,7 +53,7 @@ cargo install --path crates/cli
 `wirken run` starts the gateway daemon. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken gateway v0.7.0
+  wirken gateway v0.7.1
   ──────────────
 
   Provider: ollama/llama3.2
@@ -170,7 +170,7 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 
 ## Status
 
-19 crates, 442 tests, 8 LLM providers, 9 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
+17 crates, 442 tests, 8 LLM providers, 9 channel adapters, 15 bundled skills. CI on every push. Release binaries for Linux and macOS.
 
 ## Documentation
 
