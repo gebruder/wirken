@@ -28,7 +28,7 @@ repository = "https://github.com/gebruder/wirken"
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.51", features = ["full"] }
 
 # HTTP
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
