@@ -387,12 +387,22 @@ impl LlmClient {
             "max_tokens": self.config.max_tokens,
         });
 
+        // Item 4 slice 3: send the system prompt as a content-block
+        // array with cache_control on the last block. Anthropic
+        // caches everything up to and including the last block
+        // marked ephemeral, so the system prompt (which is stable
+        // across turns) gets a prompt-cache hit on repeat calls
+        // within the 5-minute TTL.
         if !system_prompt.is_empty() {
-            body["system"] = serde_json::Value::String(system_prompt);
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }]);
         }
 
         if !tools.is_empty() {
-            let tools_json: Vec<serde_json::Value> = tools
+            let mut tools_json: Vec<serde_json::Value> = tools
                 .iter()
                 .map(|t| {
                     serde_json::json!({
@@ -402,6 +412,12 @@ impl LlmClient {
                     })
                 })
                 .collect();
+            // Item 4 slice 3: mark the last tool def as cacheable
+            // so the full tool surface is included in the prompt
+            // cache prefix.
+            if let Some(last) = tools_json.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
             body["tools"] = serde_json::Value::Array(tools_json);
         }
 

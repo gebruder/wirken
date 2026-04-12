@@ -299,6 +299,27 @@ impl AgentConfigStore {
         Ok(())
     }
 
+    /// Update the `tools_enabled` override for an agent. `None`
+    /// resets to the provider default; `Some(true/false)` forces
+    /// tools on or off.
+    pub fn set_tools_enabled(
+        &self,
+        agent_id: &str,
+        value: Option<bool>,
+    ) -> Result<(), GatewayError> {
+        let raw = value.map(|b| if b { "true" } else { "false" });
+        let changes = self.conn.execute(
+            "UPDATE agents SET tools_enabled = ?1 WHERE id = ?2",
+            params![raw, agent_id],
+        )?;
+        if changes == 0 {
+            return Err(GatewayError::Config(format!(
+                "agent '{agent_id}' not found"
+            )));
+        }
+        Ok(())
+    }
+
     fn get_channels(&self, agent_id: &str) -> Result<Vec<String>, GatewayError> {
         let mut stmt = self
             .conn
