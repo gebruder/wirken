@@ -52,18 +52,27 @@ jobs:
       - run: cargo clippy --workspace -- -D warnings
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
-      - name: Free disk space
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
             /opt/ghc /usr/local/share/boost
           df -h /
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Cap'n Proto
+      - name: Install Cap'n Proto (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get install -y capnproto
+      - name: Install Cap'n Proto (Windows)
+        if: runner.os == 'Windows'
+        run: choco install capnproto -y
       - uses: actions/cache@v5
         with:
           path: |
