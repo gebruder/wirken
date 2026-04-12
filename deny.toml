@@ -5,6 +5,11 @@ ignore = [
     # requires CA compromise). Pinned by serenity 0.12 via rustls 0.22;
     # no upstream fix available yet.
     "RUSTSEC-2026-0049",
+    # rand 0.8.5 unsoundness when log + thread_rng re-enter. Only
+    # triggers with a custom logger that calls rand::rng() from inside
+    # a log callback. We do not define a custom logger. Pinned at 0.8
+    # by cap-rand (wasmtime), oauth2, and serenity's tungstenite.
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.8 pinned by transitive deps; re-entrant logger condition does not apply" },
 ]
 
 [licenses]
