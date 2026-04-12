@@ -267,6 +267,25 @@ pub enum SessionEvent {
     /// (legacy sessions written before this variant existed) are
     /// reported as `events_unverifiable` rather than divergent.
     SystemPromptSet { content: String },
+    /// Record of a [`SessionLog::rewind`] call. Appended immediately
+    /// after the DELETE so the chain picks up cleanly from whatever
+    /// row survived the cut. The event is the new chain head, which
+    /// means an attestation written after the rewind cryptographically
+    /// covers it. An attacker with raw SQLite access can still DELETE
+    /// rows without inserting this marker — but an *honest* caller
+    /// going through the trait can no longer silently rewrite
+    /// history.
+    ///
+    /// - `old_last_seq` is the sequence number that was at the head
+    ///   of the session immediately before the rewind.
+    /// - `deleted_count` is how many rows the DELETE actually removed.
+    /// - `reason` is the caller-supplied justification, stored
+    ///   verbatim so a reviewer can search for e.g. "crash recovery".
+    Rewind {
+        old_last_seq: u64,
+        deleted_count: u64,
+        reason: String,
+    },
     /// Sub-agent spawned by the harness (item 6).
     SubagentSpawned {
         child_session_id: String,
@@ -399,10 +418,25 @@ pub trait SessionLog: Send + Sync {
     fn last_index(&self, handle: &SessionHandle<OwnSession>) -> Result<Option<u64>, AuditError>;
 
     /// Delete the most recent `n_before` events from this session
-    /// and return the count actually deleted. Used by item 2's
-    /// `wake()` to drop a half-completed tool round and resume from
-    /// a known-good prefix.
-    fn rewind(&self, handle: &SessionHandle<OwnSession>, n_before: u64) -> Result<u64, AuditError>;
+    /// and append a [`SessionEvent::Rewind`] audit marker so the
+    /// operation is not a silent delete. Returns the count of rows
+    /// actually deleted by the DELETE — the Rewind marker itself is
+    /// appended afterwards and is not included in the count.
+    ///
+    /// `reason` is stored verbatim in the Rewind event payload.
+    /// Callers should use a short, stable string ("crash_recovery",
+    /// "user_undo", etc.) rather than free-form text so reviewers can
+    /// filter the log.
+    ///
+    /// No Rewind event is appended when the call is a no-op
+    /// (`n_before == 0`, or the session has no events). In that case
+    /// the session log is untouched.
+    fn rewind(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+        n_before: u64,
+        reason: &str,
+    ) -> Result<u64, AuditError>;
 
     /// Walk the per-session hash chain and verify every row's
     /// `leaf_hash` matches its payload and every row's chain `hash`
@@ -590,29 +624,58 @@ impl SessionLog for SqliteSessionLog {
         Ok(result.map(|n| n as u64))
     }
 
-    fn rewind(&self, handle: &SessionHandle<OwnSession>, n_before: u64) -> Result<u64, AuditError> {
+    fn rewind(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+        n_before: u64,
+        reason: &str,
+    ) -> Result<u64, AuditError> {
         if n_before == 0 {
             return Ok(0);
         }
-        let conn = self.conn.lock().expect("session log mutex");
-        let last: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
-                params![handle.id.as_str()],
-                |row| row.get(0),
-            )
-            .ok()
-            .flatten();
-        let last = match last {
-            Some(n) => n as u64,
-            None => return Ok(0),
+
+        // Phase 1: look up the current chain head and DELETE the
+        // tail under a single connection lock. We release it before
+        // calling `append` so the Rewind event reuses the same
+        // per-session lock via the public append path.
+        let (old_last_seq, deleted) = {
+            let conn = self.conn.lock().expect("session log mutex");
+            let last: Option<i64> = conn
+                .query_row(
+                    "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
+                    params![handle.id.as_str()],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+            let last = match last {
+                Some(n) => n as u64,
+                None => return Ok(0),
+            };
+            let cutoff = last.saturating_sub(n_before - 1);
+            let deleted = conn.execute(
+                "DELETE FROM session_events WHERE session_id = ?1 AND seq >= ?2",
+                params![handle.id.as_str(), cutoff as i64],
+            )? as u64;
+            (last, deleted)
         };
-        let cutoff = last.saturating_sub(n_before - 1);
-        let deleted = conn.execute(
-            "DELETE FROM session_events WHERE session_id = ?1 AND seq >= ?2",
-            params![handle.id.as_str(), cutoff as i64],
+
+        // Phase 2: append the Rewind audit marker. The marker's
+        // `prev_hash` picks up cleanly from whichever row survived
+        // the delete (or from the empty string if everything was
+        // removed), so `verify()` stays green while still recording
+        // that a rewind happened.
+        self.append(
+            handle,
+            TrustLevel::System,
+            SessionEvent::Rewind {
+                old_last_seq,
+                deleted_count: deleted,
+                reason: reason.to_string(),
+            },
         )?;
-        Ok(deleted as u64)
+
+        Ok(deleted)
     }
 
     fn verify(
