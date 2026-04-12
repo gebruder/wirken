@@ -50,6 +50,23 @@ use crate::error::AgentError;
 use crate::llm::LlmConfig;
 use crate::tool::ToolDef;
 
+/// Result of a [`ContextEngine::fit`] call. Carries the original
+/// content of any messages that were trimmed so the harness can
+/// optionally pass them to an LLM for a free-text summary (item 4
+/// slice 2.5).
+pub struct FitResult {
+    /// Original content of messages replaced with placeholders
+    /// during this fit() call. Empty when nothing was trimmed.
+    pub trimmed_messages: Vec<TrimmedMessage>,
+}
+
+/// A message whose content was replaced by a placeholder during
+/// trimming. The harness uses these to build a summarization prompt.
+pub struct TrimmedMessage {
+    pub role: Role,
+    pub content: String,
+}
+
 /// Apply compaction at this fraction of the configured budget. The
 /// 4-chars-per-token estimator is rough, so leave headroom for the
 /// LLM's max response and for the difference between estimated and
@@ -141,7 +158,11 @@ impl ContextEngine {
         tools: &[ToolDef],
         session_log: &dyn SessionLog,
         handle: &SessionHandle<OwnSession>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<FitResult, AgentError> {
+        let empty_result = FitResult {
+            trimmed_messages: Vec::new(),
+        };
+
         // Item 4 slice 2: drop any prior compaction summary so we
         // can recompute it fresh below. This must happen before the
         // budget check so identical fit() calls converge to the
@@ -156,7 +177,7 @@ impl ContextEngine {
             // compaction summary block from any prior trims so the
             // model sees the running summary on every turn.
             self.maybe_inject_compaction_summary(conversation, session_log, handle)?;
-            return Ok(());
+            return Ok(empty_result);
         }
 
         let floor = self.compute_floor(conversation);
@@ -219,8 +240,32 @@ impl ContextEngine {
         if plan.is_empty() {
             // Nothing to do. Should not happen given the early-return
             // above, but defensive.
-            return Ok(());
+            return Ok(empty_result);
         }
+
+        // Item 4 slice 2.5: snapshot the original content of
+        // messages about to be trimmed. The harness uses this to
+        // build a summarization prompt if a compaction model is
+        // configured. Captured BEFORE apply() replaces the content
+        // with placeholders.
+        let trimmed_messages: Vec<TrimmedMessage> = plan
+            .touched_indices
+            .iter()
+            .filter_map(|&idx| {
+                let msg = conversation.messages().get(idx)?;
+                // Only capture substantive content, not already-trimmed
+                // placeholders from a prior round.
+                if msg.content.starts_with(TRIMMED_TOOL_RESULT_PREFIX)
+                    || msg.content.starts_with(TRIMMED_TEXT_PREFIX)
+                {
+                    return None;
+                }
+                Some(TrimmedMessage {
+                    role: msg.role.clone(),
+                    content: msg.content.clone(),
+                })
+            })
+            .collect();
 
         // Snapshot the spans BEFORE consuming `plan` in apply().
         let touched_count = plan.touched_indices.len();
@@ -229,8 +274,7 @@ impl ContextEngine {
         let trimmed_bytes = plan.apply(conversation);
 
         // Persist a structured Compaction event so wake() and the
-        // operator can see what was dropped. Slice 1 doesn't render
-        // these back into the LLM prompt — that's slice 2.
+        // operator can see what was dropped.
         let event = SessionEvent::Compaction {
             spans,
             extracts: serde_json::json!({
@@ -245,12 +289,11 @@ impl ContextEngine {
             .append(handle, TrustLevel::Compaction, event)
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
 
-        // Item 4 slice 2: now that the new Compaction event is in
-        // the session log, inject the freshly aggregated summary as
+        // Item 4 slice 2: inject the freshly aggregated summary as
         // a Role::Compaction message at position 1.
         self.maybe_inject_compaction_summary(conversation, session_log, handle)?;
 
-        Ok(())
+        Ok(FitResult { trimmed_messages })
     }
 
     /// Walk the session log for any [`SessionEvent::Compaction`]
