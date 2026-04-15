@@ -137,8 +137,10 @@ pub fn verify_skill(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
 /// Generate a new Ed25519 keypair for skill signing.
 /// Returns (secret_key_hex, public_key_hex).
 pub fn generate_signing_keypair() -> (String, String) {
-    let mut rng = rand::thread_rng();
-    let signing_key = SigningKey::generate(&mut rng);
+    use rand::RngCore;
+    let mut secret = [0u8; 32];
+    rand::rng().fill_bytes(&mut secret);
+    let signing_key = SigningKey::from_bytes(&secret);
     let secret_hex = hex_encode(signing_key.as_bytes());
     let public_hex = hex_encode(&signing_key.verifying_key().to_bytes());
     (secret_hex, public_hex)
@@ -227,7 +229,14 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::RngCore;
     use tempfile::TempDir;
+
+    fn random_signing_key() -> SigningKey {
+        let mut secret = [0u8; 32];
+        rand::rng().fill_bytes(&mut secret);
+        SigningKey::from_bytes(&secret)
+    }
 
     #[test]
     fn sign_and_verify_skill() {
@@ -240,7 +249,7 @@ mod tests {
         )
         .unwrap();
 
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = random_signing_key();
         sign_skill(&skill_dir, &signing_key).unwrap();
 
         assert!(skill_dir.join("SKILL.sig").exists());
@@ -272,7 +281,7 @@ mod tests {
         std::fs::create_dir(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "original content").unwrap();
 
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = random_signing_key();
         sign_skill(&skill_dir, &signing_key).unwrap();
 
         // Tamper with the content
@@ -291,11 +300,11 @@ mod tests {
         std::fs::create_dir(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "content").unwrap();
 
-        let key1 = SigningKey::generate(&mut rand::thread_rng());
+        let key1 = random_signing_key();
         sign_skill(&skill_dir, &key1).unwrap();
 
         // Replace pub key with a different key
-        let key2 = SigningKey::generate(&mut rand::thread_rng());
+        let key2 = random_signing_key();
         let pub_hex = hex_encode(&key2.verifying_key().to_bytes());
         std::fs::write(skill_dir.join("SKILL.pub"), &pub_hex).unwrap();
 

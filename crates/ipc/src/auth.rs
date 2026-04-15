@@ -16,8 +16,9 @@ pub struct AdapterIdentity {
 impl AdapterIdentity {
     /// Generate a new random adapter identity.
     pub fn generate(adapter_id: impl Into<String>) -> Self {
-        let mut rng = rand::thread_rng();
-        let signing_key = SigningKey::generate(&mut rng);
+        let mut secret = [0u8; 32];
+        rand::rng().fill_bytes(&mut secret);
+        let signing_key = SigningKey::from_bytes(&secret);
         Self {
             signing_key,
             adapter_id: adapter_id.into(),
@@ -155,7 +156,7 @@ where
 {
     // 1. Generate and send challenge
     let mut nonce = [0u8; CHALLENGE_NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
 
     let mut challenge_msg = capnp::message::Builder::new_default();
     {

@@ -266,7 +266,7 @@ fn row_to_job(row: &rusqlite::Row) -> Result<CronJob, rusqlite::Error> {
 fn uuid_short() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

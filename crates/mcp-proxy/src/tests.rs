@@ -24,6 +24,12 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+fn random_signing_key() -> SigningKey {
+    let mut secret = [0u8; 32];
+    rand::rng().fill_bytes(&mut secret);
+    SigningKey::from_bytes(&secret)
+}
+
 /// Hex-decode a 32-byte value.
 fn hex_decode_32(hex: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
@@ -215,7 +221,7 @@ async fn server_round_trip_empty_registry_with_auth() {
 
     // Generate a signing key and register its public half under
     // "test-agent" so the handshake succeeds.
-    let signing_key = SigningKey::generate(&mut rand::thread_rng());
+    let signing_key = random_signing_key();
     let mut reg = ProxyRegistry::new();
     reg.register_identity("test-agent", signing_key.verifying_key());
     let registry = Arc::new(Mutex::new(reg));
@@ -280,7 +286,7 @@ async fn server_rejects_unknown_agent_id() {
     let socket_path = tmp.path().join("mcp-proxy.sock");
 
     // Registry has an identity for "work" but not for "evil".
-    let known_key = SigningKey::generate(&mut rand::thread_rng());
+    let known_key = random_signing_key();
     let mut reg = ProxyRegistry::new();
     reg.register_identity("work", known_key.verifying_key());
     let registry = Arc::new(Mutex::new(reg));
@@ -299,7 +305,7 @@ async fn server_rejects_unknown_agent_id() {
 
     let mut stream = UnixStream::connect(&socket_path).await.unwrap();
     // Claim "evil" with a valid-but-unregistered key.
-    let evil_key = SigningKey::generate(&mut rand::thread_rng());
+    let evil_key = random_signing_key();
     let result = do_handshake(&mut stream, "evil", &evil_key).await;
     assert!(
         result.is_err(),
@@ -316,8 +322,8 @@ async fn server_rejects_wrong_signing_key_for_registered_agent() {
 
     // Registry registers "work"'s real pubkey; the attacker will try
     // to impersonate "work" with a different key.
-    let real_key = SigningKey::generate(&mut rand::thread_rng());
-    let attacker_key = SigningKey::generate(&mut rand::thread_rng());
+    let real_key = random_signing_key();
+    let attacker_key = random_signing_key();
     let mut reg = ProxyRegistry::new();
     reg.register_identity("work", real_key.verifying_key());
     let registry = Arc::new(Mutex::new(reg));
@@ -349,7 +355,7 @@ async fn server_rejects_tampered_signature() {
     let tmp = TempDir::new().unwrap();
     let socket_path = tmp.path().join("mcp-proxy.sock");
 
-    let signing_key = SigningKey::generate(&mut rand::thread_rng());
+    let signing_key = random_signing_key();
     let mut reg = ProxyRegistry::new();
     reg.register_identity("work", signing_key.verifying_key());
     let registry = Arc::new(Mutex::new(reg));
@@ -372,7 +378,7 @@ async fn server_rejects_tampered_signature() {
     // nonce — the proxy must reject.
     let challenge: AuthChallenge = read_one_line(&mut stream).await;
     let mut wrong_nonce = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut wrong_nonce);
+    rand::rng().fill_bytes(&mut wrong_nonce);
     assert_ne!(hex_decode_32(&challenge.nonce), wrong_nonce);
 
     let bad_sig = signing_key.sign(&wrong_nonce);
