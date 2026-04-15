@@ -8,7 +8,7 @@ use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
-use crate::convert::{self, SignalInbound};
+use crate::convert::{self, SignalAllowlist, SignalInbound};
 use crate::error::SignalError;
 
 /// Signal adapter: bridges signal-cli's JSON-RPC daemon <-> Wirken gateway IPC.
@@ -16,6 +16,7 @@ pub struct SignalAdapter {
     identity: AdapterIdentity,
     signal_cli_endpoint: String,
     phone_number: String,
+    allowlist: SignalAllowlist,
 }
 
 impl SignalAdapter {
@@ -23,16 +24,31 @@ impl SignalAdapter {
         identity: AdapterIdentity,
         signal_cli_endpoint: String,
         phone_number: String,
+        allowlist: SignalAllowlist,
     ) -> Self {
         Self {
             identity,
             signal_cli_endpoint,
             phone_number,
+            allowlist,
         }
     }
 
     /// Connect to gateway, authenticate, then poll signal-cli for messages.
     pub async fn run(&self, socket_path: &Path) -> Result<(), SignalError> {
+        if self.allowlist.is_empty() {
+            tracing::warn!(
+                "Signal adapter starting with an empty sender allowlist. All incoming \
+                 messages will be dropped. Add entries via `wirken setup` or the vault \
+                 under `signal-allowed-senders` to enable delivery."
+            );
+        } else {
+            tracing::info!(
+                "Signal adapter allowlist contains {} entries",
+                self.allowlist.len()
+            );
+        }
+
         tracing::info!("Connecting to gateway at {}", socket_path.display());
         let stream = UnixStream::connect(socket_path).await?;
         let (mut reader, mut writer) = split_stream(stream);
@@ -99,7 +115,11 @@ impl SignalAdapter {
 
             if let Some(messages) = extract_messages(&json) {
                 for msg in messages {
-                    if !convert::should_process(&msg) {
+                    if !convert::should_process(&msg, &self.allowlist) {
+                        tracing::debug!(
+                            "Dropping Signal message from {} (not in allowlist or empty)",
+                            msg.group_id.as_deref().unwrap_or(msg.sender.as_str())
+                        );
                         continue;
                     }
                     let mut capnp_msg = capnp::message::Builder::new_default();

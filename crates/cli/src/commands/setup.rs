@@ -635,7 +635,7 @@ async fn setup_signal_channel(
     data: &std::path::Path,
 ) -> Result<()> {
     println!("  Signal requires signal-cli running as a JSON-RPC daemon.");
-    println!("  See https://github.com/AsamK/signal-cli for setup.");
+    println!("  See docs/channels/signal.md for the full setup and threat model.");
 
     let phone: String = dialoguer::Input::new()
         .with_prompt("  Registered phone number (e.g., +15551234567)")
@@ -643,8 +643,33 @@ async fn setup_signal_channel(
 
     let endpoint: String = dialoguer::Input::new()
         .with_prompt("  signal-cli JSON-RPC endpoint")
-        .default("http://localhost:8080/api/v1/rpc".into())
+        .default("http://127.0.0.1:8080/api/v1/rpc".into())
         .interact_text()?;
+
+    println!();
+    println!("  Sender allowlist (REQUIRED):");
+    println!("  Only messages from these senders will reach the agent.");
+    println!("  Enter E.164 phone numbers for DMs and/or Signal group IDs,");
+    println!("  comma-separated. Leave empty to drop every inbound message.");
+    let allowlist_csv: String = dialoguer::Input::new()
+        .with_prompt("  Allowed senders (comma-separated)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let allowlist_trimmed = allowlist_csv.trim();
+    if allowlist_trimmed.is_empty() {
+        println!(
+            "  Warning: empty allowlist. The Signal adapter will drop every \
+             inbound message until you add entries via `wirken vault set \
+             signal-allowed-senders`."
+        );
+    } else {
+        let count = allowlist_trimmed
+            .split(',')
+            .filter(|e| !e.trim().is_empty())
+            .count();
+        println!("  signal: allowlist configured with {count} entries.");
+    }
 
     // Use endpoint as the primary "token" for registration
     register_channel("signal", &endpoint, cfg, data).await?;
@@ -662,6 +687,17 @@ async fn setup_signal_channel(
     store
         .store("signal-endpoint", "signal", &endpoint_secret, None, None)
         .context("Failed to store endpoint")?;
+
+    let allowlist_secret = wirken_vault::VaultSecret::new(allowlist_trimmed.to_string());
+    store
+        .store(
+            "signal-allowed-senders",
+            "signal",
+            &allowlist_secret,
+            None,
+            None,
+        )
+        .context("Failed to store allowlist")?;
 
     println!("  signal: credentials encrypted.");
     Ok(())
