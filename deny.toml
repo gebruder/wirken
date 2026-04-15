@@ -5,17 +5,21 @@ ignore = [
     # requires CA compromise). Pinned by serenity 0.12 via rustls 0.22;
     # no upstream fix available yet.
     "RUSTSEC-2026-0049",
-    # rand 0.8.5 unsoundness when log + thread_rng re-enter. Only
-    # triggers with a custom `log::Log` implementation that calls
-    # rand::rng() from inside a log callback while ThreadRng is
-    # reseeding. wirken uses stock tracing-subscriber with no custom
-    # log impl, and wirken's own crates now use rand 0.9 (see
-    # Cargo.toml workspace deps). rand 0.8.5 is only pulled
-    # transitively by cap-rand (wasmtime-wasi), oauth2, serenity's
-    # tungstenite 0.21, and phf_generator (via cron). None of these
-    # third-party crates implement a custom logger, so the trigger
-    # cannot fire.
-    { id = "RUSTSEC-2026-0097", reason = "rand 0.8 only via transitive third-party deps; re-entrant logger trigger cannot fire with stock tracing-subscriber and wirken uses rand 0.9 directly" },
+    # rustls-webpki name-constraint bugs in the 0.102.x branch.
+    # Upstream is unpatched: the advisory lists 0.103.12 as the first
+    # patched version, and there is no 0.102.x backport. rustls-webpki
+    # 0.102.8 reaches wirken only via rustls 0.22.4 -> tokio-tungstenite
+    # 0.21 -> serenity 0.12.5 -> wirken-adapter-discord, and serenity
+    # 0.12.5 is the latest stable release (no 0.13.x exists yet). Both
+    # bugs require CA misissuance of a name-constrained certificate to
+    # exploit; the Discord adapter only connects to hardcoded Discord
+    # endpoints (gateway.discord.gg, discord.com, cdn.discordapp.com)
+    # served by standard commercial CAs that do not issue name-
+    # constrained certificates for Discord's domains. The rustls 0.23
+    # branch (reqwest, hyper-rustls) is already on the patched
+    # rustls-webpki 0.103.12 via Cargo.lock.
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the URI-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the wildcard-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
 ]
 
 [licenses]
