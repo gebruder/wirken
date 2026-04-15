@@ -6,7 +6,7 @@ use wirken_adapter_discord::DiscordAdapter;
 use wirken_adapter_google_chat::GoogleChatAdapter;
 use wirken_adapter_imessage::IMessageAdapter;
 use wirken_adapter_matrix::MatrixAdapter;
-use wirken_adapter_signal::SignalAdapter;
+use wirken_adapter_signal::{SignalAdapter, SignalAllowlist};
 use wirken_adapter_slack::SlackAdapter;
 use wirken_adapter_teams::TeamsAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
@@ -182,7 +182,16 @@ pub async fn run(channel: &str) -> Result<()> {
                 .context("No phone number found for 'signal'.")?;
             let phone_number = phone_val.expose().to_string();
 
-            let adapter = SignalAdapter::new(identity, endpoint, phone_number);
+            // Fail-closed sender allowlist. Missing vault entry = empty list
+            // = every inbound message is dropped. See docs/channels/signal.md.
+            let allowed_name = format!("{channel}-allowed-senders");
+            let allowlist_csv = store
+                .retrieve(&allowed_name)
+                .map(|(s, _)| s.expose().to_string())
+                .unwrap_or_default();
+            let allowlist = SignalAllowlist::from_csv(&allowlist_csv);
+
+            let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist);
             adapter
                 .run(&socket_path)
                 .await
