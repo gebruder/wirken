@@ -29,7 +29,7 @@ pub fn encrypt(plaintext: &VaultSecret, key: &VaultSecret) -> Result<Vec<u8>, Va
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
 
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher
@@ -83,7 +83,7 @@ pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, Vault
 /// Generate a random 32-byte key as a VaultSecret.
 pub fn generate_key() -> VaultSecret {
     let mut key_bytes = Zeroizing::new([0u8; 32]);
-    rand::thread_rng().fill_bytes(&mut *key_bytes);
+    rand::rng().fill_bytes(&mut *key_bytes);
     let hex = hex_encode(&*key_bytes);
     // key_bytes zeroed on drop by Zeroizing
     VaultSecret::new(hex)

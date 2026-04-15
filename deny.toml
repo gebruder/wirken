@@ -6,10 +6,16 @@ ignore = [
     # no upstream fix available yet.
     "RUSTSEC-2026-0049",
     # rand 0.8.5 unsoundness when log + thread_rng re-enter. Only
-    # triggers with a custom logger that calls rand::rng() from inside
-    # a log callback. We do not define a custom logger. Pinned at 0.8
-    # by cap-rand (wasmtime), oauth2, and serenity's tungstenite.
-    { id = "RUSTSEC-2026-0097", reason = "rand 0.8 pinned by transitive deps; re-entrant logger condition does not apply" },
+    # triggers with a custom `log::Log` implementation that calls
+    # rand::rng() from inside a log callback while ThreadRng is
+    # reseeding. wirken uses stock tracing-subscriber with no custom
+    # log impl, and wirken's own crates now use rand 0.9 (see
+    # Cargo.toml workspace deps). rand 0.8.5 is only pulled
+    # transitively by cap-rand (wasmtime-wasi), oauth2, serenity's
+    # tungstenite 0.21, and phf_generator (via cron). None of these
+    # third-party crates implement a custom logger, so the trigger
+    # cannot fire.
+    { id = "RUSTSEC-2026-0097", reason = "rand 0.8 only via transitive third-party deps; re-entrant logger trigger cannot fire with stock tracing-subscriber and wirken uses rand 0.9 directly" },
 ]
 
 [licenses]

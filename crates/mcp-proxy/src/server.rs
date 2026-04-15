@@ -150,7 +150,7 @@ async fn authenticate(
 ) -> Result<String, ProxyError> {
     // 1. Generate and send a fresh challenge.
     let mut nonce = [0u8; CHALLENGE_NONCE_BYTES];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let nonce_hex = hex_encode(&nonce);
 
     let challenge = AuthChallenge {
