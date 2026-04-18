@@ -22,7 +22,7 @@ wirken run
 Pin the installer before piping. The committed `install.sh` has this SHA-256:
 
 ```
-5001fa424aa5494a89fbe65f1c776545f33322d5190c72a106677575a6c438d3
+e5e8779155aab24c1d7fe0c41bc93d23b18ddd8293e48b01d19dc58b44aec7b8
 ```
 
 Verify it yourself:

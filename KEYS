@@ -21,9 +21,7 @@
 # Current active key
 #   Identity:    releases@gebruder.ottenheimer.app
 #   Algorithm:   ssh-ed25519
-#   Issued:      PENDING (to be filled on first signing)
-#   Fingerprint: PENDING (SHA256: will be recorded once key is generated)
-#
-# REPLACE: paste the output of `ssh-keygen -y -f wirken-release-signing` as
-# the key field below, preserving the identity and the ssh-ed25519 type.
-releases@gebruder.ottenheimer.app ssh-ed25519 REPLACE_ME_WITH_PUBLIC_KEY
+#   Issued:      2026-04-18
+#   Fingerprint: SHA256:tzlfNHy4G1KIsmAR+cM3MGwVndheh2ak/usA6rw7SuE
+releases@gebruder.ottenheimer.app ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPcGuqLSfpN+ibltPVbif7i9LgclLtRIaL+1TuYp+RjV releases@gebruder.ottenheimer.app
+
