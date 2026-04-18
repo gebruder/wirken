@@ -403,15 +403,13 @@ impl LlmClient {
                             }
                         }
                     }
-                    "content_block_stop" => {
-                        if in_tool_block && !current_tool_name.is_empty() {
-                            tool_calls.push(ToolCallRequest {
-                                id: current_tool_id.clone(),
-                                name: current_tool_name.clone(),
-                                arguments: current_tool_input.clone(),
-                            });
-                            in_tool_block = false;
-                        }
+                    "content_block_stop" if in_tool_block && !current_tool_name.is_empty() => {
+                        tool_calls.push(ToolCallRequest {
+                            id: current_tool_id.clone(),
+                            name: current_tool_name.clone(),
+                            arguments: current_tool_input.clone(),
+                        });
+                        in_tool_block = false;
                     }
                     "message_stop" => break 'stream,
                     _ => {}

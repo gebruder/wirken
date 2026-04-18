@@ -2,7 +2,7 @@
 
 **Wirken is AI agents on your chat tools, done the way it should have been from the start: self-hosted, channel-isolated, every action audited.**
 
-Organizations deploy AI agents across Slack, Teams, Matrix, and Signal. Every message crosses a trust boundary between the channel that delivered it, the orchestrator that routed it, and the inference provider that answered it. Most agent frameworks collapse these boundaries into a single trust domain with one token, no process isolation, and no audit trail. If that process is compromised, every channel is compromised with it.
+Organizations deploy AI agents across Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, and iMessage. Every message crosses a trust boundary between the channel that delivered it, the orchestrator that routed it, and the inference provider that answered it. Most agent frameworks collapse these boundaries into a single trust domain with one token, no process isolation, and no audit trail. If that process is compromised, every channel is compromised with it.
 
 Wirken separates the trust domains. Each channel runs in its own adapter process with a distinct ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk, or a webhook when SIEM is configured. Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
 
@@ -18,6 +18,20 @@ curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | s
 wirken setup
 wirken run
 ```
+
+Pin the installer before piping. The committed `install.sh` has this SHA-256:
+
+```
+e5e8779155aab24c1d7fe0c41bc93d23b18ddd8293e48b01d19dc58b44aec7b8
+```
+
+Verify it yourself:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sha256sum
+```
+
+The installer then fetches `checksums.sha256` and `checksums.sha256.sig` from the release, verifies the signature with `ssh-keygen -Y verify` against a signing key embedded in the script, and verifies the binary's SHA-256 against the signed checksums. Every failure path is fail-closed: missing signature, missing checksum, mismatched digest, or a machine without `sha256sum`/`shasum` aborts install. The only override is `WIRKEN_ALLOW_UNVERIFIED=1`, which warns on stderr and is documented in [docs/release-signing.md](docs/release-signing.md).
 
 Prebuilt binaries are available for Linux (x86_64, aarch64) and macOS (x86_64, Apple Silicon). The Linux binaries are statically linked against musl with no glibc dependency.
 
@@ -70,6 +84,8 @@ cargo install --path crates/cli
 
   Gateway running. Press Ctrl+C to stop.
 ```
+
+All local services bind to 127.0.0.1. Wirken never instructs you to bind inference servers, WebChat, or any local endpoint to 0.0.0.0.
 
 Install as a system service so the gateway starts on login:
 
@@ -167,6 +183,8 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [Enforcement model](docs/enforcement-model.md) (compile-time vs. runtime guarantees)
+- [Release process](docs/release-process.md) (version bump, tag, sign, publish, smoke test)
+- [Release signing](docs/release-signing.md) (Ed25519 key, rotation, verification)
 
 ## Contributing
 
@@ -183,6 +201,16 @@ Building from source requires the Cap'n Proto compiler (`capnproto` package on U
 The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 **Adapter contributions are especially welcome.** Each adapter is an independent crate (`crates/adapter-<channel>/`) that implements the same IPC contract: connect to the gateway UDS, perform Ed25519 handshake, convert platform messages to/from Cap'n Proto frames. See any existing adapter for the pattern (Telegram is the simplest; Teams shows the HTTP webhook variant).
+
+## Status
+
+Wirken 0.7.x is the current series. 0.7 gets fixes and features; 0.6 gets security fixes only.
+
+- **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
+- **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
+- **15 bundled skills** under `skills/`.
+- **452 tests** in the workspace, all green on main (`cargo test --workspace`).
+- **Signed releases.** `checksums.sha256` is signed offline with an Ed25519 SSH key. `install.sh` embeds the public key inline, fetches `checksums.sha256.sig` from the release, and fails closed on any verification failure. See [docs/release-signing.md](docs/release-signing.md) and [KEYS](KEYS).
 
 ## The name
 
