@@ -17,7 +17,8 @@ pub mod skills;
 pub mod webchat;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use wirken_agent::sandbox::{SandboxConfig, SandboxMode};
 use wirken_gateway::config::GatewayConfig;
 
 /// Resolve the data directory, ensuring it exists.
@@ -30,6 +31,56 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
 /// Get a GatewayConfig with default paths.
 pub fn config() -> GatewayConfig {
     GatewayConfig::default()
+}
+
+/// Load the sandbox configuration for the gateway. Reads
+/// `{data_dir}/sandbox.json` if it exists; falls back to
+/// `SandboxConfig::default()` (which is `SandboxMode::ExecOnly` after
+/// the 0.7.5 default flip). The org refresh flow in
+/// `wirken_gateway::org::apply_org_config` writes this file when
+/// `permissions.sandbox_mode` is set on the pulled org config, so the
+/// precedence is: org config (force-overwrites each `wirken run`) >
+/// locally configured `sandbox.json` > default.
+pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
+    let path = data_dir.join("sandbox.json");
+    if !path.exists() {
+        return SandboxConfig::default();
+    }
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "Could not read {}: {e}. Using default sandbox config.",
+                path.display()
+            );
+            return SandboxConfig::default();
+        }
+    };
+    let val: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Could not parse {}: {e}. Using default sandbox config.",
+                path.display()
+            );
+            return SandboxConfig::default();
+        }
+    };
+    let mode_str = val.get("mode").and_then(|v| v.as_str()).unwrap_or("");
+    let mode = if mode_str.is_empty() {
+        SandboxMode::default()
+    } else {
+        SandboxMode::from_str_config(mode_str)
+    };
+    let network = val
+        .get("network")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    SandboxConfig {
+        mode,
+        network,
+        ..Default::default()
+    }
 }
 
 /// Probe a running Ollama instance for its version.
@@ -230,6 +281,64 @@ pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn load_sandbox_config_missing_file_uses_default() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.mode, SandboxMode::default());
+    }
+
+    #[test]
+    fn load_sandbox_config_reads_exec_only() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("sandbox.json"),
+            r#"{"mode":"exec-only","network":false}"#,
+        )
+        .unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.mode, SandboxMode::ExecOnly);
+        assert!(!cfg.network);
+    }
+
+    #[test]
+    fn load_sandbox_config_reads_gvisor() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"gvisor"}"#).unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.mode, SandboxMode::GVisor);
+    }
+
+    #[test]
+    fn load_sandbox_config_reads_off() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"off"}"#).unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.mode, SandboxMode::Off);
+    }
+
+    #[test]
+    fn load_sandbox_config_unknown_mode_uses_default() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"chrooty"}"#).unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.mode, SandboxMode::default());
+    }
+
+    #[test]
+    fn load_sandbox_config_malformed_json_uses_default() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), "not json").unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.mode, SandboxMode::default());
+    }
 }
 
 /// Read a secret value (API key, token) with asterisk masking.

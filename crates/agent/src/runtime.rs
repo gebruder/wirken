@@ -161,11 +161,33 @@ impl Agent {
         api_key: Option<String>,
         session_log: Arc<dyn SessionLog>,
     ) -> Result<Self, AgentError> {
+        Self::new_with_sandbox(
+            id,
+            workspace,
+            llm_config,
+            api_key,
+            session_log,
+            crate::sandbox::SandboxConfig::default(),
+        )
+    }
+
+    /// Create a new agent with an explicit sandbox configuration.
+    /// `Agent::new` is a shim over this that uses the default
+    /// `SandboxConfig`. Production callers that load sandbox mode
+    /// from user config should use this constructor.
+    pub fn new_with_sandbox(
+        id: String,
+        workspace: PathBuf,
+        llm_config: LlmConfig,
+        api_key: Option<String>,
+        session_log: Arc<dyn SessionLog>,
+        sandbox: crate::sandbox::SandboxConfig,
+    ) -> Result<Self, AgentError> {
         let tool_config = ToolConfig {
             api_key: api_key.clone(),
             provider: Some(llm_config.provider.clone()),
             base_url: Some(llm_config.base_url.clone()),
-            sandbox: Default::default(),
+            sandbox,
         };
         let tools = ToolRegistry::new(workspace, tool_config);
 
@@ -221,6 +243,7 @@ impl Agent {
         llm_config: LlmConfig,
         api_key: Option<String>,
         session_log: Arc<dyn SessionLog>,
+        sandbox: crate::sandbox::SandboxConfig,
     ) -> Result<Self, AgentError> {
         let session_id = SessionId::new(id.clone());
         let session_handle = session_log.handle_for(session_id);
@@ -238,7 +261,7 @@ impl Agent {
             api_key: api_key.clone(),
             provider: Some(llm_config.provider.clone()),
             base_url: Some(llm_config.base_url.clone()),
-            sandbox: Default::default(),
+            sandbox,
         };
         let tools = ToolRegistry::new(workspace, tool_config);
 

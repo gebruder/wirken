@@ -179,5 +179,74 @@ pub fn apply_org_config(
         }
     }
 
+    // Sandbox mode, driven by `permissions.sandbox_mode` on the pulled
+    // org config. Stored as a separate `sandbox.json` file so an org
+    // update does not disturb unrelated provider config. The CLI's
+    // `load_sandbox_config` helper reads this file on each gateway
+    // start.
+    if let Some(ref perms) = org.permissions
+        && let Some(ref mode) = perms.sandbox_mode
+    {
+        let path = data_dir.join("sandbox.json");
+        if force || !path.exists() {
+            let body = serde_json::json!({ "mode": mode });
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&body).unwrap_or_default(),
+            )
+            .map_err(|e| format!("write sandbox.json: {e}"))?;
+            applied.push("sandbox".into());
+        }
+    }
+
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn apply_org_config_writes_sandbox_json_from_permissions() {
+        let tmp = TempDir::new().unwrap();
+        let org = OrgConfig {
+            permissions: Some(OrgPermissions {
+                sandbox_mode: Some("gvisor".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let applied = apply_org_config(tmp.path(), &org, true).unwrap();
+        assert!(applied.contains(&"sandbox".to_string()));
+        let body = std::fs::read_to_string(tmp.path().join("sandbox.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(val["mode"].as_str(), Some("gvisor"));
+    }
+
+    #[test]
+    fn apply_org_config_no_sandbox_without_permissions() {
+        let tmp = TempDir::new().unwrap();
+        let org = OrgConfig::default();
+        let applied = apply_org_config(tmp.path(), &org, true).unwrap();
+        assert!(!applied.contains(&"sandbox".to_string()));
+        assert!(!tmp.path().join("sandbox.json").exists());
+    }
+
+    #[test]
+    fn apply_org_config_preserves_existing_sandbox_when_not_forced() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"exec-only"}"#).unwrap();
+        let org = OrgConfig {
+            permissions: Some(OrgPermissions {
+                sandbox_mode: Some("gvisor".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        apply_org_config(tmp.path(), &org, false).unwrap();
+        let body = std::fs::read_to_string(tmp.path().join("sandbox.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(val["mode"].as_str(), Some("exec-only"));
+    }
 }

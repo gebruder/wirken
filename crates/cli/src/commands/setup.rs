@@ -485,6 +485,34 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         }
     }
 
+    // --- Step 4: Sandbox mode ---
+    //
+    // Default is exec-only (0.7.5). If `runsc` is registered as a
+    // Docker runtime, offer the stricter gvisor mode. If the operator
+    // is setting up via --org and the org config already wrote
+    // sandbox.json, don't prompt; org policy wins.
+    println!();
+    if data.join("sandbox.json").exists() {
+        println!("  Sandbox: configured by organization.");
+    } else {
+        let runsc_detected = wirken_agent::sandbox::detect_gvisor().await;
+        let accept_upgrade = runsc_detected
+            && Confirm::new()
+                .with_prompt(
+                    "  gVisor (runsc) detected. Use stricter gvisor sandbox instead of exec-only?",
+                )
+                .default(true)
+                .interact()?;
+        let mode = pick_setup_sandbox_mode(runsc_detected, accept_upgrade);
+        let body = serde_json::json!({ "mode": mode });
+        std::fs::write(
+            data.join("sandbox.json"),
+            serde_json::to_string_pretty(&body)?,
+        )
+        .context("Failed to write sandbox.json")?;
+        println!("  Sandbox: {mode}");
+    }
+
     // --- Done ---
 
     println!();
@@ -524,6 +552,40 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     println!();
 
     Ok(())
+}
+
+/// Choose the sandbox mode to write to `sandbox.json` based on
+/// runsc availability and the operator's upgrade choice. Extracted
+/// so the decision is testable without driving the interactive
+/// dialog.
+fn pick_setup_sandbox_mode(runsc_detected: bool, accept_upgrade: bool) -> &'static str {
+    if runsc_detected && accept_upgrade {
+        "gvisor"
+    } else {
+        "exec-only"
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::pick_setup_sandbox_mode;
+
+    #[test]
+    fn no_runsc_picks_exec_only() {
+        assert_eq!(pick_setup_sandbox_mode(false, false), "exec-only");
+        // Operator "upgrade" choice is irrelevant when runsc is not detected.
+        assert_eq!(pick_setup_sandbox_mode(false, true), "exec-only");
+    }
+
+    #[test]
+    fn runsc_detected_plus_upgrade_picks_gvisor() {
+        assert_eq!(pick_setup_sandbox_mode(true, true), "gvisor");
+    }
+
+    #[test]
+    fn runsc_detected_but_declined_keeps_exec_only() {
+        assert_eq!(pick_setup_sandbox_mode(true, false), "exec-only");
+    }
 }
 
 async fn setup_telegram_channel(
