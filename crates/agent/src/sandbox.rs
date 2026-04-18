@@ -314,6 +314,18 @@ pub async fn detect_runtime() -> Option<String> {
     None
 }
 
+/// Detect whether the given image is present locally. Returns false
+/// if Docker is unreachable or the image is not pulled. Used by the
+/// Docker-backed integration tests to skip cleanly when the sandbox
+/// base image has not been pulled on the host (CI runners, for
+/// example, do not pre-pull `debian:bookworm-slim`).
+pub async fn detect_image(image: &str) -> bool {
+    let Ok(docker) = Docker::connect_with_local_defaults() else {
+        return false;
+    };
+    docker.inspect_image(image).await.is_ok()
+}
+
 /// Detect if gVisor (runsc) is available as a Docker runtime.
 /// Checks both that Docker is running and that `runsc` is listed in its runtimes.
 pub async fn detect_gvisor() -> bool {
