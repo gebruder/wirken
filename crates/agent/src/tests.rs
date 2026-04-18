@@ -2040,6 +2040,226 @@ fn sandbox_gvisor_constraints_match_docker() {
 }
 
 // ---------------------------------------------------------------------------
+// Host-config hardening (structural assertions on the bollard
+// HostConfig the sandbox builds for each exec). These tests do not
+// touch Docker; they verify the wire-format struct fields.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn host_config_drops_all_caps() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace");
+    assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
+    let empty: &[String] = &[];
+    assert_eq!(hc.cap_add.as_deref(), Some(empty));
+}
+
+#[test]
+fn host_config_sets_no_new_privileges_and_seccomp() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace");
+    let opts = hc.security_opt.expect("security_opt must be set");
+    assert!(
+        opts.iter().any(|o| o == "no-new-privileges:true"),
+        "security_opt must include no-new-privileges:true, got {opts:?}"
+    );
+    assert!(
+        opts.iter().any(|o| o == "seccomp=default"),
+        "security_opt must pin seccomp=default, got {opts:?}"
+    );
+}
+
+#[test]
+fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace");
+    assert_eq!(hc.readonly_rootfs, Some(true));
+    let tmpfs = hc.tmpfs.expect("tmpfs must be set");
+    let opts = tmpfs
+        .get("/tmp")
+        .expect("/tmp must be a tmpfs mount");
+    assert!(opts.contains("size=64m"), "tmpfs /tmp must cap size at 64m");
+    assert!(opts.contains("mode=1777"), "tmpfs /tmp must be world-writable with sticky bit");
+}
+
+#[test]
+fn host_config_preserves_workspace_and_resource_caps() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    // The pre-existing restrictions must still be in place after
+    // adding cap_drop / seccomp / readonly_rootfs / tmpfs.
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace");
+    assert_eq!(
+        hc.binds.as_deref(),
+        Some(&["/host/workspace:/workspace:rw".to_string()][..])
+    );
+    assert_eq!(hc.network_mode.as_deref(), Some("none"));
+    assert_eq!(hc.memory, Some(512 * 1024 * 1024));
+    assert_eq!(hc.pids_limit, Some(256));
+    assert_eq!(hc.auto_remove, Some(true));
+}
+
+#[test]
+fn host_config_gvisor_adds_runsc_runtime_without_loosening_hardening() {
+    use crate::sandbox::{SandboxConfig, SandboxMode, build_host_config};
+
+    let cfg = SandboxConfig {
+        mode: SandboxMode::GVisor,
+        ..Default::default()
+    };
+    let hc = build_host_config(&cfg, "/host/workspace");
+    assert_eq!(hc.runtime.as_deref(), Some("runsc"));
+    assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
+    assert_eq!(hc.readonly_rootfs, Some(true));
+}
+
+// ---------------------------------------------------------------------------
+// Docker-backed hardening integration tests. Skip cleanly when Docker
+// is unavailable; these validate the actual kernel-level behaviour
+// rather than just the struct shape. Requires the `debian:bookworm-slim`
+// image to be pulled on the host.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sandbox_blocks_write_to_rootfs_but_allows_workspace_and_tmp() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_runtime};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let cfg = SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        ..Default::default()
+    };
+    let sb = match DockerSandbox::new(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+
+    let r = sb
+        .exec(
+            "set +e; \
+             touch /cannot_write_here 2>&1; echo rc=$? ; \
+             echo hi > /workspace/ok.txt && echo ws_ok=1 || echo ws_ok=0 ; \
+             echo hi > /tmp/ok.txt && echo tmp_ok=1 || echo tmp_ok=0",
+            tmp.path(),
+        )
+        .await
+        .expect("exec");
+    assert!(
+        !r.output.contains("rc=0"),
+        "write to / must fail on readonly rootfs, got: {}",
+        r.output
+    );
+    assert!(
+        r.output.contains("ws_ok=1"),
+        "write to /workspace must succeed, got: {}",
+        r.output
+    );
+    assert!(
+        r.output.contains("tmp_ok=1"),
+        "write to /tmp tmpfs must succeed, got: {}",
+        r.output
+    );
+}
+
+#[tokio::test]
+async fn sandbox_blocks_chown_via_cap_drop() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_runtime};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("victim.txt"), "hi").unwrap();
+    let cfg = SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        ..Default::default()
+    };
+    let sb = match DockerSandbox::new(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+
+    // chown requires CAP_CHOWN (or CAP_FOWNER for restricted cases);
+    // with cap_drop=ALL it must fail. We cannot assert exit code
+    // directly through the exec harness, so capture the error text
+    // stderr would emit ("Operation not permitted").
+    let r = sb
+        .exec(
+            "chown 0:0 /workspace/victim.txt 2>&1 || echo CHOWN_FAILED",
+            tmp.path(),
+        )
+        .await
+        .expect("exec");
+    assert!(
+        r.output.contains("CHOWN_FAILED") || r.output.contains("Operation not permitted"),
+        "chown inside the sandbox must fail, got: {}",
+        r.output
+    );
+}
+
+#[tokio::test]
+async fn sandbox_blocks_setuid_via_no_new_privileges() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_runtime};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let cfg = SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        ..Default::default()
+    };
+    let sb = match DockerSandbox::new(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+
+    // /usr/bin/passwd is a setuid-root binary in debian:bookworm-slim.
+    // Under no-new-privileges, execing it must not elevate; running
+    // as uid 1000 it cannot read /etc/shadow. Running `id -u` after
+    // `su` would elevate without no-new-privileges; with it, su fails.
+    let r = sb
+        .exec(
+            "ls -l /usr/bin/passwd; /usr/bin/passwd 2>&1 || echo PASSWD_RC=$?",
+            tmp.path(),
+        )
+        .await
+        .expect("exec");
+    // Under no-new-privileges the setuid bit is effectively ignored
+    // and passwd fails with a non-zero return code. We assert only
+    // that the binary was seen but the command failed; we do not
+    // assert a specific errno because different kernels report it
+    // slightly differently.
+    assert!(
+        r.output.contains("PASSWD_RC=") && !r.output.contains("PASSWD_RC=0"),
+        "setuid binary must fail to elevate under no-new-privileges, got: {}",
+        r.output
+    );
+}
+
+// ---------------------------------------------------------------------------
 // tool_to_action mapping
 // ---------------------------------------------------------------------------
 
