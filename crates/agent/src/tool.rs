@@ -207,6 +207,39 @@ impl ToolRegistry {
                 if self.sandbox_config.mode == SandboxMode::Off {
                     return None;
                 }
+
+                // Probe Docker first so the operator sees a specific
+                // message ("Docker not reachable") rather than a
+                // generic connect error. `detect_runtime` returns None
+                // if the Docker daemon is not reachable at the
+                // default local socket.
+                if crate::sandbox::detect_runtime().await.is_none() {
+                    tracing::warn!(
+                        "Sandbox mode {:?} is set but Docker is not reachable. \
+                         Install Docker and start the daemon, or set \
+                         `\"mode\":\"off\"` in sandbox.json. Falling back to \
+                         host execution for the lifetime of this agent.",
+                        self.sandbox_config.mode,
+                    );
+                    return None;
+                }
+
+                // gVisor requested but runsc not registered as a
+                // Docker runtime. Distinct from Docker-absent so the
+                // operator knows which dependency to install.
+                if self.sandbox_config.mode == SandboxMode::GVisor
+                    && !crate::sandbox::detect_gvisor().await
+                {
+                    tracing::warn!(
+                        "Sandbox mode gvisor is set but the `runsc` runtime is \
+                         not registered with Docker. Install gVisor and add \
+                         `runsc` to Docker's runtimes, or set \
+                         `\"mode\":\"exec-only\"` in sandbox.json. Falling \
+                         back to host execution for the lifetime of this agent."
+                    );
+                    return None;
+                }
+
                 match DockerSandbox::new(self.sandbox_config.clone()) {
                     Ok(s) => {
                         tracing::info!(

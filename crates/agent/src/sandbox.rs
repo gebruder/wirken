@@ -21,27 +21,39 @@ const PIDS_LIMIT: i64 = 256;
 /// Sandbox mode for tool execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxMode {
-    /// No sandboxing — direct host execution.
-    #[default]
+    /// No sandboxing. Direct host execution. Opt-in only; set
+    /// `"mode": "off"` in `sandbox.json` to use this.
     Off,
     /// Only the `exec` tool runs in a Docker container (default runc runtime).
+    /// This is the default as of 0.7.5. If Docker is not reachable at
+    /// gateway start, the ToolRegistry logs a warning and falls back
+    /// to host execution for the agent's lifetime.
+    #[default]
     ExecOnly,
     /// Only the `exec` tool runs in a gVisor container (runsc runtime).
     /// Provides kernel attack surface reduction: syscalls are intercepted by
-    /// gVisor's Sentry rather than reaching the host kernel.
+    /// gVisor's Sentry rather than reaching the host kernel. Requires
+    /// `runsc` registered as a Docker runtime.
     GVisor,
 }
 
 impl SandboxMode {
-    /// Parse a sandbox mode from a config string.
+    /// Parse a sandbox mode from a config string. Unknown modes fall
+    /// back to [`SandboxMode::default`] rather than forcing `Off`, so
+    /// a config typo does not silently strip the sandbox; the
+    /// operator gets the secure default instead, with a warning.
     pub fn from_str_config(s: &str) -> Self {
         match s {
             "exec-only" => Self::ExecOnly,
             "gvisor" => Self::GVisor,
-            "off" | "" => Self::Off,
+            "off" => Self::Off,
+            "" => Self::default(),
             _ => {
-                tracing::warn!("Unknown sandbox_mode '{s}', defaulting to off");
-                Self::Off
+                tracing::warn!(
+                    "Unknown sandbox_mode '{s}', falling back to default ({:?})",
+                    Self::default()
+                );
+                Self::default()
             }
         }
     }
@@ -68,7 +80,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            mode: SandboxMode::Off,
+            mode: SandboxMode::ExecOnly,
             image: DEFAULT_IMAGE.into(),
             timeout_secs: 300,
             network: false,
@@ -99,26 +111,12 @@ impl DockerSandbox {
             .to_string_lossy()
             .to_string();
 
-        let network_mode = if self.config.network {
-            None
-        } else {
-            Some("none".to_string())
-        };
-
         let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
             cmd: Some(vec!["sh".into(), "-c".into(), command.into()]),
             working_dir: Some("/workspace".into()),
             user: Some("1000:1000".into()),
-            host_config: Some(HostConfig {
-                binds: Some(vec![format!("{workspace_str}:/workspace:rw")]),
-                network_mode,
-                memory: Some(MEMORY_LIMIT),
-                pids_limit: Some(PIDS_LIMIT),
-                auto_remove: Some(true),
-                runtime: self.config.mode.runtime_name(),
-                ..Default::default()
-            }),
+            host_config: Some(build_host_config(&self.config, &workspace_str)),
             ..Default::default()
         };
 
@@ -258,6 +256,54 @@ impl DockerSandbox {
     }
 }
 
+/// Build the `HostConfig` for a sandboxed exec. Extracted so the
+/// hardening settings can be asserted without spinning up Docker.
+///
+/// Kernel-level hardening, in addition to the memory, PID, network,
+/// and user caps already set below:
+///
+/// * `cap_drop=ALL`: strip every Linux capability. The agent never
+///   needs `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, etc. If a real use
+///   case breaks this, re-evaluate rather than loosening by default.
+/// * `no-new-privileges`: block setuid/setgid elevation inside the
+///   container. Pairs with `cap_drop`.
+/// * `seccomp=default`: pin Docker's default seccomp profile
+///   explicitly, so a daemon-wide `"seccomp": "unconfined"`
+///   misconfiguration does not silently disable syscall filtering
+///   for our containers.
+/// * `readonly_rootfs`: make the container's `/` read-only. The
+///   workspace bind-mount stays RW, and a tmpfs at `/tmp` gives the
+///   shell somewhere to scratch.
+pub(crate) fn build_host_config(config: &SandboxConfig, workspace_str: &str) -> HostConfig {
+    let network_mode = if config.network {
+        None
+    } else {
+        Some("none".to_string())
+    };
+    let tmpfs_mounts: std::collections::HashMap<String, String> = {
+        let mut m = std::collections::HashMap::new();
+        m.insert("/tmp".into(), "size=64m,mode=1777".into());
+        m
+    };
+    HostConfig {
+        binds: Some(vec![format!("{workspace_str}:/workspace:rw")]),
+        network_mode,
+        memory: Some(MEMORY_LIMIT),
+        pids_limit: Some(PIDS_LIMIT),
+        auto_remove: Some(true),
+        runtime: config.mode.runtime_name(),
+        cap_drop: Some(vec!["ALL".into()]),
+        cap_add: Some(Vec::new()),
+        security_opt: Some(vec![
+            "no-new-privileges:true".into(),
+            "seccomp=default".into(),
+        ]),
+        readonly_rootfs: Some(true),
+        tmpfs: Some(tmpfs_mounts),
+        ..Default::default()
+    }
+}
+
 /// Detect if Docker is available.
 pub async fn detect_runtime() -> Option<String> {
     if let Ok(docker) = Docker::connect_with_local_defaults()
@@ -266,6 +312,18 @@ pub async fn detect_runtime() -> Option<String> {
         return Some("docker".into());
     }
     None
+}
+
+/// Detect whether the given image is present locally. Returns false
+/// if Docker is unreachable or the image is not pulled. Used by the
+/// Docker-backed integration tests to skip cleanly when the sandbox
+/// base image has not been pulled on the host (CI runners, for
+/// example, do not pre-pull `debian:bookworm-slim`).
+pub async fn detect_image(image: &str) -> bool {
+    let Ok(docker) = Docker::connect_with_local_defaults() else {
+        return false;
+    };
+    docker.inspect_image(image).await.is_ok()
 }
 
 /// Detect if gVisor (runsc) is available as a Docker runtime.
