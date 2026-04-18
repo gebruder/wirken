@@ -1,252 +1,250 @@
 # Release process
 
-Step-by-step runbook for cutting a Wirken release. Follow top to bottom.
-Signing mechanics live in [release-signing.md](release-signing.md); this
-document covers the surrounding workflow.
+Step-by-step runbook. Follow top to bottom. Signing crypto details live
+in [release-signing.md](release-signing.md).
 
-## Prerequisites (one-time setup)
+## Prerequisites (one-time)
 
-- `gh` CLI authenticated to github.com with access to `gebruder/wirken`.
+- `gh` authenticated to github.com with write access to `gebruder/wirken`.
 - Offline Ed25519 signing key at `~/.ssh/wirken-release-signing` (or
-  wherever, kept outside the repo tree).
-- `ssh-keygen` (OpenSSH 8.1 or newer).
+  anywhere outside the repo tree).
+- OpenSSH 8.1+ (`ssh-keygen -Y` support).
 - `cargo`, `rustfmt`, `clippy`.
 
-Verify:
+Sanity check:
 
 ```bash
 gh auth status
-ssh-keygen -Y verify -f KEYS -I releases@gebruder.ottenheimer.app \
-    -n file -s /dev/null < /dev/null 2>&1 | head -1
+ssh-keygen -lf KEYS   # must match the fingerprint in SECURITY.md
 ```
 
-The second command will fail (no signature to verify), but it confirms
-`KEYS` parses and `ssh-keygen` is present.
+## Version scheme
 
-## Decide the version
-
-Semver. `0.X.Y`:
+Semver on `0.X.Y`:
 
 - Bump `Y` for bug fixes and docs.
-- Bump `X` for new features, new adapters, breaking config changes.
-- `1.0` when the type-level channel separation is threaded through the
+- Bump `X` for features, new adapters, breaking config changes.
+- `1.0` when type-level channel separation is threaded through the
   production message path.
 
-Every workspace crate shares one version via `workspace.package.version`
-in the root `Cargo.toml`. The git tag is `v<version>` (e.g. `v0.7.4`).
+Every workspace crate shares `workspace.package.version` in the root
+`Cargo.toml`. The git tag is `v<version>`.
 
-## Pre-flight checks on main
+## Release sequence
 
-From a clean checkout of `main`:
+Run top to bottom. Replace `0.7.4` with the target version.
 
-```bash
-git checkout main
-git pull --ff-only
-git status   # must be clean
+1. **Clean main, run pre-flight.** All four must pass; fix on a branch
+   and merge before tagging.
+   ```bash
+   git checkout main && git pull --ff-only && git status   # clean
+   cargo fmt --check
+   cargo clippy --workspace -- -D warnings
+   cargo test --workspace
+   ./scripts/test-install.sh
+   ```
 
-cargo fmt --check
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
-./scripts/test-install.sh
-```
+2. **Bump the workspace version.** Edit `Cargo.toml`:
+   ```toml
+   [workspace.package]
+   version = "0.7.4"
+   ```
+   Regenerate the lockfile:
+   ```bash
+   cargo update -w
+   ```
 
-All four must pass. If any fail, fix on a branch, merge, and restart
-from this step.
+3. **Commit and push the bump. Wait for CI green on main.**
+   ```bash
+   git add Cargo.toml Cargo.lock
+   git commit -m "chore: bump version to 0.7.4"
+   git push
+   gh run watch -R gebruder/wirken   # wait for main CI
+   ```
 
-## Bump the version
+4. **Annotated tag, push.** CI triggers on the `v*` tag.
+   ```bash
+   git tag -a v0.7.4 -m "v0.7.4"
+   git push origin v0.7.4
+   ```
 
-Edit `Cargo.toml`:
+5. **Watch the release build.** Produces four binaries, `checksums.sha256`,
+   and creates a **draft** release.
+   ```bash
+   gh run watch -R gebruder/wirken
+   ```
 
-```toml
-[workspace.package]
-version = "0.7.4"
-```
+6. **Download `checksums.sha256` from the draft.** Work in a scratch
+   directory outside the repo tree (`scripts/sign-release.sh` refuses to
+   run if the private key is inside the tree).
+   ```bash
+   mkdir -p /tmp/wirken-release && cd /tmp/wirken-release
+   gh release download v0.7.4 -R gebruder/wirken --pattern checksums.sha256
+   cat checksums.sha256   # sanity: four lines, one per binary
+   ```
 
-Regenerate the lockfile:
+7. **Sign.** You will be prompted for the passphrase.
+   ```bash
+   WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing \
+       ~/code/wirken/scripts/sign-release.sh v0.7.4
+   ```
 
-```bash
-cargo update -w
-```
+8. **Self-verify before upload.** Must print `Good "file" signature for
+   releases@gebruder.ottenheimer.app`. If it fails, do not upload. See
+   [Recovery](#recovery-during-a-release).
+   ```bash
+   ssh-keygen -Y verify \
+       -f ~/code/wirken/KEYS \
+       -I releases@gebruder.ottenheimer.app \
+       -n file \
+       -s checksums.sha256.sig \
+       < checksums.sha256
+   ```
 
-Commit:
+9. **Upload the signature to the draft.**
+   ```bash
+   gh release upload v0.7.4 checksums.sha256.sig -R gebruder/wirken
+   ```
 
-```bash
-git add Cargo.toml Cargo.lock
-git commit -m "chore: bump version to 0.7.4"
-git push
-```
+10. **Confirm all assets are attached.** You should see the four
+    binaries, `checksums.sha256`, and `checksums.sha256.sig`.
+    ```bash
+    gh release view v0.7.4 -R gebruder/wirken
+    ```
 
-CI should stay green on main before tagging. Wait for it.
+11. **Publish.** Flip from draft to published.
+    ```bash
+    gh release edit v0.7.4 -R gebruder/wirken --draft=false
+    ```
 
-## Tag and push
+12. **Smoke test.** On a fresh shell, with a scratch install dir so you
+    do not overwrite your local binary.
+    ```bash
+    WIRKEN_INSTALL_DIR=/tmp/wirken-smoke \
+        sh -c 'curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh'
+    /tmp/wirken-smoke/wirken --version
+    ```
+    The installer output must contain both
+    `Signature verified: releases@gebruder.ottenheimer.app` and
+    `Checksum verified: ...`. If either is missing the release is
+    broken. Go to [Recovery](#recovery-during-a-release).
 
-Annotated tag, version prefixed with `v`:
+Post-release housekeeping: update the README Status section counts if
+any shifted (adapters, providers, skills, tests). Clean up
+`/tmp/wirken-release` and `/tmp/wirken-smoke`.
 
-```bash
-git tag -a v0.7.4 -m "v0.7.4"
-git push origin v0.7.4
-```
-
-This triggers `.github/workflows/release.yml`. The workflow:
-
-1. Builds `wirken-x86_64-unknown-linux-musl`, `wirken-aarch64-unknown-linux-musl`,
-   `wirken-x86_64-apple-darwin`, `wirken-aarch64-apple-darwin`.
-2. Computes `checksums.sha256` over all four binaries.
-3. Creates a **draft** release with the binaries and `checksums.sha256`
-   attached. The release body tells you exactly what to do next.
-
-Watch the run:
-
-```bash
-gh run watch -R gebruder/wirken
-```
-
-If the build fails, see [Recovery](#recovery).
-
-## Sign checksums.sha256
-
-Once the draft exists, download the checksums to a scratch directory
-outside the repo (`scripts/sign-release.sh` refuses to run if the
-private key is inside the repo tree, and keeping signing work out of
-the tree is cleaner):
-
-```bash
-mkdir -p /tmp/wirken-release && cd /tmp/wirken-release
-gh release download v0.7.4 -R gebruder/wirken --pattern checksums.sha256
-cat checksums.sha256   # sanity-check: four lines, one per binary
-```
-
-Sign:
-
-```bash
-WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing \
-    ~/code/wirken/scripts/sign-release.sh v0.7.4
-```
-
-You will be prompted for the key passphrase. Output:
-
-```
-Wrote checksums.sha256.sig
-```
-
-Self-verify before uploading:
-
-```bash
-ssh-keygen -Y verify \
-    -f ~/code/wirken/KEYS \
-    -I releases@gebruder.ottenheimer.app \
-    -n file \
-    -s checksums.sha256.sig \
-    < checksums.sha256
-```
-
-Expected: `Good "file" signature for releases@gebruder.ottenheimer.app`.
-
-If that fails, do not upload. See [Recovery](#recovery).
-
-## Upload signature and publish
-
-Upload the signature to the draft:
-
-```bash
-gh release upload v0.7.4 checksums.sha256.sig -R gebruder/wirken
-```
-
-Confirm all expected assets are attached:
-
-```bash
-gh release view v0.7.4 -R gebruder/wirken
-```
-
-You should see:
-
-- `wirken-x86_64-unknown-linux-musl`
-- `wirken-aarch64-unknown-linux-musl`
-- `wirken-x86_64-apple-darwin`
-- `wirken-aarch64-apple-darwin`
-- `checksums.sha256`
-- `checksums.sha256.sig`
-
-Publish (flip from draft to published):
-
-```bash
-gh release edit v0.7.4 -R gebruder/wirken --draft=false
-```
-
-## Smoke-test the published release
-
-On a clean shell, with a scratch `WIRKEN_INSTALL_DIR` so you do not
-overwrite your local binary:
-
-```bash
-WIRKEN_INSTALL_DIR=/tmp/wirken-smoke \
-    sh -c 'curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh'
-/tmp/wirken-smoke/wirken --version
-```
-
-Expected lines in the installer output:
-
-```
-Signature verified: releases@gebruder.ottenheimer.app
-Checksum verified: ...
-Installed to /tmp/wirken-smoke/wirken
-```
-
-If either verification line is missing, the release is broken even if
-the binary ran. Go to [Recovery](#recovery).
-
-Clean up:
-
-```bash
-rm -rf /tmp/wirken-smoke /tmp/wirken-release
-```
-
-## Post-release
-
-- Update `README.md` Status section counts if the numbers shifted
-  (adapters, providers, skills, test count).
-- If this release adds a new channel adapter, update `docs/channels.md`
-  and the README opening paragraph.
-- Close milestone / issues tagged for this version.
-
-## Recovery
+## Recovery during a release
 
 **CI failed on the tag push.** The tag exists on GitHub but no draft
-release was created. Fix the build, then delete and retag:
-
+was created.
 ```bash
 git tag -d v0.7.4
 git push --delete origin v0.7.4
-# fix, commit, push main
-git tag -a v0.7.4 -m "v0.7.4"
-git push origin v0.7.4
+# fix on main, then restart from step 4
 ```
 
-**You signed but verification failed against `KEYS`.** The signing key
-you used does not match the key pinned in the repo. Check
-`WIRKEN_SIGNING_KEY` points at the right file and re-run signing. Do
-not publish an unverified signature.
+**Signature verification failed in step 8.** The key you signed with
+does not match the key pinned in the repo. Check `WIRKEN_SIGNING_KEY`
+points at the right file. Do not upload an unverified signature.
 
-**You uploaded the wrong signature.** Delete the asset and re-upload:
-
+**You uploaded the wrong signature.**
 ```bash
 gh release delete-asset v0.7.4 checksums.sha256.sig -R gebruder/wirken --yes
 gh release upload v0.7.4 checksums.sha256.sig -R gebruder/wirken
 ```
 
 **You already published a bad release.** Do not delete it; users may
-already have downloaded it. Instead:
+have already downloaded. Publish a patch (`v0.7.5`) with the fix, then
+edit the bad release body to prepend `**Broken — use v0.7.5.**`. If
+the bad release is actively harmful (wrong binary, leaked credential),
+delete the binaries and signature from the release but leave the page
+with an explanatory note so the installer fails cleanly rather than
+silently installing stale content.
 
-1. Publish a patch version (`v0.7.5`) with the fix.
-2. On the bad release, edit the body to add a `**Broken — use
-   v0.7.5.**` notice at the top.
-3. If the bad release is actively harmful (wrong binary, corrupt
-   signature, credential leak), delete the binaries and signature from
-   the release but leave the release page with an explanatory note, so
-   users hitting the installer see a clean failure rather than a silent
-   broken install.
+## Key rotation
 
-**Private key compromise suspected.** Follow the key rotation
-procedure in [release-signing.md](release-signing.md#rotate-the-key),
-then re-sign and publish the next release with the new key. Alert via
-`security@gebruder.ottenheimer.app`.
+Three-step dependency. Do not reorder.
+
+1. **Generate the new key offline.** Record the fingerprint and issue
+   date.
+   ```bash
+   ssh-keygen -t ed25519 -C releases@gebruder.ottenheimer.app \
+       -f wirken-release-signing-NEW
+   ssh-keygen -lf wirken-release-signing-NEW.pub
+   ```
+   Store the private key outside the repo tree. Do not overwrite the
+   old private key until step 3 publishes.
+
+2. **In one commit on main, swap the trust anchor.** Every file that
+   pins the public key updates together:
+   - `KEYS`: add the new key as the active entry; mark the old key
+     with a `# Retired YYYY-MM-DD` comment (keep it in the file for
+     verifying pre-rotation releases).
+   - `install.sh`: replace `ALLOWED_SIGNERS` with the new public key
+     line. Update the `# Current active key` header fingerprint.
+   - `README.md`: bump the pinned install.sh SHA-256 (the value is
+     whatever `sha256sum install.sh` prints after the edit).
+   - `SECURITY.md`: update the active fingerprint and issue date.
+
+   Merge the commit.
+
+3. **Immediately tag and cut the next release with the new key.** Run
+   [the release sequence](#release-sequence) from step 4 onward using
+   the new private key for signing.
+
+**Ordering trap.** Between merging step 2 and publishing step 3, the
+installer on `main` trusts the new key but the latest release is still
+signed with the old key. `curl | sh` from the install URL exits 5
+during that window. Keep the window as short as possible: merge the
+rotation commit and tag the release in the same sitting, not days
+apart. Users with a pinned older `install.sh` are unaffected.
+
+## Key loss or compromise recovery
+
+Same shape as rotation, but with the caveats below. Severity depends
+on whether the old private key was lost (no one has it) or compromised
+(someone else might).
+
+**Users with an already-installed binary are unaffected.** The binary
+they run has no trust path to the release key. Signature verification
+only runs at install time.
+
+**Users with a pinned older `install.sh` keep working** against
+existing releases as long as those releases' signatures still verify
+under the old public key. The old public key stays in their pinned
+`install.sh` either way.
+
+**New installs from `main` break until you cut a new signed release.**
+That is the only user-visible cost. Worst case is a few hours to a few
+days of broken `curl | sh`, not catastrophic.
+
+Procedure:
+
+1. **Generate a new key offline.** Same command as rotation step 1.
+
+2. **Swap the trust anchor in one commit.** Same edits as rotation
+   step 2 with two differences:
+   - **If compromised (not just lost):** remove the old key from `KEYS`
+     entirely instead of retiring it. Any binary signed by the
+     compromised key must no longer be treated as trustworthy.
+     Explicitly yank the old releases: edit each existing release to
+     prepend `**Revoked — key compromised. Upgrade to vX.Y.Z.**`.
+   - **If only lost:** keep the old key in `KEYS` with
+     `# Retired YYYY-MM-DD — private key lost, no further signatures
+     will be produced`. Old releases stay verifiable.
+
+3. **Tag and publish a new signed release immediately.** If the loss
+   is an emergency (compromise), bump a patch version with no code
+   changes just to get a release signed under the new key out to
+   `main`-following users. The release's only purpose is to restore
+   the trust path.
+
+4. **If compromised, publish an advisory.** Post to
+   `security@gebruder.ottenheimer.app` and a GitHub security advisory:
+   which key fingerprint is revoked, which releases are affected, and
+   which version to upgrade to. Rotate any other credentials that
+   shared the same storage as the compromised private key.
+
+No recovery option short of this: there is no global revocation
+mechanism for ssh-keygen signatures. Trust anchor swap + new signed
+release is the whole fix.
