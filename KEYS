@@ -1,0 +1,29 @@
+# Wirken release signing keys
+#
+# This file is in OpenSSH allowed_signers format and can be passed to
+# `ssh-keygen -Y verify -f KEYS`. Every production release is signed with
+# the key listed here over the release's checksums.sha256.
+#
+# Verify a release locally:
+#
+#   curl -fsSLO https://github.com/gebruder/wirken/releases/download/vX.Y.Z/checksums.sha256
+#   curl -fsSLO https://github.com/gebruder/wirken/releases/download/vX.Y.Z/checksums.sha256.sig
+#   curl -fsSLO https://raw.githubusercontent.com/gebruder/wirken/main/KEYS
+#   ssh-keygen -Y verify \
+#       -f KEYS \
+#       -I releases@gebruder.ottenheimer.app \
+#       -n file \
+#       -s checksums.sha256.sig \
+#       < checksums.sha256
+#
+# Key rotation history lives in docs/release-signing.md.
+#
+# Current active key
+#   Identity:    releases@gebruder.ottenheimer.app
+#   Algorithm:   ssh-ed25519
+#   Issued:      PENDING (to be filled on first signing)
+#   Fingerprint: PENDING (SHA256: will be recorded once key is generated)
+#
+# REPLACE: paste the output of `ssh-keygen -y -f wirken-release-signing` as
+# the key field below, preserving the identity and the ssh-ed25519 type.
+releases@gebruder.ottenheimer.app ssh-ed25519 REPLACE_ME_WITH_PUBLIC_KEY
