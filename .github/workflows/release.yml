@@ -137,7 +137,7 @@ jobs:
       # uploads checksums.sha256.sig to the draft before publishing.
       # CI does not hold the signing key.
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release/*
           generate_release_notes: true
