@@ -190,6 +190,12 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             mcp_client: None,
             identity: None, // verify never signs new attestations
             allowed_subagents: Default::default(),
+            // verify re-executes deterministic read-only tools against
+            // the current workspace; no shell exec is ever replayed,
+            // so the sandbox config is inert here. Use the default
+            // rather than loading provider.json to keep verify
+            // independent of the runtime sandbox selection.
+            sandbox: Default::default(),
         },
     );
     let factory =

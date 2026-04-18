@@ -52,11 +52,12 @@ wirken agents allow-subagent parent child --tools "read_file,web_search" --max-t
 
 The ceiling is stored as JSON in the `agents.allowed_subagents` column.
 
-### Org-level tool policy (parsed, not enforced)
+### Org-level tool policy (partially enforced)
 
-The pulled org config (`wirken setup --org <url>`) deserializes `permissions.allowed_tools`, `permissions.blocked_tools`, and `permissions.sandbox_mode` into `OrgPermissions`. None of these fields are currently read by the permission check or the sandbox initializer. They parse without error and are then dropped. Tracked in `BACKLOG.md` under "Org-level tool allow/deny lists."
+The pulled org config (`wirken setup --org <url>`) deserializes `permissions.allowed_tools`, `permissions.blocked_tools`, and `permissions.sandbox_mode` into `OrgPermissions`. Of these:
 
-Do not rely on these fields for authorization today. A config that sets `blocked_tools: ["generate_image"]` will not prevent the agent from invoking `generate_image`.
+- `sandbox_mode` is enforced. When present on the pulled config, `apply_org_config` writes `sandbox.json` in the data directory, and `wirken run` re-reads it on every gateway start. Valid values are `off`, `exec-only`, and `gvisor`; unknown values fall back to the default (`exec-only`) with a warning.
+- `allowed_tools` and `blocked_tools` are still parsed but not read by the permission check. A config that sets `blocked_tools: ["generate_image"]` will not prevent the agent from invoking `generate_image`. Tracked in `BACKLOG.md` under "Org-level tool allow/deny lists."
 
 ### Channel process isolation
 

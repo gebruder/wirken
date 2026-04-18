@@ -282,6 +282,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     mcp_client: None, // populated below after the proxy starts
                     identity,
                     allowed_subagents: agent_cfg.allowed_subagents.clone(),
+                    sandbox: super::load_sandbox_config(&cfg.data_dir),
                 },
             );
         }
@@ -353,6 +354,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 mcp_client: None,
                 identity: default_identity,
                 allowed_subagents: Default::default(),
+                sandbox: super::load_sandbox_config(&cfg.data_dir),
             },
         );
     }
