@@ -140,7 +140,7 @@ fn copy_legacy_table_into_session_events(conn: &Connection) -> Result<usize, Aud
     // All migrated rows go into a single chain under the
     // pre-migration sentinel so the original ordering is preserved.
     let session_id = PRE_MIGRATION_SESSION;
-    let mut next_seq: u64 = tx
+    let initial_seq: u64 = tx
         .query_row(
             "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
             params![session_id],
@@ -160,7 +160,7 @@ fn copy_legacy_table_into_session_events(conn: &Connection) -> Result<usize, Aud
         )
         .unwrap_or_default();
 
-    for row in rows {
+    for (idx, row) in rows.enumerate() {
         let (ts, actor, action, target, channel, _session, detail_json) = row?;
         let detail: serde_json::Value = serde_json::from_str(&detail_json)?;
 
@@ -178,6 +178,7 @@ fn copy_legacy_table_into_session_events(conn: &Connection) -> Result<usize, Aud
         let payload_str =
             String::from_utf8(payload_bytes).expect("serde_json output is always valid utf-8");
 
+        let next_seq = initial_seq + idx as u64;
         tx.execute(
             "INSERT INTO session_events
                  (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
@@ -194,8 +195,7 @@ fn copy_legacy_table_into_session_events(conn: &Connection) -> Result<usize, Aud
         )?;
 
         prev_hash = row_hash;
-        next_seq += 1;
-        count += 1;
+        count = idx + 1;
     }
 
     tx.commit()?;
