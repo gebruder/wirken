@@ -239,14 +239,18 @@ install_binary() {
 }
 
 verify() {
-    if command -v wirken >/dev/null 2>&1; then
-        echo ""
-        wirken --version
-        echo ""
-        echo "Run 'wirken setup' to get started."
-    elif [ -x "${INSTALL_DIR}/wirken" ]; then
+    # Report the binary we just installed, not whatever `wirken` resolves
+    # to on PATH. A user installing to a non-PATH directory may have an
+    # older wirken elsewhere on PATH; querying PATH first misreports the
+    # installed version and makes a successful install look like a no-op.
+    if [ -x "${INSTALL_DIR}/wirken" ]; then
         echo ""
         "${INSTALL_DIR}/wirken" --version
+        echo ""
+        echo "Run 'wirken setup' to get started."
+    elif command -v wirken >/dev/null 2>&1; then
+        echo ""
+        wirken --version
         echo ""
         echo "Run 'wirken setup' to get started."
     fi
