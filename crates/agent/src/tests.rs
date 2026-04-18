@@ -1106,6 +1106,7 @@ mod wake {
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
+                sandbox: Default::default(),
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -1439,6 +1440,7 @@ mod wake {
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: Default::default(),
+                sandbox: Default::default(),
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, CacheMode::Drop, 64);
@@ -1500,6 +1502,7 @@ mod subagent {
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: parent_ceilings,
+                sandbox: Default::default(),
             },
         );
         configs.insert(
@@ -1514,6 +1517,7 @@ mod subagent {
                 mcp_client: None,
                 identity: None,
                 allowed_subagents: BTreeMap::new(),
+                sandbox: Default::default(),
             },
         );
         (AgentFactory::new(configs, log, None), tmp)

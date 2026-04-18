@@ -86,12 +86,13 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
             .context("Failed to open session log")?,
     );
 
-    let mut agent = Agent::new(
+    let mut agent = Agent::new_with_sandbox(
         "default".into(),
         workspace.clone(),
         llm_config,
         api_key,
         session_log,
+        super::load_sandbox_config(&cfg.data_dir),
     )?;
 
     let skills_dir = cfg.data_dir.join("skills");
@@ -152,12 +153,13 @@ async fn send_with_agent_config(
             .context("Failed to open session log")?,
     );
 
-    let mut agent = Agent::new(
+    let mut agent = Agent::new_with_sandbox(
         agent_cfg.id.clone(),
         workspace.clone(),
         llm_config,
         api_key,
         session_log,
+        super::load_sandbox_config(&cfg.data_dir),
     )?;
 
     let skills_dir = cfg.agent_skills_dir(&agent_cfg.id);

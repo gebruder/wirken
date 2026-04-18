@@ -96,6 +96,11 @@ pub struct AgentStaticConfig {
     /// every waked Agent so the harness can read the ceiling
     /// without re-querying the gateway config store.
     pub allowed_subagents: BTreeMap<String, SubagentCeiling>,
+    /// Sandbox configuration for shell exec. Defaults to
+    /// `SandboxMode::ExecOnly`. Operators override via
+    /// `provider.json` (or per-agent config in a future pass). The
+    /// factory clones this into every waked Agent's `ToolRegistry`.
+    pub sandbox: crate::sandbox::SandboxConfig,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -237,6 +242,7 @@ impl AgentFactory {
             cfg.llm_config.clone(),
             cfg.api_key.clone(),
             self.session_log.clone(),
+            cfg.sandbox.clone(),
         )?;
         // Inject the per-agent shared resources.
         agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone());
