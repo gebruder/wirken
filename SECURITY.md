@@ -10,11 +10,25 @@
 
 ## Reporting a Vulnerability
 
-Report security vulnerabilities via GitHub's private vulnerability reporting at [github.com/gebruder/wirken/security/advisories](https://github.com/gebruder/wirken/security/advisories).
+Report security vulnerabilities via one of:
+
+- GitHub private vulnerability reporting: [github.com/gebruder/wirken/security/advisories](https://github.com/gebruder/wirken/security/advisories)
+- Email: security@gebruder.ottenheimer.app
 
 Do not open a public issue for security vulnerabilities.
 
 You should receive an initial response within 72 hours. If the vulnerability is accepted, a fix will be released as a patch version (e.g., 0.3.1) and the advisory will be published after the fix is available.
+
+## Release signing
+
+Release artifacts are signed offline with an Ed25519 SSH key. The public key is pinned in [KEYS](KEYS) at the repository root and embedded in `install.sh` so installer verification needs no network fetch of the key. The full procedure, including key rotation, is in [docs/release-signing.md](docs/release-signing.md).
+
+Current active key:
+
+- Identity: `releases@gebruder.ottenheimer.app`
+- Algorithm: `ssh-ed25519`
+- Fingerprint: recorded in `KEYS` after offline generation
+- Signed file: `checksums.sha256` for every published release (verify with `ssh-keygen -Y verify`)
 
 ## Scope
 
