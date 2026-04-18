@@ -1,6 +1,10 @@
 # Wirken
 
-Wirken is a simple, powerful AI agent that lives in your chat tools. Message it on Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and it reads files, calls APIs, and runs tools on your behalf.
+<p align="center">
+  <img src="docs/img/wirken-switchboard.png" alt="Wirken: the switchboard for the agent era" width="420">
+</p>
+
+Wirken is the switchboard for the agent era. Message it on Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools on your behalf. Each channel gets its own line. Every call is logged before it connects.
 
 Wirken ships as a single static Rust binary and works with Ollama, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil, Privatemode, or any OpenAI-compatible endpoint. MIT licensed.
 
