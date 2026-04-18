@@ -183,6 +183,8 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)
 - [Enforcement model](docs/enforcement-model.md) (compile-time vs. runtime guarantees)
+- [Release process](docs/release-process.md) (version bump, tag, sign, publish, smoke test)
+- [Release signing](docs/release-signing.md) (Ed25519 key, rotation, verification)
 
 ## Contributing
 

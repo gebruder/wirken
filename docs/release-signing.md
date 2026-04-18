@@ -1,5 +1,8 @@
 # Release signing
 
+> Cutting a release? Follow [release-process.md](release-process.md) end
+> to end. This document covers the signing internals only.
+
 Every Wirken release is signed with an offline Ed25519 SSH key. The
 installer fetches `checksums.sha256.sig` alongside `checksums.sha256` and
 verifies both with `ssh-keygen -Y verify` before touching the binary.
