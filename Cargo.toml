@@ -29,7 +29,7 @@ description = "Team-scale AI agent orchestration with per-channel process isolat
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1.50", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 
 # HTTP
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
