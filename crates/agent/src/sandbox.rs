@@ -111,26 +111,12 @@ impl DockerSandbox {
             .to_string_lossy()
             .to_string();
 
-        let network_mode = if self.config.network {
-            None
-        } else {
-            Some("none".to_string())
-        };
-
         let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
             cmd: Some(vec!["sh".into(), "-c".into(), command.into()]),
             working_dir: Some("/workspace".into()),
             user: Some("1000:1000".into()),
-            host_config: Some(HostConfig {
-                binds: Some(vec![format!("{workspace_str}:/workspace:rw")]),
-                network_mode,
-                memory: Some(MEMORY_LIMIT),
-                pids_limit: Some(PIDS_LIMIT),
-                auto_remove: Some(true),
-                runtime: self.config.mode.runtime_name(),
-                ..Default::default()
-            }),
+            host_config: Some(build_host_config(&self.config, &workspace_str)),
             ..Default::default()
         };
 
@@ -267,6 +253,54 @@ impl DockerSandbox {
 
         let ver_str = version.version.unwrap_or_else(|| "unknown".into());
         Ok(format!("Docker {ver_str}"))
+    }
+}
+
+/// Build the `HostConfig` for a sandboxed exec. Extracted so the
+/// hardening settings can be asserted without spinning up Docker.
+///
+/// Kernel-level hardening, in addition to the memory, PID, network,
+/// and user caps already set below:
+///
+/// * `cap_drop=ALL`: strip every Linux capability. The agent never
+///   needs `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, etc. If a real use
+///   case breaks this, re-evaluate rather than loosening by default.
+/// * `no-new-privileges`: block setuid/setgid elevation inside the
+///   container. Pairs with `cap_drop`.
+/// * `seccomp=default`: pin Docker's default seccomp profile
+///   explicitly, so a daemon-wide `"seccomp": "unconfined"`
+///   misconfiguration does not silently disable syscall filtering
+///   for our containers.
+/// * `readonly_rootfs`: make the container's `/` read-only. The
+///   workspace bind-mount stays RW, and a tmpfs at `/tmp` gives the
+///   shell somewhere to scratch.
+pub(crate) fn build_host_config(config: &SandboxConfig, workspace_str: &str) -> HostConfig {
+    let network_mode = if config.network {
+        None
+    } else {
+        Some("none".to_string())
+    };
+    let tmpfs_mounts: std::collections::HashMap<String, String> = {
+        let mut m = std::collections::HashMap::new();
+        m.insert("/tmp".into(), "size=64m,mode=1777".into());
+        m
+    };
+    HostConfig {
+        binds: Some(vec![format!("{workspace_str}:/workspace:rw")]),
+        network_mode,
+        memory: Some(MEMORY_LIMIT),
+        pids_limit: Some(PIDS_LIMIT),
+        auto_remove: Some(true),
+        runtime: config.mode.runtime_name(),
+        cap_drop: Some(vec!["ALL".into()]),
+        cap_add: Some(Vec::new()),
+        security_opt: Some(vec![
+            "no-new-privileges:true".into(),
+            "seccomp=default".into(),
+        ]),
+        readonly_rootfs: Some(true),
+        tmpfs: Some(tmpfs_mounts),
+        ..Default::default()
     }
 }
 
