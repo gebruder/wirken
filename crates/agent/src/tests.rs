@@ -2130,10 +2130,17 @@ fn host_config_gvisor_adds_runsc_runtime_without_loosening_hardening() {
 
 #[tokio::test]
 async fn sandbox_blocks_write_to_rootfs_but_allows_workspace_and_tmp() {
-    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_runtime};
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
 
     if detect_runtime().await.is_none() {
         eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!(
+            "skipping: debian:bookworm-slim is not pulled on this host; \
+             run `docker pull debian:bookworm-slim` to enable this test"
+        );
         return;
     }
     let tmp = TempDir::new().unwrap();
@@ -2178,10 +2185,17 @@ async fn sandbox_blocks_write_to_rootfs_but_allows_workspace_and_tmp() {
 
 #[tokio::test]
 async fn sandbox_blocks_chown_via_cap_drop() {
-    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_runtime};
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
 
     if detect_runtime().await.is_none() {
         eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!(
+            "skipping: debian:bookworm-slim is not pulled on this host; \
+             run `docker pull debian:bookworm-slim` to enable this test"
+        );
         return;
     }
     let tmp = TempDir::new().unwrap();
@@ -2218,10 +2232,17 @@ async fn sandbox_blocks_chown_via_cap_drop() {
 
 #[tokio::test]
 async fn sandbox_blocks_setuid_via_no_new_privileges() {
-    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_runtime};
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
 
     if detect_runtime().await.is_none() {
         eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!(
+            "skipping: debian:bookworm-slim is not pulled on this host; \
+             run `docker pull debian:bookworm-slim` to enable this test"
+        );
         return;
     }
     let tmp = TempDir::new().unwrap();
