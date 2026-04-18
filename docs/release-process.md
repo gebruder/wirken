@@ -47,15 +47,25 @@ Every workspace crate shares `workspace.package.version` in the root
 
 Run top to bottom. Replace `0.7.4` with the target version.
 
-1. **Clean main, run pre-flight.** All four must pass; fix on a branch
-   and merge before tagging.
+1. **Clean main, run pre-flight.** All must pass; fix on a branch and
+   merge before tagging.
    ```bash
    git checkout main && git pull --ff-only && git status   # clean
    cargo fmt --check
    cargo clippy --workspace -- -D warnings
+   shellcheck install.sh
+   [ "$(sha256sum install.sh | awk '{print $1}')" = "$(grep -o '[0-9a-f]\{64\}' README.md | head -1)" ] \
+       && echo "install.sh SHA matches README pin" \
+       || { echo "install.sh SHA drift"; exit 1; }
    cargo test --workspace
    ./scripts/test-install.sh
    ```
+
+   The `shellcheck` and SHA checks exist because a locally modified
+   `install.sh` that has not been pushed will not be caught by the
+   `installer-pin` CI workflow until push, and a release tagged before
+   push will ship with a mismatched pin. `cargo fmt` and `cargo clippy`
+   are redundant with CI but serve as a local fast-fail.
 
 2. **Bump the workspace version.** Edit `Cargo.toml`:
    ```toml
