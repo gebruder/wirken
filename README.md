@@ -1,6 +1,6 @@
 # Wirken
 
-Teams deploy AI agents across Slack, Teams, Matrix, and Signal. Every message crosses a trust boundary between the channel that delivered it, the orchestrator that routed it, and the inference provider that answered it. Most agent frameworks collapse these boundaries into a single trust domain with one token, no process isolation, and no audit trail. If that process is compromised, every channel is compromised with it.
+Organizations deploy AI agents across Slack, Teams, Matrix, and Signal. Every message crosses a trust boundary between the channel that delivered it, the orchestrator that routed it, and the inference provider that answered it. Most agent frameworks collapse these boundaries into a single trust domain with one token, no process isolation, and no audit trail. If that process is compromised, every channel is compromised with it.
 
 Wirken separates the trust domains. Each channel runs in its own adapter process with a distinct ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk, or a webhook when SIEM is configured. Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
 
