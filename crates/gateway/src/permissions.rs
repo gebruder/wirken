@@ -343,7 +343,10 @@ mod tier_tests {
             .tier(),
             PermissionTier::Tier2
         );
-        assert_eq!(Action::CrossConversationMessage.tier(), PermissionTier::Tier2);
+        assert_eq!(
+            Action::CrossConversationMessage.tier(),
+            PermissionTier::Tier2
+        );
         assert_eq!(Action::DestructiveFileOp.tier(), PermissionTier::Tier3);
         assert_eq!(
             Action::NetworkRequest {
