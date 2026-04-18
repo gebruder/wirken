@@ -2390,19 +2390,22 @@ fn denial_context_display() {
     use crate::error::PermissionDenialContext;
     use wirken_gateway::permissions::{Action, PermissionTier};
 
+    // `curl` is a high-risk prefix (Tier 3) in the production
+    // permission model; every invocation prompts rather than
+    // remembering an approval.
     let ctx = PermissionDenialContext {
         tool_name: "exec".into(),
         action: Action::ShellExec {
             pattern: "curl".into(),
         },
-        requested_tier: PermissionTier::Tier2,
+        requested_tier: PermissionTier::Tier3,
         agent_id: "default".into(),
         trigger_message: Some("fetch that URL".into()),
     };
 
     let display = format!("{ctx}");
     assert!(display.contains("exec"));
-    assert!(display.contains("tier2"));
+    assert!(display.contains("tier3"));
     assert!(display.contains("ShellExec"));
 }
 

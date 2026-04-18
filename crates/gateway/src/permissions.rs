@@ -48,12 +48,40 @@ pub enum Action {
     SkillInstall,
 }
 
+/// Command prefixes that escalate a shell exec from the default
+/// Tier 2 ("first-use approval, remembered for 30 days") to Tier 3
+/// ("always prompt"). These are commands whose reasonable blast
+/// radius is wide enough that a single "shell:curl" approval should
+/// not cover every subsequent URL, or whose effects extend beyond
+/// the local host (network egress, remote shells, container or
+/// cluster mutations, privilege elevation, file transfer to/from
+/// arbitrary peers). `git` is included for push/fetch but
+/// read-only `git log` / `git status` also trigger Tier 3; the
+/// tradeoff favours prompting on every git invocation over
+/// silently permitting a `git push` with stored credentials.
+pub const HIGH_RISK_PREFIXES: &[&str] = &[
+    "curl", "wget", "ssh", "scp", "sftp", "sudo", "su", "doas", "kubectl", "helm", "docker",
+    "podman", "nc", "ncat", "socat", "git",
+];
+
 impl Action {
     /// Determine which tier this action belongs to.
     pub fn tier(&self) -> PermissionTier {
         match self {
             Action::WorkspaceFileAccess | Action::ChannelConverse | Action::WebSearch => {
                 PermissionTier::Tier1
+            }
+
+            // Shell exec splits on command prefix: high-risk
+            // prefixes (network egress, remote shells, cluster
+            // mutations, privilege elevation) get Tier 3 and prompt
+            // every time. Everything else keeps the Tier 2
+            // first-use-approval behaviour. This does not change
+            // the permissions.db schema; existing Tier 2 approvals
+            // for newly-Tier-3 prefixes are ignored by `check`,
+            // which never queries the store for Tier 3.
+            Action::ShellExec { pattern } if HIGH_RISK_PREFIXES.contains(&pattern.as_str()) => {
+                PermissionTier::Tier3
             }
 
             Action::ShellExec { .. }
@@ -250,4 +278,131 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    fn shell(pattern: &str) -> Action {
+        Action::ShellExec {
+            pattern: pattern.into(),
+        }
+    }
+
+    #[test]
+    fn high_risk_prefixes_are_tier3() {
+        for p in HIGH_RISK_PREFIXES {
+            assert_eq!(
+                shell(p).tier(),
+                PermissionTier::Tier3,
+                "shell prefix `{p}` must be Tier 3"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_prefixes_are_listed() {
+        // Regression: if this list is trimmed, failures here force
+        // the change to be audited in review rather than slipping
+        // through.
+        let expected = [
+            "curl", "wget", "ssh", "scp", "sftp", "sudo", "su", "doas", "kubectl", "helm",
+            "docker", "podman", "nc", "ncat", "socat", "git",
+        ];
+        for p in &expected {
+            assert!(
+                HIGH_RISK_PREFIXES.contains(p),
+                "`{p}` must be in HIGH_RISK_PREFIXES"
+            );
+        }
+    }
+
+    #[test]
+    fn non_risky_shell_exec_stays_tier2() {
+        // `ls`, `echo`, `cat`, `grep`, `rg`, `jq` etc. should keep
+        // the first-use approval behaviour.
+        for p in ["ls", "echo", "cat", "grep", "rg", "jq", "make"] {
+            assert_eq!(
+                shell(p).tier(),
+                PermissionTier::Tier2,
+                "shell prefix `{p}` must stay Tier 2"
+            );
+        }
+    }
+
+    #[test]
+    fn other_action_tiers_unchanged() {
+        assert_eq!(Action::WorkspaceFileAccess.tier(), PermissionTier::Tier1);
+        assert_eq!(Action::WebSearch.tier(), PermissionTier::Tier1);
+        assert_eq!(Action::ChannelConverse.tier(), PermissionTier::Tier1);
+        assert_eq!(
+            Action::ExternalFileAccess {
+                path: "/etc/passwd".into(),
+            }
+            .tier(),
+            PermissionTier::Tier2
+        );
+        assert_eq!(Action::CrossConversationMessage.tier(), PermissionTier::Tier2);
+        assert_eq!(Action::DestructiveFileOp.tier(), PermissionTier::Tier3);
+        assert_eq!(
+            Action::NetworkRequest {
+                domain: "example.com".into(),
+            }
+            .tier(),
+            PermissionTier::Tier3
+        );
+        assert_eq!(Action::CredentialAccess.tier(), PermissionTier::Tier3);
+        assert_eq!(Action::CronCreate.tier(), PermissionTier::Tier3);
+        assert_eq!(Action::SkillInstall.tier(), PermissionTier::Tier3);
+    }
+
+    #[test]
+    fn curl_always_needs_approval_even_after_prior_approve_call() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        // Store a Tier-2-style approval for shell:curl. The check
+        // path for Tier 3 must ignore it. We exercise this because
+        // existing installs may already hold such rows from before
+        // 0.7.5; the new tier lookup must not surface them.
+        store
+            .approve(&shell("curl"), "default", "test-operator")
+            .unwrap();
+        let result = store.check(&shell("curl"), "default").unwrap();
+        assert_eq!(
+            result,
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier3,
+            },
+        );
+    }
+
+    #[test]
+    fn ls_is_first_use_then_silent_until_expiry() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        // First call: no record, needs approval at Tier 2.
+        let first = store.check(&shell("ls"), "default").unwrap();
+        assert_eq!(
+            first,
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+        // Operator approves once.
+        store
+            .approve(&shell("ls"), "default", "test-operator")
+            .unwrap();
+        // Subsequent calls within the 30-day window: allowed
+        // without prompting. We check two calls to mirror the user
+        // behavior "prompts once then runs silently".
+        assert_eq!(
+            store.check(&shell("ls"), "default").unwrap(),
+            PermissionCheck::Allowed
+        );
+        assert_eq!(
+            store.check(&shell("ls"), "default").unwrap(),
+            PermissionCheck::Allowed
+        );
+    }
 }
