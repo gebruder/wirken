@@ -1,21 +1,34 @@
 # Release process
 
-Step-by-step runbook. Follow top to bottom. Signing crypto details live
-in [release-signing.md](release-signing.md).
+Step-by-step maintainer runbook. Follow top to bottom. Signing crypto
+details live in [release-signing.md](release-signing.md).
+
+> **Audience.** This document is for maintainers who hold the offline
+> release signing key. Contributors and users do not run these steps;
+> they consume published releases. To verify a release you downloaded,
+> see the manual verification snippet in
+> [release-signing.md](release-signing.md#verify-a-release-manually).
 
 ## Prerequisites (one-time)
 
 - `gh` authenticated to github.com with write access to `gebruder/wirken`.
-- Offline Ed25519 signing key at `~/.ssh/wirken-release-signing` (or
-  anywhere outside the repo tree).
+- Offline Ed25519 signing key stored outside the repo tree. Examples in
+  this document assume `~/.ssh/wirken-release-signing`; substitute your
+  actual path.
 - OpenSSH 8.1+ (`ssh-keygen -Y` support).
 - `cargo`, `rustfmt`, `clippy`.
+- `REPO` environment variable pointing at your local `wirken` checkout:
+  ```bash
+  export REPO=~/code/wirken   # wherever you cloned it
+  ```
+  Commands below reference `"$REPO"/scripts/sign-release.sh` and
+  `"$REPO"/KEYS`.
 
 Sanity check:
 
 ```bash
 gh auth status
-ssh-keygen -lf KEYS   # must match the fingerprint in SECURITY.md
+ssh-keygen -lf "$REPO"/KEYS   # must match the fingerprint in SECURITY.md
 ```
 
 ## Version scheme
@@ -86,7 +99,7 @@ Run top to bottom. Replace `0.7.4` with the target version.
 7. **Sign.** You will be prompted for the passphrase.
    ```bash
    WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing \
-       ~/code/wirken/scripts/sign-release.sh v0.7.4
+       "$REPO"/scripts/sign-release.sh v0.7.4
    ```
 
 8. **Self-verify before upload.** Must print `Good "file" signature for
@@ -94,7 +107,7 @@ Run top to bottom. Replace `0.7.4` with the target version.
    [Recovery](#recovery-during-a-release).
    ```bash
    ssh-keygen -Y verify \
-       -f ~/code/wirken/KEYS \
+       -f "$REPO"/KEYS \
        -I releases@gebruder.ottenheimer.app \
        -n file \
        -s checksums.sha256.sig \
