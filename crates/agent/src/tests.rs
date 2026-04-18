@@ -2081,11 +2081,12 @@ fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
     let hc = build_host_config(&cfg, "/host/workspace");
     assert_eq!(hc.readonly_rootfs, Some(true));
     let tmpfs = hc.tmpfs.expect("tmpfs must be set");
-    let opts = tmpfs
-        .get("/tmp")
-        .expect("/tmp must be a tmpfs mount");
+    let opts = tmpfs.get("/tmp").expect("/tmp must be a tmpfs mount");
     assert!(opts.contains("size=64m"), "tmpfs /tmp must cap size at 64m");
-    assert!(opts.contains("mode=1777"), "tmpfs /tmp must be world-writable with sticky bit");
+    assert!(
+        opts.contains("mode=1777"),
+        "tmpfs /tmp must be world-writable with sticky bit"
+    );
 }
 
 #[test]

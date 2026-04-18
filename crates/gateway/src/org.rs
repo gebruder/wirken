@@ -236,11 +236,7 @@ mod tests {
     #[test]
     fn apply_org_config_preserves_existing_sandbox_when_not_forced() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("sandbox.json"),
-            r#"{"mode":"exec-only"}"#,
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"exec-only"}"#).unwrap();
         let org = OrgConfig {
             permissions: Some(OrgPermissions {
                 sandbox_mode: Some("gvisor".into()),

@@ -50,7 +50,7 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
-                "Could not read {}: {e} — using default sandbox config",
+                "Could not read {}: {e}. Using default sandbox config.",
                 path.display()
             );
             return SandboxConfig::default();
@@ -60,7 +60,7 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
-                "Could not parse {}: {e} — using default sandbox config",
+                "Could not parse {}: {e}. Using default sandbox config.",
                 path.display()
             );
             return SandboxConfig::default();
@@ -72,7 +72,10 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
     } else {
         SandboxMode::from_str_config(mode_str)
     };
-    let network = val.get("network").and_then(|v| v.as_bool()).unwrap_or(false);
+    let network = val
+        .get("network")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     SandboxConfig {
         mode,
         network,
@@ -308,11 +311,7 @@ mod tests {
     #[test]
     fn load_sandbox_config_reads_gvisor() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("sandbox.json"),
-            r#"{"mode":"gvisor"}"#,
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"gvisor"}"#).unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::GVisor);
     }
@@ -320,11 +319,7 @@ mod tests {
     #[test]
     fn load_sandbox_config_reads_off() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("sandbox.json"),
-            r#"{"mode":"off"}"#,
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"off"}"#).unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::Off);
     }
@@ -332,11 +327,7 @@ mod tests {
     #[test]
     fn load_sandbox_config_unknown_mode_uses_default() {
         let tmp = TempDir::new().unwrap();
-        std::fs::write(
-            tmp.path().join("sandbox.json"),
-            r#"{"mode":"chrooty"}"#,
-        )
-        .unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"mode":"chrooty"}"#).unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::default());
     }
