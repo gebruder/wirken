@@ -1,0 +1,46 @@
+name: Installer pin
+
+# Fail CI if README.md does not pin the current install.sh SHA-256.
+# Users are instructed to verify the installer with this hash before
+# piping it to sh. Drift between README and install.sh silently breaks
+# that contract, so the check is mandatory.
+
+on:
+  pull_request:
+    paths:
+      - 'install.sh'
+      - 'README.md'
+      - '.github/workflows/installer-pin.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'README.md'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: install.sh SHA matches README pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compare SHA
+        run: |
+          set -eu
+          ACTUAL=$(sha256sum install.sh | awk '{print $1}')
+          PINNED=$(grep -oE '[0-9a-f]{64}' README.md | head -1)
+          if [ -z "$PINNED" ]; then
+            echo "Could not find a 64-char hex SHA in README.md" >&2
+            exit 1
+          fi
+          echo "README pin: $PINNED"
+          echo "actual:     $ACTUAL"
+          if [ "$ACTUAL" != "$PINNED" ]; then
+            echo "::error::install.sh SHA-256 does not match the pin in README.md"
+            echo "Update the SHA in README.md to: $ACTUAL" >&2
+            exit 1
+          fi
+          echo "install.sh SHA matches README pin."
