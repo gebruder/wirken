@@ -1,8 +1,10 @@
 # Wirken
 
-Wirken is a self-hosted AI agent gateway with cryptographic audit trails, per-channel process isolation, and crash-recoverable sessions. Single static Rust binary. No cloud dependency.
+Teams deploy AI agents across Slack, Teams, Matrix, and Signal. Every message crosses a trust boundary between the channel that delivered it, the orchestrator that routed it, and the inference provider that answered it. Most agent frameworks collapse these boundaries into a single trust domain with one token, no process isolation, and no audit trail. If that process is compromised, every channel is compromised with it.
 
-It connects to the messaging platforms you already use (Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage) and routes conversations to an LLM agent that can execute tools on your behalf. Credentials are encrypted at rest with XChaCha20-Poly1305, keyed from the OS keychain. All agent actions are logged to a queryable, append-only, hash-chained session log before execution.
+Wirken separates the trust domains. Each channel runs in its own adapter process with a distinct ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk, or a webhook when SIEM is configured. Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
+
+Wirken is self-hosted and ships as a single static Rust binary. It runs against Ollama, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil, Privatemode, or any OpenAI-compatible endpoint. Point it at a Hetzner GPU box running a self-hosted model, a local Ollama install, or a hosted API. MIT licensed.
 
 ## Install and run
 
@@ -95,7 +97,7 @@ graph TD
             Tools --> Sandbox[Docker / gVisor / Wasm]
         end
 
-        SessionLog["Session Log\n(hash-chained, attested)"]
+        SessionLog["Session Log\n(per-session hash chain, attested)"]
     end
 
     Agent -- "UDS" --> McpProxy["MCP Proxy\n(separate process)"]
@@ -112,7 +114,7 @@ graph TD
 
 Each channel adapter runs as a separate OS process. Adapters authenticate to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket. Messages are serialized with Cap'n Proto (zero-copy, traversal-limited). An adapter can only deliver inbound messages for its own channel and request outbound sends for its own channel. It cannot invoke tools, read other channels' sessions, or access other channels' credentials.
 
-This isolation is enforced at the type level. Session handles are parameterized by a channel marker type (`SessionHandle<Telegram>`), and the Rust compiler rejects any attempt to use a Telegram session handle in a Discord context. If an adapter process is compromised, the blast radius is exactly one channel because the gateway's IPC boundary, running in a separate memory-safe process, prevents lateral movement.
+Channel isolation operates at two levels. The active mechanism is process-level: each channel runs in its own OS process with a distinct ed25519 identity. The IPC crate also defines a sealed `Channel` trait and `SessionHandle<C: Channel>` type that makes cross-channel handle conversions a compile error. This type-level API is not yet threaded through the production message path, where the channel discriminator is a string field on the Cap'n Proto inbound frame. If an adapter process is compromised, the blast radius is exactly one channel because the gateway's IPC boundary, running in a separate memory-safe process, prevents lateral movement.
 
 The MCP proxy also runs out-of-process over a Unix domain socket, with the vault handle isolated in the proxy. MCP servers connect via stdio, HTTP, or OAuth2, and the agent process never sees MCP credentials.
 
@@ -122,9 +124,9 @@ Agents can delegate bounded subtasks to child agents via `spawn_subagent`. The o
 
 ## Security properties
 
-- **Session attestation.** Per-agent Ed25519 identity signs the session log hash chain after every turn. `wirken session verify` replays the log offline and re-checks message hashes, deterministic tool results, and chain integrity. Tampered sessions break the chain.
+- **Session attestation.** Per-agent Ed25519 identity signs the per-session hash chain after every turn. `wirken session verify` replays the log offline and re-checks message hashes, deterministic tool results, and chain integrity. Tampered sessions break the chain.
 - **Reproducible replay.** Every LLM call is recorded as a typed session event with a SHA-256 hash of the exact messages and tools sent. The verifier recomputes these hashes from the log and flags any divergence.
-- **Compile-time channel isolation.** `SessionHandle<Telegram>` and `SessionHandle<Discord>` are different types. The Rust compiler rejects cross-channel access at build time, not runtime.
+- **Per-channel process isolation.** Each channel adapter runs in its own OS process with a distinct ed25519 identity. Type-level channel separation (`SessionHandle<Telegram>` vs `SessionHandle<Discord>`) exists in the IPC crate and is regression-tested but not yet used in the production message path.
 - **Out-of-process credential isolation.** MCP credentials (bearer tokens, OAuth2 client secrets) live in a separate proxy process. The agent process never sees them. The vault is XChaCha20-Poly1305, keyed from the OS keychain; `secrecy` + `zeroize` make logging a secret a compile error.
 - **Capability-attenuated multi-agent.** The LLM cannot widen a child agent's permissions. The operator sets the ceiling; the harness intersects, clamps, and enforces. Children run headless with no interactive approvals.
 
@@ -134,7 +136,7 @@ Full OWASP and NIST AI RMF mappings: [docs/security-properties.md](docs/security
 
 Wirken gives organizations the controls they need to deploy AI agents without bypassing existing security, compliance, and audit requirements.
 
-- **Full attribution.** Every agent action is tied to a user, channel, session, and agent. Typed session events record who triggered what, when, and on which target.
+- **Full attribution.** Every inbound message records the platform sender id, channel, session, and agent. Permission decisions are scoped per agent, not per user. Typed session events record what action ran, when, and on which target.
 - **Tamper-evident audit trail.** All actions logged as typed session events before execution. Per-session SHA-256 hash chain detects modification or deletion. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the log offline and re-checks hashes. SIEM forwarding sends events to Datadog, Splunk, or any webhook in real time.
 - **Crash recovery.** Agents are stateless between turns. The harness replays the session log on wake. Incomplete tool rounds are detected and surfaced as failures rather than silently re-executed.
 - **Graduated permissions.** Three-tier model. Workspace file access and web search are always allowed. Shell exec and external file access require first-use approval. Destructive operations, credential access, and skill installs always require explicit approval. Approvals expire after 30 days.
@@ -149,6 +151,8 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
+- [Deploying for teams](docs/deploying-for-teams.md) (shared inference, per-channel adapters, current limitations)
+- [Permissions and identity](docs/permissions-and-identity.md) (what exists today, what is planned)
 - [CLI reference](docs/cli.md)
 - [Configuration reference](docs/configuration.md)
 - [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage)

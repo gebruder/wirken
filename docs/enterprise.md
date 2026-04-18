@@ -54,13 +54,13 @@ On every `wirken run`, the org config refreshes automatically.
 }
 ```
 
-All fields are optional. Only provided fields are applied. The `permissions.sandbox_mode` field is honored today; org-level allow/deny lists for individual tools are on the roadmap and currently parse but do not enforce.
+All fields are optional. Only provided fields are applied. The `provider`, `api_key_name`, `siem`, `mcp`, and `skills` fields are wired through. The `permissions` block (`sandbox_mode`, `allowed_tools`, `blocked_tools`) is deserialized into `OrgPermissions` and then dropped: no consumer reads the values. Do not rely on these fields for enforcement today. Tracked in `BACKLOG.md` under "Org-level tool allow/deny lists."
 
 ## SIEM integration
 
 Every agent action is forwarded to Datadog, Splunk, or any webhook in real time. See [configuration.md](configuration.md) for siem.json format.
 
-Events include: actor, action, target, channel, session, timestamp, and a detail payload. The local audit log is hash-chained for tamper detection. SIEM forwarding runs alongside, not instead of, the local log.
+Events include: actor, action, target, channel, session, timestamp, and a detail payload. The local audit log is per-session hash-chained for tamper detection. SIEM forwarding runs alongside, not instead of, the local log.
 
 ## Credential distribution
 
@@ -70,11 +70,13 @@ For organizations using a shared API key, the `api_key_name` field in the org co
 
 ## Sandbox enforcement
 
-Set `permissions.sandbox_mode` in the org config to control how agent shell commands are executed:
+The Docker sandbox code path supports three modes, selected by `SandboxMode` in the agent runtime:
 
-- `"exec-only"` — Docker containers with default `runc` runtime. Ephemeral, no network, 512MB memory, 256 PID limit, non-root user.
-- `"gvisor"` — Docker containers with `runsc` runtime. Same resource constraints as `exec-only`, with kernel attack surface reduction — syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Requires gVisor installed on the host.
-- `"off"` — Direct host execution (default).
+- `ExecOnly`: Docker containers with default `runc` runtime. Ephemeral, no network, 512MB memory, 256 PID limit, non-root user.
+- `GVisor`: Docker containers with `runsc` runtime. Same resource constraints as `ExecOnly`, with kernel attack surface reduction: syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Requires gVisor installed on the host.
+- `Off`: Direct host execution (default).
+
+Today, the runtime constructs `SandboxConfig` via `Default::default()`, which yields `Off`. The `permissions.sandbox_mode` field in the org config is parsed into `OrgPermissions.sandbox_mode` but is not currently read by the runtime. Selecting a non-default sandbox mode requires a code change in the agent crate or a follow-up that wires the config value into `SandboxConfig`. Tracked in `BACKLOG.md`.
 
 ## Deployment options
 

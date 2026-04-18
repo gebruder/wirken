@@ -3,6 +3,7 @@ name = "wirken-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Wirken agent runtime: LLM dispatch, tool execution, context engine, reproducible session replay."
 
 [dependencies]
 wirken-audit = { path = "../audit" }

@@ -25,6 +25,7 @@ version = "0.7.3"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/gebruder/wirken"
+description = "Team-scale AI agent orchestration with per-channel process isolation, encrypted credential vault, and per-session hash-chained audit log."
 
 [workspace.dependencies]
 # Async runtime
