@@ -27,7 +27,8 @@ Current active key:
 
 - Identity: `releases@gebruder.ottenheimer.app`
 - Algorithm: `ssh-ed25519`
-- Fingerprint: recorded in `KEYS` after offline generation
+- Fingerprint: `SHA256:tzlfNHy4G1KIsmAR+cM3MGwVndheh2ak/usA6rw7SuE`
+- Issued: 2026-04-18
 - Signed file: `checksums.sha256` for every published release (verify with `ssh-keygen -Y verify`)
 
 ## Scope

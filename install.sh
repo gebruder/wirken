@@ -25,7 +25,7 @@ INSTALL_DIR="${WIRKEN_INSTALL_DIR:-$HOME/.local/bin}"
 # this script so verification does not depend on a network fetch of KEYS.
 # REPLACE: paste the public key line from KEYS after offline key generation.
 # --------------------------------------------------------------------------
-ALLOWED_SIGNERS='releases@gebruder.ottenheimer.app ssh-ed25519 REPLACE_ME_WITH_PUBLIC_KEY'
+ALLOWED_SIGNERS='releases@gebruder.ottenheimer.app ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPcGuqLSfpN+ibltPVbif7i9LgclLtRIaL+1TuYp+RjV releases@gebruder.ottenheimer.app'
 SIGNER_IDENTITY="releases@gebruder.ottenheimer.app"
 
 UNVERIFIED_WARNED=0
