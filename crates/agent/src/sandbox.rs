@@ -21,27 +21,39 @@ const PIDS_LIMIT: i64 = 256;
 /// Sandbox mode for tool execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxMode {
-    /// No sandboxing — direct host execution.
-    #[default]
+    /// No sandboxing. Direct host execution. Opt-in only; set
+    /// `"mode": "off"` in `sandbox.json` to use this.
     Off,
     /// Only the `exec` tool runs in a Docker container (default runc runtime).
+    /// This is the default as of 0.7.5. If Docker is not reachable at
+    /// gateway start, the ToolRegistry logs a warning and falls back
+    /// to host execution for the agent's lifetime.
+    #[default]
     ExecOnly,
     /// Only the `exec` tool runs in a gVisor container (runsc runtime).
     /// Provides kernel attack surface reduction: syscalls are intercepted by
-    /// gVisor's Sentry rather than reaching the host kernel.
+    /// gVisor's Sentry rather than reaching the host kernel. Requires
+    /// `runsc` registered as a Docker runtime.
     GVisor,
 }
 
 impl SandboxMode {
-    /// Parse a sandbox mode from a config string.
+    /// Parse a sandbox mode from a config string. Unknown modes fall
+    /// back to [`SandboxMode::default`] rather than forcing `Off`, so
+    /// a config typo does not silently strip the sandbox; the
+    /// operator gets the secure default instead, with a warning.
     pub fn from_str_config(s: &str) -> Self {
         match s {
             "exec-only" => Self::ExecOnly,
             "gvisor" => Self::GVisor,
-            "off" | "" => Self::Off,
+            "off" => Self::Off,
+            "" => Self::default(),
             _ => {
-                tracing::warn!("Unknown sandbox_mode '{s}', defaulting to off");
-                Self::Off
+                tracing::warn!(
+                    "Unknown sandbox_mode '{s}', falling back to default ({:?})",
+                    Self::default()
+                );
+                Self::default()
             }
         }
     }
@@ -68,7 +80,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            mode: SandboxMode::Off,
+            mode: SandboxMode::ExecOnly,
             image: DEFAULT_IMAGE.into(),
             timeout_secs: 300,
             network: false,

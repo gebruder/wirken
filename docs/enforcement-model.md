@@ -165,7 +165,9 @@ Two rate limiters, both in-memory:
 
 **Crate:** `wirken-agent` | **File:** `crates/agent/src/sandbox.rs`
 
-`SandboxMode` (`Off`, `ExecOnly`, `GVisor`) and `SandboxConfig` (image, timeout, network, memory/PID limits) are set at agent construction. `GVisor` mode uses the `runsc` OCI runtime via Docker, providing kernel attack surface reduction — agent code syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Resource constraints (512MB memory, 256 PID, no-network, non-root) are identical across `ExecOnly` and `GVisor` modes.
+`SandboxMode` (`Off`, `ExecOnly`, `GVisor`) and `SandboxConfig` (image, timeout, network, memory/PID limits) are set at agent construction. `SandboxConfig::default()` is `ExecOnly` as of 0.7.5; the operator can override to `Off` or `GVisor` via `sandbox.json` in the data dir, which the CLI writes during `wirken setup` (with an upgrade prompt if `runsc` is registered) and which `apply_org_config` populates from `OrgPermissions.sandbox_mode`. `GVisor` mode uses the `runsc` OCI runtime via Docker, providing kernel attack surface reduction: agent code syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Container hardening is identical across `ExecOnly` and `GVisor`: `cap_drop=ALL`, `no-new-privileges`, default seccomp, read-only rootfs with a 64 MB tmpfs at `/tmp`, 512 MB memory, 256 PIDs, no network, non-root user (1000:1000), workspace bind-mounted RW at `/workspace`.
+
+If Docker is not reachable when the first sandboxed tool runs, the `ToolRegistry` logs a warning naming `Docker` specifically and falls back to host execution for the agent's lifetime. If `gvisor` mode is configured but `runsc` is not registered with Docker, the warning names `runsc` specifically. Provisioning failures are sticky for the lifetime of the registry; a fresh `wirken run` retries.
 
 **Live update:** Sandbox mode changes require gateway restart. Container resource limits are constants in the sandbox module.
 

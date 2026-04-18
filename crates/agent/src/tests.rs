@@ -280,8 +280,22 @@ fn skill_prompt_generation() {
 
 #[tokio::test]
 async fn tool_exec_command() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
+    // Force host execution. This test asserts exec semantics, not
+    // sandbox provisioning; using the default (ExecOnly) would make
+    // the result depend on whether Docker is reachable on the test
+    // host. The sandbox path has its own dedicated test below.
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::Off,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
 
     let result = tools
         .execute("exec", r#"{"command":"echo hello world"}"#)
@@ -293,8 +307,18 @@ async fn tool_exec_command() {
 
 #[tokio::test]
 async fn tool_exec_failing_command() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
     let tmp = TempDir::new().unwrap();
-    let tools = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default());
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::Off,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
 
     let result = tools
         .execute("exec", r#"{"command":"false"}"#)
@@ -1882,14 +1906,19 @@ fn sandbox_mode_from_str_config() {
     use crate::sandbox::SandboxMode;
 
     assert_eq!(SandboxMode::from_str_config("off"), SandboxMode::Off);
-    assert_eq!(SandboxMode::from_str_config(""), SandboxMode::Off);
+    // Empty and unknown both fall back to the current default
+    // (ExecOnly as of 0.7.5) rather than silently stripping the
+    // sandbox.
+    assert_eq!(SandboxMode::from_str_config(""), SandboxMode::default());
     assert_eq!(
         SandboxMode::from_str_config("exec-only"),
         SandboxMode::ExecOnly
     );
     assert_eq!(SandboxMode::from_str_config("gvisor"), SandboxMode::GVisor);
-    // Unknown falls back to Off
-    assert_eq!(SandboxMode::from_str_config("invalid"), SandboxMode::Off);
+    assert_eq!(
+        SandboxMode::from_str_config("invalid"),
+        SandboxMode::default()
+    );
 }
 
 #[test]
@@ -1910,8 +1939,12 @@ fn sandbox_mode_gvisor_runtime_name() {
 fn sandbox_config_defaults() {
     use crate::sandbox::{SandboxConfig, SandboxMode};
 
+    // 0.7.5 flipped the default from Off to ExecOnly. Operators can
+    // still opt out by setting `"mode":"off"` in sandbox.json, and the
+    // ToolRegistry fall-through logs a distinct warning if Docker is
+    // unavailable.
     let config = SandboxConfig::default();
-    assert_eq!(config.mode, SandboxMode::Off);
+    assert_eq!(config.mode, SandboxMode::ExecOnly);
     assert!(!config.network);
     assert_eq!(config.timeout_secs, 300);
 }
