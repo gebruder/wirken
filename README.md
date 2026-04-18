@@ -1,12 +1,10 @@
 # Wirken
 
-**Wirken is AI agents on your chat tools, done the way it should have been from the start: self-hosted, channel-isolated, every action audited.**
+Wirken is a simple, powerful AI agent that lives in your chat tools. Message it on Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and it reads files, calls APIs, and runs tools on your behalf.
 
-Organizations deploy AI agents across Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, and iMessage. Every message crosses a trust boundary between the channel that delivered it, the orchestrator that routed it, and the inference provider that answered it. Most agent frameworks collapse these boundaries into a single trust domain with one token, no process isolation, and no audit trail. If that process is compromised, every channel is compromised with it.
+Wirken ships as a single static Rust binary and works with Ollama, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil, Privatemode, or any OpenAI-compatible endpoint. MIT licensed.
 
-Wirken separates the trust domains. Each channel runs in its own adapter process with a distinct ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk, or a webhook when SIEM is configured. Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
-
-Wirken is self-hosted and ships as a single static Rust binary. It runs against Ollama, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil, Privatemode, or any OpenAI-compatible endpoint. Point it at a Hetzner GPU box running a self-hosted model, a local Ollama install, or a hosted API. MIT licensed.
+Each channel runs in its own adapter process with a distinct Ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk, or a webhook when SIEM is configured. Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
 
 ## Install and run
 
