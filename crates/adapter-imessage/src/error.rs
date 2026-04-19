@@ -13,4 +13,7 @@ pub enum IMessageError {
 
     #[error("bluebubbles api error: {0}")]
     BlueBubbles(String),
+
+    #[error("configuration error: {0}")]
+    Config(String),
 }

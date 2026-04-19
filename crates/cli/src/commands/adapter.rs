@@ -238,7 +238,8 @@ pub async fn run(channel: &str) -> Result<()> {
                 .parse()
                 .unwrap_or(3981);
 
-            let adapter = IMessageAdapter::new(identity, bb_url, server_password, listen_port);
+            let adapter = IMessageAdapter::new(identity, bb_url, server_password, listen_port)
+                .map_err(|e| anyhow::anyhow!("iMessage adapter error: {e}"))?;
             adapter
                 .run(&socket_path)
                 .await
