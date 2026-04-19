@@ -8,6 +8,23 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## 0.7.7 — Security audit fix (generate_image)
+
+Single finding from the Round 2 audit.
+
+- **Vuln 9 — generate_image path traversal (agent).** The
+  `generate_image` tool read `filename` directly from LLM-controlled
+  tool args and built the output path with
+  `images_dir.join(format!("{filename}.png"))` with no validation.
+  `PathBuf::join` with an absolute path replaces the base, and
+  `..` components walk out of the workspace. The Vuln 2 fix did
+  not cover this call site (it guarded `write_file` via
+  `resolve_path_for_write`; `generate_image` built its path
+  directly). New `sanitize_image_filename` strips `/`, `\`, and
+  null bytes to `_` and refuses empty / `.` / `..`; the write now
+  routes through `resolve_path_for_write` so the leaf-symlink
+  refusal that protects `write_file` also guards this path.
+
 ## 0.7.6 — Security audit fixes
 
 Eight findings from the security audit. Numbered to match the audit
