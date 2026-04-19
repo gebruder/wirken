@@ -9,6 +9,7 @@ use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
+use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert;
 use crate::error::GoogleChatError;
 
@@ -16,16 +17,41 @@ use crate::error::GoogleChatError;
 pub struct GoogleChatAdapter {
     identity: AdapterIdentity,
     service_account_token: String,
+    app_project_number: String,
     listen_port: u16,
 }
 
 impl GoogleChatAdapter {
-    pub fn new(identity: AdapterIdentity, service_account_token: String, listen_port: u16) -> Self {
-        Self {
+    /// Construct a Google Chat adapter. Fails if either
+    /// `service_account_token` (outbound bearer) or
+    /// `app_project_number` (inbound JWT audience) is empty. Both
+    /// are security-critical: the token authenticates outbound
+    /// messages to Google Chat, and the project number is the
+    /// audience claim that every inbound JWT must match.
+    pub fn new(
+        identity: AdapterIdentity,
+        service_account_token: String,
+        app_project_number: String,
+        listen_port: u16,
+    ) -> Result<Self, GoogleChatError> {
+        if service_account_token.is_empty() {
+            return Err(GoogleChatError::Config(
+                "Google Chat adapter requires a non-empty service_account_token".into(),
+            ));
+        }
+        if app_project_number.is_empty() {
+            return Err(GoogleChatError::Config(
+                "Google Chat adapter requires a non-empty app_project_number; \
+                 inbound JWT validation uses it as the audience claim"
+                    .into(),
+            ));
+        }
+        Ok(Self {
             identity,
             service_account_token,
+            app_project_number,
             listen_port,
-        }
+        })
     }
 
     /// Connect to gateway, authenticate, then run the webhook listener.
@@ -39,6 +65,8 @@ impl GoogleChatAdapter {
         tracing::info!("Handshake complete");
 
         let writer = Arc::new(Mutex::new(writer));
+        let http = reqwest::Client::new();
+        let jwks = Arc::new(JwksCache::new(http.clone()));
 
         // Spawn outbound handler (gateway -> Google Chat via REST API)
         let out_token = self.service_account_token.clone();
@@ -63,9 +91,11 @@ impl GoogleChatAdapter {
         loop {
             let (mut stream, _) = listener.accept().await?;
             let w = writer.clone();
+            let j = jwks.clone();
+            let aud = self.app_project_number.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_webhook(&mut stream, w).await {
+                if let Err(e) = handle_webhook(&mut stream, &j, &aud, w).await {
                     tracing::error!("Webhook error: {e}");
                 }
             });
@@ -73,9 +103,16 @@ impl GoogleChatAdapter {
     }
 }
 
+async fn respond(stream: &mut tokio::net::TcpStream, status_line: &str) -> std::io::Result<()> {
+    let body = format!("HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    stream.write_all(body.as_bytes()).await
+}
+
 /// Handle an incoming webhook request from Google Chat.
-async fn handle_webhook(
+pub(crate) async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
+    jwks: &JwksCache,
+    expected_aud: &str,
     writer: Arc<Mutex<FrameWriter>>,
 ) -> Result<(), GoogleChatError> {
     let mut buf = vec![0u8; 65536];
@@ -92,8 +129,23 @@ async fn handle_webhook(
 
     // Only handle POST requests
     if !first_line.starts_with("POST") {
-        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = respond(stream, "200 OK").await;
+        return Ok(());
+    }
+
+    // JWT validation must succeed before touching the body. On
+    // failure, always 401 with the specific reason going to tracing.
+    let token = match extract_bearer_token(&request) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Google Chat webhook rejected: {e}");
+            let _ = respond(stream, "401 Unauthorized").await;
+            return Ok(());
+        }
+    };
+    if let Err(e) = jwks.validate_token(token, expected_aud).await {
+        tracing::warn!("Google Chat webhook rejected: {e}");
+        let _ = respond(stream, "401 Unauthorized").await;
         return Ok(());
     }
 
@@ -113,8 +165,7 @@ async fn handle_webhook(
         }
     }
 
-    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    let _ = stream.write_all(resp.as_bytes()).await;
+    let _ = respond(stream, "200 OK").await;
 
     Ok(())
 }

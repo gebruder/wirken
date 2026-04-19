@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod auth;
 pub mod convert;
 pub mod error;
 

@@ -2,7 +2,10 @@ use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
+use crate::adapter::GoogleChatAdapter;
+use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert;
+use crate::error::{AuthError, GoogleChatError};
 
 // ---------------------------------------------------------------------------
 // Payload extraction
@@ -381,5 +384,188 @@ async fn full_message_flow_simulation() {
             );
         }
         _ => panic!("expected OutboundResult"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constructor validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_rejects_empty_service_account_token() {
+    let id = AdapterIdentity::generate("google-chat");
+    let r = GoogleChatAdapter::new(id, String::new(), "123456".into(), 3980);
+    match r {
+        Err(GoogleChatError::Config(msg)) => {
+            assert!(msg.contains("service_account_token"), "msg: {msg}");
+        }
+        Err(other) => panic!("expected Config error, got {other:?}"),
+        Ok(_) => panic!("empty service_account_token must fail at construction"),
+    }
+}
+
+#[test]
+fn new_rejects_empty_project_number() {
+    let id = AdapterIdentity::generate("google-chat");
+    let r = GoogleChatAdapter::new(id, "token".into(), String::new(), 3980);
+    match r {
+        Err(GoogleChatError::Config(msg)) => {
+            assert!(msg.contains("app_project_number"), "msg: {msg}");
+        }
+        Err(other) => panic!("expected Config error, got {other:?}"),
+        Ok(_) => panic!("empty app_project_number must fail at construction"),
+    }
+}
+
+#[test]
+fn new_accepts_both_non_empty() {
+    let id = AdapterIdentity::generate("google-chat");
+    assert!(GoogleChatAdapter::new(id, "token".into(), "123456".into(), 3980).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Authorization header extraction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bearer_token_extracted() {
+    let req = "POST / HTTP/1.1\r\n\
+               Host: bot.example\r\n\
+               Authorization: Bearer abc.def.ghi\r\n\
+               \r\n";
+    assert_eq!(extract_bearer_token(req).unwrap(), "abc.def.ghi");
+}
+
+#[test]
+fn missing_authorization_rejected() {
+    let req = "POST / HTTP/1.1\r\n\r\n";
+    match extract_bearer_token(req) {
+        Err(AuthError::MissingHeader) => {}
+        other => panic!("expected MissingHeader, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_bearer_scheme_rejected() {
+    let req = "POST / HTTP/1.1\r\nAuthorization: Basic creds\r\n\r\n";
+    match extract_bearer_token(req) {
+        Err(AuthError::MalformedHeader) => {}
+        other => panic!("expected MalformedHeader, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JWT validation
+// ---------------------------------------------------------------------------
+
+mod jwt {
+    use super::*;
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
+    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
+    use serde_json::json;
+
+    const TEST_ISSUER: &str = "chat@system.gserviceaccount.com";
+    const TEST_AUD: &str = "123456789012";
+    const TEST_KID: &str = "test-gchat-kid-01";
+
+    fn keypair() -> (EncodingKey, DecodingKey) {
+        let mut rng = rand08::thread_rng();
+        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public = rsa::RsaPublicKey::from(&private);
+        let priv_pem = private.to_pkcs1_pem(LineEnding::LF).unwrap().to_string();
+        let pub_pem = public.to_pkcs1_pem(LineEnding::LF).unwrap();
+        (
+            EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap(),
+            DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap(),
+        )
+    }
+
+    fn sign(enc: &EncodingKey, kid: &str, claims: &serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.into());
+        encode(&header, claims, enc).unwrap()
+    }
+
+    fn exp_future() -> i64 {
+        chrono::Utc::now().timestamp() + 3600
+    }
+
+    fn exp_past() -> i64 {
+        chrono::Utc::now().timestamp() - 3600
+    }
+
+    #[tokio::test]
+    async fn valid_token_is_accepted() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({ "iss": TEST_ISSUER, "aud": TEST_AUD, "exp": exp_future() }),
+        );
+        let claims = cache.validate_token(&token, TEST_AUD).await.unwrap();
+        assert_eq!(claims.aud, TEST_AUD);
+        assert_eq!(claims.iss, TEST_ISSUER);
+    }
+
+    #[tokio::test]
+    async fn wrong_aud_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({ "iss": TEST_ISSUER, "aud": "other-project", "exp": exp_future() }),
+        );
+        assert!(matches!(
+            cache.validate_token(&token, TEST_AUD).await,
+            Err(AuthError::JwtValidation(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({ "iss": TEST_ISSUER, "aud": TEST_AUD, "exp": exp_past() }),
+        );
+        assert!(matches!(
+            cache.validate_token(&token, TEST_AUD).await,
+            Err(AuthError::JwtValidation(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn foreign_signed_rejected() {
+        let (_trusted_enc, trusted_dec) = keypair();
+        let (attacker_enc, _) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), trusted_dec)], TEST_ISSUER);
+        let token = sign(
+            &attacker_enc,
+            TEST_KID,
+            &json!({ "iss": TEST_ISSUER, "aud": TEST_AUD, "exp": exp_future() }),
+        );
+        assert!(matches!(
+            cache.validate_token(&token, TEST_AUD).await,
+            Err(AuthError::JwtValidation(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn wrong_issuer_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({ "iss": "https://evil.example", "aud": TEST_AUD, "exp": exp_future() }),
+        );
+        assert!(matches!(
+            cache.validate_token(&token, TEST_AUD).await,
+            Err(AuthError::JwtValidation(_))
+        ));
     }
 }
