@@ -377,13 +377,19 @@ fn new_accepts_non_empty_server_password() {
 #[test]
 fn verify_password_accepts_exact_match() {
     use crate::adapter::verify_password;
-    assert!(verify_password("correct-horse-battery-staple", Some("correct-horse-battery-staple")));
+    assert!(verify_password(
+        "correct-horse-battery-staple",
+        Some("correct-horse-battery-staple")
+    ));
 }
 
 #[test]
 fn verify_password_rejects_mismatch() {
     use crate::adapter::verify_password;
-    assert!(!verify_password("correct-horse-battery-staple", Some("wrong-password")));
+    assert!(!verify_password(
+        "correct-horse-battery-staple",
+        Some("wrong-password")
+    ));
 }
 
 #[test]
@@ -403,7 +409,10 @@ fn verify_password_rejects_empty_both_sides() {
 #[test]
 fn verify_password_length_mismatch_rejected() {
     use crate::adapter::verify_password;
-    assert!(!verify_password("short", Some("shorter-extension-of-the-same-prefix")));
+    assert!(!verify_password(
+        "short",
+        Some("shorter-extension-of-the-same-prefix")
+    ));
 }
 
 #[test]

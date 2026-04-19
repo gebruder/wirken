@@ -107,7 +107,10 @@ fn new_rejects_empty_app_secret() {
     );
     match result {
         Err(WhatsAppError::Config(msg)) => {
-            assert!(msg.contains("app_secret"), "error should name the field: {msg}");
+            assert!(
+                msg.contains("app_secret"),
+                "error should name the field: {msg}"
+            );
         }
         Err(other) => panic!("expected Config error, got {other:?}"),
         Ok(_) => panic!("empty app_secret must fail at construction"),

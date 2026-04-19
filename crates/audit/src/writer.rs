@@ -212,7 +212,10 @@ mod tests {
         let mut buffer = vec![AuditEvent::new("actor", "a1", "t1")];
         let res = flush(&db_path, &mut buffer, &None).await;
         assert!(res.is_ok(), "flush should succeed against a valid db");
-        assert!(buffer.is_empty(), "buffer must clear after a successful flush");
+        assert!(
+            buffer.is_empty(),
+            "buffer must clear after a successful flush"
+        );
     }
 
     #[tokio::test]
