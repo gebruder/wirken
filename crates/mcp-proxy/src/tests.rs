@@ -55,9 +55,10 @@ async fn do_handshake(
         return Err(format!("expected auth_challenge, got {:?}", challenge.kind));
     }
 
-    // Sign nonce.
+    // Sign (domain || agent_id || nonce) — v3 handshake payload.
     let nonce = hex_decode_32(&challenge.nonce);
-    let signature = signing_key.sign(&nonce);
+    let signed = crate::wire::handshake_signed_payload(agent_id, &nonce);
+    let signature = signing_key.sign(&signed);
 
     // Send AuthResponse.
     let response = AuthResponse {
@@ -651,4 +652,39 @@ async fn read_one_line<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) 
     }
     let s = String::from_utf8(buf).unwrap();
     serde_json::from_str(&s).unwrap_or_else(|e| panic!("parse {s}: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Handshake payload: domain + agent_id binding
+// ---------------------------------------------------------------------------
+
+#[test]
+fn handshake_payload_binds_agent_id() {
+    use crate::wire::handshake_signed_payload;
+    let nonce = [7u8; 32];
+    let a = handshake_signed_payload("agent-a", &nonce);
+    let b = handshake_signed_payload("agent-b", &nonce);
+    assert_ne!(a, b, "payload must differ when agent_id differs");
+}
+
+#[test]
+fn handshake_payload_binds_nonce() {
+    use crate::wire::handshake_signed_payload;
+    let n1 = [1u8; 32];
+    let n2 = [2u8; 32];
+    assert_ne!(
+        handshake_signed_payload("agent", &n1),
+        handshake_signed_payload("agent", &n2),
+        "payload must differ when nonce differs"
+    );
+}
+
+#[test]
+fn handshake_payload_includes_domain_prefix() {
+    use crate::wire::{HANDSHAKE_DOMAIN, handshake_signed_payload};
+    let p = handshake_signed_payload("agent", &[0u8; 32]);
+    assert!(
+        p.starts_with(HANDSHAKE_DOMAIN),
+        "payload must be domain-prefixed so it cannot be replayed on another protocol"
+    );
 }
