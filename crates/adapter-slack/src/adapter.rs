@@ -12,6 +12,15 @@ use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 use crate::convert;
 use crate::error::SlackError;
 
+/// Shared context threaded through the Slack Socket Mode listener.
+/// Carries the inbound event forwarder plus the bot's own Slack
+/// user id so [`is_bot_mentioned`] can match exact mentions instead
+/// of any `<@...>` occurrence.
+struct SlackBotContext {
+    tx: tokio::sync::mpsc::Sender<convert::SlackInbound>,
+    bot_user_id: String,
+}
+
 /// Slack adapter: bridges Slack API <-> Wirken gateway IPC.
 /// Uses Socket Mode (WebSocket) — no public URL required.
 pub struct SlackAdapter {
@@ -62,6 +71,27 @@ impl SlackAdapter {
                 .map_err(|e| SlackError::Slack(format!("connector: {e}")))?,
         );
 
+        // Resolve the bot's own Slack user id once at connect time.
+        // `auth.test` returns the bot-user id that Slack uses in
+        // `<@Uxxx>` mention syntax. Storing it here lets the event
+        // handler match exact mentions of the bot rather than any
+        // user mention. If auth.test fails the adapter refuses to
+        // start: running without bot_user_id means we would either
+        // accept every mention (the bug we are fixing) or drop
+        // every mention.
+        let bot_token = make_token(&self.bot_token);
+        let auth_client = Arc::new(SlackClient::new(
+            SlackClientHyperConnector::new()
+                .map_err(|e| SlackError::Slack(format!("connector: {e}")))?,
+        ));
+        let auth_session = auth_client.open_session(&bot_token);
+        let auth_resp = auth_session
+            .auth_test()
+            .await
+            .map_err(|e| SlackError::Slack(format!("auth.test: {e}")))?;
+        let bot_user_id = auth_resp.user_id.0.clone();
+        tracing::info!("Slack bot user id resolved: {bot_user_id}");
+
         // Use a channel to bridge Socket Mode events to our IPC writer
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<convert::SlackInbound>(256);
 
@@ -83,21 +113,22 @@ impl SlackAdapter {
             }
         });
 
-        // Socket Mode listener with event_tx for forwarding
+        let ctx = SlackBotContext {
+            tx: event_tx,
+            bot_user_id,
+        };
         let listener_env = Arc::new(
-            SlackClientEventsListenerEnvironment::new(Arc::new(client)).with_user_state(event_tx),
+            SlackClientEventsListenerEnvironment::new(Arc::new(client)).with_user_state(ctx),
         );
 
         let callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(
             |event: SlackPushEventCallback, _client: Arc<SlackHyperClient>, states| async move {
                 tracing::info!("Slack push event received");
-                let tx_lock = states.read().await;
-                if let Some(tx) =
-                    tx_lock.get_user_state::<tokio::sync::mpsc::Sender<convert::SlackInbound>>()
-                {
-                    process_push_event(event, tx).await;
+                let state_lock = states.read().await;
+                if let Some(ctx) = state_lock.get_user_state::<SlackBotContext>() {
+                    process_push_event(event, &ctx.tx, &ctx.bot_user_id).await;
                 } else {
-                    tracing::warn!("No event_tx in user state");
+                    tracing::warn!("No SlackBotContext in user state");
                 }
                 Ok(())
             },
@@ -127,10 +158,26 @@ impl SlackAdapter {
     }
 }
 
+/// Check whether the bot is mentioned by its exact Slack user id.
+///
+/// Slack mention syntax is `<@Uxxxxx>`. An earlier implementation used
+/// `text.contains("<@")` which matched any user mention, not just the
+/// bot — a workspace member mentioning a colleague would trigger the
+/// bot's mention gate. The exact form `<@{bot_user_id}>` (with the
+/// closing `>`) also prevents substring collisions between user ids
+/// that share a prefix (e.g. `<@U123>` must not match bot id `U1234`).
+pub(crate) fn is_bot_mentioned(text: &str, bot_user_id: &str) -> bool {
+    if bot_user_id.is_empty() {
+        return false;
+    }
+    text.contains(&format!("<@{bot_user_id}>"))
+}
+
 /// Process a push event and send to the event channel.
 async fn process_push_event(
     event: SlackPushEventCallback,
     tx: &tokio::sync::mpsc::Sender<convert::SlackInbound>,
+    bot_user_id: &str,
 ) {
     let SlackPushEventCallback { event: body, .. } = event;
 
@@ -171,7 +218,7 @@ async fn process_push_event(
         .map(|ct| ct.0 == "im")
         .unwrap_or(false);
 
-    let bot_mentioned = text.contains("<@");
+    let bot_mentioned = is_bot_mentioned(&text, bot_user_id);
 
     let files: Vec<String> = msg_event
         .content
