@@ -20,6 +20,7 @@ ignore = [
     # rustls-webpki 0.103.12 via Cargo.lock.
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the URI-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the wildcard-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
+    { id = "RUSTSEC-2023-0071", reason = "Marvin Attack in the rsa crate affects RSA private-key operations (signing, decryption) observable via network timing. wirken reaches rsa only through jsonwebtoken's RS256 verify path, which performs public-key operations (signature verification) that are not affected by Marvin. RSA private keys are used only in dev-deps (adapter-teams and adapter-google-chat tests) for synthetic JWT generation; those paths never run in production and are not network-observable. Revisit when rsa crate ships a constant-time implementation or jsonwebtoken switches to a non-rsa backend." },
 ]
 
 [licenses]
