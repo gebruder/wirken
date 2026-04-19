@@ -2,7 +2,10 @@ use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
+use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, Activity, ChannelAccount, ConversationAccount};
+use crate::error::{AuthError, TeamsError};
+use crate::adapter::TeamsAdapter;
 
 // ---------------------------------------------------------------------------
 // Activity construction helpers
@@ -391,6 +394,284 @@ async fn full_message_flow_simulation() {
             );
         }
         _ => panic!("expected OutboundResult"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compile-time isolation: five channel types are distinct
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Constructor validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_rejects_empty_app_id() {
+    let id = AdapterIdentity::generate("teams");
+    let r = TeamsAdapter::new(id, String::new(), "password".into(), 3978);
+    match r {
+        Err(TeamsError::Config(msg)) => assert!(msg.contains("app_id"), "msg: {msg}"),
+        Err(other) => panic!("expected Config error for empty app_id, got {other:?}"),
+        Ok(_) => panic!("empty app_id must fail at construction"),
+    }
+}
+
+#[test]
+fn new_rejects_empty_app_password() {
+    let id = AdapterIdentity::generate("teams");
+    let r = TeamsAdapter::new(id, "app-id".into(), String::new(), 3978);
+    match r {
+        Err(TeamsError::Config(msg)) => assert!(msg.contains("app_password"), "msg: {msg}"),
+        Err(other) => panic!("expected Config error for empty app_password, got {other:?}"),
+        Ok(_) => panic!("empty app_password must fail at construction"),
+    }
+}
+
+#[test]
+fn new_accepts_both_non_empty() {
+    let id = AdapterIdentity::generate("teams");
+    let r = TeamsAdapter::new(id, "app-id".into(), "password".into(), 3978);
+    assert!(r.is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Authorization header extraction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bearer_token_extracted_from_authorization_header() {
+    let req = "POST /api/messages HTTP/1.1\r\n\
+               Host: bot.example\r\n\
+               Authorization: Bearer abc.def.ghi\r\n\
+               Content-Type: application/json\r\n\
+               \r\n\
+               {}";
+    let token = extract_bearer_token(req).unwrap();
+    assert_eq!(token, "abc.def.ghi");
+}
+
+#[test]
+fn bearer_token_is_case_insensitive_on_header_name() {
+    let req = "POST /api/messages HTTP/1.1\r\n\
+               authorization: Bearer tok\r\n\
+               \r\n";
+    assert_eq!(extract_bearer_token(req).unwrap(), "tok");
+}
+
+#[test]
+fn missing_authorization_header_is_rejected() {
+    let req = "POST /api/messages HTTP/1.1\r\n\
+               Host: bot.example\r\n\
+               \r\n";
+    match extract_bearer_token(req) {
+        Err(AuthError::MissingHeader) => {}
+        other => panic!("expected MissingHeader, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_bearer_scheme_is_rejected() {
+    let req = "POST /api/messages HTTP/1.1\r\n\
+               Authorization: Basic dXNlcjpwYXNz\r\n\
+               \r\n";
+    match extract_bearer_token(req) {
+        Err(AuthError::MalformedHeader) => {}
+        other => panic!("expected MalformedHeader for Basic scheme, got {other:?}"),
+    }
+}
+
+#[test]
+fn empty_bearer_token_is_rejected() {
+    let req = "POST /api/messages HTTP/1.1\r\n\
+               Authorization: Bearer \r\n\
+               \r\n";
+    match extract_bearer_token(req) {
+        Err(AuthError::MalformedHeader) => {}
+        other => panic!("expected MalformedHeader for empty token, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JWT validation
+// ---------------------------------------------------------------------------
+
+mod jwt {
+    use super::*;
+    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
+    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
+    use serde_json::json;
+
+    const TEST_ISSUER: &str = "https://api.botframework.com";
+    const TEST_AUD: &str = "11111111-2222-3333-4444-555555555555";
+    const TEST_KID: &str = "test-kid-01";
+
+    fn keypair() -> (EncodingKey, DecodingKey) {
+        let mut rng = rand08::thread_rng();
+        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let public = rsa::RsaPublicKey::from(&private);
+
+        let priv_pem = private.to_pkcs1_pem(LineEnding::LF).unwrap().to_string();
+        let pub_pem = public.to_pkcs1_pem(LineEnding::LF).unwrap();
+
+        let enc = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap();
+        let dec = DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap();
+        (enc, dec)
+    }
+
+    fn sign(enc: &EncodingKey, kid: &str, claims: &serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.into());
+        encode(&header, claims, enc).unwrap()
+    }
+
+    fn exp_future() -> i64 {
+        chrono::Utc::now().timestamp() + 3600
+    }
+
+    fn exp_past() -> i64 {
+        chrono::Utc::now().timestamp() - 3600
+    }
+
+    #[tokio::test]
+    async fn valid_token_is_accepted() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({
+                "iss": TEST_ISSUER,
+                "aud": TEST_AUD,
+                "exp": exp_future(),
+            }),
+        );
+        let claims = cache.validate_token(&token, TEST_AUD).await.unwrap();
+        assert_eq!(claims.aud, TEST_AUD);
+        assert_eq!(claims.iss, TEST_ISSUER);
+    }
+
+    #[tokio::test]
+    async fn token_with_wrong_aud_is_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({
+                "iss": TEST_ISSUER,
+                "aud": "some-other-app-id",
+                "exp": exp_future(),
+            }),
+        );
+        match cache.validate_token(&token, TEST_AUD).await {
+            Err(AuthError::JwtValidation(_)) => {}
+            other => panic!("expected JwtValidation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_token_is_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({
+                "iss": TEST_ISSUER,
+                "aud": TEST_AUD,
+                "exp": exp_past(),
+            }),
+        );
+        match cache.validate_token(&token, TEST_AUD).await {
+            Err(AuthError::JwtValidation(_)) => {}
+            other => panic!("expected JwtValidation for expired token, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn token_with_wrong_issuer_is_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            TEST_KID,
+            &json!({
+                "iss": "https://evil.example",
+                "aud": TEST_AUD,
+                "exp": exp_future(),
+            }),
+        );
+        match cache.validate_token(&token, TEST_AUD).await {
+            Err(AuthError::JwtValidation(_)) => {}
+            other => panic!("expected issuer rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn token_signed_by_foreign_key_is_rejected() {
+        let (_trusted_enc, trusted_dec) = keypair();
+        let (attacker_enc, _attacker_dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), trusted_dec)], TEST_ISSUER);
+
+        // Attacker signs with their own key but advertises the trusted kid.
+        let token = sign(
+            &attacker_enc,
+            TEST_KID,
+            &json!({
+                "iss": TEST_ISSUER,
+                "aud": TEST_AUD,
+                "exp": exp_future(),
+            }),
+        );
+        match cache.validate_token(&token, TEST_AUD).await {
+            Err(AuthError::JwtValidation(_)) => {}
+            other => panic!(
+                "signature verification must reject foreign-signed tokens, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn token_with_unknown_kid_is_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let token = sign(
+            &enc,
+            "unknown-kid",
+            &json!({
+                "iss": TEST_ISSUER,
+                "aud": TEST_AUD,
+                "exp": exp_future(),
+            }),
+        );
+        match cache.validate_token(&token, TEST_AUD).await {
+            Err(AuthError::UnknownKid(k)) => assert_eq!(k, "unknown-kid"),
+            Err(AuthError::JwksFetch(_)) => {
+                // for_test cache does not hit the network, but the
+                // refresh path is exercised first on miss; an empty
+                // openid_config_url means the refresh errors before
+                // JwksFetch bubbles out. Accept either.
+            }
+            other => panic!("expected UnknownKid or JwksFetch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn token_without_kid_is_rejected() {
+        let (enc, dec) = keypair();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        // Sign without setting the kid header.
+        let header = Header::new(Algorithm::RS256);
+        let claims = json!({
+            "iss": TEST_ISSUER,
+            "aud": TEST_AUD,
+            "exp": exp_future(),
+        });
+        let token = encode(&header, &claims, &enc).unwrap();
+        match cache.validate_token(&token, TEST_AUD).await {
+            Err(AuthError::JwtHeader(_)) => {}
+            other => panic!("expected JwtHeader rejection, got {other:?}"),
+        }
     }
 }
 

@@ -9,6 +9,7 @@ use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
 
+use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, Activity};
 use crate::error::TeamsError;
 
@@ -22,18 +23,39 @@ pub struct TeamsAdapter {
 }
 
 impl TeamsAdapter {
+    /// Construct a Teams adapter. Fails if `app_id` or `app_password`
+    /// is empty, since both are required: `app_id` is the JWT
+    /// audience claim checked on every inbound webhook, and
+    /// `app_password` is the client secret used to mint outbound
+    /// Bot Framework tokens. Missing either silently breaks
+    /// authentication (previously `app_id`-empty combined with the
+    /// missing JWT validation to accept any POST as any user).
     pub fn new(
         identity: AdapterIdentity,
         app_id: String,
         app_password: String,
         listen_port: u16,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, TeamsError> {
+        if app_id.is_empty() {
+            return Err(TeamsError::Config(
+                "Teams adapter requires a non-empty app_id; \
+                 inbound JWT validation uses it as the audience claim"
+                    .into(),
+            ));
+        }
+        if app_password.is_empty() {
+            return Err(TeamsError::Config(
+                "Teams adapter requires a non-empty app_password; \
+                 outbound messaging cannot mint Bot Framework tokens without it"
+                    .into(),
+            ));
+        }
+        Ok(Self {
             identity,
             app_id,
             app_password,
             listen_port,
-        }
+        })
     }
 
     /// Connect to the gateway, authenticate, then run the webhook listener.
@@ -47,6 +69,8 @@ impl TeamsAdapter {
         tracing::info!("Handshake complete");
 
         let writer = Arc::new(Mutex::new(writer));
+        let http = reqwest::Client::new();
+        let jwks = Arc::new(JwksCache::new(http.clone()));
 
         // Spawn outbound handler (gateway -> Teams via Bot Framework REST API)
         let outbound_writer = writer.clone();
@@ -75,9 +99,10 @@ impl TeamsAdapter {
             let (mut stream, _) = listener.accept().await?;
             let w = writer.clone();
             let bid = bot_id.clone();
+            let j = jwks.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_webhook_request(&mut stream, &bid, w).await {
+                if let Err(e) = handle_webhook_request(&mut stream, &bid, &j, w).await {
                     tracing::error!("Webhook request error: {e}");
                 }
             });
@@ -85,10 +110,18 @@ impl TeamsAdapter {
     }
 }
 
+/// HTTP response helpers. Bodies are empty; the status code carries
+/// the outcome. Callers should return after writing.
+async fn respond(stream: &mut tokio::net::TcpStream, status_line: &str) -> std::io::Result<()> {
+    let body = format!("HTTP/1.1 {status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    stream.write_all(body.as_bytes()).await
+}
+
 /// Handle a single incoming HTTP request from Bot Framework.
-async fn handle_webhook_request(
+pub(crate) async fn handle_webhook_request(
     stream: &mut tokio::net::TcpStream,
     bot_id: &str,
+    jwks: &JwksCache,
     writer: Arc<Mutex<FrameWriter>>,
 ) -> Result<(), TeamsError> {
     let mut buf = vec![0u8; 65536];
@@ -102,27 +135,42 @@ async fn handle_webhook_request(
     // Only handle POST requests
     let first_line = request.lines().next().unwrap_or("");
     if !first_line.starts_with("POST") {
-        let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        stream.write_all(response.as_bytes()).await?;
+        let _ = respond(stream, "200 OK").await;
         return Ok(());
     }
 
-    // Extract JSON body
+    // Inbound JWT validation. Must succeed before the body is
+    // parsed or forwarded to the gateway. A failed validation always
+    // surfaces as a generic 401 on the wire; the specific reason
+    // goes to tracing so an operator can debug without the reason
+    // becoming an oracle for attackers.
+    let token = match extract_bearer_token(&request) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Teams webhook rejected: {e}");
+            let _ = respond(stream, "401 Unauthorized").await;
+            return Ok(());
+        }
+    };
+    if let Err(e) = jwks.validate_token(token, bot_id).await {
+        tracing::warn!("Teams webhook rejected: {e}");
+        let _ = respond(stream, "401 Unauthorized").await;
+        return Ok(());
+    }
+
+    // Extract JSON body (after the auth check passes)
     let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
     let activity: Activity = match serde_json::from_str(body) {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!("Invalid activity JSON: {e}");
-            let response =
-                "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            stream.write_all(response.as_bytes()).await?;
+            let _ = respond(stream, "400 Bad Request").await;
             return Ok(());
         }
     };
 
     // Respond 200 immediately (Bot Framework expects fast response)
-    let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    stream.write_all(response.as_bytes()).await?;
+    let _ = respond(stream, "200 OK").await;
 
     // Check if we should process this message
     if !convert::should_process(&activity, bot_id) {
