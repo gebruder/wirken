@@ -205,7 +205,16 @@ pub async fn run(channel: &str) -> Result<()> {
                 .parse()
                 .unwrap_or(3980);
 
-            let adapter = GoogleChatAdapter::new(identity, bot_token, listen_port);
+            let project_name = format!("{channel}-project-number");
+            let (project_val, _) = store.retrieve(&project_name).context(
+                "No project number found for 'google-chat'. Run `wirken channel add google-chat`. \
+                 The project number is the inbound JWT audience required by Google Chat webhooks.",
+            )?;
+            let app_project_number = project_val.expose().to_string();
+
+            let adapter =
+                GoogleChatAdapter::new(identity, bot_token, app_project_number, listen_port)
+                    .map_err(|e| anyhow::anyhow!("Google Chat adapter error: {e}"))?;
             adapter
                 .run(&socket_path)
                 .await

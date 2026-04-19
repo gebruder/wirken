@@ -6212,7 +6212,10 @@ version = "0.7.5"
 dependencies = [
  "capnp",
  "chrono",
+ "jsonwebtoken",
+ "rand 0.8.5",
  "reqwest 0.13.2",
+ "rsa",
  "serde",
  "serde_json",
  "tempfile",
