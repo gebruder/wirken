@@ -2067,9 +2067,12 @@ fn host_config_sets_no_new_privileges_and_seccomp() {
         opts.iter().any(|o| o == "no-new-privileges:true"),
         "security_opt must include no-new-privileges:true, got {opts:?}"
     );
+    // Docker applies its default seccomp profile when no seccomp
+    // SecurityOpt is set; setting `seccomp=default` is not a valid
+    // option string and causes the daemon to reject container start.
     assert!(
-        opts.iter().any(|o| o == "seccomp=default"),
-        "security_opt must pin seccomp=default, got {opts:?}"
+        !opts.iter().any(|o| o.starts_with("seccomp=")),
+        "security_opt must not set a seccomp option, got {opts:?}"
     );
 }
 

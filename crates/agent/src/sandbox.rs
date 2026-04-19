@@ -267,10 +267,10 @@ impl DockerSandbox {
 ///   case breaks this, re-evaluate rather than loosening by default.
 /// * `no-new-privileges`: block setuid/setgid elevation inside the
 ///   container. Pairs with `cap_drop`.
-/// * `seccomp=default`: pin Docker's default seccomp profile
-///   explicitly, so a daemon-wide `"seccomp": "unconfined"`
-///   misconfiguration does not silently disable syscall filtering
-///   for our containers.
+/// * seccomp: rely on Docker's default seccomp profile. Docker
+///   applies it automatically when no seccomp SecurityOpt is set;
+///   the string `seccomp=default` is not a valid option and causes
+///   the daemon to reject container start.
 /// * `readonly_rootfs`: make the container's `/` read-only. The
 ///   workspace bind-mount stays RW, and a tmpfs at `/tmp` gives the
 ///   shell somewhere to scratch.
@@ -296,7 +296,7 @@ pub(crate) fn build_host_config(config: &SandboxConfig, workspace_str: &str) -> 
         cap_add: Some(Vec::new()),
         security_opt: Some(vec![
             "no-new-privileges:true".into(),
-            "seccomp=default".into(),
+            // Docker applies its default seccomp profile when no seccomp SecurityOpt is set.
         ]),
         readonly_rootfs: Some(true),
         tmpfs: Some(tmpfs_mounts),
