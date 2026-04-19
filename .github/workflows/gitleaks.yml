@@ -1,0 +1,74 @@
+# gitleaks — scans the repo and full git history for committed
+# secrets (hard-coded keys, tokens, credentials). Runs as a
+# required gate on every PR so a leaked secret cannot merge, plus
+# scheduled weekly so rules added upstream after a merge still
+# catch historical commits.
+#
+# Installs the gitleaks binary directly from the official GitHub
+# release and verifies the SHA-256 checksum before execution. Keeps
+# the workflow independent of the gitleaks-action wrapper, which
+# is license-gated for organization accounts and pings a remote
+# telemetry endpoint on run completion. The binary path is exactly
+# what `gitleaks detect` would do locally.
+#
+# Allowlist for known test fixtures lives in `.gitleaks.toml` at
+# the repo root.
+
+name: gitleaks
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
+  schedule:
+    # Monday 04:00 UTC — weekly sweep of full history in case a new
+    # upstream rule flags a historical commit that was clean under
+    # the old rule set.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Full history so `detect` can walk past commits too, not
+          # just the working tree.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          VERSION=8.30.1
+          TARBALL="gitleaks_${VERSION}_linux_x64.tar.gz"
+          EXPECTED_SHA256="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/${TARBALL}" \
+            -o "${TARBALL}"
+
+          echo "${EXPECTED_SHA256}  ${TARBALL}" | sha256sum -c -
+
+          tar -xzf "${TARBALL}" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan working tree and git history
+        run: |
+          # --redact hides matched secret values in log output so the
+          #   Action log itself doesn't leak what was found.
+          # --verbose shows rule id and file path for each finding.
+          # --exit-code=1 fails the job on any finding.
+          # Default config comes from .gitleaks.toml in the repo root.
+          gitleaks detect \
+            --source="${GITHUB_WORKSPACE}" \
+            --redact \
+            --verbose \
+            --exit-code=1

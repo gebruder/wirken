@@ -1,0 +1,45 @@
+# gitleaks configuration for wirken.
+#
+# Extends the default rule set from https://github.com/gitleaks/gitleaks.
+# The allowlist below covers intentional test fixtures and
+# pre-reviewed constants that the default rules would otherwise
+# flag on every run.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "wirken test fixtures and pre-reviewed constants"
+
+# File paths that are expected to contain material matching the
+# default rules. Each entry is a regex anchored to the repo root.
+paths = [
+  # Static RSA keypairs used only inside #[cfg(test)] JWT tests.
+  # Generated offline via `openssl genrsa -traditional 2048` with
+  # the explicit intent of being test-only. See the embedded
+  # constants in adapter-teams / adapter-google-chat tests.rs.
+  '''crates/adapter-teams/src/test_rsa_.*\.pem$''',
+  '''crates/adapter-google-chat/src/test_rsa_.*\.pem$''',
+]
+
+# Regex patterns that should NOT trip even when they appear
+# outside the allowlisted paths. Scoped narrowly.
+regexes = [
+  # WhatsApp adapter test HMAC secret. Already annotated in code
+  # with `// CodeQL:hardcoded-credential-ok`; mirror that here.
+  '''whatsapp_test_hmac_key''',
+
+  # The name of the cipher used by the vault crate. Appears in
+  # the crate description and ambient docs; the generic-api-key
+  # rule matches on its entropy. `XChaCha20-Poly1305` is a
+  # published algorithm identifier, not a secret.
+  '''XChaCha20-Poly1305''',
+
+  # Release signing key PUBLIC fingerprint shown as example
+  # output in docs/release-signing.md. The fingerprint is
+  # intentionally public — it's what readers verify releases
+  # against. gitleaks extracts the base64 portion after the
+  # `SHA256:` prefix as its secret value, so the allowlist
+  # matches that extracted form.
+  '''tzlfNHy4G1KIsmAR\+cM3MGwVndheh2ak/usA6rw7SuE''',
+]
