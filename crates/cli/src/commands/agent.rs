@@ -1,8 +1,11 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context, Result};
 
 use wirken_agent::Agent;
 use wirken_agent::llm::LlmConfig;
 use wirken_gateway::agent_config::AgentConfigStore;
+use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -95,6 +98,13 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
+    // Attach the gateway's permission store so tier gating applies
+    // on the ask path too — otherwise Tier 2/3 actions execute
+    // unchecked and bypass the three-tier model.
+    let perms = PermissionStore::open(&cfg.permissions_db_path())
+        .context("Failed to open permission store")?;
+    agent.set_permissions(Arc::new(Mutex::new(perms)));
+
     let skills_dir = cfg.data_dir.join("skills");
     if skills_dir.is_dir() {
         let _ = agent.load_skills(&skills_dir);
@@ -161,6 +171,10 @@ async fn send_with_agent_config(
         session_log,
         super::load_sandbox_config(&cfg.data_dir),
     )?;
+
+    let perms = PermissionStore::open(&cfg.permissions_db_path())
+        .context("Failed to open permission store")?;
+    agent.set_permissions(Arc::new(Mutex::new(perms)));
 
     let skills_dir = cfg.agent_skills_dir(&agent_cfg.id);
     if skills_dir.is_dir() {

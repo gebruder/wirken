@@ -2146,7 +2146,7 @@ impl Agent {
     /// [`Self::verify`] to recompute `tools_hash`. Tool defs are
     /// sorted by name for stable hashing (matches the slice 1 sort
     /// in `process_message`).
-    async fn snapshot_tool_defs(&self) -> Vec<crate::tool::ToolDef> {
+    pub(crate) async fn snapshot_tool_defs(&self) -> Vec<crate::tool::ToolDef> {
         let mcp_defs = match &self.mcp {
             Some(mcp) => mcp.lock().await.definitions(),
             None => Vec::new(),
