@@ -62,7 +62,7 @@ fn ignore_non_text_messages() {
 // ---------------------------------------------------------------------------
 
 fn allowlist_with(entries: &[&str]) -> SignalAllowlist {
-    SignalAllowlist::from_csv(&entries.join(","))
+    SignalAllowlist::from_csv(&entries.join(",")).expect("valid allowlist in test")
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn group_message_uses_group_id_for_allowlist() {
 
 #[test]
 fn allowlist_parses_whitespace_and_empty_segments() {
-    let list = SignalAllowlist::from_csv(" +15551234567 , , group-xyz ,");
+    let list = SignalAllowlist::from_csv(" +15551234567 , , group-xyz ,").unwrap();
     assert_eq!(list.len(), 2);
     let msg = SignalInbound {
         message_id: "sig_6".into(),
@@ -615,7 +615,7 @@ async fn end_to_end_against_fake_signal_cli_daemon() {
 
     // ----- Run the real adapter against both fakes -----
     let identity = AdapterIdentity::generate("signal");
-    let allowlist = SignalAllowlist::from_csv("+15559876543");
+    let allowlist = SignalAllowlist::from_csv("+15559876543").unwrap();
     let adapter = SignalAdapter::new(identity, endpoint, "+15551112222".to_string(), allowlist);
     let socket_path_for_adapter = socket_path.clone();
     let adapter_task = tokio::spawn(async move { adapter.run(&socket_path_for_adapter).await });
@@ -749,7 +749,7 @@ async fn adapter_drops_messages_from_unknown_senders() {
 
     // Allowlist contains only a number that is *not* the fake message's sender.
     let identity = AdapterIdentity::generate("signal");
-    let allowlist = SignalAllowlist::from_csv("+15559999999");
+    let allowlist = SignalAllowlist::from_csv("+15559999999").unwrap();
     let adapter = SignalAdapter::new(identity, endpoint, "+15551112222".to_string(), allowlist);
     let socket_path_for_adapter = socket_path.clone();
     let adapter_task = tokio::spawn(async move { adapter.run(&socket_path_for_adapter).await });
@@ -759,4 +759,107 @@ async fn adapter_drops_messages_from_unknown_senders() {
 
     adapter_task.abort();
     http_task.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Vuln 11: allowlist normalization + parse-time rejection
+// ---------------------------------------------------------------------------
+
+use crate::convert::SignalAllowlistError;
+
+#[test]
+fn allowlist_normalizes_phone_formats_consistently() {
+    // Entry written by the operator with human-friendly separators.
+    let list = SignalAllowlist::from_csv("+1 (555) 123-4567").unwrap();
+    // Runtime senders arriving in various signal-cli format variants
+    // must all match the same canonical entry.
+    for sender in [
+        "+15551234567",
+        "+1-555-123-4567",
+        "+1 555 123 4567",
+        "+1.555.123.4567",
+        "+1 (555) 123-4567",
+    ] {
+        let msg = SignalInbound {
+            message_id: "m".into(),
+            sender: sender.into(),
+            sender_name: "Op".into(),
+            text: "hi".into(),
+            timestamp: 0,
+            group_id: None,
+        };
+        assert!(
+            list.allows(&msg),
+            "sender '{sender}' should match normalized allowlist entry"
+        );
+    }
+}
+
+#[test]
+fn allowlist_rejects_phone_without_plus_at_parse_time() {
+    // A phone-shaped entry missing the leading `+` is ambiguous
+    // (country code unknown). Reject it at parse time so the
+    // operator sees the error at startup.
+    match SignalAllowlist::from_csv("15551234567") {
+        Err(SignalAllowlistError::PhoneMissingPlus(_)) => {}
+        other => panic!("expected PhoneMissingPlus, got {other:?}"),
+    }
+    match SignalAllowlist::from_csv("+15551234567, 14155550000") {
+        Err(SignalAllowlistError::PhoneMissingPlus(_)) => {}
+        other => panic!("expected PhoneMissingPlus on second entry, got {other:?}"),
+    }
+}
+
+#[test]
+fn allowlist_group_ids_are_a_separate_namespace() {
+    // Group ids contain non-phone characters and bypass phone
+    // normalization entirely. They are stored verbatim.
+    let list = SignalAllowlist::from_csv("group.abcDEF123=,+15551234567").unwrap();
+    assert_eq!(list.len(), 2);
+
+    let group_msg = SignalInbound {
+        message_id: "g".into(),
+        sender: "+15550000000".into(),
+        sender_name: "Alice".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        group_id: Some("group.abcDEF123=".into()),
+    };
+    assert!(list.allows(&group_msg));
+
+    // A group id that looks nothing like the allowlist entry is rejected.
+    let other_group = SignalInbound {
+        message_id: "g2".into(),
+        sender: "+15550000000".into(),
+        sender_name: "Alice".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        group_id: Some("group.other=".into()),
+    };
+    assert!(!list.allows(&other_group));
+}
+
+#[test]
+fn allowlist_runtime_sender_without_plus_is_rejected() {
+    // If signal-cli ever hands us a sender without a leading `+`, we
+    // cannot safely normalize it to match. Drop rather than match
+    // loosely.
+    let list = SignalAllowlist::from_csv("+15551234567").unwrap();
+    let msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "15551234567".into(),
+        sender_name: "Op".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        group_id: None,
+    };
+    assert!(!list.allows(&msg));
+}
+
+#[test]
+fn allowlist_empty_still_parses() {
+    let list = SignalAllowlist::from_csv("").unwrap();
+    assert!(list.is_empty());
+    let list = SignalAllowlist::from_csv("  ,  , ").unwrap();
+    assert!(list.is_empty());
 }
