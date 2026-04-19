@@ -72,19 +72,9 @@ pub enum Action {
 /// case-variant invocations (`CURL`, `SuDo`) match identically and
 /// cannot bypass the gate.
 pub const HIGH_RISK_PREFIXES: &[&str] = &[
-    // network / transfer
-    "curl", "wget", "scp", "sftp",
-    // remote shells / orchestration
-    "ssh", "kubectl", "helm", "docker", "podman",
-    // privilege elevation
-    "sudo", "su", "doas",
-    // raw sockets / tunnels
-    "nc", "ncat", "socat",
-    // version control with push/fetch and hook side effects
-    "git",
-    // shell and process wrappers that can launder any of the above
-    "sh", "bash", "dash", "zsh", "env", "xargs", "nohup", "timeout", "nice", "ionice", "setsid",
-    "stdbuf",
+    "curl", "wget", "scp", "sftp", "ssh", "kubectl", "helm", "docker", "podman", "sudo", "su",
+    "doas", "nc", "ncat", "socat", "git", "sh", "bash", "dash", "zsh", "env", "xargs", "nohup",
+    "timeout", "nice", "ionice", "setsid", "stdbuf",
 ];
 
 /// Canonicalize a shell-exec pattern's first token for tier matching

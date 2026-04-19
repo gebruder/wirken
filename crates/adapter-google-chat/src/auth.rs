@@ -102,7 +102,9 @@ impl JwksCache {
         expected_aud: &str,
     ) -> Result<Claims, AuthError> {
         let header = decode_header(token).map_err(|e| AuthError::JwtHeader(e.to_string()))?;
-        let kid = header.kid.ok_or_else(|| AuthError::JwtHeader("no kid".into()))?;
+        let kid = header
+            .kid
+            .ok_or_else(|| AuthError::JwtHeader("no kid".into()))?;
 
         let key = self.get_key(&kid).await?;
 
@@ -125,10 +127,10 @@ impl JwksCache {
     async fn get_key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
         {
             let state = self.state.read().await;
-            if let Some(k) = state.keys.get(kid) {
-                if !state.is_stale() {
-                    return Ok(k.clone());
-                }
+            if let Some(k) = state.keys.get(kid)
+                && !state.is_stale()
+            {
+                return Ok(k.clone());
             }
         }
 

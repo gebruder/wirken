@@ -161,8 +161,7 @@ pub(crate) async fn handle_webhook(
     let presented = extract_webhook_password(&request, &json);
     if !verify_password(expected_password, presented) {
         tracing::warn!("iMessage webhook rejected: missing or invalid password");
-        let resp =
-            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(resp.as_bytes()).await;
         return Ok(());
     }
@@ -193,10 +192,10 @@ pub(crate) fn extract_webhook_password<'a>(
     request: &'a str,
     json: &'a serde_json::Value,
 ) -> Option<&'a str> {
-    if let Some(pw) = json.get("password").and_then(|v| v.as_str()) {
-        if !pw.is_empty() {
-            return Some(pw);
-        }
+    if let Some(pw) = json.get("password").and_then(|v| v.as_str())
+        && !pw.is_empty()
+    {
+        return Some(pw);
     }
     for line in request.lines() {
         if line.is_empty() {

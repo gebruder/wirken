@@ -2,10 +2,10 @@ use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
+use crate::adapter::TeamsAdapter;
 use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, Activity, ChannelAccount, ConversationAccount};
 use crate::error::{AuthError, TeamsError};
-use crate::adapter::TeamsAdapter;
 
 // ---------------------------------------------------------------------------
 // Activity construction helpers
@@ -625,9 +625,9 @@ mod jwt {
         );
         match cache.validate_token(&token, TEST_AUD).await {
             Err(AuthError::JwtValidation(_)) => {}
-            other => panic!(
-                "signature verification must reject foreign-signed tokens, got {other:?}"
-            ),
+            other => {
+                panic!("signature verification must reject foreign-signed tokens, got {other:?}")
+            }
         }
     }
 
