@@ -104,7 +104,8 @@ pub async fn run(channel: &str) -> Result<()> {
                 .parse()
                 .unwrap_or(3978);
 
-            let adapter = TeamsAdapter::new(identity, app_id, bot_token, listen_port);
+            let adapter = TeamsAdapter::new(identity, app_id, bot_token, listen_port)
+                .map_err(|e| anyhow::anyhow!("Teams adapter error: {e}"))?;
             adapter
                 .run(&socket_path)
                 .await
