@@ -2101,6 +2101,56 @@ async fn write_file_refuses_symlink_at_leaf() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Vuln 9: generate_image filename sanitization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sanitize_image_filename_strips_slashes_and_dots() {
+    use crate::tool::sanitize_image_filename;
+
+    // Traversal attempts: `/`, `\`, and null bytes are mapped to `_`
+    // so the result is always a single path component. `..` is
+    // preserved inside the string (it becomes `.._.._.._tmp_owned`
+    // here, which is a benign filename), not a path component.
+    assert_eq!(
+        sanitize_image_filename("../../../tmp/owned").unwrap(),
+        ".._.._.._tmp_owned"
+    );
+    assert_eq!(
+        sanitize_image_filename("/absolute/path").unwrap(),
+        "_absolute_path"
+    );
+    assert_eq!(
+        sanitize_image_filename("..\\..\\windows").unwrap(),
+        ".._.._windows"
+    );
+    assert_eq!(sanitize_image_filename("foo\0bar").unwrap(), "foo_bar");
+}
+
+#[test]
+fn sanitize_image_filename_rejects_empty_and_dot_specials() {
+    use crate::tool::sanitize_image_filename;
+
+    assert!(sanitize_image_filename("").is_err());
+    assert!(sanitize_image_filename(".").is_err());
+    assert!(sanitize_image_filename("..").is_err());
+}
+
+#[test]
+fn sanitize_image_filename_accepts_normal_names() {
+    use crate::tool::sanitize_image_filename;
+
+    assert_eq!(sanitize_image_filename("sunset").unwrap(), "sunset");
+    assert_eq!(
+        sanitize_image_filename("img_2026-04-19").unwrap(),
+        "img_2026-04-19"
+    );
+    // A leading dot is fine (hidden file), only `.` / `..` exact
+    // matches are refused.
+    assert_eq!(sanitize_image_filename(".hidden").unwrap(), ".hidden");
+}
+
 #[test]
 fn sandbox_gvisor_constraints_match_docker() {
     use crate::sandbox::{SandboxConfig, SandboxMode};

@@ -544,11 +544,12 @@ impl ToolRegistry {
             .and_then(|v| v.as_str())
             .unwrap_or("1024x1024");
 
-        let filename = args
+        let filename_raw = args
             .get("filename")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("img_{}", uuid::Uuid::new_v4()));
+        let filename = sanitize_image_filename(&filename_raw)?;
 
         let url = format!("{base_url}/images/generations");
         let body = serde_json::json!({
@@ -594,13 +595,19 @@ impl ToolRegistry {
             .decode(b64_data)
             .map_err(|e| AgentError::Tool(format!("decode image: {e}")))?;
 
-        // Save to workspace/generated_images/
+        // Save to workspace/generated_images/. Route the final path
+        // through resolve_path_for_write so the same workspace
+        // containment check and leaf-symlink refusal that protect
+        // write_file also apply here. filename was sanitized above
+        // to strip separators and reject `.` / `..`, so the
+        // formatted leaf is a single path component.
         let images_dir = self.workspace.join("generated_images");
         tokio::fs::create_dir_all(&images_dir)
             .await
             .map_err(|e| AgentError::Tool(format!("create images dir: {e}")))?;
 
-        let file_path = images_dir.join(format!("{filename}.png"));
+        let relative = format!("generated_images/{filename}.png");
+        let file_path = self.resolve_path_for_write(&relative)?;
         tokio::fs::write(&file_path, &image_bytes)
             .await
             .map_err(|e| AgentError::Tool(format!("write image: {e}")))?;
@@ -862,6 +869,32 @@ pub fn extract_exec_command(args: &serde_json::Value) -> Result<String, AgentErr
         )),
         None => Err(AgentError::Tool("missing 'command' argument".into())),
     }
+}
+
+/// Sanitize an LLM-supplied `filename` before it is used to build a
+/// path for `generate_image`. The raw value is passed into
+/// `PathBuf::join`, and `join` with an absolute path replaces the
+/// base entirely; `..` components walk out of the workspace; a null
+/// byte can truncate the path in some lower-level syscalls. Strip
+/// those and refuse the dot-specials so the result is always a
+/// single safe path component.
+///
+/// Kept separate from `resolve_path_for_write` so `generate_image`
+/// can guarantee the filename is a component before any path math
+/// runs. The leaf-symlink check still lives downstream in
+/// `resolve_path_for_write`.
+pub(crate) fn sanitize_image_filename(raw: &str) -> Result<String, AgentError> {
+    let stripped: String = raw
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | '\0' => '_',
+            other => other,
+        })
+        .collect();
+    if stripped.is_empty() || stripped == "." || stripped == ".." {
+        return Err(AgentError::Tool(format!("invalid image filename '{raw}'")));
+    }
+    Ok(stripped)
 }
 
 /// Map a built-in tool invocation to a permission Action for tier checking.
