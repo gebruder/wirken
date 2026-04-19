@@ -1027,4 +1027,28 @@ mod session {
         let expected1 = format!("{:x}", hasher.finalize());
         assert_eq!(rows[1].hash.0, expected1);
     }
+
+    #[test]
+    fn permission_denied_deserializes_without_action_key() {
+        // Legacy rows written before `action_key` was added must
+        // still deserialize; the field defaults to an empty string.
+        let legacy = r#"{"kind":"permission_denied","tool":"exec","tier":"tier3","agent_id":"default","trigger":"hi"}"#;
+        let event: SessionEvent = serde_json::from_str(legacy).unwrap();
+        match event {
+            SessionEvent::PermissionDenied {
+                tool,
+                action_key,
+                tier,
+                agent_id,
+                trigger,
+            } => {
+                assert_eq!(tool, "exec");
+                assert_eq!(action_key, "");
+                assert_eq!(tier, "tier3");
+                assert_eq!(agent_id, "default");
+                assert_eq!(trigger.as_deref(), Some("hi"));
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
 }
