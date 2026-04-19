@@ -2067,9 +2067,12 @@ fn host_config_sets_no_new_privileges_and_seccomp() {
         opts.iter().any(|o| o == "no-new-privileges:true"),
         "security_opt must include no-new-privileges:true, got {opts:?}"
     );
+    // Docker applies its default seccomp profile when no seccomp
+    // SecurityOpt is set; setting `seccomp=default` is not a valid
+    // option string and causes the daemon to reject container start.
     assert!(
-        opts.iter().any(|o| o == "seccomp=default"),
-        "security_opt must pin seccomp=default, got {opts:?}"
+        !opts.iter().any(|o| o.starts_with("seccomp=")),
+        "security_opt must not set a seccomp option, got {opts:?}"
     );
 }
 
@@ -2104,7 +2107,9 @@ fn host_config_preserves_workspace_and_resource_caps() {
     assert_eq!(hc.network_mode.as_deref(), Some("none"));
     assert_eq!(hc.memory, Some(512 * 1024 * 1024));
     assert_eq!(hc.pids_limit, Some(256));
-    assert_eq!(hc.auto_remove, Some(true));
+    // auto_remove is off so post-wait log collection can still read
+    // the container; cleanup is explicit via kill_and_remove.
+    assert_eq!(hc.auto_remove, Some(false));
 }
 
 #[test]
@@ -3701,13 +3706,8 @@ mod verify {
         });
     }
 
-    async fn agent_snapshot_tools(_agent: &Agent) -> Vec<crate::tool::ToolDef> {
-        // Match Agent::snapshot_tool_defs exactly: when the LLM
-        // config has tools_enabled = false (e.g., Ollama), the
-        // agent sends no tool defs to the model and the tools_hash
-        // is the hash of an empty Vec. This test uses Ollama, so
-        // return empty.
-        Vec::new()
+    async fn agent_snapshot_tools(agent: &Agent) -> Vec<crate::tool::ToolDef> {
+        agent.snapshot_tool_defs().await
     }
 
     #[test]
