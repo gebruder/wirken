@@ -189,7 +189,7 @@ impl Agent {
             base_url: Some(llm_config.base_url.clone()),
             sandbox,
         };
-        let tools = ToolRegistry::new(workspace, tool_config);
+        let tools = ToolRegistry::new(workspace, tool_config)?;
 
         let system_prompt = default_system_prompt();
         let mut conversation = Conversation::new(100_000); // legacy compaction is now a no-op; ContextEngine handles trimming
@@ -263,7 +263,7 @@ impl Agent {
             base_url: Some(llm_config.base_url.clone()),
             sandbox,
         };
-        let tools = ToolRegistry::new(workspace, tool_config);
+        let tools = ToolRegistry::new(workspace, tool_config)?;
 
         let system_prompt = default_system_prompt();
         let mut conversation = Conversation::new(100_000);

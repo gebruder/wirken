@@ -31,6 +31,11 @@ bollard = { workspace = true }
 wasmtime = { workspace = true }
 wasmtime-wasi = "43.0.1"
 futures-util = "0.3"
+# Capability-based filesystem handle for the agent workspace. Opened
+# once at ToolRegistry construction, then all read/write/list ops go
+# through Dir methods that refuse paths escaping the workspace. Used
+# instead of hand-rolled canonicalize + symlink_metadata checks.
+cap-std = "3.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }

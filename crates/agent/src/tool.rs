@@ -1,8 +1,10 @@
 use base64::Engine;
+use cap_std::ambient_authority;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use crate::error::AgentError;
 use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
@@ -34,7 +36,20 @@ pub struct ToolConfig {
 
 /// Built-in tool implementations.
 pub struct ToolRegistry {
+    /// Path form of the workspace. Kept for the `exec` tool's
+    /// current-dir and sandbox bind-mount; those paths still go
+    /// through the OS by filename. All file tools use
+    /// [`Self::workspace_dir`] instead.
     workspace: PathBuf,
+    /// Capability-based handle to the agent workspace. File tools
+    /// (`read_file`, `write_file`, `list_files`, `generate_image`)
+    /// operate exclusively through this `Dir`. cap-std uses
+    /// `openat2` with `RESOLVE_BENEATH` on Linux (and equivalent
+    /// semantics on macOS/Windows) so any path that escapes the
+    /// workspace via `..` or an absolute component is refused at
+    /// the syscall layer. Replaces the previous `resolve_path` /
+    /// `resolve_path_for_write` / `symlink_metadata` leaf check.
+    workspace_dir: Arc<cap_std::fs::Dir>,
     tools: HashMap<String, ToolDef>,
     http: reqwest::Client,
     config: ToolConfig,
@@ -47,8 +62,25 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Create a new tool registry with built-in tools.
-    pub fn new(workspace: PathBuf, config: ToolConfig) -> Self {
+    /// Create a new tool registry with built-in tools. Opens a
+    /// capability handle to `workspace`; returns `AgentError` if the
+    /// directory does not exist or cannot be opened. The parent
+    /// workspace directory is created if it doesn't yet exist.
+    pub fn new(workspace: PathBuf, config: ToolConfig) -> Result<Self, AgentError> {
+        std::fs::create_dir_all(&workspace).map_err(|e| {
+            AgentError::Tool(format!(
+                "workspace setup failed for {}: {e}",
+                workspace.display()
+            ))
+        })?;
+        let workspace_dir = cap_std::fs::Dir::open_ambient_dir(&workspace, ambient_authority())
+            .map_err(|e| {
+                AgentError::Tool(format!(
+                    "opening workspace dir {} as capability failed: {e}",
+                    workspace.display()
+                ))
+            })?;
+        let workspace_dir = Arc::new(workspace_dir);
         let mut tools = HashMap::new();
 
         tools.insert(
@@ -180,14 +212,15 @@ impl ToolRegistry {
 
         let sandbox_config = config.sandbox.clone();
 
-        Self {
+        Ok(Self {
             workspace,
+            workspace_dir,
             tools,
             http: reqwest::Client::new(),
             config,
             sandbox: tokio::sync::OnceCell::new(),
             sandbox_config,
-        }
+        })
     }
 
     /// Whether the sandbox `OnceCell` has been initialized. Test-only helper
@@ -364,11 +397,16 @@ impl ToolRegistry {
     async fn read_file(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
         let path_str = args["path"]
             .as_str()
-            .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?;
+            .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?
+            .to_string();
 
-        let path = self.resolve_path(path_str)?;
+        let dir = self.workspace_dir.clone();
+        let path_for_err = path_str.clone();
+        let result = tokio::task::spawn_blocking(move || dir.read_to_string(&path_str))
+            .await
+            .map_err(|e| AgentError::Tool(format!("read_file join: {e}")))?;
 
-        match tokio::fs::read_to_string(&path).await {
+        match result {
             Ok(content) => {
                 let mut output = content;
                 if output.len() > 64_000 {
@@ -381,7 +419,7 @@ impl ToolRegistry {
                 })
             }
             Err(e) => Ok(ToolResult {
-                output: format!("Error reading {}: {e}", path.display()),
+                output: format!("Error reading {path_for_err}: {e}"),
                 success: false,
             }),
         }
@@ -390,64 +428,76 @@ impl ToolRegistry {
     async fn write_file(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
         let path_str = args["path"]
             .as_str()
-            .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?;
+            .ok_or_else(|| AgentError::Tool("missing 'path' argument".into()))?
+            .to_string();
         let content = args["content"]
             .as_str()
-            .ok_or_else(|| AgentError::Tool("missing 'content' argument".into()))?;
+            .ok_or_else(|| AgentError::Tool("missing 'content' argument".into()))?
+            .to_string();
 
-        let path = self.resolve_path_for_write(path_str)?;
+        let dir = self.workspace_dir.clone();
+        let path_for_err = path_str.clone();
+        let content_len = content.len();
+        let result = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = std::path::Path::new(&path_str).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                dir.create_dir_all(parent)?;
+            }
+            dir.write(&path_str, content.as_bytes())
+        })
+        .await
+        .map_err(|e| AgentError::Tool(format!("write_file join: {e}")))?;
 
-        if let Some(parent) = path.parent()
-            && let Err(e) = tokio::fs::create_dir_all(parent).await
-        {
-            return Ok(ToolResult {
-                output: format!("Error creating directory: {e}"),
-                success: false,
-            });
-        }
-
-        match tokio::fs::write(&path, content).await {
+        match result {
             Ok(()) => Ok(ToolResult {
-                output: format!("Wrote {} bytes to {}", content.len(), path.display()),
+                output: format!("Wrote {content_len} bytes to {path_for_err}"),
                 success: true,
             }),
             Err(e) => Ok(ToolResult {
-                output: format!("Error writing {}: {e}", path.display()),
+                output: format!("Error writing {path_for_err}: {e}"),
                 success: false,
             }),
         }
     }
 
     async fn list_files(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
-        let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let path = self.resolve_path(path_str)?;
+        let path_str = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(".")
+            .to_string();
 
-        let mut entries = match tokio::fs::read_dir(&path).await {
-            Ok(rd) => rd,
-            Err(e) => {
-                return Ok(ToolResult {
-                    output: format!("Error listing {}: {e}", path.display()),
-                    success: false,
-                });
+        let dir = self.workspace_dir.clone();
+        let path_for_err = path_str.clone();
+        let result = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<String>> {
+            let mut names = Vec::new();
+            for entry in dir.read_dir(&path_str)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if is_dir {
+                    names.push(format!("{name}/"));
+                } else {
+                    names.push(name);
+                }
             }
-        };
-
-        let mut names = Vec::new();
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            if is_dir {
-                names.push(format!("{name}/"));
-            } else {
-                names.push(name);
-            }
-        }
-        names.sort();
-
-        Ok(ToolResult {
-            output: names.join("\n"),
-            success: true,
+            names.sort();
+            Ok(names)
         })
+        .await
+        .map_err(|e| AgentError::Tool(format!("list_files join: {e}")))?;
+
+        match result {
+            Ok(names) => Ok(ToolResult {
+                output: names.join("\n"),
+                success: true,
+            }),
+            Err(e) => Ok(ToolResult {
+                output: format!("Error listing {path_for_err}: {e}"),
+                success: false,
+            }),
+        }
     }
 
     async fn web_search(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
@@ -544,12 +594,11 @@ impl ToolRegistry {
             .and_then(|v| v.as_str())
             .unwrap_or("1024x1024");
 
-        let filename_raw = args
+        let filename = args
             .get("filename")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("img_{}", uuid::Uuid::new_v4()));
-        let filename = sanitize_image_filename(&filename_raw)?;
 
         let url = format!("{base_url}/images/generations");
         let body = serde_json::json!({
@@ -595,128 +644,35 @@ impl ToolRegistry {
             .decode(b64_data)
             .map_err(|e| AgentError::Tool(format!("decode image: {e}")))?;
 
-        // Save to workspace/generated_images/. Route the final path
-        // through resolve_path_for_write so the same workspace
-        // containment check and leaf-symlink refusal that protect
-        // write_file also apply here. filename was sanitized above
-        // to strip separators and reject `.` / `..`, so the
-        // formatted leaf is a single path component.
-        let images_dir = self.workspace.join("generated_images");
-        tokio::fs::create_dir_all(&images_dir)
-            .await
-            .map_err(|e| AgentError::Tool(format!("create images dir: {e}")))?;
+        // Save to workspace/generated_images/. Open that directory
+        // as a sub-capability so the filename cannot escape it via
+        // `../`, an absolute path, or a symlink staged by `exec`.
+        // cap-std's `Dir::create_dir_all` + `open_dir` + `write`
+        // path is enforced by openat2(RESOLVE_BENEATH) on Linux and
+        // equivalent semantics on macOS/Windows.
+        let dir = self.workspace_dir.clone();
+        let filename_for_err = filename.clone();
+        let bytes_len = image_bytes.len();
+        let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            dir.create_dir_all("generated_images")?;
+            let images_dir = dir.open_dir("generated_images")?;
+            let leaf = format!("{filename}.png");
+            images_dir.write(&leaf, &image_bytes)
+        })
+        .await
+        .map_err(|e| AgentError::Tool(format!("generate_image join: {e}")))?;
+        write_result
+            .map_err(|e| AgentError::Tool(format!("write image {filename_for_err}: {e}")))?;
 
-        let relative = format!("generated_images/{filename}.png");
-        let file_path = self.resolve_path_for_write(&relative)?;
-        tokio::fs::write(&file_path, &image_bytes)
-            .await
-            .map_err(|e| AgentError::Tool(format!("write image: {e}")))?;
+        let file_path = self
+            .workspace
+            .join("generated_images")
+            .join(format!("{filename_for_err}.png"));
 
         Ok(ToolResult {
-            output: format!(
-                "Image saved to {} ({} bytes)",
-                file_path.display(),
-                image_bytes.len()
-            ),
+            output: format!("Image saved to {} ({bytes_len} bytes)", file_path.display()),
             success: true,
         })
-    }
-
-    /// Resolve a path and verify it is within the workspace boundary.
-    fn resolve_path(&self, path: &str) -> Result<PathBuf, AgentError> {
-        let joined = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            self.workspace.join(path)
-        };
-
-        let workspace = self
-            .workspace
-            .canonicalize()
-            .map_err(|e| AgentError::Tool(format!("workspace resolution failed: {e}")))?;
-
-        if joined.exists() {
-            let canonical = joined.canonicalize().map_err(|e| {
-                AgentError::Tool(format!("path resolution failed for '{}': {e}", path))
-            })?;
-            if !canonical.starts_with(&workspace) {
-                return Err(AgentError::Tool(format!(
-                    "access denied: '{}' is outside the workspace",
-                    path
-                )));
-            }
-            return Ok(canonical);
-        }
-
-        self.check_ancestor_in_workspace(&joined, &workspace, path)?;
-        Ok(joined)
-    }
-
-    /// Resolve a path for write operations where the target may not exist yet.
-    ///
-    /// The leaf is rejected if it is a symlink, whether the target
-    /// exists or is dangling. A dangling symlink inside the workspace
-    /// passes the ancestor check (`.exists()` follows symlinks and
-    /// returns false on a broken link, so the loop pops past to the
-    /// workspace root which validates), but a subsequent
-    /// `tokio::fs::write` would create the target at the symlink
-    /// destination — which may be outside the workspace. Rejecting
-    /// symlink leaves closes that path.
-    fn resolve_path_for_write(&self, path: &str) -> Result<PathBuf, AgentError> {
-        let joined = if Path::new(path).is_absolute() {
-            PathBuf::from(path)
-        } else {
-            self.workspace.join(path)
-        };
-
-        let workspace = self
-            .workspace
-            .canonicalize()
-            .map_err(|e| AgentError::Tool(format!("workspace resolution failed: {e}")))?;
-
-        self.check_ancestor_in_workspace(&joined, &workspace, path)?;
-
-        // symlink_metadata does not follow, so a dangling symlink
-        // reports as an existing entry with is_symlink() == true.
-        if let Ok(meta) = std::fs::symlink_metadata(&joined)
-            && meta.file_type().is_symlink()
-        {
-            return Err(AgentError::Tool(format!(
-                "access denied: '{path}' is a symlink; refusing to write through it"
-            )));
-        }
-
-        Ok(joined)
-    }
-
-    fn check_ancestor_in_workspace(
-        &self,
-        target: &Path,
-        workspace: &Path,
-        original_path: &str,
-    ) -> Result<(), AgentError> {
-        let mut existing_ancestor = target.to_path_buf();
-        while !existing_ancestor.exists() {
-            if !existing_ancestor.pop() {
-                return Err(AgentError::Tool(format!(
-                    "no valid ancestor for '{}'",
-                    original_path
-                )));
-            }
-        }
-
-        let canonical_ancestor = existing_ancestor
-            .canonicalize()
-            .map_err(|e| AgentError::Tool(format!("path resolution failed: {e}")))?;
-
-        if !canonical_ancestor.starts_with(workspace) {
-            return Err(AgentError::Tool(format!(
-                "access denied: '{}' is outside the workspace",
-                original_path
-            )));
-        }
-
-        Ok(())
     }
 }
 
@@ -869,32 +825,6 @@ pub fn extract_exec_command(args: &serde_json::Value) -> Result<String, AgentErr
         )),
         None => Err(AgentError::Tool("missing 'command' argument".into())),
     }
-}
-
-/// Sanitize an LLM-supplied `filename` before it is used to build a
-/// path for `generate_image`. The raw value is passed into
-/// `PathBuf::join`, and `join` with an absolute path replaces the
-/// base entirely; `..` components walk out of the workspace; a null
-/// byte can truncate the path in some lower-level syscalls. Strip
-/// those and refuse the dot-specials so the result is always a
-/// single safe path component.
-///
-/// Kept separate from `resolve_path_for_write` so `generate_image`
-/// can guarantee the filename is a component before any path math
-/// runs. The leaf-symlink check still lives downstream in
-/// `resolve_path_for_write`.
-pub(crate) fn sanitize_image_filename(raw: &str) -> Result<String, AgentError> {
-    let stripped: String = raw
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | '\0' => '_',
-            other => other,
-        })
-        .collect();
-    if stripped.is_empty() || stripped == "." || stripped == ".." {
-        return Err(AgentError::Tool(format!("invalid image filename '{raw}'")));
-    }
-    Ok(stripped)
 }
 
 /// Map a built-in tool invocation to a permission Action for tier checking.
