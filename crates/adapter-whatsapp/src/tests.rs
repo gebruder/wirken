@@ -91,6 +91,47 @@ fn valid_text_processed() {
 }
 
 #[test]
+fn new_rejects_empty_app_secret() {
+    use super::WhatsAppAdapter;
+    use crate::error::WhatsAppError;
+    use wirken_ipc::AdapterIdentity;
+
+    let identity = AdapterIdentity::generate("whatsapp-test");
+    let result = WhatsAppAdapter::new(
+        identity,
+        "bot-token".into(),
+        "phone-id".into(),
+        "verify-token".into(),
+        String::new(),
+        3979,
+    );
+    match result {
+        Err(WhatsAppError::Config(msg)) => {
+            assert!(msg.contains("app_secret"), "error should name the field: {msg}");
+        }
+        Err(other) => panic!("expected Config error, got {other:?}"),
+        Ok(_) => panic!("empty app_secret must fail at construction"),
+    }
+}
+
+#[test]
+fn new_accepts_non_empty_app_secret() {
+    use super::WhatsAppAdapter;
+    use wirken_ipc::AdapterIdentity;
+
+    let identity = AdapterIdentity::generate("whatsapp-test");
+    let adapter = WhatsAppAdapter::new(
+        identity,
+        "bot-token".into(),
+        "phone-id".into(),
+        "verify-token".into(),
+        "a-real-secret".into(),
+        3979,
+    );
+    assert!(adapter.is_ok(), "non-empty app_secret must construct");
+}
+
+#[test]
 fn hmac_signature_verification() {
     // Test-only value — not a production secret.
     let secret = "whatsapp_test_hmac_key"; // CodeQL:hardcoded-credential-ok

@@ -16,4 +16,7 @@ pub enum WhatsAppError {
 
     #[error("webhook error: {0}")]
     Webhook(String),
+
+    #[error("configuration error: {0}")]
+    Config(String),
 }

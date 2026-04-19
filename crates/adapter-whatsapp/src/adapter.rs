@@ -34,15 +34,27 @@ impl WhatsAppAdapter {
         verify_token: String,
         app_secret: String,
         listen_port: u16,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, WhatsAppError> {
+        // Refuse to start without an app secret. A missing secret used
+        // to silently disable webhook HMAC verification, turning the
+        // adapter into an unauthenticated POST endpoint. Fail closed
+        // at construction so no runtime path reaches the handler
+        // without a configured secret.
+        if app_secret.is_empty() {
+            return Err(WhatsAppError::Config(
+                "WhatsApp adapter requires a non-empty app_secret; \
+                 webhook signature verification is mandatory"
+                    .into(),
+            ));
+        }
+        Ok(Self {
             identity,
             access_token,
             phone_number_id,
             verify_token,
             app_secret,
             listen_port,
-        }
+        })
     }
 
     /// Connect to gateway, authenticate, then run the webhook listener.
@@ -124,15 +136,15 @@ async fn handle_webhook(
     if first_line.starts_with("POST /webhook") {
         let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
 
-        // Verify HMAC signature if app_secret is configured
-        if !app_secret.is_empty() {
-            let signature = extract_header(&request, "X-Hub-Signature-256");
-            if !verify_signature(app_secret, body, &signature) {
-                let resp =
-                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = stream.write_all(resp.as_bytes()).await;
-                return Ok(());
-            }
+        // HMAC signature is required. The constructor guarantees
+        // app_secret is non-empty, so this path always enforces
+        // verification and rejects unsigned or mismatched requests.
+        let signature = extract_header(&request, "X-Hub-Signature-256");
+        if !verify_signature(app_secret, body, &signature) {
+            let resp =
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return Ok(());
         }
 
         let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
