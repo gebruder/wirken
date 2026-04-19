@@ -371,3 +371,51 @@ async fn handshake_wrong_key_rejected() {
     let err = adapter_result.unwrap().unwrap_err();
     assert!(matches!(err, HandshakeError::Rejected(_)));
 }
+
+// ---------------------------------------------------------------------------
+// AuthenticatedChannel: gateway-side inbound channel pinning
+// ---------------------------------------------------------------------------
+
+#[test]
+fn authenticated_channel_accepts_matching_claim() {
+    use crate::AuthenticatedChannel;
+    let auth = AuthenticatedChannel::new("telegram");
+    assert!(auth.require_match("telegram").is_ok());
+}
+
+#[test]
+fn authenticated_channel_rejects_cross_channel_claim() {
+    use crate::{AuthenticatedChannel, ChannelMismatch};
+    let auth = AuthenticatedChannel::new("telegram");
+    match auth.require_match("slack") {
+        Err(ChannelMismatch {
+            authenticated,
+            claimed,
+        }) => {
+            assert_eq!(authenticated, "telegram");
+            assert_eq!(claimed, "slack");
+        }
+        Ok(_) => panic!("cross-channel claim must not match"),
+    }
+}
+
+#[test]
+fn authenticated_channel_is_case_sensitive() {
+    use crate::AuthenticatedChannel;
+    // A Unicode-lookalike or different-case channel must not
+    // collide with the authenticated one. Channel ids are internal
+    // enum names (per `Channel::id`) — any variance is a bug
+    // upstream, and this check holds the line.
+    let auth = AuthenticatedChannel::new("telegram");
+    assert!(auth.require_match("Telegram").is_err());
+    assert!(auth.require_match("TELEGRAM").is_err());
+    assert!(auth.require_match(" telegram").is_err());
+    assert!(auth.require_match("telegram ").is_err());
+}
+
+#[test]
+fn authenticated_channel_rejects_empty_claim() {
+    use crate::AuthenticatedChannel;
+    let auth = AuthenticatedChannel::new("telegram");
+    assert!(auth.require_match("").is_err());
+}

@@ -11,7 +11,7 @@ pub mod wirken_capnp {
 pub use auth::{
     AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake, send_rejection,
 };
-pub use channel::{Channel, SessionHandle, SessionId};
+pub use channel::{AuthenticatedChannel, Channel, ChannelMismatch, SessionHandle, SessionId};
 pub use error::HandshakeError;
 pub use error::IpcError;
 pub use transport::{FrameReader, FrameWriter};

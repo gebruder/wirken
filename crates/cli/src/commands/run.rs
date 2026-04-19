@@ -15,9 +15,9 @@ use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
-use wirken_ipc::perform_gateway_handshake;
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
+use wirken_ipc::{AuthenticatedChannel, perform_gateway_handshake};
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -700,11 +700,33 @@ async fn handle_adapter_connection(
         .await
         .context("Adapter handshake failed")?;
 
-    tracing::info!("Adapter '{adapter_id}' authenticated");
+    // Resolve the authenticated channel from the registry. Every
+    // inbound frame on this connection must claim the same channel
+    // — otherwise a compromised adapter could send a frame with
+    // `channel: "slack"` and drive Slack-bound agent routing under
+    // session context that has nothing to do with the authenticated
+    // connection. The `channel` field in the frame is attacker-
+    // influenced; the registry lookup by adapter_id is authenticated
+    // by the ed25519 handshake. Pin to the latter. Wrapped in
+    // `AuthenticatedChannel` so the type distinguishes it from any
+    // claimed-from-the-wire channel string further down.
+    let authenticated_channel = match registry.lock().await.get(&adapter_id) {
+        Some(entry) => AuthenticatedChannel::new(entry.channel),
+        None => {
+            return Err(anyhow::anyhow!(
+                "Adapter '{adapter_id}' passed handshake but is not in the registry (race?)"
+            ));
+        }
+    };
+
+    tracing::info!("Adapter '{adapter_id}' authenticated on channel '{authenticated_channel}'");
     registry.lock().await.set_connected(&adapter_id, true);
 
     audit
-        .log(AuditEvent::new("gateway", "adapter.connect", &adapter_id).with_channel(&adapter_id))
+        .log(
+            AuditEvent::new("gateway", "adapter.connect", &adapter_id)
+                .with_channel(authenticated_channel.as_str()),
+        )
         .await?;
 
     let writer = Arc::new(Mutex::new(writer));
@@ -712,6 +734,7 @@ async fn handle_adapter_connection(
     // Message loop
     let result = message_loop(
         &adapter_id,
+        &authenticated_channel,
         &mut reader,
         writer.clone(),
         factory,
@@ -725,7 +748,8 @@ async fn handle_adapter_connection(
     registry.lock().await.set_connected(&adapter_id, false);
     audit
         .log(
-            AuditEvent::new("gateway", "adapter.disconnect", &adapter_id).with_channel(&adapter_id),
+            AuditEvent::new("gateway", "adapter.disconnect", &adapter_id)
+                .with_channel(authenticated_channel.as_str()),
         )
         .await?;
 
@@ -734,9 +758,18 @@ async fn handle_adapter_connection(
 }
 
 /// Main message loop: read inbound from adapter, route to agent, send response back.
+///
+/// `authenticated_channel` is the channel string the adapter is
+/// registered under in the adapter registry, confirmed by the
+/// Ed25519 handshake. Every inbound frame's self-declared `channel`
+/// field is compared against this value; mismatches are rejected
+/// and audited. Without that check, a compromised adapter could
+/// claim any other channel in the frame payload and hijack that
+/// channel's session state, routing, and permission context.
 #[allow(clippy::too_many_arguments)]
 async fn message_loop(
     adapter_id: &str,
+    authenticated_channel: &AuthenticatedChannel,
     reader: &mut FrameReader,
     writer: Arc<Mutex<FrameWriter>>,
     factory: Arc<AgentFactory>,
@@ -831,6 +864,36 @@ async fn message_loop(
                 channel,
                 conversation_id,
             } => {
+                // Reject any inbound that claims a channel the
+                // authenticated adapter is not responsible for. See
+                // `AuthenticatedChannel::require_match`. The frame's
+                // `channel` field is attacker-influenced; the
+                // adapter's channel was authenticated by the
+                // handshake + registry lookup.
+                if let Err(mismatch) = authenticated_channel.require_match(&channel) {
+                    tracing::warn!(
+                        "Adapter '{adapter_id}' rejected cross-channel frame: {mismatch}"
+                    );
+                    let _ = audit
+                        .log(
+                            AuditEvent::new(
+                                adapter_id,
+                                "adapter.channel_mismatch",
+                                mismatch.to_string(),
+                            )
+                            .with_channel(authenticated_channel.as_str())
+                            .with_detail(serde_json::json!({
+                                "authenticated_channel": mismatch.authenticated,
+                                "claimed_channel": mismatch.claimed,
+                                "conversation_id": conversation_id,
+                                "sender_id": sender_id,
+                                "message_id": id,
+                            })),
+                        )
+                        .await;
+                    continue;
+                }
+
                 tracing::info!(
                     "[{}] {} ({}): {}",
                     channel,
