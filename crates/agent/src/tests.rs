@@ -2093,6 +2093,39 @@ async fn write_file_refuses_broken_symlink_via_cap_std() {
 }
 
 #[tokio::test]
+async fn read_file_follows_inside_workspace_symlink() {
+    // Counterpart to the symlink-escape test: a symlink that stays
+    // inside the workspace is legitimate and must resolve. This
+    // locks in that cap-std uses RESOLVE_BENEATH (refuses escape)
+    // rather than RESOLVE_NO_SYMLINKS (refuses any symlink), so
+    // the next person touching the file boundary knows which
+    // rejections are load-bearing and which would be a regression.
+    #[cfg(not(unix))]
+    {
+        eprintln!("skipping: symlinks require unix");
+        return;
+    }
+
+    let workspace = TempDir::new().unwrap();
+    let target = workspace.path().join("target.txt");
+    std::fs::write(&target, "hello via symlink").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("target.txt", workspace.path().join("link")).unwrap();
+
+    let tools = ToolRegistry::new(workspace.path().to_path_buf(), ToolConfig::default()).unwrap();
+    let result = tools
+        .execute("read_file", r#"{"path":"link"}"#)
+        .await
+        .unwrap();
+    assert!(
+        result.success,
+        "inside-workspace symlink must resolve: {}",
+        result.output
+    );
+    assert_eq!(result.output, "hello via symlink");
+}
+
+#[tokio::test]
 async fn write_file_refuses_absolute_path() {
     let workspace = TempDir::new().unwrap();
     let tools = ToolRegistry::new(workspace.path().to_path_buf(), ToolConfig::default()).unwrap();
