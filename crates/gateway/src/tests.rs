@@ -277,8 +277,9 @@ fn tier2_needs_approval_first_time() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
+    // `ls` is on the Tier 2 allowlist; first use needs approval.
     let action = Action::ShellExec {
-        pattern: "git *".into(),
+        pattern: "ls".into(),
     };
     let check = perms.check(&action, "agent-1").unwrap();
     assert_eq!(
@@ -295,7 +296,7 @@ fn tier2_allowed_after_approval() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let action = Action::ShellExec {
-        pattern: "git *".into(),
+        pattern: "ls".into(),
     };
     perms.approve(&action, "agent-1", "telegram").unwrap();
 
@@ -309,7 +310,7 @@ fn tier2_approval_scoped_to_agent() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let action = Action::ShellExec {
-        pattern: "git *".into(),
+        pattern: "ls".into(),
     };
     perms.approve(&action, "agent-1", "telegram").unwrap();
 
@@ -375,15 +376,103 @@ fn shell_wrappers_are_tier3() {
 }
 
 #[test]
-fn shell_exec_benign_commands_stay_tier2() {
-    for bare in ["ls", "cat", "grep", "echo", "python", "node", "make"] {
+fn allowlisted_verbs_are_tier2() {
+    for verb in [
+        "ls", "cat", "head", "tail", "grep", "diff", "cmp", "stat", "file", "wc", "tree",
+        "readlink", "realpath", "basename", "dirname", "pwd", "whoami", "id", "uname", "hostname",
+        "date", "echo", "printf", "which", "type",
+    ] {
         let action = Action::ShellExec {
-            pattern: bare.into(),
+            pattern: verb.into(),
         };
         assert_eq!(
             action.tier(),
             PermissionTier::Tier2,
-            "benign command {bare} must stay Tier 2"
+            "allowlisted verb {verb} must be Tier 2"
+        );
+    }
+}
+
+#[test]
+fn interpreters_with_eval_flags_are_tier3() {
+    // Language interpreters with -c / -e / BEGIN{} can launder any
+    // inner command. They must fall to Tier 3 so each invocation
+    // prompts rather than getting a blanket 30-day approval.
+    for interp in [
+        "python", "python3", "node", "perl", "ruby", "lua", "deno", "awk", "sed",
+    ] {
+        let action = Action::ShellExec {
+            pattern: interp.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "interpreter {interp} must be Tier 3"
+        );
+    }
+}
+
+#[test]
+fn exec_hatch_looking_tools_are_tier3() {
+    // Tools that look inspection-only but have an exec flag at arms
+    // length. rg --pre runs a preprocessor; find -exec runs a
+    // command; sort --compress-program runs a filter; less / more /
+    // man shell out via `!` and $PAGER. All Tier 3.
+    for verb in ["rg", "ag", "find", "sort", "less", "more", "man"] {
+        let action = Action::ShellExec {
+            pattern: verb.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "verb with known exec hatch {verb} must be Tier 3"
+        );
+    }
+}
+
+#[test]
+fn network_and_vcs_verbs_are_tier3() {
+    // Carried over from the old denylist: network-egress, remote
+    // shells, cluster mutations, privilege elevation, file
+    // transfer, version control. All excluded from the allowlist
+    // by absence.
+    for verb in [
+        "curl", "wget", "scp", "sftp", "ssh", "kubectl", "helm", "docker", "podman", "sudo", "su",
+        "doas", "nc", "ncat", "socat", "git",
+    ] {
+        let action = Action::ShellExec {
+            pattern: verb.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "{verb} must be Tier 3"
+        );
+    }
+}
+
+#[test]
+fn unknown_verbs_default_tier3() {
+    // Any verb not on the allowlist is Tier 3 by default. This is
+    // the shape change: previous model was "unknown -> Tier 2";
+    // new model is "unknown -> Tier 3".
+    for verb in [
+        "make",
+        "cargo",
+        "rustc",
+        "go",
+        "docker-compose",
+        "aws",
+        "gcloud",
+        "my-custom-tool",
+    ] {
+        let action = Action::ShellExec {
+            pattern: verb.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "unknown verb {verb} must default to Tier 3"
         );
     }
 }
@@ -430,7 +519,7 @@ fn revoke_approval() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let action = Action::ShellExec {
-        pattern: "npm *".into(),
+        pattern: "cat".into(),
     };
     perms.approve(&action, "agent-1", "slack").unwrap();
 
@@ -453,7 +542,7 @@ fn list_approvals() {
     perms
         .approve(
             &Action::ShellExec {
-                pattern: "git *".into(),
+                pattern: "ls".into(),
             },
             "agent-1",
             "tg",
@@ -462,7 +551,7 @@ fn list_approvals() {
     perms
         .approve(
             &Action::ShellExec {
-                pattern: "npm *".into(),
+                pattern: "grep".into(),
             },
             "agent-1",
             "tg",

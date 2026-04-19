@@ -48,33 +48,37 @@ pub enum Action {
     SkillInstall,
 }
 
-/// Command prefixes that escalate a shell exec from the default
-/// Tier 2 ("first-use approval, remembered for 30 days") to Tier 3
-/// ("always prompt"). These are commands whose reasonable blast
-/// radius is wide enough that a single "shell:curl" approval should
-/// not cover every subsequent URL, or whose effects extend beyond
-/// the local host (network egress, remote shells, container or
-/// cluster mutations, privilege elevation, file transfer to/from
-/// arbitrary peers). `git` is included for push/fetch but
-/// read-only `git log` / `git status` also trigger Tier 3; the
-/// tradeoff favours prompting on every git invocation over
-/// silently permitting a `git push` with stored credentials.
+/// Commands whose shell-exec pattern keeps the default Tier 2
+/// ("first-use approval, remembered for 30 days") behaviour. Every
+/// other exec prefix escalates to Tier 3 ("always prompt"). This is
+/// an allowlist, not a denylist: the previous denylist grew without
+/// bound because every new shell wrapper (`sh`/`env`/`xargs`/...)
+/// and every language interpreter with `-c`/`-e` eval (`python`,
+/// `node`, `perl`, `ruby`, `lua`, `awk`, `sed` with GNU `s///e`,
+/// ...) can launder an arbitrary inner verb past the gate. The
+/// allowlist collapses the wrapper-laundering class in one rule:
+/// if a verb is not on this list, it prompts.
 ///
-/// Shell and process wrappers are included because they launder the
-/// inner command into a different-looking prefix (`sh -c 'curl ...'`,
-/// `env curl ...`, `xargs curl ...`). Arbitrary shell cannot be
-/// parsed reliably to recover the inner verb, so the wrappers
-/// themselves are gated. This covers `sh`/`bash`/`dash`/`zsh`,
-/// `env`, `xargs`, `nohup`, `timeout`, `nice`/`ionice`, `setsid`,
-/// and `stdbuf`. Patterns are matched against the lowercase basename
-/// of the first whitespace-separated token of the invoked command,
-/// so path-qualified invocations (`/usr/bin/curl`, `./curl`) and
-/// case-variant invocations (`CURL`, `SuDo`) match identically and
-/// cannot bypass the gate.
-pub const HIGH_RISK_PREFIXES: &[&str] = &[
-    "curl", "wget", "scp", "sftp", "ssh", "kubectl", "helm", "docker", "podman", "sudo", "su",
-    "doas", "nc", "ncat", "socat", "git", "sh", "bash", "dash", "zsh", "env", "xargs", "nohup",
-    "timeout", "nice", "ionice", "setsid", "stdbuf",
+/// Every verb here is pure inspection / identity / path math with
+/// no documented `-exec`, `--*-program`, `!`, `$PAGER`, or
+/// `system()`-style escape hatch after man-page review. Notable
+/// exclusions even among "read-only looking" tools:
+/// - `rg` has `--pre <cmd>` that runs a preprocessor.
+/// - `sort` has `--compress-program`.
+/// - `find` has `-exec`.
+/// - `git` honours hooks, `-c core.pager`, and aliases.
+/// - `less` / `more` / `man` shell out via `!` and `$PAGER`.
+/// - `sed` (GNU) has `s///e`; `awk` has `system()`.
+///
+/// Match is against the canonical (basename + lowercase) form of
+/// the first whitespace-separated token, so `/usr/bin/ls`,
+/// `./ls`, and `LS` all reduce to `ls`.
+pub const TIER2_ALLOWLIST: &[&str] = &[
+    // inspection (read/stat)
+    "ls", "cat", "head", "tail", "grep", "diff", "cmp", "stat", "file", "wc", "tree",
+    // pure path math
+    "readlink", "realpath", "basename", "dirname", // identity / system info (read-only)
+    "pwd", "whoami", "id", "uname", "hostname", "date", "echo", "printf", "which", "type",
 ];
 
 /// Canonicalize a shell-exec pattern's first token for tier matching
@@ -104,23 +108,20 @@ impl Action {
                 PermissionTier::Tier1
             }
 
-            // Shell exec splits on command prefix: high-risk
-            // prefixes (network egress, remote shells, cluster
-            // mutations, privilege elevation, shell wrappers) get
-            // Tier 3 and prompt every time. The prefix is
-            // canonicalized (basename + lowercase) before the
-            // contains check so `/usr/bin/curl`, `./curl`, and
-            // `CURL` all match `curl`. Everything else keeps the
-            // Tier 2 first-use-approval behaviour. This does not
-            // change the permissions.db schema; existing Tier 2
-            // approvals for newly-Tier-3 prefixes are ignored by
-            // `check`, which never queries the store for Tier 3.
+            // Shell exec: Tier 2 only for inspection verbs on the
+            // curated allowlist (read/identity/path math, no exec
+            // escape hatch). Everything else is Tier 3. The prefix
+            // is canonicalized (basename + lowercase) before the
+            // lookup so `/usr/bin/ls`, `./ls`, and `LS` all reduce
+            // to `ls`. Wrappers (`sh`, `env`, `xargs`, ...) and
+            // interpreters (`python`, `node`, `awk`, `sed`, ...)
+            // fall to Tier 3 naturally by absence from the list.
             Action::ShellExec { pattern } => {
                 let canonical = canonical_exec_prefix(pattern);
-                if HIGH_RISK_PREFIXES.contains(&canonical.as_str()) {
-                    PermissionTier::Tier3
-                } else {
+                if TIER2_ALLOWLIST.contains(&canonical.as_str()) {
                     PermissionTier::Tier2
+                } else {
+                    PermissionTier::Tier3
                 }
             }
 
@@ -182,6 +183,19 @@ pub struct PermissionStore {
 
 impl PermissionStore {
     /// Open or create the permission store.
+    ///
+    /// Runs a one-shot prune of approvals for shell verbs that are no
+    /// longer Tier 2 eligible under the current allowlist. When the
+    /// Tier 2 model flipped from a denylist (everything except a
+    /// small set of high-risk verbs was Tier 2) to an allowlist (only
+    /// a small set of inspection verbs is Tier 2), previously stored
+    /// approvals for now-Tier-3 verbs (`shell:git`, `shell:kubectl`,
+    /// `shell:make`, language interpreters, ...) became dead rows.
+    /// Dropping them on open keeps the store honest: the permission
+    /// gate does not consult them, and the operator sees a log line
+    /// enumerating what was pruned rather than discovering later that
+    /// `wirken permissions list` shows approvals that no longer take
+    /// effect.
     pub fn open(db_path: &Path) -> Result<Self, GatewayError> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
@@ -196,10 +210,59 @@ impl PermissionStore {
              );",
         )?;
 
-        Ok(Self {
+        let mut store = Self {
             conn,
             default_expiry_days: 30,
-        })
+        };
+        store.prune_non_tier2_shell_approvals()?;
+        Ok(store)
+    }
+
+    /// Delete every `shell:<prefix>` approval row whose prefix is not
+    /// on [`TIER2_ALLOWLIST`]. Called once from [`Self::open`]. Logs
+    /// a single `info` line listing what was pruned if the set is
+    /// non-empty; no-op otherwise. Called publicly as well so
+    /// integration tests can exercise the migration directly.
+    pub fn prune_non_tier2_shell_approvals(&mut self) -> Result<Vec<String>, GatewayError> {
+        let mut select = self
+            .conn
+            .prepare("SELECT DISTINCT action_key FROM approvals WHERE action_key LIKE 'shell:%'")?;
+        let rows = select.query_map([], |row| row.get::<_, String>(0))?;
+
+        let mut stale = Vec::new();
+        for row in rows {
+            let key = row?;
+            let Some(prefix) = key.strip_prefix("shell:") else {
+                continue;
+            };
+            if !TIER2_ALLOWLIST.contains(&prefix) {
+                stale.push(key);
+            }
+        }
+        drop(select);
+
+        if stale.is_empty() {
+            return Ok(stale);
+        }
+
+        let tx = self.conn.transaction()?;
+        {
+            let mut delete = tx.prepare("DELETE FROM approvals WHERE action_key = ?1")?;
+            for key in &stale {
+                delete.execute(params![key])?;
+            }
+        }
+        tx.commit()?;
+
+        tracing::info!(
+            count = stale.len(),
+            keys = ?stale,
+            "permissions: pruned approvals for shell verbs that are no longer Tier 2 eligible \
+             under the current allowlist. These approvals would have been ignored by the gate; \
+             removing them keeps `wirken permissions list` honest."
+        );
+
+        Ok(stale)
     }
 
     /// Check if an action is allowed for a given agent.
@@ -250,14 +313,29 @@ impl PermissionStore {
     /// that already have the key (e.g., the CLI `permissions approve`
     /// command, reading it off a past `PermissionDenied` audit entry)
     /// use this to avoid reparsing the key back into an [`Action`].
-    /// Tier semantics are unchanged: Tier 3 keys can be stored but
-    /// `check` ignores approvals for them.
+    ///
+    /// Refuses to write a `shell:<prefix>` approval whose prefix is
+    /// not on [`TIER2_ALLOWLIST`]. Those verbs are Tier 3 under the
+    /// current policy — the gate would ignore the stored approval
+    /// anyway — and accepting the CLI call silently would let an
+    /// operator believe they had pre-approved a verb that still
+    /// prompts on every use.
     pub fn approve_by_key(
         &self,
         action_key: &str,
         agent_id: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
+        if let Some(prefix) = action_key.strip_prefix("shell:")
+            && !TIER2_ALLOWLIST.contains(&prefix)
+        {
+            return Err(GatewayError::Config(format!(
+                "refusing to store approval for '{action_key}': '{prefix}' is Tier 3 under the \
+                 current allowlist and cannot be pre-approved. Tier 3 actions prompt on every \
+                 use by design."
+            )));
+        }
+
         let agent_id = canonical_agent_id(agent_id);
         let now = Utc::now();
         let expires = now + Duration::days(self.default_expiry_days as i64);
@@ -386,42 +464,43 @@ mod tier_tests {
     }
 
     #[test]
-    fn high_risk_prefixes_are_tier3() {
-        for p in HIGH_RISK_PREFIXES {
-            assert_eq!(
-                shell(p).tier(),
-                PermissionTier::Tier3,
-                "shell prefix `{p}` must be Tier 3"
-            );
-        }
-    }
-
-    #[test]
-    fn expected_prefixes_are_listed() {
-        // Regression: if this list is trimmed, failures here force
-        // the change to be audited in review rather than slipping
-        // through.
-        let expected = [
-            "curl", "wget", "ssh", "scp", "sftp", "sudo", "su", "doas", "kubectl", "helm",
-            "docker", "podman", "nc", "ncat", "socat", "git",
-        ];
-        for p in &expected {
-            assert!(
-                HIGH_RISK_PREFIXES.contains(p),
-                "`{p}` must be in HIGH_RISK_PREFIXES"
-            );
-        }
-    }
-
-    #[test]
-    fn non_risky_shell_exec_stays_tier2() {
-        // `ls`, `echo`, `cat`, `grep`, `rg`, `jq` etc. should keep
-        // the first-use approval behaviour.
-        for p in ["ls", "echo", "cat", "grep", "rg", "jq", "make"] {
+    fn every_tier2_allowlist_verb_is_tier2() {
+        for p in TIER2_ALLOWLIST {
             assert_eq!(
                 shell(p).tier(),
                 PermissionTier::Tier2,
-                "shell prefix `{p}` must stay Tier 2"
+                "allowlisted verb `{p}` must be Tier 2"
+            );
+        }
+    }
+
+    #[test]
+    fn expected_verbs_are_in_allowlist() {
+        // Regression: trimming the allowlist requires the change to
+        // fail this test in review, since any of these becoming
+        // Tier 3 is a user-facing policy change worth flagging.
+        let expected = [
+            "ls", "cat", "head", "tail", "grep", "stat", "pwd", "whoami", "date", "echo",
+        ];
+        for p in &expected {
+            assert!(
+                TIER2_ALLOWLIST.contains(p),
+                "`{p}` must be in TIER2_ALLOWLIST"
+            );
+        }
+    }
+
+    #[test]
+    fn formerly_tier2_unknown_verbs_are_now_tier3() {
+        // Under the old denylist these were Tier 2 (just not on the
+        // high-risk list). Under the allowlist they are Tier 3
+        // because they are not on the allowlist. Locks in the
+        // intentional shape change.
+        for p in ["rg", "jq", "make", "cargo", "python", "node"] {
+            assert_eq!(
+                shell(p).tier(),
+                PermissionTier::Tier3,
+                "non-allowlisted verb `{p}` must now be Tier 3"
             );
         }
     }
@@ -456,16 +535,20 @@ mod tier_tests {
     }
 
     #[test]
-    fn curl_always_needs_approval_even_after_prior_approve_call() {
+    fn curl_cannot_be_pre_approved_and_always_prompts() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
-        // Store a Tier-2-style approval for shell:curl. The check
-        // path for Tier 3 must ignore it. We exercise this because
-        // existing installs may already hold such rows from before
-        // 0.7.5; the new tier lookup must not surface them.
-        store
+        // curl is Tier 3 under the allowlist. Two invariants:
+        // 1. approve() refuses to store an approval for it (would
+        //    otherwise be a dead row).
+        // 2. check() returns Tier 3 NeedsApproval on every call.
+        let err = store
             .approve(&shell("curl"), "default", "test-operator")
-            .unwrap();
+            .expect_err("approve for Tier 3 shell verb must refuse");
+        match err {
+            GatewayError::Config(msg) => assert!(msg.contains("Tier 3"), "msg: {msg}"),
+            other => panic!("expected Config error, got {other:?}"),
+        }
         let result = store.check(&shell("curl"), "default").unwrap();
         assert_eq!(
             result,
@@ -473,6 +556,86 @@ mod tier_tests {
                 tier: PermissionTier::Tier3,
             },
         );
+    }
+
+    #[test]
+    fn prune_drops_stale_non_allowlist_shell_rows_on_open() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+
+        // Seed the DB with rows for verbs that WERE Tier 2 under the
+        // old denylist and are now Tier 3. We bypass approve() since
+        // it now refuses these, and insert directly.
+        {
+            let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS approvals (
+                     action_key TEXT NOT NULL,
+                     agent_id TEXT NOT NULL,
+                     approved_at TEXT NOT NULL,
+                     approved_by TEXT NOT NULL,
+                     expires_at TEXT NOT NULL,
+                     PRIMARY KEY (action_key, agent_id)
+                 );",
+            )
+            .unwrap();
+            for key in [
+                "shell:git",
+                "shell:kubectl",
+                "shell:make",
+                "shell:ls",
+                "shell:cat",
+            ] {
+                conn.execute(
+                    "INSERT INTO approvals VALUES (?1, 'default', '2026-01-01T00:00:00Z', 'seed', '2100-01-01T00:00:00Z')",
+                    rusqlite::params![key],
+                )
+                .unwrap();
+            }
+            // Also seed a non-shell approval that must survive.
+            conn.execute(
+                "INSERT INTO approvals VALUES ('file:/tmp/*', 'default', '2026-01-01T00:00:00Z', 'seed', '2100-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Open runs the migration.
+        let store = PermissionStore::open(tmp.path()).unwrap();
+
+        // Allowlisted shell verbs survive. Non-allowlisted are gone.
+        let remaining = store.list("default").unwrap();
+        let keys: std::collections::BTreeSet<String> =
+            remaining.iter().map(|a| a.action_key.clone()).collect();
+        assert!(
+            keys.contains("shell:ls"),
+            "allowlisted shell:ls must survive"
+        );
+        assert!(
+            keys.contains("shell:cat"),
+            "allowlisted shell:cat must survive"
+        );
+        assert!(
+            keys.contains("file:/tmp/*"),
+            "non-shell approvals must survive"
+        );
+        assert!(!keys.contains("shell:git"), "shell:git must be pruned");
+        assert!(
+            !keys.contains("shell:kubectl"),
+            "shell:kubectl must be pruned"
+        );
+        assert!(!keys.contains("shell:make"), "shell:make must be pruned");
+    }
+
+    #[test]
+    fn prune_is_idempotent_and_noop_on_clean_store() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        // Fresh store is already clean.
+        let first = store.prune_non_tier2_shell_approvals().unwrap();
+        assert!(first.is_empty());
+        // Running again is still a no-op.
+        let second = store.prune_non_tier2_shell_approvals().unwrap();
+        assert!(second.is_empty());
     }
 
     #[test]

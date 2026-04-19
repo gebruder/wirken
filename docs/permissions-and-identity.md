@@ -11,10 +11,30 @@ If you are deploying Wirken for a team, read both sections before designing your
 Every tool action falls into one of three tiers:
 
 - **Tier 1, always allowed.** Workspace file access, channel converse, web search.
-- **Tier 2, first-use approval with a 30-day expiry.** Shell exec (per pattern), external file access (per path), cross-conversation message.
-- **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, skill install.
+- **Tier 2, first-use approval with a 30-day expiry.** External file access (per path), cross-conversation message, and a small curated allowlist of shell-inspection verbs (see below). Everything else that would have been Tier 2 under a denylist model is Tier 3 instead.
+- **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, skill install, and every shell verb outside the Tier 2 allowlist.
 
-Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` is derived from the action variant: for example, a `ShellExec { pattern: "kubectl *" }` approval stores `shell:kubectl *` against the agent that requested it.
+### Shell exec allowlist
+
+Shell exec is Tier 2 only for verbs on an explicit allowlist:
+
+```
+ls cat head tail grep diff cmp stat file wc tree
+readlink realpath basename dirname
+pwd whoami id uname hostname date echo printf which type
+```
+
+Every verb is pure inspection, identity, or path math with no documented exec escape hatch. Every other exec prefix is Tier 3 and prompts on each invocation. That includes shell wrappers (`sh`, `bash`, `env`, `xargs`, ...), language interpreters that can eval (`python -c`, `node -e`, `perl -e`, `ruby -e`, `lua`, `awk`, `sed` with GNU `s///e`), build / deploy tools (`make`, `cargo`, `docker`, `kubectl`, `git`), and exec-hatch-bearing inspection tools (`rg --pre`, `sort --compress-program`, `find -exec`, `less`/`more`/`man` via `!` and `$PAGER`).
+
+The allowlist is curated in `crates/gateway/src/permissions.rs::TIER2_ALLOWLIST`. Adding a verb requires reviewing its man page for exec escapes of the kinds listed above.
+
+Matching is on the canonical form of the first whitespace token: `/usr/bin/ls`, `./ls`, and `LS` all match `ls`.
+
+### Where approvals live
+
+Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix — `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation for 30 days.
+
+On upgrade from pre-allowlist versions, `PermissionStore::open` prunes any stored `shell:<prefix>` rows whose prefix is no longer Tier 2 eligible (e.g., `shell:git`, `shell:kubectl`, `shell:make`). Operators see a single log line at startup enumerating what was dropped. The gate would have ignored those rows anyway; the prune keeps `wirken permission list` honest.
 
 `wirken permission list --agent work` prints all approvals for an agent. `wirken permission revoke <key> --agent work` removes one.
 
