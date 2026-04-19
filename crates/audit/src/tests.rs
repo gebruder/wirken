@@ -911,6 +911,7 @@ mod session {
                 TrustLevel::System,
                 SessionEvent::PermissionDenied {
                     tool: "exec".into(),
+                    action_key: "shell:curl".into(),
                     tier: "tier3".into(),
                     agent_id: "default".into(),
                     trigger: Some("delete the universe".into()),

@@ -227,9 +227,14 @@ pub enum SessionEvent {
         tokens_out: u32,
         latency_ms: u64,
     },
-    /// Permission denial recorded by the harness.
+    /// Permission denial recorded by the harness. `action_key` is
+    /// the canonical key under which an operator can grant approval
+    /// (e.g., `shell:curl`); kept alongside `tool` so reviewers can
+    /// map the denial back to a permissions.db entry without having
+    /// to reparse tool arguments.
     PermissionDenied {
         tool: String,
+        action_key: String,
         tier: String,
         agent_id: String,
         trigger: Option<String>,
@@ -448,6 +453,19 @@ pub trait SessionLog: Send + Sync {
     -> Result<SessionVerifyResult, AuditError>;
 }
 
+/// A flattened `PermissionDenied` event, tagged with its session
+/// and sequence so operators can correlate against the session log.
+#[derive(Debug, Clone)]
+pub struct PermissionDenialRecord {
+    pub session_id: String,
+    pub seq: u64,
+    pub ts: String,
+    pub tool: String,
+    pub action_key: String,
+    pub tier: String,
+    pub trigger: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // SQLite implementation
 // ---------------------------------------------------------------------------
@@ -484,6 +502,59 @@ impl SqliteSessionLog {
     #[cfg(test)]
     pub(crate) fn raw_conn_for_test(&self) -> &Mutex<Connection> {
         &self.conn
+    }
+
+    /// Scan every session for `PermissionDenied` events belonging to
+    /// `agent_id`. Returns one row per stored event, most recent
+    /// first. Used by `wirken permissions list-pending` to build its
+    /// view of denials that may want an approval. Scans are linear
+    /// in the size of the log; the caller is expected to run this
+    /// interactively, not on a hot path.
+    pub fn find_permission_denials(&self, agent_id: &str) -> Vec<PermissionDenialRecord> {
+        let conn = self.conn.lock().expect("session log mutex");
+        let mut stmt = match conn.prepare(
+            "SELECT session_id, seq, ts, payload FROM session_events
+             WHERE payload LIKE '%\"PermissionDenied\"%'
+             ORDER BY ts DESC",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+        let rows: Vec<(String, u64, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)? as u64,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        rows.into_iter()
+            .filter_map(|(session_id, seq, ts, payload)| {
+                let event: SessionEvent = serde_json::from_str(&payload).ok()?;
+                match event {
+                    SessionEvent::PermissionDenied {
+                        tool,
+                        action_key,
+                        tier,
+                        agent_id: ev_agent,
+                        trigger,
+                    } if ev_agent == agent_id => Some(PermissionDenialRecord {
+                        session_id,
+                        seq,
+                        ts,
+                        tool,
+                        action_key,
+                        tier,
+                        trigger,
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// Item 6 slice 2: list child session IDs whose session_id
