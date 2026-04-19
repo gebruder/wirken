@@ -20,5 +20,3 @@ jsonwebtoken = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
-rsa = "0.9"
-rand08 = { package = "rand", version = "0.8" }
