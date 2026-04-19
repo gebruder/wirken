@@ -1,6 +1,68 @@
 use std::fmt;
 use std::marker::PhantomData;
 
+use thiserror::Error;
+
+/// The channel an IPC connection was authenticated under, as
+/// resolved from the adapter registry after a successful Ed25519
+/// handshake. Threaded through the gateway's message loop so that
+/// every inbound frame's self-declared `channel` field can be
+/// checked against the authenticated value.
+///
+/// A bare `String` would work here, but the distinction between
+/// "authenticated channel" (trusted, set once at handshake) and
+/// "claimed channel" (untrusted, read from the wire on every
+/// frame) is exactly the confusion this type is named to prevent.
+/// Callers that accidentally pass the claimed value where the
+/// authenticated one is expected get a type-mismatch at review
+/// time rather than a runtime cross-channel impersonation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthenticatedChannel(String);
+
+impl AuthenticatedChannel {
+    /// Construct from the string stored in the adapter registry.
+    /// Only the gateway (and tests) should construct this.
+    pub fn new(channel: impl Into<String>) -> Self {
+        Self(channel.into())
+    }
+
+    /// The channel identifier as a string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Succeeds iff `claimed` equals the authenticated channel.
+    /// Returns `ChannelMismatch` otherwise so callers can audit
+    /// the attempt and drop the frame without taking a branch on
+    /// the claimed value.
+    pub fn require_match(&self, claimed: &str) -> Result<(), ChannelMismatch> {
+        if claimed == self.0 {
+            Ok(())
+        } else {
+            Err(ChannelMismatch {
+                authenticated: self.0.clone(),
+                claimed: claimed.to_string(),
+            })
+        }
+    }
+}
+
+impl fmt::Display for AuthenticatedChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An inbound frame claimed to originate from a channel the
+/// authenticated connection is not responsible for. The gateway
+/// rejects the frame and audits both sides of the mismatch.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("channel mismatch: authenticated as '{authenticated}', frame claimed '{claimed}'")]
+pub struct ChannelMismatch {
+    pub authenticated: String,
+    pub claimed: String,
+}
+
 /// Trait for channel marker types. Sealed — only types defined
 /// in this crate can implement it.
 pub trait Channel: Send + Sync + 'static {
