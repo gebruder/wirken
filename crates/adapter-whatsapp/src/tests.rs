@@ -158,6 +158,49 @@ fn hmac_signature_verification() {
 }
 
 #[test]
+fn hmac_signature_wrong_length_rejected_before_decode() {
+    let secret = "whatsapp_test_hmac_key";
+    let body = r#"{"test":"data"}"#;
+    // Exactly one byte short of the 64-char hex expectation; must
+    // reject before any HMAC computation or hex decode.
+    let short = format!("sha256={}", "a".repeat(63));
+    assert!(!super::adapter::verify_signature(secret, body, &short));
+    // And one byte too long.
+    let long = format!("sha256={}", "a".repeat(65));
+    assert!(!super::adapter::verify_signature(secret, body, &long));
+}
+
+#[test]
+fn hmac_signature_non_hex_rejected() {
+    let secret = "whatsapp_test_hmac_key";
+    let body = r#"{"test":"data"}"#;
+    // Exactly 64 chars but not all hex.
+    let mixed: String = "z".repeat(64);
+    let header = format!("sha256={mixed}");
+    assert!(!super::adapter::verify_signature(secret, body, &header));
+}
+
+#[test]
+fn hmac_signature_upper_case_hex_accepted() {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    type HmacSha256 = Hmac<Sha256>;
+
+    let secret = "whatsapp_test_hmac_key";
+    let body = r#"{"test":"data"}"#;
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let result = mac.finalize().into_bytes();
+    let hex_upper: String = result.iter().map(|b| format!("{b:02X}")).collect();
+    let header = format!("sha256={hex_upper}");
+
+    // The decoder accepts either case; Meta emits lowercase in
+    // practice, but accepting upper case keeps verification robust
+    // to any variant of the documented format.
+    assert!(super::adapter::verify_signature(secret, body, &header));
+}
+
+#[test]
 fn build_heartbeat() {
     let mut msg = capnp::message::Builder::new_default();
     convert::build_heartbeat(&mut msg, 42);
