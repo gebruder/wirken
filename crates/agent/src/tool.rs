@@ -289,18 +289,16 @@ impl ToolRegistry {
     }
 
     async fn exec_command(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
-        let command = args["command"]
-            .as_str()
-            .ok_or_else(|| AgentError::Tool("missing 'command' argument".into()))?;
+        let command = extract_exec_command(args)?;
 
         // Use sandbox if available (provisioned lazily on first call)
         if let Some(sandbox) = self.sandbox().await {
-            return sandbox.exec(command, &self.workspace).await;
+            return sandbox.exec(&command, &self.workspace).await;
         }
 
         let child = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg(command)
+            .arg(&command)
             .current_dir(&self.workspace)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -796,13 +794,52 @@ fn urlencoding_decode(s: &str) -> String {
     String::from_utf8_lossy(&result).into_owned()
 }
 
+/// Extract the shell command string from an `exec` tool call's args.
+/// Accepts either `command: "curl foo"` (string) or
+/// `command: ["curl", "foo"]` (array of strings, space-joined for
+/// both tier classification and sandbox execution).
+///
+/// Returns an error for missing, null, object, or array-with-
+/// non-string-elements forms. This matters for tier enforcement:
+/// the pre-fix code swallowed non-string `command` via `as_str()`,
+/// yielding an empty pattern that fell through to Tier 2 even for
+/// high-risk prefixes like `curl` or `ssh`.
+pub fn extract_exec_command(args: &serde_json::Value) -> Result<String, AgentError> {
+    match args.get("command") {
+        Some(serde_json::Value::String(s)) => Ok(s.clone()),
+        Some(serde_json::Value::Array(items)) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                match item.as_str() {
+                    Some(s) => parts.push(s.to_string()),
+                    None => {
+                        return Err(AgentError::Tool(
+                            "exec.command array must contain only strings".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(parts.join(" "))
+        }
+        Some(_) => Err(AgentError::Tool(
+            "exec.command must be a string or array of strings".into(),
+        )),
+        None => Err(AgentError::Tool("missing 'command' argument".into())),
+    }
+}
+
 /// Map a built-in tool invocation to a permission Action for tier checking.
 /// Returns None for tools that don't map to a permission-checkable action
 /// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
 pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Action> {
     match tool_name {
         "exec" => {
-            let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            // Normalize via the same extractor the dispatcher uses so
+            // tier classification never disagrees with execution about
+            // the command shape. A malformed payload yields an empty
+            // pattern and falls through to Tier 2; the dispatcher then
+            // rejects the call before it runs.
+            let cmd = extract_exec_command(args).unwrap_or_default();
             let pattern = cmd.split_whitespace().next().unwrap_or("").to_string();
             Some(Action::ShellExec { pattern })
         }
