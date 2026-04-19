@@ -21,18 +21,30 @@ pub struct IMessageAdapter {
 }
 
 impl IMessageAdapter {
+    /// Construct an iMessage adapter. Fails with `IMessageError::Config`
+    /// when `server_password` is empty: previously an empty password
+    /// combined with a missing inbound-auth check turned the adapter
+    /// into an unauthenticated POST endpoint. The password is now
+    /// required and verified on every inbound webhook.
     pub fn new(
         identity: AdapterIdentity,
         bluebubbles_url: String,
         server_password: String,
         listen_port: u16,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, IMessageError> {
+        if server_password.is_empty() {
+            return Err(IMessageError::Config(
+                "iMessage adapter requires a non-empty server_password; \
+                 inbound BlueBubbles webhooks are authenticated with it"
+                    .into(),
+            ));
+        }
+        Ok(Self {
             identity,
             bluebubbles_url,
             server_password,
             listen_port,
-        }
+        })
     }
 
     /// Connect to gateway, authenticate, register webhook, then run the listener.
@@ -75,9 +87,10 @@ impl IMessageAdapter {
         loop {
             let (mut stream, _) = listener.accept().await?;
             let w = writer.clone();
+            let pw = self.server_password.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_webhook(&mut stream, w).await {
+                if let Err(e) = handle_webhook(&mut stream, &pw, w).await {
                     tracing::error!("Webhook error: {e}");
                 }
             });
@@ -113,8 +126,9 @@ impl IMessageAdapter {
 }
 
 /// Handle an incoming webhook request from BlueBubbles.
-async fn handle_webhook(
+pub(crate) async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
+    expected_password: &str,
     writer: Arc<Mutex<FrameWriter>>,
 ) -> Result<(), IMessageError> {
     let mut buf = vec![0u8; 65536];
@@ -129,30 +143,102 @@ async fn handle_webhook(
     let request = String::from_utf8_lossy(&buf[..n]);
     let first_line = request.lines().next().unwrap_or("");
 
-    if first_line.starts_with("POST /webhook") {
-        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-
-        let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-
-        if let Some(msg) = convert::extract_message(&json)
-            && convert::should_process(&msg)
-        {
-            let mut capnp_msg = capnp::message::Builder::new_default();
-            convert::imessage_to_inbound(&msg, &mut capnp_msg);
-            let mut w = writer.lock().await;
-            if let Err(e) = w.write_message(&capnp_msg).await {
-                tracing::error!("Failed to forward to gateway: {e}");
-            }
-        }
-
-        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let _ = stream.write_all(resp.as_bytes()).await;
-    } else {
+    if !first_line.starts_with("POST /webhook") {
         let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(resp.as_bytes()).await;
+        return Ok(());
     }
 
+    let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+    let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+
+    // Authenticate the request using the shared BlueBubbles password
+    // registered at webhook setup. Without this check the webhook
+    // accepted any POST matching the payload shape. The password is
+    // searched for in the JSON body (matches the outbound flow
+    // convention) or in an `X-BlueBubbles-Password` header. Missing
+    // or mismatched → 401.
+    let presented = extract_webhook_password(&request, &json);
+    if !verify_password(expected_password, presented) {
+        tracing::warn!("iMessage webhook rejected: missing or invalid password");
+        let resp =
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes()).await;
+        return Ok(());
+    }
+
+    if let Some(msg) = convert::extract_message(&json)
+        && convert::should_process(&msg)
+    {
+        let mut capnp_msg = capnp::message::Builder::new_default();
+        convert::imessage_to_inbound(&msg, &mut capnp_msg);
+        let mut w = writer.lock().await;
+        if let Err(e) = w.write_message(&capnp_msg).await {
+            tracing::error!("Failed to forward to gateway: {e}");
+        }
+    }
+
+    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let _ = stream.write_all(resp.as_bytes()).await;
+
     Ok(())
+}
+
+/// Pull the password presented by BlueBubbles. Checks the JSON body
+/// field `password` (matches the outbound convention on line where
+/// wirken sends its own password to BB in the body) and the
+/// `X-BlueBubbles-Password` / `X-BB-Password` headers. Returns the
+/// first non-empty match.
+pub(crate) fn extract_webhook_password<'a>(
+    request: &'a str,
+    json: &'a serde_json::Value,
+) -> Option<&'a str> {
+    if let Some(pw) = json.get("password").and_then(|v| v.as_str()) {
+        if !pw.is_empty() {
+            return Some(pw);
+        }
+    }
+    for line in request.lines() {
+        if line.is_empty() {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.eq_ignore_ascii_case("x-bluebubbles-password")
+            || name.eq_ignore_ascii_case("x-bb-password")
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Constant-time password comparison. Length mismatch short-circuits
+/// (length is typically fixed for a provisioned secret, and
+/// revealing "wrong length" is not meaningfully useful to an
+/// attacker); content comparison is constant-time.
+pub(crate) fn verify_password(expected: &str, presented: Option<&str>) -> bool {
+    let Some(presented) = presented else {
+        return false;
+    };
+    if expected.is_empty() || presented.is_empty() {
+        return false;
+    }
+    let a = expected.as_bytes();
+    let b = presented.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Handle outbound messages from gateway to iMessage via BlueBubbles.
