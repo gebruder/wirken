@@ -374,92 +374,12 @@ fn new_accepts_non_empty_server_password() {
     );
 }
 
-#[test]
-fn verify_password_accepts_exact_match() {
-    use crate::adapter::verify_password;
-    assert!(verify_password(
-        "correct-horse-battery-staple",
-        Some("correct-horse-battery-staple")
-    ));
-}
-
-#[test]
-fn verify_password_rejects_mismatch() {
-    use crate::adapter::verify_password;
-    assert!(!verify_password(
-        "correct-horse-battery-staple",
-        Some("wrong-password")
-    ));
-}
-
-#[test]
-fn verify_password_rejects_missing() {
-    use crate::adapter::verify_password;
-    assert!(!verify_password("secret", None));
-}
-
-#[test]
-fn verify_password_rejects_empty_both_sides() {
-    use crate::adapter::verify_password;
-    assert!(!verify_password("", Some("")));
-    assert!(!verify_password("", Some("anything")));
-    assert!(!verify_password("secret", Some("")));
-}
-
-#[test]
-fn verify_password_length_mismatch_rejected() {
-    use crate::adapter::verify_password;
-    assert!(!verify_password(
-        "short",
-        Some("shorter-extension-of-the-same-prefix")
-    ));
-}
-
-#[test]
-fn extract_password_from_json_body() {
-    use crate::adapter::extract_webhook_password;
-    let req = "POST /webhook HTTP/1.1\r\nContent-Type: application/json\r\n\r\n{}";
-    let body = serde_json::json!({ "password": "s3cret", "data": {} });
-    assert_eq!(extract_webhook_password(req, &body), Some("s3cret"));
-}
-
-#[test]
-fn extract_password_from_custom_header() {
-    use crate::adapter::extract_webhook_password;
-    let req = "POST /webhook HTTP/1.1\r\n\
-               X-BlueBubbles-Password: header-secret\r\n\
-               \r\n{}";
-    let body = serde_json::json!({});
-    assert_eq!(extract_webhook_password(req, &body), Some("header-secret"));
-}
-
-#[test]
-fn extract_password_prefers_body_over_header() {
-    use crate::adapter::extract_webhook_password;
-    let req = "POST /webhook HTTP/1.1\r\n\
-               X-BlueBubbles-Password: header-secret\r\n\
-               \r\n{}";
-    let body = serde_json::json!({ "password": "body-secret" });
-    // Body-first matches the outbound flow convention (password is
-    // sent in the JSON body to BlueBubbles).
-    assert_eq!(extract_webhook_password(req, &body), Some("body-secret"));
-}
-
-#[test]
-fn extract_password_none_when_absent() {
-    use crate::adapter::extract_webhook_password;
-    let req = "POST /webhook HTTP/1.1\r\n\r\n";
-    let body = serde_json::json!({});
-    assert_eq!(extract_webhook_password(req, &body), None);
-}
-
-#[test]
-fn extract_password_rejects_empty_body_field() {
-    use crate::adapter::extract_webhook_password;
-    // An empty body field should NOT be treated as a valid password;
-    // it must fall through to the header search. If both are empty,
-    // return None so the caller rejects.
-    let req = "POST /webhook HTTP/1.1\r\n\r\n";
-    let body = serde_json::json!({ "password": "" });
-    assert_eq!(extract_webhook_password(req, &body), None);
-}
+// The verify_password and extract_webhook_password tests that
+// previously lived here are deleted along with the helpers. See
+// the comment on `handle_webhook` in adapter.rs for the protocol
+// reality: BlueBubbles posts webhooks with no authentication, so a
+// receiver-side password check was always going to fail (and did,
+// silently, in 0.7.6). The trust boundary moved to the listener
+// binding; tests on the loopback-only invariant belong at the
+// integration level (the `run` method refuses to start if the
+// bound local_addr is not loopback) rather than here.
