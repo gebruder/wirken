@@ -2311,6 +2311,83 @@ fn tool_to_action_exec_empty_command() {
 }
 
 #[test]
+fn tool_to_action_exec_array_form_curl_is_tier3() {
+    // A model that emits `command` as an array must not escape the
+    // high-risk-prefix check. Pre-fix behavior collapsed this to
+    // pattern="" → Tier 2. After the fix the first array element
+    // becomes the pattern.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let args = serde_json::json!({"command": ["curl", "https://example.com"]});
+    let action = tool_to_action("exec", &args).unwrap();
+    match action {
+        Action::ShellExec { ref pattern } => assert_eq!(pattern, "curl"),
+        other => panic!("expected ShellExec, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+}
+
+#[test]
+fn tool_to_action_exec_array_form_ssh_is_tier3() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let args = serde_json::json!({"command": ["ssh", "user@host", "uptime"]});
+    let action = tool_to_action("exec", &args).unwrap();
+    match action {
+        Action::ShellExec { ref pattern } => assert_eq!(pattern, "ssh"),
+        other => panic!("expected ShellExec, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+}
+
+#[test]
+fn tool_to_action_exec_array_form_ls_is_tier2() {
+    // Non-high-risk prefixes keep their Tier 2 classification under
+    // array form, same as string form.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let args = serde_json::json!({"command": ["ls", "-la"]});
+    let action = tool_to_action("exec", &args).unwrap();
+    match action {
+        Action::ShellExec { ref pattern } => assert_eq!(pattern, "ls"),
+        other => panic!("expected ShellExec, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier2);
+}
+
+#[test]
+fn extract_exec_command_rejects_malformed_shapes() {
+    use crate::tool::extract_exec_command;
+
+    // Object form: not a shell command.
+    let args = serde_json::json!({"command": {"argv": ["curl"]}});
+    assert!(extract_exec_command(&args).is_err());
+
+    // Null.
+    let args = serde_json::json!({"command": null});
+    assert!(extract_exec_command(&args).is_err());
+
+    // Array containing non-string elements.
+    let args = serde_json::json!({"command": ["curl", 42]});
+    assert!(extract_exec_command(&args).is_err());
+
+    // Missing entirely.
+    let args = serde_json::json!({});
+    assert!(extract_exec_command(&args).is_err());
+
+    // String form: passes through.
+    let args = serde_json::json!({"command": "ls /"});
+    assert_eq!(extract_exec_command(&args).unwrap(), "ls /");
+
+    // Array of strings: space-joined.
+    let args = serde_json::json!({"command": ["curl", "https://x"]});
+    assert_eq!(extract_exec_command(&args).unwrap(), "curl https://x");
+}
+
+#[test]
 fn tool_to_action_read_file() {
     use crate::tool::tool_to_action;
     use wirken_gateway::permissions::Action;
