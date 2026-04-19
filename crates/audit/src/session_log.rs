@@ -234,6 +234,10 @@ pub enum SessionEvent {
     /// to reparse tool arguments.
     PermissionDenied {
         tool: String,
+        /// Defaulted for rows written before this field existed; old
+        /// audit events deserialize with an empty key so a pre-upgrade
+        /// session log stays readable.
+        #[serde(default)]
         action_key: String,
         tier: String,
         agent_id: String,
