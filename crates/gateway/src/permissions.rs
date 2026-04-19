@@ -59,10 +59,52 @@ pub enum Action {
 /// read-only `git log` / `git status` also trigger Tier 3; the
 /// tradeoff favours prompting on every git invocation over
 /// silently permitting a `git push` with stored credentials.
+///
+/// Shell and process wrappers are included because they launder the
+/// inner command into a different-looking prefix (`sh -c 'curl ...'`,
+/// `env curl ...`, `xargs curl ...`). Arbitrary shell cannot be
+/// parsed reliably to recover the inner verb, so the wrappers
+/// themselves are gated. This covers `sh`/`bash`/`dash`/`zsh`,
+/// `env`, `xargs`, `nohup`, `timeout`, `nice`/`ionice`, `setsid`,
+/// and `stdbuf`. Patterns are matched against the lowercase basename
+/// of the first whitespace-separated token of the invoked command,
+/// so path-qualified invocations (`/usr/bin/curl`, `./curl`) and
+/// case-variant invocations (`CURL`, `SuDo`) match identically and
+/// cannot bypass the gate.
 pub const HIGH_RISK_PREFIXES: &[&str] = &[
-    "curl", "wget", "ssh", "scp", "sftp", "sudo", "su", "doas", "kubectl", "helm", "docker",
-    "podman", "nc", "ncat", "socat", "git",
+    // network / transfer
+    "curl", "wget", "scp", "sftp",
+    // remote shells / orchestration
+    "ssh", "kubectl", "helm", "docker", "podman",
+    // privilege elevation
+    "sudo", "su", "doas",
+    // raw sockets / tunnels
+    "nc", "ncat", "socat",
+    // version control with push/fetch and hook side effects
+    "git",
+    // shell and process wrappers that can launder any of the above
+    "sh", "bash", "dash", "zsh", "env", "xargs", "nohup", "timeout", "nice", "ionice", "setsid",
+    "stdbuf",
 ];
+
+/// Canonicalize a shell-exec pattern's first token for tier matching
+/// and approval-key stability.
+///
+/// - Strips any leading path components so `/usr/bin/curl` and
+///   `./curl` both reduce to `curl`.
+/// - Lowercases the basename so `CURL` / `SuDo` match on
+///   case-insensitive hosts (macOS default APFS, Windows).
+///
+/// The return is always an owned `String` so callers can form
+/// approval keys and slice comparisons without borrow gymnastics.
+pub fn canonical_exec_prefix(pattern: &str) -> String {
+    let token = pattern.trim();
+    let basename = Path::new(token)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(token);
+    basename.to_ascii_lowercase()
+}
 
 impl Action {
     /// Determine which tier this action belongs to.
@@ -74,19 +116,27 @@ impl Action {
 
             // Shell exec splits on command prefix: high-risk
             // prefixes (network egress, remote shells, cluster
-            // mutations, privilege elevation) get Tier 3 and prompt
-            // every time. Everything else keeps the Tier 2
-            // first-use-approval behaviour. This does not change
-            // the permissions.db schema; existing Tier 2 approvals
-            // for newly-Tier-3 prefixes are ignored by `check`,
-            // which never queries the store for Tier 3.
-            Action::ShellExec { pattern } if HIGH_RISK_PREFIXES.contains(&pattern.as_str()) => {
-                PermissionTier::Tier3
+            // mutations, privilege elevation, shell wrappers) get
+            // Tier 3 and prompt every time. The prefix is
+            // canonicalized (basename + lowercase) before the
+            // contains check so `/usr/bin/curl`, `./curl`, and
+            // `CURL` all match `curl`. Everything else keeps the
+            // Tier 2 first-use-approval behaviour. This does not
+            // change the permissions.db schema; existing Tier 2
+            // approvals for newly-Tier-3 prefixes are ignored by
+            // `check`, which never queries the store for Tier 3.
+            Action::ShellExec { pattern } => {
+                let canonical = canonical_exec_prefix(pattern);
+                if HIGH_RISK_PREFIXES.contains(&canonical.as_str()) {
+                    PermissionTier::Tier3
+                } else {
+                    PermissionTier::Tier2
+                }
             }
 
-            Action::ShellExec { .. }
-            | Action::ExternalFileAccess { .. }
-            | Action::CrossConversationMessage => PermissionTier::Tier2,
+            Action::ExternalFileAccess { .. } | Action::CrossConversationMessage => {
+                PermissionTier::Tier2
+            }
 
             Action::DestructiveFileOp
             | Action::NetworkRequest { .. }
@@ -97,9 +147,15 @@ impl Action {
     }
 
     /// The canonical key for storing approval (Tier 2 actions).
+    ///
+    /// Shell-exec keys canonicalize the pattern (basename + lowercase)
+    /// so path-qualified and case-variant invocations share a single
+    /// approval row. Without this, `curl`, `/usr/bin/curl`, and `CURL`
+    /// would each generate their own key and an operator's "approve
+    /// shell:curl" would not cover the other forms.
     pub fn approval_key(&self) -> String {
         match self {
-            Action::ShellExec { pattern } => format!("shell:{pattern}"),
+            Action::ShellExec { pattern } => format!("shell:{}", canonical_exec_prefix(pattern)),
             Action::ExternalFileAccess { path } => format!("file:{path}"),
             Action::CrossConversationMessage => "cross-conversation".to_string(),
             other => format!("{other:?}"),

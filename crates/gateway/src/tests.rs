@@ -324,6 +324,85 @@ fn tier2_approval_scoped_to_agent() {
 }
 
 #[test]
+fn shell_exec_uppercase_variants_are_tier3() {
+    for variant in ["CURL", "Curl", "cURL", "SuDo", "GIT", "DOCKER"] {
+        let action = Action::ShellExec {
+            pattern: variant.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "case variant {variant} must not bypass Tier 3"
+        );
+    }
+}
+
+#[test]
+fn shell_exec_path_qualified_high_risk_is_tier3() {
+    for variant in [
+        "/usr/bin/curl",
+        "./curl",
+        "../tools/curl",
+        "/opt/bin/SuDo",
+        "/usr/local/bin/docker",
+    ] {
+        let action = Action::ShellExec {
+            pattern: variant.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "path-qualified form {variant} must not bypass Tier 3"
+        );
+    }
+}
+
+#[test]
+fn shell_wrappers_are_tier3() {
+    for wrapper in [
+        "sh", "bash", "dash", "zsh", "env", "xargs", "nohup", "timeout", "nice", "ionice",
+        "setsid", "stdbuf",
+    ] {
+        let action = Action::ShellExec {
+            pattern: wrapper.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "shell/process wrapper {wrapper} must be Tier 3 so it cannot launder an inner verb"
+        );
+    }
+}
+
+#[test]
+fn shell_exec_benign_commands_stay_tier2() {
+    for bare in ["ls", "cat", "grep", "echo", "python", "node", "make"] {
+        let action = Action::ShellExec {
+            pattern: bare.into(),
+        };
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier2,
+            "benign command {bare} must stay Tier 2"
+        );
+    }
+}
+
+#[test]
+fn approval_key_normalizes_pattern_across_forms() {
+    for pattern in ["curl", "CURL", "/usr/bin/curl", "./curl", "  curl  "] {
+        let key = Action::ShellExec {
+            pattern: pattern.into(),
+        }
+        .approval_key();
+        assert_eq!(
+            key, "shell:curl",
+            "variant {pattern} must canonicalize to shell:curl"
+        );
+    }
+}
+
+#[test]
 fn tier3_always_needs_approval() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
