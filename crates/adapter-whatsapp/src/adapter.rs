@@ -427,23 +427,50 @@ fn extract_header(request: &str, name: &str) -> String {
     String::new()
 }
 
-/// Verify the HMAC-SHA256 signature from Meta's webhook.
+/// Verify the HMAC-SHA256 signature from Meta's webhook. Uses
+/// `Mac::verify_slice` on the decoded bytes so the comparison is
+/// constant-time; the prior implementation compared hex strings
+/// with `==`, which short-circuited on the first mismatched byte
+/// and leaked per-byte validity via response latency. The hex
+/// length is checked before decoding so a malformed signature
+/// cannot produce a parallel length oracle.
 pub(crate) fn verify_signature(app_secret: &str, body: &str, signature_header: &str) -> bool {
-    let expected_prefix = "sha256=";
-    let hex_sig = match signature_header.strip_prefix(expected_prefix) {
-        Some(s) => s,
-        None => return false,
+    let Some(hex_sig) = signature_header.strip_prefix("sha256=") else {
+        return false;
     };
-
-    let mut mac = match HmacSha256::new_from_slice(app_secret.as_bytes()) {
-        Ok(m) => m,
-        Err(_) => return false,
+    // HMAC-SHA256 is 32 bytes encoded as 64 lowercase hex characters.
+    if hex_sig.len() != 64 {
+        return false;
+    }
+    let Ok(sig_bytes) = decode_hex_32(hex_sig) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(app_secret.as_bytes()) else {
+        return false;
     };
     mac.update(body.as_bytes());
+    mac.verify_slice(&sig_bytes).is_ok()
+}
 
-    let expected = mac.finalize().into_bytes();
-    let expected_hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
+fn decode_hex_32(s: &str) -> Result<[u8; 32], ()> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        return Err(());
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        let hi = hex_nibble(bytes[i * 2])?;
+        let lo = hex_nibble(bytes[i * 2 + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Ok(out)
+}
 
-    // Constant-time comparison
-    expected_hex == hex_sig
+fn hex_nibble(b: u8) -> Result<u8, ()> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(()),
+    }
 }
