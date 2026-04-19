@@ -398,8 +398,35 @@ impl Agent {
     /// to inject the per-agent long-lived proxy connection into a
     /// freshly waked Agent. Concurrent waked Agents for the same
     /// agent_id share the same Arc and serialize through its Mutex.
+    ///
+    /// MCP-served tools skip the permission tier check (see
+    /// `tool_to_action` in tool.rs — it returns `None` for any name
+    /// outside the built-in set, and `execute_tool` routes to the
+    /// MCP client without gating). This is by design: the operator
+    /// trusts the MCP servers they configured. To make that trust
+    /// decision visible, spawn a task that lists the cached MCP
+    /// tools and logs them on attach. Operators see this line on
+    /// every `wirken run` and can review which names run
+    /// unprivileged.
     pub fn attach_mcp(&mut self, client: Arc<tokio::sync::Mutex<McpProxyClient>>) {
-        self.mcp = Some(client);
+        self.mcp = Some(client.clone());
+        let agent_id = self.id.clone();
+        tokio::spawn(async move {
+            let defs = client.lock().await.definitions();
+            if defs.is_empty() {
+                return;
+            }
+            let names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
+            tracing::warn!(
+                agent_id = %agent_id,
+                count = names.len(),
+                tools = ?names,
+                "MCP tools bypass the wirken permission tier check. The operator has \
+                 delegated authorization for these tools to the MCP server that serves \
+                 them. If the MCP server is compromised, these tools execute without a \
+                 tier gate. Review the list above and confirm the MCP server is trusted."
+            );
+        });
     }
 
     /// Attach skill collections. Used by
