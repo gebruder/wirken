@@ -117,6 +117,17 @@ pub struct Approval {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Normalize a runtime `agent_id` to the logical agent id used in
+/// `permissions.db`. The runtime hands permission checks the full
+/// session-scoped id `{agent}/{channel}/{conversation}` (see
+/// `session_id_for` in `wirken_agent::factory`); approvals are stored
+/// per logical agent so a single approval applies across every
+/// conversation on every channel for that agent. Returns the prefix
+/// before the first `/`, or the input unchanged if no `/` is present.
+fn canonical_agent_id(agent_id: &str) -> &str {
+    agent_id.split('/').next().unwrap_or(agent_id)
+}
+
 /// Permission store backed by SQLite.
 pub struct PermissionStore {
     conn: Connection,
@@ -151,6 +162,7 @@ impl PermissionStore {
     /// - Ok(false) for unapproved Tier 2 or any Tier 3
     /// - Err for database errors
     pub fn check(&self, action: &Action, agent_id: &str) -> Result<PermissionCheck, GatewayError> {
+        let agent_id = canonical_agent_id(agent_id);
         match action.tier() {
             PermissionTier::Tier1 => Ok(PermissionCheck::Allowed),
             PermissionTier::Tier2 => {
@@ -200,6 +212,7 @@ impl PermissionStore {
         agent_id: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
+        let agent_id = canonical_agent_id(agent_id);
         let now = Utc::now();
         let expires = now + Duration::days(self.default_expiry_days as i64);
 
@@ -222,6 +235,7 @@ impl PermissionStore {
     /// approval for `agent_id`. Used by `list-pending` to exclude
     /// already-approved denials.
     pub fn has_approval(&self, action_key: &str, agent_id: &str) -> Result<bool, GatewayError> {
+        let agent_id = canonical_agent_id(agent_id);
         let mut stmt = self
             .conn
             .prepare("SELECT expires_at FROM approvals WHERE action_key = ?1 AND agent_id = ?2")?;
@@ -239,6 +253,7 @@ impl PermissionStore {
 
     /// Revoke an approval.
     pub fn revoke(&self, action_key: &str, agent_id: &str) -> Result<(), GatewayError> {
+        let agent_id = canonical_agent_id(agent_id);
         self.conn.execute(
             "DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2",
             params![action_key, agent_id],
@@ -248,6 +263,7 @@ impl PermissionStore {
 
     /// List all approvals for an agent.
     pub fn list(&self, agent_id: &str) -> Result<Vec<Approval>, GatewayError> {
+        let agent_id = canonical_agent_id(agent_id);
         let mut stmt = self.conn.prepare(
             "SELECT action_key, agent_id, approved_at, approved_by, expires_at
              FROM approvals WHERE agent_id = ?1 ORDER BY approved_at DESC",
@@ -439,6 +455,42 @@ mod tier_tests {
         assert_eq!(
             store.check(&shell("ls"), "default").unwrap(),
             PermissionCheck::Allowed
+        );
+    }
+
+    #[test]
+    fn approval_for_logical_agent_covers_session_scoped_check() {
+        // The agent runtime passes the full session-scoped id
+        // `{agent}/{channel}/{conversation}` into `check`. Approvals
+        // are stored per logical agent, so the check must normalize
+        // on the prefix before the first `/` or a webchat/Telegram
+        // caller would never see a stored Tier 2 approval.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        store
+            .approve(&shell("ls"), "default", "test-operator")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .check(&shell("ls"), "default/webchat/webchat-default")
+                .unwrap(),
+            PermissionCheck::Allowed,
+        );
+        assert_eq!(
+            store
+                .check(&shell("ls"), "default/telegram/chat-42")
+                .unwrap(),
+            PermissionCheck::Allowed,
+        );
+        // approve_by_key called with a session-scoped id must also
+        // normalize, so the stored row matches later checks.
+        store
+            .approve_by_key("shell:cat", "default/webchat/x", "test-operator")
+            .unwrap();
+        assert_eq!(
+            store.check(&shell("cat"), "default").unwrap(),
+            PermissionCheck::Allowed,
         );
     }
 }
