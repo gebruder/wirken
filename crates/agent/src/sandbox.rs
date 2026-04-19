@@ -138,7 +138,10 @@ impl DockerSandbox {
             .await
             .map_err(|e| AgentError::Sandbox(format!("start container: {e}")))?;
 
-        // Wait for container to finish, with timeout
+        // Wait for container to finish, with timeout.
+        // Bollard surfaces any container exit with status_code > 0
+        // as `DockerContainerWaitError`; treat it as a successful
+        // wait with a non-zero exit code rather than a sandbox error.
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
         let wait_result = tokio::time::timeout(timeout, async {
             let mut stream = self.client.wait_container(
@@ -150,6 +153,9 @@ impl DockerSandbox {
             if let Some(result) = stream.next().await {
                 match result {
                     Ok(exit) => return Ok(exit.status_code),
+                    Err(bollard::errors::Error::DockerContainerWaitError { code, .. }) => {
+                        return Ok(code);
+                    }
                     Err(e) => return Err(AgentError::Sandbox(format!("wait: {e}"))),
                 }
             }
@@ -200,7 +206,8 @@ impl DockerSandbox {
             }
         }
 
-        // Cleanup (auto_remove should handle it, but be safe)
+        // Cleanup — auto_remove is off so logs can be collected; we
+        // must remove the container explicitly here.
         let _ = self.kill_and_remove(&container.id).await;
 
         let mut result = String::new();
@@ -290,7 +297,11 @@ pub(crate) fn build_host_config(config: &SandboxConfig, workspace_str: &str) -> 
         network_mode,
         memory: Some(MEMORY_LIMIT),
         pids_limit: Some(PIDS_LIMIT),
-        auto_remove: Some(true),
+        // With auto_remove=true the container is torn down the
+        // moment it exits, which races the post-wait `logs` call and
+        // leaves no output to return to the agent. Rely on the
+        // explicit `kill_and_remove` cleanup instead.
+        auto_remove: Some(false),
         runtime: config.mode.runtime_name(),
         cap_drop: Some(vec!["ALL".into()]),
         cap_add: Some(Vec::new()),

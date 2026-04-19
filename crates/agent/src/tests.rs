@@ -2107,7 +2107,9 @@ fn host_config_preserves_workspace_and_resource_caps() {
     assert_eq!(hc.network_mode.as_deref(), Some("none"));
     assert_eq!(hc.memory, Some(512 * 1024 * 1024));
     assert_eq!(hc.pids_limit, Some(256));
-    assert_eq!(hc.auto_remove, Some(true));
+    // auto_remove is off so post-wait log collection can still read
+    // the container; cleanup is explicit via kill_and_remove.
+    assert_eq!(hc.auto_remove, Some(false));
 }
 
 #[test]
