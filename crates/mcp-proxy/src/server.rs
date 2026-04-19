@@ -21,6 +21,7 @@ use crate::mcp_registry::ProxyRegistry;
 use crate::wire::{
     AuthChallenge, AuthChallengeKind, AuthResponse, AuthResponseKind, CHALLENGE_NONCE_BYTES,
     HelloAck, HelloAckKind, MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ToolDefWire,
+    handshake_signed_payload,
 };
 
 /// Bind a UnixListener at `socket_path` with mode 0600 and run the
@@ -198,12 +199,14 @@ async fn authenticate(
         }
     }
 
-    // 5. Verify the signature over the nonce.
+    // 5. Verify the signature over (domain || agent_id || nonce).
+    //    See `wire::handshake_signed_payload` for rationale.
     let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes)
         .map_err(|e| ProxyError::Protocol(format!("invalid ed25519 public key: {e}")))?;
     let signature = Signature::from_bytes(&sig_bytes);
+    let signed = handshake_signed_payload(&response.agent_id, &nonce);
     verifying_key
-        .verify(&nonce, &signature)
+        .verify(&signed, &signature)
         .map_err(|_| ProxyError::Protocol("ed25519 signature verification failed".into()))?;
 
     Ok(response.agent_id)

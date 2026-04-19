@@ -7,17 +7,18 @@
 //!
 //! ## Handshake
 //!
-//! Protocol version 2 adds an Ed25519 challenge-response handshake
-//! before any other traffic. Ported from `wirken_ipc::auth` — same
-//! primitives, different framing.
+//! Ed25519 challenge-response before any other traffic. Ported from
+//! `wirken_ipc::auth` — same primitives, different framing.
 //!
 //! 1. Server → client: [`AuthChallenge`] with a fresh 32-byte nonce.
-//! 2. Client → server: [`AuthResponse`] with `agent_id`, the client's
-//!    Ed25519 public key, and an Ed25519 signature over the nonce.
+//! 2. Client → server: [`AuthResponse`] with `agent_id`, the
+//!    client's Ed25519 public key, and an Ed25519 signature over
+//!    [`handshake_signed_payload`] (domain tag + agent_id + nonce).
 //! 3. Server verifies that `agent_id` is registered with a matching
-//!    public key and that the signature is valid. On success the
-//!    server sends [`HelloAck`] with `has_servers`; on failure the
-//!    server closes the connection without sending a frame.
+//!    public key and that the signature is valid under the same
+//!    payload construction. On success the server sends [`HelloAck`]
+//!    with `has_servers`; on failure the server closes the
+//!    connection without sending a frame.
 //!
 //! The handshake is the only authoritative trust boundary. The prior
 //! "filesystem ACL is the trust boundary" model is retired — any
@@ -32,14 +33,46 @@ use serde::{Deserialize, Serialize};
 /// connection is dropped.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
-/// Current protocol version. Bumped to 2 when the Ed25519 handshake
-/// replaced the old self-declared-agent_id `Hello` frame. Old clients
-/// speaking version 1 will fail to parse the server's first frame and
-/// disconnect.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Current protocol version.
+///
+/// - v1: self-declared agent_id in a `Hello` frame. Retired.
+/// - v2: Ed25519 challenge-response, signature over the bare nonce.
+///   The binding to `agent_id` was implicit through pubkey
+///   registration lookup on the server side.
+/// - v3: signature is now over [`handshake_signed_payload`]
+///   (domain tag + agent_id + nonce). The binding is explicit at
+///   the cryptographic layer: a sig accepted under one agent_id
+///   cannot be replayed under another even if the pubkey lookup
+///   logic is ever refactored in a way that loosens the
+///   per-agent mapping. Old v2 clients fail to parse the version
+///   mismatch on the challenge and disconnect cleanly.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Size of the authentication challenge nonce in bytes.
 pub const CHALLENGE_NONCE_BYTES: usize = 32;
+
+/// Domain-separated prefix that goes on every handshake signature
+/// payload. Different from the prefix used by the IPC adapter
+/// handshake so a signature from one protocol cannot be replayed
+/// on the other even if the key material is shared.
+pub const HANDSHAKE_DOMAIN: &[u8] = b"wirken-mcp-proxy-handshake-v3\x00";
+
+/// Build the byte sequence that the client signs and the server
+/// verifies during the handshake. The payload is
+/// `HANDSHAKE_DOMAIN || agent_id_bytes || 0x00 || nonce`. The
+/// domain tag prevents cross-protocol signature reuse; the
+/// `agent_id` binds the signature to the claimed identity so
+/// future refactors of the pubkey registration lookup cannot
+/// loosen the agent binding at the crypto layer; the nonce
+/// prevents replay across connections.
+pub fn handshake_signed_payload(agent_id: &str, nonce: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(HANDSHAKE_DOMAIN.len() + agent_id.len() + 1 + nonce.len());
+    msg.extend_from_slice(HANDSHAKE_DOMAIN);
+    msg.extend_from_slice(agent_id.as_bytes());
+    msg.push(0x00);
+    msg.extend_from_slice(nonce);
+    msg
+}
 
 // ---------------------------------------------------------------------------
 // Handshake frames

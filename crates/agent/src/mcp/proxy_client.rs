@@ -26,7 +26,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use wirken_mcp_proxy::wire::{
     AuthChallenge, AuthChallengeKind, AuthResponse, AuthResponseKind, HelloAck, HelloAckKind,
-    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ToolDefWire,
+    MAX_FRAME_BYTES, PROTOCOL_VERSION, Request, Response, ToolDefWire, handshake_signed_payload,
 };
 
 use crate::error::AgentError;
@@ -88,10 +88,13 @@ impl McpProxyClient {
             )));
         }
 
-        // 2. Sign the nonce with this agent's Ed25519 secret key.
+        // 2. Sign (domain || agent_id || nonce) so the server's
+        //    verification binds to this agent_id cryptographically,
+        //    not only through the pubkey-registration lookup.
         let nonce = hex_decode(&challenge.nonce)
             .map_err(|e| AgentError::Mcp(format!("challenge nonce decode: {e}")))?;
-        let signature = identity.sign(&nonce);
+        let signed = handshake_signed_payload(agent_id, &nonce);
+        let signature = identity.sign(&signed);
 
         // 3. Send AuthResponse.
         let response = AuthResponse {

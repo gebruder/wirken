@@ -7,6 +7,29 @@ use crate::wirken_capnp::frame;
 
 const CHALLENGE_NONCE_SIZE: usize = 32;
 
+/// Domain-separated prefix for handshake signatures. Distinct from
+/// the MCP proxy's `HANDSHAKE_DOMAIN` so a signature from one
+/// handshake cannot be replayed on the other even if the same
+/// signing key is reused across both.
+const HANDSHAKE_DOMAIN: &[u8] = b"wirken-ipc-adapter-handshake-v1\x00";
+
+/// Build the signed payload. `HANDSHAKE_DOMAIN || adapter_id || 0x00 || nonce`.
+/// Binds the signature to (a) this protocol, (b) the claimed
+/// adapter identity, and (c) this specific challenge. Without the
+/// `adapter_id` binding, a compromise of the pubkey-registration
+/// lookup (or any future refactor that loosens per-adapter
+/// matching) would let a sig produced for one adapter verify
+/// under another. The binding is now at the crypto layer, not
+/// only in the lookup.
+fn signed_payload(adapter_id: &str, nonce: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(HANDSHAKE_DOMAIN.len() + adapter_id.len() + 1 + nonce.len());
+    msg.extend_from_slice(HANDSHAKE_DOMAIN);
+    msg.extend_from_slice(adapter_id.as_bytes());
+    msg.push(0x00);
+    msg.extend_from_slice(nonce);
+    msg
+}
+
 /// An adapter's Ed25519 identity (keypair + identifier).
 pub struct AdapterIdentity {
     signing_key: SigningKey,
@@ -90,8 +113,9 @@ pub async fn perform_adapter_handshake(
         _ => return Err(HandshakeError::Protocol("expected AuthChallenge".into())),
     };
 
-    // 2. Sign nonce
-    let signature = identity.sign(&nonce);
+    // 2. Sign (domain || adapter_id || nonce). See `signed_payload`.
+    let payload = signed_payload(identity.adapter_id(), &nonce);
+    let signature = identity.sign(&payload);
 
     // 3. Send response
     let mut response_msg = capnp::message::Builder::new_default();
@@ -223,12 +247,14 @@ where
     // 3. Verify the adapter is registered
     verify_adapter(&adapter_id, &pub_key_bytes)?;
 
-    // 4. Verify the signature
+    // 4. Verify the signature over (domain || adapter_id || nonce).
+    //    See `signed_payload` for rationale.
     let verifying_key =
         VerifyingKey::from_bytes(&pub_key_bytes).map_err(|_| HandshakeError::InvalidSignature)?;
     let signature = Signature::from_bytes(&sig_bytes);
+    let payload = signed_payload(&adapter_id, &nonce);
     verifying_key
-        .verify(&nonce, &signature)
+        .verify(&payload, &signature)
         .map_err(|_| HandshakeError::InvalidSignature)?;
 
     // 5. Send success
