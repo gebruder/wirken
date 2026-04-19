@@ -498,24 +498,32 @@ fn empty_bearer_token_is_rejected() {
 mod jwt {
     use super::*;
     use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
-    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
     use serde_json::json;
 
     const TEST_ISSUER: &str = "https://api.botframework.com";
     const TEST_AUD: &str = "11111111-2222-3333-4444-555555555555";
     const TEST_KID: &str = "test-kid-01";
 
+    // Static 2048-bit RSA test keypair. Generated offline via
+    // `openssl genrsa -traditional 2048` so the test suite does not
+    // depend on a runtime RSA keygen (which required pulling rand
+    // 0.8 in under an alias and tripped RUSTSEC-2026-0097). This
+    // key is test-only and not reused in any production path.
+    const TEST_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_private.pem");
+    const TEST_PUBLIC_PEM: &[u8] = include_bytes!("test_rsa_public.pem");
+    /// Second, independently generated 2048-bit RSA key used to
+    /// exercise the "foreign signer" path in validation tests. Its
+    /// public half is never trusted.
+    const ATTACKER_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_attacker_private.pem");
+
     fn keypair() -> (EncodingKey, DecodingKey) {
-        let mut rng = rand08::thread_rng();
-        let private = rsa::RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let public = rsa::RsaPublicKey::from(&private);
-
-        let priv_pem = private.to_pkcs1_pem(LineEnding::LF).unwrap().to_string();
-        let pub_pem = public.to_pkcs1_pem(LineEnding::LF).unwrap();
-
-        let enc = EncodingKey::from_rsa_pem(priv_pem.as_bytes()).unwrap();
-        let dec = DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap();
+        let enc = EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM).unwrap();
+        let dec = DecodingKey::from_rsa_pem(TEST_PUBLIC_PEM).unwrap();
         (enc, dec)
+    }
+
+    fn attacker_enc() -> EncodingKey {
+        EncodingKey::from_rsa_pem(ATTACKER_PRIVATE_PEM).unwrap()
     }
 
     fn sign(enc: &EncodingKey, kid: &str, claims: &serde_json::Value) -> String {
@@ -610,12 +618,12 @@ mod jwt {
     #[tokio::test]
     async fn token_signed_by_foreign_key_is_rejected() {
         let (_trusted_enc, trusted_dec) = keypair();
-        let (attacker_enc, _attacker_dec) = keypair();
+        let attacker = attacker_enc();
         let cache = JwksCache::for_test(vec![(TEST_KID.into(), trusted_dec)], TEST_ISSUER);
 
         // Attacker signs with their own key but advertises the trusted kid.
         let token = sign(
-            &attacker_enc,
+            &attacker,
             TEST_KID,
             &json!({
                 "iss": TEST_ISSUER,

@@ -20,8 +20,3 @@ jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-rsa = "0.9"
-# rsa 0.9 depends on rand_core 0.6 via its CryptoRngCore trait; rand 0.9
-# ships rand_core 0.9 which is incompatible. Pull in rand 0.8 under an
-# alias just for key generation in tests.
-rand08 = { package = "rand", version = "0.8" }
