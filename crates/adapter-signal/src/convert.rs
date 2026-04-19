@@ -2,6 +2,19 @@ use std::collections::HashSet;
 
 use wirken_ipc::wirken_capnp::frame;
 
+/// Reason an allowlist entry failed to parse. Surfaced to the
+/// operator at adapter startup so misconfigured entries do not
+/// silently drop legitimate senders at runtime.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SignalAllowlistError {
+    #[error(
+        "allowlist entry '{0}' looks like a phone number but is missing the leading '+'; use E.164 format (e.g. +15551234567)"
+    )]
+    PhoneMissingPlus(String),
+    #[error("allowlist entry '{0}' looks like a phone number but contains no digits")]
+    PhoneNoDigits(String),
+}
+
 /// Parsed inbound Signal message.
 pub struct SignalInbound {
     pub message_id: String,
@@ -35,16 +48,27 @@ pub struct SignalAllowlist {
 }
 
 impl SignalAllowlist {
-    /// Parse from a comma-separated string, as stored in the credential vault.
-    /// Whitespace is trimmed; empty segments are ignored.
-    pub fn from_csv(s: &str) -> Self {
-        let entries = s
-            .split(',')
-            .map(str::trim)
-            .filter(|e| !e.is_empty())
-            .map(String::from)
-            .collect();
-        Self { entries }
+    /// Parse from a comma-separated string, as stored in the
+    /// credential vault. Whitespace is trimmed and empty segments are
+    /// ignored. Phone-shaped entries are normalized to digits with a
+    /// leading `+` so runtime senders that arrive in a slightly
+    /// different format (extra spaces, dashes) still match. Group ids
+    /// are a separate namespace and are kept verbatim.
+    ///
+    /// Entries that look like phone numbers but cannot be normalized
+    /// (e.g., no leading `+`) are rejected here so the operator sees
+    /// the error at startup rather than discovering silent drops in
+    /// production.
+    pub fn from_csv(s: &str) -> Result<Self, SignalAllowlistError> {
+        let mut entries = HashSet::new();
+        for raw in s.split(',') {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            entries.insert(normalize_entry(trimmed)?);
+        }
+        Ok(Self { entries })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -57,10 +81,57 @@ impl SignalAllowlist {
 
     /// Returns true iff this message should be delivered to the gateway.
     /// Group messages are keyed on the group ID; DMs on the sender number.
+    ///
+    /// The runtime sender goes through the same normalization as the
+    /// allowlist entries so format drift between signal-cli and the
+    /// operator-configured list does not cause silent drops.
     pub fn allows(&self, msg: &SignalInbound) -> bool {
-        let key = msg.group_id.as_deref().unwrap_or(msg.sender.as_str());
-        self.entries.contains(key)
+        let key = match msg.group_id.as_deref() {
+            Some(g) => g.to_string(),
+            None => match normalize_phone(msg.sender.as_str()) {
+                Ok(p) => p,
+                Err(_) => return false,
+            },
+        };
+        self.entries.contains(&key)
     }
+}
+
+/// Normalize a single allowlist entry. Phone-shaped inputs go
+/// through `normalize_phone`; anything else (group ids) is returned
+/// verbatim after the caller has already trimmed it.
+fn normalize_entry(entry: &str) -> Result<String, SignalAllowlistError> {
+    if looks_like_phone(entry) {
+        normalize_phone(entry)
+    } else {
+        Ok(entry.to_string())
+    }
+}
+
+/// `true` if every character is one of `+0-9` plus the common
+/// human-written separators (space, `-`, `(`, `)`, `.`) AND there is
+/// at least one digit. Group ids contain other characters and fail
+/// this test, which is what routes them past the phone normalizer.
+fn looks_like_phone(s: &str) -> bool {
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    let only_phone_chars = s
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | ' ' | '(' | ')' | '.'));
+    has_digit && only_phone_chars
+}
+
+/// Produce the canonical E.164 form `+<digits>`. Requires a leading
+/// `+` in the input to avoid heuristically assuming country code.
+pub(crate) fn normalize_phone(raw: &str) -> Result<String, SignalAllowlistError> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('+') {
+        return Err(SignalAllowlistError::PhoneMissingPlus(raw.to_string()));
+    }
+    let digits: String = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return Err(SignalAllowlistError::PhoneNoDigits(raw.to_string()));
+    }
+    Ok(format!("+{digits}"))
 }
 
 /// Check if an inbound message should be processed.

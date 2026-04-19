@@ -191,7 +191,8 @@ pub async fn run(channel: &str) -> Result<()> {
                 .retrieve(&allowed_name)
                 .map(|(s, _)| s.expose().to_string())
                 .unwrap_or_default();
-            let allowlist = SignalAllowlist::from_csv(&allowlist_csv);
+            let allowlist = SignalAllowlist::from_csv(&allowlist_csv)
+                .map_err(|e| anyhow::anyhow!("Signal adapter: invalid allowlist entry: {e}"))?;
 
             let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist);
             adapter
