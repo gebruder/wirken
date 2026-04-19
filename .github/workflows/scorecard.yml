@@ -1,0 +1,68 @@
+# OSSF Scorecard — supply-chain / security-posture baseline.
+# Uses a third-party action; see its own terms.
+#
+# Scored checks land in the Security tab as SARIF and (for public
+# repos) published to the OpenSSF REST API so the Scorecard badge
+# works. The Branch-Protection check reads admin settings via the
+# GitHub API — it requires a fine-grained PAT saved as the
+# `SCORECARD_TOKEN` repository secret with read access to repo
+# administration and metadata. Without it, that check scores 0.
+
+name: Scorecard supply-chain security
+
+on:
+  # Re-run when branch protection changes so the check reflects current state.
+  branch_protection_rule:
+  # Weekly baseline so the "Maintained" check stays fresh.
+  schedule:
+    - cron: '31 12 * * 4'
+  # And every push to main.
+  push:
+    branches: [ "main" ]
+
+# Read-only by default; each job escalates only what it needs.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    # `publish_results: true` only works from the default branch.
+    if: github.event.repository.default_branch == github.ref_name || github.event_name == 'pull_request'
+    permissions:
+      # Upload SARIF to the code-scanning dashboard.
+      security-events: write
+      # Publish results and mint a signed badge.
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@f49aabe0b5af0936a0987cfb85d86b75731b0186 # v2.4.1
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Branch-Protection check needs repo-admin read; this token is
+          # a fine-grained PAT scoped to metadata + administration: read,
+          # saved as `SCORECARD_TOKEN`. If the secret is missing the
+          # action still runs but that one check scores 0.
+          repo_token: ${{ secrets.SCORECARD_TOKEN }}
+          # Public repo: publish to the OpenSSF REST API so the badge works.
+          # Private repos force this to false regardless.
+          publish_results: true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4.6.1
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning dashboard
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
+        with:
+          sarif_file: results.sarif
