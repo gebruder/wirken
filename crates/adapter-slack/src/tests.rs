@@ -443,3 +443,50 @@ fn three_channel_types_are_distinct() {
     // let _: SessionHandle<Discord> = sl;
     // let _: SessionHandle<Slack> = tg;
 }
+
+// ---------------------------------------------------------------------------
+// Vuln 10: bot mention exact-match
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bot_mention_detects_exact_match() {
+    use crate::adapter::is_bot_mentioned;
+    assert!(is_bot_mentioned("hello <@U_BOT> please", "U_BOT"));
+    assert!(is_bot_mentioned("<@U_BOT>", "U_BOT"));
+}
+
+#[test]
+fn bot_mention_rejects_other_user_mention() {
+    use crate::adapter::is_bot_mentioned;
+    // The bug fix: a mention of another user must NOT match.
+    assert!(!is_bot_mentioned("<@U_TEAMMATE> can you help?", "U_BOT"));
+    assert!(!is_bot_mentioned("hey <@U_ADMIN>", "U_BOT"));
+}
+
+#[test]
+fn bot_mention_rejects_prefix_collision() {
+    use crate::adapter::is_bot_mentioned;
+    // `<@U123>` must not match bot_user_id "U1234" — the closing `>`
+    // in the format string prevents substring-prefix confusion.
+    assert!(!is_bot_mentioned("<@U123>", "U1234"));
+    assert!(!is_bot_mentioned("<@U1>", "U12"));
+    // And vice versa: a longer id should not match a shorter bot id.
+    assert!(!is_bot_mentioned("<@U1234>", "U123"));
+}
+
+#[test]
+fn bot_mention_rejects_empty_bot_user_id() {
+    use crate::adapter::is_bot_mentioned;
+    // If somehow bot_user_id is empty (should not happen after
+    // auth.test succeeds), refuse to match anything rather than
+    // matching every message via `<@` substring.
+    assert!(!is_bot_mentioned("<@U_BOT>", ""));
+    assert!(!is_bot_mentioned("any text", ""));
+}
+
+#[test]
+fn bot_mention_no_mention_at_all() {
+    use crate::adapter::is_bot_mentioned;
+    assert!(!is_bot_mentioned("hello everyone", "U_BOT"));
+    assert!(!is_bot_mentioned("", "U_BOT"));
+}
