@@ -163,7 +163,8 @@ pub async fn run(channel: &str) -> Result<()> {
                 verify_token,
                 app_secret,
                 listen_port,
-            );
+            )
+            .map_err(|e| anyhow::anyhow!("WhatsApp adapter error: {e}"))?;
             adapter
                 .run(&socket_path)
                 .await
