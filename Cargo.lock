@@ -6360,6 +6360,7 @@ dependencies = [
  "anyhow",
  "base64",
  "bollard",
+ "cap-std",
  "chrono",
  "ed25519-dalek",
  "futures-util",
