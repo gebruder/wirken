@@ -165,10 +165,24 @@ enum PermissionCommands {
         #[arg(long, default_value = "default")]
         agent: String,
     },
+    /// Grant a 30-day approval for an action key
+    Approve {
+        /// Action key to approve (e.g., shell:sh, file:/path)
+        key: String,
+        /// Agent ID
+        #[arg(long, default_value = "default")]
+        agent: String,
+    },
     /// Revoke a permission
     Revoke {
         /// Action key to revoke
         key: String,
+        /// Agent ID
+        #[arg(long, default_value = "default")]
+        agent: String,
+    },
+    /// Show permission denials that have no current approval
+    ListPending {
         /// Agent ID
         #[arg(long, default_value = "default")]
         agent: String,
@@ -388,8 +402,14 @@ async fn main() -> Result<()> {
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,
+            PermissionCommands::Approve { key, agent } => {
+                commands::permission::approve(&key, &agent).await
+            }
             PermissionCommands::Revoke { key, agent } => {
                 commands::permission::revoke(&key, &agent).await
+            }
+            PermissionCommands::ListPending { agent } => {
+                commands::permission::list_pending(&agent).await
             }
         },
         Commands::Credentials(cmd) => match cmd {
