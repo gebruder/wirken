@@ -1972,14 +1972,16 @@ async fn sandbox_construction_is_lazy() {
 }
 
 #[tokio::test]
-async fn sandbox_falls_through_to_host_when_unavailable() {
+async fn sandbox_refuses_host_fallback_when_unavailable() {
     use crate::sandbox::{SandboxConfig, SandboxMode, detect_runtime};
 
-    // This test asserts the fall-through behaviour when Docker is not
-    // available: the first exec attempt provisions (and fails), and
-    // subsequent calls reuse the failed cell without retrying. We can only
-    // observe this on a host without Docker; on hosts with Docker the call
-    // would succeed in the sandbox and the assertion below would not apply.
+    // When sandbox mode is ExecOnly (or GVisor) and the runtime is
+    // not reachable, `exec` must refuse rather than silently fall
+    // back to host execution. Silent fallback was the original
+    // behaviour and is the amplifier for host-filesystem escape
+    // (see the symlink-write finding): operators set ExecOnly
+    // expecting isolation and got host exec instead. Observed only
+    // on a host without Docker; skip when Docker is available.
     if detect_runtime().await.is_some() {
         eprintln!("skipping: Docker is available on this host");
         return;
@@ -1996,27 +1998,107 @@ async fn sandbox_falls_through_to_host_when_unavailable() {
     let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
     assert!(!tools.sandbox_initialized());
 
-    // First exec — sandbox provisioning is attempted, fails (no Docker),
-    // and falls through to host execution. The OnceCell is now set to None.
-    let r1 = tools
+    // First exec: sandbox provisioning fails (no Docker). Instead of
+    // running on the host, the call surfaces a sandbox error.
+    let err = tools
         .execute("exec", r#"{"command": "echo first"}"#)
         .await
-        .unwrap();
-    assert!(r1.success);
-    assert!(r1.output.contains("first"));
+        .expect_err("exec must refuse to host-fall-back when mode is not Off");
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("sandbox") && msg.contains("refus"),
+        "error should explain the refusal: {msg}"
+    );
     assert!(
         tools.sandbox_initialized(),
-        "first exec must initialize the cell"
+        "first exec must initialize the cell even on refusal"
     );
 
-    // Second exec — the cell is already set to None, no retry, host exec.
-    let r2 = tools
+    // Second exec: still refused, no host exec, no retry.
+    let err = tools
         .execute("exec", r#"{"command": "echo second"}"#)
         .await
-        .unwrap();
-    assert!(r2.success);
-    assert!(r2.output.contains("second"));
+        .expect_err("second exec must also refuse");
+    assert!(err.to_string().to_lowercase().contains("sandbox"));
     assert!(tools.sandbox_initialized());
+}
+
+#[tokio::test]
+async fn sandbox_mode_off_permits_host_exec() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+
+    // When the operator has explicitly opted into host execution by
+    // setting SandboxMode::Off, `exec` runs on the host as before.
+    // This is the escape hatch for environments without Docker.
+    let tmp = TempDir::new().unwrap();
+    let config = ToolConfig {
+        sandbox: SandboxConfig {
+            mode: SandboxMode::Off,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), config);
+
+    let r = tools
+        .execute("exec", r#"{"command": "echo opted-in"}"#)
+        .await
+        .unwrap();
+    assert!(r.success);
+    assert!(r.output.contains("opted-in"));
+}
+
+#[tokio::test]
+async fn write_file_refuses_symlink_at_leaf() {
+    // A dangling symlink inside the workspace pointing at a path
+    // outside it bypasses the ancestor-only validation: .exists()
+    // follows and returns false, so the ancestor loop pops past the
+    // link to the workspace root, which validates. Without the
+    // leaf-is-symlink check, tokio::fs::write would then create the
+    // symlink's target — outside the workspace, on the host.
+    let workspace = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+
+    let victim = outside.path().join("victim.txt");
+    let link = workspace.path().join("trap");
+
+    // Ensure the target does NOT exist (dangling link is the bug path).
+    assert!(!victim.exists());
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    #[cfg(not(unix))]
+    {
+        eprintln!("skipping: symlink creation requires unix");
+        return;
+    }
+
+    let tools = ToolRegistry::new(workspace.path().to_path_buf(), ToolConfig::default());
+    let args = format!(r#"{{"path":"trap","content":"pwned"}}"#);
+    let result = tools.execute("write_file", &args).await;
+
+    // The write must either return Err or return Ok with success=false.
+    // Either way, the victim path must NOT have been created.
+    match result {
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            assert!(
+                msg.contains("symlink") || msg.contains("access"),
+                "error should name the cause: {msg}"
+            );
+        }
+        Ok(tool_result) => {
+            assert!(
+                !tool_result.success,
+                "symlink write must not succeed; got {}",
+                tool_result.output
+            );
+        }
+    }
+    assert!(
+        !victim.exists(),
+        "symlink target outside workspace must not be created"
+    );
 }
 
 #[test]

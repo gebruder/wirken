@@ -25,9 +25,12 @@ pub enum SandboxMode {
     /// `"mode": "off"` in `sandbox.json` to use this.
     Off,
     /// Only the `exec` tool runs in a Docker container (default runc runtime).
-    /// This is the default as of 0.7.5. If Docker is not reachable at
-    /// gateway start, the ToolRegistry logs a warning and falls back
-    /// to host execution for the agent's lifetime.
+    /// This is the default as of 0.7.5. If Docker is not reachable, the
+    /// `exec` tool refuses to run rather than silently falling back to
+    /// host execution; operators who want host execution must set
+    /// `"mode":"off"` explicitly. Sandbox provisioning is still lazy
+    /// (attempted on first `exec` call), so a missing runtime only
+    /// surfaces when a tool call is issued.
     #[default]
     ExecOnly,
     /// Only the `exec` tool runs in a gVisor container (runsc runtime).

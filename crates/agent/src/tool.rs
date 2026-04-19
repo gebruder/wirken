@@ -296,6 +296,22 @@ impl ToolRegistry {
             return sandbox.exec(&command, &self.workspace).await;
         }
 
+        // No sandbox. Host execution is only permitted when the
+        // operator explicitly set SandboxMode::Off. Any other mode
+        // means the requested sandbox runtime failed to provision;
+        // silently running on the host would violate the configured
+        // trust boundary. Refuse with a clear message so the operator
+        // either fixes the runtime or opts in explicitly.
+        if self.sandbox_config.mode != SandboxMode::Off {
+            return Err(AgentError::Sandbox(format!(
+                "sandbox mode is {:?} but the sandbox is unavailable; \
+                 refusing to fall back to host execution. Set \
+                 `\"mode\":\"off\"` in sandbox.json to opt into host execution, \
+                 or fix the sandbox runtime (Docker / gVisor) and restart.",
+                self.sandbox_config.mode
+            )));
+        }
+
         let child = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&command)
@@ -630,6 +646,15 @@ impl ToolRegistry {
     }
 
     /// Resolve a path for write operations where the target may not exist yet.
+    ///
+    /// The leaf is rejected if it is a symlink, whether the target
+    /// exists or is dangling. A dangling symlink inside the workspace
+    /// passes the ancestor check (`.exists()` follows symlinks and
+    /// returns false on a broken link, so the loop pops past to the
+    /// workspace root which validates), but a subsequent
+    /// `tokio::fs::write` would create the target at the symlink
+    /// destination — which may be outside the workspace. Rejecting
+    /// symlink leaves closes that path.
     fn resolve_path_for_write(&self, path: &str) -> Result<PathBuf, AgentError> {
         let joined = if Path::new(path).is_absolute() {
             PathBuf::from(path)
@@ -643,6 +668,17 @@ impl ToolRegistry {
             .map_err(|e| AgentError::Tool(format!("workspace resolution failed: {e}")))?;
 
         self.check_ancestor_in_workspace(&joined, &workspace, path)?;
+
+        // symlink_metadata does not follow, so a dangling symlink
+        // reports as an existing entry with is_symlink() == true.
+        if let Ok(meta) = std::fs::symlink_metadata(&joined)
+            && meta.file_type().is_symlink()
+        {
+            return Err(AgentError::Tool(format!(
+                "access denied: '{path}' is a symlink; refusing to write through it"
+            )));
+        }
+
         Ok(joined)
     }
 
