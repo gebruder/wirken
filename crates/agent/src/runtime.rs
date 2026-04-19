@@ -1233,6 +1233,7 @@ impl Agent {
                                     TrustLevel::System,
                                     SessionEvent::PermissionDenied {
                                         tool: ctx.tool_name.clone(),
+                                        action_key: ctx.action.approval_key(),
                                         tier: ctx.requested_tier.label().to_string(),
                                         agent_id: ctx.agent_id.clone(),
                                         trigger: ctx.trigger_message.clone(),
@@ -1357,6 +1358,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::PermissionDenied {
                             tool: name.to_string(),
+                            action_key: action.approval_key(),
                             tier: action.tier().label().to_string(),
                             agent_id: self.id.clone(),
                             trigger: self.current_trigger.clone(),
@@ -1449,6 +1451,7 @@ impl Agent {
                     TrustLevel::System,
                     SessionEvent::PermissionDenied {
                         tool: ctx.tool_name.clone(),
+                        action_key: ctx.action.approval_key(),
                         tier: ctx.requested_tier.label().to_string(),
                         agent_id: ctx.agent_id.clone(),
                         trigger: ctx.trigger_message.clone(),

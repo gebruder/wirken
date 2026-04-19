@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -185,23 +185,56 @@ impl PermissionStore {
         agent_id: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
-        let key = action.approval_key();
+        self.approve_by_key(&action.approval_key(), agent_id, approved_by)
+    }
+
+    /// Record an approval using a pre-computed action key. Callers
+    /// that already have the key (e.g., the CLI `permissions approve`
+    /// command, reading it off a past `PermissionDenied` audit entry)
+    /// use this to avoid reparsing the key back into an [`Action`].
+    /// Tier semantics are unchanged: Tier 3 keys can be stored but
+    /// `check` ignores approvals for them.
+    pub fn approve_by_key(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+        approved_by: &str,
+    ) -> Result<Approval, GatewayError> {
         let now = Utc::now();
         let expires = now + Duration::days(self.default_expiry_days as i64);
 
         self.conn.execute(
             "INSERT OR REPLACE INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![key, agent_id, now.to_rfc3339(), approved_by, expires.to_rfc3339()],
+            params![action_key, agent_id, now.to_rfc3339(), approved_by, expires.to_rfc3339()],
         )?;
 
         Ok(Approval {
-            action_key: key,
+            action_key: action_key.to_string(),
             agent_id: agent_id.to_string(),
             approved_at: now,
             approved_by: approved_by.to_string(),
             expires_at: expires,
         })
+    }
+
+    /// Check whether a specific `action_key` has a current (non-expired)
+    /// approval for `agent_id`. Used by `list-pending` to exclude
+    /// already-approved denials.
+    pub fn has_approval(&self, action_key: &str, agent_id: &str) -> Result<bool, GatewayError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT expires_at FROM approvals WHERE action_key = ?1 AND agent_id = ?2")?;
+        let row = stmt
+            .query_row(params![action_key, agent_id], |row| row.get::<_, String>(0))
+            .optional()?;
+        match row {
+            None => Ok(false),
+            Some(expires) => {
+                let expires_at = parse_dt(&expires);
+                Ok(Utc::now() < expires_at)
+            }
+        }
     }
 
     /// Revoke an approval.
