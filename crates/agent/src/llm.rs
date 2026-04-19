@@ -107,7 +107,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
-            tools_enabled: false,
+            tools_enabled: true,
             context_window: 8_192,
         }
     }
@@ -172,7 +172,7 @@ impl LlmConfig {
             max_tokens: 4096,
             temperature: 0.7,
             region: None,
-            tools_enabled: provider != "ollama",
+            tools_enabled: true,
             context_window,
         }
     }

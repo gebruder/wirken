@@ -3701,13 +3701,8 @@ mod verify {
         });
     }
 
-    async fn agent_snapshot_tools(_agent: &Agent) -> Vec<crate::tool::ToolDef> {
-        // Match Agent::snapshot_tool_defs exactly: when the LLM
-        // config has tools_enabled = false (e.g., Ollama), the
-        // agent sends no tool defs to the model and the tools_hash
-        // is the hash of an empty Vec. This test uses Ollama, so
-        // return empty.
-        Vec::new()
+    async fn agent_snapshot_tools(agent: &Agent) -> Vec<crate::tool::ToolDef> {
+        agent.snapshot_tool_defs().await
     }
 
     #[test]
