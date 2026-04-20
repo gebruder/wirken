@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Reject commit messages that leak local paths, non-canonical
+# ottenheimer.app identities, or AI-tool signatures.
+#
+# Install: scripts/git-hooks/install.sh
+set -euo pipefail
+
+msg_file="${1:?usage: commit-msg <path>}"
+msg=$(cat "$msg_file")
+payload=$(printf '%s\n' "$msg" | grep -v '^#' || true)
+
+fail=0
+report() {
+	printf 'commit-msg: %s\n' "$1" >&2
+	fail=1
+}
+
+if printf '%s' "$payload" | grep -qE '(/home/|/Users/)[a-z]'; then
+	report 'absolute home path in message; use $REPO or a relative path'
+fi
+
+if printf '%s' "$payload" | grep -qE 'gebruder@ottenheimer\.app'; then
+	report 'gebruder@ottenheimer.app must not appear; use davi@ottenheimer.app'
+fi
+
+if printf '%s' "$payload" | grep -qiE 'Co-Authored-By:.*claude|Generated with \[?Claude'; then
+	report 'Claude/AI tool signature blocked (CLAUDE.md rule)'
+fi
+
+if [ $fail -ne 0 ]; then
+	printf '\n-- rejected message --\n%s\n--\n' "$msg" >&2
+	exit 1
+fi
+
+exit 0
