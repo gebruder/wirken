@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Reject commit messages that leak local paths or attribution trailers.
+#
+# Install: scripts/git-hooks/install.sh
+set -euo pipefail
+
+msg_file="${1:?usage: commit-msg <path>}"
+msg=$(cat "$msg_file")
+payload=$(printf '%s\n' "$msg" | grep -v '^#' || true)
+
+fail=0
+report() {
+	printf 'commit-msg: %s\n' "$1" >&2
+	fail=1
+}
+
+if printf '%s' "$payload" | grep -qE '(/home/|/Users/)[a-z]'; then
+	report 'absolute home path in message; use $REPO or a relative path'
+fi
+
+if printf '%s' "$payload" | grep -qiE '^Co-Authored-By:|^Generated with '; then
+	report 'Attribution rule violation.'
+fi
+
+if [ $fail -ne 0 ]; then
+	printf '\n-- rejected message --\n%s\n--\n' "$msg" >&2
+	exit 1
+fi
+
+exit 0
