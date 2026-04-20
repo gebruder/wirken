@@ -20,6 +20,11 @@ paths = [
   # constants in adapter-teams / adapter-google-chat tests.rs.
   '''crates/adapter-teams/src/test_rsa_.*\.pem$''',
   '''crates/adapter-google-chat/src/test_rsa_.*\.pem$''',
+
+  # Self-reference: the commit-msg hook and this config document the
+  # identity strings they are supposed to reject, by necessity.
+  '''scripts/git-hooks/commit-msg$''',
+  '''\.gitleaks\.toml$''',
 ]
 
 # Regex patterns that should NOT trip even when they appear
@@ -43,3 +48,22 @@ regexes = [
   # matches that extracted form.
   '''tzlfNHy4G1KIsmAR\+cM3MGwVndheh2ak/usA6rw7SuE''',
 ]
+
+# Non-canonical ottenheimer.app identities. davi@ottenheimer.app is
+# the only allowed form for gebruder repos. gebruder@ottenheimer.app
+# has leaked via GitHub squash-merge Co-authored-by attribution;
+# this rule catches regressions in diffs or messages.
+[[rules]]
+id = "internal-email-leak"
+description = "Non-canonical ottenheimer.app email"
+regex = '''gebruder@ottenheimer\.app'''
+tags = ["identity", "leak"]
+
+# Absolute home paths leak local checkout layout. Commit 5ff35e0
+# scrubbed the release runbook; docs and configs should use $REPO
+# or a relative path.
+[[rules]]
+id = "home-path-leak"
+description = "Absolute home path in tracked content"
+regex = '''/(home|Users)/davi/'''
+tags = ["path", "leak"]
