@@ -566,7 +566,6 @@ fn pick_setup_sandbox_mode(runsc_detected: bool, accept_upgrade: bool) -> &'stat
     }
 }
 
-
 async fn setup_telegram_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,

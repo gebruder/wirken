@@ -283,7 +283,6 @@ pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-
 /// Read a secret value (API key, token) with asterisk masking.
 /// Unlike dialoguer's Password which shows nothing, this prints one
 /// asterisk per character so the user can see that paste/typing worked.
