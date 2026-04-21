@@ -23,7 +23,7 @@ members = [
 [workspace.package]
 version = "0.7.7"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 license = "MIT"
 repository = "https://github.com/gebruder/wirken"
 description = "Team-scale AI agent orchestration with per-channel process isolation, encrypted credential vault, and per-session hash-chained audit log."
