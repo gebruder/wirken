@@ -2,6 +2,7 @@
 name = "wirken-gateway"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Wirken gateway: adapter registry, router, three-tier permission store, and subagent ceilings."
 
