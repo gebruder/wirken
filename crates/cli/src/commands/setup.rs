@@ -566,27 +566,6 @@ fn pick_setup_sandbox_mode(runsc_detected: bool, accept_upgrade: bool) -> &'stat
     }
 }
 
-#[cfg(test)]
-mod setup_tests {
-    use super::pick_setup_sandbox_mode;
-
-    #[test]
-    fn no_runsc_picks_exec_only() {
-        assert_eq!(pick_setup_sandbox_mode(false, false), "exec-only");
-        // Operator "upgrade" choice is irrelevant when runsc is not detected.
-        assert_eq!(pick_setup_sandbox_mode(false, true), "exec-only");
-    }
-
-    #[test]
-    fn runsc_detected_plus_upgrade_picks_gvisor() {
-        assert_eq!(pick_setup_sandbox_mode(true, true), "gvisor");
-    }
-
-    #[test]
-    fn runsc_detected_but_declined_keeps_exec_only() {
-        assert_eq!(pick_setup_sandbox_mode(true, false), "exec-only");
-    }
-}
 
 async fn setup_telegram_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
@@ -825,4 +804,26 @@ async fn setup_imessage_channel(
 
     println!("  imessage: credentials encrypted.");
     Ok(())
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::pick_setup_sandbox_mode;
+
+    #[test]
+    fn no_runsc_picks_exec_only() {
+        assert_eq!(pick_setup_sandbox_mode(false, false), "exec-only");
+        // Operator "upgrade" choice is irrelevant when runsc is not detected.
+        assert_eq!(pick_setup_sandbox_mode(false, true), "exec-only");
+    }
+
+    #[test]
+    fn runsc_detected_plus_upgrade_picks_gvisor() {
+        assert_eq!(pick_setup_sandbox_mode(true, true), "gvisor");
+    }
+
+    #[test]
+    fn runsc_detected_but_declined_keeps_exec_only() {
+        assert_eq!(pick_setup_sandbox_mode(true, false), "exec-only");
+    }
 }

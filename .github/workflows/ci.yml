@@ -49,7 +49,7 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Test

@@ -535,7 +535,7 @@ mod tests {
             json["threat"]["aggregate_severity"].as_str().unwrap(),
             "high"
         );
-        assert!(json["threat"]["indicators"].as_array().unwrap().len() > 0);
+        assert!(!json["threat"]["indicators"].as_array().unwrap().is_empty());
     }
 
     // --- Indicator positions ---
