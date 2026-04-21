@@ -1,5 +1,7 @@
 # Wirken
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![CI](https://github.com/gebruder/wirken/actions/workflows/ci.yml/badge.svg)](https://github.com/gebruder/wirken/actions/workflows/ci.yml) ![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg) [![Release](https://img.shields.io/github/v/release/gebruder/wirken)](https://github.com/gebruder/wirken/releases)
+
 <p align="center">
   <img src="docs/img/wirken-switchboard.webp" alt="Wirken: the switchboard for the agent era" width="420">
 </p>
