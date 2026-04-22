@@ -199,7 +199,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
         },
     );
     let factory =
-        AgentFactory::with_options(configs, session_log.clone(), None, CacheMode::Drop, 1);
+        AgentFactory::with_options(configs, session_log.clone(), None, None, CacheMode::Drop, 1);
 
     let agent_arc = factory
         .wake(&agent_id, session_id)

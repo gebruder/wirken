@@ -72,12 +72,12 @@ wirken agents allow-subagent parent child --tools "read_file,web_search" --max-t
 
 The ceiling is stored as JSON in the `agents.allowed_subagents` column.
 
-### Org-level tool policy (partially enforced)
+### Org-level tool policy
 
-The pulled org config (`wirken setup --org <url>`) deserializes `permissions.allowed_tools`, `permissions.blocked_tools`, and `permissions.sandbox_mode` into `OrgPermissions`. Of these:
+The pulled org config (`wirken setup --org <url>`) deserializes `permissions.allowed_tools`, `permissions.blocked_tools`, and `permissions.sandbox_mode` into `OrgPermissions`. All three are enforced:
 
-- `sandbox_mode` is enforced. When present on the pulled config, `apply_org_config` writes `sandbox.json` in the data directory, and `wirken run` re-reads it on every gateway start. Valid values are `off`, `exec-only`, and `gvisor`; unknown values fall back to the default (`exec-only`) with a warning.
-- `allowed_tools` and `blocked_tools` are still parsed but not read by the permission check. A config that sets `blocked_tools: ["generate_image"]` will not prevent the agent from invoking `generate_image`. Tracked in `BACKLOG.md` under "Org-level tool allow/deny lists."
+- `sandbox_mode`. `apply_org_config` writes `sandbox.json` in the data directory; `wirken run` re-reads it on every gateway start. Valid values are `off`, `exec-only`, and `gvisor`; unknown values fall back to the default (`exec-only`) with a warning.
+- `allowed_tools` and `blocked_tools`. Persisted to `tool_policy.json` in the data directory when at least one list is non-empty. `wirken run` loads the file and injects it into every waked agent. The check sits in `crates/agent/src/runtime.rs::execute_tool` ahead of the tier permission check: a call to a name in `blocked_tools` fails before dispatch; a call to a name not in `allowed_tools` fails before dispatch when `allowed_tools` is non-empty; `blocked_tools` wins when a name appears in both. Denials are written to the session log as `PermissionDenied` events with `tier: "org_policy"`.
 
 ### Channel process isolation
 
