@@ -34,6 +34,12 @@ regexes = [
   # with `// CodeQL:hardcoded-credential-ok`; mirror that here.
   '''whatsapp_test_hmac_key''',
 
+  # WhatsApp setup test fixture (commit 18297d2) — sequential hex
+  # secret used in channel.rs::tests to exercise validate_app_secret.
+  # Superseded in the working tree by low-entropy fixtures, but
+  # still present in history and flagged by generic-api-key.
+  '''0123456789abcdef0123456789abcdef''',
+
   # The name of the cipher used by the vault crate. Appears in
   # the crate description and ambient docs; the generic-api-key
   # rule matches on its entropy. `XChaCha20-Poly1305` is a
