@@ -199,7 +199,52 @@ pub fn apply_org_config(
         }
     }
 
+    // Tool allow/deny policy. Persisted to `tool_policy.json` on the
+    // same principle as `sandbox.json`: a single-purpose file the
+    // gateway reads on every start. Absent or empty lists disable
+    // the corresponding check in `crates/agent/src/runtime.rs::execute_tool`.
+    if let Some(ref perms) = org.permissions
+        && (!perms.allowed_tools.is_empty() || !perms.blocked_tools.is_empty())
+    {
+        let path = data_dir.join("tool_policy.json");
+        if force || !path.exists() {
+            let body = serde_json::json!({
+                "allowed_tools": perms.allowed_tools,
+                "blocked_tools": perms.blocked_tools,
+            });
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&body).unwrap_or_default(),
+            )
+            .map_err(|e| format!("write tool_policy.json: {e}"))?;
+            applied.push("tool_policy".into());
+        }
+    }
+
     Ok(applied)
+}
+
+/// Read `tool_policy.json` from the gateway data directory and
+/// return it as an [`OrgPermissions`] carrying only the allow/deny
+/// lists (sandbox_mode is None — sandbox is already loaded separately).
+/// Returns `None` if the file is absent or unreadable; malformed
+/// JSON is logged and treated as absent (fail-open on policy load is
+/// intentional: a corrupted policy file should not brick the
+/// gateway, but the operator sees a warning).
+pub fn load_tool_policy(data_dir: &Path) -> Option<OrgPermissions> {
+    let path = data_dir.join("tool_policy.json");
+    let body = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<OrgPermissions>(&body) {
+        Ok(perms) => Some(perms),
+        Err(e) => {
+            tracing::warn!(
+                "tool_policy.json at {} is malformed: {e}; \
+                 continuing with no org tool policy",
+                path.display()
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +276,53 @@ mod tests {
         let applied = apply_org_config(tmp.path(), &org, true).unwrap();
         assert!(!applied.contains(&"sandbox".to_string()));
         assert!(!tmp.path().join("sandbox.json").exists());
+    }
+
+    #[test]
+    fn apply_org_config_writes_tool_policy_when_lists_non_empty() {
+        let tmp = TempDir::new().unwrap();
+        let org = OrgConfig {
+            permissions: Some(OrgPermissions {
+                sandbox_mode: None,
+                allowed_tools: vec!["read_file".into(), "web_search".into()],
+                blocked_tools: vec!["exec".into()],
+            }),
+            ..Default::default()
+        };
+        let applied = apply_org_config(tmp.path(), &org, true).unwrap();
+        assert!(applied.contains(&"tool_policy".to_string()));
+        let loaded = load_tool_policy(tmp.path()).unwrap();
+        assert_eq!(loaded.allowed_tools, vec!["read_file", "web_search"]);
+        assert_eq!(loaded.blocked_tools, vec!["exec"]);
+    }
+
+    #[test]
+    fn apply_org_config_skips_tool_policy_when_both_lists_empty() {
+        let tmp = TempDir::new().unwrap();
+        let org = OrgConfig {
+            permissions: Some(OrgPermissions {
+                sandbox_mode: Some("gvisor".into()),
+                allowed_tools: vec![],
+                blocked_tools: vec![],
+            }),
+            ..Default::default()
+        };
+        let applied = apply_org_config(tmp.path(), &org, true).unwrap();
+        assert!(!applied.contains(&"tool_policy".to_string()));
+        assert!(!tmp.path().join("tool_policy.json").exists());
+    }
+
+    #[test]
+    fn load_tool_policy_returns_none_for_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        assert!(load_tool_policy(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn load_tool_policy_returns_none_for_malformed_json() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("tool_policy.json"), "{ not json").unwrap();
+        assert!(load_tool_policy(tmp.path()).is_none());
     }
 
     #[test]

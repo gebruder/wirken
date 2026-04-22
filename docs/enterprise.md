@@ -54,7 +54,7 @@ On every `wirken run`, the org config refreshes automatically.
 }
 ```
 
-All fields are optional. Only provided fields are applied. The `provider`, `api_key_name`, `siem`, `mcp`, and `skills` fields are wired through. The `permissions` block (`sandbox_mode`, `allowed_tools`, `blocked_tools`) is deserialized into `OrgPermissions` and then dropped: no consumer reads the values. Do not rely on these fields for enforcement today. Tracked in `BACKLOG.md` under "Org-level tool allow/deny lists."
+All fields are optional. Only provided fields are applied. The `provider`, `api_key_name`, `siem`, `mcp`, `skills`, and `permissions` fields are wired through. `permissions.sandbox_mode` drives `sandbox.json`; `permissions.allowed_tools` and `permissions.blocked_tools` drive `tool_policy.json`, which `wirken run` loads and enforces in the agent's tool dispatcher ahead of the tier permission check. See [Permissions and identity](permissions-and-identity.md) for enforcement details.
 
 ## SIEM integration
 

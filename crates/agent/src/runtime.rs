@@ -89,6 +89,12 @@ pub struct Agent {
     /// Optional permission store for checking tool execution permissions.
     /// When None, all tools execute without permission checks (standalone mode).
     permissions: Option<Arc<std::sync::Mutex<PermissionStore>>>,
+    /// Optional org-level tool allow/deny policy. Evaluated before
+    /// the tier permission check: `blocked_tools` short-circuits to
+    /// denial; a non-empty `allowed_tools` acts as an allowlist.
+    /// None means no org policy applies (the local permission store
+    /// is authoritative).
+    org_permissions: Option<Arc<wirken_gateway::org::OrgPermissions>>,
     /// The current user message that triggered this processing round.
     /// Captured in process_message() for inclusion in denial audit events.
     current_trigger: Option<String>,
@@ -209,6 +215,7 @@ impl Agent {
             system_prompt,
             api_key,
             permissions: None,
+            org_permissions: None,
             current_trigger: None,
             session_log,
             session_handle,
@@ -285,6 +292,7 @@ impl Agent {
             system_prompt,
             api_key,
             permissions: None,
+            org_permissions: None,
             current_trigger: None,
             session_log,
             session_handle,
@@ -368,6 +376,14 @@ impl Agent {
     /// before execution. Denials are collected in the `ProcessResult`.
     pub fn set_permissions(&mut self, store: Arc<std::sync::Mutex<PermissionStore>>) {
         self.permissions = Some(store);
+    }
+
+    /// Attach the org-level tool allow/deny policy. See
+    /// `OrgPermissions` for the shape. Checked before the tier
+    /// permission check in `execute_tool`, fail-closed with a
+    /// denial event written to the session log.
+    pub fn set_org_permissions(&mut self, org: Arc<wirken_gateway::org::OrgPermissions>) {
+        self.org_permissions = Some(org);
     }
 
     /// Connect to the out-of-process MCP proxy and load this agent's
@@ -1340,7 +1356,7 @@ impl Agent {
 
     /// Execute a tool call, trying built-in tools, then MCP, then Wasm skills.
     /// Permission checks are applied when a PermissionStore is configured.
-    async fn execute_tool(
+    pub(crate) async fn execute_tool(
         &mut self,
         name: &str,
         arguments: &str,
@@ -1366,6 +1382,47 @@ impl Agent {
                 output: format!("tool '{name}' is not in this subagent's allowed tool set"),
                 success: false,
             });
+        }
+
+        // Org-level allow/deny check: applied before the tier
+        // permission check so a blocked tool never goes to the
+        // approval prompt, never touches the sandbox, and never
+        // reaches the tool dispatcher. `blocked_tools` is absolute.
+        // `allowed_tools`, when non-empty, acts as an allowlist:
+        // any tool not in it is treated as blocked. `spawn_subagent`
+        // is handled earlier in this function via a dedicated
+        // intercept and is out of scope for org policy (subagent
+        // ceilings already govern spawning).
+        if let Some(ref org) = self.org_permissions {
+            let blocked = org.blocked_tools.iter().any(|t| t == name);
+            let outside_allowlist =
+                !org.allowed_tools.is_empty() && !org.allowed_tools.iter().any(|t| t == name);
+            if blocked || outside_allowlist {
+                let reason = if blocked {
+                    format!("tool '{name}' is blocked by org policy")
+                } else {
+                    format!("tool '{name}' is not in the org allowed_tools list")
+                };
+                let args: serde_json::Value =
+                    serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+                let action_key = tool_to_action(name, &args)
+                    .map(|a| a.approval_key())
+                    .unwrap_or_else(|| name.to_string());
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::PermissionDenied {
+                        tool: name.to_string(),
+                        action_key,
+                        tier: "org_policy".to_string(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                    },
+                )?;
+                return Ok(crate::tool::ToolResult {
+                    output: reason,
+                    success: false,
+                });
+            }
         }
 
         // Permission check before execution

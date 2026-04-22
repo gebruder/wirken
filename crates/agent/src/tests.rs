@@ -1470,7 +1470,7 @@ mod wake {
                 sandbox: Default::default(),
             },
         );
-        let factory = AgentFactory::with_options(configs, log, None, CacheMode::Drop, 64);
+        let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 64);
 
         let session = "agent-drop/test/conv-1";
         let a = factory.wake("agent-drop", session).unwrap();
@@ -4322,5 +4322,166 @@ mod system_prompt_event {
         let mut conv = Conversation::new(100_000);
         conv.replay_from_log(&*log, &h).unwrap();
         assert_eq!(conv.messages()[0].content, "second");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Org-level tool allow/deny policy (closes #32)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod org_tool_policy {
+    use super::*;
+    use crate::factory::{AgentFactory, AgentStaticConfig, CacheMode};
+    use crate::llm::LlmConfig;
+    use std::sync::Arc;
+    use wirken_audit::SqliteSessionLog;
+    use wirken_gateway::org::OrgPermissions;
+
+    async fn make_agent_with_policy(
+        org: Option<OrgPermissions>,
+    ) -> (Arc<tokio::sync::Mutex<crate::runtime::Agent>>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut configs = std::collections::HashMap::new();
+        configs.insert(
+            "a1".to_string(),
+            AgentStaticConfig {
+                agent_id: "a1".to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: LlmConfig::ollama("test"),
+                api_key: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: Default::default(),
+                sandbox: Default::default(),
+            },
+        );
+        let factory =
+            AgentFactory::with_options(configs, log, None, org.map(Arc::new), CacheMode::Drop, 4);
+        let arc = factory.wake("a1", "a1/test/conv-1").unwrap();
+        (arc, tmp)
+    }
+
+    #[tokio::test]
+    async fn blocked_tool_fails_before_dispatch() {
+        let org = OrgPermissions {
+            sandbox_mode: None,
+            allowed_tools: vec![],
+            blocked_tools: vec!["read_file".into()],
+        };
+        let (agent, _tmp) = make_agent_with_policy(Some(org)).await;
+        let mut a = agent.lock().await;
+        let result = a
+            .execute_tool("read_file", r#"{"path":"anything"}"#)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result.output.contains("blocked by org policy"),
+            "expected blocked-by-org message, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn non_allowlisted_tool_fails_when_allowlist_non_empty() {
+        let org = OrgPermissions {
+            sandbox_mode: None,
+            allowed_tools: vec!["read_file".into()],
+            blocked_tools: vec![],
+        };
+        let (agent, _tmp) = make_agent_with_policy(Some(org)).await;
+        let mut a = agent.lock().await;
+        let result = a
+            .execute_tool("web_search", r#"{"query":"x"}"#)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result.output.contains("not in the org allowed_tools list"),
+            "expected not-in-allowlist message, got: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn allowlisted_tool_reaches_dispatch() {
+        // read_file will fail at dispatch because the target file
+        // doesn't exist, but it must get past the org check first.
+        // The failure surface tells us which gate rejected it.
+        let org = OrgPermissions {
+            sandbox_mode: None,
+            allowed_tools: vec!["read_file".into()],
+            blocked_tools: vec![],
+        };
+        let (agent, _tmp) = make_agent_with_policy(Some(org)).await;
+        let mut a = agent.lock().await;
+        let result = a
+            .execute_tool("read_file", r#"{"path":"missing.txt"}"#)
+            .await;
+        // Should NOT be "not in the org allowed_tools list" — either
+        // it succeeds (file exists) or the dispatcher returns a
+        // read-specific error. Either way the gate didn't reject it.
+        match result {
+            Ok(r) => assert!(!r.output.contains("not in the org allowed_tools list")),
+            Err(e) => assert!(!format!("{e}").contains("not in the org allowed_tools list")),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_allowlist_does_not_act_as_deny_all() {
+        let org = OrgPermissions {
+            sandbox_mode: None,
+            allowed_tools: vec![],
+            blocked_tools: vec![],
+        };
+        let (agent, _tmp) = make_agent_with_policy(Some(org)).await;
+        let mut a = agent.lock().await;
+        let result = a
+            .execute_tool("read_file", r#"{"path":"missing.txt"}"#)
+            .await;
+        // An empty allowed_tools list means "no allowlist restriction,"
+        // not "deny everything." The call should reach dispatch and fail
+        // for a dispatch-level reason (file not found), never for org policy.
+        if let Ok(r) = result {
+            assert!(!r.output.contains("not in the org allowed_tools list"));
+            assert!(!r.output.contains("blocked by org policy"));
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_takes_precedence_over_allowlist() {
+        // A tool on both lists is blocked. This matters if an operator
+        // mis-configures both fields: the safer gate wins.
+        let org = OrgPermissions {
+            sandbox_mode: None,
+            allowed_tools: vec!["read_file".into()],
+            blocked_tools: vec!["read_file".into()],
+        };
+        let (agent, _tmp) = make_agent_with_policy(Some(org)).await;
+        let mut a = agent.lock().await;
+        let result = a
+            .execute_tool("read_file", r#"{"path":"anything"}"#)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("blocked by org policy"));
+    }
+
+    #[tokio::test]
+    async fn no_policy_attached_preserves_default_behavior() {
+        let (agent, _tmp) = make_agent_with_policy(Option::<OrgPermissions>::None).await;
+        let mut a = agent.lock().await;
+        let result = a
+            .execute_tool("read_file", r#"{"path":"missing.txt"}"#)
+            .await;
+        // With no org policy set, the call goes straight to dispatch.
+        if let Ok(r) = result {
+            assert!(!r.output.contains("blocked by org policy"));
+            assert!(!r.output.contains("not in the org allowed_tools list"));
+        }
     }
 }
