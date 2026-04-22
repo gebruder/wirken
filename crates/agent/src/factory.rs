@@ -87,19 +87,37 @@ pub(crate) fn channel_from_session_id(session_id: &str) -> Option<&str> {
     Some(channel)
 }
 
+/// Paired LLM config + API key selected for a specific channel. A
+/// provider and its credential are always chosen together, so the
+/// factory treats them as one record rather than two parallel maps
+/// that can drift out of sync.
+///
+/// In-memory this struct carries the raw key, matching the default
+/// `AgentStaticConfig::api_key` pattern. On-disk config files should
+/// instead name a vault slot (`"provider-api-key"` etc.) and let
+/// startup resolve the slot to the key material before constructing
+/// the `AgentStaticConfig`.
+#[derive(Clone)]
+pub struct ChannelOverride {
+    pub llm_config: LlmConfig,
+    pub api_key: Option<String>,
+}
+
 /// Per-agent static configuration held by the factory and injected
 /// into every waked Agent.
 pub struct AgentStaticConfig {
     pub agent_id: String,
     pub workspace: PathBuf,
     pub llm_config: LlmConfig,
-    /// Optional per-channel LLM config override (closes #60). When
-    /// the waked session id names a channel with an entry in this
-    /// map, the factory builds the Agent with the override instead
-    /// of `llm_config`. Missing channels fall through to the
-    /// default. Empty map = no overrides, same as pre-#60 behavior.
+    /// Optional per-channel (LLM config + API key) override
+    /// (closes #60). When the waked session id names a channel
+    /// with an entry in this map, the factory builds the Agent
+    /// with that override's provider and credential instead of
+    /// the defaults. Missing channels fall through to the
+    /// agent-wide defaults. Empty map = no overrides, same as
+    /// pre-#60 behavior.
     #[doc(alias = "per-channel-provider")]
-    pub llm_overrides: HashMap<String, LlmConfig>,
+    pub channel_overrides: HashMap<String, ChannelOverride>,
     pub api_key: Option<String>,
     pub skills: Vec<Skill>,
     pub wasm_skills: Vec<WasmSkill>,
@@ -271,18 +289,23 @@ impl AgentFactory {
 
         // #60: per-channel LLM override. Extract the channel segment
         // from the session id and pick the matching entry from
-        // `llm_overrides`. Any non-conforming session id (system
-        // sentinels, unit-test short ids) falls back to the default.
-        let llm_config = channel_from_session_id(session_id)
-            .and_then(|ch| cfg.llm_overrides.get(ch))
-            .unwrap_or(&cfg.llm_config)
-            .clone();
+        // `channel_overrides` — an override carries both the
+        // `LlmConfig` and the `api_key` so the agent ends up with
+        // the credential that matches the provider it will call.
+        // Any non-conforming session id (system sentinels,
+        // unit-test short ids) falls back to the defaults.
+        let override_for_channel =
+            channel_from_session_id(session_id).and_then(|ch| cfg.channel_overrides.get(ch));
+        let (llm_config, api_key) = match override_for_channel {
+            Some(ov) => (ov.llm_config.clone(), ov.api_key.clone()),
+            None => (cfg.llm_config.clone(), cfg.api_key.clone()),
+        };
 
         let mut agent = Agent::from_session_log(
             session_id.to_string(),
             cfg.workspace.clone(),
             llm_config,
-            cfg.api_key.clone(),
+            api_key,
             self.session_log.clone(),
             cfg.sandbox.clone(),
         )?;

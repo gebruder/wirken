@@ -17,7 +17,7 @@ pub mod wasm_sandbox;
 
 pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};
-pub use factory::{AgentFactory, AgentStaticConfig, session_id_for};
+pub use factory::{AgentFactory, AgentStaticConfig, ChannelOverride, session_id_for};
 pub use identity::AgentIdentity;
 pub use runtime::{
     Agent, DivergenceRecord, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult, VerifyReport,

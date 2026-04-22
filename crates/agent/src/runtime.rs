@@ -513,6 +513,15 @@ impl Agent {
         self.llm.config()
     }
 
+    /// Test-only accessor returning the api_key this agent was
+    /// woken with. Used by #60 tests to prove per-channel
+    /// credential selection pairs the right key with the right
+    /// provider.
+    #[cfg(test)]
+    pub(crate) fn api_key_for_test(&self) -> Option<&str> {
+        self.api_key.as_deref()
+    }
+
     /// Test-only setter for the depth counter, used to drive the
     /// MAX_SUBAGENT_DEPTH cap test without spinning up a real
     /// nested factory chain.
