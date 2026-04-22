@@ -512,10 +512,26 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(64);
+    let org_tool_policy =
+        wirken_gateway::org::load_tool_policy(&cfg.data_dir).map(std::sync::Arc::new);
+    if let Some(ref policy) = org_tool_policy {
+        let allowed = if policy.allowed_tools.is_empty() {
+            "any".to_string()
+        } else {
+            policy.allowed_tools.join(", ")
+        };
+        let blocked = if policy.blocked_tools.is_empty() {
+            "none".to_string()
+        } else {
+            policy.blocked_tools.join(", ")
+        };
+        println!("  Org tool policy: allowed={allowed}; blocked={blocked}");
+    }
     let factory = AgentFactory::with_options(
         static_configs,
         session_log.clone(),
         Some(permissions.clone()),
+        org_tool_policy,
         cache_mode,
         cache_capacity,
     );

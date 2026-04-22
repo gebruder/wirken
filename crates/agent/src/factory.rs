@@ -44,6 +44,7 @@ use lru::LruCache;
 use tokio::sync::Mutex as AsyncMutex;
 use wirken_audit::SessionLog;
 use wirken_gateway::agent_config::SubagentCeiling;
+use wirken_gateway::org::OrgPermissions;
 use wirken_gateway::permissions::PermissionStore;
 
 use crate::error::AgentError;
@@ -132,6 +133,10 @@ pub struct AgentFactory {
     static_configs: HashMap<String, AgentStaticConfig>,
     session_log: Arc<dyn SessionLog>,
     permissions: Option<Arc<StdMutex<PermissionStore>>>,
+    /// Org-level tool allow/deny policy, applied before the per-tier
+    /// permission check. Shared across every waked Agent because org
+    /// policy is a gateway-wide setting, not a per-agent one.
+    org_permissions: Option<Arc<OrgPermissions>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -157,6 +162,7 @@ impl AgentFactory {
             static_configs,
             session_log,
             permissions,
+            None,
             CacheMode::Cached,
             DEFAULT_CACHE_CAPACITY,
         )
@@ -174,6 +180,7 @@ impl AgentFactory {
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
         permissions: Option<Arc<StdMutex<PermissionStore>>>,
+        org_permissions: Option<Arc<OrgPermissions>>,
         cache_mode: CacheMode,
         cache_capacity: usize,
     ) -> Arc<Self> {
@@ -186,6 +193,7 @@ impl AgentFactory {
             static_configs,
             session_log,
             permissions,
+            org_permissions,
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
@@ -248,6 +256,9 @@ impl AgentFactory {
         agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone());
         if let Some(perms) = &self.permissions {
             agent.set_permissions(perms.clone());
+        }
+        if let Some(org) = &self.org_permissions {
+            agent.set_org_permissions(org.clone());
         }
         if let Some(mcp) = &cfg.mcp_client {
             agent.attach_mcp(mcp.clone());
