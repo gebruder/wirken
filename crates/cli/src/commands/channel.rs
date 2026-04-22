@@ -479,20 +479,23 @@ mod tests {
 
     #[test]
     fn app_secret_accepts_32_lowercase_hex() {
-        assert!(validate_app_secret("0123456789abcdef0123456789abcdef").is_ok());
+        // Low-entropy fixtures so gitleaks' generic-api-key rule
+        // does not treat them as real secrets. The validator only
+        // cares about char class and length, not distribution.
+        assert!(validate_app_secret("abababababababababababababababab").is_ok());
         assert!(validate_app_secret("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_ok());
     }
 
     #[test]
     fn app_secret_rejects_wrong_length() {
-        assert!(validate_app_secret("0123456789abcdef").is_err());
-        assert!(validate_app_secret("0123456789abcdef0123456789abcdefa").is_err());
+        assert!(validate_app_secret("abababab").is_err());
+        assert!(validate_app_secret("abababababababababababababababababab").is_err());
     }
 
     #[test]
     fn app_secret_rejects_uppercase_and_non_hex() {
-        assert!(validate_app_secret("0123456789ABCDEF0123456789abcdef").is_err());
-        assert!(validate_app_secret("0123456789abcdef0123456789abcdeZ").is_err());
+        assert!(validate_app_secret("ABABABABABABABABABABABABABABABAB").is_err());
+        assert!(validate_app_secret("abababababababababababababababaZ").is_err());
     }
 
     #[test]
@@ -506,21 +509,23 @@ mod tests {
     // -- Non-interactive end-to-end -----------------------------------
 
     fn good_flags() -> AddFlags {
+        // All fixture values are intentionally low-entropy so the
+        // gitleaks scanner does not flag them as `generic-api-key`.
         AddFlags {
-            token: Some("EAAG_fake_token_value".into()),
+            token: Some("fake_token_value".into()),
             phone_number_id: Some("123456789012345".into()),
             verify_token: Some("my_verify_token".into()),
-            app_secret: Some("0123456789abcdef0123456789abcdef".into()),
+            app_secret: Some("00000000000000000000000000000000".into()),
         }
     }
 
     #[test]
     fn collect_whatsapp_creds_from_flags_succeeds() {
         let creds = collect_whatsapp_creds(good_flags()).expect("flags should validate");
-        assert_eq!(creds.token, "EAAG_fake_token_value");
+        assert_eq!(creds.token, "fake_token_value");
         assert_eq!(creds.phone_number_id, "123456789012345");
         assert_eq!(creds.verify_token, "my_verify_token");
-        assert_eq!(creds.app_secret, "0123456789abcdef0123456789abcdef");
+        assert_eq!(creds.app_secret, "00000000000000000000000000000000");
     }
 
     #[test]
@@ -577,7 +582,7 @@ mod tests {
         }
 
         let (token, _) = store.retrieve("whatsapp-token").unwrap();
-        assert_eq!(token.expose(), "EAAG_fake_token_value");
+        assert_eq!(token.expose(), "fake_token_value");
         let (phone, _) = store.retrieve("whatsapp-phone-number-id").unwrap();
         assert_eq!(phone.expose(), "123456789012345");
     }
