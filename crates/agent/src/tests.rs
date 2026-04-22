@@ -1127,6 +1127,7 @@ mod wake {
                 agent_id: agent_id.to_string(),
                 workspace: tmp.path().to_path_buf(),
                 llm_config: LlmConfig::ollama("test"),
+                llm_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
@@ -1461,6 +1462,7 @@ mod wake {
                 agent_id: "agent-drop".to_string(),
                 workspace: PathBuf::from("/tmp"),
                 llm_config: LlmConfig::ollama("test"),
+                llm_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
@@ -1523,6 +1525,7 @@ mod subagent {
                 agent_id: parent_id.to_string(),
                 workspace: tmp.path().to_path_buf(),
                 llm_config: LlmConfig::ollama("test"),
+                llm_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
@@ -1538,6 +1541,7 @@ mod subagent {
                 agent_id: child_id.to_string(),
                 workspace: tmp.path().to_path_buf(),
                 llm_config: LlmConfig::ollama("test"),
+                llm_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
@@ -4326,6 +4330,122 @@ mod system_prompt_event {
 }
 
 // ---------------------------------------------------------------------------
+// Per-channel LLM override (closes #60 core slice)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod per_channel_llm_override {
+    use super::*;
+    use crate::factory::{
+        AgentFactory, AgentStaticConfig, CacheMode, channel_from_session_id, session_id_for,
+    };
+    use crate::llm::LlmConfig;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use wirken_audit::SqliteSessionLog;
+
+    #[test]
+    fn channel_from_canonical_session_id() {
+        let id = session_id_for("myagent", "signal", "conv-1");
+        assert_eq!(channel_from_session_id(&id), Some("signal"));
+    }
+
+    #[test]
+    fn channel_from_session_id_handles_conv_with_slashes_safely() {
+        // splitn(3) caps the split so a conv id that happened to
+        // contain a `/` doesn't confuse channel extraction.
+        let id = "ag/discord/server/channel/thread";
+        assert_eq!(channel_from_session_id(id), Some("discord"));
+    }
+
+    #[test]
+    fn channel_from_sentinel_or_short_id_is_none() {
+        assert_eq!(channel_from_session_id("__system__"), None);
+        assert_eq!(channel_from_session_id(""), None);
+        assert_eq!(channel_from_session_id("agent-only"), None);
+        assert_eq!(channel_from_session_id("agent/channel"), None);
+    }
+
+    fn make_factory_with_overrides(
+        default_model: &str,
+        overrides: HashMap<String, LlmConfig>,
+    ) -> (Arc<AgentFactory>, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut configs = HashMap::new();
+        configs.insert(
+            "a1".to_string(),
+            AgentStaticConfig {
+                agent_id: "a1".to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: LlmConfig::ollama(default_model),
+                llm_overrides: overrides,
+                api_key: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: Default::default(),
+                sandbox: Default::default(),
+            },
+        );
+        let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 4);
+        (factory, tmp)
+    }
+
+    #[tokio::test]
+    async fn wake_uses_channel_override_when_present() {
+        let mut overrides = HashMap::new();
+        overrides.insert("signal".into(), LlmConfig::ollama("override-model"));
+        let (factory, _tmp) = make_factory_with_overrides("default-model", overrides);
+
+        let session = session_id_for("a1", "signal", "conv-1");
+        let agent = factory.wake("a1", &session).unwrap();
+        let a = agent.lock().await;
+        assert_eq!(a.llm_config_for_test().model, "override-model");
+    }
+
+    #[tokio::test]
+    async fn wake_falls_back_to_default_when_channel_not_in_overrides() {
+        let mut overrides = HashMap::new();
+        overrides.insert("signal".into(), LlmConfig::ollama("signal-model"));
+        let (factory, _tmp) = make_factory_with_overrides("default-model", overrides);
+
+        let session = session_id_for("a1", "slack", "conv-1");
+        let agent = factory.wake("a1", &session).unwrap();
+        let a = agent.lock().await;
+        // slack not in the overrides map → default.
+        assert_eq!(a.llm_config_for_test().model, "default-model");
+    }
+
+    #[tokio::test]
+    async fn wake_with_empty_overrides_preserves_default_behavior() {
+        // Pre-#60 semantics: no overrides, every session uses the
+        // agent's default llm_config. This is the back-compat path.
+        let (factory, _tmp) = make_factory_with_overrides("only-model", HashMap::new());
+        let session = session_id_for("a1", "telegram", "conv-1");
+        let agent = factory.wake("a1", &session).unwrap();
+        let a = agent.lock().await;
+        assert_eq!(a.llm_config_for_test().model, "only-model");
+    }
+
+    #[tokio::test]
+    async fn wake_with_non_canonical_session_id_uses_default() {
+        // A system sentinel or short id has no channel segment to
+        // match against; the factory falls through to the default
+        // llm_config rather than panicking or applying an override.
+        let mut overrides = HashMap::new();
+        overrides.insert("signal".into(), LlmConfig::ollama("signal-model"));
+        let (factory, _tmp) = make_factory_with_overrides("default-model", overrides);
+
+        // Use a non-canonical but still valid-agent-id id.
+        let agent = factory.wake("a1", "a1/justone").unwrap();
+        let a = agent.lock().await;
+        assert_eq!(a.llm_config_for_test().model, "default-model");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Org-level tool allow/deny policy (closes #32)
 // ---------------------------------------------------------------------------
 
@@ -4350,6 +4470,7 @@ mod org_tool_policy {
                 agent_id: "a1".to_string(),
                 workspace: tmp.path().to_path_buf(),
                 llm_config: LlmConfig::ollama("test"),
+                llm_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),

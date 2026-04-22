@@ -70,12 +70,36 @@ pub fn session_id_for(agent_id: &str, channel: &str, conversation_id: &str) -> S
     format!("{agent_id}/{channel}/{conversation_id}")
 }
 
+/// Extract the channel segment from a canonical session id built by
+/// [`session_id_for`]. Returns `None` for reserved sentinel ids
+/// (`__system__`, `__pre_migration__`) and any id that does not
+/// contain at least two `/` separators. Callers that need channel
+/// routing should treat `None` as "fall back to the agent's default
+/// `llm_config`" — the per-channel override is skipped.
+pub(crate) fn channel_from_session_id(session_id: &str) -> Option<&str> {
+    let mut parts = session_id.splitn(3, '/');
+    let _agent = parts.next()?;
+    let channel = parts.next()?;
+    // A well-formed session id always has a conversation_id too;
+    // require the third part so `{agent}/` prefix-only ids don't
+    // accidentally match.
+    parts.next()?;
+    Some(channel)
+}
+
 /// Per-agent static configuration held by the factory and injected
 /// into every waked Agent.
 pub struct AgentStaticConfig {
     pub agent_id: String,
     pub workspace: PathBuf,
     pub llm_config: LlmConfig,
+    /// Optional per-channel LLM config override (closes #60). When
+    /// the waked session id names a channel with an entry in this
+    /// map, the factory builds the Agent with the override instead
+    /// of `llm_config`. Missing channels fall through to the
+    /// default. Empty map = no overrides, same as pre-#60 behavior.
+    #[doc(alias = "per-channel-provider")]
+    pub llm_overrides: HashMap<String, LlmConfig>,
     pub api_key: Option<String>,
     pub skills: Vec<Skill>,
     pub wasm_skills: Vec<WasmSkill>,
@@ -244,10 +268,20 @@ impl AgentFactory {
             .static_configs
             .get(agent_id)
             .ok_or_else(|| AgentError::ToolNotFound(format!("unknown agent_id '{agent_id}'")))?;
+
+        // #60: per-channel LLM override. Extract the channel segment
+        // from the session id and pick the matching entry from
+        // `llm_overrides`. Any non-conforming session id (system
+        // sentinels, unit-test short ids) falls back to the default.
+        let llm_config = channel_from_session_id(session_id)
+            .and_then(|ch| cfg.llm_overrides.get(ch))
+            .unwrap_or(&cfg.llm_config)
+            .clone();
+
         let mut agent = Agent::from_session_log(
             session_id.to_string(),
             cfg.workspace.clone(),
-            cfg.llm_config.clone(),
+            llm_config,
             cfg.api_key.clone(),
             self.session_log.clone(),
             cfg.sandbox.clone(),

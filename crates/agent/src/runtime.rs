@@ -505,6 +505,14 @@ impl Agent {
         self.subagent_depth
     }
 
+    /// Test-only accessor returning the [`LlmConfig`] this agent
+    /// was woken with. Used by #60 tests to prove the factory
+    /// picked the right config per channel.
+    #[cfg(test)]
+    pub(crate) fn llm_config_for_test(&self) -> &LlmConfig {
+        self.llm.config()
+    }
+
     /// Test-only setter for the depth counter, used to drive the
     /// MAX_SUBAGENT_DEPTH cap test without spinning up a real
     /// nested factory chain.
