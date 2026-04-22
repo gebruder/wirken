@@ -4479,6 +4479,153 @@ mod per_channel_llm_override {
         assert_eq!(a.api_key_for_test(), Some("default-key"));
     }
 
+    // -- Integration: audit capture + verify across providers --------
+    //
+    // Acceptance from #60: audit log records provider per LLM call,
+    // and `wirken sessions verify` passes when providers differ
+    // across turns. The factory + audit integration is what ties
+    // them together: whichever LlmConfig wake() picked is what ends
+    // up in the LlmRequest event's `provider` field, and because
+    // the hash chain is provider-agnostic, verify tolerates
+    // provider switches.
+
+    #[tokio::test]
+    async fn audit_captures_distinct_providers_across_channels() {
+        use wirken_audit::{SessionEvent, SessionId, TrustLevel};
+
+        // Build two LlmConfigs with obviously distinct provider
+        // names so the captured LlmRequest events cannot be
+        // accidentally equal.
+        let mut llm_a = LlmConfig::ollama("default-model");
+        llm_a.provider = "provider-default".into();
+        let mut llm_b = LlmConfig::ollama("override-model");
+        llm_b.provider = "provider-override".into();
+
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut configs = HashMap::new();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "signal".into(),
+            ChannelOverride {
+                llm_config: llm_b.clone(),
+                api_key: Some("override-key".into()),
+            },
+        );
+        configs.insert(
+            "a1".to_string(),
+            AgentStaticConfig {
+                agent_id: "a1".to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: llm_a.clone(),
+                channel_overrides: overrides,
+                api_key: Some("default-key".into()),
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: Default::default(),
+                sandbox: Default::default(),
+            },
+        );
+        let factory =
+            AgentFactory::with_options(configs, log.clone(), None, None, CacheMode::Drop, 4);
+
+        // Wake each channel, assert the factory picked the right
+        // (llm_config, api_key) pair, then emit an LlmRequest event
+        // using the agent's own config. The manual emit mirrors
+        // what `process_message_inner` does at runtime.rs:1001,
+        // without requiring a live HTTP endpoint.
+        for (channel, expected_provider, expected_model, expected_key) in [
+            (
+                "signal",
+                "provider-override",
+                "override-model",
+                "override-key",
+            ),
+            ("slack", "provider-default", "default-model", "default-key"),
+        ] {
+            let session = session_id_for("a1", channel, "conv-1");
+            let agent = factory.wake("a1", &session).unwrap();
+            let a = agent.lock().await;
+            assert_eq!(a.llm_config_for_test().provider, expected_provider);
+            assert_eq!(a.llm_config_for_test().model, expected_model);
+            assert_eq!(a.api_key_for_test(), Some(expected_key));
+
+            let handle = log.handle_for(SessionId::new(&session));
+            log.append(
+                &handle,
+                TrustLevel::System,
+                SessionEvent::LlmRequest {
+                    provider: a.llm_config_for_test().provider.clone(),
+                    model: a.llm_config_for_test().model.clone(),
+                    request_id: format!("req-{channel}"),
+                    tools_hash: wirken_audit::HashHex("00".repeat(32)),
+                    messages_hash: wirken_audit::HashHex("00".repeat(32)),
+                },
+            )
+            .unwrap();
+        }
+
+        // Each session's log carries the provider that matches
+        // the factory's wake-time selection. Two channels → two
+        // sessions → two distinct provider values recorded.
+        for (channel, expected) in [
+            ("signal", "provider-override"),
+            ("slack", "provider-default"),
+        ] {
+            let session = session_id_for("a1", channel, "conv-1");
+            let handle = log.handle_for(SessionId::new(&session));
+            let events = log.get_since(&handle, 0).unwrap();
+            let llm_req = events
+                .iter()
+                .find_map(|e| match &e.event {
+                    SessionEvent::LlmRequest { provider, .. } => Some(provider.clone()),
+                    _ => None,
+                })
+                .expect("LlmRequest event present");
+            assert_eq!(llm_req, expected, "channel {channel}");
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_passes_when_providers_differ_within_one_session() {
+        // An operator who changes the override for a channel
+        // mid-life (restart Wirken with a new config) produces a
+        // session whose earlier turns used the old provider and
+        // later turns use the new one. The hash chain does not
+        // care — it's computed over event payloads, and provider
+        // is just a payload field. `verify` must still pass.
+        use wirken_audit::{SessionEvent, SessionId, SessionVerifyResult, TrustLevel};
+
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let session_id = "a1/signal/conv-1";
+        let handle = log.handle_for(SessionId::new(session_id));
+
+        for (provider, model, req_id) in [
+            ("provider-v1", "model-v1", "req-1"),
+            ("provider-v2", "model-v2", "req-2"),
+        ] {
+            log.append(
+                &handle,
+                TrustLevel::System,
+                SessionEvent::LlmRequest {
+                    provider: provider.into(),
+                    model: model.into(),
+                    request_id: req_id.into(),
+                    tools_hash: wirken_audit::HashHex("00".repeat(32)),
+                    messages_hash: wirken_audit::HashHex("00".repeat(32)),
+                },
+            )
+            .unwrap();
+        }
+
+        match log.verify(&handle).unwrap() {
+            SessionVerifyResult::Ok { .. } => {}
+            other => panic!("verify should pass across provider switch, got: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn wake_uses_default_api_key_when_override_leaves_key_none() {
         // An override that leaves api_key = None is a deliberate
