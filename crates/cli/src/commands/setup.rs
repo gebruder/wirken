@@ -470,6 +470,16 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     println!();
 
+    // --- Step 2b: Per-channel LLM overrides (closes #60) ---
+    //
+    // Skip silently when no channels were selected; the override
+    // question has no meaning without a channel to attach it to.
+    if !selected_channels.is_empty() {
+        configure_channel_overrides(&cfg, &data, &selected_channels).await?;
+    }
+
+    println!();
+
     // --- Step 3: Service installation ---
 
     let should_install = if install_service {
@@ -860,6 +870,138 @@ async fn setup_whatsapp_channel(
         .context("Failed to register WhatsApp adapter")?;
 
     println!("  whatsapp: credentials encrypted, adapter keypair generated, registered.");
+    Ok(())
+}
+
+/// #60: prompt the operator for optional per-channel LLM provider
+/// overrides and persist them into provider.json under a
+/// `channel_overrides` map. Each override is keyed by channel and
+/// carries provider + model + base_url + the vault slot name to read
+/// the API key from at runtime. The slot is not created here — the
+/// operator must have run `wirken credentials add <slot>` separately,
+/// or use the default-slot `<provider>-api-key` naming. The wizard
+/// validates that the slot exists in the vault before persisting.
+async fn configure_channel_overrides(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+    selected_channels: &[&str],
+) -> Result<()> {
+    let wants_override = Confirm::new()
+        .with_prompt("  Configure a per-channel LLM provider override?")
+        .default(false)
+        .interact()?;
+    if !wants_override {
+        return Ok(());
+    }
+
+    // Load existing provider.json (main provider lands here first
+    // during setup, so the file exists by this point).
+    let provider_path = data.join("provider.json");
+    let mut provider_json: serde_json::Value = std::fs::read_to_string(&provider_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let mut overrides = provider_json
+        .get("channel_overrides")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    // Open the vault once so we can validate slot names the
+    // operator picks for each override.
+    let keychain = wirken_vault::probe_keychain(data, || {
+        dialoguer::Password::new()
+            .with_prompt("  Vault passphrase")
+            .interact()
+            .unwrap_or_default()
+    });
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    loop {
+        let channel_choices: Vec<String> =
+            selected_channels.iter().map(|s| s.to_string()).collect();
+        let ch_idx = Select::new()
+            .with_prompt("  Channel to override")
+            .items(&channel_choices)
+            .default(0)
+            .interact()?;
+        let channel = &channel_choices[ch_idx];
+
+        let providers = &[
+            ("openai", "https://api.openai.com/v1"),
+            ("anthropic", "https://api.anthropic.com/v1"),
+            ("ollama", "http://localhost:11434/v1"),
+            ("privatemode", "http://localhost:8080/v1"),
+            ("tinfoil", "https://api.tinfoil.sh/v1"),
+            ("bedrock", ""),
+            ("gemini", "https://generativelanguage.googleapis.com/v1beta"),
+            ("custom", ""),
+        ];
+        let provider_labels: Vec<&str> = providers.iter().map(|(p, _)| *p).collect();
+        let pidx = Select::new()
+            .with_prompt("  Provider for this channel")
+            .items(&provider_labels)
+            .default(0)
+            .interact()?;
+        let (provider_name, default_base_url) = providers[pidx];
+
+        let model: String = Input::new().with_prompt("  Model").interact_text()?;
+
+        let base_url: String = Input::new()
+            .with_prompt("  Base URL")
+            .default(default_base_url.to_string())
+            .interact_text()?;
+
+        // Per the #60 design: configs reference vault slots by name,
+        // the vault owns key material. The default slot name is
+        // `<provider>-api-key` (matching how `wirken setup` stores
+        // the main provider's key).
+        let default_slot = format!("{provider_name}-api-key");
+        let api_key_name: String = Input::new()
+            .with_prompt("  Vault slot for API key")
+            .default(default_slot.clone())
+            .interact_text()?;
+
+        // Validate early: refuse to persist a pointer at a slot
+        // that does not exist. Avoids a runtime failure on the
+        // first message routed to this channel.
+        if api_key_name.trim().is_empty() {
+            println!("  (no api_key_name provided — override will run without a key)");
+        } else if store.retrieve(&api_key_name).is_err() {
+            println!(
+                "  Warning: vault slot '{api_key_name}' does not exist yet. \
+                 Run `wirken credentials add {api_key_name}` before starting the gateway."
+            );
+        }
+
+        let entry = serde_json::json!({
+            "provider": provider_name,
+            "model": model,
+            "base_url": base_url,
+            "api_key_name": api_key_name,
+        });
+        overrides.insert(channel.clone(), entry);
+        println!(
+            "  Override recorded: {channel} -> {provider_name}/{model} (key slot: {api_key_name})"
+        );
+
+        if !Confirm::new()
+            .with_prompt("  Add another override?")
+            .default(false)
+            .interact()?
+        {
+            break;
+        }
+    }
+
+    provider_json["channel_overrides"] = serde_json::Value::Object(overrides);
+    std::fs::write(
+        &provider_path,
+        serde_json::to_string_pretty(&provider_json)?,
+    )
+    .context("Failed to write provider.json")?;
     Ok(())
 }
 
