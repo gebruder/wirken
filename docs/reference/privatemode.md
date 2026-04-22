@@ -58,7 +58,7 @@ Verified against <https://docs.privatemode.ai/models/overview/> as of Privatemod
 
 | Model ID | Context | Tools | Vision | Status |
 |----------|---------|-------|--------|--------|
-| `kimi-k2.5` | 262k | Yes | Yes | Preview (v1.38 release note); models page shows stable |
+| `kimi-k2.5` | 262k | Yes | Yes | Stable |
 | `gemma-3-27b` | 128k | Yes¹ | Yes | Stable |
 | `gpt-oss-120b` | 128k | Yes | No | Stable |
 | `qwen3-coder-30b-a3b` | 128k | Yes | No | **Deprecated** — migrate to `kimi-k2.5` |
@@ -66,7 +66,7 @@ Verified against <https://docs.privatemode.ai/models/overview/> as of Privatemod
 
 ¹ Gemma 3 cannot generate mixed text and tool outputs in the same response.
 
-**Wirken's choice (target):** default model is `gpt-oss-120b` (stable, text-only, 128k, tools). `kimi-k2.5` is Privatemode's recommended flagship and is what their 2.0 messaging leads with; exposing it via config is required but pinning it as the default is deferred until the preview-vs-stable discrepancy in Privatemode's own docs is resolved. The full catalog above is selectable via `model = "..."` in the provider config.
+**Wirken's default: `kimi-k2.5`.** Matches Privatemode's recommended flagship: 262k context, tools, multimodal. Alternates are selectable via `model = "..."` in the provider config.
 
 ## Credentials
 
@@ -113,7 +113,7 @@ Grounded in the Privatemode 2.0 launch email (2026-04-22) and the public release
 - Privatemode 2.0 bundles Kimi K2.5, the browser web app, and separate input/output/cached token pricing. The desktop app is deprecated in favor of the web app.
 - Proxy attestation happens before Wirken sends any request. The proxy writes manifest transitions to `log.txt` in its workspace.
 - `gpt-oss-120b` is stable with 128k context and tool calling (text-only, no vision).
-- `kimi-k2.5` shipped in **v1.38.0** (2026-04-22) with 262k context and multimodal input. The release note labels it preview; the models overview page shows it stable. Treat as preview until the two sources agree.
+- `kimi-k2.5` shipped in **v1.38.0** (2026-04-22) with 262k context and multimodal input.
 
 ## Known gotchas
 
@@ -127,7 +127,6 @@ Grounded in the Privatemode 2.0 launch email (2026-04-22) and the public release
 
 - Per-channel inference provider selection is not yet implemented.
 - Wirken does not verify Privatemode attestation independently; it trusts the proxy handshake.
-- Kimi K2.5 preview status is ambiguous in Privatemode's own docs; default to `gpt-oss-120b` until the two sources agree.
 - No integration test against a real proxy in CI. Acceptance in #57 requires a proxy stub or recorded cassettes.
 
 ## References

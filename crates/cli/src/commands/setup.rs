@@ -281,7 +281,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 println!("  The local proxy handles attestation and end-to-end encryption.");
                 println!("  Start it first:");
                 println!(
-                    "    docker run -p 8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>"
+                    "    docker run -p 127.0.0.1:8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>"
                 );
                 println!("  Get an API key at https://www.privatemode.ai");
                 println!();
@@ -294,7 +294,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 let model = if models.is_empty() {
                     Input::new()
                         .with_prompt("  Model")
-                        .default("gpt-oss-120b".into())
+                        .default("kimi-k2.5".into())
                         .interact_text()?
                 } else {
                     let idx = Select::new()
