@@ -291,6 +291,18 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // Create default agent for any unbound channels (backward compat with wirken setup)
     if !static_configs.contains_key("default") {
+        // Channel overrides from provider.json (closes #60). Optional;
+        // absent or empty map means "single-provider agent, pre-#60
+        // behavior." Each override entry names a vault slot for its
+        // api_key rather than carrying the key directly, so configs
+        // on disk stay key-free.
+        let channel_overrides = resolve_channel_overrides(
+            &provider_json,
+            &cfg.data_dir,
+            &cfg.vault_db_path(),
+            &vault_passphrase,
+        )?;
+
         let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
         // Bedrock: extract region from provider.json or base_url
         if provider == "bedrock" {
@@ -349,7 +361,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 agent_id: "default".into(),
                 workspace,
                 llm_config,
-                channel_overrides: std::collections::HashMap::new(),
+                channel_overrides,
                 api_key,
                 skills,
                 wasm_skills: Vec::new(),
@@ -1190,4 +1202,235 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         service,
         environment,
     })
+}
+
+/// Parse the `channel_overrides` map from provider.json and resolve
+/// each override's declared vault slot into a raw api_key.
+///
+/// Expected shape in provider.json:
+///
+/// ```json
+/// {
+///   "provider": "anthropic",
+///   "model": "claude-sonnet-4-6",
+///   "base_url": "...",
+///   "channel_overrides": {
+///     "signal": {
+///       "provider": "privatemode",
+///       "model": "kimi-k2.5",
+///       "base_url": "http://localhost:8080/v1",
+///       "api_key_name": "privatemode-access-key"
+///     }
+///   }
+/// }
+/// ```
+///
+/// An absent / malformed `channel_overrides` key is treated as
+/// "no overrides" — the function returns an empty map and
+/// `AgentFactory::wake` falls through to the default for every
+/// channel. This matches the back-compat contract from #60.
+///
+/// `api_key_name` is looked up in the vault; the function is
+/// fail-closed on a configured-but-missing slot (an operator who
+/// named a slot that does not exist in the vault gets an early,
+/// clear error instead of a runtime failure on the first inbound
+/// message).
+fn resolve_channel_overrides(
+    provider_json: &serde_json::Value,
+    data_dir: &std::path::Path,
+    vault_db_path: &std::path::Path,
+    vault_passphrase: &str,
+) -> anyhow::Result<std::collections::HashMap<String, wirken_agent::ChannelOverride>> {
+    let raw = match provider_json.get("channel_overrides") {
+        Some(serde_json::Value::Object(m)) if !m.is_empty() => m,
+        _ => return Ok(std::collections::HashMap::new()),
+    };
+
+    // Open the vault once, not per-override. The passphrase is
+    // already collected earlier in run() for the default provider's
+    // key; reuse it verbatim.
+    let passphrase = vault_passphrase.to_string();
+    let keychain = probe_keychain(data_dir, move || passphrase.clone());
+    let store = CredentialStore::open(vault_db_path, keychain.as_ref())
+        .context("Failed to open credential store for channel_overrides")?;
+
+    let mut out = std::collections::HashMap::new();
+    for (channel, cfg) in raw {
+        let provider = cfg
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("channel_overrides['{channel}'] missing 'provider' field")
+            })?;
+        let model = cfg.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
+            anyhow::anyhow!("channel_overrides['{channel}'] missing 'model' field")
+        })?;
+        let base_url = cfg.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
+
+        let api_key = match cfg.get("api_key_name").and_then(|v| v.as_str()) {
+            Some(slot) => {
+                let (secret, _) = store.retrieve(slot).with_context(|| {
+                    format!(
+                        "channel_overrides['{channel}'] names vault slot '{slot}', \
+                         but that slot is not present in the vault. \
+                         Run `wirken credentials add {slot}` to add it."
+                    )
+                })?;
+                Some(secret.expose().to_string())
+            }
+            None => None,
+        };
+
+        let llm_config = LlmConfig::from_provider(provider, base_url, model);
+        out.insert(
+            channel.clone(),
+            wirken_agent::ChannelOverride {
+                llm_config,
+                api_key,
+            },
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod channel_overrides_tests {
+    use super::resolve_channel_overrides;
+    use tempfile::TempDir;
+    use wirken_vault::{AgeFileKeychain, CredentialStore, VaultSecret};
+
+    fn vault_with(slot: &str, value: &str) -> (TempDir, std::path::PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let keychain = AgeFileKeychain::new(tmp.path().join("keychain"), "test-passphrase".into());
+        let store = CredentialStore::open(&vault_path, &keychain).unwrap();
+        store
+            .store(slot, "test", &VaultSecret::new(value.into()), None, None)
+            .unwrap();
+        (tmp, vault_path)
+    }
+
+    #[test]
+    fn missing_channel_overrides_returns_empty_map() {
+        let (tmp, vault_path) = vault_with("ignored-slot", "ignored");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "base_url": "https://api.anthropic.com/v1",
+        });
+        let out =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn empty_channel_overrides_object_returns_empty_map() {
+        let (tmp, vault_path) = vault_with("ignored-slot", "ignored");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude",
+            "channel_overrides": {},
+        });
+        let out =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resolves_slot_to_key_and_constructs_override() {
+        let (tmp, vault_path) = vault_with("privatemode-access-key", "pm-secret");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude",
+            "channel_overrides": {
+                "signal": {
+                    "provider": "privatemode",
+                    "model": "kimi-k2.5",
+                    "base_url": "http://localhost:8080/v1",
+                    "api_key_name": "privatemode-access-key"
+                }
+            }
+        });
+        let out =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .unwrap();
+        let signal = out.get("signal").expect("signal override resolved");
+        assert_eq!(signal.llm_config.model, "kimi-k2.5");
+        assert_eq!(signal.api_key.as_deref(), Some("pm-secret"));
+    }
+
+    #[test]
+    fn missing_slot_in_vault_fails_closed_at_startup() {
+        // Operator named a vault slot that was never created. Refusing
+        // to start here beats a confusing runtime failure on the first
+        // message routed to the channel.
+        let (tmp, vault_path) = vault_with("some-other-slot", "irrelevant");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude",
+            "channel_overrides": {
+                "signal": {
+                    "provider": "privatemode",
+                    "model": "kimi-k2.5",
+                    "api_key_name": "privatemode-access-key"
+                }
+            }
+        });
+        let err =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .expect_err("missing slot must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("privatemode-access-key"),
+            "error must name the missing slot, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn override_without_api_key_name_is_allowed() {
+        // Some provider configurations do not require a key (local
+        // Ollama, Privatemode proxy accepting any bearer). An override
+        // that omits api_key_name persists cleanly with api_key = None.
+        let (tmp, vault_path) = vault_with("ignored", "ignored");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude",
+            "channel_overrides": {
+                "ollama-channel": {
+                    "provider": "ollama",
+                    "model": "llama3",
+                    "base_url": "http://localhost:11434/v1"
+                }
+            }
+        });
+        let out =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .unwrap();
+        let ov = out.get("ollama-channel").unwrap();
+        assert_eq!(ov.llm_config.model, "llama3");
+        assert_eq!(ov.api_key, None);
+    }
+
+    #[test]
+    fn override_missing_provider_field_errors_with_channel_name() {
+        let (tmp, vault_path) = vault_with("ignored", "ignored");
+        let provider_json = serde_json::json!({
+            "provider": "anthropic",
+            "model": "claude",
+            "channel_overrides": {
+                "signal": { "model": "kimi-k2.5" }
+            }
+        });
+        let err =
+            resolve_channel_overrides(&provider_json, tmp.path(), &vault_path, "test-passphrase")
+                .expect_err("missing provider must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("signal"), "error must name the channel: {msg}");
+        assert!(
+            msg.contains("provider"),
+            "error must name the missing field: {msg}"
+        );
+    }
 }
