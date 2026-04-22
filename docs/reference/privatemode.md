@@ -1,6 +1,17 @@
 # Privatemode reference instance
 
-Wirken advertises Privatemode as a supported confidential inference backend. This document describes the reference instance: what runs, how it is deployed, how it is tested, and how to verify a round-trip.
+> **Status: in development (tracked in [#57](https://github.com/gebruder/wirken/issues/57)).**
+> This document specifies the target Wirken + Privatemode reference instance timed to the Privatemode 2.0 release. Sections marked _Target_ describe work that is not yet built; sections marked _Today_ describe what ships in the current Wirken binary. The "Verified claims" list describes properties of Privatemode itself (not this integration's completeness).
+
+## What works today
+
+Wirken already ships a Privatemode provider option. Running `wirken setup` and selecting Privatemode will:
+
+- Prompt for the proxy URL (default `http://localhost:8080`) and access key.
+- Encrypt the access key into the XChaCha20-Poly1305 vault alongside channel credentials.
+- Configure the agent to call the Privatemode local proxy with OpenAI-shape requests at `POST /v1/chat/completions`, 128k context, tools enabled.
+
+That path works end-to-end against a user-started `privatemode-proxy` container. What this reference instance adds: Anthropic-shape default, packaged sidecar recipes, an end-to-end integration test, and a round-trip verification procedure documented below.
 
 ## Architecture
 
@@ -27,12 +38,10 @@ Stacked, the only parties who see plaintext are the end user and the TEE.
 
 ## API shape
 
-Privatemode supports both Anthropic `/v1/messages` and OpenAI `/v1/chat/completions`. Wirken defaults to Anthropic shape:
+Privatemode supports both Anthropic `/v1/messages` and OpenAI `/v1/chat/completions`.
 
-- `POST http://localhost:8080/v1/messages` (default)
-- `POST http://localhost:8080/v1/chat/completions` (alternate)
-
-Select with `api_shape = "anthropic"` or `"openai"` in the provider config.
+- _Today:_ Wirken uses OpenAI shape (`POST http://localhost:8080/v1/chat/completions`). See `crates/agent/src/llm.rs::privatemode()`.
+- _Target:_ default to Anthropic shape with OpenAI shape as alternate, selectable via `api_shape = "anthropic" | "openai"` in the provider config.
 
 ## Models
 
@@ -41,18 +50,28 @@ Select with `api_shape = "anthropic"` or `"openai"` in the provider config.
 
 ## Credentials
 
-The Privatemode access key is stored in Wirken's XChaCha20-Poly1305 vault as a single inference credential. It is not channel-scoped. All channels share one inference backend.
+_Today._ The Privatemode access key is stored in Wirken's XChaCha20-Poly1305 vault as a single inference credential. It is not channel-scoped — all channels share one inference backend.
 
 ## Deployment
 
-`privatemode-proxy` runs as a sidecar next to Wirken. Recipes live in `deploy/privatemode/`:
+_Today._ Users start `privatemode-proxy` themselves, for example:
+
+```
+docker run -p 8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>
+```
+
+The `wirken setup` wizard prints this command when Privatemode is selected.
+
+_Target._ Packaged sidecar recipes in `deploy/privatemode/`:
 
 - `systemd/privatemode-proxy.service` for systemd hosts
 - `compose/docker-compose.yml` for container hosts
 
-Both bind the proxy to `127.0.0.1:8080`. Wirken talks to loopback only.
+Both will bind the proxy to `127.0.0.1:8080`. Wirken talks to loopback only.
 
 ## Verifying a round-trip
+
+_Target procedure:_
 
 1. Start the proxy via the chosen recipe.
 2. `wirken run` with `provider = "privatemode"`.
@@ -60,6 +79,8 @@ Both bind the proxy to `127.0.0.1:8080`. Wirken talks to loopback only.
 4. Confirm receipt of the agent response in the channel.
 5. `wirken audit log` shows the inference request and response appended.
 6. `wirken sessions verify` succeeds against the hash-chained log.
+
+Step 5 and step 6 depend on audit/session tooling covered by the acceptance criteria in #57.
 
 ## Verified claims
 
