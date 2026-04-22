@@ -184,7 +184,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             agent_id: agent_id.clone(),
             workspace,
             llm_config,
-            llm_overrides: HashMap::new(),
+            channel_overrides: HashMap::new(),
             api_key: None, // verify never calls the LLM
             skills: Vec::new(),
             wasm_skills: Vec::new(),
