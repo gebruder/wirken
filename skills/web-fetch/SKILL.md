@@ -2,7 +2,7 @@
 name: web-fetch
 description: Fetch and extract content from URLs
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [curl]
 ---

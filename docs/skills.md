@@ -13,7 +13,7 @@ Example (`~/.wirken/skills/weather/SKILL.md`):
 name: weather
 description: Get current weather and forecasts
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [curl]
 ---
@@ -29,7 +29,7 @@ Get weather using wttr.in.
 The frontmatter fields:
 - `name`: Skill name (falls back to directory name)
 - `description`: One-line description
-- `metadata.openclaw.requires.bins`: Required binaries. The skill is marked unavailable if any are missing.
+- `metadata.wirken.requires.bins`: Required binaries. The skill is marked unavailable if any are missing. `metadata.openclaw.requires.bins` is accepted as a deprecated alias.
 
 Wirken ships with 15 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
 

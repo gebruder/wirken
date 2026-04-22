@@ -2,7 +2,7 @@
 name: docker
 description: Docker container management
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [docker]
 ---

@@ -125,7 +125,7 @@ fn load_skill_from_markdown() {
         r#"---
 name: weather
 description: "Get current weather via wttr.in"
-metadata: { "openclaw": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
+metadata: { "wirken": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
 ---
 
 # Weather Skill
@@ -201,7 +201,8 @@ description: "Needs a nonexistent binary"
 metadata: { "openclaw": { "requires": { "bins": ["nonexistent_binary_xyz_999"] } } }
 ---
 
-This skill requires a binary that doesn't exist.
+This skill requires a binary that doesn't exist, declared under the
+deprecated `openclaw` alias to exercise the back-compat path.
 "#,
     )
     .unwrap();
