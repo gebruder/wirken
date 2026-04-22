@@ -50,7 +50,7 @@ pub struct AgentIdentity {
 impl AgentIdentity {
     /// Generate a fresh identity. Does not persist anything.
     pub fn generate(agent_id: impl Into<String>) -> Self {
-        use rand::RngCore;
+        use rand::Rng;
         let mut secret = [0u8; 32];
         rand::rng().fill_bytes(&mut secret);
         Self {
