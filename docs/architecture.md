@@ -214,7 +214,7 @@ These skills have zero compilation and zero migration cost. Wirken's agent runti
 ---
 name: weather
 description: "Get current weather via wttr.in"
-metadata: { "openclaw": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
+metadata: { "wirken": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
 ---
 ```
 

@@ -2,7 +2,7 @@
 name: tmux
 description: Manage tmux terminal sessions
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [tmux]
 ---

@@ -149,12 +149,27 @@ fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentE
 }
 
 /// Extract required binary names from the metadata field.
-/// Handles the OpenClaw format: metadata.openclaw.requires.bins
+/// Primary key is `metadata.wirken.requires.bins`. `metadata.openclaw.*`
+/// is accepted as a deprecated alias for back-compat; a migration hint
+/// is logged when only the alias is present.
 fn extract_required_bins(fm: &SkillFrontmatter) -> Vec<String> {
-    fm.metadata
-        .as_ref()
-        .and_then(|m| m.get("openclaw"))
-        .and_then(|oc| oc.get("requires"))
+    let metadata = match fm.metadata.as_ref() {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+
+    let section = metadata.get("wirken").or_else(|| {
+        let openclaw = metadata.get("openclaw");
+        if openclaw.is_some() {
+            tracing::warn!(
+                "skill frontmatter uses deprecated 'openclaw' metadata key; rename to 'wirken'"
+            );
+        }
+        openclaw
+    });
+
+    section
+        .and_then(|s| s.get("requires"))
         .and_then(|req| req.get("bins"))
         .and_then(|bins| bins.as_array())
         .map(|arr| {

@@ -2,7 +2,7 @@
 name: github
 description: GitHub operations via the gh CLI
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [gh]
 ---
