@@ -5,7 +5,7 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 use ed25519_dalek::{Signer, SigningKey};
-use rand::RngCore;
+use rand::Rng;
 
 use crate::mcp_registry::ProxyRegistry;
 use crate::server;

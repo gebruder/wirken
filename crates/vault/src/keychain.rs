@@ -235,7 +235,7 @@ mod age_file {
 
             // Generate a random salt
             let mut salt = [0u8; SALT_SIZE];
-            rand::RngCore::fill_bytes(&mut rand::rng(), &mut salt);
+            rand::Rng::fill_bytes(&mut rand::rng(), &mut salt);
 
             // Derive wrapping key from passphrase + salt
             let wrapping_key = self.derive_wrapping_key(&salt)?;

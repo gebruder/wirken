@@ -1,5 +1,5 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::RngCore;
+use rand::Rng;
 
 use crate::error::HandshakeError;
 use crate::transport::{FrameReader, FrameWriter};
