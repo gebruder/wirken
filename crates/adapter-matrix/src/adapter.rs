@@ -164,9 +164,11 @@ impl MatrixAdapter {
             // Process room events
             if let Some(rooms) = sync_json["rooms"]["join"].as_object() {
                 for (room_id, room_data) in rooms {
+                    let is_dm = is_room_dm(&room_data["summary"]);
                     if let Some(events) = room_data["timeline"]["events"].as_array() {
                         for event in events {
-                            if let Some(inbound) = parse_sync_event(event, room_id, &user_id) {
+                            if let Some(inbound) = parse_sync_event(event, room_id, &user_id, is_dm)
+                            {
                                 if !convert::should_process(&inbound, &user_id, "Wirken") {
                                     continue;
                                 }
@@ -186,11 +188,26 @@ impl MatrixAdapter {
     }
 }
 
+/// A Matrix room is treated as a 1:1 DM when its sync `summary`
+/// reports exactly two joined members. The Matrix spec also defines
+/// `m.direct` account-data for an authoritative DM flag, but that
+/// requires a separate fetch and depends on the peer having set it at
+/// room creation; member-count is the reliable signal available
+/// inline in every /sync response. Missing/malformed summary falls
+/// back to `false` (treated as group, mention-gated).
+pub(crate) fn is_room_dm(summary: &serde_json::Value) -> bool {
+    summary
+        .get("m.joined_member_count")
+        .and_then(|v| v.as_i64())
+        .is_some_and(|n| n == 2)
+}
+
 /// Parse a sync timeline event into a MatrixInbound.
-fn parse_sync_event(
+pub(crate) fn parse_sync_event(
     event: &serde_json::Value,
     room_id: &str,
     bot_user_id: &str,
+    is_dm: bool,
 ) -> Option<MatrixInbound> {
     let event_type = event.get("type")?.as_str()?;
     if event_type != "m.room.message" {
@@ -230,7 +247,7 @@ fn parse_sync_event(
         room_id: room_id.to_string(),
         text: body.to_string(),
         timestamp_ms,
-        is_dm: false, // Determined by room membership count
+        is_dm,
         reply_to_event,
         room_name: None,
         is_encrypted: false, // No E2EE without matrix-sdk
