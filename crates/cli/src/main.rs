@@ -98,8 +98,23 @@ enum Commands {
 enum ChannelCommands {
     /// Add a new channel
     Add {
-        /// Channel type (telegram, discord, slack)
+        /// Channel type (telegram, discord, slack, whatsapp, etc.)
         channel: String,
+        /// Access/bot token. Reads WIRKEN_<CHANNEL>_TOKEN env var if not supplied.
+        #[arg(long)]
+        token: Option<String>,
+        /// WhatsApp: Cloud API phone number ID (15-16 digit numeric).
+        /// Reads WIRKEN_WHATSAPP_PHONE_NUMBER_ID if not supplied.
+        #[arg(long)]
+        phone_number_id: Option<String>,
+        /// WhatsApp: webhook verify token Meta calls with ?hub.verify_token=.
+        /// Reads WIRKEN_WHATSAPP_VERIFY_TOKEN if not supplied.
+        #[arg(long)]
+        verify_token: Option<String>,
+        /// WhatsApp: Meta app secret (32-char lowercase hex) for HMAC signature.
+        /// Reads WIRKEN_WHATSAPP_APP_SECRET if not supplied.
+        #[arg(long)]
+        app_secret: Option<String>,
     },
     /// List configured channels
     List,
@@ -381,7 +396,24 @@ async fn main() -> Result<()> {
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,
         Commands::McpProxy => commands::mcp_proxy::run().await,
         Commands::Channel(cmd) => match cmd {
-            ChannelCommands::Add { channel } => commands::channel::add(&channel).await,
+            ChannelCommands::Add {
+                channel,
+                token,
+                phone_number_id,
+                verify_token,
+                app_secret,
+            } => {
+                commands::channel::add(
+                    &channel,
+                    commands::channel::AddFlags {
+                        token,
+                        phone_number_id,
+                        verify_token,
+                        app_secret,
+                    },
+                )
+                .await
+            }
             ChannelCommands::List => commands::channel::list().await,
             ChannelCommands::Remove { channel } => commands::channel::remove(&channel).await,
         },
