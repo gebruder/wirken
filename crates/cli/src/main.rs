@@ -336,6 +336,15 @@ enum CredentialCommands {
         /// Optional channel/category tag for `wirken credentials list`
         #[arg(long)]
         channel: Option<String>,
+        /// Read the value from stdin instead of prompting. A single
+        /// trailing newline is stripped. Useful for piping:
+        /// `echo "$SECRET" | wirken credentials add NAME --stdin`.
+        #[arg(long, conflicts_with = "value_file")]
+        stdin: bool,
+        /// Read the value from a file. A single trailing newline is
+        /// stripped. Mutually exclusive with --stdin.
+        #[arg(long, conflicts_with = "stdin")]
+        value_file: Option<std::path::PathBuf>,
     },
     /// Rotate a credential
     Rotate {
@@ -446,8 +455,18 @@ async fn main() -> Result<()> {
         },
         Commands::Credentials(cmd) => match cmd {
             CredentialCommands::List => commands::credential::list().await,
-            CredentialCommands::Add { name, channel } => {
-                commands::credential::add(&name, channel.as_deref()).await
+            CredentialCommands::Add {
+                name,
+                channel,
+                stdin,
+                value_file,
+            } => {
+                commands::credential::add(
+                    &name,
+                    channel.as_deref(),
+                    commands::credential::ValueSource::from_flags(stdin, value_file),
+                )
+                .await
             }
             CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
         },
