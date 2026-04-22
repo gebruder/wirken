@@ -2,6 +2,7 @@ use wirken_ipc::transport::split_stream;
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
 
+use crate::adapter::{is_room_dm, parse_sync_event};
 use crate::convert::{self, MatrixInbound};
 
 // ---------------------------------------------------------------------------
@@ -361,6 +362,87 @@ async fn full_message_flow_simulation() {
         }
         _ => panic!("expected OutboundResult"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// DM detection from room summary
+// ---------------------------------------------------------------------------
+
+#[test]
+fn room_with_two_joined_members_is_dm() {
+    let summary = serde_json::json!({ "m.joined_member_count": 2 });
+    assert!(is_room_dm(&summary));
+}
+
+#[test]
+fn room_with_three_joined_members_is_not_dm() {
+    let summary = serde_json::json!({ "m.joined_member_count": 3 });
+    assert!(!is_room_dm(&summary));
+}
+
+#[test]
+fn room_with_missing_summary_is_not_dm() {
+    assert!(!is_room_dm(&serde_json::Value::Null));
+    assert!(!is_room_dm(&serde_json::json!({})));
+}
+
+#[test]
+fn parse_sync_event_propagates_is_dm_flag() {
+    let event = serde_json::json!({
+        "type": "m.room.message",
+        "sender": "@alice:example.org",
+        "event_id": "$ev:example.org",
+        "origin_server_ts": 1711234567890i64,
+        "content": { "msgtype": "m.text", "body": "hi" },
+    });
+
+    let dm = parse_sync_event(&event, "!room:example.org", "@bot:example.org", true).unwrap();
+    assert!(dm.is_dm);
+
+    let group = parse_sync_event(&event, "!room:example.org", "@bot:example.org", false).unwrap();
+    assert!(!group.is_dm);
+}
+
+#[test]
+fn dm_detected_from_summary_bypasses_mention_gate() {
+    // 1:1 DM: summary says 2 joined members → parse gives is_dm=true
+    // → should_process returns true even without the bot being mentioned.
+    let summary = serde_json::json!({ "m.joined_member_count": 2 });
+    let event = serde_json::json!({
+        "type": "m.room.message",
+        "sender": "@alice:example.org",
+        "event_id": "$ev:example.org",
+        "origin_server_ts": 1711234567890i64,
+        "content": { "msgtype": "m.text", "body": "no mention here" },
+    });
+    let msg = parse_sync_event(
+        &event,
+        "!room:example.org",
+        "@bot:example.org",
+        is_room_dm(&summary),
+    )
+    .unwrap();
+    assert!(convert::should_process(&msg, "@bot:example.org", "Wirken"));
+}
+
+#[test]
+fn group_room_without_mention_still_dropped() {
+    let summary = serde_json::json!({ "m.joined_member_count": 5 });
+    let event = serde_json::json!({
+        "type": "m.room.message",
+        "sender": "@alice:example.org",
+        "event_id": "$ev:example.org",
+        "origin_server_ts": 1711234567890i64,
+        "content": { "msgtype": "m.text", "body": "hello everyone" },
+    });
+    let msg = parse_sync_event(
+        &event,
+        "!room:example.org",
+        "@bot:example.org",
+        is_room_dm(&summary),
+    )
+    .unwrap();
+    assert!(!convert::should_process(&msg, "@bot:example.org", "Wirken"));
 }
 
 // ---------------------------------------------------------------------------
