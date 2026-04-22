@@ -4,7 +4,7 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
-use rand::RngCore;
+use rand::Rng;
 use zeroize::Zeroizing;
 
 /// Nonce size for XChaCha20-Poly1305 (24 bytes).

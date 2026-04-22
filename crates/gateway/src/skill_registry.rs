@@ -137,7 +137,7 @@ pub fn verify_skill(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
 /// Generate a new Ed25519 keypair for skill signing.
 /// Returns (secret_key_hex, public_key_hex).
 pub fn generate_signing_keypair() -> (String, String) {
-    use rand::RngCore;
+    use rand::Rng;
     let mut secret = [0u8; 32];
     rand::rng().fill_bytes(&mut secret);
     let signing_key = SigningKey::from_bytes(&secret);
@@ -229,7 +229,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::RngCore;
+    use rand::Rng;
     use tempfile::TempDir;
 
     fn random_signing_key() -> SigningKey {
