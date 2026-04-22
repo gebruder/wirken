@@ -125,7 +125,6 @@ Grounded in the Privatemode 2.0 launch email (2026-04-22) and the public release
 
 ## Gaps
 
-- Per-channel inference provider selection is not yet implemented.
 - Wirken does not verify Privatemode attestation independently; it trusts the proxy handshake.
 - No integration test against a real proxy in CI. Acceptance in #57 requires a proxy stub or recorded cassettes.
 

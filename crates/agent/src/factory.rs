@@ -97,7 +97,7 @@ pub(crate) fn channel_from_session_id(session_id: &str) -> Option<&str> {
 /// instead name a vault slot (`"provider-api-key"` etc.) and let
 /// startup resolve the slot to the key material before constructing
 /// the `AgentStaticConfig`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChannelOverride {
     pub llm_config: LlmConfig,
     pub api_key: Option<String>,
