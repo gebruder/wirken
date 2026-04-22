@@ -2,7 +2,7 @@
 name: ssh
 description: SSH key management and remote connections
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [ssh]
 ---

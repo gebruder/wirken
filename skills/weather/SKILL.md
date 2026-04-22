@@ -2,7 +2,7 @@
 name: weather
 description: Get current weather and forecasts
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [curl]
 ---

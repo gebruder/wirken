@@ -2,7 +2,7 @@
 name: git
 description: Git version control operations
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [git]
 ---

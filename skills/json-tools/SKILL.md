@@ -2,7 +2,7 @@
 name: json-tools
 description: Parse, query, and transform JSON data
 metadata:
-  openclaw:
+  wirken:
     requires:
       bins: [jq]
 ---
