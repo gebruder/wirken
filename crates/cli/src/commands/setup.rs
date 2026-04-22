@@ -406,6 +406,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         "Signal",
         "Google Chat",
         "iMessage (BlueBubbles)",
+        "WhatsApp (Cloud API)",
         "Skip for now",
     ];
     let mut selected_channels = Vec::new();
@@ -450,7 +451,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 setup_imessage_channel(&cfg, &data).await?;
                 selected_channels.push("imessage");
             }
-            8 => break,
+            8 => {
+                setup_whatsapp_channel(&cfg, &data).await?;
+                selected_channels.push("whatsapp");
+            }
+            9 => break,
             _ => unreachable!(),
         }
 
@@ -802,6 +807,59 @@ async fn setup_imessage_channel(
         .context("Failed to store server password")?;
 
     println!("  imessage: credentials encrypted.");
+    Ok(())
+}
+
+async fn setup_whatsapp_channel(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+) -> Result<()> {
+    println!("  WhatsApp uses the Meta Cloud API. You need four values from your");
+    println!("  Meta app's WhatsApp product page:");
+    println!("    - Access token (permanent system-user token recommended)");
+    println!("    - Phone number ID (15-16 digit numeric)");
+    println!("    - Verify token (any string you chose when registering the webhook)");
+    println!("    - App secret (32-char hex from Meta app settings)");
+    println!("  See https://developers.facebook.com/docs/whatsapp/cloud-api");
+
+    // collect_whatsapp_creds honors WIRKEN_WHATSAPP_* env vars and
+    // otherwise prompts; passing default flags means the wizard is
+    // interactive but an operator can still pre-populate via env.
+    let creds = super::channel::collect_whatsapp_creds(super::channel::AddFlags::default())
+        .context("Failed to collect WhatsApp credentials")?;
+
+    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    super::channel::store_whatsapp_creds(&store, &creds)?;
+
+    // The adapter registry identifies channels by name; register it
+    // the same way every other adapter does so the spawn loop in
+    // `wirken run` picks it up.
+    let identity = wirken_ipc::AdapterIdentity::generate("whatsapp");
+    let pub_key = identity.public_key_bytes();
+    let secret_key_hex: String = identity
+        .secret_key_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    store
+        .store(
+            "whatsapp-adapter-key",
+            "whatsapp",
+            &wirken_vault::VaultSecret::new(secret_key_hex),
+            None,
+            None,
+        )
+        .context("Failed to store WhatsApp adapter key")?;
+    let registry = wirken_gateway::adapter_registry::AdapterRegistry::open(&cfg.adapters_db_path())
+        .context("Failed to open adapter registry")?;
+    let _ = registry.unregister("whatsapp");
+    registry
+        .register("whatsapp", &pub_key, "whatsapp")
+        .context("Failed to register WhatsApp adapter")?;
+
+    println!("  whatsapp: credentials encrypted, adapter keypair generated, registered.");
     Ok(())
 }
 
