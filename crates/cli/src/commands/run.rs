@@ -377,6 +377,46 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .context(format!("Failed to bind UDS at {}", socket_path.display()))?;
     println!("  Socket: {}", socket_path.display());
 
+    // --- Pre-flight: validate per-adapter vault entries ---
+    //
+    // Each adapter binary will fail at startup if its vault keys are
+    // missing or malformed, but that failure surfaces as an adapter
+    // subprocess crash several hundred milliseconds after `wirken run`
+    // prints "Gateway running," which is a confusing failure mode for
+    // an operator. Check upfront. WhatsApp is the first channel with
+    // multiple required fields; extend this list as other channels
+    // grow mandatory secondary credentials.
+    {
+        let keychain = probe_keychain(&cfg.data_dir, String::new);
+        let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
+        for adapter_entry in registry.lock().await.list() {
+            if adapter_entry.channel == "whatsapp"
+                && let Some(ref store) = vault
+            {
+                let required = [
+                    ("whatsapp-token", "access token"),
+                    ("whatsapp-phone-number-id", "phone number ID"),
+                    ("whatsapp-verify-token", "verify token"),
+                    ("whatsapp-app-secret", "app secret"),
+                ];
+                let missing: Vec<&str> = required
+                    .iter()
+                    .filter(|(key, _)| store.retrieve(key).is_err())
+                    .map(|(_, human)| *human)
+                    .collect();
+                if !missing.is_empty() {
+                    anyhow::bail!(
+                        "WhatsApp adapter is registered but the vault is missing: {}. \
+                         Re-run `wirken channel add whatsapp` or set WIRKEN_WHATSAPP_TOKEN, \
+                         WIRKEN_WHATSAPP_PHONE_NUMBER_ID, WIRKEN_WHATSAPP_VERIFY_TOKEN, and \
+                         WIRKEN_WHATSAPP_APP_SECRET before starting.",
+                        missing.join(", ")
+                    );
+                }
+            }
+        }
+    }
+
     // --- Spawn adapter processes ---
     let exe = std::env::current_exe()?;
     let mut adapter_handles = Vec::new();
