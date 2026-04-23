@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use dialoguer::{Confirm, Input, Password, Select};
+use dialoguer::{Confirm, Input, Select};
 
 use super::channel::register_channel;
 use super::{config, data_dir};
@@ -28,12 +28,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                         }
                         if let Some(ref key_name) = org.api_key_name {
                             // Check if the API key credential already exists
-                            let keychain = probe_keychain(&data, || {
-                                Password::new()
-                                    .with_prompt("  Vault passphrase (for encrypting credentials)")
-                                    .interact()
-                                    .unwrap_or_default()
-                            });
+                            let keychain = probe_keychain(&data, super::cached_vault_passphrase);
                             let store =
                                 CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                                     .context("Failed to open credential store")?;
@@ -108,12 +103,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                                         data: &std::path::Path|
          -> Result<String> {
             println!("  Encrypting API key...");
-            let keychain = probe_keychain(data, || {
-                Password::new()
-                    .with_prompt("  Vault passphrase (for encrypting credentials)")
-                    .interact()
-                    .unwrap_or_default()
-            });
+            let keychain = probe_keychain(data, super::cached_vault_passphrase);
             let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                 .context("Failed to open credential store")?;
             let secret = VaultSecret::new(api_key);
@@ -341,12 +331,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
             println!("  Encrypting API key...");
 
-            let keychain = probe_keychain(&data, || {
-                Password::new()
-                    .with_prompt("  Vault passphrase (for encrypting credentials)")
-                    .interact()
-                    .unwrap_or_default()
-            });
+            let keychain = probe_keychain(&data, super::cached_vault_passphrase);
 
             let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
                 .context("Failed to open credential store")?;
@@ -611,7 +596,7 @@ async fn setup_slack_channel(
     register_channel("slack", &bot_token, cfg, data).await?;
 
     // Store the app token separately (Socket Mode needs both)
-    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
     let secret = wirken_vault::VaultSecret::new(app_token);
@@ -637,7 +622,7 @@ async fn setup_teams_channel(
     register_channel("teams", &app_password, cfg, data).await?;
 
     // Store the app ID separately
-    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
     let secret = wirken_vault::VaultSecret::new(app_id);
@@ -667,7 +652,7 @@ async fn setup_matrix_channel(
     register_channel("matrix", &password, cfg, data).await?;
 
     // Store homeserver URL and username in vault
-    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
@@ -729,7 +714,7 @@ async fn setup_signal_channel(
     // Use endpoint as the primary "token" for registration
     register_channel("signal", &endpoint, cfg, data).await?;
 
-    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
@@ -790,7 +775,7 @@ async fn setup_imessage_channel(
     // Use server password as primary token
     register_channel("imessage", &server_password, cfg, data).await?;
 
-    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
@@ -838,7 +823,7 @@ async fn setup_whatsapp_channel(
     let creds = super::channel::collect_whatsapp_creds(super::channel::AddFlags::default())
         .context("Failed to collect WhatsApp credentials")?;
 
-    let keychain = wirken_vault::probe_keychain(data, String::new);
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
     super::channel::store_whatsapp_creds(&store, &creds)?;
@@ -910,12 +895,7 @@ async fn configure_channel_overrides(
 
     // Open the vault once so we can validate slot names the
     // operator picks for each override.
-    let keychain = wirken_vault::probe_keychain(data, || {
-        dialoguer::Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let keychain = wirken_vault::probe_keychain(data, super::cached_vault_passphrase);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 

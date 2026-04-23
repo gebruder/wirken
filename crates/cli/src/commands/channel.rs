@@ -402,25 +402,24 @@ pub async fn remove(channel: &str) -> Result<()> {
         .unregister(channel)
         .context(format!("Failed to remove channel '{channel}'"))?;
 
-    // Remove credential(s). WhatsApp has four keys; everything else
-    // uses one `<channel>-token` entry.
-    let keychain = probe_keychain(&cfg.data_dir, String::new);
-    if let Ok(store) = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
-        if channel == "whatsapp" {
-            for key in [
-                "whatsapp-token",
-                "whatsapp-phone-number-id",
-                "whatsapp-verify-token",
-                "whatsapp-app-secret",
-            ] {
-                let _ = store.delete(key);
-            }
-        } else {
-            let _ = store.delete(&format!("{channel}-token"));
-        }
-    }
+    // Remove every credential tagged with this channel — `<channel>-token`,
+    // `<channel>-adapter-key`, plus any per-channel detail rows (signal's
+    // endpoint/phone/allowlist, slack's app-token, whatsapp's four keys,
+    // etc.). Vault open is best-effort: if the device key cannot be
+    // unwrapped (e.g. the operator re-keyed the vault), the registry
+    // entry still goes away and the encrypted rows can be cleared with
+    // `wirken credentials remove <name>`.
+    let keychain = probe_keychain(&cfg.data_dir, super::cached_vault_passphrase);
+    let removed = match CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
+        Ok(store) => store.delete_by_channel(channel).unwrap_or(0),
+        Err(_) => 0,
+    };
 
-    println!("  Channel '{channel}' removed.");
+    if removed > 0 {
+        println!("  Channel '{channel}' removed ({removed} credentials cleared).");
+    } else {
+        println!("  Channel '{channel}' removed.");
+    }
     Ok(())
 }
 
@@ -431,13 +430,10 @@ pub async fn register_channel(
     cfg: &GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
-    // Store token in vault
-    let keychain = probe_keychain(data, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    // Store token in vault. Use the shared cached-passphrase helper so
+    // the immediately-following per-channel detail writes in `setup`
+    // re-derive the same wrapping key.
+    let keychain = probe_keychain(data, super::cached_vault_passphrase);
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;

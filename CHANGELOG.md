@@ -8,6 +8,47 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## 0.7.8 — Setup-time vault corruption fix; credential CLI gaps
+
+Headline is a setup-time data-loss bug: every multi-step channel setup
+(signal, slack, teams, matrix, imessage, whatsapp) reopened the
+keychain with an empty-passphrase fallback after the first real prompt,
+which silently re-keyed the AgeFile keychain and made every row written
+under the original passphrase undecryptable. User-visible symptom was
+`aead::Error` at `wirken run` time complaining the channel token would
+not decrypt.
+
+- **Setup-time vault corruption (cli).** Each `probe_keychain(data,
+  String::new)` after `register_channel` constructed an `AgeFileKeychain`
+  with an empty passphrase. `CredentialStore::open` then fell into its
+  "first run" branch, generated a fresh device key, and overwrote the
+  keychain file with that key under empty passphrase — orphaning the
+  rows from the first open. Same pattern bit `register_channel`, the
+  org-config arm, `store_key_and_pick_model` (cloud providers), the AWS
+  Bedrock arm, and `configure_channel_overrides` from #68. New
+  `cached_vault_passphrase()` helper prompts once per process and
+  stashes the result in `WIRKEN_VAULT_PASSPHRASE` (the env var
+  `wirken run` already propagates to spawned adapters), so every
+  keychain open in the same invocation derives the same wrapping key.
+- **`CredentialStore::open` hardened (vault).** Previously any
+  `retrieve_device_key` failure was treated as "first run" and triggered
+  an auto-generate-and-overwrite. `open` now distinguishes
+  `VaultError::Decryption` (existing keychain that will not unwrap —
+  hard error) from other errors (no keychain yet — auto-generate).
+  Defense in depth: even if a future call site reintroduces a
+  passphrase-mismatch open, the vault layer surfaces it instead of
+  silently corrupting.
+- **`wirken credentials remove <name>` (cli).** New subcommand. The
+  vault layer already exposed `CredentialStore::delete`; only the CLI
+  was missing. Errors with `VaultError::NotFound` if no row matches.
+- **`wirken channel remove <ch>` clears every per-channel row (cli).**
+  Previously deleted only `<channel>-token`, with a hardcoded fallback
+  for the four whatsapp keys, leaving entries like `signal-adapter-key`,
+  `signal-endpoint`, `signal-allowed-senders`, and `slack-app-token`
+  orphaned. Now calls a new `CredentialStore::delete_by_channel` that
+  removes every row tagged with the channel in one statement, and
+  reports the cleared count.
+
 ## 0.7.7 — Security audit fix (generate_image)
 
 Single finding from the Round 2 audit.
