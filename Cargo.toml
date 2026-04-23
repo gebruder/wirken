@@ -5,6 +5,7 @@ members = [
     "crates/audit",
     "crates/ipc",
     "crates/gateway",
+    "crates/adapter-core",
     "crates/adapter-telegram",
     "crates/adapter-discord",
     "crates/adapter-slack",
@@ -29,6 +30,11 @@ repository = "https://github.com/gebruder/wirken"
 description = "Team-scale AI agent orchestration with per-channel process isolation, encrypted credential vault, and per-session hash-chained audit log."
 
 [workspace.dependencies]
+# Internal crates referenced via workspace.dependencies so each crate's
+# Cargo.toml carries `foo.workspace = true` rather than duplicating the
+# relative path. Single source of truth for path and version.
+wirken-adapter-core = { path = "crates/adapter-core" }
+
 # Async runtime
 tokio = { version = "1.52", features = ["full"] }
 
