@@ -6,7 +6,7 @@ wirken channel add signal
 
 Signal is different from every other wirken channel. There is no bot API: you connect by running [signal-cli](https://github.com/AsamK/signal-cli) as a local JSON-RPC daemon and pointing wirken at it. That daemon acts as a real Signal client, under your identity. This page documents how to set it up **and** the exposure that comes with it, so you can decide whether to run it and how to harden it.
 
-> **0.7.9 transport change.** The adapter previously polled signal-cli's HTTP JSON-RPC endpoint with a `receive` call per tick. signal-cli 0.14.x's HTTP daemon auto-consumes inbound messages in the background and rejects concurrent `receive` RPCs, which broke the polling loop. The adapter now speaks newline-delimited JSON-RPC over a Unix socket and consumes `subscribeReceive` notifications the daemon pushes unprompted. Pre-0.7.9 installs that stored an HTTP URL as `signal-endpoint` must re-enter the endpoint via `wirken setup` or `wirken channel add signal`; the adapter rejects HTTP URLs at startup with a migration error.
+> **0.8.0 transport change.** The adapter previously polled signal-cli's HTTP JSON-RPC endpoint with a `receive` call per tick. signal-cli 0.14.x's HTTP daemon auto-consumes inbound messages in the background and rejects concurrent `receive` RPCs, which broke the polling loop. The adapter now speaks newline-delimited JSON-RPC over a Unix socket and consumes `subscribeReceive` notifications the daemon pushes unprompted. Pre-0.8.0 installs that stored an HTTP URL as `signal-endpoint` must re-enter the endpoint via `wirken setup` or `wirken channel add signal`; the adapter rejects HTTP URLs at startup with a migration error.
 
 ## What you get
 
@@ -164,7 +164,7 @@ This is a signal-cli architecture property, not a wirken bug. Tracked separately
 
 ## Known limitations
 
-- **Inbound latency is pure IPC + LLM time.** 0.7.9 moved to push-based JSON-RPC over a Unix socket; no polling floor. Response latency is dominated by LLM turn time.
+- **Inbound latency is pure IPC + LLM time.** 0.8.0 moved to push-based JSON-RPC over a Unix socket; no polling floor. Response latency is dominated by LLM turn time.
 - **No typing indicators, reactions, or read receipts.** We drop everything except text messages.
 - **Own-send echoes are suppressed, not forwarded.** Signal mirrors every send to every linked device including the daemon; the adapter filters those by message timestamp so the agent does not re-process its own replies. Sends from other linked devices (your phone messaging a contact) are dropped by default — set `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1` if you want those routed in too, e.g., for test-to-self smoke checks.
 - **Approval is coarse.** Tier 2 shell approvals are keyed on the first token of the command. Finer-grained patterns are not yet supported.
@@ -175,7 +175,7 @@ This is a signal-cli architecture property, not a wirken bug. Tracked separately
 
 - **Adapter starts but drops all messages.** Check logs for `"not in allowlist or empty"`. Confirm the allowlist entry matches exactly: phone numbers must be E.164 (leading `+`, no spaces or dashes).
 - **`signal-cli --version` works but the adapter gets connection refused.** Make sure the daemon is running with `--socket /path/to/sock` (not `--http`, which the adapter no longer speaks) and that the socket path in the vault matches.
-- **Adapter logs `signal endpoint is an HTTP URL`.** Left over from a pre-0.7.9 install. Remove and re-add the endpoint:
+- **Adapter logs `signal endpoint is an HTTP URL`.** Left over from a pre-0.8.0 install. Remove and re-add the endpoint:
   ```bash
   wirken credentials remove signal-endpoint
   wirken credentials add signal-endpoint --channel signal
