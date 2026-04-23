@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use wirken_adapter_core::{OutboundFormatter, SignalFormatter};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
@@ -59,12 +60,15 @@ impl SignalAdapter {
 
         let writer = Arc::new(Mutex::new(writer));
 
-        // Spawn outbound handler
+        // Spawn outbound handler. The formatter is constructed here
+        // rather than passed down from the adapter struct so swapping
+        // the transport implementation (next commit) carries the
+        // same formatter wiring without reshuffling signatures.
         let out_endpoint = self.signal_cli_endpoint.clone();
         let out_phone = self.phone_number.clone();
         let out_writer = writer.clone();
         let _outbound_handle = tokio::spawn(async move {
-            handle_outbound(reader, out_endpoint, out_phone, out_writer).await;
+            handle_outbound(reader, out_endpoint, out_phone, out_writer, SignalFormatter).await;
         });
 
         // Spawn heartbeat
@@ -202,11 +206,18 @@ pub(crate) fn extract_messages(json: &serde_json::Value) -> Option<Vec<SignalInb
 }
 
 /// Handle outbound messages from gateway to Signal via signal-cli.
+///
+/// Runs every reply through `formatter` before writing it into the
+/// `send` RPC payload. Agents emit markdown; Signal renders almost
+/// none of it, so without the formatter the end user saw literal
+/// `##`, `**`, and GFM table pipes in replies. See `adapter-core`
+/// for the SignalFormatter dialect rules.
 async fn handle_outbound(
     mut reader: FrameReader,
     signal_cli_endpoint: String,
     phone_number: String,
     writer: Arc<Mutex<FrameWriter>>,
+    formatter: SignalFormatter,
 ) {
     let http = reqwest::Client::new();
 
@@ -251,13 +262,14 @@ async fn handle_outbound(
 
         match action {
             FrameAction::SendMessage(fields) => {
+                let rendered = formatter.format(&fields.text);
                 let body = serde_json::json!({
                     "jsonrpc": "2.0",
                     "method": "send",
                     "params": {
                         "account": phone_number,
                         "recipient": [fields.conversation_id],
-                        "message": fields.text,
+                        "message": rendered,
                     },
                     "id": 1
                 });
