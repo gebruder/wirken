@@ -27,8 +27,136 @@ pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
     match channel {
         "whatsapp" => add_whatsapp(&cfg, &data, flags).await,
         "slack" => add_slack(&cfg, &data, flags).await,
+        "signal" => add_signal(&cfg, &data).await,
         _ => add_simple(channel, &cfg, &data, flags).await,
     }
+}
+
+/// Collect signal-cli socket path, account phone number, and sender
+/// allowlist from the operator. Shared between `wirken channel add
+/// signal` and the setup wizard's Signal arm so both paths produce the
+/// same vault state.
+pub struct SignalCreds {
+    pub phone: String,
+    pub endpoint: String,
+    pub allowlist_csv: String,
+}
+
+pub fn collect_signal_creds() -> Result<SignalCreds> {
+    println!("  Signal requires signal-cli running as a JSON-RPC daemon.");
+    println!("  See docs/channels/signal.md for the full setup and threat model.");
+
+    let phone: String = dialoguer::Input::new()
+        .with_prompt("  Registered phone number (e.g., +15551234567)")
+        .interact_text()?;
+
+    // Validate on input so the adapter never starts against an HTTP URL
+    // the transport no longer speaks. Accept bare paths and `unix://`.
+    let endpoint: String = loop {
+        let e: String = dialoguer::Input::new()
+            .with_prompt("  signal-cli socket path")
+            .default("/tmp/signal-cli.sock".into())
+            .interact_text()?;
+        let trimmed = e.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            println!(
+                "  The signal adapter speaks JSON-RPC over a Unix socket now. \
+                 Restart signal-cli with `daemon --socket /path/to/signal-cli.sock` \
+                 and supply that path here, not an HTTP URL."
+            );
+            continue;
+        }
+        if trimmed.is_empty() {
+            println!("  Socket path cannot be empty.");
+            continue;
+        }
+        break trimmed.to_string();
+    };
+
+    println!();
+    println!("  Sender allowlist (REQUIRED):");
+    println!("  Only messages from these senders will reach the agent.");
+    println!("  Enter E.164 phone numbers for DMs and/or Signal group IDs,");
+    println!("  comma-separated. Leave empty to drop every inbound message.");
+    let allowlist_csv: String = dialoguer::Input::new()
+        .with_prompt("  Allowed senders (comma-separated)")
+        .allow_empty(true)
+        .interact_text()?;
+
+    let allowlist_trimmed = allowlist_csv.trim();
+    if allowlist_trimmed.is_empty() {
+        println!(
+            "  Warning: empty allowlist. The Signal adapter will drop every \
+             inbound message until you add entries via `wirken credentials \
+             add signal-allowed-senders --channel signal`."
+        );
+    } else {
+        let count = allowlist_trimmed
+            .split(',')
+            .filter(|e| !e.trim().is_empty())
+            .count();
+        println!("  signal: allowlist configured with {count} entries.");
+    }
+
+    Ok(SignalCreds {
+        phone,
+        endpoint,
+        allowlist_csv: allowlist_trimmed.to_string(),
+    })
+}
+
+/// Persist the three signal-specific credential rows (phone, endpoint,
+/// allowlist) plus the adapter keypair. `register_channel` must have
+/// already stored `signal-token` and registered the adapter identity in
+/// the registry; this function fills in the remaining fields the
+/// adapter needs at runtime.
+pub fn store_signal_creds(store: &CredentialStore, creds: &SignalCreds) -> Result<()> {
+    store
+        .store(
+            "signal-phone-number",
+            "signal",
+            &VaultSecret::new(creds.phone.clone()),
+            None,
+            None,
+        )
+        .context("Failed to store phone number")?;
+    store
+        .store(
+            "signal-endpoint",
+            "signal",
+            &VaultSecret::new(creds.endpoint.clone()),
+            None,
+            None,
+        )
+        .context("Failed to store endpoint")?;
+    store
+        .store(
+            "signal-allowed-senders",
+            "signal",
+            &VaultSecret::new(creds.allowlist_csv.clone()),
+            None,
+            None,
+        )
+        .context("Failed to store allowlist")?;
+    Ok(())
+}
+
+async fn add_signal(cfg: &GatewayConfig, data: &std::path::Path) -> Result<()> {
+    let creds = collect_signal_creds()?;
+    // register_channel stores signal-token (value is the endpoint) and
+    // the adapter keypair. Must run before store_signal_creds so both
+    // writes share the same cached vault passphrase.
+    register_channel("signal", &creds.endpoint, cfg, data).await?;
+
+    let keychain = probe_keychain(data, super::cached_vault_passphrase);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    store_signal_creds(&store, &creds)?;
+
+    println!("  signal: credentials encrypted.");
+    println!("  Channel 'signal' added.");
+    println!("  Start the adapter with: wirken adapter signal");
+    Ok(())
 }
 
 async fn add_simple(
