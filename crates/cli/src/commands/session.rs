@@ -47,22 +47,55 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
         return Ok(());
     }
 
+    // Resolve channel -> agent bindings so we can print the composite
+    // session-log id (`<agent>/<channel>/<conversation>`) that
+    // `wirken sessions verify` actually accepts. The store's hex id is
+    // only a primary key inside the sessions DB; the audit/session-log
+    // DB keys rows by composite. Printing both removes the "ID from
+    // list does not work with verify" paper cut.
+    let binding_map =
+        match wirken_gateway::agent_config::AgentConfigStore::open(&cfg.agent_config_db_path()) {
+            Ok(agent_store) => {
+                let mut map = std::collections::HashMap::new();
+                if let Ok(agents) = agent_store.list() {
+                    for agent in agents {
+                        for ch in agent.channels {
+                            map.insert(ch, agent.id.clone());
+                        }
+                    }
+                }
+                map
+            }
+            Err(_) => std::collections::HashMap::new(),
+        };
+
     println!(
-        "  {:32}  {:12}  {:>6}  {:20}",
-        "ID", "CHANNEL", "MSGS", "LAST ACTIVITY"
+        "  {:16}  {:40}  {:12}  {:>6}  {:20}",
+        "STORE ID", "LOG ID", "CHANNEL", "MSGS", "LAST ACTIVITY"
     );
     println!(
-        "  {}  {}  {}  {}",
-        "─".repeat(32),
+        "  {}  {}  {}  {}  {}",
+        "─".repeat(16),
+        "─".repeat(40),
         "─".repeat(12),
         "─".repeat(6),
         "─".repeat(20)
     );
 
     for session in &sessions {
+        let agent_id = binding_map
+            .get(&session.channel)
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+        let log_id = format!(
+            "{}/{}/{}",
+            agent_id, session.channel, session.conversation_id
+        );
+        let short_id: String = session.id.chars().take(16).collect();
         println!(
-            "  {:32}  {:12}  {:>6}  {:20}",
-            session.id,
+            "  {:16}  {:40}  {:12}  {:>6}  {:20}",
+            short_id,
+            truncate_for_display(&log_id, 40),
             session.channel,
             session.message_count,
             session.last_activity.format("%Y-%m-%d %H:%M:%S"),
@@ -71,6 +104,7 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
 
     println!();
     println!("  {} active sessions.", sessions.len());
+    println!("  Use STORE ID for `wirken sessions close`, LOG ID for `wirken sessions verify`.");
     Ok(())
 }
 
@@ -112,6 +146,42 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     use wirken_gateway::agent_config::AgentConfigStore;
 
     let cfg = config();
+
+    // Accept either the composite session-log id or the hex store id
+    // that `wirken sessions list` prints. Translating the store id
+    // into the composite via SessionStore lookup lets operators copy
+    // from either column of the list output. For composite input
+    // (contains `/`) we pass through unchanged.
+    let session_id_owned = if session_id.contains('/') {
+        session_id.to_string()
+    } else {
+        match wirken_gateway::session::SessionStore::open(
+            &cfg.sessions_db_path(),
+            cfg.session_expiry_secs,
+        )
+        .ok()
+        .and_then(|s| s.get(session_id).ok())
+        {
+            Some(sess) => {
+                let agent_id = match AgentConfigStore::open(&cfg.agent_config_db_path()) {
+                    Ok(agent_store) => agent_store
+                        .list()
+                        .ok()
+                        .and_then(|agents| {
+                            agents
+                                .into_iter()
+                                .find(|a| a.channels.iter().any(|c| c == &sess.channel))
+                                .map(|a| a.id)
+                        })
+                        .unwrap_or_else(|| "default".into()),
+                    Err(_) => "default".into(),
+                };
+                format!("{}/{}/{}", agent_id, sess.channel, sess.conversation_id)
+            }
+            None => session_id.to_string(),
+        }
+    };
+    let session_id = session_id_owned.as_str();
 
     // Parse agent_id from session_id. Slice 2 of item 2 fixed the
     // format as `{agent_id}/{channel}/{conversation_id}`. Older
