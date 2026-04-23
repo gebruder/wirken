@@ -351,6 +351,12 @@ enum CredentialCommands {
         /// Credential name
         name: String,
     },
+    /// Remove a credential by name. The encrypted row is deleted from
+    /// the vault. Errors if no credential with that name exists.
+    Remove {
+        /// Credential name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -469,6 +475,7 @@ async fn main() -> Result<()> {
                 .await
             }
             CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
+            CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
         },
         Commands::Mcp(cmd) => match cmd {
             McpCommands::Authorize { server, agent } => {

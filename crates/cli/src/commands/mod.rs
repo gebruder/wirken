@@ -283,6 +283,34 @@ pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Return the vault passphrase for the current process, prompting once
+/// and caching in `WIRKEN_VAULT_PASSPHRASE` for subsequent calls.
+///
+/// `wirken setup` opens the keychain repeatedly across `register_channel`
+/// and per-channel detail writes. Each `probe_keychain` call constructs a
+/// new `AgeFileKeychain`, so without a shared passphrase a second open
+/// with an empty fallback re-keyed the file and orphaned the rows from
+/// the first open. Routing every prompt through this helper keeps a
+/// single derivation across the whole invocation, and `wirken run`
+/// already propagates the same env var to spawned adapters.
+pub fn cached_vault_passphrase() -> String {
+    if let Ok(p) = std::env::var("WIRKEN_VAULT_PASSPHRASE") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+    let p = dialoguer::Password::new()
+        .with_prompt("  Vault passphrase")
+        .interact()
+        .unwrap_or_default();
+    // Setup runs single-threaded before any adapter or agent spawn, so
+    // there are no concurrent readers of the process environment here.
+    unsafe {
+        std::env::set_var("WIRKEN_VAULT_PASSPHRASE", &p);
+    }
+    p
+}
+
 /// Read a secret value (API key, token) with asterisk masking.
 /// Unlike dialoguer's Password which shows nothing, this prints one
 /// asterisk per character so the user can see that paste/typing worked.
