@@ -6,9 +6,11 @@ wirken channel add signal
 
 Signal is different from every other wirken channel. There is no bot API: you connect by running [signal-cli](https://github.com/AsamK/signal-cli) as a local JSON-RPC daemon and pointing wirken at it. That daemon acts as a real Signal client, under your identity. This page documents how to set it up **and** the exposure that comes with it, so you can decide whether to run it and how to harden it.
 
+> **0.7.9 transport change.** The adapter previously polled signal-cli's HTTP JSON-RPC endpoint with a `receive` call per tick. signal-cli 0.14.x's HTTP daemon auto-consumes inbound messages in the background and rejects concurrent `receive` RPCs, which broke the polling loop. The adapter now speaks newline-delimited JSON-RPC over a Unix socket and consumes `subscribeReceive` notifications the daemon pushes unprompted. Pre-0.7.9 installs that stored an HTTP URL as `signal-endpoint` must re-enter the endpoint via `wirken setup` or `wirken channel add signal`; the adapter rejects HTTP URLs at startup with a migration error.
+
 ## What you get
 
-- Inbound: wirken polls signal-cli every second and forwards incoming Signal messages (DMs and groups) to the gateway as normal channel messages.
+- Inbound: wirken subscribes to signal-cli's JSON-RPC push stream and forwards incoming Signal messages (DMs and groups) to the gateway as normal channel messages. No polling.
 - Outbound: the agent's replies are sent back through signal-cli, which delivers them as if you typed them from your phone.
 - Works with 1:1 DMs and Signal groups. Non-text messages (typing indicators, reactions, stickers) are dropped.
 
@@ -47,21 +49,24 @@ Caveats of linked-device mode:
 
 **Register a new phone number.** Only do this if you want a dedicated number for the bot. signal-cli becomes the primary device for that number, which kicks any existing Signal install on that number offline and requires SMS/voice CAPTCHA verification. See the [signal-cli wiki](https://github.com/AsamK/signal-cli/wiki/Quickstart) for the full flow.
 
-### 3. Run the daemon bound to localhost
+### 3. Run the daemon bound to a Unix socket
 
-**Always bind the HTTP endpoint to `127.0.0.1`**, never `0.0.0.0`. The daemon has no authentication; anything that can reach the port can send messages as you.
-
-```bash
-signal-cli -a +15551234567 daemon --http 127.0.0.1:8080
-```
-
-Leave that running in a terminal or under a supervisor (systemd user unit, tmux, etc.). Verify it's responsive:
+The daemon's JSON-RPC transport has no authentication: any process that can open the socket can send Signal messages as you. A filesystem-permissioned Unix socket is the default because it reduces the reachable surface to processes on the same host running as the same uid (or members of a group you grant via `chmod`).
 
 ```bash
-curl -s http://127.0.0.1:8080/api/v1/rpc \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"version","id":1}'
+signal-cli -a +15551234567 daemon --socket /tmp/signal-cli.sock
 ```
+
+Leave that running in a terminal or under a supervisor (systemd user unit, tmux, etc.). Verify the socket exists and speaks JSON-RPC:
+
+```bash
+ls -l /tmp/signal-cli.sock   # must be a socket file owned by you (srw-------)
+echo '{"jsonrpc":"2.0","method":"version","id":1}' | socat - UNIX-CONNECT:/tmp/signal-cli.sock
+```
+
+The response should be a single JSON line containing the signal-cli version. If you need a different path (e.g., a XDG-respecting location), pass it to `--socket` and provide the same path to wirken below.
+
+If you used `--http` with a prior wirken release, remove that invocation — the adapter no longer speaks HTTP.
 
 ### 4. Register with wirken
 
@@ -72,15 +77,26 @@ wirken channel add signal
 You'll be prompted for:
 
 - **Registered phone number**: the E.164 number you linked or registered.
-- **signal-cli JSON-RPC endpoint**: defaults to `http://127.0.0.1:8080/api/v1/rpc`.
+- **signal-cli socket path**: defaults to `/tmp/signal-cli.sock`. Accepts a bare path or `unix:///absolute/path`. HTTP URLs are rejected.
 - **Allowed senders (comma-separated)**: **required**. See the next section.
 
 ### 5. Configure the sender allowlist
 
-The Signal adapter is fail-closed: an empty allowlist drops every inbound message. Setup prompts you for the initial list, and you can edit it later:
+The Signal adapter is fail-closed: an empty allowlist drops every inbound message. The allowlist IS the authorization — anyone whose E.164 number or group ID is in it can drive the agent; anyone not in it has their messages dropped before the LLM ever sees them. There is no additional per-sender challenge.
+
+Setup prompts you for the initial list. To edit it afterward, rotate the vault entry. There is no one-shot "set" command; remove and re-add to change the full list:
 
 ```bash
-wirken vault set signal-allowed-senders "+15551234567,+15559876543,group-abc-xyz="
+wirken credentials remove signal-allowed-senders
+wirken credentials add signal-allowed-senders --channel signal
+# prompts for the new comma-separated value
+```
+
+Or pipe the value for scripted updates:
+
+```bash
+echo "+15551234567,+15559876543,group-abc-xyz=" \
+  | wirken credentials add signal-allowed-senders --channel signal --stdin
 ```
 
 Entries are matched against the inbound message's conversation:
@@ -94,7 +110,7 @@ To find a group's ID:
 signal-cli -a +15551234567 listGroups
 ```
 
-If you change the allowlist, restart the signal adapter (`wirken adapter signal`) for it to pick up the new values.
+If you change the allowlist, restart `wirken run` so the adapter re-reads the vault.
 
 ## Signal-specific exposure
 
@@ -112,14 +128,13 @@ A Tier 2 approval is recorded per-agent, not per-channel. If you have already ap
 
 The gateway's `InjectionDetector` (see `docs/security-properties.md` → MEASURE 2.6) scans every inbound Signal message for role-switching, instruction overrides, base64-encoded shell, tool-call injection, and system-prompt extraction. When it fires, it annotates the `message.inbound` audit event and emits a separate `message.threat_flagged` event for SIEM. It does **not** block the message, rewrite it, add a warning to the LLM turn, or gate tool execution on the threat level. Tracking higher-confidence responses to Critical-severity flags is an open backlog item.
 
-### signal-cli daemon HTTP endpoint has no authentication
+### signal-cli daemon socket has no authentication
 
-The signal-cli JSON-RPC HTTP endpoint is not authenticated. Any local process on the host can `POST` to it and send Signal messages as you. Mitigations:
+The signal-cli JSON-RPC socket is not authenticated. Any local process that can open the socket can send Signal messages as you. Mitigations (by default, filesystem permissions on the socket do most of the work):
 
-- Bind to `127.0.0.1`, never `0.0.0.0`.
-- Run signal-cli as a dedicated user on multi-user hosts.
-- Consider restricting the port to your UID with `iptables`/`nftables` owner matches.
-- signal-cli also supports a Unix-socket transport (`--socket` / DBus). The wirken adapter speaks HTTP today; moving to a local socket with filesystem permissions is a planned hardening.
+- Use a socket path inside a directory you own (`$XDG_RUNTIME_DIR`, `~/.local/share/signal-cli/`, etc.). `/tmp` is fine on a single-user host; on shared hosts, prefer a directory outside `/tmp` that is `chmod 700`.
+- Run signal-cli as a dedicated user on multi-user hosts and only grant that uid's group access to the socket.
+- DBus transport is also available; the wirken adapter speaks JSON-RPC over a Unix socket.
 
 ### signal-cli credential storage
 
@@ -133,10 +148,25 @@ Linking produces an account state directory at `~/.local/share/signal-cli/data/`
 
 Signal's end-to-end encryption is not what fails here. An allowlisted message arrives authenticated and decrypted; its text is placed into an LLM prompt; the LLM may act on attacker-controlled instructions. The transport is cryptographically sound; the application layer above it is a classic prompt-injection surface. The allowlist, the permission tiers, and the injection detector's audit trail are what bound the blast radius.
 
+## Operational constraints
+
+### Messages delivered during a signal-cli restart are not replayed to wirken
+
+`signal-cli --socket` streams envelopes to currently-subscribed JSON-RPC listeners only. When signal-cli restarts (crash, manual kill, systemd restart), any Signal message that reaches the daemon before wirken's adapter has reconnected and resubscribed is written to the daemon's stdout log and is **not** delivered to the adapter's subscription. The hash chain across the disconnect is intact — the missed message simply never enters the session log — but the agent will not answer it.
+
+Practical implications:
+
+- Keep signal-cli running under a supervisor (systemd user unit, tmux + auto-respawn, or similar) so restart windows stay short.
+- If an inbound DM arrives during a restart window and needs an agent response, the sender has to send it again.
+- Observability: the daemon's stdout shows `Envelope from: ...` for the lost DM. Cross-reference with wirken's log to distinguish "adapter never saw it" from "adapter dropped it" (the latter would log `not in allowlist or empty`).
+
+This is a signal-cli architecture property, not a wirken bug. Tracked separately if signal-cli ever adds a replay/queue RPC that wirken could call after reconnect.
+
 ## Known limitations
 
-- **Inbound polling interval is 1 second.** Latency between message receipt and agent response is ≥1s plus LLM time. Not a fit for low-latency chat.
+- **Inbound latency is pure IPC + LLM time.** 0.7.9 moved to push-based JSON-RPC over a Unix socket; no polling floor. Response latency is dominated by LLM turn time.
 - **No typing indicators, reactions, or read receipts.** We drop everything except text messages.
+- **Own-send echoes are suppressed, not forwarded.** Signal mirrors every send to every linked device including the daemon; the adapter filters those by message timestamp so the agent does not re-process its own replies. Sends from other linked devices (your phone messaging a contact) are dropped by default — set `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1` if you want those routed in too, e.g., for test-to-self smoke checks.
 - **Approval is coarse.** Tier 2 shell approvals are keyed on the first token of the command. Finer-grained patterns are not yet supported.
 - **No rate limiting on the adapter.** An allowlisted sender spamming messages will spam the LLM and your API bill. If you expose this to more than a handful of trusted people, add external rate limiting.
 - **Not audited.** No third party has reviewed this integration. Treat it as experimental.
@@ -144,6 +174,17 @@ Signal's end-to-end encryption is not what fails here. An allowlisted message ar
 ## Troubleshooting
 
 - **Adapter starts but drops all messages.** Check logs for `"not in allowlist or empty"`. Confirm the allowlist entry matches exactly: phone numbers must be E.164 (leading `+`, no spaces or dashes).
-- **`signal-cli --version` works but the adapter gets connection refused.** Make sure the daemon is actually running (`--http`, not just the one-shot CLI) and that the endpoint in the vault matches the daemon's bind address.
-- **Messages arrive at signal-cli but never flow to wirken.** Tail the adapter logs (`wirken adapter signal`). The most common cause is an allowlist mismatch; the second most common is signal-cli returning an error response that you can spot with `curl` against the endpoint.
-- **The wrong device shows as linked on your phone.** Unlink everything from your phone's Signal settings and re-run `signal-cli link` with a recognizable name.
+- **`signal-cli --version` works but the adapter gets connection refused.** Make sure the daemon is running with `--socket /path/to/sock` (not `--http`, which the adapter no longer speaks) and that the socket path in the vault matches.
+- **Adapter logs `signal endpoint is an HTTP URL`.** Left over from a pre-0.7.9 install. Remove and re-add the endpoint:
+  ```bash
+  wirken credentials remove signal-endpoint
+  wirken credentials add signal-endpoint --channel signal
+  # enter the socket path, e.g. /tmp/signal-cli.sock
+  ```
+- **Adapter keeps reconnecting.** Signal-cli daemon may have crashed or been restarted; the adapter retries with exponential backoff up to 30s between attempts. Tail signal-cli's output and confirm the socket exists and responds to `version`:
+  ```bash
+  ls -l /tmp/signal-cli.sock
+  echo '{"jsonrpc":"2.0","method":"version","id":1}' | socat - UNIX-CONNECT:/tmp/signal-cli.sock
+  ```
+- **Messages arrive at signal-cli but never flow to wirken.** Tail `wirken run` logs. The most common cause is an allowlist mismatch; the second most common is a sync-send being dropped because `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS` is unset (expected for production, not for test-to-self).
+- **The wrong device shows as linked on your phone.** Unlink everything from your phone's Signal settings and re-run `signal-cli link` with a recognizable name. Wait for the link command to exit on its own — killing it before the handshake completes leaves a half-initialized account directory and causes NPEs on first receive.

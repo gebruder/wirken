@@ -6267,7 +6267,7 @@ name = "wirken-adapter-signal"
 version = "0.7.8"
 dependencies = [
  "capnp",
- "reqwest 0.13.2",
+ "lru",
  "serde",
  "serde_json",
  "tempfile",
