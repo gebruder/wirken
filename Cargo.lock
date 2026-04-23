@@ -6189,6 +6189,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wirken-adapter-core"
+version = "0.7.8"
+
+[[package]]
 name = "wirken-adapter-discord"
 version = "0.7.8"
 dependencies = [
@@ -6263,7 +6267,7 @@ name = "wirken-adapter-signal"
 version = "0.7.8"
 dependencies = [
  "capnp",
- "reqwest 0.13.2",
+ "lru",
  "serde",
  "serde_json",
  "tempfile",
@@ -6271,6 +6275,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wirken-adapter-core",
  "wirken-ipc",
 ]
 
