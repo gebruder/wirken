@@ -42,11 +42,24 @@ pub struct CredentialStore {
 impl CredentialStore {
     /// Open or create a credential store at the given path.
     /// The keychain provides the device key for encryption/decryption.
+    ///
+    /// On `VaultError::Decryption` from `retrieve_device_key` — an existing
+    /// keychain file that won't unwrap with the supplied passphrase — this
+    /// refuses to overwrite. Any other error (missing file, missing keyring
+    /// entry) is treated as "first run" and generates a fresh device key.
+    /// Without that guard a wrong-passphrase open silently re-keyed the
+    /// keychain and orphaned every prior row.
     pub fn open(db_path: &Path, keychain: &dyn Keychain) -> Result<Self, VaultError> {
         let device_key = match keychain.retrieve_device_key() {
             Ok(key) => key,
+            Err(VaultError::Decryption(_)) => {
+                return Err(VaultError::Keychain(
+                    "device key unwrap failed (wrong vault passphrase). \
+                     Refusing to overwrite the existing keychain file."
+                        .into(),
+                ));
+            }
             Err(_) => {
-                // First run — generate and store a new device key
                 let key = generate_key();
                 keychain.store_device_key(&key)?;
                 key
@@ -193,6 +206,16 @@ impl CredentialStore {
         }
 
         Ok(())
+    }
+
+    /// Delete every credential whose `channel` column matches.
+    /// Returns the number of rows removed (0 if none matched).
+    pub fn delete_by_channel(&self, channel: &str) -> Result<usize, VaultError> {
+        let changes = self.conn.execute(
+            "DELETE FROM credentials WHERE channel = ?1",
+            params![channel],
+        )?;
+        Ok(changes)
     }
 
     /// List all credential metadata (without decrypting values).

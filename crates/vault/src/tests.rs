@@ -307,6 +307,75 @@ fn delete_nonexistent_fails() {
 }
 
 #[test]
+fn delete_by_channel_clears_all_matching() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+
+    let s = VaultSecret::new("v".into());
+    store
+        .store("signal-token", "signal", &s, None, None)
+        .unwrap();
+    store
+        .store("signal-adapter-key", "signal", &s, None, None)
+        .unwrap();
+    store
+        .store("signal-endpoint", "signal", &s, None, None)
+        .unwrap();
+    store
+        .store("openai-api-key", "openai", &s, None, None)
+        .unwrap();
+
+    let removed = store.delete_by_channel("signal").unwrap();
+    assert_eq!(removed, 3);
+
+    let remaining: Vec<String> = store.list().unwrap().into_iter().map(|m| m.name).collect();
+    assert_eq!(remaining, vec!["openai-api-key".to_string()]);
+}
+
+#[test]
+fn delete_by_channel_no_match_returns_zero() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+
+    let s = VaultSecret::new("v".into());
+    store
+        .store("openai-api-key", "openai", &s, None, None)
+        .unwrap();
+
+    let removed = store.delete_by_channel("signal").unwrap();
+    assert_eq!(removed, 0);
+    assert_eq!(store.list().unwrap().len(), 1);
+}
+
+#[test]
+fn store_open_with_wrong_passphrase_refuses_overwrite() {
+    // Regression for the setup-time bug where a second probe_keychain
+    // call with an empty passphrase silently re-keyed the AgeFile
+    // keychain and orphaned every row written under the first
+    // passphrase. CredentialStore::open must distinguish "keychain
+    // file does not exist yet" (auto-generate) from "keychain file
+    // exists but unwrap failed" (hard error).
+    let tmp = TempDir::new().unwrap();
+    let kc_dir = tmp.path().join("kc");
+    let db_path = tmp.path().join("vault.db");
+
+    let kc1 = AgeFileKeychain::new(kc_dir.clone(), "real-passphrase".into());
+    let store = CredentialStore::open(&db_path, &kc1).unwrap();
+    let secret = VaultSecret::new("v".into());
+    store.store("k", "chan", &secret, None, None).unwrap();
+    drop(store);
+
+    let kc2 = AgeFileKeychain::new(kc_dir.clone(), "".into());
+    let result = CredentialStore::open(&db_path, &kc2);
+    assert!(matches!(result, Err(crate::VaultError::Keychain(_))));
+
+    let kc3 = AgeFileKeychain::new(kc_dir, "real-passphrase".into());
+    let store3 = CredentialStore::open(&db_path, &kc3).unwrap();
+    let (got, _) = store3.retrieve("k").unwrap();
+    assert_eq!(got.expose(), "v");
+}
+
+#[test]
 fn list_credentials() {
     let tmp = TempDir::new().unwrap();
     let store = test_store(&tmp);
