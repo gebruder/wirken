@@ -340,6 +340,48 @@ fn extract_receipt_real_wire_shape_dropped() {
 }
 
 #[test]
+fn extract_data_message_with_groupv2_id() {
+    // Modern signal-cli routes group messages via
+    // `dataMessage.groupV2.id`. Legacy `groupInfo.groupId` is still
+    // accepted but groupV2 takes precedence when both are present.
+    let envelope = serde_json::json!({
+        "source": "+15559876543",
+        "sourceName": "Alice",
+        "timestamp": 1711900000000_i64,
+        "dataMessage": {
+            "message": "new-style group hello",
+            "timestamp": 1711900000000_i64,
+            "groupV2": {
+                "id": "W8Z6FYAeHrqO1CRc4xBBDRHVJzRjzYqP4wQr+IhsUCA=",
+                "revision": 3
+            }
+        }
+    });
+    let (msg, _kind) = convert::extract_inbound(&envelope).expect("groupV2 must parse");
+    assert_eq!(
+        msg.group_id.as_deref(),
+        Some("W8Z6FYAeHrqO1CRc4xBBDRHVJzRjzYqP4wQr+IhsUCA=")
+    );
+}
+
+#[test]
+fn extract_data_message_groupv2_takes_precedence_over_groupinfo() {
+    let envelope = serde_json::json!({
+        "source": "+15559876543",
+        "sourceName": "Alice",
+        "timestamp": 1711900000000_i64,
+        "dataMessage": {
+            "message": "dual-shape",
+            "timestamp": 1711900000000_i64,
+            "groupV2": { "id": "v2-id=" },
+            "groupInfo": { "groupId": "legacy-id" }
+        }
+    });
+    let (msg, _kind) = convert::extract_inbound(&envelope).unwrap();
+    assert_eq!(msg.group_id.as_deref(), Some("v2-id="));
+}
+
+#[test]
 fn extract_data_message_with_group_id() {
     let envelope = serde_json::json!({
         "source": "+15559876543",
