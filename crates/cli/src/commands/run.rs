@@ -1029,8 +1029,21 @@ async fn message_loop(
                         match ag.process_message(&text, id.clone()).await {
                             Ok(result) => (result.response, result.denials),
                             Err(e) => {
+                                // The full error stays in operator logs
+                                // and the audit trail. The outbound
+                                // reply is a generic apology — raw
+                                // error strings can leak operator-side
+                                // internals (database paths, session
+                                // log locks, provider stack traces)
+                                // to an allowlisted contact over
+                                // whatever channel they reached us on.
                                 tracing::error!("Agent '{resolved_agent}' error: {e}");
-                                (format!("Error processing message: {e}"), Vec::new())
+                                (
+                                    "Sorry, I hit an internal error and could not process \
+                                     that message. The operator has been notified."
+                                        .into(),
+                                    Vec::new(),
+                                )
                             }
                         }
                     }
@@ -1141,10 +1154,17 @@ enum InboundAction {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max])
+        return s.to_string();
     }
+    // `max` is a byte budget. Slicing bytes mid-char panics on any
+    // multi-byte scalar (Devanagari, emoji, CJK, etc.), so walk back
+    // to the nearest char boundary. `is_char_boundary(0)` is always
+    // true so the loop terminates.
+    let mut cut = max;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }
 
 /// Load SIEM forwarding config from ~/.wirken/siem.json.
@@ -1432,5 +1452,48 @@ mod channel_overrides_tests {
             msg.contains("provider"),
             "error must name the missing field: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate;
+
+    #[test]
+    fn short_input_returned_verbatim() {
+        assert_eq!(truncate("hi", 80), "hi");
+    }
+
+    #[test]
+    fn ascii_truncation_at_exact_byte_offset() {
+        let s = "a".repeat(200);
+        let t = truncate(&s, 80);
+        assert_eq!(t, format!("{}...", "a".repeat(80)));
+    }
+
+    #[test]
+    fn devanagari_input_does_not_panic_at_byte_80() {
+        // Regression: this input was captured from an LLM reply that
+        // crashed the gateway at `&s[..80]` because byte 80 fell
+        // inside a multi-byte Devanagari scalar. The fix walks back
+        // to the nearest char boundary.
+        let s = "**अब की धड़कन, कविता की झलक**\n\nअब का क्षण, हवाओं में बँधा,\nहर लफ़्ज़ में गूंजे अनकहा।";
+        let t = truncate(s, 80);
+        assert!(t.ends_with("..."));
+        // Safe sanity: the cut prefix must be valid UTF-8 (it already
+        // is by construction, but the assertion guards against future
+        // refactors that reintroduce raw-byte slicing).
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn emoji_input_does_not_panic() {
+        // 4-byte scalars stress the walk-back loop harder than
+        // 3-byte Devanagari because the boundary search has to go
+        // back up to 3 bytes.
+        let s = "🦀".repeat(40);
+        let t = truncate(&s, 50);
+        assert!(t.ends_with("..."));
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
     }
 }

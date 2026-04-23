@@ -253,8 +253,11 @@ async fn fetch_index() -> Result<SkillIndex> {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
+        return s.to_string();
     }
+    let mut cut = max.saturating_sub(3);
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
 }
