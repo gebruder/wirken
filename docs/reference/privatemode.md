@@ -1,7 +1,12 @@
 # Privatemode reference instance
 
-> **Status: in development (tracked in [#57](https://github.com/gebruder/wirken/issues/57)).**
-> This document specifies the target Wirken + Privatemode reference instance, aligned with the Privatemode 2.0 release (the v1.37 / v1.38 release cluster featuring Kimi K2.5, the browser web app, and separate input/output/cached token pricing). Sections marked _Today_ describe what ships in the current Wirken binary. Sections marked _Target_ describe work tracked in #57. Concrete specs (endpoints, flags, model IDs) are grounded in the Privatemode documentation at <https://docs.privatemode.ai/> and the source at <https://github.com/edgelesssys/privatemode-public>.
+Reference documentation for running Wirken against the Privatemode 2.0
+confidential-inference proxy. Everything described here is verified on
+the current `wirken` binary; aspirational sections that did not survive
+contact with a live run were removed. Claims about Privatemode itself
+(model capabilities, endpoint shapes, release history) are sourced from
+Privatemode's docs at <https://docs.privatemode.ai/> and the public
+source at <https://github.com/edgelesssys/privatemode-public>.
 
 ## Quickstart
 
@@ -30,11 +35,11 @@ One sequential procedure to get a working Wirken + Privatemode instance. Assumes
 
 If any step fails, see [Troubleshooting](#troubleshooting). For a mixed-provider agent (e.g., Privatemode on Signal, Anthropic on Slack), see [Route a single channel to Privatemode](#route-a-single-channel-to-privatemode) instead of step 3.
 
-## What works today
+## What works
 
-The Quickstart above is the shipping path. Concretely, `wirken setup` writes a `provider.json` pointing at the local proxy, `wirken run` opens an OpenAI-shape client at `POST http://localhost:8080/v1/chat/completions` with 128k context and tools enabled, and the access key lives encrypted in the XChaCha20-Poly1305 vault.
+`wirken setup` picks **Privatemode** and writes a `provider.json` pointing at the local proxy. `wirken run` opens an OpenAI-shape client at `POST http://localhost:8080/v1/chat/completions`. The access key lives encrypted in the XChaCha20-Poly1305 vault. Default model is `kimi-k2.5`; context window and tool support depend on the chosen model — see the [Models](#models) table.
 
-What this reference instance still adds beyond what ships: Anthropic-shape support, packaged sidecar recipes under `deploy/privatemode/`, loopback-only default binding at the proxy layer, and an integration test against a proxy stub in CI.
+End-to-end verified: message arrives on a channel adapter → agent runs → outbound request hits the local Privatemode proxy → response routes back through the channel. Every turn writes one `LlmRequest` event to the hash-chained session log, and `wirken sessions verify` walks the chain.
 
 ## Architecture
 
@@ -43,8 +48,8 @@ What this reference instance still adds beyond what ships: Anthropic-shape suppo
 Three trust zones, three enforcement mechanisms.
 
 1. Channels do not trust each other. Enforcement: per-channel process isolation via Rust phantom types.
-2. Tool execution is not trusted. Enforcement: gVisor sandbox.
-3. Inference operator is not trusted. Enforcement: confidential computing attestation in the Privatemode local proxy. The proxy fetches a signed manifest from `cdn.confidential.cloud:443`, validates the remote TEE attestation (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC), and establishes an end-to-end encrypted channel before forwarding any client request.
+2. Tool execution is not trusted. Enforcement: configurable sandbox — `exec-only` (default since 0.7.5), `gvisor`, or `off`. Mode is read from `~/.wirken/sandbox.json`. See `docs/security-properties.md` for the full matrix.
+3. Inference operator is not trusted. Enforcement: confidential-computing attestation inside the Privatemode local proxy. The proxy fetches a signed manifest from `cdn.confidential.cloud:443`, validates the remote TEE attestation (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC per the Privatemode docs), and establishes an end-to-end encrypted channel before forwarding any client request. Wirken trusts the proxy handshake — it does not independently verify the attestation.
 
 Stacked, the only parties who see plaintext are the end user and the TEE.
 
@@ -52,7 +57,7 @@ Stacked, the only parties who see plaintext are the end user and the TEE.
 
 1. Message arrives at a channel adapter. Adapter authenticates to core with Ed25519.
 2. Core loads channel-scoped credentials from the vault.
-3. Skills run in the gVisor sandbox if tools are invoked.
+3. Skills run in the configured sandbox (`exec-only` by default) if tools are invoked.
 4. Core emits an inference request to `privatemode-proxy` at `localhost:8080`.
 5. Proxy has already attested the Privatemode backend. It encrypts the request, ships it to `api.privatemode.ai:443`, receives the encrypted response.
 6. Proxy returns plaintext to Wirken.
@@ -70,10 +75,9 @@ Privatemode exposes both Anthropic-compatible and OpenAI-compatible surfaces on 
 | OpenAI | `POST /v1/embeddings` | `qwen3-embedding-4b` only |
 | OpenAI | `POST /v1/audio/transcriptions` | `whisper-large-v3`, `voxtral-mini-3b` |
 
-All requests use `Content-Type: application/json`. The `--apiKey` flag on the proxy authenticates the proxy-to-backend leg; client requests to the local proxy need a non-empty `Authorization: Bearer <anything>` header but the value is not validated.
+All requests use `Content-Type: application/json`. The `--apiKey` flag on the proxy authenticates the proxy-to-backend leg.
 
-- _Today:_ Wirken uses OpenAI shape (`POST /v1/chat/completions`). See `crates/agent/src/llm.rs::privatemode()`.
-- _Target:_ add Anthropic shape with selection via `api_shape = "anthropic" | "openai"` in provider config; default TBD (see [model choice](#models) below, since the Anthropic `/v1/messages` endpoint is newer in Privatemode — added in v1.37).
+Wirken uses the OpenAI shape (`POST /v1/chat/completions`). Implementation in `crates/agent/src/llm.rs::privatemode()`. Anthropic-shape and embeddings / transcription endpoints are exposed by the same proxy and documented upstream; Wirken does not send to them today.
 
 ## Models
 
@@ -128,27 +132,24 @@ The more interesting configuration — and the Privatemode partnership's headlin
 
 ## Credentials
 
-_Today._ The Privatemode access key is stored in Wirken's XChaCha20-Poly1305 vault as a single inference credential. It is not channel-scoped — all channels share one inference backend.
-
-_Target._ When Wirken spawns the proxy sidecar directly, the key is written to a mode-0600 tmpfile and passed via `--apiKey @/path/to/keyfile` (the `@` prefix tells the proxy to read from the file). This keeps the key out of `ps`-visible arguments and out of environment variables. When the proxy is managed externally (systemd, k8s), the operator is responsible for secret delivery.
+The Privatemode access key is stored in Wirken's XChaCha20-Poly1305 vault as a single inference credential (`privatemode-access-key` when used as a channel override; otherwise the default `<provider>-api-key` slot). The operator delivers the key to the proxy via `--apiKey` on the `docker run` command line — that leg is proxy ↔ backend, not Wirken's surface.
 
 ## Deployment
 
-_Today._ Users start `privatemode-proxy` themselves. The `wirken setup` wizard prints:
+Wirken does not manage the proxy lifecycle. Operators start `privatemode-proxy` themselves. The `wirken setup` wizard prints the reference command:
 
 ```
-docker run -p 8080:8080 ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest --apiKey <key>
+docker run -d --name privatemode-proxy \
+  -p 127.0.0.1:8080:8080 \
+  ghcr.io/edgelesssys/privatemode/privatemode-proxy:latest \
+  --apiKey <key>
 ```
 
-**Security note:** the proxy itself binds `0.0.0.0:8080` by default. The docker flag above publishes that to all interfaces on the host. For a single-host deployment, users should bind the published port to loopback explicitly: `-p 127.0.0.1:8080:8080`.
+**Security note:** the proxy binary binds `0.0.0.0` by default. The `-p 127.0.0.1:8080:8080` form above restricts the published port to loopback so it is not reachable from other hosts. Do not drop the `127.0.0.1:` prefix on a multi-tenant or internet-exposed host.
 
-_Target._ Packaged sidecar recipes in `deploy/privatemode/`:
+Under systemd, run the same `docker` invocation from a user unit, or point `ExecStart=` at the binary directly. Under Kubernetes, use Privatemode's upstream Helm chart at `privatemode-proxy/charts/privatemode-proxy/` in <https://github.com/edgelesssys/privatemode-public>. Wirken does not ship unit files or charts of its own.
 
-- `systemd/privatemode-proxy.service` — single-host, key delivered via `LoadCredentialEncrypted=`, proxy invoked with `--apiKey @%d/apikey`. Port published to `127.0.0.1:8080` via `Requires=` chaining to a socket unit that binds loopback.
-- `compose/docker-compose.yml` — single-host container deployment. `ports: ["127.0.0.1:8080:8080"]`. Key delivered via docker-compose secrets (`--apiKey @/run/secrets/privatemode_key`).
-- Kubernetes operators should use Privatemode's upstream Helm chart at `privatemode-proxy/charts/privatemode-proxy/` in <https://github.com/edgelesssys/privatemode-public>. Wirken does not ship its own chart.
-
-All three deployments run the proxy with manifest auto-fetch enabled (the default). Pinning via `--manifestPath` is not recommended for production per the upstream guide.
+Run with manifest auto-fetch enabled (the default). Pinning via `--manifestPath` is not recommended for production per the upstream guide.
 
 ## Verifying a round-trip
 
@@ -189,7 +190,8 @@ Grounded in the Privatemode 2.0 launch email (2026-04-22) and the public release
 ## Gaps
 
 - Wirken does not verify Privatemode attestation independently; it trusts the proxy handshake.
-- No integration test against a real proxy in CI. Acceptance in #57 requires a proxy stub or recorded cassettes.
+- No integration test in CI exercises the Privatemode code path. The adapter + LLM client paths have unit coverage, but the end-to-end request/response with the real proxy (or a stub) is verified by hand.
+- The `privatemode-access-key` vault slot is per-agent, not per-caller. Multi-user deployments that want to bill inference to distinct humans need per-caller key scoping that does not exist today.
 
 ## References
 
