@@ -162,9 +162,11 @@ pub enum InboundKind {
 ///   only by UUID (Signal's phone-privacy feature) have empty
 ///   `source` and will be dropped by the allowlist. That path is a
 ///   known gap; see the follow-up for sourceUuid handling.
-/// - Data messages use the message text from `dataMessage.message` and
-///   the group id (if any) from `dataMessage.groupInfo.groupId`. The
-///   modern `groupV2.id` path is a known gap tracked separately.
+/// - Data messages use the message text from `dataMessage.message`.
+///   Group id (if any) is drawn from `dataMessage.groupV2.id` (modern
+///   signal-cli emits v2 for all new groups) with a fallback to the
+///   legacy `dataMessage.groupInfo.groupId` so pre-v2 group backlogs
+///   still route.
 /// - Sync-sent messages use the destination as the conversation key so
 ///   the allowlist matches the contact the operator was messaging, not
 ///   their own number. Tests-to-self work when the operator's own
@@ -195,10 +197,20 @@ pub fn extract_inbound(envelope: &serde_json::Value) -> Option<(SignalInbound, I
         if text.is_empty() {
             return None;
         }
+        // Modern signal-cli emits `dataMessage.groupV2.id` (base64) for
+        // group messages. Legacy envelopes used
+        // `dataMessage.groupInfo.groupId`; accept both so pre-v2 group
+        // backlogs still route. groupV2 takes precedence when both are
+        // present.
         let group_id = dm
-            .get("groupInfo")
-            .and_then(|g| g.get("groupId"))
+            .get("groupV2")
+            .and_then(|g| g.get("id"))
             .and_then(|id| id.as_str())
+            .or_else(|| {
+                dm.get("groupInfo")
+                    .and_then(|g| g.get("groupId"))
+                    .and_then(|id| id.as_str())
+            })
             .map(|s| s.to_string());
         let message_id = format!("{source}_{timestamp}");
         return Some((
