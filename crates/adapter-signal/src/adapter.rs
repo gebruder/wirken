@@ -402,10 +402,11 @@ impl SignalAdapter {
     /// filtered out. Returns the Signal message timestamp (used as the
     /// message id in the gateway result frame).
     ///
-    /// Sends go through the `recipient` param. Group sends are a known
-    /// gap — signal-cli's send RPC expects `groupId` rather than
-    /// `recipient` when the destination is a group, and this path does
-    /// not branch yet. Tracked as a follow-up.
+    /// Routing: phone-shaped `conversation_id` values (starting with
+    /// `+`, E.164) go through the `recipient` param; anything else is
+    /// treated as a Signal group id and goes through `groupId`.
+    /// signal-cli rejects the RPC if both are present, so this
+    /// branching is required for group sends to work at all.
     async fn send_message(&self, conversation_id: &str, text: &str) -> Result<i64, SignalError> {
         let conn = {
             let guard = self.inner.lock().await;
@@ -420,11 +421,19 @@ impl SignalAdapter {
         // into signal-cli's send RPC shares the same rendering.
         let rendered = self.formatter.format(text);
 
-        let params = json!({
-            "account": self.phone_number,
-            "recipient": [conversation_id],
-            "message": rendered,
-        });
+        let params = if is_group_id(conversation_id) {
+            json!({
+                "account": self.phone_number,
+                "groupId": conversation_id,
+                "message": rendered,
+            })
+        } else {
+            json!({
+                "account": self.phone_number,
+                "recipient": [conversation_id],
+                "message": rendered,
+            })
+        };
 
         let resp = self.rpc(&conn, "send", params).await?;
 
@@ -440,6 +449,36 @@ impl SignalAdapter {
         self.echoed_timestamps.lock().await.put(ts, ());
         Ok(ts)
     }
+}
+
+/// Heuristic: Signal 1:1 recipients are either E.164 phone numbers
+/// (start with `+`) or ACI UUIDs (36 chars, dashes at positions
+/// 8/13/18/23, hex everywhere else). Everything else in a
+/// `conversation_id` slot is treated as a Signal group id.
+fn is_group_id(s: &str) -> bool {
+    !s.starts_with('+') && !is_uuid(s)
+}
+
+fn is_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let b = s.as_bytes();
+    for (i, c) in b.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *c != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !c.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Normalize and validate a configured endpoint string. Accepts
