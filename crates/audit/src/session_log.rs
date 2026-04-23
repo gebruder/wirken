@@ -611,8 +611,25 @@ impl SqliteSessionLog {
     }
 
     fn init_schema(conn: &Connection) -> Result<(), AuditError> {
+        // Pragmas are per-connection. Every `SqliteSessionLog::open`
+        // — including each reopen inside `AuditWriter::flush` every
+        // 50ms — MUST set them, or the connection falls back to the
+        // SQLite defaults (`DELETE` journal, no busy-wait) and
+        // concurrent writers immediately fail with `SQLITE_BUSY`
+        // ("database is locked") instead of serializing on the write
+        // lock. WAL lets concurrent readers through and keeps a
+        // single logical writer at a time; `busy_timeout` gives
+        // contending writers a 5-second window to wait for their
+        // turn rather than erroring to the caller on the first miss.
+        //
+        // `synchronous=NORMAL` is the SQLite-recommended pairing
+        // with WAL — still fsyncs the WAL on checkpoint but not on
+        // every transaction, which is where we need the throughput
+        // for the flush path that writes in 50 ms batches.
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA synchronous=NORMAL;
              CREATE TABLE IF NOT EXISTS session_events (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  session_id TEXT NOT NULL,
@@ -902,7 +919,15 @@ fn append_inner(
     event: SessionEvent,
     ts_override: Option<DateTime<Utc>>,
 ) -> Result<u64, AuditError> {
-    let tx = conn.unchecked_transaction()?;
+    // IMMEDIATE (not DEFERRED) so the write lock is claimed up front.
+    // DEFERRED promotes read-to-write on the first INSERT, and in WAL
+    // mode that upgrade path returns `SQLITE_BUSY` immediately when
+    // another connection already holds the write lock — `busy_timeout`
+    // only applies to the initial acquisition, not the upgrade. With
+    // IMMEDIATE the timeout is effective and concurrent writers
+    // serialize instead of erroring. Session-log appends are small so
+    // holding the write lock for the full SELECT+INSERT is fine.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
 
     // Compute next seq atomically inside the transaction. SQLite
     // serializes writers in WAL mode so the read-then-insert is
