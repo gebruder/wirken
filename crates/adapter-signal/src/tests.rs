@@ -5,11 +5,27 @@ use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, perform_gateway_han
 use crate::convert::{self, InboundKind, SignalAllowlist, SignalInbound};
 
 // ---------------------------------------------------------------------------
-// Hand-shaped envelope fixtures. Builder functions parameterized by sub_id /
-// text / timestamp. Used by the end-to-end tests that script a fake
-// signal-cli. The shape mirrors what signal-cli 0.14.2 emits (sourceNumber,
-// sourceUuid, sourceDevice, serverReceivedTimestamp, expiresInSeconds, …);
-// a byte-accurate capture replaces this in a later commit.
+// Wire-shape fixtures captured from a real signal-cli 0.14.2 daemon during
+// the 0.7.9 socket-transport rollout. Identifiers are sanitized but field
+// shapes (key names, nesting, presence of extra timestamps and flags) are
+// preserved so the parser is exercised against the actual superset signal-cli
+// emits, not a hand-rolled subset.
+//
+// Two layers of fixtures:
+//
+// - This `fixtures` module: builder functions (hand-shaped, parameterized
+//   by sub_id / text / timestamp) used by the end-to-end tests that
+//   script a fake signal-cli. They mirror real-wire shape but need to
+//   be mutable across test cases.
+// - `tests/fixtures/signal_envelopes_20260423.json`: byte-accurate
+//   captures of real signal-cli output, sanitized. Consumed by the
+//   `real_wire_*` tests to prove the parser tolerates the exact key
+//   ordering and extra fields (sourceDevice, serverReceivedTimestamp,
+//   expiresInSeconds, etc.) that signal-cli actually emits.
+//
+// Group envelopes were not present in the 2026-04-23 capture. The
+// `extract_data_message_with_groupv2_id` test uses a synthesized
+// fixture until a group capture is available.
 // ---------------------------------------------------------------------------
 
 mod fixtures {
@@ -339,6 +355,115 @@ fn extract_receipt_real_wire_shape_dropped() {
     assert!(convert::extract_inbound(envelope).is_none());
 }
 
+// ---------------------------------------------------------------------------
+// Real wire bytes. Parsed from tests/fixtures/signal_envelopes_20260423.json,
+// captured from a live signal-cli 0.14.2 `daemon --socket` stream via socat
+// during the 0.7.9 socket-transport smoke test. Identifiers sanitized; wire
+// shape (key order, extra flags like expiresInSeconds/sourceDevice/
+// serverReceivedTimestamp) preserved byte-for-byte. If signal-cli ever
+// rearranges fields or adds keys the parser does not tolerate, these tests
+// surface that drift before operators do.
+// ---------------------------------------------------------------------------
+
+const REAL_ENVELOPES_JSON: &str = include_str!("../tests/fixtures/signal_envelopes_20260423.json");
+
+fn real_envelope(key: &str) -> serde_json::Value {
+    let doc: serde_json::Value =
+        serde_json::from_str(REAL_ENVELOPES_JSON).expect("fixture file must parse");
+    let raw_line = doc[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("fixture key '{key}' missing"));
+    let frame: serde_json::Value =
+        serde_json::from_str(raw_line).expect("fixture frame must parse");
+    frame["params"]["result"]["envelope"].clone()
+}
+
+#[test]
+fn real_wire_data_message_extracts_to_data_kind() {
+    let env = real_envelope("data_message_subscribed");
+    let (msg, kind) = convert::extract_inbound(&env).expect("real dataMessage must parse");
+    assert_eq!(kind, InboundKind::Data);
+    // Sanitized sender and account from the fixture.
+    assert_eq!(msg.sender, "+15555550001");
+    assert_eq!(msg.sender_name, "Alice");
+    // Non-ASCII text (em-dash, accented char, emoji) survives through
+    // extract_inbound.
+    assert!(msg.text.contains("açcents"));
+    assert!(msg.text.contains("🦀"));
+    assert!(msg.text.contains("—"));
+    assert!(msg.group_id.is_none());
+    // sourceUuid is preserved even when a phone number is also present.
+    assert_eq!(
+        msg.sender_uuid.as_deref(),
+        Some("00000000-0000-4000-a000-000000000001")
+    );
+}
+
+#[test]
+fn real_wire_sync_sent_extracts_to_syncsent_kind() {
+    let env = real_envelope("sync_sent_subscribed");
+    let (msg, kind) = convert::extract_inbound(&env).expect("real sentMessage must parse");
+    assert_eq!(kind, InboundKind::SyncSent);
+    // Sync-sent keys on destination so a reply routes back to the
+    // contact the operator was messaging, not the operator's own number.
+    assert_eq!(msg.sender, "+15555550001");
+    assert_eq!(msg.text, "integration-test reply");
+}
+
+#[test]
+fn real_wire_typing_returns_none() {
+    let env = real_envelope("typing_subscribed");
+    assert!(convert::extract_inbound(&env).is_none());
+}
+
+#[test]
+fn real_wire_receipt_returns_none() {
+    let env = real_envelope("receipt_subscribed");
+    assert!(convert::extract_inbound(&env).is_none());
+}
+
+#[test]
+fn extract_data_message_with_groupv2_id() {
+    // Modern signal-cli routes group messages via
+    // `dataMessage.groupV2.id`. Legacy `groupInfo.groupId` is still
+    // accepted but groupV2 takes precedence when both are present.
+    let envelope = serde_json::json!({
+        "source": "+15559876543",
+        "sourceName": "Alice",
+        "timestamp": 1711900000000_i64,
+        "dataMessage": {
+            "message": "new-style group hello",
+            "timestamp": 1711900000000_i64,
+            "groupV2": {
+                "id": "W8Z6FYAeHrqO1CRc4xBBDRHVJzRjzYqP4wQr+IhsUCA=",
+                "revision": 3
+            }
+        }
+    });
+    let (msg, _kind) = convert::extract_inbound(&envelope).expect("groupV2 must parse");
+    assert_eq!(
+        msg.group_id.as_deref(),
+        Some("W8Z6FYAeHrqO1CRc4xBBDRHVJzRjzYqP4wQr+IhsUCA=")
+    );
+}
+
+#[test]
+fn extract_data_message_groupv2_takes_precedence_over_groupinfo() {
+    let envelope = serde_json::json!({
+        "source": "+15559876543",
+        "sourceName": "Alice",
+        "timestamp": 1711900000000_i64,
+        "dataMessage": {
+            "message": "dual-shape",
+            "timestamp": 1711900000000_i64,
+            "groupV2": { "id": "v2-id=" },
+            "groupInfo": { "groupId": "legacy-id" }
+        }
+    });
+    let (msg, _kind) = convert::extract_inbound(&envelope).unwrap();
+    assert_eq!(msg.group_id.as_deref(), Some("v2-id="));
+}
+
 #[test]
 fn extract_uuid_only_sender_routes_via_uuid() {
     // Contact reached us with phone privacy: no sourceNumber, only
@@ -412,48 +537,6 @@ fn allowlist_phone_entry_still_matches_when_uuid_also_present() {
         group_id: None,
     };
     assert!(list.allows(&msg));
-}
-
-#[test]
-fn extract_data_message_with_groupv2_id() {
-    // Modern signal-cli routes group messages via
-    // `dataMessage.groupV2.id`. Legacy `groupInfo.groupId` is still
-    // accepted but groupV2 takes precedence when both are present.
-    let envelope = serde_json::json!({
-        "source": "+15559876543",
-        "sourceName": "Alice",
-        "timestamp": 1711900000000_i64,
-        "dataMessage": {
-            "message": "new-style group hello",
-            "timestamp": 1711900000000_i64,
-            "groupV2": {
-                "id": "W8Z6FYAeHrqO1CRc4xBBDRHVJzRjzYqP4wQr+IhsUCA=",
-                "revision": 3
-            }
-        }
-    });
-    let (msg, _kind) = convert::extract_inbound(&envelope).expect("groupV2 must parse");
-    assert_eq!(
-        msg.group_id.as_deref(),
-        Some("W8Z6FYAeHrqO1CRc4xBBDRHVJzRjzYqP4wQr+IhsUCA=")
-    );
-}
-
-#[test]
-fn extract_data_message_groupv2_takes_precedence_over_groupinfo() {
-    let envelope = serde_json::json!({
-        "source": "+15559876543",
-        "sourceName": "Alice",
-        "timestamp": 1711900000000_i64,
-        "dataMessage": {
-            "message": "dual-shape",
-            "timestamp": 1711900000000_i64,
-            "groupV2": { "id": "v2-id=" },
-            "groupInfo": { "groupId": "legacy-id" }
-        }
-    });
-    let (msg, _kind) = convert::extract_inbound(&envelope).unwrap();
-    assert_eq!(msg.group_id.as_deref(), Some("v2-id="));
 }
 
 #[test]
