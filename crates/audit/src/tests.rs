@@ -1028,6 +1028,73 @@ mod session {
         assert_eq!(rows[1].hash.0, expected1);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_across_distinct_connections_all_succeed() {
+        // Regression for "database is locked" errors surfaced in the
+        // 0.7.9 signal smoke test. Two separate `SqliteSessionLog`
+        // instances on the same file now coexist because the WAL +
+        // busy_timeout pragmas are set on every open. Before the
+        // fix, the second writer errored immediately with
+        // `SQLITE_BUSY` and the error text surfaced to the user via
+        // the channel adapter.
+        use crate::SessionLog;
+        use crate::session_log::{SessionEvent, SessionId, SqliteSessionLog, TrustLevel};
+        use std::sync::Arc;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("concurrency.db");
+
+        // Two independent opens on the same file — mirrors the
+        // production case where AuditWriter::flush opens a fresh
+        // log every 50ms while the agent holds its own handle.
+        let log_a = Arc::new(SqliteSessionLog::open(&db_path).unwrap());
+        let log_b = Arc::new(SqliteSessionLog::open(&db_path).unwrap());
+
+        let handle_a = log_a.handle_for(SessionId::new("sess-a".to_string()));
+        let handle_b = log_b.handle_for(SessionId::new("sess-b".to_string()));
+
+        let a_clone = log_a.clone();
+        let b_clone = log_b.clone();
+
+        let task_a = tokio::spawn(async move {
+            for i in 0..50 {
+                a_clone
+                    .append(
+                        &handle_a,
+                        TrustLevel::User,
+                        SessionEvent::AssistantMessage {
+                            content: format!("a-{i}"),
+                        },
+                    )
+                    .expect("append via log_a must succeed under contention");
+            }
+        });
+        let task_b = tokio::spawn(async move {
+            for i in 0..50 {
+                b_clone
+                    .append(
+                        &handle_b,
+                        TrustLevel::User,
+                        SessionEvent::AssistantMessage {
+                            content: format!("b-{i}"),
+                        },
+                    )
+                    .expect("append via log_b must succeed under contention");
+            }
+        });
+
+        let (ra, rb) = tokio::join!(task_a, task_b);
+        ra.unwrap();
+        rb.unwrap();
+
+        // Both sessions' chains are intact and contain exactly the
+        // rows each task wrote.
+        let probe_a = log_a.handle_for(SessionId::new("sess-a".to_string()));
+        let probe_b = log_a.handle_for(SessionId::new("sess-b".to_string()));
+        assert_eq!(log_a.last_index(&probe_a).unwrap(), Some(49));
+        assert_eq!(log_a.last_index(&probe_b).unwrap(), Some(49));
+    }
+
     #[test]
     fn permission_denied_deserializes_without_action_key() {
         // Legacy rows written before `action_key` was added must
