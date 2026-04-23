@@ -18,10 +18,20 @@ pub enum SignalAllowlistError {
 /// Parsed inbound Signal message.
 pub struct SignalInbound {
     pub message_id: String,
+    /// Addressable identifier for the sender. Phone number in E.164
+    /// form when signal-cli supplies one; otherwise the ACI UUID. Used
+    /// as the `conversation_id` for 1:1 DMs so replies can be routed
+    /// back through the same channel via signal-cli's `recipient`
+    /// field (which accepts both phone and UUID).
     pub sender: String,
     pub sender_name: String,
     pub text: String,
     pub timestamp: i64,
+    /// Sender's Signal ACI UUID, when the envelope supplied one.
+    /// Carried independently of `sender` so the allowlist can match
+    /// either form — necessary for contacts who have enabled phone
+    /// number privacy and reach others by username / UUID only.
+    pub sender_uuid: Option<String>,
     /// Group ID if this message was sent to a group, None for 1:1 DMs.
     pub group_id: Option<String>,
 }
@@ -80,20 +90,31 @@ impl SignalAllowlist {
     }
 
     /// Returns true iff this message should be delivered to the gateway.
-    /// Group messages are keyed on the group ID; DMs on the sender number.
+    /// Group messages are keyed on the group ID; DMs on the sender's
+    /// phone number OR UUID.
     ///
-    /// The runtime sender goes through the same normalization as the
+    /// Phone-shaped senders go through the same normalization as the
     /// allowlist entries so format drift between signal-cli and the
-    /// operator-configured list does not cause silent drops.
+    /// operator-configured list does not cause silent drops. If the
+    /// sender cannot be normalized as a phone (or has no phone at all,
+    /// only a UUID because of Signal's phone-privacy feature), the
+    /// UUID is checked as a fallback. Allowlist entries can be either
+    /// phone numbers or UUIDs — they live in the same set.
     pub fn allows(&self, msg: &SignalInbound) -> bool {
-        let key = match msg.group_id.as_deref() {
-            Some(g) => g.to_string(),
-            None => match normalize_phone(msg.sender.as_str()) {
-                Ok(p) => p,
-                Err(_) => return false,
-            },
-        };
-        self.entries.contains(&key)
+        if let Some(g) = msg.group_id.as_deref() {
+            return self.entries.contains(g);
+        }
+        if let Ok(p) = normalize_phone(msg.sender.as_str())
+            && self.entries.contains(&p)
+        {
+            return true;
+        }
+        if let Some(u) = msg.sender_uuid.as_deref()
+            && self.entries.contains(u)
+        {
+            return true;
+        }
+        false
     }
 }
 
@@ -157,11 +178,11 @@ pub enum InboundKind {
 /// sync envelopes that carry no user text.
 ///
 /// Extraction rules:
-/// - `source` prefers the legacy `source` field but falls back to
-///   `sourceNumber`; both carry E.164 in 0.14.x. Contacts reachable
-///   only by UUID (Signal's phone-privacy feature) have empty
-///   `source` and will be dropped by the allowlist. That path is a
-///   known gap; see the follow-up for sourceUuid handling.
+/// - `source` prefers an E.164 phone number from the `source` /
+///   `sourceNumber` fields, and falls back to the ACI UUID from
+///   `sourceUuid` when the envelope has no phone (Signal's phone-
+///   privacy feature). The UUID is also surfaced independently in
+///   `sender_uuid` so allowlists can match either form.
 /// - Data messages use the message text from `dataMessage.message`.
 ///   Group id (if any) is drawn from `dataMessage.groupV2.id` (modern
 ///   signal-cli emits v2 for all new groups) with a fallback to the
@@ -172,12 +193,25 @@ pub enum InboundKind {
 ///   their own number. Tests-to-self work when the operator's own
 ///   number is in the allowlist.
 pub fn extract_inbound(envelope: &serde_json::Value) -> Option<(SignalInbound, InboundKind)> {
-    let source = envelope
+    let source_phone = envelope
         .get("source")
         .or_else(|| envelope.get("sourceNumber"))
         .and_then(|s| s.as_str())
-        .unwrap_or("")
-        .to_string();
+        .filter(|s| s.starts_with('+'))
+        .map(|s| s.to_string());
+    let source_uuid = envelope
+        .get("sourceUuid")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // Prefer the phone number as the canonical sender/conversation id
+    // so replies still route to legacy E.164-allowlisted contacts
+    // without change. Fall back to the UUID when the envelope has no
+    // phone — Signal's phone-privacy users reach us by ACI only.
+    let source = source_phone
+        .clone()
+        .or_else(|| source_uuid.clone())
+        .unwrap_or_default();
     let source_name = envelope
         .get("sourceName")
         .and_then(|s| s.as_str())
@@ -220,6 +254,7 @@ pub fn extract_inbound(envelope: &serde_json::Value) -> Option<(SignalInbound, I
                 sender_name: source_name,
                 text,
                 timestamp,
+                sender_uuid: source_uuid,
                 group_id,
             },
             InboundKind::Data,
@@ -255,6 +290,14 @@ pub fn extract_inbound(envelope: &serde_json::Value) -> Option<(SignalInbound, I
                 sender_name: source_name,
                 text,
                 timestamp,
+                // Sync-sent envelopes describe the operator's own
+                // outbound to a destination — the destination UUID
+                // field is under `syncMessage.sentMessage` rather than
+                // the envelope root, and the adapter currently does
+                // not surface it. sourceUuid on the envelope itself
+                // is the operator's own ACI, which is not useful as
+                // an allowlist key.
+                sender_uuid: None,
                 group_id: None,
             },
             InboundKind::SyncSent,
