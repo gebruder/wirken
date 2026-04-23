@@ -134,6 +134,124 @@ pub(crate) fn normalize_phone(raw: &str) -> Result<String, SignalAllowlistError>
     Ok(format!("+{digits}"))
 }
 
+/// Envelope kind, used by the adapter to gate linked-device sends and to
+/// record the self-echo fingerprint for outgoing `send` RPCs. Consumers
+/// downstream of the adapter do not distinguish; allowlist and gateway
+/// both see a single [`SignalInbound`] shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundKind {
+    /// `envelope.dataMessage` — an inbound DM or group message from
+    /// another contact. Production case for an allowlisted sender.
+    Data,
+    /// `envelope.syncMessage.sentMessage` — a message the operator sent
+    /// from another linked device (e.g., their phone), mirrored to this
+    /// daemon by Signal's multi-device protocol. Gated by the adapter's
+    /// `forward_linked_device_sends` flag and the self-echo filter.
+    SyncSent,
+}
+
+/// Parse a single envelope JSON value (as carried inside a
+/// `subscribeReceive` notification's `params.result.envelope`) into the
+/// adapter's internal inbound shape. Returns `None` for envelopes the
+/// adapter should drop silently: receipts, typing indicators, and empty
+/// sync envelopes that carry no user text.
+///
+/// Extraction rules:
+/// - `source` prefers the legacy `source` field but falls back to
+///   `sourceNumber`; both carry E.164 in 0.14.x. Contacts reachable
+///   only by UUID (Signal's phone-privacy feature) have empty
+///   `source` and will be dropped by the allowlist. That path is a
+///   known gap; see the follow-up for sourceUuid handling.
+/// - Data messages use the message text from `dataMessage.message` and
+///   the group id (if any) from `dataMessage.groupInfo.groupId`. The
+///   modern `groupV2.id` path is a known gap tracked separately.
+/// - Sync-sent messages use the destination as the conversation key so
+///   the allowlist matches the contact the operator was messaging, not
+///   their own number. Tests-to-self work when the operator's own
+///   number is in the allowlist.
+pub fn extract_inbound(envelope: &serde_json::Value) -> Option<(SignalInbound, InboundKind)> {
+    let source = envelope
+        .get("source")
+        .or_else(|| envelope.get("sourceNumber"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let source_name = envelope
+        .get("sourceName")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let timestamp = envelope
+        .get("timestamp")
+        .and_then(|t| t.as_i64())
+        .unwrap_or(0);
+
+    if let Some(dm) = envelope.get("dataMessage") {
+        let text = dm
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        if text.is_empty() {
+            return None;
+        }
+        let group_id = dm
+            .get("groupInfo")
+            .and_then(|g| g.get("groupId"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string());
+        let message_id = format!("{source}_{timestamp}");
+        return Some((
+            SignalInbound {
+                message_id,
+                sender: source,
+                sender_name: source_name,
+                text,
+                timestamp,
+                group_id,
+            },
+            InboundKind::Data,
+        ));
+    }
+
+    if let Some(sent) = envelope
+        .get("syncMessage")
+        .and_then(|s| s.get("sentMessage"))
+    {
+        let text = sent
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        if text.is_empty() {
+            return None;
+        }
+        let destination = sent
+            .get("destination")
+            .or_else(|| sent.get("destinationNumber"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        if destination.is_empty() {
+            return None;
+        }
+        let message_id = format!("sync_{timestamp}");
+        return Some((
+            SignalInbound {
+                message_id,
+                sender: destination,
+                sender_name: source_name,
+                text,
+                timestamp,
+                group_id: None,
+            },
+            InboundKind::SyncSent,
+        ));
+    }
+
+    None
+}
+
 /// Check if an inbound message should be processed.
 ///
 /// A message is processed only if it has non-empty text AND its sender (or

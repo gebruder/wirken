@@ -176,7 +176,7 @@ pub async fn run(channel: &str) -> Result<()> {
             let endpoint = store
                 .retrieve(&endpoint_name)
                 .map(|(s, _)| s.expose().to_string())
-                .unwrap_or_else(|_| "http://localhost:8080/api/v1/rpc".into());
+                .unwrap_or_else(|_| "/tmp/signal-cli.sock".into());
 
             let phone_name = format!("{channel}-phone-number");
             let (phone_val, _) = store
@@ -194,8 +194,9 @@ pub async fn run(channel: &str) -> Result<()> {
             let allowlist = SignalAllowlist::from_csv(&allowlist_csv)
                 .map_err(|e| anyhow::anyhow!("Signal adapter: invalid allowlist entry: {e}"))?;
 
-            let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist);
-            adapter
+            let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist)
+                .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
+            std::sync::Arc::new(adapter)
                 .run(&socket_path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
