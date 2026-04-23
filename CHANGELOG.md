@@ -8,6 +8,97 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## 0.8.0 — Signal socket transport; adapter-core formatters; audit concurrency
+
+Breaking-on-upgrade for Signal operators: the adapter no longer speaks
+HTTP to signal-cli. The daemon must run with `--socket <path>` and the
+endpoint stored in the vault must be a filesystem path (or
+`unix:///path`). Pre-0.8.0 installs with an `http://` endpoint get a
+clear migration error at startup and must re-run `wirken setup` or
+`wirken channel add signal`. Every other provider and channel is
+unchanged.
+
+- **Signal adapter rewritten to `--socket` JSON-RPC.** signal-cli
+  0.14.x's HTTP daemon auto-consumes inbound messages in the
+  background and rejects concurrent `receive` RPCs, which broke
+  every tick of the previous polling loop with `"Receive command
+  cannot be used if messages are already being received."` The
+  adapter now calls `subscribeReceive` once and consumes push
+  notifications over a Unix socket. Reader-side subscription-id
+  interception so no race between subscribe response and first
+  notification. Reconnect-with-exponential-backoff around
+  connect + subscribe + read_loop. Bounded inbound channel (256)
+  for backpressure. Self-echo LRU (1024 entries) keyed on the
+  timestamp signal-cli returns from `send` so Signal's
+  multi-device mirror does not re-enter the agent as fresh
+  inbound. End-to-end test against a fake Unix socket; byte-accurate
+  captured envelopes from a real signal-cli 0.14.2 daemon land
+  as the authoritative parse fixture.
+- **Signal envelope coverage expanded.** `dataMessage.groupV2.id`
+  (modern signal-cli) reads before legacy `groupInfo.groupId`.
+  `sourceUuid` is surfaced on `SignalInbound` and the allowlist
+  accepts UUID entries alongside E.164 phone numbers, so contacts
+  using Signal's phone-privacy feature can reach the agent.
+  Outbound sends to a group route via the `groupId` RPC param
+  instead of always using `recipient` — group replies used to be
+  silently rejected by signal-cli.
+- **`wirken channel add signal`.** Signal has its own arm that
+  collects phone, socket path, and allowlist through the same
+  helper the setup wizard uses. Previously it went through the
+  generic bot-token prompt and produced a half-populated vault
+  state that crashed the adapter at startup.
+- **`adapter-core` crate.** Channel-specific outbound formatting
+  has a typed home: `OutboundFormatter` trait, `PlainFormatter`
+  (explicit pass-through so "no formatter" stops being
+  accidental), `SignalFormatter` (renders markdown to Signal's
+  `*bold*` / `_italic_` dialect and flattens GFM tables to
+  `header: value` per cell). Wired into the signal adapter's
+  `send_message`. Slack / Discord / Telegram / Matrix formatters
+  are tracked in #71.
+- **UTF-8 correctness in cli and formatter.** Three `truncate(&str,
+  max)` helpers in `run.rs`, `audit.rs`, `skills.rs` were slicing
+  `&s[..max]` on byte offsets, which panics when the offset falls
+  inside a multi-byte UTF-8 scalar — `byte index 80 is not a char
+  boundary; it is inside 'ा'` crashed the gateway on a Hindi LLM
+  reply during live testing. All three walk back to the nearest
+  `is_char_boundary` now. `SignalFormatter::replace_links` had the
+  same bug (`bytes[i] as char` per non-bracket byte) and now
+  copies full codepoints via `&str` slicing.
+- **Agent error text no longer leaks to the end user.** When
+  `agent.process_message` returned `Err`, the raw error string
+  (database paths, session-log locks, provider stack traces) was
+  formatted and sent back through whatever channel the sender
+  reached us on. Outbound reply is now a generic apology; the
+  full error still lands in the operator log and the audit trail.
+- **Audit writer serializes concurrent writers.** Two inbound
+  messages arriving within seconds of each other produced
+  `database error: database is locked` on the session log.
+  `SqliteSessionLog::init_schema` now sets `busy_timeout=5000` and
+  `synchronous=NORMAL` on every open alongside the existing WAL;
+  `append_inner` uses `BEGIN IMMEDIATE` instead of the default
+  DEFERRED so the write lock is claimed up front where
+  `busy_timeout` applies. Concurrent writers serialize instead of
+  erroring. Regression test: 100 concurrent appends across two
+  `SqliteSessionLog` instances on the same file, all succeed.
+- **AuditWriter connection reuse.** `flush` was reopening the
+  SQLite connection on every 50ms tick, paying the full
+  pragma + migration cost for nothing. `flush_loop` now opens
+  once at startup and threads the `Arc<AuditLog>` through.
+- **`wirken sessions list` / `verify` id mapping.** `list` prints
+  both the `STORE ID` (hex primary key in `sessions.db`) and the
+  `LOG ID` (composite `{agent}/{channel}/{conversation}` keyed by
+  the audit log). Operators copying either into the right command
+  works; previously the hex id from `list` produced `No events for
+  session …` on `verify`. `verify` also translates a bare hex id
+  to the composite via a SessionStore lookup, so pre-0.8.0 scripts
+  that passed the `list` output keep working.
+- **Privatemode reference doc rewritten.** `docs/reference/privatemode.md`
+  drops the `_Target_` sections describing work that was never
+  built (packaged `deploy/privatemode/` sidecar recipes, direct
+  proxy sidecar spawning, an Anthropic-shape provider switch). The
+  doc now describes only what works on the current binary.
+  Tracking issue #57 closed; remaining CI-stub work relocated to #72.
+
 ## 0.7.8 — Setup-time vault corruption fix; credential CLI gaps
 
 Headline is a setup-time data-loss bug: every multi-step channel setup
