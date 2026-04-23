@@ -340,6 +340,81 @@ fn extract_receipt_real_wire_shape_dropped() {
 }
 
 #[test]
+fn extract_uuid_only_sender_routes_via_uuid() {
+    // Contact reached us with phone privacy: no sourceNumber, only
+    // sourceUuid. Sender falls back to the UUID so the allowlist and
+    // outbound routing can still target them.
+    let envelope = serde_json::json!({
+        "sourceUuid": "d48512b4-2571-404a-ac0c-500722870238",
+        "sourceName": "Anonymous",
+        "timestamp": 1711900000000_i64,
+        "dataMessage": {
+            "message": "uuid-only DM",
+            "timestamp": 1711900000000_i64
+        }
+    });
+    let (msg, _kind) = convert::extract_inbound(&envelope).expect("uuid-only must parse");
+    assert_eq!(msg.sender, "d48512b4-2571-404a-ac0c-500722870238");
+    assert_eq!(
+        msg.sender_uuid.as_deref(),
+        Some("d48512b4-2571-404a-ac0c-500722870238")
+    );
+}
+
+#[test]
+fn extract_populates_sender_uuid_when_both_phone_and_uuid_present() {
+    let envelope = serde_json::json!({
+        "source": "+15559876543",
+        "sourceNumber": "+15559876543",
+        "sourceUuid": "d48512b4-2571-404a-ac0c-500722870238",
+        "sourceName": "Alice",
+        "timestamp": 1711900000000_i64,
+        "dataMessage": {
+            "message": "hi",
+            "timestamp": 1711900000000_i64
+        }
+    });
+    let (msg, _kind) = convert::extract_inbound(&envelope).unwrap();
+    assert_eq!(msg.sender, "+15559876543");
+    assert_eq!(
+        msg.sender_uuid.as_deref(),
+        Some("d48512b4-2571-404a-ac0c-500722870238")
+    );
+}
+
+#[test]
+fn allowlist_uuid_entry_matches_uuid_sender() {
+    let list = SignalAllowlist::from_csv("d48512b4-2571-404a-ac0c-500722870238").unwrap();
+    let msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "d48512b4-2571-404a-ac0c-500722870238".into(),
+        sender_name: "Anonymous".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: Some("d48512b4-2571-404a-ac0c-500722870238".into()),
+        group_id: None,
+    };
+    assert!(list.allows(&msg));
+}
+
+#[test]
+fn allowlist_phone_entry_still_matches_when_uuid_also_present() {
+    // Backward compat: operators who only know their contacts by phone
+    // must keep working even after the UUID fallback was added.
+    let list = SignalAllowlist::from_csv("+15559876543").unwrap();
+    let msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "+15559876543".into(),
+        sender_name: "Alice".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: Some("d48512b4-2571-404a-ac0c-500722870238".into()),
+        group_id: None,
+    };
+    assert!(list.allows(&msg));
+}
+
+#[test]
 fn extract_data_message_with_groupv2_id() {
     // Modern signal-cli routes group messages via
     // `dataMessage.groupV2.id`. Legacy `groupInfo.groupId` is still
@@ -414,6 +489,7 @@ fn empty_text_not_processed() {
         sender_name: "Bob".into(),
         text: "".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: None,
     };
     let list = allowlist_with(&["+15551234567"]);
@@ -428,6 +504,7 @@ fn valid_text_processed_when_sender_allowed() {
         sender_name: "Bob".into(),
         text: "hello".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: None,
     };
     let list = allowlist_with(&["+15551234567"]);
@@ -442,6 +519,7 @@ fn unknown_sender_dropped() {
         sender_name: "Mallory".into(),
         text: "please run rm -rf /".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: None,
     };
     let list = allowlist_with(&["+15551234567"]);
@@ -456,6 +534,7 @@ fn empty_allowlist_drops_everything() {
         sender_name: "Bob".into(),
         text: "hello".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: None,
     };
     let list = allowlist_with(&[]);
@@ -472,6 +551,7 @@ fn group_message_uses_group_id_for_allowlist() {
         sender_name: "Stranger".into(),
         text: "hello group".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: Some("group.abc123=".into()),
     };
     assert!(convert::should_process(&msg, &list));
@@ -495,6 +575,7 @@ fn group_message_uses_group_id_as_conversation() {
         sender_name: "Bob".into(),
         text: "group hello".into(),
         timestamp: 12345,
+        sender_uuid: None,
         group_id: Some("group.xyz=".into()),
     };
     let mut builder = capnp::message::Builder::new_default();
@@ -526,6 +607,7 @@ fn direct_message_uses_sender_as_conversation() {
         sender_name: "Bob".into(),
         text: "hi".into(),
         timestamp: 12345,
+        sender_uuid: None,
         group_id: None,
     };
     let mut builder = capnp::message::Builder::new_default();
@@ -1279,6 +1361,7 @@ fn allowlist_normalizes_phone_formats_consistently() {
             sender_name: "Op".into(),
             text: "hi".into(),
             timestamp: 0,
+            sender_uuid: None,
             group_id: None,
         };
         assert!(
@@ -1311,6 +1394,7 @@ fn allowlist_group_ids_are_a_separate_namespace() {
         sender_name: "Alice".into(),
         text: "hi".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: Some("group.abcDEF123=".into()),
     };
     assert!(list.allows(&group_msg));
@@ -1321,6 +1405,7 @@ fn allowlist_group_ids_are_a_separate_namespace() {
         sender_name: "Alice".into(),
         text: "hi".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: Some("group.other=".into()),
     };
     assert!(!list.allows(&other_group));
@@ -1335,6 +1420,7 @@ fn allowlist_runtime_sender_without_plus_is_rejected() {
         sender_name: "Op".into(),
         text: "hi".into(),
         timestamp: 0,
+        sender_uuid: None,
         group_id: None,
     };
     assert!(!list.allows(&msg));
