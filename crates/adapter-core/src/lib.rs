@@ -8,10 +8,17 @@
 //! on the way out.
 //!
 //! Scope: trait + [`PlainFormatter`] + [`SignalFormatter`] + [`SlackFormatter`]
-//! + [`DiscordFormatter`].
+//! + [`DiscordFormatter`] + [`TelegramFormatter`].
 //!
-//! Telegram and Matrix adapters still ship raw markdown. Their
-//! formatters are tracked as follow-ups in #71.
+//! [`TelegramFormatter`] emits HTML, not MarkdownV2, because the escape
+//! surface is bounded (three characters: `<`, `>`, `&`) and the
+//! converter shares structure with the Matrix HTML path. MarkdownV2's
+//! escape table covers fifteen-plus characters and is the kind of
+//! perfect-parser-over-hostile-input that fails silently on a single
+//! missed character; HTML mode collapses that surface.
+//!
+//! The Matrix adapter still ships raw markdown. Its formatter is
+//! tracked as a follow-up in #71.
 
 /// Transform agent-emitted markdown into a string suitable for the
 /// target channel's plain-text or rich-text envelope.
@@ -542,6 +549,332 @@ impl OutboundFormatter for DiscordFormatter {
 /// contents reach the output unmangled.
 fn apply_inline_discord(line: &str) -> String {
     line.to_string()
+}
+
+/// Render markdown to Telegram's HTML mode.
+///
+/// Telegram bots accept either `MarkdownV2` or `HTML` as the message
+/// `parse_mode`. We pick HTML because the escape surface is bounded
+/// to three characters (`<`, `>`, `&`); MarkdownV2 escapes fifteen-
+/// plus characters with strict positional rules and silently breaks
+/// on one missed character of user content. HTML mode also shares
+/// structure with the planned Matrix HTML path, so this converter is
+/// reusable with a different tag whitelist.
+///
+/// Tag whitelist (per Telegram Bot API):
+/// `<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<blockquote>`,
+/// `<a href="...">`. The agent's outbound message must arrive at the
+/// adapter with `parse_mode = "HTML"` set on the send call —
+/// `wirken-adapter-telegram` does that wiring on the consuming side.
+///
+/// - `# H` / `## H` / `### H` → `<b>H</b>` on its own line, blank line
+///   following (Telegram has no native heading tag)
+/// - `**x**` / `__x__` → `<b>x</b>`
+/// - `*x*` / `_x_` → `<i>x</i>`
+/// - `~~x~~` → `<s>x</s>`
+/// - `` `x` `` → `<code>x</code>`
+/// - Fenced code blocks ` ```lang ` → `<pre><code class="language-lang">…</code></pre>`
+/// - Fenced code blocks ` ``` ` (no lang) → `<pre><code>…</code></pre>`
+/// - GFM tables → flattened to `header: value` lines per row,
+///   inline-formatted per cell
+/// - Bullet lists `- ` / `* ` → `• ` (Telegram has no list primitive)
+/// - Numbered lists → unchanged
+/// - Links `[text](url)` → `<a href="url">text</a>`. URL `"` are
+///   escaped to `&quot;` to keep the attribute sealed; `<>&` are
+///   already escaped by the body pass.
+/// - Blockquotes `> x` → `<blockquote>x</blockquote>`
+/// - Horizontal rules → blank line
+/// - Literal `<`, `>`, `&` in agent output → escaped to `&lt;`,
+///   `&gt;`, `&amp;` (so an agent emitting `<script>` sends literal
+///   text, not an injected tag)
+pub struct TelegramFormatter;
+
+impl OutboundFormatter for TelegramFormatter {
+    fn format(&self, markdown: &str) -> String {
+        let mut out = String::with_capacity(markdown.len());
+        let mut lines = markdown.lines().peekable();
+        let mut in_code_fence = false;
+        let mut code_lang: Option<String> = None;
+        let mut code_buf = String::new();
+        let mut table_header: Option<Vec<String>> = None;
+
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim_end();
+
+            // Fenced code blocks: collect content into a buffer,
+            // emit a single `<pre><code>` element on close. The
+            // content is HTML-escaped on emit so `<`, `>`, `&` in
+            // code reach Telegram as literals.
+            if trimmed.trim_start().starts_with("```") {
+                if !in_code_fence {
+                    let lang = trimmed.trim_start().trim_start_matches('`').trim();
+                    code_lang = if lang.is_empty() {
+                        None
+                    } else {
+                        Some(lang.to_string())
+                    };
+                    code_buf.clear();
+                    in_code_fence = true;
+                } else {
+                    out.push_str("<pre>");
+                    match &code_lang {
+                        Some(l) => {
+                            out.push_str("<code class=\"language-");
+                            out.push_str(&html_escape_attr(l));
+                            out.push_str("\">");
+                        }
+                        None => out.push_str("<code>"),
+                    }
+                    // Strip the trailing newline added when buffering
+                    // the last line so the closing tag sits on the
+                    // same line as the final code line.
+                    let body = code_buf.trim_end_matches('\n');
+                    out.push_str(&html_escape(body));
+                    out.push_str("</code></pre>\n");
+                    in_code_fence = false;
+                    code_lang = None;
+                    code_buf.clear();
+                }
+                continue;
+            }
+            if in_code_fence {
+                code_buf.push_str(line);
+                code_buf.push('\n');
+                continue;
+            }
+
+            if is_hr(trimmed) {
+                out.push('\n');
+                continue;
+            }
+
+            if let Some(stripped) = strip_heading(trimmed) {
+                if !stripped.is_empty() {
+                    out.push_str("<b>");
+                    out.push_str(&apply_inline_telegram(stripped));
+                    out.push_str("</b>");
+                }
+                out.push('\n');
+                out.push('\n');
+                continue;
+            }
+
+            if is_table_row(trimmed) {
+                let cells = split_table_row(trimmed, &apply_inline_telegram);
+                if table_header.is_none() {
+                    match lines.peek().map(|s| s.trim_end()) {
+                        Some(next) if is_table_delimiter(next) => {
+                            table_header = Some(cells);
+                            lines.next();
+                            continue;
+                        }
+                        _ => {
+                            emit_flat_row(&mut out, None, &cells);
+                            continue;
+                        }
+                    }
+                }
+                emit_flat_row(&mut out, table_header.as_deref(), &cells);
+                continue;
+            } else {
+                table_header = None;
+            }
+
+            if let Some(rest) = strip_bullet(trimmed) {
+                out.push_str("• ");
+                out.push_str(&apply_inline_telegram(rest));
+                out.push('\n');
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("> ") {
+                out.push_str("<blockquote>");
+                out.push_str(&apply_inline_telegram(rest));
+                out.push_str("</blockquote>\n");
+                continue;
+            }
+            if trimmed == ">" {
+                out.push_str("<blockquote></blockquote>\n");
+                continue;
+            }
+
+            out.push_str(&apply_inline_telegram(line));
+            out.push('\n');
+        }
+
+        // If a fence never closed (malformed input), flush whatever
+        // we buffered as a plain code block. Better than dropping the
+        // content silently.
+        if in_code_fence && !code_buf.is_empty() {
+            out.push_str("<pre><code>");
+            out.push_str(&html_escape(code_buf.trim_end_matches('\n')));
+            out.push_str("</code></pre>\n");
+        }
+
+        // Heading + a literal blank line in source markdown produces
+        // three newlines; collapse to a paragraph break.
+        while let Some(idx) = out.find("\n\n\n") {
+            out.replace_range(idx..idx + 3, "\n\n");
+        }
+
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out
+    }
+}
+
+/// Telegram inline pipeline. Single-pass tokenizer over the
+/// HTML-escaped input so that markdown markers inside an inline-code
+/// span are NOT re-tokenized as bold/italic/etc. — a multi-pass
+/// regex-style approach would mistake `*x*` inside ` ``...*x*...`` `
+/// for italic.
+///
+/// Order of recognition at each cursor position:
+/// 1. inline code (`` ` ``)
+/// 2. link (`[`)
+/// 3. bold (`**` or `__`)
+/// 4. strikethrough (`~~`)
+/// 5. italic (`*` or `_`, single-char, only when the closing marker
+///    is not part of a doubled run)
+///
+/// Falls through to a UTF-8-safe codepoint copy when no marker
+/// matches.
+fn apply_inline_telegram(input: &str) -> String {
+    let escaped = html_escape(input);
+    let bytes = escaped.as_bytes();
+    let mut out = String::with_capacity(escaped.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // Inline code: ``…``  (single backtick, no nested backticks).
+        if bytes[i] == b'`'
+            && let Some(close) = find_byte(bytes, b'`', i + 1)
+        {
+            out.push_str("<code>");
+            out.push_str(&escaped[i + 1..close]);
+            out.push_str("</code>");
+            i = close + 1;
+            continue;
+        }
+        // Link: [text](url)
+        if bytes[i] == b'['
+            && let Some(close) = find_byte(bytes, b']', i + 1)
+            && close + 1 < bytes.len()
+            && bytes[close + 1] == b'('
+            && let Some(paren_close) = find_byte(bytes, b')', close + 2)
+        {
+            let text = &escaped[i + 1..close];
+            let url = &escaped[close + 2..paren_close];
+            if url.is_empty() {
+                out.push_str(text);
+            } else {
+                let url_attr = url.replace('"', "&quot;");
+                out.push_str("<a href=\"");
+                out.push_str(&url_attr);
+                out.push_str("\">");
+                out.push_str(if text.is_empty() { url } else { text });
+                out.push_str("</a>");
+            }
+            i = paren_close + 1;
+            continue;
+        }
+        // Bold: **x** or __x__
+        if i + 1 < bytes.len()
+            && (bytes[i] == b'*' || bytes[i] == b'_')
+            && bytes[i + 1] == bytes[i]
+            && let Some(close) = find_doubled(bytes, bytes[i], i + 2)
+        {
+            out.push_str("<b>");
+            out.push_str(&escaped[i + 2..close]);
+            out.push_str("</b>");
+            i = close + 2;
+            continue;
+        }
+        // Strikethrough: ~~x~~
+        if i + 1 < bytes.len()
+            && bytes[i] == b'~'
+            && bytes[i + 1] == b'~'
+            && let Some(close) = find_doubled(bytes, b'~', i + 2)
+        {
+            out.push_str("<s>");
+            out.push_str(&escaped[i + 2..close]);
+            out.push_str("</s>");
+            i = close + 2;
+            continue;
+        }
+        // Italic: *x* or _x_ (single-char). Only when neither the
+        // opener nor the closer is part of a doubled run, to avoid
+        // mis-pairing with leftover bold markers.
+        if (bytes[i] == b'*' || bytes[i] == b'_')
+            && (i + 1 >= bytes.len() || bytes[i + 1] != bytes[i])
+            && let Some(close) = find_byte(bytes, bytes[i], i + 1)
+            && close > i + 1
+            && (close + 1 >= bytes.len() || bytes[close + 1] != bytes[i])
+        {
+            out.push_str("<i>");
+            out.push_str(&escaped[i + 1..close]);
+            out.push_str("</i>");
+            i = close + 1;
+            continue;
+        }
+        let next = next_char_boundary(&escaped, i);
+        out.push_str(&escaped[i..next]);
+        i = next;
+    }
+    out
+}
+
+/// Find the next position of two consecutive bytes equal to `c`.
+/// Used to locate the closing `**`, `__`, or `~~` marker for the
+/// Telegram inline tokenizer.
+fn find_doubled(bytes: &[u8], c: u8, start: usize) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < bytes.len() {
+        if bytes[i] == c && bytes[i + 1] == c {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Escape `<`, `>`, `&` in body text. These three characters carry
+/// HTML semantics in Telegram's HTML parse mode; nothing else needs
+/// escaping outside attribute contexts.
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Escape a value embedded in an HTML attribute. Same as
+/// [`html_escape`] plus `"` → `&quot;` so quotation marks can't
+/// terminate the attribute early. Used for `<code class="…">`
+/// language hints; URL attribute escaping is handled inline at the
+/// link-rewrite site so an empty/invalid URL does not produce a
+/// dangling tag.
+fn html_escape_attr(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 4);
+    for c in input.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Slack inline pipeline: links → bold collapse. Inline code is left
@@ -1099,6 +1432,272 @@ Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
         assert!(out.contains("Protein (g/100g): 31"));
         assert!(out.contains("- Prioritize variety."));
         assert!(out.contains("[the guide](https://example.com/protein)"));
+        for line in out.lines() {
+            assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
+        }
+    }
+
+    // -------- Telegram formatter -------------------------------------
+
+    fn tg() -> TelegramFormatter {
+        TelegramFormatter
+    }
+
+    #[test]
+    fn telegram_html_special_chars_in_text_are_escaped() {
+        // Agent emits a literal `<script>` tag in a reply; output
+        // must be inert (rendered as text), not injected.
+        let out = tg().format("<script>alert(1)</script>");
+        assert_eq!(out, "&lt;script&gt;alert(1)&lt;/script&gt;");
+    }
+
+    #[test]
+    fn telegram_ampersand_in_text_is_escaped() {
+        let out = tg().format("R&D budget");
+        assert_eq!(out, "R&amp;D budget");
+    }
+
+    #[test]
+    fn telegram_bold_double_asterisk() {
+        let out = tg().format("This is **bold** text.");
+        assert_eq!(out, "This is <b>bold</b> text.");
+    }
+
+    #[test]
+    fn telegram_bold_double_underscore() {
+        let out = tg().format("This is __bold__ text.");
+        assert_eq!(out, "This is <b>bold</b> text.");
+    }
+
+    #[test]
+    fn telegram_italic_single_asterisk_and_underscore() {
+        let out = tg().format("Maybe *italic* or _italic_.");
+        assert_eq!(out, "Maybe <i>italic</i> or <i>italic</i>.");
+    }
+
+    #[test]
+    fn telegram_strikethrough() {
+        let out = tg().format("Was ~~important~~ now retired.");
+        assert_eq!(out, "Was <s>important</s> now retired.");
+    }
+
+    #[test]
+    fn telegram_inline_code() {
+        let out = tg().format("Use `cargo build`.");
+        assert_eq!(out, "Use <code>cargo build</code>.");
+    }
+
+    #[test]
+    fn telegram_inline_code_shields_inner_markdown() {
+        // Critical correctness: `*foo*` inside a code span must NOT
+        // be re-tokenized as italic. The single-pass tokenizer
+        // consumes the code span first and skips its contents.
+        let out = tg().format("Avoid `*foo*` rendering as italic.");
+        assert_eq!(out, "Avoid <code>*foo*</code> rendering as italic.");
+    }
+
+    #[test]
+    fn telegram_inline_code_with_html_special_chars_escaped() {
+        // The body-escape pass runs before tokenization, so `<` and
+        // `>` inside backticks reach Telegram as `&lt;` / `&gt;`
+        // wrapped in <code>.
+        let out = tg().format("Pattern: `<int>`");
+        assert_eq!(out, "Pattern: <code>&lt;int&gt;</code>");
+    }
+
+    #[test]
+    fn telegram_fenced_code_block_with_language_tag() {
+        let out = tg().format("```rust\nfn main() {}\n```");
+        assert_eq!(
+            out,
+            "<pre><code class=\"language-rust\">fn main() {}</code></pre>"
+        );
+    }
+
+    #[test]
+    fn telegram_fenced_code_block_without_language_tag() {
+        let out = tg().format("```\nplain text\n```");
+        assert_eq!(out, "<pre><code>plain text</code></pre>");
+    }
+
+    #[test]
+    fn telegram_fenced_code_block_escapes_html_in_content() {
+        // Code blocks frequently contain `<` and `>`. Those must be
+        // escaped on emit; otherwise the bot API rejects the message
+        // for malformed HTML.
+        let out = tg().format("```\nif x < y && y > 0 { ok }\n```");
+        assert_eq!(
+            out,
+            "<pre><code>if x &lt; y &amp;&amp; y &gt; 0 { ok }</code></pre>"
+        );
+    }
+
+    #[test]
+    fn telegram_unclosed_fence_still_emits_a_code_block() {
+        // Defense against malformed input from the agent. Better to
+        // ship the partial body wrapped in <pre><code> than to drop
+        // it from the buffer.
+        let out = tg().format("```\nhalf finished\n");
+        assert_eq!(out, "<pre><code>half finished</code></pre>");
+    }
+
+    #[test]
+    fn telegram_links_use_anchor_tag() {
+        let out = tg().format("See [docs](https://wirken.app/docs).");
+        assert_eq!(out, "See <a href=\"https://wirken.app/docs\">docs</a>.");
+    }
+
+    #[test]
+    fn telegram_link_url_with_ampersand_is_attribute_safe() {
+        // `&` in the URL gets `&amp;` from the body-escape pass; that
+        // is the correct HTML attribute encoding, so the anchor
+        // attribute remains valid.
+        let out = tg().format("[search](https://example.com/?a=b&c=d)");
+        assert_eq!(
+            out,
+            "<a href=\"https://example.com/?a=b&amp;c=d\">search</a>"
+        );
+    }
+
+    #[test]
+    fn telegram_link_url_with_quote_is_attribute_safe() {
+        // `"` is not in the body-escape set, so the link rewrite
+        // adds an attribute-context escape. Without this, a URL
+        // containing `"` would close the href= attribute early and
+        // leak the rest as injected attributes.
+        let out = tg().format(r#"[x](https://e.com/")"#);
+        assert_eq!(out, r#"<a href="https://e.com/&quot;">x</a>"#);
+    }
+
+    #[test]
+    fn telegram_link_with_empty_url_falls_back_to_text() {
+        let out = tg().format("[orphan]()");
+        assert_eq!(out, "orphan");
+    }
+
+    #[test]
+    fn telegram_link_with_empty_text_uses_url_as_label() {
+        let out = tg().format("[](https://wirken.app)");
+        assert_eq!(out, "<a href=\"https://wirken.app\">https://wirken.app</a>");
+    }
+
+    #[test]
+    fn telegram_headings_become_bold_with_blank_line_after() {
+        let out = tg().format("# Title\nbody");
+        assert_eq!(out, "<b>Title</b>\n\nbody");
+    }
+
+    #[test]
+    fn telegram_blockquote_is_native_tag() {
+        let out = tg().format("> a quoted line\n> a second one");
+        assert_eq!(
+            out,
+            "<blockquote>a quoted line</blockquote>\n<blockquote>a second one</blockquote>"
+        );
+    }
+
+    #[test]
+    fn telegram_bullet_list_becomes_round_bullets() {
+        // Telegram HTML mode has no list primitive; render with `•`
+        // for visual consistency with Signal/Slack.
+        let out = tg().format("- one\n- two\n* three");
+        assert_eq!(out, "• one\n• two\n• three");
+    }
+
+    #[test]
+    fn telegram_numbered_list_passes_through() {
+        let out = tg().format("1. first\n2. second");
+        assert_eq!(out, "1. first\n2. second");
+    }
+
+    #[test]
+    fn telegram_horizontal_rule_becomes_blank_line() {
+        let out = tg().format("before\n---\nafter");
+        assert!(out.contains("before"));
+        assert!(out.contains("after"));
+        assert!(!out.lines().any(|l| l.trim() == "---"));
+    }
+
+    #[test]
+    fn telegram_gfm_table_flattens_with_html_escaped_cells() {
+        let out = tg()
+            .format("| Fruit | Color |\n|-------|-------|\n| Apple | Red   |\n| Lime  | Green |");
+        assert!(out.contains("Fruit: Apple"));
+        assert!(out.contains("Color: Red"));
+        for line in out.lines() {
+            assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
+        }
+    }
+
+    #[test]
+    fn telegram_table_cell_with_html_chars_is_escaped() {
+        // Defense against an agent that produces a table cell
+        // containing literal `<` or `>`. The cell content goes
+        // through `apply_inline_telegram` which escapes first, so
+        // the flatten emits safe text.
+        let out = tg().format("| Tag | Form |\n|-----|------|\n| open | <b> |");
+        assert!(
+            out.contains("Form: &lt;b&gt;"),
+            "unexpected output: {out:?}"
+        );
+    }
+
+    #[test]
+    fn telegram_empty_input_yields_empty_output() {
+        assert_eq!(tg().format(""), "");
+    }
+
+    #[test]
+    fn telegram_non_ascii_text_preserved_verbatim() {
+        let input = "café — don't forget the apostrophe: “quote” 🦀";
+        let out = tg().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn telegram_devanagari_survives_link_rewrite() {
+        let input = "देखें [डॉक्स](https://wirken.app/hi/docs).";
+        let out = tg().format(input);
+        assert_eq!(out, "देखें <a href=\"https://wirken.app/hi/docs\">डॉक्स</a>.");
+    }
+
+    #[test]
+    fn telegram_cjk_in_heading_and_bold() {
+        let input = "## 重要事项\n\nこれは **大切** です.";
+        let out = tg().format(input);
+        assert_eq!(out, "<b>重要事项</b>\n\nこれは <b>大切</b> です.");
+    }
+
+    #[test]
+    fn telegram_emoji_in_bullet_list() {
+        let input = "- 🦀 first\n- 🚀 second";
+        let out = tg().format(input);
+        assert_eq!(out, "• 🦀 first\n• 🚀 second");
+    }
+
+    #[test]
+    fn telegram_full_message_round_trip() {
+        let input = "\
+## Protein sources\n\
+\n\
+Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
+\n\
+| Food          | Protein (g/100g) |\n\
+|---------------|-----------------:|\n\
+| Chicken breast| 31               |\n\
+| Lentils       | 9                |\n\
+\n\
+- Prioritize variety.\n\
+- See [the guide](https://example.com/protein) for more.\n\
+";
+        let out = tg().format(input);
+        assert!(out.contains("<b>Protein sources</b>"));
+        assert!(out.contains("<b>chicken breast</b>"));
+        assert!(out.contains("<code>lentils</code>"));
+        assert!(out.contains("Food: Chicken breast"));
+        assert!(out.contains("Protein (g/100g): 31"));
+        assert!(out.contains("• Prioritize variety."));
+        assert!(out.contains("<a href=\"https://example.com/protein\">the guide</a>"));
         for line in out.lines() {
             assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
         }
