@@ -5,6 +5,7 @@ use slack_morphism::prelude::*;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use wirken_adapter_core::{OutboundFormatter, SlackFormatter};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
@@ -298,7 +299,12 @@ async fn handle_outbound(
         match action {
             FrameAction::SendMessage(fields) => {
                 let channel: SlackChannelId = fields.channel_id.into();
-                let content = SlackMessageContent::new().with_text(fields.text);
+                // Render the agent's markdown into Slack mrkdwn before
+                // handing it to the SDK. Without this, `**bold**`,
+                // `[text](url)`, GFM tables, and `# headings` reach
+                // Slack as literal text rather than rendered markup.
+                let rendered = SlackFormatter.format(&fields.text);
+                let content = SlackMessageContent::new().with_text(rendered);
                 let mut req = SlackApiChatPostMessageRequest::new(channel, content);
 
                 if let Some(ref ts) = fields.thread_ts {
