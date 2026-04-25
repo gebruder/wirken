@@ -2,10 +2,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId, ReplyParameters};
+use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use wirken_adapter_core::{OutboundFormatter, TelegramFormatter};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
@@ -146,7 +147,14 @@ async fn handle_outbound(mut reader: FrameReader, bot: Bot, writer: Arc<Mutex<Fr
         match action {
             FrameAction::SendMessage(fields) => {
                 let chat_id = ChatId(fields.conversation_id);
-                let mut request = bot.send_message(chat_id, &fields.text);
+                // Render the agent's markdown into Telegram's HTML
+                // dialect, then ship it with `parse_mode=HTML` so the
+                // bot API actually parses the tags. Without the
+                // parse_mode set, Telegram renders the HTML as
+                // literal text.
+                let rendered = TelegramFormatter.format(&fields.text);
+                let mut request = bot.send_message(chat_id, rendered);
+                request = request.parse_mode(ParseMode::Html);
 
                 if let Some(reply_id) = fields.reply_to_id {
                     request = request.reply_parameters(ReplyParameters::new(MessageId(reply_id)));
