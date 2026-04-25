@@ -9,6 +9,7 @@ use serenity::all::{
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use wirken_adapter_core::{DiscordFormatter, OutboundFormatter};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
@@ -193,7 +194,13 @@ async fn handle_outbound(
                 drop(http_guard);
 
                 let channel_id = ChannelId::new(fields.channel_id);
-                let mut message = CreateMessage::new().content(&fields.text);
+                // Render the agent's markdown into Discord's flavor
+                // before handing it to serenity. Most of CommonMark
+                // passes through; the meaningful work is flattening
+                // GFM tables (Discord has no table primitive) and
+                // collapsing horizontal rules.
+                let rendered = DiscordFormatter.format(&fields.text);
+                let mut message = CreateMessage::new().content(&rendered);
 
                 if let Some(reply_id) = fields.reply_to_id {
                     message = message.reference_message((channel_id, MessageId::new(reply_id)));

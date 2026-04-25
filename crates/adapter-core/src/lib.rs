@@ -7,8 +7,10 @@
 //! the agent channel-agnostic; adapters apply their own [`OutboundFormatter`]
 //! on the way out.
 //!
-//! Scope: trait + [`PlainFormatter`] + [`SignalFormatter`] + [`SlackFormatter`].
-//! Discord, Telegram, Matrix adapters still ship raw markdown. Their
+//! Scope: trait + [`PlainFormatter`] + [`SignalFormatter`] + [`SlackFormatter`]
+//! + [`DiscordFormatter`].
+//!
+//! Telegram and Matrix adapters still ship raw markdown. Their
 //! formatters are tracked as follow-ups in #71.
 
 /// Transform agent-emitted markdown into a string suitable for the
@@ -439,6 +441,109 @@ impl OutboundFormatter for SlackFormatter {
     }
 }
 
+/// Render markdown to Discord's flavor.
+///
+/// Discord renders a CommonMark-shaped subset natively, plus its own
+/// `**bold**`, `_italic_`, `~~strike~~`, and `>` blockquote. Most of
+/// the markdown vocabulary an agent emits passes through unchanged.
+/// Concentrate work on the two things Discord *does not* render:
+/// GFM tables (no native primitive — flatten to `header: value`) and
+/// horizontal rules (collapse to a blank line).
+///
+/// - `# H` / `## H` / `### H` → kept verbatim (native heading support
+///   landed in Discord 2023)
+/// - `**x**` → kept (Discord reads double-asterisk as bold; this is
+///   the *opposite* of the Signal/Slack collapse to single asterisk)
+/// - `_x_` / `*x*` → kept
+/// - `~~x~~` → kept (Discord strikethrough)
+/// - `> x` → kept (Discord blockquote)
+/// - `` `x` `` → kept
+/// - Fenced code blocks ` ``` ` (with optional language tag) → kept
+///   verbatim
+/// - GFM tables → flattened to `header: value` lines per row
+/// - Bullet / numbered lists → kept (Discord renders both natively)
+/// - Links `[text](url)` → kept
+/// - Mentions and channel refs (`<@id>`, `<#id>`) → kept (the link
+///   rewrite that mangles `<…>` strings on Slack is absent here)
+/// - Horizontal rules (`---`, `***`, `___`) → blank line (Discord
+///   does not render an HR)
+pub struct DiscordFormatter;
+
+impl OutboundFormatter for DiscordFormatter {
+    fn format(&self, markdown: &str) -> String {
+        let mut out = String::with_capacity(markdown.len());
+        let mut lines = markdown.lines().peekable();
+        let mut in_code_fence = false;
+        let mut table_header: Option<Vec<String>> = None;
+
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim_end();
+
+            if trimmed.trim_start().starts_with("```") {
+                in_code_fence = !in_code_fence;
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            if in_code_fence {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            if is_hr(trimmed) {
+                out.push('\n');
+                continue;
+            }
+
+            // GFM tables only — Discord's other markdown vocabulary
+            // is left alone above.
+            if is_table_row(trimmed) {
+                let cells = split_table_row(trimmed, &apply_inline_discord);
+                if table_header.is_none() {
+                    match lines.peek().map(|s| s.trim_end()) {
+                        Some(next) if is_table_delimiter(next) => {
+                            table_header = Some(cells);
+                            lines.next();
+                            continue;
+                        }
+                        _ => {
+                            emit_flat_row(&mut out, None, &cells);
+                            continue;
+                        }
+                    }
+                }
+                emit_flat_row(&mut out, table_header.as_deref(), &cells);
+                continue;
+            } else {
+                table_header = None;
+            }
+
+            // Default: pass the line through unchanged. Headings,
+            // bold, italic, strikethrough, blockquote, lists, links,
+            // and mentions all render in Discord as written.
+            out.push_str(line);
+            out.push('\n');
+        }
+
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out
+    }
+}
+
+/// Discord inline pipeline: identity. Discord renders the markdown
+/// the agent emits; the only block-level transform is table flatten,
+/// which still needs an inline closure for `split_table_row` so cell
+/// contents reach the output unmangled.
+fn apply_inline_discord(line: &str) -> String {
+    line.to_string()
+}
+
 /// Slack inline pipeline: links → bold collapse. Inline code is left
 /// alone because Slack renders single-backtick spans.
 fn apply_inline_slack(line: &str) -> String {
@@ -812,6 +917,191 @@ Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
         let input = "- 🦀 first\n- 🚀 second";
         let out = slack().format(input);
         assert_eq!(out, "• 🦀 first\n• 🚀 second");
+    }
+
+    // -------- Discord formatter --------------------------------------
+
+    fn discord() -> DiscordFormatter {
+        DiscordFormatter
+    }
+
+    #[test]
+    fn discord_double_asterisk_bold_is_kept() {
+        // Opposite of Signal/Slack: Discord reads `**bold**` natively,
+        // so the formatter must NOT collapse it to single asterisk.
+        let out = discord().format("This is **bold** text.");
+        assert_eq!(out, "This is **bold** text.");
+    }
+
+    #[test]
+    fn discord_single_asterisk_italic_is_kept() {
+        let out = discord().format("This is *italic* and _also italic_.");
+        assert_eq!(out, "This is *italic* and _also italic_.");
+    }
+
+    #[test]
+    fn discord_strikethrough_is_kept() {
+        let out = discord().format("Was ~~important~~ now retired.");
+        assert_eq!(out, "Was ~~important~~ now retired.");
+    }
+
+    #[test]
+    fn discord_blockquote_is_kept() {
+        let out = discord().format("> a quoted line\n> a second one");
+        assert_eq!(out, "> a quoted line\n> a second one");
+    }
+
+    #[test]
+    fn discord_inline_code_is_kept() {
+        let out = discord().format("Use `cargo build` then `cargo test`.");
+        assert_eq!(out, "Use `cargo build` then `cargo test`.");
+    }
+
+    #[test]
+    fn discord_fenced_code_block_kept_with_language_tag() {
+        let out = discord().format("```rust\nfn main() {}\n```");
+        assert_eq!(out, "```rust\nfn main() {}\n```");
+    }
+
+    #[test]
+    fn discord_headings_pass_through() {
+        // Discord renders `# H` natively (since 2023). No rewrite.
+        let out = discord().format("# Title\n## Sub\n### Deep");
+        assert_eq!(out, "# Title\n## Sub\n### Deep");
+    }
+
+    #[test]
+    fn discord_links_pass_through() {
+        let out = discord().format("See [docs](https://wirken.app/docs).");
+        assert_eq!(out, "See [docs](https://wirken.app/docs).");
+    }
+
+    #[test]
+    fn discord_user_and_channel_mentions_pass_through_unchanged() {
+        // Discord mentions arrive as `<@123>` / `<#456>`. The
+        // formatter has no link-rewrite pass that would mangle the
+        // angle-bracket form, so they survive intact.
+        let input = "Hi <@123456789>, see <#987654321> for details.";
+        let out = discord().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn discord_bullet_list_passes_through() {
+        // Discord renders `- ` and `* ` as native list markers. Don't
+        // rewrite to `•` like Signal/Slack do; that would break the
+        // visual hierarchy in the rendered message.
+        let out = discord().format("- one\n- two\n* three");
+        assert_eq!(out, "- one\n- two\n* three");
+    }
+
+    #[test]
+    fn discord_numbered_list_passes_through() {
+        let out = discord().format("1. first\n2. second");
+        assert_eq!(out, "1. first\n2. second");
+    }
+
+    #[test]
+    fn discord_gfm_table_flattens_to_header_value_per_cell() {
+        // Discord has no table primitive; flatten to `Header: value`
+        // lines so the data is at least readable.
+        let out = discord()
+            .format("| Fruit | Color |\n|-------|-------|\n| Apple | Red   |\n| Lime  | Green |");
+        assert!(out.contains("Fruit: Apple"));
+        assert!(out.contains("Color: Red"));
+        assert!(out.contains("Fruit: Lime"));
+        assert!(out.contains("Color: Green"));
+        for line in out.lines() {
+            assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
+        }
+    }
+
+    #[test]
+    fn discord_horizontal_rule_becomes_blank_line() {
+        // Discord does not render `---` as a horizontal rule. Drop
+        // to a blank line so the surrounding paragraphs still have
+        // visual separation.
+        let out = discord().format("before\n---\nafter");
+        assert!(out.contains("before"));
+        assert!(out.contains("after"));
+        assert!(!out.lines().any(|l| l.trim() == "---"));
+    }
+
+    #[test]
+    fn discord_bold_inside_table_cell_survives_flatten() {
+        // The flatten pass copies cell contents verbatim; markdown
+        // inside cells must reach Discord intact so the rendered
+        // `header: value` lines still show inline formatting.
+        let out = discord().format("| Item | Note |\n|------|------|\n| **A** | first |");
+        assert!(out.contains("Item: **A**"));
+        assert!(out.contains("Note: first"));
+    }
+
+    #[test]
+    fn discord_empty_input_yields_empty_output() {
+        assert_eq!(discord().format(""), "");
+    }
+
+    #[test]
+    fn discord_non_ascii_text_preserved_verbatim() {
+        let input = "café — don't forget the apostrophe: “quote” 🦀";
+        let out = discord().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn discord_devanagari_passes_through_links() {
+        // No link rewrite for Discord, so the entire string is
+        // identity-mapped. Locked in to catch any future regression
+        // that adds a link transform without UTF-8 awareness.
+        let input = "देखें [डॉक्स](https://wirken.app/hi/docs).";
+        let out = discord().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn discord_cjk_in_heading_passes_through() {
+        let input = "## 重要事项\n\nこれは **大切** です.";
+        let out = discord().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn discord_emoji_in_bullet_list_passes_through() {
+        let input = "- 🦀 first\n- 🚀 second";
+        let out = discord().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn discord_full_message_round_trip() {
+        // Same shape as the Slack/Signal end-to-end test: heading,
+        // bold, inline code, table, bullets, link. Locks in that
+        // Discord keeps everything except tables.
+        let input = "\
+## Protein sources\n\
+\n\
+Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
+\n\
+| Food          | Protein (g/100g) |\n\
+|---------------|-----------------:|\n\
+| Chicken breast| 31               |\n\
+| Lentils       | 9                |\n\
+\n\
+- Prioritize variety.\n\
+- See [the guide](https://example.com/protein) for more.\n\
+";
+        let out = discord().format(input);
+        assert!(out.contains("## Protein sources"));
+        assert!(out.contains("**chicken breast**"));
+        assert!(out.contains("`lentils`"));
+        assert!(out.contains("Food: Chicken breast"));
+        assert!(out.contains("Protein (g/100g): 31"));
+        assert!(out.contains("- Prioritize variety."));
+        assert!(out.contains("[the guide](https://example.com/protein)"));
+        for line in out.lines() {
+            assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
+        }
     }
 
     #[test]
