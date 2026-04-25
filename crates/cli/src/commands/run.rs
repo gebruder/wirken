@@ -900,6 +900,20 @@ async fn message_loop(
                         .to_str()
                         .map_err(|e| anyhow::anyhow!("id not utf8: {e}"))?
                         .to_string();
+                    // Carry the inbound's reply_to_id (Slack's
+                    // thread_ts; Telegram's reply_to_message_id; etc.)
+                    // through to the outbound construction below so
+                    // the bot's reply lands in the same thread as the
+                    // inbound when one was specified, and at the
+                    // channel root otherwise. Empty string means "no
+                    // thread / no reply target" — explicitly NOT the
+                    // inbound's own message id, which would auto-
+                    // thread every root message.
+                    let reply_to_id = m
+                        .get_reply_to_id()?
+                        .to_str()
+                        .map_err(|e| anyhow::anyhow!("reply_to_id not utf8: {e}"))?
+                        .to_string();
 
                     InboundAction::Message {
                         id: msg_id,
@@ -908,6 +922,7 @@ async fn message_loop(
                         sender_name,
                         channel,
                         conversation_id,
+                        reply_to_id,
                     }
                 }
                 frame::Heartbeat(hb) => {
@@ -933,6 +948,7 @@ async fn message_loop(
                 sender_name,
                 channel,
                 conversation_id,
+                reply_to_id,
             } => {
                 // Reject any inbound that claims a channel the
                 // authenticated adapter is not responsible for. See
@@ -1091,14 +1107,22 @@ async fn message_loop(
                     )
                     .await?;
 
-                // Send response back to adapter
+                // Send response back to adapter. `reply_to_id`
+                // carries the inbound's thread root (Slack's
+                // thread_ts, Telegram's reply_to_message_id, etc.) —
+                // not the inbound's own message id. Setting it to
+                // the inbound's id would auto-thread every root
+                // message; passing the inbound's reply_to_id
+                // through preserves the conversation thread when
+                // one existed and leaves the reply at the channel
+                // root otherwise.
                 let mut reply = capnp::message::Builder::new_default();
                 {
                     let fb = reply.init_root::<frame::Builder<'_>>();
                     let mut outbound = fb.init_outbound();
                     outbound.set_conversation_id(&conversation_id);
                     outbound.set_text(&response);
-                    outbound.set_reply_to_id(&id);
+                    outbound.set_reply_to_id(&reply_to_id);
                     outbound.set_metadata("{}");
                 }
 
@@ -1143,6 +1167,12 @@ enum InboundAction {
         sender_name: String,
         channel: String,
         conversation_id: String,
+        /// Thread root carried from the inbound (Slack thread_ts,
+        /// Telegram reply_to_message_id, …). Empty string means the
+        /// inbound was at the channel root; the bot's reply must
+        /// also go to the channel root in that case, not auto-thread
+        /// off the inbound's own message id.
+        reply_to_id: String,
     },
     Heartbeat(u64),
     DeliveryResult {

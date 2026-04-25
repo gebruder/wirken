@@ -14,12 +14,15 @@ use crate::convert;
 use crate::error::SlackError;
 
 /// Shared context threaded through the Slack Socket Mode listener.
-/// Carries the inbound event forwarder plus the bot's own Slack
-/// user id so [`is_bot_mentioned`] can match exact mentions instead
-/// of any `<@...>` occurrence.
+/// Carries the inbound event forwarder plus the bot's self-identity
+/// (user id + bot id) so [`convert::from_push_event`] can drop the
+/// bot's own messages from `message.im` events instead of forwarding
+/// them to the agent — Slack delivers a bot's own outbound back
+/// through `message.im` and the agent treats every one as fresh user
+/// input, generating a reply, which Slack delivers back, ad infinitum.
 struct SlackBotContext {
     tx: tokio::sync::mpsc::Sender<convert::SlackInbound>,
-    bot_user_id: String,
+    identity: convert::SlackBotIdentity,
 }
 
 /// Slack adapter: bridges Slack API <-> Wirken gateway IPC.
@@ -91,7 +94,11 @@ impl SlackAdapter {
             .await
             .map_err(|e| SlackError::Slack(format!("auth.test: {e}")))?;
         let bot_user_id = auth_resp.user_id.0.clone();
-        tracing::info!("Slack bot user id resolved: {bot_user_id}");
+        let bot_id = auth_resp.bot_id.as_ref().map(|b| b.0.clone());
+        tracing::info!(
+            "Slack bot identity resolved: user_id={bot_user_id} bot_id={}",
+            bot_id.as_deref().unwrap_or("(none)")
+        );
 
         // Use a channel to bridge Socket Mode events to our IPC writer
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<convert::SlackInbound>(256);
@@ -116,7 +123,10 @@ impl SlackAdapter {
 
         let ctx = SlackBotContext {
             tx: event_tx,
-            bot_user_id,
+            identity: convert::SlackBotIdentity {
+                user_id: bot_user_id,
+                bot_id,
+            },
         };
         let listener_env = Arc::new(
             SlackClientEventsListenerEnvironment::new(Arc::new(client)).with_user_state(ctx),
@@ -127,7 +137,7 @@ impl SlackAdapter {
                 tracing::info!("Slack push event received");
                 let state_lock = states.read().await;
                 if let Some(ctx) = state_lock.get_user_state::<SlackBotContext>() {
-                    process_push_event(event, &ctx.tx, &ctx.bot_user_id).await;
+                    process_push_event(event, &ctx.tx, &ctx.identity).await;
                 } else {
                     tracing::warn!("No SlackBotContext in user state");
                 }
@@ -169,91 +179,18 @@ impl SlackAdapter {
     }
 }
 
-/// Check whether the bot is mentioned by its exact Slack user id.
-///
-/// Slack mention syntax is `<@Uxxxxx>`. An earlier implementation used
-/// `text.contains("<@")` which matched any user mention, not just the
-/// bot — a workspace member mentioning a colleague would trigger the
-/// bot's mention gate. The exact form `<@{bot_user_id}>` (with the
-/// closing `>`) also prevents substring collisions between user ids
-/// that share a prefix (e.g. `<@U123>` must not match bot id `U1234`).
-pub(crate) fn is_bot_mentioned(text: &str, bot_user_id: &str) -> bool {
-    if bot_user_id.is_empty() {
-        return false;
-    }
-    text.contains(&format!("<@{bot_user_id}>"))
-}
-
 /// Process a push event and send to the event channel.
 async fn process_push_event(
     event: SlackPushEventCallback,
     tx: &tokio::sync::mpsc::Sender<convert::SlackInbound>,
-    bot_user_id: &str,
+    identity: &convert::SlackBotIdentity,
 ) {
-    let SlackPushEventCallback { event: body, .. } = event;
-
-    let SlackEventCallbackBody::Message(msg_event) = body else {
+    // All filtering — bot self-message drop, subtype allowlist, empty
+    // text, missing sender — lives in `convert::from_push_event` so
+    // it can be unit-tested without spinning up the listener.
+    let Some(inbound) = convert::from_push_event(&event, identity) else {
         return;
     };
-
-    let user_id = match &msg_event.sender.user {
-        Some(uid) => uid.0.clone(),
-        None => return,
-    };
-
-    let text = msg_event
-        .content
-        .as_ref()
-        .and_then(|c| c.text.as_ref())
-        .map(|t| t.to_string())
-        .unwrap_or_default();
-
-    if text.is_empty() {
-        return;
-    }
-
-    let channel_id = msg_event
-        .origin
-        .channel
-        .as_ref()
-        .map(|c| c.0.clone())
-        .unwrap_or_default();
-
-    let message_ts = msg_event.origin.ts.0.clone();
-    let thread_ts = msg_event.origin.thread_ts.as_ref().map(|t| t.0.clone());
-
-    let is_dm = msg_event
-        .origin
-        .channel_type
-        .as_ref()
-        .map(|ct| ct.0 == "im")
-        .unwrap_or(false);
-
-    let bot_mentioned = is_bot_mentioned(&text, bot_user_id);
-
-    let files: Vec<String> = msg_event
-        .content
-        .as_ref()
-        .and_then(|c| c.files.as_ref())
-        .map(|fl| {
-            fl.iter()
-                .filter_map(|f| f.url_private.as_ref().map(|u| u.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let inbound = convert::SlackInbound {
-        message_ts,
-        user_id,
-        user_name: String::new(),
-        channel_id,
-        text,
-        thread_ts,
-        is_dm,
-        bot_mentioned,
-        files,
-    };
-
     let _ = tx.send(inbound).await;
 }
 
