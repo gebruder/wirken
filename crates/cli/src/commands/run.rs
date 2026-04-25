@@ -1170,7 +1170,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// Load SIEM forwarding config from ~/.wirken/siem.json.
 /// Returns None if the file doesn't exist (SIEM forwarding disabled).
 ///
-/// Example siem.json:
+/// Example siem.json (Datadog):
 /// ```json
 /// {
 ///     "target": "datadog",
@@ -1180,6 +1180,20 @@ fn truncate(s: &str, max: usize) -> String {
 ///     "environment": "production"
 /// }
 /// ```
+///
+/// Example siem.json (Microsoft Sentinel via Logs Ingestion API):
+/// ```json
+/// {
+///     "target": "sentinel",
+///     "endpoint": "https://<dce>.<region>.ingest.monitor.azure.com/dataCollectionRules/<dcr-id>/streams/Custom-WirkenAudit?api-version=2023-01-01",
+///     "api_key": "<azure-ad-bearer-token>",
+///     "service": "wirken",
+///     "environment": "production"
+/// }
+/// ```
+/// Sentinel tokens expire (typically 1 hour); refresh by rewriting
+/// this file from a sidecar before expiry. Wirken does not manage
+/// Azure AD token lifecycle.
 fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemConfig> {
     let path = cfg.siem_config_path();
     if !path.exists() {
@@ -1193,6 +1207,7 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
     let target = match target_str {
         "datadog" => SiemTarget::Datadog,
         "splunk" => SiemTarget::Splunk,
+        "sentinel" => SiemTarget::Sentinel,
         _ => SiemTarget::Webhook,
     };
 
