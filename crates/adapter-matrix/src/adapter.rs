@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
+use wirken_adapter_core::{MatrixFormatter, OutboundFormatter, SignalFormatter};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
@@ -313,9 +314,22 @@ async fn handle_outbound(
                     txn_id
                 );
 
+                // Matrix `m.room.message` carries two rendering
+                // surfaces: a plain-text `body` and an HTML
+                // `formatted_body` with `format: org.matrix.custom.html`.
+                // Both ship on every send. Clients that ignore HTML
+                // (or accessibility tooling) see the plain-text
+                // version; clients that render HTML see the rich
+                // version. Sourcing `body` from SignalFormatter
+                // keeps it as real plain-text-from-markdown rather
+                // than the raw markdown source.
+                let body = SignalFormatter.format(&fields.text);
+                let formatted_body = MatrixFormatter.format(&fields.text);
                 let mut content = serde_json::json!({
                     "msgtype": "m.text",
-                    "body": fields.text,
+                    "body": body,
+                    "format": "org.matrix.custom.html",
+                    "formatted_body": formatted_body,
                 });
 
                 if let Some(ref reply_to) = fields.reply_to_event {

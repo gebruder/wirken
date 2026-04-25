@@ -727,23 +727,337 @@ impl OutboundFormatter for TelegramFormatter {
     }
 }
 
-/// Telegram inline pipeline. Single-pass tokenizer over the
-/// HTML-escaped input so that markdown markers inside an inline-code
-/// span are NOT re-tokenized as bold/italic/etc. — a multi-pass
-/// regex-style approach would mistake `*x*` inside ` ``...*x*...`` `
-/// for italic.
+/// Render markdown to Matrix's `org.matrix.custom.html` dialect.
+///
+/// Matrix's tag whitelist is the most permissive of any channel
+/// Wirken targets: real `<h1>`-`<h6>` headings, real `<ul>/<ol>/<li>`
+/// lists, real `<table>/<thead>/<tbody>/<tr>/<th>/<td>`, semantic
+/// `<strong>`/`<em>`/`<del>` for emphasis, `<hr>`, `<blockquote>`,
+/// `<code>`, `<pre>`, `<a>`. The flatten passes that Signal/Slack/
+/// Telegram apply to lists and tables are unnecessary here; each
+/// markdown construct maps to its native HTML primitive.
+///
+/// The Matrix message event (per `m.room.message`) carries two
+/// rendering surfaces:
+/// - `body` — plain-text fallback for clients that ignore HTML and
+///   for accessibility tooling. The adapter sources this from
+///   [`SignalFormatter`], which already produces a plain-text-from-
+///   markdown rendering with `•` bullets and flattened tables.
+/// - `formatted_body` — the HTML payload this formatter produces.
+///   Sent with `format: "org.matrix.custom.html"` on the event.
+///
+/// Both fields ship on every message; clients pick whichever they
+/// can render.
+///
+/// - `# H` … `###### H` → `<h1>H</h1>` … `<h6>H</h6>`
+/// - `**x**` / `__x__` → `<strong>x</strong>`
+/// - `*x*` / `_x_` → `<em>x</em>`
+/// - `~~x~~` → `<del>x</del>`
+/// - `` `x` `` → `<code>x</code>`
+/// - Fenced code blocks ` ```lang ` →
+///   `<pre><code class="language-lang">…</code></pre>`
+/// - GFM tables → `<table><thead><tr><th>…</th></tr></thead>
+///   <tbody><tr><td>…</td></tr>…</tbody></table>`
+/// - Bullet lists `- ` / `* ` → consecutive items wrapped in
+///   `<ul>`, each item is `<li>`
+/// - Numbered lists → `<ol><li>…</li></ol>`
+/// - Links `[text](url)` → `<a href="url">text</a>`
+/// - Blockquotes `> x` → `<blockquote>x</blockquote>` per line
+/// - Horizontal rules → `<hr>`
+/// - Literal `<`, `>`, `&` in agent output → escaped as in
+///   [`TelegramFormatter`]
+pub struct MatrixFormatter;
+
+impl OutboundFormatter for MatrixFormatter {
+    fn format(&self, markdown: &str) -> String {
+        let mut out = String::with_capacity(markdown.len());
+        let mut lines = markdown.lines().peekable();
+        let mut in_code_fence = false;
+        let mut code_lang: Option<String> = None;
+        let mut code_buf = String::new();
+        // Track an open list's tag so consecutive items collapse into
+        // one element. `None` means no list is open; `Some("ul")` /
+        // `Some("ol")` means we're mid-list and the next non-list line
+        // must close it.
+        let mut open_list: Option<&'static str> = None;
+
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim_end();
+
+            if trimmed.trim_start().starts_with("```") {
+                if !in_code_fence {
+                    close_open_list(&mut out, &mut open_list);
+                    let lang = trimmed.trim_start().trim_start_matches('`').trim();
+                    code_lang = if lang.is_empty() {
+                        None
+                    } else {
+                        Some(lang.to_string())
+                    };
+                    code_buf.clear();
+                    in_code_fence = true;
+                } else {
+                    out.push_str("<pre>");
+                    match &code_lang {
+                        Some(l) => {
+                            out.push_str("<code class=\"language-");
+                            out.push_str(&html_escape_attr(l));
+                            out.push_str("\">");
+                        }
+                        None => out.push_str("<code>"),
+                    }
+                    let body = code_buf.trim_end_matches('\n');
+                    out.push_str(&html_escape(body));
+                    out.push_str("</code></pre>\n");
+                    in_code_fence = false;
+                    code_lang = None;
+                    code_buf.clear();
+                }
+                continue;
+            }
+            if in_code_fence {
+                code_buf.push_str(line);
+                code_buf.push('\n');
+                continue;
+            }
+
+            // Bullet item: `-` / `*` / `+`. Open <ul> on first hit;
+            // a later non-list line closes it.
+            if let Some(rest) = strip_bullet(trimmed) {
+                if open_list != Some("ul") {
+                    close_open_list(&mut out, &mut open_list);
+                    out.push_str("<ul>\n");
+                    open_list = Some("ul");
+                }
+                out.push_str("<li>");
+                out.push_str(&apply_inline_matrix(rest));
+                out.push_str("</li>\n");
+                continue;
+            }
+
+            // Numbered item: `<digits>. ` start.
+            if let Some(rest) = strip_numbered(trimmed) {
+                if open_list != Some("ol") {
+                    close_open_list(&mut out, &mut open_list);
+                    out.push_str("<ol>\n");
+                    open_list = Some("ol");
+                }
+                out.push_str("<li>");
+                out.push_str(&apply_inline_matrix(rest));
+                out.push_str("</li>\n");
+                continue;
+            }
+
+            // Anything below this point ends an open list.
+            close_open_list(&mut out, &mut open_list);
+
+            if is_hr(trimmed) {
+                out.push_str("<hr>\n");
+                continue;
+            }
+
+            if let Some((depth, stripped)) = strip_heading_with_depth(trimmed) {
+                if !stripped.is_empty() {
+                    let tag_open = heading_open_tag(depth);
+                    let tag_close = heading_close_tag(depth);
+                    out.push_str(tag_open);
+                    out.push_str(&apply_inline_matrix(stripped));
+                    out.push_str(tag_close);
+                }
+                out.push('\n');
+                continue;
+            }
+
+            if is_table_row(trimmed) {
+                let cells = split_table_row(trimmed, &apply_inline_matrix);
+                // A real GFM table has a delimiter as the second line.
+                // Without it, treat as a single body row.
+                let next_is_delim =
+                    matches!(lines.peek().map(|s| s.trim_end()), Some(n) if is_table_delimiter(n));
+                out.push_str("<table>\n");
+                if next_is_delim {
+                    lines.next(); // consume delimiter
+                    out.push_str("<thead><tr>");
+                    for cell in &cells {
+                        out.push_str("<th>");
+                        out.push_str(cell);
+                        out.push_str("</th>");
+                    }
+                    out.push_str("</tr></thead>\n");
+                    out.push_str("<tbody>\n");
+                    while let Some(peek) = lines.peek() {
+                        let pt = peek.trim_end();
+                        if !is_table_row(pt) {
+                            break;
+                        }
+                        let row_cells = split_table_row(pt, &apply_inline_matrix);
+                        lines.next();
+                        out.push_str("<tr>");
+                        for cell in &row_cells {
+                            out.push_str("<td>");
+                            out.push_str(cell);
+                            out.push_str("</td>");
+                        }
+                        out.push_str("</tr>\n");
+                    }
+                    out.push_str("</tbody>\n");
+                } else {
+                    out.push_str("<tbody><tr>");
+                    for cell in &cells {
+                        out.push_str("<td>");
+                        out.push_str(cell);
+                        out.push_str("</td>");
+                    }
+                    out.push_str("</tr></tbody>\n");
+                }
+                out.push_str("</table>\n");
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("> ") {
+                out.push_str("<blockquote>");
+                out.push_str(&apply_inline_matrix(rest));
+                out.push_str("</blockquote>\n");
+                continue;
+            }
+            if trimmed == ">" {
+                out.push_str("<blockquote></blockquote>\n");
+                continue;
+            }
+
+            out.push_str(&apply_inline_matrix(line));
+            out.push('\n');
+        }
+
+        // Close any list still open at end of input.
+        close_open_list(&mut out, &mut open_list);
+
+        // Flush an unclosed code fence as a plain code block.
+        if in_code_fence && !code_buf.is_empty() {
+            out.push_str("<pre><code>");
+            out.push_str(&html_escape(code_buf.trim_end_matches('\n')));
+            out.push_str("</code></pre>\n");
+        }
+
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out
+    }
+}
+
+fn close_open_list(out: &mut String, open_list: &mut Option<&'static str>) {
+    if let Some(tag) = open_list.take() {
+        out.push_str("</");
+        out.push_str(tag);
+        out.push_str(">\n");
+    }
+}
+
+/// `# H` / `## H` / … → (depth, body). Depth saturates at 6 to match
+/// the HTML heading vocabulary; a 7+ `#` run is treated as plain text
+/// (no `<h7>` exists).
+fn strip_heading_with_depth(line: &str) -> Option<(usize, &str)> {
+    let t = line.trim_start();
+    for depth in (1..=6).rev() {
+        let prefix: String = "#".repeat(depth) + " ";
+        if let Some(rest) = t.strip_prefix(prefix.as_str()) {
+            return Some((depth, rest.trim_end_matches('#').trim()));
+        }
+    }
+    None
+}
+
+fn heading_open_tag(depth: usize) -> &'static str {
+    match depth {
+        1 => "<h1>",
+        2 => "<h2>",
+        3 => "<h3>",
+        4 => "<h4>",
+        5 => "<h5>",
+        _ => "<h6>",
+    }
+}
+
+fn heading_close_tag(depth: usize) -> &'static str {
+    match depth {
+        1 => "</h1>",
+        2 => "</h2>",
+        3 => "</h3>",
+        4 => "</h4>",
+        5 => "</h5>",
+        _ => "</h6>",
+    }
+}
+
+/// Strip a leading `<digits>. ` from a numbered-list item. Returns
+/// the body. Matches CommonMark's loose form (any positive integer
+/// followed by `.` and a space). Returns `None` if the prefix is
+/// not present.
+fn strip_numbered(line: &str) -> Option<&str> {
+    let t = line.trim_start();
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || i + 1 >= bytes.len() || bytes[i] != b'.' || bytes[i + 1] != b' ' {
+        return None;
+    }
+    Some(&t[i + 2..])
+}
+
+/// Tag pairs the inline HTML tokenizer emits for each markdown
+/// marker. Different HTML dialects (Telegram, Matrix, …) want
+/// different tag names — Telegram's whitelist accepts `<b>`/`<i>`,
+/// Matrix prefers semantic `<strong>`/`<em>`, etc. — so the dialect
+/// is parameterized rather than baked in.
+struct HtmlInlineTags {
+    bold: (&'static str, &'static str),
+    italic: (&'static str, &'static str),
+    strike: (&'static str, &'static str),
+    code: (&'static str, &'static str),
+}
+
+const TELEGRAM_INLINE_TAGS: HtmlInlineTags = HtmlInlineTags {
+    bold: ("<b>", "</b>"),
+    italic: ("<i>", "</i>"),
+    strike: ("<s>", "</s>"),
+    code: ("<code>", "</code>"),
+};
+
+const MATRIX_INLINE_TAGS: HtmlInlineTags = HtmlInlineTags {
+    bold: ("<strong>", "</strong>"),
+    italic: ("<em>", "</em>"),
+    strike: ("<del>", "</del>"),
+    code: ("<code>", "</code>"),
+};
+
+/// Single-pass markdown-to-HTML inline tokenizer.
+///
+/// Walks the HTML-escaped input once and emits HTML tags directly
+/// when a markdown marker matches. The single-pass shape is the
+/// correctness story: a multi-pass regex-style approach would mistake
+/// `*x*` inside ` ``…*x*…`` ` for italic because the bold/italic pass
+/// has no awareness of the code-span boundary the prior pass already
+/// crossed. Recognizing inline code FIRST at each cursor position and
+/// jumping past its contents shields markdown markers inside code
+/// from re-tokenization.
 ///
 /// Order of recognition at each cursor position:
 /// 1. inline code (`` ` ``)
 /// 2. link (`[`)
 /// 3. bold (`**` or `__`)
 /// 4. strikethrough (`~~`)
-/// 5. italic (`*` or `_`, single-char, only when the closing marker
-///    is not part of a doubled run)
+/// 5. italic (`*` or `_`, single-char, only when neither the opener
+///    nor the closing marker is part of a doubled run)
 ///
 /// Falls through to a UTF-8-safe codepoint copy when no marker
-/// matches.
-fn apply_inline_telegram(input: &str) -> String {
+/// matches. The `tags` parameter selects the dialect (Telegram vs
+/// Matrix etc.).
+fn apply_inline_html(input: &str, tags: &HtmlInlineTags) -> String {
     let escaped = html_escape(input);
     let bytes = escaped.as_bytes();
     let mut out = String::with_capacity(escaped.len());
@@ -753,9 +1067,9 @@ fn apply_inline_telegram(input: &str) -> String {
         if bytes[i] == b'`'
             && let Some(close) = find_byte(bytes, b'`', i + 1)
         {
-            out.push_str("<code>");
+            out.push_str(tags.code.0);
             out.push_str(&escaped[i + 1..close]);
-            out.push_str("</code>");
+            out.push_str(tags.code.1);
             i = close + 1;
             continue;
         }
@@ -787,9 +1101,9 @@ fn apply_inline_telegram(input: &str) -> String {
             && bytes[i + 1] == bytes[i]
             && let Some(close) = find_doubled(bytes, bytes[i], i + 2)
         {
-            out.push_str("<b>");
+            out.push_str(tags.bold.0);
             out.push_str(&escaped[i + 2..close]);
-            out.push_str("</b>");
+            out.push_str(tags.bold.1);
             i = close + 2;
             continue;
         }
@@ -799,9 +1113,9 @@ fn apply_inline_telegram(input: &str) -> String {
             && bytes[i + 1] == b'~'
             && let Some(close) = find_doubled(bytes, b'~', i + 2)
         {
-            out.push_str("<s>");
+            out.push_str(tags.strike.0);
             out.push_str(&escaped[i + 2..close]);
-            out.push_str("</s>");
+            out.push_str(tags.strike.1);
             i = close + 2;
             continue;
         }
@@ -814,9 +1128,9 @@ fn apply_inline_telegram(input: &str) -> String {
             && close > i + 1
             && (close + 1 >= bytes.len() || bytes[close + 1] != bytes[i])
         {
-            out.push_str("<i>");
+            out.push_str(tags.italic.0);
             out.push_str(&escaped[i + 1..close]);
-            out.push_str("</i>");
+            out.push_str(tags.italic.1);
             i = close + 1;
             continue;
         }
@@ -825,6 +1139,14 @@ fn apply_inline_telegram(input: &str) -> String {
         i = next;
     }
     out
+}
+
+fn apply_inline_telegram(input: &str) -> String {
+    apply_inline_html(input, &TELEGRAM_INLINE_TAGS)
+}
+
+fn apply_inline_matrix(input: &str) -> String {
+    apply_inline_html(input, &MATRIX_INLINE_TAGS)
 }
 
 /// Find the next position of two consecutive bytes equal to `c`.
@@ -1701,6 +2023,273 @@ Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
         for line in out.lines() {
             assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
         }
+    }
+
+    // -------- Matrix formatter ---------------------------------------
+
+    fn mx() -> MatrixFormatter {
+        MatrixFormatter
+    }
+
+    #[test]
+    fn matrix_html_special_chars_escaped() {
+        let out = mx().format("<script>alert(1)</script>");
+        assert_eq!(out, "&lt;script&gt;alert(1)&lt;/script&gt;");
+    }
+
+    #[test]
+    fn matrix_bold_uses_semantic_strong() {
+        let out = mx().format("This is **bold** text.");
+        assert_eq!(out, "This is <strong>bold</strong> text.");
+    }
+
+    #[test]
+    fn matrix_italic_uses_semantic_em() {
+        let out = mx().format("This is *italic* text.");
+        assert_eq!(out, "This is <em>italic</em> text.");
+    }
+
+    #[test]
+    fn matrix_strikethrough_uses_del() {
+        let out = mx().format("Was ~~important~~.");
+        assert_eq!(out, "Was <del>important</del>.");
+    }
+
+    #[test]
+    fn matrix_inline_code() {
+        let out = mx().format("Use `cargo build`.");
+        assert_eq!(out, "Use <code>cargo build</code>.");
+    }
+
+    #[test]
+    fn matrix_inline_code_shields_inner_markdown() {
+        // Parity with Telegram: tokenizer must NOT re-tokenize
+        // markdown markers inside an inline code span.
+        let out = mx().format("Avoid `*foo*` rendering as italic.");
+        assert_eq!(out, "Avoid <code>*foo*</code> rendering as italic.");
+    }
+
+    #[test]
+    fn matrix_fenced_code_block_with_language_tag() {
+        let out = mx().format("```rust\nfn main() {}\n```");
+        assert_eq!(
+            out,
+            "<pre><code class=\"language-rust\">fn main() {}</code></pre>"
+        );
+    }
+
+    #[test]
+    fn matrix_fenced_code_block_escapes_html_in_content() {
+        let out = mx().format("```\nif x < y && y > 0 { ok }\n```");
+        assert_eq!(
+            out,
+            "<pre><code>if x &lt; y &amp;&amp; y &gt; 0 { ok }</code></pre>"
+        );
+    }
+
+    #[test]
+    fn matrix_headings_use_real_h_tags_with_depth() {
+        let out = mx().format("# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6");
+        assert!(out.contains("<h1>H1</h1>"));
+        assert!(out.contains("<h2>H2</h2>"));
+        assert!(out.contains("<h3>H3</h3>"));
+        assert!(out.contains("<h4>H4</h4>"));
+        assert!(out.contains("<h5>H5</h5>"));
+        assert!(out.contains("<h6>H6</h6>"));
+    }
+
+    #[test]
+    fn matrix_bullet_list_collapses_into_one_ul() {
+        let out = mx().format("- one\n- two\n- three");
+        assert_eq!(
+            out,
+            "<ul>\n<li>one</li>\n<li>two</li>\n<li>three</li>\n</ul>"
+        );
+    }
+
+    #[test]
+    fn matrix_numbered_list_collapses_into_one_ol() {
+        let out = mx().format("1. first\n2. second\n3. third");
+        assert_eq!(
+            out,
+            "<ol>\n<li>first</li>\n<li>second</li>\n<li>third</li>\n</ol>"
+        );
+    }
+
+    #[test]
+    fn matrix_list_closes_when_non_list_line_appears() {
+        // The list scope ends at the first non-list line so prose
+        // following the list is not incorrectly nested.
+        let out = mx().format("- a\n- b\n\nplain text");
+        assert!(out.contains("<ul>\n<li>a</li>\n<li>b</li>\n</ul>"));
+        assert!(out.contains("plain text"));
+        // The </ul> must precede the prose.
+        let ul_close = out.find("</ul>").unwrap();
+        let prose = out.find("plain text").unwrap();
+        assert!(ul_close < prose);
+    }
+
+    #[test]
+    fn matrix_links_use_anchor_tag() {
+        let out = mx().format("See [docs](https://wirken.app/docs).");
+        assert_eq!(out, "See <a href=\"https://wirken.app/docs\">docs</a>.");
+    }
+
+    #[test]
+    fn matrix_blockquote_native_tag() {
+        let out = mx().format("> a quote\n> a second");
+        assert_eq!(
+            out,
+            "<blockquote>a quote</blockquote>\n<blockquote>a second</blockquote>"
+        );
+    }
+
+    #[test]
+    fn matrix_horizontal_rule_uses_hr_tag() {
+        let out = mx().format("before\n---\nafter");
+        assert!(out.contains("<hr>"));
+        assert!(out.contains("before"));
+        assert!(out.contains("after"));
+        assert!(!out.lines().any(|l| l.trim() == "---"));
+    }
+
+    #[test]
+    fn matrix_table_renders_real_table_element() {
+        // Matrix supports <table>; produce the full structural form
+        // with thead/tbody/th/td rather than the flatten Signal/
+        // Slack/Telegram apply.
+        let out = mx()
+            .format("| Fruit | Color |\n|-------|-------|\n| Apple | Red   |\n| Lime  | Green |");
+        assert!(out.contains("<table>"));
+        assert!(out.contains("<thead><tr><th>Fruit</th><th>Color</th></tr></thead>"));
+        assert!(out.contains("<tr><td>Apple</td><td>Red</td></tr>"));
+        assert!(out.contains("<tr><td>Lime</td><td>Green</td></tr>"));
+        assert!(out.contains("</tbody>"));
+        assert!(out.contains("</table>"));
+    }
+
+    #[test]
+    fn matrix_table_cell_with_html_chars_is_escaped() {
+        let out = mx().format("| Tag | Form |\n|-----|------|\n| open | <b> |");
+        // The inline pipeline runs html_escape first, so `<b>`
+        // arrives as literal text wrapped in <td>.
+        assert!(out.contains("<td>&lt;b&gt;</td>"), "out={out}");
+    }
+
+    #[test]
+    fn matrix_empty_input_yields_empty_output() {
+        assert_eq!(mx().format(""), "");
+    }
+
+    #[test]
+    fn matrix_non_ascii_text_preserved_verbatim() {
+        let input = "café — don't forget the apostrophe: “quote” 🦀";
+        let out = mx().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn matrix_devanagari_survives_link_rewrite() {
+        let input = "देखें [डॉक्स](https://wirken.app/hi/docs).";
+        let out = mx().format(input);
+        assert_eq!(out, "देखें <a href=\"https://wirken.app/hi/docs\">डॉक्स</a>.");
+    }
+
+    #[test]
+    fn matrix_cjk_in_heading_and_bold() {
+        let input = "## 重要事项\n\nこれは **大切** です.";
+        let out = mx().format(input);
+        assert!(out.contains("<h2>重要事项</h2>"));
+        assert!(out.contains("これは <strong>大切</strong> です."));
+    }
+
+    #[test]
+    fn matrix_emoji_in_bullet_list() {
+        let input = "- 🦀 first\n- 🚀 second";
+        let out = mx().format(input);
+        assert_eq!(out, "<ul>\n<li>🦀 first</li>\n<li>🚀 second</li>\n</ul>");
+    }
+
+    #[test]
+    fn matrix_full_message_round_trip() {
+        let input = "\
+## Protein sources\n\
+\n\
+Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
+\n\
+| Food          | Protein (g/100g) |\n\
+|---------------|-----------------:|\n\
+| Chicken breast| 31               |\n\
+| Lentils       | 9                |\n\
+\n\
+- Prioritize variety.\n\
+- See [the guide](https://example.com/protein) for more.\n\
+";
+        let out = mx().format(input);
+        assert!(out.contains("<h2>Protein sources</h2>"));
+        assert!(out.contains("<strong>chicken breast</strong>"));
+        assert!(out.contains("<code>lentils</code>"));
+        assert!(out.contains("<table>"));
+        assert!(out.contains("<th>Food</th>"));
+        assert!(out.contains("<td>Chicken breast</td>"));
+        assert!(out.contains("<ul>"));
+        assert!(out.contains("<li>Prioritize variety.</li>"));
+        assert!(out.contains("<a href=\"https://example.com/protein\">the guide</a>"));
+    }
+
+    // -- Dual-field shape: body + formatted_body. ---------------------
+    //
+    // Matrix's `m.room.message` event carries both a plain-text
+    // `body` and an HTML `formatted_body`. Wirken's adapter populates
+    // both on every send: `body` from `SignalFormatter`, `formatted_body`
+    // from `MatrixFormatter`. The tests below cover the *contract*
+    // those two surfaces must satisfy together.
+
+    #[test]
+    fn matrix_dual_field_body_is_readable_plain_text_not_raw_markdown() {
+        // The `body` source must be a real plain-text rendering, not
+        // the raw markdown source (which would leak `**` / `*` / `#`
+        // characters at the user) and not the HTML output with tags
+        // stripped (which would collide adjacent words). Signal's
+        // formatter satisfies both.
+        let input = "## Title\n\n- one\n- two";
+        let body = SignalFormatter.format(input);
+        assert!(body.contains("*Title*"), "body should mark the heading");
+        assert!(body.contains("• one"), "body should render bullets");
+        assert!(body.contains("• two"));
+        assert!(!body.contains("##"), "no leftover markdown heading marker");
+        assert!(!body.contains("<"), "no leftover html tags");
+    }
+
+    #[test]
+    fn matrix_dual_field_formatted_body_carries_native_html() {
+        // The `formatted_body` source is the HTML with real list and
+        // heading tags — the whole point of the Matrix path over the
+        // flatten dialects.
+        let input = "## Title\n\n- one\n- two";
+        let formatted = MatrixFormatter.format(input);
+        assert!(formatted.contains("<h2>Title</h2>"));
+        assert!(formatted.contains("<ul>"));
+        assert!(formatted.contains("<li>one</li>"));
+        assert!(formatted.contains("<li>two</li>"));
+    }
+
+    #[test]
+    fn matrix_dual_field_both_handle_html_special_chars_safely() {
+        // An agent that emits a literal `<script>` tag must arrive
+        // inert on both surfaces: as text in `body`, as escaped
+        // entities in `formatted_body`.
+        let input = "Use the <script> tag carefully.";
+        let body = SignalFormatter.format(input);
+        let formatted = MatrixFormatter.format(input);
+        // Plain-text body: the literal characters survive (no
+        // injection because there's no HTML interpretation on this
+        // surface).
+        assert!(body.contains("<script>"));
+        // HTML body: must be escaped so the client renders it as
+        // text rather than parsing it as markup.
+        assert!(formatted.contains("&lt;script&gt;"));
+        assert!(!formatted.contains("<script>"));
     }
 
     #[test]
