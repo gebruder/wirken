@@ -1,7 +1,8 @@
 //! SIEM log forwarding — sends audit events to external systems via HTTP.
 //!
-//! Supports Datadog, Splunk HEC, and generic webhook endpoints.
-//! Events are serialized as structured JSON and POSTed in batches.
+//! Supports Datadog, Splunk HEC, Microsoft Sentinel (Logs Ingestion API
+//! over a Data Collection Rule), and generic webhook endpoints. Events
+//! are serialized as structured JSON and POSTed in batches.
 
 use crate::event::AuditEvent;
 
@@ -27,6 +28,16 @@ pub enum SiemTarget {
     Datadog,
     /// Splunk HTTP Event Collector (https://<host>:8088/services/collector/event)
     Splunk,
+    /// Microsoft Sentinel via the Logs Ingestion API. The operator
+    /// provides the full Data Collection Endpoint URL — including the
+    /// stream segment that selects the custom table — as `endpoint`,
+    /// e.g. `https://<dce>.<region>.ingest.monitor.azure.com\
+    /// /dataCollectionRules/<dcr-immutable-id>/streams/Custom-WirkenAudit\
+    /// ?api-version=2023-01-01`. Authentication is an Azure AD bearer
+    /// token in `api_key`. Wirken does not refresh the token; the
+    /// operator's responsibility (typically a sidecar that rewrites
+    /// `~/.wirken/siem.json` before expiry).
+    Sentinel,
     /// Generic webhook — POSTs JSON array of events.
     Webhook,
 }
@@ -70,6 +81,7 @@ impl SiemForwarder {
         let result = match self.config.target {
             SiemTarget::Datadog => self.forward_datadog(events).await,
             SiemTarget::Splunk => self.forward_splunk(events).await,
+            SiemTarget::Sentinel => self.forward_sentinel(events).await,
             SiemTarget::Webhook => self.forward_webhook(events).await,
         };
 
@@ -147,6 +159,50 @@ impl SiemForwarder {
             .send()
             .await
             .map_err(|e| format!("Splunk: {e}"))?;
+
+        Ok(())
+    }
+
+    async fn forward_sentinel(&self, events: &[AuditEvent]) -> Result<(), String> {
+        // Sentinel's Logs Ingestion API takes a JSON array of records;
+        // the DCR attached to the endpoint URL transforms records into
+        // the operator's custom-table columns. We send the same flat
+        // shape as the webhook path so a single DCR transform covers
+        // both targets — the operator picks `Sentinel` to require the
+        // bearer token and document the auth model, not because the
+        // body schema differs.
+        if self.config.api_key.is_empty() {
+            return Err(
+                "Sentinel: api_key (Azure AD bearer token) is required, not optional".into(),
+            );
+        }
+
+        let payload: Vec<serde_json::Value> = events
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "TimeGenerated": e.ts.to_rfc3339(),
+                    "Actor": e.actor,
+                    "Action": e.action,
+                    "Target": e.target,
+                    "Channel": e.channel,
+                    "Session": e.session,
+                    "Detail": e.detail,
+                    "Service": self.config.service,
+                    "Environment": self.config.environment,
+                    "Hostname": hostname(),
+                })
+            })
+            .collect();
+
+        self.http
+            .post(&self.config.endpoint)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Sentinel: {e}"))?;
 
         Ok(())
     }
