@@ -1,4 +1,16 @@
+use slack_morphism::prelude::{
+    SlackEventCallbackBody, SlackMessageEventType, SlackPushEventCallback,
+};
 use wirken_ipc::wirken_capnp::frame;
+
+/// Bot self-identity used to filter the bot's own messages out of the
+/// inbound stream. `bot_id` is `None` if Slack did not return one for
+/// this app, in which case the bot_id branch of the filter is a no-op.
+#[derive(Debug, Clone)]
+pub struct SlackBotIdentity {
+    pub user_id: String,
+    pub bot_id: Option<String>,
+}
 
 /// Extracted fields from a Slack message event for IPC.
 #[derive(Debug, Clone)]
@@ -48,6 +60,128 @@ pub fn slack_to_inbound(
     meta["bot_mentioned"] = serde_json::json!(msg.bot_mentioned);
 
     inbound.set_metadata(meta.to_string());
+}
+
+/// Convert a Slack push event into a [`SlackInbound`], applying every
+/// echo-loop and noise filter. Returns `None` for any event that
+/// must not reach the agent. Centralised here so the filter logic is
+/// unit-testable without spinning up the adapter task graph.
+///
+/// Filter rules, in order:
+///
+/// 1. Body must be a `Message` event. AppHomeOpened, ReactionAdded,
+///    UserChange, and the dozens of other [`SlackEventCallbackBody`]
+///    variants are dropped.
+/// 2. `subtype` must be one of the allowed user-message variants
+///    (`None`, `me_message`, `thread_broadcast`, `file_share`).
+///    `bot_message` (the bot's own outbound coming back through
+///    `message.im`), `message_changed`/`message_deleted` (edits and
+///    deletions), and every system / membership / channel-metadata
+///    subtype are dropped.
+/// 3. `sender.user` must be present.
+/// 4. `sender.user` must not equal `bot.user_id`. Belt-and-suspenders
+///    against an event whose subtype passed the allowlist but whose
+///    sender is the bot itself.
+/// 5. If the event carries a `sender.bot_id` and `bot.bot_id` is
+///    known, they must not match. Some events carry `bot_id` without
+///    a `user_id`; this branch handles them.
+/// 6. Text must be non-empty.
+pub fn from_push_event(
+    event: &SlackPushEventCallback,
+    bot: &SlackBotIdentity,
+) -> Option<SlackInbound> {
+    let SlackEventCallbackBody::Message(msg_event) = &event.event else {
+        return None;
+    };
+
+    match &msg_event.subtype {
+        None => {}
+        Some(t) => match t {
+            SlackMessageEventType::MeMessage
+            | SlackMessageEventType::ThreadBroadcast
+            | SlackMessageEventType::FileShare => {}
+            _ => return None,
+        },
+    }
+
+    let user_id = msg_event.sender.user.as_ref()?.0.clone();
+
+    if user_id == bot.user_id {
+        return None;
+    }
+    if let (Some(self_bot_id), Some(event_bot_id)) =
+        (bot.bot_id.as_ref(), msg_event.sender.bot_id.as_ref())
+        && self_bot_id == &event_bot_id.0
+    {
+        return None;
+    }
+
+    let text = msg_event
+        .content
+        .as_ref()
+        .and_then(|c| c.text.as_ref())
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+    if text.is_empty() {
+        return None;
+    }
+
+    let channel_id = msg_event
+        .origin
+        .channel
+        .as_ref()
+        .map(|c| c.0.clone())
+        .unwrap_or_default();
+
+    let message_ts = msg_event.origin.ts.0.clone();
+    let thread_ts = msg_event.origin.thread_ts.as_ref().map(|t| t.0.clone());
+
+    let is_dm = msg_event
+        .origin
+        .channel_type
+        .as_ref()
+        .map(|ct| ct.0 == "im")
+        .unwrap_or(false);
+
+    let bot_mentioned = is_bot_mentioned(&text, &bot.user_id);
+
+    let files: Vec<String> = msg_event
+        .content
+        .as_ref()
+        .and_then(|c| c.files.as_ref())
+        .map(|fl| {
+            fl.iter()
+                .filter_map(|f| f.url_private.as_ref().map(|u| u.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(SlackInbound {
+        message_ts,
+        user_id,
+        user_name: String::new(),
+        channel_id,
+        text,
+        thread_ts,
+        is_dm,
+        bot_mentioned,
+        files,
+    })
+}
+
+/// Check whether the bot is mentioned by its exact Slack user id.
+///
+/// Slack mention syntax is `<@Uxxxxx>`. An earlier implementation used
+/// `text.contains("<@")` which matched any user mention, not just the
+/// bot — a workspace member mentioning a colleague would trigger the
+/// bot's mention gate. The exact form `<@{bot_user_id}>` (with the
+/// closing `>`) also prevents substring collisions between user ids
+/// that share a prefix (e.g. `<@U123>` must not match bot id `U1234`).
+pub(crate) fn is_bot_mentioned(text: &str, bot_user_id: &str) -> bool {
+    if bot_user_id.is_empty() {
+        return false;
+    }
+    text.contains(&format!("<@{bot_user_id}>"))
 }
 
 /// Check if a channel message should be processed (mention-gating).

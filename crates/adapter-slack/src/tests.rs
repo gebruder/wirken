@@ -450,14 +450,14 @@ fn three_channel_types_are_distinct() {
 
 #[test]
 fn bot_mention_detects_exact_match() {
-    use crate::adapter::is_bot_mentioned;
+    use crate::convert::is_bot_mentioned;
     assert!(is_bot_mentioned("hello <@U_BOT> please", "U_BOT"));
     assert!(is_bot_mentioned("<@U_BOT>", "U_BOT"));
 }
 
 #[test]
 fn bot_mention_rejects_other_user_mention() {
-    use crate::adapter::is_bot_mentioned;
+    use crate::convert::is_bot_mentioned;
     // The bug fix: a mention of another user must NOT match.
     assert!(!is_bot_mentioned("<@U_TEAMMATE> can you help?", "U_BOT"));
     assert!(!is_bot_mentioned("hey <@U_ADMIN>", "U_BOT"));
@@ -465,7 +465,7 @@ fn bot_mention_rejects_other_user_mention() {
 
 #[test]
 fn bot_mention_rejects_prefix_collision() {
-    use crate::adapter::is_bot_mentioned;
+    use crate::convert::is_bot_mentioned;
     // `<@U123>` must not match bot_user_id "U1234" — the closing `>`
     // in the format string prevents substring-prefix confusion.
     assert!(!is_bot_mentioned("<@U123>", "U1234"));
@@ -476,7 +476,7 @@ fn bot_mention_rejects_prefix_collision() {
 
 #[test]
 fn bot_mention_rejects_empty_bot_user_id() {
-    use crate::adapter::is_bot_mentioned;
+    use crate::convert::is_bot_mentioned;
     // If somehow bot_user_id is empty (should not happen after
     // auth.test succeeds), refuse to match anything rather than
     // matching every message via `<@` substring.
@@ -486,7 +486,190 @@ fn bot_mention_rejects_empty_bot_user_id() {
 
 #[test]
 fn bot_mention_no_mention_at_all() {
-    use crate::adapter::is_bot_mentioned;
+    use crate::convert::is_bot_mentioned;
     assert!(!is_bot_mentioned("hello everyone", "U_BOT"));
     assert!(!is_bot_mentioned("", "U_BOT"));
+}
+
+// ---------------------------------------------------------------------------
+// from_push_event — echo-loop and noise filtering, thread_ts capture.
+// Fixtures use serde_json::from_value to build SlackPushEventCallback the
+// same way slack-morphism receives it over WSS, so the parse path is the
+// production path.
+// ---------------------------------------------------------------------------
+
+mod from_push_event {
+    use crate::convert::{SlackBotIdentity, from_push_event};
+    use serde_json::json;
+    use slack_morphism::prelude::SlackPushEventCallback;
+
+    fn bot() -> SlackBotIdentity {
+        SlackBotIdentity {
+            user_id: "U_BOT".into(),
+            bot_id: Some("B_BOT".into()),
+        }
+    }
+
+    fn parse(payload: serde_json::Value) -> SlackPushEventCallback {
+        serde_json::from_value(payload).expect("fixture must deserialize")
+    }
+
+    fn message_event(extra: serde_json::Value) -> SlackPushEventCallback {
+        let mut event = json!({
+            "type": "message",
+            "ts": "1711234567.890123",
+            "user": "U_USER",
+            "text": "hello there",
+            "channel": "C_CHANNEL",
+            "channel_type": "channel",
+        });
+        if let serde_json::Value::Object(extra_map) = extra
+            && let serde_json::Value::Object(base) = &mut event
+        {
+            for (k, v) in extra_map {
+                base.insert(k, v);
+            }
+        }
+        parse(json!({
+            "team_id": "T1",
+            "api_app_id": "A1",
+            "event": event,
+            "event_id": "Ev1",
+            "event_time": 1711234567,
+        }))
+    }
+
+    #[test]
+    fn regular_user_message_passes() {
+        let evt = message_event(json!({}));
+        let result = from_push_event(&evt, &bot()).expect("regular message must convert");
+        assert_eq!(result.user_id, "U_USER");
+        assert_eq!(result.text, "hello there");
+        assert_eq!(result.channel_id, "C_CHANNEL");
+        assert_eq!(result.message_ts, "1711234567.890123");
+        assert!(!result.is_dm);
+        assert_eq!(result.thread_ts, None);
+    }
+
+    #[test]
+    fn drops_when_sender_user_is_bot() {
+        // The bot's own outbound comes back through `message.im` with
+        // user=U_BOT. Forwarding it would drive an infinite echo loop
+        // through the agent (one inbound → one response → one event
+        // back → repeat).
+        let evt = message_event(json!({ "user": "U_BOT" }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_when_sender_bot_id_matches_self() {
+        // Some events carry the bot's `bot_id` without a user_id.
+        // Belt-and-suspenders against the `subtype: bot_message`
+        // path where Slack sometimes omits the user field.
+        let evt = message_event(json!({
+            "subtype": "bot_message",
+            "bot_id": "B_BOT",
+            "user": null,
+        }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_subtype_bot_message_even_with_other_user() {
+        // Defensive: even if Slack tags a `bot_message` with some
+        // other user field, drop it. We treat `bot_message` as
+        // "never forward to the agent" without exception.
+        let evt = message_event(json!({
+            "subtype": "bot_message",
+            "bot_id": "B_OTHER",
+        }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_subtype_message_changed() {
+        // Edits of past messages are not user-driven turns. The
+        // agent has no concept of editing its previous response, so
+        // forwarding edits would silently re-process old text as
+        // new input.
+        let evt = message_event(json!({ "subtype": "message_changed" }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_subtype_message_deleted() {
+        let evt = message_event(json!({
+            "subtype": "message_deleted",
+            "deleted_ts": "1711234560.000000",
+        }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_subtype_channel_join() {
+        // Channel-membership events are not messages to the agent.
+        let evt = message_event(json!({ "subtype": "channel_join" }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_when_text_empty() {
+        let evt = message_event(json!({ "text": "" }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn drops_when_user_missing() {
+        let evt = message_event(json!({ "user": null }));
+        assert!(from_push_event(&evt, &bot()).is_none());
+    }
+
+    #[test]
+    fn thread_ts_present_propagates_to_inbound() {
+        // The inbound was a reply inside a thread rooted at
+        // 1711230000.000000. The bot's response must land in the
+        // same thread; the gateway dispatcher and outbound path
+        // depend on thread_ts riding on SlackInbound.
+        let evt = message_event(json!({
+            "thread_ts": "1711230000.000000",
+        }));
+        let result = from_push_event(&evt, &bot()).expect("threaded message must convert");
+        assert_eq!(result.thread_ts, Some("1711230000.000000".to_string()));
+    }
+
+    #[test]
+    fn thread_ts_absent_yields_none() {
+        // Root-of-channel message has no thread_ts. The bot's reply
+        // must NOT auto-thread; SlackInbound.thread_ts stays None
+        // and propagates as an empty reply_to_id through the
+        // capnp frame.
+        let evt = message_event(json!({}));
+        let result = from_push_event(&evt, &bot()).expect("root message must convert");
+        assert_eq!(result.thread_ts, None);
+    }
+
+    #[test]
+    fn dm_channel_type_is_recognized() {
+        let evt = message_event(json!({
+            "channel_type": "im",
+            "channel": "D12345",
+        }));
+        let result = from_push_event(&evt, &bot()).expect("DM must convert");
+        assert!(result.is_dm);
+    }
+
+    #[test]
+    fn me_message_subtype_passes() {
+        // /me actions are user-driven; pass them through.
+        let evt = message_event(json!({ "subtype": "me_message" }));
+        assert!(from_push_event(&evt, &bot()).is_some());
+    }
+
+    #[test]
+    fn file_share_subtype_passes() {
+        // file_share carries text + an attachment; the agent
+        // should see the text part.
+        let evt = message_event(json!({ "subtype": "file_share" }));
+        assert!(from_push_event(&evt, &bot()).is_some());
+    }
 }
