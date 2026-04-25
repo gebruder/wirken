@@ -4859,8 +4859,11 @@ checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.23.38",
  "rustls-native-certs",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tungstenite 0.28.0",
 ]
 
@@ -5089,6 +5092,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.4",
+ "rustls 0.23.38",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
@@ -6294,6 +6299,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
  "wirken-adapter-core",
