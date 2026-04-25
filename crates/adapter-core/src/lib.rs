@@ -7,9 +7,9 @@
 //! the agent channel-agnostic; adapters apply their own [`OutboundFormatter`]
 //! on the way out.
 //!
-//! Scope (0.7.9): trait + [`PlainFormatter`] + [`SignalFormatter`]. Slack,
+//! Scope: trait + [`PlainFormatter`] + [`SignalFormatter`] + [`SlackFormatter`].
 //! Discord, Telegram, Matrix adapters still ship raw markdown. Their
-//! formatters are tracked as follow-ups.
+//! formatters are tracked as follow-ups in #71.
 
 /// Transform agent-emitted markdown into a string suitable for the
 /// target channel's plain-text or rich-text envelope.
@@ -106,7 +106,7 @@ impl OutboundFormatter for SignalFormatter {
             // delimiter row, and buffer the header row until the
             // first body row.
             if is_table_row(trimmed) {
-                let cells = split_table_row(trimmed);
+                let cells = split_table_row(trimmed, &apply_inline);
                 if table_header.is_none() {
                     // Peek at next line: if it's a delimiter, this
                     // is a real table header. Otherwise treat as
@@ -204,13 +204,10 @@ fn is_table_delimiter(line: &str) -> bool {
     t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t')) && t.contains('-')
 }
 
-fn split_table_row(line: &str) -> Vec<String> {
+fn split_table_row(line: &str, inline: &dyn Fn(&str) -> String) -> Vec<String> {
     let t = line.trim();
     let inner = t.trim_start_matches('|').trim_end_matches('|');
-    inner
-        .split('|')
-        .map(|cell| apply_inline(cell.trim()))
-        .collect()
+    inner.split('|').map(|cell| inline(cell.trim())).collect()
 }
 
 fn emit_flat_row(out: &mut String, header: Option<&[String]>, cells: &[String]) {
@@ -320,6 +317,175 @@ fn replace_bold(input: &str) -> String {
 /// preserve the enclosed content.
 fn replace_inline_code(input: &str) -> String {
     input.replace('`', "")
+}
+
+/// Render markdown to Slack's `mrkdwn` dialect.
+///
+/// Slack's API renders `mrkdwn` in `text` payloads (default for Bolt).
+/// The dialect overlaps Signal in some places (`*bold*`, `_italic_`)
+/// and diverges in others — most importantly links use the angle-pipe
+/// form `<url|text>` and code blocks render natively, so neither inline
+/// backticks nor fenced blocks should be stripped.
+///
+/// - `# H` / `## H` / `### H` → `*H*` on its own line, blank line
+///   following (Slack has no native heading; the blank line keeps
+///   subsequent content visually separated)
+/// - `**x**` → `*x*` (Slack reads single-asterisk as bold)
+/// - `_x_` / `__x__` → `_x_`
+/// - `` `x` `` → `` `x` `` (kept; Slack renders inline code)
+/// - Fenced code blocks ` ``` ` → kept verbatim (Slack renders them)
+/// - GFM tables → flattened to `header: value` lines per row, same as
+///   Signal — Slack `mrkdwn` has no table primitive
+/// - Bullet lists `- ` / `* ` → `• `
+/// - Numbered lists → unchanged
+/// - Links `[text](url)` → `<url|text>`
+/// - Horizontal rules → blank line
+///
+/// Mentions (`<@user_id>`) and channel refs (`<#channel_id>`) pass
+/// through verbatim because the inline pipeline only rewrites the
+/// `[text](url)` form; raw `<@…>` strings are not matched.
+pub struct SlackFormatter;
+
+impl OutboundFormatter for SlackFormatter {
+    fn format(&self, markdown: &str) -> String {
+        let mut out = String::with_capacity(markdown.len());
+        let mut lines = markdown.lines().peekable();
+        let mut in_code_fence = false;
+        let mut table_header: Option<Vec<String>> = None;
+
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim_end();
+
+            // Fenced code blocks: keep the fence and content. Slack
+            // renders triple-backtick blocks natively.
+            if trimmed.trim_start().starts_with("```") {
+                in_code_fence = !in_code_fence;
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            if in_code_fence {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+
+            if is_hr(trimmed) {
+                out.push('\n');
+                continue;
+            }
+
+            // Heading: emit `*H*` on its own line followed by a blank
+            // line. The trailing blank line replaces the visual weight
+            // a real heading would carry in a rendered document.
+            if let Some(stripped) = strip_heading(trimmed) {
+                if !stripped.is_empty() {
+                    out.push('*');
+                    out.push_str(&apply_inline_slack(stripped));
+                    out.push('*');
+                }
+                out.push('\n');
+                out.push('\n');
+                continue;
+            }
+
+            if is_table_row(trimmed) {
+                let cells = split_table_row(trimmed, &apply_inline_slack);
+                if table_header.is_none() {
+                    match lines.peek().map(|s| s.trim_end()) {
+                        Some(next) if is_table_delimiter(next) => {
+                            table_header = Some(cells);
+                            lines.next();
+                            continue;
+                        }
+                        _ => {
+                            emit_flat_row(&mut out, None, &cells);
+                            continue;
+                        }
+                    }
+                }
+                emit_flat_row(&mut out, table_header.as_deref(), &cells);
+                continue;
+            } else {
+                table_header = None;
+            }
+
+            if let Some(rest) = strip_bullet(trimmed) {
+                out.push_str("• ");
+                out.push_str(&apply_inline_slack(rest));
+                out.push('\n');
+                continue;
+            }
+
+            out.push_str(&apply_inline_slack(line));
+            out.push('\n');
+        }
+
+        // Headings emit `*H*\n\n`; if the source markdown also had a
+        // blank line after the heading the buffer accumulates a triple
+        // newline. Collapse runs of three or more newlines down to a
+        // paragraph break.
+        while let Some(idx) = out.find("\n\n\n") {
+            out.replace_range(idx..idx + 3, "\n\n");
+        }
+
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out
+    }
+}
+
+/// Slack inline pipeline: links → bold collapse. Inline code is left
+/// alone because Slack renders single-backtick spans.
+fn apply_inline_slack(line: &str) -> String {
+    let linked = replace_links_slack(line);
+    replace_bold(&linked)
+}
+
+/// `[text](url)` → `<url|text>` (Slack mrkdwn link form). Same byte-
+/// walking shape as [`replace_links`], but emits the angle-pipe
+/// dialect Slack expects. UTF-8 codepoints are preserved verbatim
+/// outside the matched bracket pattern — see `replace_links` for the
+/// rationale on `next_char_boundary` over `bytes[i] as char`.
+fn replace_links_slack(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'['
+            && let Some(close) = find_byte(bytes, b']', i + 1)
+            && close + 1 < bytes.len()
+            && bytes[close + 1] == b'('
+            && let Some(paren_close) = find_byte(bytes, b')', close + 2)
+        {
+            let text = &input[i + 1..close];
+            let url = &input[close + 2..paren_close];
+            if url.is_empty() {
+                // No URL — render the bracket text plain. A bare `[x]()`
+                // would otherwise produce `<|x>`, which Slack renders
+                // as nothing at all.
+                out.push_str(text);
+            } else {
+                out.push('<');
+                out.push_str(url);
+                if !text.is_empty() {
+                    out.push('|');
+                    out.push_str(text);
+                }
+                out.push('>');
+            }
+            i = paren_close + 1;
+            continue;
+        }
+        let next = next_char_boundary(input, i);
+        out.push_str(&input[i..next]);
+        i = next;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -501,5 +667,180 @@ Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
         let input = "- 🦀 first\n- 🚀 second";
         let out = sig().format(input);
         assert_eq!(out, "• 🦀 first\n• 🚀 second");
+    }
+
+    // -------- Slack formatter ----------------------------------------
+
+    fn slack() -> SlackFormatter {
+        SlackFormatter
+    }
+
+    #[test]
+    fn slack_bold_double_asterisks_collapse_to_single() {
+        let out = slack().format("This is **bold** and **very bold**.");
+        assert_eq!(out, "This is *bold* and *very bold*.");
+    }
+
+    #[test]
+    fn slack_italic_single_underscore_passes_through() {
+        let out = slack().format("A _note_ on _emphasis_.");
+        assert_eq!(out, "A _note_ on _emphasis_.");
+    }
+
+    #[test]
+    fn slack_inline_code_is_kept() {
+        // Slack mrkdwn renders single-backtick spans natively.
+        let out = slack().format("Call `send()` with `params`.");
+        assert_eq!(out, "Call `send()` with `params`.");
+    }
+
+    #[test]
+    fn slack_fenced_code_block_kept_verbatim() {
+        // Slack renders triple-backtick blocks. The fence lines and
+        // content both pass through.
+        let out = slack().format("```rust\nfn main() {}\n```");
+        assert_eq!(out, "```rust\nfn main() {}\n```");
+    }
+
+    #[test]
+    fn slack_links_use_angle_pipe_form() {
+        let out = slack().format("See [docs](https://wirken.app/docs).");
+        assert_eq!(out, "See <https://wirken.app/docs|docs>.");
+    }
+
+    #[test]
+    fn slack_link_with_empty_url_falls_back_to_plain_text() {
+        // `[x]()` would render as `<|x>` and disappear in Slack. Treat
+        // an empty URL as a plain text segment.
+        let out = slack().format("[orphan]()");
+        assert_eq!(out, "orphan");
+    }
+
+    #[test]
+    fn slack_link_with_empty_text_keeps_url_visible() {
+        // `[](https://x)` renders the bare URL — better than dropping
+        // the line silently.
+        let out = slack().format("[](https://wirken.app)");
+        assert_eq!(out, "<https://wirken.app>");
+    }
+
+    #[test]
+    fn slack_headings_become_bold_with_blank_line_after() {
+        // Each heading emits `*H*` followed by a blank line so the
+        // following content gets visual separation Slack lacks for
+        // headings natively.
+        let out = slack().format("# Title\nbody");
+        assert_eq!(out, "*Title*\n\nbody");
+    }
+
+    #[test]
+    fn slack_gfm_table_flattens_to_header_value_per_cell() {
+        let out = slack()
+            .format("| Fruit | Color |\n|-------|-------|\n| Apple | Red   |\n| Lime  | Green |");
+        assert!(out.contains("Fruit: Apple"));
+        assert!(out.contains("Color: Red"));
+        assert!(out.contains("Fruit: Lime"));
+        assert!(out.contains("Color: Green"));
+        // No leftover pipe rows.
+        for line in out.lines() {
+            assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
+        }
+    }
+
+    #[test]
+    fn slack_bullet_list_becomes_round_bullets() {
+        let out = slack().format("- one\n- two\n* three");
+        assert_eq!(out, "• one\n• two\n• three");
+    }
+
+    #[test]
+    fn slack_user_and_channel_mentions_pass_through_unchanged() {
+        // Agents that emit `<@U12345>` / `<#C67890>` Slack handles
+        // expect them to arrive verbatim. The link rewrite only
+        // matches `[text](url)`, so raw angle-bracket forms are
+        // outside its lookahead and survive.
+        let input = "Hi <@U12345>, see <#C67890> for details.";
+        let out = slack().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn slack_horizontal_rule_becomes_blank_line() {
+        let out = slack().format("before\n---\nafter");
+        assert!(out.contains("before"));
+        assert!(out.contains("after"));
+    }
+
+    #[test]
+    fn slack_triple_asterisk_bold_italic_collapses_to_bold() {
+        let out = slack().format("That is ***critical*** to note.");
+        assert_eq!(out, "That is *critical* to note.");
+    }
+
+    #[test]
+    fn slack_empty_input_yields_empty_output() {
+        assert_eq!(slack().format(""), "");
+    }
+
+    #[test]
+    fn slack_non_ascii_text_preserved_verbatim() {
+        // UTF-8 parity with the Signal formatter. Multi-byte
+        // codepoints (smart quotes, em-dashes, accented characters,
+        // emoji, Devanagari, CJK) survive the link-rewrite byte walk
+        // intact.
+        let input = "café — don't forget the apostrophe: “quote” 🦀";
+        let out = slack().format(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn slack_devanagari_survives_link_rewrite() {
+        let input = "देखें [डॉक्स](https://wirken.app/hi/docs).";
+        let out = slack().format(input);
+        assert_eq!(out, "देखें <https://wirken.app/hi/docs|डॉक्स>.");
+    }
+
+    #[test]
+    fn slack_cjk_survives_heading_and_bold() {
+        let input = "## 重要事项\n\nこれは **大切** です.";
+        let out = slack().format(input);
+        assert_eq!(out, "*重要事项*\n\nこれは *大切* です.");
+    }
+
+    #[test]
+    fn slack_emoji_in_bullet_list_roundtrips() {
+        let input = "- 🦀 first\n- 🚀 second";
+        let out = slack().format(input);
+        assert_eq!(out, "• 🦀 first\n• 🚀 second");
+    }
+
+    #[test]
+    fn slack_full_message_round_trip() {
+        // Representative LLM reply: heading, bold, inline code,
+        // table, bullets, link. Locks in the integration shape.
+        let input = "\
+## Protein sources\n\
+\n\
+Common high-protein foods include **chicken breast**, `lentils`, and tofu.\n\
+\n\
+| Food          | Protein (g/100g) |\n\
+|---------------|-----------------:|\n\
+| Chicken breast| 31               |\n\
+| Lentils       | 9                |\n\
+\n\
+- Prioritize variety.\n\
+- See [the guide](https://example.com/protein) for more.\n\
+";
+        let out = slack().format(input);
+        assert!(out.contains("*Protein sources*"));
+        assert!(out.contains("*chicken breast*"));
+        assert!(out.contains("`lentils`"), "inline code must be kept");
+        assert!(out.contains("Food: Chicken breast"));
+        assert!(out.contains("Protein (g/100g): 31"));
+        assert!(out.contains("• Prioritize variety."));
+        assert!(out.contains("<https://example.com/protein|the guide>"));
+        for line in out.lines() {
+            assert!(!line.trim_start().starts_with('|'), "leaked pipe: {line:?}");
+        }
     }
 }
