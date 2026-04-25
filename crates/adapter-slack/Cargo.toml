@@ -10,6 +10,16 @@ wirken-ipc = { path = "../ipc" }
 wirken-adapter-core = { workspace = true }
 capnp = { workspace = true }
 slack-morphism = { workspace = true }
+# slack-morphism 2.19.0's `hyper` feature activates the dep
+# `tokio-tungstenite/rustls-native-certs`, which in tokio-tungstenite
+# 0.28 is an optional-dep name, not the feature that activates
+# `__rustls-tls`. tungstenite ends up compiled without TLS support
+# and every `wss://` URL fails at parse time with
+# `Url(TlsFeatureNotEnabled)`. Cargo features unify across the
+# workspace, so adding a direct dep here with the actually-correct
+# feature flag activates `__rustls-tls` in tungstenite and the WSS
+# connection succeeds. The dep is feature-only — we don't import it.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
