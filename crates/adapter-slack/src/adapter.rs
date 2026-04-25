@@ -145,12 +145,22 @@ impl SlackAdapter {
         socket_listener
             .listen_for(&app_token)
             .await
-            .map_err(|e| SlackError::Slack(format!("socket mode: {e}")))?;
+            .map_err(|e| SlackError::Slack(format!("socket mode register: {e}")))?;
 
-        tracing::info!("Slack Socket Mode connected and listening");
+        // `listen_for` only registers the app token with the clients
+        // manager; it does not open a WSS connection. `start()` is
+        // what drives the WSS handshake. Done explicitly rather than
+        // via `serve()` so the adapter owns its own shutdown
+        // ordering: ctrl_c here, then shutdown(), then abort the
+        // task handles below — instead of nesting slack-morphism's
+        // `await_term_signals` under our task supervision.
+        socket_listener.start().await;
+        tracing::info!("Slack Socket Mode WSS connection started");
 
-        // Wait for shutdown
         tokio::signal::ctrl_c().await.ok();
+
+        tracing::info!("Slack Socket Mode shutdown initiated");
+        socket_listener.shutdown().await;
 
         outbound_handle.abort();
         hb_handle.abort();
