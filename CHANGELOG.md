@@ -8,6 +8,91 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## 0.9.0 — Channel formatters cohort; Sentinel SIEM; Slack live transport; pipeline-laundering hardening
+
+No breaking config changes. Operators upgrading from 0.8.0 keep their
+existing `~/.wirken/` layout; the changes are all additive on the wire
+(new formatters, new SIEM target) or hardening on the runtime
+(pipeline metacharacters, Slack echo and thread fixes).
+
+- **Per-channel outbound formatters in `adapter-core`** (closes #71).
+  Slack (`mrkdwn`: `<url|text>` links, `*bold*` collapse, GFM tables
+  flattened), Discord (CommonMark pass-through; only tables flatten,
+  `<hr>` collapses), Telegram (HTML mode with bounded escape surface
+  `<>&`, single-pass tokenizer that shields markdown markers inside
+  inline code from re-tokenization, `<pre><code class="language-…">`
+  for fenced blocks), Matrix (`org.matrix.custom.html` with real
+  `<h1>`–`<h6>`, native `<ul>`/`<ol>`/`<li>`, real `<table>`,
+  `<strong>`/`<em>`/`<del>`, dual-field `body` + `formatted_body` on
+  `m.room.message`). Each formatter wired into its adapter's send
+  path with a regression-test bar of UTF-8 parity (Devanagari, CJK,
+  emoji, smart quotes) plus a full round-trip test. The Telegram
+  inline tokenizer is parameterised on a tag set; Matrix reuses it
+  with semantic tag pairs.
+- **Microsoft Sentinel SIEM target** on the audit forwarder. POST to
+  the Logs Ingestion API endpoint (`<dce>/dataCollectionRules/<dcr>/
+  streams/Custom-…`) with an Azure-AD bearer token in `api_key`. JSON
+  record body uses the Custom-table column convention (`TimeGenerated`,
+  `Actor`, `Action`, …) so a DCR transform can map straight into the
+  operator's table without renaming. Joins existing Datadog Log
+  Intake, Splunk HEC, and generic webhook. Wirken does not refresh
+  the bearer token; the operator's responsibility (typically a
+  sidecar that rewrites `~/.wirken/siem.json` before expiry).
+- **Slack adapter live transport.** Two upstream issues that
+  previously blocked any real Slack round-trip, both fixed:
+  `slack-morphism 2.19`'s `SlackClientSocketModeListener::listen_for`
+  only registers an app token; the WSS handshake comes from
+  `start()`/`shutdown()`. The adapter now drives that explicitly,
+  with the misleading "connected and listening" log line replaced
+  by truthful "WSS connection started" / "shutdown initiated"
+  markers. And `slack-morphism`'s `hyper` feature activates
+  `tokio-tungstenite/rustls-native-certs` — an optional-dep name in
+  `tokio-tungstenite 0.28`, not the feature that activates
+  `__rustls-tls`. Workspace feature unification fixes it via a
+  feature-only direct dep on `tokio-tungstenite` with
+  `features = ["rustls-tls-native-roots"]`. Tungstenite now compiles
+  with rustls 0.23 + the patched rustls-webpki 0.103.13.
+- **Slack echo loop closed; thread_ts preserved.** The bot's own
+  outbound used to come back through `message.im` and re-enter the
+  agent as fresh user input, generating an autoresponse, repeating
+  indefinitely. The slack-adapter event filter now drops messages
+  whose `sender.user` matches `bot.user_id`, whose `sender.bot_id`
+  matches `bot.bot_id`, or whose subtype is `bot_message` /
+  `message_changed` / `message_deleted` / any of the
+  membership/system variants. The conversion lives in
+  `convert::from_push_event` so the filter is unit-testable; 14 new
+  tests cover each drop case plus the thread_ts pass-through.
+  Separately, the gateway dispatcher in `cli/src/commands/run.rs`
+  used to set `outbound.reply_to_id = inbound.id` (the inbound's own
+  message ts), which auto-threaded every root message off itself.
+  It now propagates `inbound.reply_to_id` (the inbound's thread
+  root) — empty string for root inbounds, the thread root for
+  thread inbounds. Bot replies land in the same thread as the
+  question; root messages don't auto-thread.
+- **Pipeline-laundering hardening on shell exec** (closes #36). The
+  Tier 2 allowlist for shell verbs lets `ls`, `cat`, `pwd`, etc.
+  through with first-use approval. Without metacharacter awareness,
+  an agent could lead with an allowlisted verb and chain to a
+  non-allowlisted one: `echo "rm -rf /" | bash`, `pwd && curl evil`,
+  `cat /etc/passwd > /tmp/leak`, multi-line bodies fed to a shell.
+  `tool_to_action` now scans the raw command for shell
+  metacharacters (`| ; & $( ` `` ` ` `` `> < \n`) before splitting
+  on whitespace; any presence forces a sentinel pattern
+  (`:pipeline:`) that cannot match the allowlist, landing the
+  action on Tier 3.
+- **`docs/sandbox-properties.md` and code-anchored RMF mapping.** New
+  `docs/sandbox-properties.md` enumerates the three `SandboxMode`
+  values, container hardening (`cap_drop=ALL`,
+  `no-new-privileges:true`, `readonly_rootfs`, `network_mode=none`,
+  512 MB memory, 256 PID, non-root UID, 300 s timeout), Docker
+  default seccomp coverage, gVisor (`runsc`) syscall-trap delta,
+  and the Wasmtime WASI surface for skills. Every property cites
+  the source line that implements it; six verification commands an
+  operator can run to confirm each claim. `docs/security-properties.md`
+  NIST AI RMF rows now carry file:line citations on every
+  implementation reference instead of the previous crate-name-only
+  form.
+
 ## 0.8.0 — Signal socket transport; adapter-core formatters; audit concurrency
 
 Breaking-on-upgrade for Signal operators: the adapter no longer speaks
