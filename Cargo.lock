@@ -6333,6 +6333,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wirken-adapter-core",
  "wirken-ipc",
 ]
 
