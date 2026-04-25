@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 wirken-ipc = { path = "../ipc" }
+wirken-adapter-core = { workspace = true }
 capnp = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
