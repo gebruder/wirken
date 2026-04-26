@@ -7,7 +7,16 @@ use tokio::sync::Mutex;
 
 use wirken_agent::{AgentFactory, session_id_for};
 use wirken_audit::{AuditEvent, AuditWriter};
+use wirken_gateway::rate_limit::ControlPlaneRateLimiter;
 use wirken_gateway::session::SessionStore;
+
+/// WebChat rate limit. 60 chat POSTs per minute is two orders of
+/// magnitude above any plausible interactive use; sized to bound
+/// runaway-tab and naive-CSRF spend on the operator's API key, not
+/// to throttle a human typing fast. Also bounds the cost of an
+/// authenticated-but-malicious browser tab if H-1's Origin check is
+/// somehow bypassed (defence in depth).
+const WEBCHAT_MAX_POSTS_PER_MIN: u32 = 60;
 
 const HTML: &str = r#"<!DOCTYPE html>
 <html>
@@ -144,11 +153,17 @@ pub async fn serve(
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     tracing::info!("WebChat listening on http://127.0.0.1:{port}");
 
+    // Per-process rate limiter on the chat POST path. GCRA from
+    // `wirken-gateway::rate_limit`; lock-free hot path. See
+    // `WEBCHAT_MAX_POSTS_PER_MIN` for the cap rationale.
+    let rate_limit = Arc::new(ControlPlaneRateLimiter::new(WEBCHAT_MAX_POSTS_PER_MIN));
+
     loop {
         let (mut stream, _) = listener.accept().await?;
         let factory = factory.clone();
         let audit = audit.clone();
         let sessions = sessions.clone();
+        let rate_limit = rate_limit.clone();
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
@@ -168,6 +183,52 @@ pub async fn serve(
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
             } else if first_line.starts_with("POST /api/chat") {
+                // Rate-limit before any other work. A spinning client
+                // (runaway browser tab, naive CSRF, scripted abuse)
+                // would otherwise drive unbounded LLM spend on the
+                // operator's API key. Burst-tolerant via GCRA.
+                if let Err(retry_after) = rate_limit.check() {
+                    let resp = r#"{"error":"rate limit exceeded"}"#;
+                    let response = format!(
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        retry_after.as_secs().max(1),
+                        resp.len(),
+                        resp
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
+
+                // CSRF defence: an `Origin` header from a browser must
+                // match the WebChat origin. A page on attacker.com that
+                // POSTs to http://127.0.0.1:18790/api/chat would carry
+                // `Origin: https://attacker.com`; without this check the
+                // browser's same-origin policy blocks the SSE response
+                // read but the agent still runs the prompt and bills
+                // the operator's API key. Missing `Origin` is allowed
+                // because non-browser clients (curl, scripts) don't
+                // send it; browsers always do on cross-origin POSTs
+                // with `Content-Type: application/json`.
+                let origin = request
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("Origin: ")
+                            .or_else(|| l.strip_prefix("origin: "))
+                    })
+                    .map(|s| s.trim().to_string());
+                if let Some(o) = &origin {
+                    if !is_webchat_origin(o, port) {
+                        let resp = r#"{"error":"forbidden origin"}"#;
+                        let response = format!(
+                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                }
+
                 // Extract JSON body
                 let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
                 let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
@@ -289,5 +350,64 @@ pub async fn serve(
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });
+    }
+}
+
+/// Whether an `Origin:` value names the WebChat surface itself.
+/// Accepted: `http://127.0.0.1:<port>`, `http://localhost:<port>`,
+/// `http://[::1]:<port>` for the bound port. No other origin is
+/// permitted; in particular any `https://`, any non-loopback host,
+/// and any port mismatch are rejected. The check is a string equality
+/// against the three accepted forms — no parsing, no DNS, no
+/// substring matching.
+fn is_webchat_origin(origin: &str, port: u16) -> bool {
+    let accepted = [
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+        format!("http://[::1]:{port}"),
+    ];
+    accepted.iter().any(|a| a == origin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_webchat_origin;
+
+    #[test]
+    fn accepts_loopback_origins_at_bound_port() {
+        assert!(is_webchat_origin("http://127.0.0.1:18790", 18790));
+        assert!(is_webchat_origin("http://localhost:18790", 18790));
+        assert!(is_webchat_origin("http://[::1]:18790", 18790));
+    }
+
+    #[test]
+    fn rejects_external_origins() {
+        // The CSRF threat: attacker.com posts cross-origin to the
+        // WebChat surface; the browser sends Origin: https://attacker.com.
+        assert!(!is_webchat_origin("https://attacker.com", 18790));
+        assert!(!is_webchat_origin("http://attacker.com", 18790));
+        assert!(!is_webchat_origin("https://localhost:18790", 18790));
+    }
+
+    #[test]
+    fn rejects_port_mismatch() {
+        // An operator bound to a non-default port should not
+        // accept the default-port origin.
+        assert!(!is_webchat_origin("http://127.0.0.1:18790", 9999));
+        assert!(!is_webchat_origin("http://localhost:18791", 18790));
+    }
+
+    #[test]
+    fn rejects_substring_attacks() {
+        // Defensive against substring-prefix shenanigans like
+        // `http://127.0.0.1:18790.attacker.com`.
+        assert!(!is_webchat_origin(
+            "http://127.0.0.1:18790.attacker.com",
+            18790
+        ));
+        assert!(!is_webchat_origin(
+            "http://attacker.com/?127.0.0.1:18790",
+            18790
+        ));
     }
 }
