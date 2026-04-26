@@ -72,6 +72,22 @@ Forward audit events to a SIEM in real time.
 }
 ```
 
+### Microsoft Sentinel
+
+Sentinel ingestion uses the Logs Ingestion API over a Data Collection Rule. The operator configures a DCE + DCR + custom table out of band; Wirken POSTs JSON records to the DCR's stream endpoint.
+
+```json
+{
+    "target": "sentinel",
+    "endpoint": "https://<dce>.<region>.ingest.monitor.azure.com/dataCollectionRules/<dcr-id>/streams/Custom-WirkenAudit?api-version=2023-01-01",
+    "api_key": "<azure-ad-bearer-token>",
+    "service": "wirken",
+    "environment": "production"
+}
+```
+
+`api_key` must be an Azure AD bearer token scoped for `https://monitor.azure.com/.default`. Wirken does not refresh the token; it expires on Azure AD's normal cadence (typically one hour). Refresh by rewriting `~/.wirken/siem.json` from a sidecar before expiry. The record body uses Sentinel's PascalCase column convention (`TimeGenerated`, `Actor`, `Action`, `Target`, `Channel`, `Session`, `Detail`, `Service`, `Environment`, `Hostname`) so the DCR transform maps cleanly into a custom table without renaming.
+
 ### Generic webhook
 
 ```json

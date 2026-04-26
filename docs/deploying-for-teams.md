@@ -24,7 +24,7 @@ Every claim here maps to current behavior. Items that read like team-scale featu
                    └───────────┘     endpoint at /v1
                          │
                          ▼
-                 Datadog / Splunk / webhook (SIEM forwarding, optional)
+                 Datadog / Splunk / Sentinel / webhook (SIEM forwarding, optional)
 ```
 
 Wirken runs on its own VPS or bare-metal host. The inference host runs Ollama, vLLM, or any OpenAI-compatible server. The two hosts talk over HTTPS or, for plain-HTTP inference endpoints, a WireGuard or Tailscale tunnel so the bearer is not on the public internet. Adapters connect from the Wirken host outward to Slack, Teams, Matrix, or whichever platforms the team uses. Each adapter is a separate OS process. The gateway routes inbound platform messages to the configured agent, which calls the inference endpoint and writes structured events to the per-session audit log.
@@ -85,7 +85,7 @@ For structured egress to a SIEM, write `~/.wirken/siem.json`:
 }
 ```
 
-Supported targets: `datadog`, `splunk` (HEC), `webhook`. HTTPS is required for non-localhost endpoints. Every audit event is forwarded as structured JSON: actor, action, target, channel, session, timestamp, detail payload, hostname. See [configuration.md](configuration.md) for each target's exact schema.
+Supported targets: `datadog`, `splunk` (HEC), `sentinel` (Microsoft Sentinel via Logs Ingestion API; bearer token required), `webhook`. HTTPS is required for non-localhost endpoints. Every audit event is forwarded as structured JSON: actor, action, target, channel, session, timestamp, detail payload, hostname. See [configuration.md](configuration.md) for each target's exact schema.
 
 A compliance officer reconstructing an incident from the local audit.db proceeds as follows:
 
