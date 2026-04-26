@@ -13,7 +13,7 @@ You need a Microsoft App ID and App Password from the [Azure Bot registration](h
 
 The adapter listens on `127.0.0.1:3978` for webhook callbacks from the Bot Framework.
 
-In group chats, the bot only responds when mentioned. In 1:1 chats, it responds to all messages.
+In group chats, the bot only responds when mentioned. In 1:1 chats, it responds to all messages. Replies preserve the inbound's reply context (the gateway dispatcher carries the inbound's `reply_to_id` through to the outbound), so a response posts in the same conversation as the question. Outbound text is shipped without channel-specific formatting; the Bot Framework SDK renders markdown as it sees fit.
 
 ## Team deployment notes
 

@@ -14,6 +14,8 @@ HTTPS is enforced for all non-localhost homeservers. The adapter uses the Client
 
 In rooms, the bot responds when mentioned by display name or MXID. In DMs, it responds to all messages.
 
+Outbound carries both fields of an `m.room.message` event: `body` is sourced from `SignalFormatter` (plain-text-from-markdown for clients that ignore HTML and for accessibility tooling), and `formatted_body` is sourced from `MatrixFormatter` (semantic HTML — real `<h1>`-`<h6>`, native `<ul>`/`<ol>`/`<li>`, full `<table>`/`<thead>`/`<tbody>`/`<tr>`/`<th>`/`<td>`, `<strong>`/`<em>`/`<del>`, `<blockquote>`, `<code>`, `<pre>`, `<a>`). The HTML payload ships with `format: "org.matrix.custom.html"`; clients that ignore HTML render the plain-text `body` instead. Replies preserve the inbound's `m.in_reply_to` event reference; the gateway dispatcher carries the reply context through so the bot's response threads correctly. Root messages are not auto-replied-to.
+
 E2EE is not yet supported (blocked by a dependency version conflict).
 
 ## Team deployment notes
