@@ -314,22 +314,16 @@ impl CredentialStore {
         Ok(encrypted)
     }
 
-    /// Write encrypted credential bytes to a file descriptor.
-    #[cfg(unix)]
-    pub fn write_to_fd(&self, name: &str, fd: std::os::unix::io::RawFd) -> Result<(), VaultError> {
-        use std::io::Write;
-        use std::os::unix::io::FromRawFd;
-
-        let encrypted = self.export_encrypted(name)?;
-
-        // Safety: caller guarantees fd is valid and open for writing
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-        let result = file.write_all(&encrypted);
-        // Always prevent File from closing the fd — caller owns it.
-        // Must run even on write error to avoid double-close.
-        std::mem::forget(file);
-        result.map_err(Into::into)
-    }
+    // `write_to_fd` was an unused pub fn that built a `File` from a
+    // raw fd via `unsafe { File::from_raw_fd }` + `mem::forget` for
+    // "spawn adapter with vault export over fd" — a path that never
+    // got wired up. Removed in the 2026-04-27 audit pass: the only
+    // `unsafe` block in `wirken-vault` was sitting unused, ready to
+    // be lit up by a future refactor without the safety contract
+    // being re-audited at any call site. The substrate it depended
+    // on (`export_encrypted` above, returning bytes) stays. If an
+    // fd-write path is needed later, restore the function with the
+    // safety contract documented at each caller.
 }
 
 fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {
