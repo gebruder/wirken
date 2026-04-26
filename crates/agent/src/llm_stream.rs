@@ -7,6 +7,15 @@ use crate::error::AgentError;
 use crate::llm::{LlmClient, LlmResponse};
 use crate::tool::ToolDef;
 
+/// Cap on the SSE accumulation buffer per response. A hostile or
+/// buggy LLM endpoint that sends bytes without `\n\n` separators
+/// would otherwise grow the buffer without bound until OOM. Real
+/// SSE events from OpenAI / Anthropic are < 1 KB each; 1 MB is two
+/// orders of magnitude over any legitimate single event but small
+/// enough to surface a runaway stream as an error rather than a
+/// crash.
+const MAX_SSE_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// Events emitted during a streaming completion.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -99,6 +108,13 @@ impl LlmClient {
         'stream: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(AgentError::Http(format!(
+                    "SSE accumulation exceeded {} bytes without an event boundary; \
+                     refusing to grow further (hostile or buggy upstream?)",
+                    MAX_SSE_BUFFER_BYTES
+                )));
+            }
 
             // Process complete SSE lines
             while let Some(pos) = buffer.find("\n\n") {
@@ -333,6 +349,13 @@ impl LlmClient {
         'stream: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            if buffer.len() > MAX_SSE_BUFFER_BYTES {
+                return Err(AgentError::Http(format!(
+                    "SSE accumulation exceeded {} bytes without an event boundary; \
+                     refusing to grow further (hostile or buggy upstream?)",
+                    MAX_SSE_BUFFER_BYTES
+                )));
+            }
 
             while let Some(pos) = buffer.find("\n\n") {
                 let event_block = buffer[..pos].to_string();
