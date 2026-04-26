@@ -27,6 +27,8 @@ The adapter uses Socket Mode (WebSocket). No public URL or webhook endpoint need
 
 In channels, the bot only responds when mentioned. In DMs, it responds to all messages.
 
+When a message is posted inside a thread, the bot's reply lands in the same thread. When a message is posted at the channel root, the reply also lands at the root — root messages are not auto-threaded. The bot's own outbound messages are filtered out of the inbound stream by `user_id` and `bot_id`, so DM channels do not echo-loop on the bot's own replies.
+
 ## Team deployment notes
 
 ### Workspace boundary

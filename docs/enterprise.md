@@ -58,7 +58,7 @@ All fields are optional. Only provided fields are applied. The `provider`, `api_
 
 ## SIEM integration
 
-Every agent action is forwarded to Datadog, Splunk, or any webhook in real time. See [configuration.md](configuration.md) for siem.json format.
+Every agent action is forwarded to Datadog, Splunk HEC, Microsoft Sentinel (Logs Ingestion API), or any webhook in real time. See [configuration.md](configuration.md) for siem.json format.
 
 Events include: actor, action, target, channel, session, timestamp, and a detail payload. The local audit log is per-session hash-chained for tamper detection. SIEM forwarding runs alongside, not instead of, the local log.
 
