@@ -74,6 +74,46 @@ Connect the agent to Datadog for querying logs, metrics, and incidents:
 }
 ```
 
+## Trust boundary
+
+MCP servers are an explicit trust extension by the operator. Read this section before pasting an MCP-server command from the internet into `mcp.json`.
+
+### Process topology
+
+```
+wirken run                              gateway + agent (one process; holds vault key + provider API keys + audit handle)
+  └─ wirken mcp-proxy                   separate subprocess; holds the resolved keychain for vault: lookups + per-MCP credentials
+       └─ <your MCP server>             grandchild of the gateway; spawned by mcp-proxy with a sanitised environment
+```
+
+The MCP server runs as a grandchild of the gateway, parented by `wirken-mcp-proxy`. It does **not** share the gateway's address space. Provider API keys, the agent's session log writer, and adapter Ed25519 secrets all live in the gateway process and are not reachable from inside an MCP server process.
+
+### What a compromised MCP server can reach
+
+Protected (a compromised MCP server cannot reach these):
+
+- **Provider API keys** (OpenAI, Anthropic, Bedrock, Tinfoil, Privatemode, …). They live in the gateway process memory and are used by the in-process agent.
+- **Vault unwrap key.** `WIRKEN_VAULT_PASSPHRASE` is removed from `mcp-proxy`'s environ after `probe_keychain` reads it on startup, and `StdioTransport::spawn` calls `env_clear()` before adding back only the allowlisted shell variables (`PATH`, `HOME`, locale + `XDG_*`, etc.). The MCP child's environ does not contain the passphrase.
+- **Vault contents at rest.** `~/.wirken/vault.db` is XChaCha20-Poly1305-encrypted. Without the unwrap key (above), the bytes are inert.
+- **Adapter Ed25519 secrets.** Each adapter's secret stays in its own subprocess; the gateway resolves them once at handshake.
+
+At risk (the operator's blast radius if an MCP server is malicious or compromised):
+
+- **Operator UID filesystem.** Same UID as the gateway. The MCP child can read/write anything the operator can: `~/.wirken/audit.db`, the operator's home directory, any path outside `~/.wirken/` they have access to. Direct byte-tampering of `audit.db` is detected by `wirken sessions verify` (the hash chain catches it), but the tamper happens; the detection is after the fact.
+- **Operator UID network reach.** Outbound to any host the operator can reach. Use a per-server `network` strategy if your MCP doesn't need that reach.
+- **Per-MCP credentials in `env`.** Anything passed in via `mcp.json`'s `env` block is plaintext in the MCP child's environment — including `vault:`-resolved secrets. This is by operator design (you listed it), not an inadvertent leak. A compromised MCP server reads its own `env` and gets these tokens.
+- **The MCP server's declared tool surface.** Whatever tools the MCP server exposes to the LLM are operator-trusted. A compromised filesystem-MCP server gives the LLM file ops within its bind-mount; a compromised git-MCP server gives the LLM `git` operations on its checkout.
+
+### What the operator should do
+
+- Treat each MCP server like a third-party CLI. Audit the source (or the `npx @org/package` provenance) before adding it to `mcp.json`.
+- Use a per-server `env` block to pass only the credentials that server actually needs. Don't dump shared secrets across multiple MCP servers.
+- For MCP servers that don't need the operator's network reach, run `wirken-mcp-proxy` (or the operator's whole gateway) inside a network-namespaced container or a `firejail` profile. Wirken does not yet ship per-MCP-server sandboxing — see the next section.
+
+### What this is not
+
+This is not a sandbox. There is no `cap_drop`, seccomp filter, namespace, gVisor, or Wasm runtime around the MCP child. The `exec` tool runs in a Docker / gVisor sandbox per `docs/sandbox-properties.md`; MCP servers do not. Closing that asymmetry is design work that lands together with — or after — the broader decision about whether agents themselves should run as subprocesses (see `docs/architecture.md` §6 "Direct LLM calls"). Doing it before that decision would lock in container-isolation shapes around a process boundary the project hasn't yet committed to.
+
 ## Supported transports
 
 - **stdio** — spawn process, communicate via stdin/stdout. Default for local MCP servers.
