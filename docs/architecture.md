@@ -266,7 +266,11 @@ Wasm skills are exposed to the LLM as tools named `wasm_<skill_name>`. Gateway-p
 
 **Direct LLM calls:**
 
-The agent's `LlmClient` (`crates/agent/src/llm.rs`) calls providers directly over HTTPS using `reqwest` + `rustls`. Streaming responses use `reqwest-eventsource`. API keys are decrypted from the vault on gateway startup and held in memory by the owning agent for the lifetime of the process. A separate gateway-side LLM proxy (so that agent processes never see raw keys) is on the roadmap but not yet implemented.
+The agent's `LlmClient` (`crates/agent/src/llm.rs`) calls providers directly over HTTPS using `reqwest` + `rustls`. Streaming responses use `reqwest-eventsource`. API keys are decrypted from the vault on gateway startup and held in memory for the lifetime of the gateway process.
+
+**Process boundary, current state.** The agent runs as a library inside the gateway process — `crates/cli/Cargo.toml` pulls `wirken-agent` as a path dep, and `crates/cli/src/commands/run.rs` constructs `Agent` values via `AgentFactory::wake` and calls `process_message` directly. There is no UDS between agent and gateway; they share an address space. Channel adapters are separate processes (per Section 2), but agents are not. This means the in-memory provider keys are held by the same process that holds the vault unwrap key, the audit writer, the session log, and everything else — splitting the proxy out today would not change the threat model, because the proxy and the consumer would live in the same address space.
+
+**Subprocess isolation as a future option, not an in-flight item.** A gateway-side LLM proxy that delivers a real threat-model improvement requires the agent to also run as a subprocess: gateway holds the vault, agent runs without it, the two communicate over a UDS that the proxy mediates. Whether to take on agent-as-subprocess (process supervision, new IPC schema for inbound/tool-call/outbound traffic, streaming over UDS, rate-limit and audit hooks at the new boundary) is an architectural commitment that has not been made; it is a future option, not a roadmap item. The vault's XChaCha20-Poly1305 protects keys at rest regardless. The agent-process-compromise threat model only activates once there is a process boundary between agent and gateway.
 
 **Supported providers:**
 - OpenAI (API key, Bearer token)
