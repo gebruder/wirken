@@ -36,6 +36,77 @@ pub struct JsonRpcError {
     pub message: String,
 }
 
+/// Inherited environment variables a spawned MCP server is allowed to
+/// see. Anything outside this list is dropped before the child starts.
+///
+/// The list is the small set real-world MCP servers (npx-based,
+/// python/uvx-based, native binaries) need to find their interpreter
+/// and config dirs. Notably **excluded**:
+///
+/// - `WIRKEN_VAULT_PASSPHRASE` — mcp-proxy reads this on startup
+///   (`crates/mcp-proxy/src/runner.rs::open_vault`) and it would
+///   otherwise stay in mcp-proxy's environ for the proxy's lifetime.
+///   Without env-clearing, every MCP child would inherit it, read it
+///   from its own env, open `~/.wirken/vault.db` at the same UID,
+///   and decrypt every credential — provider API keys, adapter
+///   secrets, channel tokens.
+/// - `SSH_*`, `AWS_*`, `GOOGLE_*`, `AZURE_*`, etc. — cloud and SSH
+///   credentials the operator may have in their shell.
+/// - `DISPLAY`, `XAUTHORITY` — X11 authority handles.
+/// - Any other operator-environment leak.
+///
+/// Per-MCP `env` from `mcp.json` (including `vault:`-resolved
+/// secrets) is applied AFTER this allowlist, so the operator can
+/// override any of these per-server if they need to.
+const SAFE_ENV_PASSTHROUGH: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_TIME",
+    "LC_NUMERIC",
+    "TERM",
+    "TZ",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+];
+
+/// Build the env map a spawned MCP child should see. Pure function so
+/// the env-isolation property can be tested without spawning a real
+/// child.
+///
+/// `parent_env` is any iterator of `(name, value)` pairs representing
+/// the host process's environment (typically `std::env::vars()`).
+/// `mcp_env` is the per-server env from `mcp.json` (already
+/// `vault:`-resolved by the caller).
+///
+/// Output: only allowlisted vars from `parent_env`, then `mcp_env`
+/// (which can override). Anything in `parent_env` not on the
+/// allowlist is dropped — including secrets that have no business
+/// reaching an external MCP process.
+pub(crate) fn build_spawn_env(
+    parent_env: impl IntoIterator<Item = (String, String)>,
+    mcp_env: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for (k, v) in parent_env {
+        if SAFE_ENV_PASSTHROUGH.iter().any(|allowed| *allowed == k) {
+            out.insert(k, v);
+        }
+    }
+    for (k, v) in mcp_env {
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
 /// Stdio transport: spawn a child process and communicate via JSON-RPC over stdin/stdout.
 pub struct StdioTransport {
     child: Child,
@@ -57,9 +128,13 @@ impl StdioTransport {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
+        // Strip inherited env, then re-add only the allowlisted
+        // shell variables and the per-MCP env. See
+        // `SAFE_ENV_PASSTHROUGH` for what this drops and why
+        // (most importantly, `WIRKEN_VAULT_PASSPHRASE`).
+        cmd.env_clear();
+        let spawn_env = build_spawn_env(std::env::vars(), env);
+        cmd.envs(spawn_env);
 
         let mut child = cmd
             .spawn()
@@ -357,5 +432,122 @@ impl Transport {
             Transport::Stdio(t) => t.shutdown().await,
             Transport::Http(t) => t.shutdown().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod env_isolation_tests {
+    use super::{SAFE_ENV_PASSTHROUGH, build_spawn_env};
+    use std::collections::HashMap;
+
+    fn parent(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn vault_passphrase_is_dropped() {
+        // The headline property: a compromised MCP child must not be
+        // able to read the vault passphrase from its inherited env.
+        let p = parent(&[
+            ("WIRKEN_VAULT_PASSPHRASE", "supersecret"),
+            ("PATH", "/usr/bin:/bin"),
+        ]);
+        let out = build_spawn_env(p, &HashMap::new());
+        assert!(!out.contains_key("WIRKEN_VAULT_PASSPHRASE"));
+        assert_eq!(out.get("PATH"), Some(&"/usr/bin:/bin".to_string()));
+    }
+
+    #[test]
+    fn ssh_aws_cloud_creds_are_dropped() {
+        // The operator's shell may carry SSH agent sockets, AWS
+        // session tokens, GCP / Azure credentials. None of those
+        // belong in an external MCP server's environ.
+        let p = parent(&[
+            ("SSH_AUTH_SOCK", "/tmp/ssh-XXX/agent.123"),
+            ("AWS_SESSION_TOKEN", "AQoDYXdzEJr"),
+            ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+            ("GOOGLE_APPLICATION_CREDENTIALS", "/home/me/.gcp/key.json"),
+            ("AZURE_CLIENT_SECRET", "secret"),
+            ("PATH", "/usr/bin"),
+        ]);
+        let out = build_spawn_env(p, &HashMap::new());
+        for k in [
+            "SSH_AUTH_SOCK",
+            "AWS_SESSION_TOKEN",
+            "AWS_ACCESS_KEY_ID",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "AZURE_CLIENT_SECRET",
+        ] {
+            assert!(!out.contains_key(k), "{k} must be dropped");
+        }
+        assert!(out.contains_key("PATH"));
+    }
+
+    #[test]
+    fn x11_handles_are_dropped() {
+        let p = parent(&[("DISPLAY", ":0"), ("XAUTHORITY", "/home/me/.Xauthority")]);
+        let out = build_spawn_env(p, &HashMap::new());
+        assert!(!out.contains_key("DISPLAY"));
+        assert!(!out.contains_key("XAUTHORITY"));
+    }
+
+    #[test]
+    fn allowlisted_shell_vars_pass_through() {
+        // npx, python, uvx need PATH and HOME to find their
+        // interpreter and config dirs; locale + tz keep date /
+        // string handling sane. The list is exhaustive.
+        let inputs: Vec<(String, String)> = SAFE_ENV_PASSTHROUGH
+            .iter()
+            .map(|name| ((*name).to_string(), format!("val-{name}")))
+            .collect();
+        let out = build_spawn_env(inputs, &HashMap::new());
+        for name in SAFE_ENV_PASSTHROUGH {
+            assert_eq!(
+                out.get(*name),
+                Some(&format!("val-{name}")),
+                "{name} must pass through"
+            );
+        }
+    }
+
+    #[test]
+    fn per_mcp_env_overrides_allowlist() {
+        // The operator can pin a per-server PATH (e.g., to point
+        // at a specific node toolchain) by listing it in mcp.json.
+        let p = parent(&[("PATH", "/usr/bin:/bin")]);
+        let mut mcp = HashMap::new();
+        mcp.insert("PATH".to_string(), "/opt/node/bin".to_string());
+        mcp.insert("GITHUB_TOKEN".to_string(), "ghp_xxx".to_string());
+        let out = build_spawn_env(p, &mcp);
+        assert_eq!(out.get("PATH"), Some(&"/opt/node/bin".to_string()));
+        assert_eq!(out.get("GITHUB_TOKEN"), Some(&"ghp_xxx".to_string()));
+    }
+
+    #[test]
+    fn empty_parent_env_yields_only_mcp_env() {
+        // Defence against a future call path that ignores
+        // std::env::vars() and synthesises its own input.
+        let mut mcp = HashMap::new();
+        mcp.insert("MY_VAR".to_string(), "1".to_string());
+        let out = build_spawn_env(Vec::<(String, String)>::new(), &mcp);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.get("MY_VAR"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn unrelated_wirken_env_vars_are_also_dropped() {
+        // Any operator-side `WIRKEN_*` config that happens to be
+        // in the parent shell does not belong in an MCP server's
+        // environ, even if not directly secret.
+        let p = parent(&[
+            ("WIRKEN_DATA_DIR", "/home/me/.wirken"),
+            ("WIRKEN_LOG", "debug"),
+            ("WIRKEN_VAULT_PASSPHRASE", "secret"),
+        ]);
+        let out = build_spawn_env(p, &HashMap::new());
+        assert!(out.is_empty());
     }
 }

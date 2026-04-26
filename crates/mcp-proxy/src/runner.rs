@@ -152,7 +152,26 @@ fn hex_decode_32(hex: &str) -> Result<[u8; 32], String> {
 
 fn open_vault(data_dir: &Path) -> Option<CredentialStore> {
     let keychain = probe_keychain(data_dir, || {
-        std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default()
+        let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
+        // Wipe the passphrase from this process's environ now that
+        // the AgeFileKeychain has copied it onto the heap. Defence
+        // in depth against a future code path that spawns a child
+        // without env_clear() — `mcp_transport::spawn` already
+        // clears, but a `/proc/<mcp-proxy-pid>/environ` read by
+        // another process at the same UID would otherwise still
+        // turn up the passphrase as a plaintext null-separated
+        // string in mcp-proxy's environ for the proxy's lifetime.
+        //
+        // Safety: this fires from `run()` synchronously, before any
+        // `.await` that could yield to a tokio worker thread that
+        // reads or writes env. No other code in mcp-proxy reads
+        // `WIRKEN_VAULT_PASSPHRASE`. Single-threaded guarantee
+        // matches the `env::set_var` site in
+        // `crates/cli/src/commands/mod.rs::cached_vault_passphrase`.
+        unsafe {
+            std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
+        }
+        pp
     });
     CredentialStore::open(&data_dir.join("vault.db"), keychain.as_ref()).ok()
 }
