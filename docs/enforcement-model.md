@@ -157,7 +157,7 @@ Two rate limiters, both in-memory:
 
 **Crate:** `wirken-audit` | **File:** `crates/audit/src/siem.rs`
 
-`SiemForwarder` sends audit events to Datadog, Splunk, or a generic webhook endpoint. Configuration is read from `~/.wirken/siem.json` at gateway start.
+`SiemForwarder` sends audit events to Datadog, Splunk HEC, Microsoft Sentinel (Logs Ingestion API), or a generic webhook endpoint. Configuration is read from `~/.wirken/siem.json` at gateway start.
 
 **Live update:** Changing SIEM targets requires editing `siem.json` and restarting the gateway. Event forwarding is non-blocking -- failures are logged but do not block the audit pipeline.
 
