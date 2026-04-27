@@ -54,6 +54,8 @@ Three tiers, in order:
 
 Matches do not get suppressed. They route to a separate regression stream. A duplicate of a past disclosed bug means a patch did not hold or a code path reintroduced the root cause — that is its own report, often higher value than novel findings.
 
+If `.lyrik/prior/` is empty or absent, all three tiers are no-ops. Every finding routes to the novel stream. Do not call the model for the causal tier when there is nothing to compare against.
+
 ## Scoring
 
 Four axes, scored independently before they combine:
@@ -63,7 +65,7 @@ Four axes, scored independently before they combine:
 - Can an attacker reach the entry point
 - Blast radius
 
-Score each high-severity candidate more than once. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales through the `scoring_disagreement` gate. Do not proceed on silence.
+Score each high-severity candidate more than once. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales through the `scoring_disagreement` gate. If the rubric does not cleanly tier a finding (rather than scorers disagreeing on it), route to the same gate with a `rubric clarification` tag — the team can refine the rubric in-flight. Do not proceed on silence.
 
 ## Concentration test
 
