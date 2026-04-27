@@ -69,6 +69,10 @@ const SKILLS: &[BundledSkill] = &[
         name: "csv-tools",
         content: include_str!("../../../skills/csv-tools/SKILL.md"),
     },
+    BundledSkill {
+        name: "lyrik",
+        content: include_str!("../../../skills/lyrik/SKILL.md"),
+    },
 ];
 
 /// Install bundled skills to a directory. Skips skills that already exist.

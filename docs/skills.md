@@ -31,7 +31,7 @@ The frontmatter fields:
 - `description`: One-line description
 - `metadata.wirken.requires.bins`: Required binaries. The skill is marked unavailable if any are missing. `metadata.openclaw.requires.bins` is accepted as a deprecated alias.
 
-Wirken ships with 15 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
+Wirken ships with 16 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
 
 ## Wasm skills
 

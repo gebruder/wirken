@@ -212,7 +212,7 @@ Wirken 0.9.x is the current series. 0.9 gets fixes and features; 0.8 gets securi
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
-- **15 bundled skills** under `skills/`.
+- **16 bundled skills** under `skills/`.
 - **766 tests** in the workspace, all green on main (`cargo test --workspace`).
 - **Signed releases.** `checksums.sha256` is signed offline with an Ed25519 SSH key. `install.sh` embeds the public key inline, fetches `checksums.sha256.sig` from the release, and fails closed on any verification failure. See [docs/release-signing.md](docs/release-signing.md) and [KEYS](KEYS).
 
