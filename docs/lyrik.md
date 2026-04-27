@@ -51,13 +51,19 @@ Object. One entry per phase that makes a model call. Each entry pins the provide
 | `articulate` | Phase 0 project context generation. Long-context reasoning over the repo. |
 | `rubric` | Phase 0 severity rubric derivation from the project context. |
 | `recon` | Entry-point and trust-boundary mapping. Cheap pass. |
-| `framing` | The eight framings (`auth`, `crypto`, `injection`, `deserialization`, `memory_safety`, `secrets`, `supply_chain`, `race_condition`) and their two sub-passes. The largest token consumer. |
+| `framing` | The nine framings (`auth`, `crypto`, `injection`, `deserialization`, `memory_safety`, `secrets`, `supply_chain`, `race_condition`, `prompt_injection`) and their two sub-passes. The largest token consumer. |
 | `score` | Four-axis scoring per finding, multi-instance. The dedup gate's causal tier reuses this pin. |
 | `exploit` | Exploit-attempt code generation, run inside the gVisor sandbox. |
 
 Confidentiality is achieved by pinning confidential phases to a Privatemode or Tinfoil provider. Lyrik has no `confidential: true` flag — the pin is the mechanism.
 
 Per-class pinning inside `framing` (`framing.crypto` on a different provider than `framing.injection`) is not supported. If a real engagement needs it, file a `skills/lyrik/FOLLOWUPS.md` entry.
+
+#### `prompt_injection` activation
+
+`prompt_injection` is the ninth framing class. Recon activates it when the scope contains any of: an LLM client, an agent loop, tool execution, system-prompt construction, retrieval (RAG, embedding lookup, in-context file reads), or an MCP host. Untrusted text reaching a model's context is a distinct trust model from classical SQL/shell/log injection — sanitization shapes from those domains do not apply, and in-context content inherits trust from the surrounding prompt by default. The framing covers system-prompt content under attacker influence, tool-output amplification into context, retrieval payload trust, and cross-tool prompt-relay paths.
+
+For Wirken-internal scopes, this means `crates/agent/`, `crates/mcp-proxy/` (MCP host surface), `crates/cli/src/commands/webchat.rs`, and any skill loader or skill execution path activates `prompt_injection`. For external assessments, the same pattern applies to any LLM-hosting application: agent frameworks, RAG pipelines, retrieval-augmented chat services, MCP servers, and skill/tool/plugin executors all activate it.
 
 ### `gates`
 

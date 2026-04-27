@@ -26,13 +26,15 @@ Deliver both through the `phase_0_signoff` gate and wait for explicit sign-off b
 
 ## Recon
 
-Map entry points, auth boundaries, trust transitions, data stores. Cheap pass — feeds the framings, not a finding source on its own. From the recon output, select which framings actually apply to the scope: no network surface skips `auth` and `injection`; no untrusted parser skips `deserialization`; no concurrency primitives skips `race_condition`; and so on. The set of framings run, and the framings skipped with one-line reasons, both go into the report.
+Map entry points, auth boundaries, trust transitions, data stores. Cheap pass — feeds the framings, not a finding source on its own. From the recon output, select which framings actually apply to the scope: no network surface skips `auth` and `injection`; no untrusted parser skips `deserialization`; no concurrency primitives skips `race_condition`; presence of an LLM client, agent loop, tool execution, system-prompt construction, retrieval, or MCP host activates `prompt_injection`; and so on. The set of framings run, and the framings skipped with one-line reasons, both go into the report.
 
 ## Framings
 
 Run the framings selected by recon as separate passes over its output. They are different lenses, not categories of the same scan.
 
-`auth` · `crypto` · `injection` · `deserialization` · `memory_safety` · `secrets` · `supply_chain` · `race_condition`
+`auth` · `crypto` · `injection` · `deserialization` · `memory_safety` · `secrets` · `supply_chain` · `race_condition` · `prompt_injection`
+
+`prompt_injection` is a distinct trust model from classical injection: untrusted text reaching model context inherits the surrounding prompt's authority, and SQL/shell-shaped sanitization defences do not apply. Cover system-prompt content under attacker influence, tool-output amplification into context, retrieval payload trust, and cross-tool prompt-relay paths.
 
 For each framing run, run two sub-passes and union the candidates: a **careful auditor** (broad, conservative, codes assumptions explicitly) and an **attacker hunting one bug** (narrow, adversarial, fixates on a single hypothesis).
 
