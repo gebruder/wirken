@@ -19,6 +19,8 @@ Lyrik draws a hard line between operator-level state and per-repo state. Operato
 
 `.lyrik/config.json` references operator-level resources by name. `phases.score.provider: "privatemode"` resolves through the Wirken vault; `gates.phase_0_signoff.adapter: "slack"` resolves through Wirken's channel registry. Lyrik never sees a credential.
 
+The form of `rubric.md` and `context.md` is whatever the channel renders well — markdown prose, tables, bulleted tiers. The team picks at first sign-off; the chosen form is committed and reviewed in PR like any other artifact.
+
 ## First-run setup
 
 1. Install Wirken — see [getting-started.md](getting-started.md). Pick at least one LLM provider and at least one channel adapter that can carry the gates.
