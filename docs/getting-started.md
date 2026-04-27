@@ -36,7 +36,7 @@ This walks you through:
 2. **Pick your channels.** Telegram, Discord, Slack, Teams, or Matrix. Each bot token is encrypted into the vault.
 3. **Service install.** Optionally install as a systemd/launchd service so the gateway starts on login.
 
-15 bundled skills (weather, github, git, tmux, docker, etc.) are installed automatically.
+16 bundled skills (weather, github, git, tmux, docker, etc.) are installed automatically.
 
 ## Run
 
