@@ -33,6 +33,11 @@ Several findings from this assessment were not vulnerabilities but API-hardening
 
 The four-axis scorer is built for vulnerability findings — *is this a real bug / is the code path reachable / can attacker reach entry / blast radius*. Applied to API-hardening suggestions, the answers come out awkward ("depends on caller" / "yes always" / "depends on caller" / "depends on caller"). The scorer's signal-to-noise drops on these.
 
+**Two more cases**, surfaced 2026-04-28 during dogfood on `crates/mcp-proxy/src/server.rs` and `crates/mcp-proxy/src/wire.rs`:
+
+- `MAX_FRAME_BYTES = 16 * 1024 * 1024` (16 MB) is generous for an NDJSON protocol where real frames are kilobytes. A 256 KB or 1 MB cap would catch DoS earlier without affecting legitimate traffic. Not exploitable today (caller is same-UID gated). The API shape — a hardcoded constant rather than a config-tunable limit — makes the choice a recompile rather than an operator dial.
+- The accept loop has no per-process connection cap. A same-UID attacker opens many connections; each spawned task can grow its read buffer to `MAX_FRAME_BYTES`. Memory-pressure DoS at modest connection counts. Same threat-model gating as above. Absence of a connection limit is API/config shape that makes misuse possible.
+
 Schema questions:
 
 - Should the report carry a third `hardening` stream alongside `novel` and `regression`?
@@ -40,7 +45,7 @@ Schema questions:
 - Does the dedup gate apply? Across runs, the same hardening finding rediscovered every assessment until the underlying API is fixed is still useful as a steady-state warning, but at lower volume than novel findings.
 - How is hardening prioritised in the report? Vulnerabilities first is obvious; hardening clusters second, ordered by what?
 
-One worked case so far. Collect more before deciding.
+Five worked cases now across two threat models (vault crypto, mcp-proxy protocol). The pattern is consistent — *API/config shape that makes misuse easy, not exploitable today* — and is distinct from both novel-vulnerability and latent-config-dependent. Decision threshold reached: schema design can be made cleanly in a single session of design work when picked up.
 
 ## 3. Intra-run clustering for related-by-root-cause findings
 
@@ -58,3 +63,22 @@ Schema questions:
 - Does the umbrella inherit the highest member's grade, or get its own?
 
 One worked case so far. Look for the pattern again on mcp-proxy and channel adapters before deciding.
+
+## 4. Cross-surface / codebase-wide pattern recognition
+
+Surfaced 2026-04-28 across two dogfood sessions: `crates/cli/src/commands/webchat.rs` and `crates/mcp-proxy/src/server.rs`.
+
+Two findings, one root cause across surfaces. Webchat's "no per-call rate limit on local POSTs" and mcp-proxy's "no per-tool-call rate limit on authenticated agents" are structurally the same finding: **Wirken's resource-bounding posture is per-surface, not codebase-wide.** Each individual surface has decided locally whether to bound resource consumption; there is no project-level invariant that all trust-crossings carry resource bounds.
+
+This is a real finding *about Wirken*, not about webchat or mcp-proxy individually. It is higher-value than any individual vulnerability because it is structural to how the codebase thinks. A scanner that surfaces these patterns is meaningfully different from one that does not.
+
+A lyrik report that surfaces a structural finding requires lyrik to **keep state across assessments of the same codebase** — and to compare candidate findings against past findings *for clustering by structural similarity*, not just for suppression-or-routing as the dedup gate currently does. This is distinct from intra-run clustering (item 3) — the lifecycle and storage are different.
+
+Schema questions:
+
+- Where does cross-assessment state live? `.lyrik/` per-repo already carries rubric and context; a `patterns/` subdirectory holding previously-observed structural findings is plausible.
+- How does the agent decide a new finding matches a structural pattern? Causal-tier model call against past structural findings, similar in shape to the dedup causal tier but with different intent.
+- Should the report carry a fourth stream (`structural`) alongside `novel`, `regression`, and (eventually) `hardening`? Or should structural findings be a tag on existing-stream findings ("this novel finding is the third instance of pattern X across this codebase")?
+- Cadence: structural findings tend to be slow-moving — the "rate-bound every trust-crossing" pattern won't be fixed in one PR. Does each assessment re-surface them at full salience, or do they decay to a steady-state warning?
+
+Two cases so far. Three or four more before the design question is ripe. The shape is the highest-value capability the lyrik form can plausibly carry — worth more design weight than any of items 1–3.
