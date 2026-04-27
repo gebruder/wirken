@@ -14,16 +14,24 @@ In today's report this finding scores 0 ("not a real bug now"). That under-repor
 
 **Second case**, surfaced 2026-04-28 during dogfood on `crates/vault/src/crypto.rs`.
 
-The `decrypt` function returns plaintext via `cipher.decrypt` as `Vec<u8>` that lives unzeroed for a brief window before being wrapped in `VaultSecret`. The chacha20poly1305 internal stack state inside that call is also not zeroed by the crate. Today this is graded 0 — defence-in-depth, not exploitable without an additional capability (memory read on the live operator process). Under "operator's machine compromised but keychain entry not yet read" — a real post-compromise lateral-movement threat — the residual key material in stack/heap *is* exploitable via process memory dump or core file. Same shape: graded 0 against the named threat model, would be HIGH in a slightly expanded one. Two cases now: a config-flip threat (Origin) and a threat-model-expansion threat (vault memory hygiene).
+The `decrypt` function returns plaintext via `cipher.decrypt` as `Vec<u8>` that lives unzeroed for a brief window before being wrapped in `VaultSecret`. The chacha20poly1305 internal stack state inside that call is also not zeroed by the crate. Today this is graded 0 — defence-in-depth, not exploitable without an additional capability (memory read on the live operator process). Under "operator's machine compromised but keychain entry not yet read" — a real post-compromise lateral-movement threat — the residual key material in stack/heap *is* exploitable via process memory dump or core file. Same shape: graded 0 against the named threat model, would be HIGH in a slightly expanded one.
+
+**Third case**, surfaced 2026-04-28 during dogfood on `crates/agent/src/skill.rs`.
+
+`SkillLoader::load_dir` reads `~/.wirken/skills/*/SKILL.md` at start-up and concatenates each `body` verbatim into the agent's system prompt via `build_prompt`. Signature verification happens at install time (`wirken skills install`) but **not at load time**. Today, FS permissions on the home directory gate this — the threat model assumes "trusted operator on a single-user machine." Under any expansion of that threat model — a same-UID compromised process, a multi-user host, a shared dev environment, a relaxed-permissions deployment — the same code becomes prompt-injection-as-a-feature: any process with same-UID write to the skills dir gets its content delivered as system prompt content. Graded 0 today, HIGH in expanded threat model.
+
+**Fourth case**, also from `crates/agent/src/bundled_skills.rs` and `crates/cli/src/commands/setup.rs`.
+
+`install_bundled_skills` skips skills whose path already exists. An attacker who plants `~/.wirken/skills/<name>/` *before* the operator's first `wirken setup` run keeps their version forever — subsequent setups skip the directory unconditionally. Realistic attacker-precedes-operator scenarios (compromised CI image, shared machine, restored-from-backup state). Graded 0 today (atypical threat model), HIGH if attacker-precedes-operator is in scope.
 
 Schema questions for whoever picks this up:
 
 - Does `latent` get its own report stream, or extend the existing grade scheme (e.g. `0/H` — "graded zero now, would be H if condition X")?
-- How does the agent identify the "condition X" that flips a finding live? Pattern-match on bind addresses and similar config? Explicit operator-named threat models in the rubric?
+- How does the agent identify the "condition X" that flips a finding live? Pattern-match on bind addresses, install-time checks, hardcoded permissions assumptions? Explicit operator-named threat models in the rubric?
 - How does latent interact with regression? A latent finding later realized by a config change is structurally similar to the reintroduction case the regression stream already names.
 - What's the dedup story across runs? If the same latent finding is rediscovered every assessment until the underlying code is fixed, does it suppress after first sighting, or does it keep appearing as a steady-state warning?
 
-Two cases so far, both real. Keep collecting worked cases as dogfooding proceeds — three or four data points before any design lock-in.
+Four cases now across three threat models (network surface config, crypto memory hygiene, skill-loader trust timing). Pattern is consistent: graded 0 against the named threat model, HIGH in a single-step expansion. One or two more cases before the design question is ripe.
 
 ## 2. Hardening stream alongside novel and regression
 
@@ -38,6 +46,10 @@ The four-axis scorer is built for vulnerability findings — *is this a real bug
 - `MAX_FRAME_BYTES = 16 * 1024 * 1024` (16 MB) is generous for an NDJSON protocol where real frames are kilobytes. A 256 KB or 1 MB cap would catch DoS earlier without affecting legitimate traffic. Not exploitable today (caller is same-UID gated). The API shape — a hardcoded constant rather than a config-tunable limit — makes the choice a recompile rather than an operator dial.
 - The accept loop has no per-process connection cap. A same-UID attacker opens many connections; each spawned task can grow its read buffer to `MAX_FRAME_BYTES`. Memory-pressure DoS at modest connection counts. Same threat-model gating as above. Absence of a connection limit is API/config shape that makes misuse possible.
 
+**One more case**, surfaced 2026-04-28 during dogfood on `crates/agent/src/skill.rs`:
+
+- `parse_frontmatter` reads the entire SKILL.md and runs `serde_yaml::from_str` on the frontmatter slice with no size cap. A 100 MB SKILL.md or a YAML bomb DoSes the loader. Same shape as the mcp-proxy `MAX_FRAME_BYTES` finding: a hardcoded-or-absent input size cap on a parser that should refuse oversized input early.
+
 Schema questions:
 
 - Should the report carry a third `hardening` stream alongside `novel` and `regression`?
@@ -45,7 +57,7 @@ Schema questions:
 - Does the dedup gate apply? Across runs, the same hardening finding rediscovered every assessment until the underlying API is fixed is still useful as a steady-state warning, but at lower volume than novel findings.
 - How is hardening prioritised in the report? Vulnerabilities first is obvious; hardening clusters second, ordered by what?
 
-Five worked cases now across two threat models (vault crypto, mcp-proxy protocol). The pattern is consistent — *API/config shape that makes misuse easy, not exploitable today* — and is distinct from both novel-vulnerability and latent-config-dependent. Decision threshold reached: schema design can be made cleanly in a single session of design work when picked up.
+Six worked cases now across three threat models (vault crypto, mcp-proxy protocol, skill loader). The pattern is consistent — *API/config shape that makes misuse easy, not exploitable today* — and is distinct from both novel-vulnerability and latent-config-dependent. Decision threshold solidly passed: schema design can be made cleanly in a single session of design work when picked up.
 
 ## 3. Intra-run clustering for related-by-root-cause findings
 
