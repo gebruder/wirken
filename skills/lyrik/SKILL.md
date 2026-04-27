@@ -26,15 +26,15 @@ Deliver both through the `phase_0_signoff` gate and wait for explicit sign-off b
 
 ## Recon
 
-Map entry points, auth boundaries, trust transitions, data stores. Cheap pass — feeds the framings, not a finding source on its own.
+Map entry points, auth boundaries, trust transitions, data stores. Cheap pass — feeds the framings, not a finding source on its own. From the recon output, select which framings actually apply to the scope: no network surface skips `auth` and `injection`; no untrusted parser skips `deserialization`; no concurrency primitives skips `race_condition`; and so on. The set of framings run, and the framings skipped with one-line reasons, both go into the report.
 
 ## Framings
 
-Run each as a separate pass over the recon output. They are different lenses, not categories of the same scan.
+Run the framings selected by recon as separate passes over its output. They are different lenses, not categories of the same scan.
 
 `auth` · `crypto` · `injection` · `deserialization` · `memory_safety` · `secrets` · `supply_chain` · `race_condition`
 
-For each framing, run two sub-passes and union the candidates: a **careful auditor** (broad, conservative, codes assumptions explicitly) and an **attacker hunting one bug** (narrow, adversarial, fixates on a single hypothesis).
+For each framing run, run two sub-passes and union the candidates: a **careful auditor** (broad, conservative, codes assumptions explicitly) and an **attacker hunting one bug** (narrow, adversarial, fixates on a single hypothesis).
 
 ## Scanners (optional)
 
