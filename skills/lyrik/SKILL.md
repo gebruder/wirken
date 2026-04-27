@@ -9,9 +9,10 @@ Produce a security assessment of a codebase. Lyrik is the form the report takes:
 
 ## Inputs
 
-- Target: repo path, scope spec (paths in / out), assessment type (`full`, `delta`, `variant_hunt`).
-- Prior context: past CVEs and pentest reports, internal disclosures, ADRs, postmortems, threat models, security-keyword commit messages, FIXME/TODO/HACK/XXX comments.
-- Confidentiality: when a phase handles material the user has marked confidential, route the model call to a Privatemode or Tinfoil provider if one is configured.
+- Target: repo path, plus an optional scope override from the user (paths in / out) and an assessment type (`full`, `delta`, `variant_hunt`).
+- Per-repo state: read `.lyrik/config.json` from the target repo for scope, model pins per phase, gate destinations, and the prior-findings path. Read `.lyrik/rubric.md` and `.lyrik/context.md` if they exist; treat them as approved unless invalidated. Read `.lyrik/prior/` for the dedup gate. If the config is missing, ask the user before generating artifacts. See `docs/lyrik.md` for the schema.
+- Prior context (additional): ADRs, postmortems, threat models, security-keyword commit messages, FIXME/TODO/HACK/XXX comments.
+- Confidentiality: pin confidential phases to a Privatemode or Tinfoil provider in `phases.<phase>.provider`. Lyrik references operator-level providers and channel adapters by name; credentials live in the Wirken vault and Lyrik never sees them.
 
 ## Phase 0 — project context and rubric
 
@@ -21,7 +22,7 @@ Produce two artifacts before any candidate is generated.
 
 **Severity rubric.** Project-specific, not CVSS-shaped. Crash severity depends on whether availability is a security property of *this* software. State the tiers and what falls in each.
 
-Deliver both through the configured channel adapter and wait for explicit sign-off before continuing. Do not proceed on silence.
+Deliver both through the `phase_0_signoff` gate and wait for explicit sign-off before continuing. Do not proceed on silence. On approval, write `.lyrik/rubric.md` and `.lyrik/context.md` to the target repo so the team can commit them. Skip Phase 0 generation on subsequent runs unless the dependency lockfile hash or framework version fingerprint has changed.
 
 ## Recon
 
@@ -49,7 +50,7 @@ Three tiers, in order:
 
 - **Exact.** File path + line range + rule ID.
 - **Semantic.** Embed the root cause description; compare against past findings. Default similarity threshold 0.85.
-- **Causal.** Ask the model whether the candidate is the same root cause as any of the top-K retrieved historical findings.
+- **Causal.** Ask the model whether the candidate is the same root cause as any of the top-K retrieved historical findings. Uses the `score` provider pin — same calibrated-judgment task class.
 
 Matches do not get suppressed. They route to a separate regression stream. A duplicate of a past disclosed bug means a patch did not hold or a code path reintroduced the root cause — that is its own report, often higher value than novel findings.
 
@@ -62,7 +63,7 @@ Four axes, scored independently before they combine:
 - Can an attacker reach the entry point
 - Blast radius
 
-Score each high-severity candidate more than once. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales to the user for adjudication. Do not proceed on silence.
+Score each high-severity candidate more than once. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales through the `scoring_disagreement` gate. Do not proceed on silence.
 
 ## Concentration test
 
@@ -92,7 +93,7 @@ Each finding rendered in the smallest true number of words. The report contains:
 - **Funnel disclosure**: candidates generated, after dedup, scored, exploit-verified. The numbers must reconcile.
 - **Audit log reference** for the run.
 
-Deliver the bundle through the configured channel adapter. Route any 1.0-grade finding through an encrypted channel (Signal, Matrix) when one is configured. Lyrik does not auto-disclose to vendors — that is a human action.
+Deliver the bundle through the configured channel adapter. Each 1.0-grade finding pauses at the `high_severity_review` gate before delivery — a human reviewer signs off on the destination, redirects to a different channel, or holds. There is no auto-routing of 1.0-grade findings, encrypted channel or otherwise. Lyrik does not auto-disclose to vendors — that is a human action.
 
 ## Tips
 
@@ -101,4 +102,5 @@ Deliver the bundle through the configured channel adapter. Route any 1.0-grade f
 - Log lines describe observed state, not intended state. "Exploit succeeded" is emitted after the PoC ran, never speculatively.
 - A finding that pattern-matches a known false-positive class still goes into the candidate pool. The dedup gate decides routing, not the framing.
 - Architectural changes invalidate the project context. Re-run Phase 0 after a major refactor or framework version bump.
+- Config is per-repo. Provider credentials, channel adapter credentials, and the vault stay at the operator level (Wirken's existing config). `.lyrik/config.json` references those by name, never by credential.
 - If actual use surfaces a real boundary that the markdown form can't carry — a state store, a typed schema, a programmatic dispatch — record it in `skills/lyrik/FOLLOWUPS.md`, don't grow this file into a substitute.
