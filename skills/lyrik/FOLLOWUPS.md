@@ -94,3 +94,54 @@ Schema questions:
 - Cadence: structural findings tend to be slow-moving — the "rate-bound every trust-crossing" pattern won't be fixed in one PR. Does each assessment re-surface them at full salience, or do they decay to a steady-state warning?
 
 Two cases so far. Three or four more before the design question is ripe. The shape is the highest-value capability the lyrik form can plausibly carry — worth more design weight than any of items 1–3.
+
+## 5. Live ticket-tracker integration beyond CSV
+
+Surfaced 2026-04-28 during enrichment-path build.
+
+The current Jira ingest reads `<memory_path>/jira.csv` — a one-shot export. That intentionally avoids API credentials, OAuth flows, and the runtime cost of fetching ticket state per assessment. It also means lyrik's view of operational signal is as stale as the operator's last export.
+
+Live integrations (Jira REST API, GitHub Issues API, Linear API, etc.) would let lyrik query current ticket state at assessment time and pick up tickets opened between exports. They also introduce: credential storage (which would route through the Wirken vault same as LLM provider keys), rate-limit handling, multi-tenancy on shared accounts, and the question of whether lyrik should ever write back (e.g., creating a Jira issue per finding — its own can of worms).
+
+Schema questions:
+
+- Where do API credentials live? Wirken vault (operator-level) is the obvious answer; lyrik references by name as for LLM providers and channel adapters.
+- One connector per system, or a generic "ticket source" abstraction with adapters?
+- Read-only by default, or allow lyrik to create tickets for high-severity findings (gated by a human gate, similar to `high_severity_review`)?
+- Does CSV stay as a fallback / disconnected-mode option, or get retired once API connectors land?
+
+CSV ingest covers the demo case. API integration is real demand from teams running lyrik at any cadence faster than weekly.
+
+## 6. Embedding-backed retrieval over `.lyrik/memory/`
+
+Surfaced 2026-04-28 during enrichment-path build.
+
+The current Phase 0 enrichment reads `.lyrik/memory/*.md` files into the agent's context directly. For small project memory (tens of markdown files, single-digit MBs total), that scales fine. For mature codebases — a decade of ADRs, dozens of postmortems, hundreds of design docs — the markdown dump approaches the model context window and pushes out other Phase 0 work.
+
+Embedding-backed retrieval over the memory corpus would let the agent fetch only the top-K relevant docs per component, scaling project memory size independently of context window. It introduces an embedding model (operator decision; another provider pin), an embedding store (FAISS, sqlite-vec, etc.), an indexing step (when does lyrik regenerate the index?), and the question of whether the index lives in `.lyrik/` (committed, but binary-ish) or `~/.wirken/lyrik/index/` (operator-local, not committed).
+
+Schema questions:
+
+- Where does the index live? Per-repo committed (everyone gets the same retrieval) versus operator-local (each operator's index is fresh)?
+- Which embedding provider? Same pin shape as `phases.<phase>.provider`, or distinct?
+- Re-index trigger: dependency-lockfile-hash change (same as Phase 0 invalidation), explicit `wirken lyrik reindex`, or on every run?
+- Smallest-viable form — sqlite-vec inline, or pull in a real vector store?
+
+Real demand for indexed memory will come from teams whose `.lyrik/memory/` exceeds roughly 100 KB.
+
+## 7. Memory relevance filtering as a phase
+
+Surfaced 2026-04-28 during enrichment-path build.
+
+The current SKILL.md tells the articulate phase to "filter to security-relevant content; do not dump every ADR into the context regardless of topic." That filtering happens implicitly inside articulate's own reasoning — same model call, same context, no separate pass.
+
+For small memory directories this is fine. For larger ones, the articulate model is doing two distinct jobs: read everything, decide what is relevant, then synthesize the project context using only the relevant subset. A cheap-class pre-filter pass (similar in shape to recon) would let articulate receive only pre-filtered memory and focus its context budget on synthesis.
+
+Schema questions:
+
+- Separate phase (`memory_filter` between recon and articulate), or sub-pass inside articulate?
+- Dedicated model pin? Cheap class, similar to recon.
+- "Security-relevant" defined by keyword, model judgement, or operator tags in the memory file frontmatter?
+- Does the filtered-out set get reported? Operator visibility into "lyrik decided these ADRs were not security-relevant" matters for trust.
+
+Becomes worth building when articulate's context budget is materially eaten by memory content.
