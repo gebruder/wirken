@@ -22,6 +22,13 @@ permissions:
       # loader derives one from the other, both are maintained by hand
       # in this preset. Adding a source means editing both files in the
       # same commit. Mismatch is an attach-time error in a later scope.
+      #
+      # Ollama embedding endpoint: 127.0.0.1 is in the allowlist
+      # specifically so the orchestrator's POST to <ollama>/api/embed
+      # passes the policed transport. This is NOT a generic
+      # local-network exception — only the orchestrator's embedding
+      # pass uses it (per the C-LLM pre-checks Path C decision).
+      - 127.0.0.1
       - export.arxiv.org
       - papers.ssrn.com
       - www.ftc.gov
