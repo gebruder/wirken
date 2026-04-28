@@ -257,6 +257,7 @@ fn skill_prompt_generation() {
             body: "Use curl wttr.in".into(),
             path: PathBuf::new(),
             available: true,
+            permissions: crate::skill_perms::PermissionsSource::Legacy,
         },
         Skill {
             name: "unavailable".into(),
@@ -265,6 +266,7 @@ fn skill_prompt_generation() {
             body: "Should not appear".into(),
             path: PathBuf::new(),
             available: false,
+            permissions: crate::skill_perms::PermissionsSource::Legacy,
         },
     ];
 
