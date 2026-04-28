@@ -1,6 +1,7 @@
 ---
 name: weather
 description: Get current weather and forecasts
+disable-model-invocation: false
 metadata:
   wirken:
     requires:

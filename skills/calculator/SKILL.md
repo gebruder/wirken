@@ -1,6 +1,7 @@
 ---
 name: calculator
 description: Math calculations and unit conversions
+disable-model-invocation: false
 permissions:
   tools:
     allow: [exec]

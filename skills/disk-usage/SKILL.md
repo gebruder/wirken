@@ -1,6 +1,7 @@
 ---
 name: disk-usage
 description: Analyze disk usage and find large files
+disable-model-invocation: false
 permissions:
   tools:
     allow: [exec]

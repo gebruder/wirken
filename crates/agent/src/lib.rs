@@ -14,6 +14,7 @@ pub mod sandbox;
 pub(crate) mod sigv4;
 pub mod skill;
 pub mod skill_perms;
+pub mod slash;
 pub mod tool;
 pub mod wasm_sandbox;
 
