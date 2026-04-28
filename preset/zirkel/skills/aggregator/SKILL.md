@@ -2,6 +2,13 @@
 name: aggregator
 description: Daily fetch from a fixed public allowlist; score against the user's interests file; cluster into themes; push the digest to the configured channel
 disable-model-invocation: true
+# This skill is never agent-attached. It is loaded by PresetLoader for
+# its permissions block, which the `wirken zirkel run` orchestrator
+# applies to its own policed HTTP and SQLite clients. The tools.allow
+# list below is dead surface from the agent-loop perspective — there
+# is no agent that exposes these tools to an LLM for this skill.
+# The permissions block exists as the orchestrator's policy source,
+# not as an attach manifest. See crates/zirkel/src/orchestrator.rs.
 permissions:
   tools:
     allow: [exec, read_file, write_file, list_files]

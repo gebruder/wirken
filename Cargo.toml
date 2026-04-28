@@ -18,7 +18,9 @@ members = [
     "crates/agent",
     "crates/mcp-proxy",
     "crates/cli",
+    "crates/skill-store",
     "crates/webchat",
+    "crates/zirkel",
 ]
 
 [workspace.package]

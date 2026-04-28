@@ -6500,6 +6500,7 @@ dependencies = [
  "wirken-ipc",
  "wirken-mcp-proxy",
  "wirken-vault",
+ "wirken-zirkel",
 ]
 
 [[package]]
@@ -6566,6 +6567,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wirken-skill-store"
+version = "0.9.1"
+dependencies = [
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "wirken-agent",
+]
+
+[[package]]
 name = "wirken-vault"
 version = "0.9.1"
 dependencies = [
@@ -6593,6 +6605,22 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "wirken-zirkel"
+version = "0.9.1"
+dependencies = [
+ "reqwest 0.13.2",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "wirken-agent",
+ "wirken-skill-store",
 ]
 
 [[package]]

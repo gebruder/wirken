@@ -15,6 +15,7 @@ wirken-vault = { path = "../vault" }
 wirken-audit = { path = "../audit" }
 wirken-gateway = { path = "../gateway" }
 wirken-agent = { path = "../agent" }
+wirken-zirkel = { path = "../zirkel" }
 wirken-ipc = { path = "../ipc" }
 wirken-mcp-proxy = { path = "../mcp-proxy" }
 wirken-adapter-telegram = { path = "../adapter-telegram" }
