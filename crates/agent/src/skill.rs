@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::error::AgentError;
+use crate::skill_perms::{PermissionsBlock, PermissionsSource, resolve_block};
 
 /// A loaded markdown skill.
 #[derive(Debug, Clone)]
@@ -12,6 +13,10 @@ pub struct Skill {
     pub body: String,
     pub path: PathBuf,
     pub available: bool,
+    /// Per-skill permissions declared in the frontmatter `permissions:` block,
+    /// or `Legacy` if the block is absent. The agent merges declared profiles
+    /// from all loaded skills into one effective per-agent profile at init.
+    pub permissions: PermissionsSource,
 }
 
 /// YAML frontmatter parsed from SKILL.md files.
@@ -22,6 +27,8 @@ struct SkillFrontmatter {
     description: Option<String>,
     #[serde(default)]
     metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    permissions: Option<PermissionsBlock>,
 }
 
 /// Loads SKILL.md files from a directory.
@@ -81,6 +88,26 @@ impl SkillLoader {
             .unwrap_or("unknown")
             .to_string();
 
+        let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        let permissions = match frontmatter.permissions {
+            Some(block) => {
+                let profile = resolve_block(block, skill_root, home.as_deref()).map_err(|e| {
+                    AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
+                })?;
+                PermissionsSource::Explicit(profile)
+            }
+            None => {
+                tracing::warn!(
+                    "skill {} has no `permissions:` block; treating as legacy. \
+                     This will become a hard load failure in a future release. \
+                     See gebruder/wirken#76.",
+                    path.display()
+                );
+                PermissionsSource::Legacy
+            }
+        };
+
         Ok(Skill {
             name: frontmatter.name.unwrap_or(dir_name),
             description: frontmatter.description.unwrap_or_default(),
@@ -88,6 +115,7 @@ impl SkillLoader {
             body,
             path: path.to_path_buf(),
             available,
+            permissions,
         })
     }
 
@@ -128,6 +156,7 @@ fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentE
                 name: None,
                 description: None,
                 metadata: None,
+                permissions: None,
             },
             content.to_string(),
         ));
