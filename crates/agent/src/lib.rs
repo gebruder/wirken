@@ -2,6 +2,7 @@ pub mod attestation;
 pub mod bundled_skills;
 pub mod context;
 pub mod conversation;
+pub mod egress;
 pub mod error;
 pub mod factory;
 pub mod identity;
