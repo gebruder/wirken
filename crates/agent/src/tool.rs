@@ -534,7 +534,8 @@ impl ToolRegistry {
         let resp = self
             .http
             .post("https://html.duckduckgo.com/html/")
-            .map_err(|e| AgentError::EgressDenied { host: e.host })?
+            .await
+            .map_err(map_http_access_denied)?
             .header("User-Agent", "Wirken/1.0")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!("q={}", urlencoding_encode(query)))
@@ -633,7 +634,8 @@ impl ToolRegistry {
         let resp = self
             .http
             .post(&url)
-            .map_err(|e| AgentError::EgressDenied { host: e.host })?
+            .await
+            .map_err(map_http_access_denied)?
             .header("Authorization", format!("Bearer {api_key}"))
             .json(&body)
             .send()
@@ -702,6 +704,21 @@ struct SearchResult {
     title: String,
     url: String,
     snippet: String,
+}
+
+/// Map an [`crate::egress::HttpAccessDenied`] from the wrapped HTTP
+/// client into an [`AgentError`]. The agent's tool dispatcher (#76
+/// Phase 2.2) intercepts both variants and emits the appropriate
+/// `SkillPermissionDenied` audit event before surfacing a non-success
+/// `ToolResult`. The agent-tool case (web_search / generate_image)
+/// runs with an unrestricted rate limit by default so the
+/// `RateLimit` arm only fires when an operator has deliberately
+/// installed a stricter config.
+fn map_http_access_denied(e: crate::egress::HttpAccessDenied) -> AgentError {
+    match e {
+        crate::egress::HttpAccessDenied::Egress(d) => AgentError::EgressDenied { host: d.host },
+        crate::egress::HttpAccessDenied::RateLimit(d) => AgentError::Tool(format!("{d}")),
+    }
 }
 
 /// Parse DuckDuckGo HTML Lite search results.

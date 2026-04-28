@@ -16,6 +16,7 @@ pub mod session;
 pub mod setup;
 pub mod skills;
 pub mod webchat;
+pub mod zirkel;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
