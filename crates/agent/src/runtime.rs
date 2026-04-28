@@ -32,6 +32,18 @@ enum FsAxis {
     Write,
 }
 
+/// Returned by [`Agent::apply_interceptors`]. Either the chain wants
+/// processing to continue with a (possibly rewritten) message, or an
+/// interceptor handled the message in full — the LLM is skipped and
+/// the agent's outbound is the interceptor's reply.
+enum InterceptorOutcome {
+    Continue(String),
+    Handled {
+        reply: String,
+        audit_events: Vec<wirken_audit::SessionEvent>,
+    },
+}
+
 /// Item 6 slice 1 — hard cap on the depth of `spawn_subagent` calls,
 /// independent of any per-ceiling configuration. Even with badly
 /// configured ceilings the harness refuses to nest deeper than this.
@@ -173,6 +185,12 @@ pub struct Agent {
     /// (transitional during the migration window). Enforcement is
     /// per-agent, not per-skill — see gebruder/wirken#76.
     effective_permissions: crate::skill_perms::EffectiveProfile,
+    /// Pre-LLM inbound interceptors. The slash-command interceptor
+    /// (#79) is registered by default; additional interceptors plug
+    /// in via [`Self::attach_interceptor`]. The chain runs at the
+    /// top of every `process_message` / `process_message_stream`
+    /// invocation; first non-`Pass` result wins.
+    interceptors: Vec<Box<dyn crate::inbound_interceptor::InboundInterceptor>>,
 }
 
 impl Agent {
@@ -245,6 +263,7 @@ impl Agent {
             auto_deny_above_tier: None,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
+            interceptors: vec![Box::new(crate::slash::SlashInterceptor)],
         })
     }
 
@@ -323,6 +342,7 @@ impl Agent {
             auto_deny_above_tier: None,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
+            interceptors: vec![Box::new(crate::slash::SlashInterceptor)],
         })
     }
 
@@ -575,22 +595,46 @@ impl Agent {
         Some((axis, absolute))
     }
 
-    /// #79: rewrite a slash-invoked user message so the LLM sees the
-    /// invoked skill's body before the user's actual request. Returns
-    /// the original message unchanged when no slash prefix is present.
-    /// Returns `Err(AgentError::UnknownSlashSkill)` when the prefix
-    /// names a skill that isn't loaded — the channel surfaces this
-    /// back to the user so they can correct the typo.
-    fn preprocess_slash_invocation(&self, message: &str) -> Result<String, AgentError> {
-        match crate::slash::parse(message, &self.skills) {
-            crate::slash::SlashResult::None => Ok(message.to_string()),
-            crate::slash::SlashResult::Invoked { skill, remainder } => {
-                Ok(crate::slash::rewrite_with_skill_body(skill, &remainder))
+    /// Register a pre-LLM inbound interceptor. Runs after the slash
+    /// interceptor that's registered by default; for keep/skip-style
+    /// skill-specific replies (Zirkel's case), the consumer
+    /// constructs the interceptor with whatever state it needs (a
+    /// SkillStore handle, etc.) and registers it on the agent at
+    /// startup. Order matters only when two interceptors could match
+    /// the same shape — registration order is the tiebreaker.
+    pub fn attach_interceptor(
+        &mut self,
+        interceptor: Box<dyn crate::inbound_interceptor::InboundInterceptor>,
+    ) {
+        self.interceptors.push(interceptor);
+    }
+
+    /// Apply the interceptor chain to an inbound message. Returns
+    /// either the (possibly rewritten) message to continue processing
+    /// with, or an early `ProcessResult` if an interceptor fully
+    /// handled the message. Callers (`process_message_inner` and
+    /// `process_message_stream`) propagate the early result to the
+    /// caller without invoking the LLM.
+    fn apply_interceptors(&self, message: &str) -> Result<InterceptorOutcome, AgentError> {
+        let ctx = crate::inbound_interceptor::InterceptorContext {
+            agent_id: &self.id,
+            skills: &self.skills,
+        };
+        match crate::inbound_interceptor::run_chain(&self.interceptors, message, &ctx) {
+            crate::inbound_interceptor::InterceptResult::Pass => {
+                Ok(InterceptorOutcome::Continue(message.to_string()))
             }
-            crate::slash::SlashResult::UnknownSkill { name } => {
-                let known: Vec<String> = self.skills.iter().map(|s| s.name.clone()).collect();
-                Err(AgentError::UnknownSlashSkill { name, known })
+            crate::inbound_interceptor::InterceptResult::Rewrite(s) => {
+                Ok(InterceptorOutcome::Continue(s))
             }
+            crate::inbound_interceptor::InterceptResult::Handle {
+                reply,
+                audit_events,
+            } => Ok(InterceptorOutcome::Handled {
+                reply,
+                audit_events,
+            }),
+            crate::inbound_interceptor::InterceptResult::Reject(e) => Err(e),
         }
     }
 
@@ -1072,11 +1116,42 @@ impl Agent {
         // exact conversation prefix that was hashed into LlmRequest.
         self.maybe_log_system_prompt()?;
 
-        // #79: detect `/<skill-name>` slash invocation and inline the
-        // named skill's body so the LLM has its instructions for this
-        // turn even though the skill is excluded from the auto-pickable
-        // system prompt.
-        let user_message = self.preprocess_slash_invocation(user_message)?;
+        // Run pre-LLM interceptor chain (slash, Zirkel keep/skip,
+        // future skill-specific). Three outcomes:
+        //   - Continue(msg): proceed to LLM with msg.
+        //   - Handled: interceptor fully replied; emit its audit events
+        //     and return without an LLM round-trip.
+        //   - Err: an interceptor rejected the message (e.g. unknown
+        //     slash skill). Surface to the channel.
+        let user_message = match self.apply_interceptors(user_message)? {
+            InterceptorOutcome::Continue(s) => s,
+            InterceptorOutcome::Handled {
+                reply,
+                audit_events,
+            } => {
+                self.current_trigger = Some(reply.clone());
+                self.log_event(
+                    TrustLevel::User,
+                    SessionEvent::UserMessage {
+                        content: user_message.to_string(),
+                        inbound_id: Some(inbound_id),
+                    },
+                )?;
+                for event in audit_events {
+                    self.log_event(TrustLevel::System, event)?;
+                }
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::AssistantMessage {
+                        content: reply.clone(),
+                    },
+                )?;
+                return Ok(ProcessResult {
+                    response: reply,
+                    denials: Vec::new(),
+                });
+            }
+        };
         self.current_trigger = Some(user_message.clone());
         self.conversation.add_user_message(&user_message);
         self.log_event(
@@ -1315,10 +1390,42 @@ impl Agent {
         // Item 10 follow-up — see process_message_inner.
         self.maybe_log_system_prompt()?;
 
-        // #79: same slash-invocation pre-processing as the non-streaming
-        // path. Done before adding to the conversation so the recorded
-        // user message reflects what the LLM actually saw.
-        let user_message = self.preprocess_slash_invocation(user_message)?;
+        // Run pre-LLM interceptor chain. Same shape as
+        // `process_message_inner`. Stream path returns `Done` to the
+        // client without further LLM streaming when an interceptor
+        // handles the message.
+        let user_message = match self.apply_interceptors(user_message)? {
+            InterceptorOutcome::Continue(s) => s,
+            InterceptorOutcome::Handled {
+                reply,
+                audit_events,
+            } => {
+                self.current_trigger = Some(reply.clone());
+                self.log_event(
+                    TrustLevel::User,
+                    SessionEvent::UserMessage {
+                        content: user_message.to_string(),
+                        inbound_id: Some(inbound_id),
+                    },
+                )?;
+                for event in audit_events {
+                    self.log_event(TrustLevel::System, event)?;
+                }
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::AssistantMessage {
+                        content: reply.clone(),
+                    },
+                )?;
+                let _ = tx
+                    .send(StreamEvent::Done(LlmResponse::Text(reply.clone())))
+                    .await;
+                return Ok(ProcessResult {
+                    response: reply,
+                    denials: Vec::new(),
+                });
+            }
+        };
         self.current_trigger = Some(user_message.clone());
         self.conversation.add_user_message(&user_message);
         self.log_event(

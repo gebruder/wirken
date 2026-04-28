@@ -16,7 +16,33 @@
 //! interpret `use lyrik to ...` as explicit invocation. Fuzzy invocation
 //! turns "explicit" into "unpredictable"; the slash prefix is the contract.
 
+use crate::error::AgentError;
+use crate::inbound_interceptor::{InboundInterceptor, InterceptResult, InterceptorContext};
 use crate::skill::Skill;
+
+/// [`InboundInterceptor`] that handles `/<skill-name> ...` invocations.
+/// First registered interceptor on the agent — others (e.g. Zirkel's
+/// keep/skip) plug in alongside.
+pub struct SlashInterceptor;
+
+impl InboundInterceptor for SlashInterceptor {
+    fn name(&self) -> &'static str {
+        "slash"
+    }
+
+    fn intercept(&self, message: &str, ctx: &InterceptorContext<'_>) -> InterceptResult {
+        match parse(message, ctx.skills) {
+            SlashResult::None => InterceptResult::Pass,
+            SlashResult::Invoked { skill, remainder } => {
+                InterceptResult::Rewrite(rewrite_with_skill_body(skill, &remainder))
+            }
+            SlashResult::UnknownSkill { name } => {
+                let known: Vec<String> = ctx.skills.iter().map(|s| s.name.clone()).collect();
+                InterceptResult::Reject(AgentError::UnknownSlashSkill { name, known })
+            }
+        }
+    }
+}
 
 /// Result of running [`parse`] on a user message.
 #[derive(Debug)]
