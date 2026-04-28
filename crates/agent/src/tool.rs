@@ -2,7 +2,7 @@ use base64::Engine;
 use cap_std::ambient_authority;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -39,7 +39,9 @@ pub struct ToolRegistry {
     /// Path form of the workspace. Kept for the `exec` tool's
     /// current-dir and sandbox bind-mount; those paths still go
     /// through the OS by filename. All file tools use
-    /// [`Self::workspace_dir`] instead.
+    /// [`Self::workspace_dir`] instead. Also surfaced via
+    /// [`Self::workspace`] so the agent's `attach_skills` can expand
+    /// the `<workspace>` token in filesystem permission paths.
     workspace: PathBuf,
     /// Capability-based handle to the agent workspace. File tools
     /// (`read_file`, `write_file`, `list_files`, `generate_image`)
@@ -298,6 +300,12 @@ impl ToolRegistry {
     /// Get all tool definitions (for sending to the LLM).
     pub fn definitions(&self) -> Vec<ToolDef> {
         self.tools.values().cloned().collect()
+    }
+
+    /// Workspace directory in OS path form. The agent uses this to
+    /// expand the `<workspace>` token in skill permission paths.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
     }
 
     /// Execute a tool by name with the given JSON arguments.
