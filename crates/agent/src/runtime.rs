@@ -473,9 +473,9 @@ impl Agent {
         skills: Vec<Skill>,
         wasm_skills: Vec<WasmSkill>,
     ) -> Result<(), AgentError> {
-        let sources: Vec<crate::skill_perms::PermissionsSource> =
+        let profiles: Vec<crate::skill_perms::PermissionProfile> =
             skills.iter().map(|s| s.permissions.clone()).collect();
-        let effective = crate::skill_perms::effective_for_skills(&sources)
+        let effective = crate::skill_perms::effective_for_skills(&profiles)
             .map_err(|e| AgentError::SkillLoad(format!("permissions merge: {e}")))?;
         // Expand the `<workspace>` token in filesystem paths now that we
         // know the workspace.

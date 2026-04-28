@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 use crate::error::AgentError;
-use crate::skill_perms::{PermissionsBlock, PermissionsSource, resolve_block};
+use crate::skill_perms::{PermissionProfile, PermissionsBlock, resolve_block};
 
 /// A loaded markdown skill.
 #[derive(Debug, Clone)]
@@ -13,10 +13,12 @@ pub struct Skill {
     pub body: String,
     pub path: PathBuf,
     pub available: bool,
-    /// Per-skill permissions declared in the frontmatter `permissions:` block,
-    /// or `Legacy` if the block is absent. The agent merges declared profiles
-    /// from all loaded skills into one effective per-agent profile at init.
-    pub permissions: PermissionsSource,
+    /// Per-skill permissions declared in the frontmatter `permissions:`
+    /// block. Required since the migration window closed (#76); the
+    /// loader hard-fails on a missing block. The agent merges declared
+    /// profiles from all loaded skills into one effective per-agent
+    /// profile at `attach_skills` time.
+    pub permissions: PermissionProfile,
 }
 
 /// YAML frontmatter parsed from SKILL.md files.
@@ -91,20 +93,16 @@ impl SkillLoader {
         let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
         let home = std::env::var("HOME").ok().map(PathBuf::from);
         let permissions = match frontmatter.permissions {
-            Some(block) => {
-                let profile = resolve_block(block, skill_root, home.as_deref()).map_err(|e| {
-                    AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
-                })?;
-                PermissionsSource::Explicit(profile)
-            }
+            Some(block) => resolve_block(block, skill_root, home.as_deref()).map_err(|e| {
+                AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
+            })?,
             None => {
-                tracing::warn!(
-                    "skill {} has no `permissions:` block; treating as legacy. \
-                     This will become a hard load failure in a future release. \
-                     See gebruder/wirken#76.",
+                return Err(AgentError::SkillLoad(format!(
+                    "skill at {} has no `permissions:` block; required since #76 \
+                     migration-window flip. See an existing bundled SKILL.md for \
+                     the schema.",
                     path.display()
-                );
-                PermissionsSource::Legacy
+                )));
             }
         };
 
