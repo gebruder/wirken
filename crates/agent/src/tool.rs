@@ -53,7 +53,13 @@ pub struct ToolRegistry {
     /// `resolve_path_for_write` / `symlink_metadata` leaf check.
     workspace_dir: Arc<cap_std::fs::Dir>,
     tools: HashMap<String, ToolDef>,
-    http: reqwest::Client,
+    /// HTTP client used by built-in tools that touch the network
+    /// (`web_search`, `generate_image`). Wrapped with the egress
+    /// allowlist enforcement (#76 Phase 2.2). The agent updates the
+    /// enforcement at `attach_skills` time. A future per-host
+    /// rate limiter sits between this wrapper and `reqwest::Client`,
+    /// not outside it — see [`crate::egress`].
+    http: crate::egress::EgressClient,
     config: ToolConfig,
     /// Lazily provisioned on first use of a sandboxed tool. The outer
     /// `OnceCell` is set exactly once; the inner `Option` records whether
@@ -218,7 +224,7 @@ impl ToolRegistry {
             workspace,
             workspace_dir,
             tools,
-            http: reqwest::Client::new(),
+            http: crate::egress::EgressClient::new(),
             config,
             sandbox: tokio::sync::OnceCell::new(),
             sandbox_config,
@@ -306,6 +312,12 @@ impl ToolRegistry {
     /// expand the `<workspace>` token in skill permission paths.
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    /// Update the egress enforcement policy on the registry's HTTP
+    /// client. Called by the agent at `attach_skills` time.
+    pub fn set_egress_enforcement(&self, enforcement: crate::egress::EgressEnforcement) {
+        self.http.set_enforcement(enforcement);
     }
 
     /// Execute a tool by name with the given JSON arguments.
@@ -522,6 +534,7 @@ impl ToolRegistry {
         let resp = self
             .http
             .post("https://html.duckduckgo.com/html/")
+            .map_err(|e| AgentError::EgressDenied { host: e.host })?
             .header("User-Agent", "Wirken/1.0")
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(format!("q={}", urlencoding_encode(query)))
@@ -620,6 +633,7 @@ impl ToolRegistry {
         let resp = self
             .http
             .post(&url)
+            .map_err(|e| AgentError::EgressDenied { host: e.host })?
             .header("Authorization", format!("Bearer {api_key}"))
             .json(&body)
             .send()
