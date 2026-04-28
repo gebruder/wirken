@@ -275,8 +275,11 @@ pub enum SessionEvent {
     },
     /// Zirkel: a fetched item passed exclusion + keyword screening and
     /// landed in the candidates table with its keyword-match score.
-    /// `score` is the count of distinct keyword matches in this slice;
-    /// the LLM-relevance score lives in a separate event under C-LLM.
+    /// `keyword_match_score` is the count of distinct keyword matches.
+    /// The LLM-relevance pass emits a separate `CandidateLlmScored`
+    /// event after this one — the two-event split keeps each pass
+    /// independently auditable, so a failed LLM pass leaves the
+    /// keyword event in the chain rather than orphaning the candidate.
     /// `matched_keywords` is the JSON-encoded list, kept verbatim so
     /// the chain-verifier can replay the screening decision.
     CandidateScored {
@@ -284,6 +287,18 @@ pub enum SessionEvent {
         candidate_id: i64,
         keyword_match_score: u32,
         matched_keywords: String,
+    },
+    /// Zirkel: the LLM relevance pass scored a candidate.
+    /// `llm_relevance_score` is 0–100. `matched_keyword` is the single
+    /// user keyword the LLM identified as the strongest signal (one of
+    /// the keywords in the matched-keywords list from the keyword
+    /// pass). `why_surfaced` is the LLM's one-line rationale.
+    CandidateLlmScored {
+        run_id: String,
+        candidate_id: i64,
+        llm_relevance_score: u32,
+        matched_keyword: String,
+        why_surfaced: String,
     },
     /// Zirkel: the user marked a candidate as kept from the digest.
     /// Emitted by C-Signal when the keep button (or numbered reply) is

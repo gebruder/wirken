@@ -47,10 +47,16 @@ use wirken_audit::{
 };
 use wirken_skill_store::{SkillStore, SkillStoreError};
 
+use wirken_agent::llm::LlmClient;
+
+use crate::cluster::{ClusterLabel, cluster as cluster_embeddings, group_by_cluster};
+use crate::embedding::embed_batch;
 use crate::fetcher::{FetchError, FetchedItem, fetch_rss};
 use crate::interests::{InterestsError, last_snapshot_hash, load as load_interests, snapshot};
+use crate::llm_score::score_candidate;
 use crate::schema::AGGREGATOR_MIGRATIONS;
 use crate::score::{Item, Screened, screen};
+use crate::themes::{ClusterMember, name_theme};
 
 const AGGREGATOR_SKILL_NAME: &str = "aggregator";
 
@@ -75,6 +81,27 @@ pub struct OrchestratorConfig {
     /// `Arc<dyn SessionLog>` the rest of Wirken uses so the chain is
     /// continuous across orchestrator runs and agent sessions.
     pub session_log: Option<Arc<dyn SessionLog>>,
+    /// LLM client for the relevance-scoring + theme-naming passes.
+    /// `None` disables both passes — kept items still land in the
+    /// database with `llm_relevance_score` NULL and no `themes` rows.
+    /// Production threads an `LlmClient` configured for the agent's
+    /// `inference.default` provider; tests pass `None` (skip) or a
+    /// client pointing at a local mock server.
+    pub llm: Option<Arc<LlmClient>>,
+    /// API key for the LLM provider. `None` is correct for Ollama
+    /// (no auth) and for tests with a mock server.
+    pub llm_api_key: Option<String>,
+    /// Base URL for Ollama's `/api/embed` endpoint (the embedding
+    /// pass for clustering). The orchestrator hits this through the
+    /// policed [`EgressClient`] — `127.0.0.1` must be in the
+    /// aggregator's `egress.domains` allow-set. Empty string disables
+    /// embedding + clustering even when `llm` is set; useful for
+    /// tests of the LLM-scoring path in isolation.
+    pub ollama_embed_base: String,
+    /// Embedding model name for the `/api/embed` request. Defaults to
+    /// [`crate::embedding::DEFAULT_EMBEDDING_MODEL`] in the CLI; tests
+    /// can pass any string the mock server will echo.
+    pub embed_model: String,
 }
 
 /// Outcome of one orchestrator run, by category.
@@ -96,6 +123,26 @@ pub struct RunSummary {
     pub items_kept: usize,
     pub kept_candidate_ids: Vec<i64>,
     pub interests_changed: bool,
+    /// Count of candidates the LLM relevance pass scored. Equals
+    /// `items_kept` on a clean run; less if the LLM failed for some
+    /// candidates (which is logged but doesn't abort the run).
+    pub items_llm_scored: usize,
+    /// `themes` rows written by the theme-naming pass. Zero when LLM
+    /// is disabled, embedding fails, all items land in noise, or
+    /// fewer than 2 items survived the filter (clustering is skipped).
+    pub themes_named: usize,
+    /// Per-candidate LLM-call failures during the relevance pass.
+    /// Audit chain has the kept-item event but no LLM event for these.
+    pub llm_score_failures: Vec<LlmStageFailure>,
+    /// Embedding / clustering / theme-naming failures. Logged here
+    /// for the CLI summary; the run completes regardless.
+    pub theme_stage_failures: Vec<LlmStageFailure>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LlmStageFailure {
+    pub candidate_id: Option<i64>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -402,7 +449,282 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
         }
     }
 
+    // ----- LLM relevance scoring pass --------------------------------
+    // One LLM call per kept candidate. Failures are logged in the run
+    // summary but don't abort the run — the keyword pass already
+    // recorded the candidate; the LLM pass adds nuance, not gating.
+    if let Some(llm) = config.llm.as_ref() {
+        run_llm_score_pass(
+            &store,
+            llm,
+            config.llm_api_key.as_deref(),
+            &interests,
+            &run_id,
+            config.session_log.as_ref(),
+            audit_handle.as_ref(),
+            &mut summary,
+        )
+        .await;
+
+        // ----- Embedding + clustering + theme naming -----------------
+        // Skipped when fewer than 2 candidates landed in this run
+        // (HDBSCAN can't cluster a single point) or when the operator
+        // explicitly disabled embedding by passing an empty
+        // `ollama_embed_base`.
+        if summary.items_kept >= 2 && !config.ollama_embed_base.is_empty() {
+            run_theme_pass(
+                &store,
+                &http,
+                llm,
+                config.llm_api_key.as_deref(),
+                &config.ollama_embed_base,
+                &config.embed_model,
+                &run_id,
+                config.session_log.as_ref(),
+                audit_handle.as_ref(),
+                &mut summary,
+            )
+            .await;
+        }
+    }
+
     Ok(summary)
+}
+
+/// Iterate this run's kept candidates, call the LLM relevance scorer
+/// for each, write the result back, emit the audit event. Per-candidate
+/// failures land in `summary.llm_score_failures` and the run continues.
+#[allow(clippy::too_many_arguments)]
+async fn run_llm_score_pass(
+    store: &SkillStore,
+    llm: &LlmClient,
+    api_key: Option<&str>,
+    interests: &crate::interests::Interests,
+    run_id: &str,
+    session_log: Option<&Arc<dyn SessionLog>>,
+    handle: Option<&SessionHandle<OwnSession>>,
+    summary: &mut RunSummary,
+) {
+    let candidates: Vec<(i64, FetchedItem)> = match collect_run_candidates(store, run_id) {
+        Ok(c) => c,
+        Err(e) => {
+            summary.theme_stage_failures.push(LlmStageFailure {
+                candidate_id: None,
+                reason: format!("read run candidates: {e}"),
+            });
+            return;
+        }
+    };
+
+    for (cid, item) in candidates {
+        match score_candidate(llm, api_key, &item, interests).await {
+            Ok(score) => {
+                let res = store.conn().execute(
+                    "UPDATE candidates SET llm_relevance_score = ?1, llm_why_surfaced = ?2 \
+                     WHERE id = ?3",
+                    rusqlite::params![score.score as i64, score.why_surfaced, cid],
+                );
+                if let Err(e) = res {
+                    summary.llm_score_failures.push(LlmStageFailure {
+                        candidate_id: Some(cid),
+                        reason: format!("update candidate row: {e}"),
+                    });
+                    continue;
+                }
+                summary.items_llm_scored += 1;
+                emit(
+                    session_log,
+                    handle,
+                    SessionEvent::CandidateLlmScored {
+                        run_id: run_id.to_string(),
+                        candidate_id: cid,
+                        llm_relevance_score: score.score,
+                        matched_keyword: score.matched_keyword,
+                        why_surfaced: score.why_surfaced,
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!("LLM scoring failed for candidate {cid}: {e}");
+                summary.llm_score_failures.push(LlmStageFailure {
+                    candidate_id: Some(cid),
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Embed every kept candidate, cluster, name each cluster, write the
+/// `themes` rows and update each candidate's `cluster_id`. Stage-level
+/// failures (embedding HTTP errors, clustering failure, individual
+/// theme-naming failures) land in `summary.theme_stage_failures` and
+/// the run completes regardless.
+#[allow(clippy::too_many_arguments)]
+async fn run_theme_pass(
+    store: &SkillStore,
+    http: &EgressClient,
+    llm: &LlmClient,
+    api_key: Option<&str>,
+    ollama_embed_base: &str,
+    embed_model: &str,
+    run_id: &str,
+    session_log: Option<&Arc<dyn SessionLog>>,
+    handle: Option<&SessionHandle<OwnSession>>,
+    summary: &mut RunSummary,
+) {
+    // Pull (id, title, abstract, matched_keywords_json) for clustering.
+    let rows: Vec<(i64, String, String, String)> = match collect_cluster_rows(store, run_id) {
+        Ok(r) => r,
+        Err(e) => {
+            summary.theme_stage_failures.push(LlmStageFailure {
+                candidate_id: None,
+                reason: format!("query cluster rows: {e}"),
+            });
+            return;
+        }
+    };
+
+    if rows.len() < 2 {
+        return;
+    }
+
+    let texts: Vec<String> = rows
+        .iter()
+        .map(|(_, title, abs_, _)| format!("{title}\n\n{abs_}"))
+        .collect();
+    let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let embeddings = match embed_batch(http, ollama_embed_base, embed_model, &text_refs).await {
+        Ok(e) => e,
+        Err(e) => {
+            summary.theme_stage_failures.push(LlmStageFailure {
+                candidate_id: None,
+                reason: format!("embed batch: {e}"),
+            });
+            return;
+        }
+    };
+
+    let labels = match cluster_embeddings(&embeddings, 2, 1) {
+        Ok(l) => l,
+        Err(e) => {
+            summary.theme_stage_failures.push(LlmStageFailure {
+                candidate_id: None,
+                reason: format!("hdbscan: {e}"),
+            });
+            return;
+        }
+    };
+
+    // Build `(label, candidate_id, ClusterMember)` triples for grouping.
+    let mut by_cluster: std::collections::BTreeMap<u32, Vec<(i64, ClusterMember)>> =
+        Default::default();
+    for ((row, label), _) in rows.iter().zip(labels.iter()).zip(0..) {
+        if let ClusterLabel::Cluster(n) = label {
+            let kws: Vec<String> = serde_json::from_str(&row.3).unwrap_or_default();
+            by_cluster.entry(*n).or_default().push((
+                row.0,
+                ClusterMember {
+                    title: row.1.clone(),
+                    matched_keywords: kws,
+                },
+            ));
+        }
+    }
+
+    // Use group_by_cluster to confirm parity with the expected shape.
+    // (Functionally redundant with the loop above; kept as the public
+    // API entry the cluster module exposes.)
+    let _check = group_by_cluster(&labels, &rows);
+
+    for (_cluster_label, members) in by_cluster.iter() {
+        let cluster_members: Vec<ClusterMember> = members.iter().map(|(_, m)| m.clone()).collect();
+        match name_theme(llm, api_key, &cluster_members).await {
+            Ok(theme) => {
+                let member_count = cluster_members.len() as i64;
+                let res = store.conn().execute(
+                    "INSERT INTO themes (run_id, name, member_count) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![run_id, &theme.name, member_count],
+                );
+                let theme_id = match res {
+                    Ok(_) => store.conn().last_insert_rowid(),
+                    Err(e) => {
+                        summary.theme_stage_failures.push(LlmStageFailure {
+                            candidate_id: None,
+                            reason: format!("insert theme: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                for (cid, _) in members {
+                    let _ = store.conn().execute(
+                        "UPDATE candidates SET cluster_id = ?1 WHERE id = ?2",
+                        rusqlite::params![theme_id, cid],
+                    );
+                }
+                summary.themes_named += 1;
+                emit(
+                    session_log,
+                    handle,
+                    SessionEvent::ThemeNamed {
+                        run_id: run_id.to_string(),
+                        theme_id,
+                        name: theme.name,
+                        member_count: member_count as u32,
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!("theme naming failed for cluster: {e}");
+                summary.theme_stage_failures.push(LlmStageFailure {
+                    candidate_id: None,
+                    reason: format!("name_theme: {e}"),
+                });
+            }
+        }
+    }
+}
+
+fn collect_cluster_rows(
+    store: &SkillStore,
+    run_id: &str,
+) -> Result<Vec<(i64, String, String, String)>, rusqlite::Error> {
+    let conn = store.conn();
+    let mut stmt =
+        conn.prepare("SELECT id, title, body, matched_keywords FROM candidates WHERE run_id = ?1")?;
+    stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?
+    .collect()
+}
+
+fn collect_run_candidates(
+    store: &SkillStore,
+    run_id: &str,
+) -> Result<Vec<(i64, FetchedItem)>, rusqlite::Error> {
+    let conn = store.conn();
+    let mut stmt = conn.prepare(
+        "SELECT id, source_name, url, title, body, COALESCE(published_at, '') \
+         FROM candidates WHERE run_id = ?1",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![run_id], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            FetchedItem {
+                source_name: row.get::<_, String>(1)?,
+                url: row.get::<_, String>(2)?,
+                title: row.get::<_, String>(3)?,
+                abstract_text: row.get::<_, String>(4)?,
+                published_at: row.get::<_, String>(5)?,
+            },
+        ))
+    })?;
+    rows.collect()
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -640,6 +962,14 @@ skills = ["aggregator"]
             interests_path,
             rate_limit: RateLimitConfig::unrestricted_for_tests(),
             session_log: log,
+            // C-LLM fields default to "off" for the C-foundation tests:
+            // none of them exercise the LLM-scoring or theme-naming
+            // passes. The C-LLM tests construct their own config with
+            // the LLM client and embed base populated.
+            llm: None,
+            llm_api_key: None,
+            ollama_embed_base: String::new(),
+            embed_model: String::new(),
         }
     }
 
@@ -934,5 +1264,382 @@ skills = ["other"]
         .await
         .unwrap_err();
         assert!(matches!(err, OrchestratorError::LoadInterests(_)));
+    }
+
+    // ----- C-LLM tests -----------------------------------------------
+
+    /// Multi-request mock server. Dispatches by URL path:
+    /// - `/feed` → returns the RSS fixture body
+    /// - `/v1/chat/completions` → returns an OpenAI-shaped tool_call
+    ///   response. Tool name is detected from the request body so
+    ///   the same server can stand in for both score and theme calls.
+    /// - `/api/embed` → returns canned vectors.
+    ///
+    /// Stays alive serving up to `max_requests` connections, then
+    /// stops. Returns the bound base URL like `http://127.0.0.1:<port>`.
+    async fn mock_llm_and_feed_server(
+        feed_body: &'static str,
+        embed_vectors: Vec<Vec<f32>>,
+        max_requests: usize,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+        tokio::spawn(async move {
+            for _ in 0..max_requests {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 65536];
+                let n = match sock.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = match req.find("\r\n\r\n") {
+                    Some(idx) => &req[idx + 4..],
+                    None => "",
+                };
+
+                let response_body: String = if req.contains("POST /feed") {
+                    feed_body.to_string()
+                } else if req.contains("POST /v1/chat/completions")
+                    || req.contains("POST /chat/completions")
+                {
+                    if body.contains("zirkel_score_candidate") {
+                        canned_score_response()
+                    } else if body.contains("zirkel_name_theme") {
+                        canned_theme_response()
+                    } else {
+                        // Unrecognized — fail loudly so the test
+                        // shows what shape the request actually had.
+                        panic!("mock LLM saw no known synthetic-tool name in request body: {body}")
+                    }
+                } else if req.contains("POST /api/embed") {
+                    canned_embed_response(&embed_vectors)
+                } else {
+                    // Any GET request (e.g. RSS feed served via GET).
+                    if req.contains("GET /feed") {
+                        feed_body.to_string()
+                    } else {
+                        format!("not found: {}", req.lines().next().unwrap_or(""))
+                    }
+                };
+
+                let content_type = if req.contains("/feed") {
+                    "application/xml"
+                } else {
+                    "application/json"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\n\r\n{}",
+                    response_body.len(),
+                    content_type,
+                    response_body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        url
+    }
+
+    fn canned_score_response() -> String {
+        // OpenAI chat-completions shape with one tool_call to
+        // zirkel_score_candidate. Same fixed score for every request
+        // — the test asserts whatever lands in the DB matches.
+        r#"{
+  "id": "test-1",
+  "object": "chat.completion",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_score_1",
+        "type": "function",
+        "function": {
+          "name": "zirkel_score_candidate",
+          "arguments": "{\"score\":80,\"why_surfaced\":\"matched 'data broker' — substantively about FTC enforcement against a broker\",\"matched_keyword\":\"data broker\"}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}"#
+        .to_string()
+    }
+
+    fn canned_theme_response() -> String {
+        r#"{
+  "id": "test-2",
+  "object": "chat.completion",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_theme_1",
+        "type": "function",
+        "function": {
+          "name": "zirkel_name_theme",
+          "arguments": "{\"name\":\"FTC enforcement\"}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}"#
+        .to_string()
+    }
+
+    fn canned_embed_response(vectors: &[Vec<f32>]) -> String {
+        let v_str = vectors
+            .iter()
+            .map(|v| {
+                let inner = v
+                    .iter()
+                    .map(|f| format!("{}", f))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("[{inner}]")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"model\":\"nomic-embed-text:v1.5\",\"embeddings\":[{}]}}",
+            v_str
+        )
+    }
+
+    fn config_for_llm_e2e(
+        preset_dir: PathBuf,
+        storage_dir: PathBuf,
+        interests_path: PathBuf,
+        log: Option<Arc<dyn SessionLog>>,
+        llm_base: &str,
+        embed_base: &str,
+    ) -> OrchestratorConfig {
+        let llm_cfg = wirken_agent::llm::LlmConfig {
+            provider: "ollama".to_string(),
+            model: "llama3.1:8b".to_string(),
+            base_url: format!("{llm_base}/v1"),
+            max_tokens: 1024,
+            temperature: 0.0,
+            region: None,
+            tools_enabled: true,
+            context_window: 8192,
+        };
+        let llm = Arc::new(LlmClient::new(llm_cfg).unwrap());
+        OrchestratorConfig {
+            preset_dir,
+            storage_dir,
+            interests_path,
+            rate_limit: RateLimitConfig::unrestricted_for_tests(),
+            session_log: log,
+            llm: Some(llm),
+            llm_api_key: None,
+            ollama_embed_base: embed_base.to_string(),
+            embed_model: "nomic-embed-text:v1.5".to_string(),
+        }
+    }
+
+    /// LLM relevance-scoring pass writes `llm_relevance_score` and
+    /// `llm_why_surfaced` to the candidate row and emits the
+    /// `CandidateLlmScored` audit event. Single-source single-item
+    /// fixture: clustering is skipped (need ≥2 items), so this test
+    /// isolates the LLM-scoring path.
+    #[tokio::test]
+    async fn llm_scoring_pass_writes_relevance_and_emits_event() {
+        let single_item_feed = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>FTC</title><link>https://x</link><description>x</description>
+<item>
+  <title>FTC sues data broker over Section 5 unfairness</title>
+  <link>https://www.ftc.gov/x/data-broker</link>
+  <description>The FTC sued ExampleCorp under Section 5.</description>
+</item>
+</channel></rss>"#;
+        // Connections expected: 1 feed GET + 1 score chat-completion.
+        let server = mock_llm_and_feed_server(single_item_feed, vec![], 4).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let preset_dir = tmp.path().join("preset");
+        let storage_dir = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let sources_toml =
+            format!("[[source]]\nname=\"ftc\"\nendpoint=\"{server}/feed\"\nmethod=\"rss\"\n");
+        write_fixture_preset(&preset_dir, &storage_dir, &["127.0.0.1"], &sources_toml);
+        let interests_path = storage_dir.join("interests.toml");
+        write_interests(&interests_path, r#"keywords = ["data broker"]"#);
+
+        let log: Arc<dyn SessionLog> =
+            Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"));
+
+        let summary = run(config_for_llm_e2e(
+            preset_dir,
+            storage_dir.clone(),
+            interests_path,
+            Some(log.clone()),
+            &server,
+            "", // empty embed base disables clustering for this test
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(summary.items_kept, 1);
+        assert_eq!(summary.items_llm_scored, 1);
+        assert_eq!(summary.themes_named, 0);
+
+        // Candidate row carries the LLM fields.
+        let conn = rusqlite::Connection::open(storage_dir.join("aggregator.db")).unwrap();
+        let (relevance, why): (f64, String) = conn
+            .query_row(
+                "SELECT llm_relevance_score, llm_why_surfaced FROM candidates LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(relevance as i64, 80);
+        assert!(why.contains("data broker"));
+
+        // Audit chain has the CandidateLlmScored event.
+        let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, SessionEvent::CandidateLlmScored { .. })),
+            "expected CandidateLlmScored event in chain"
+        );
+    }
+
+    /// Full C-LLM pipeline end-to-end. HDBSCAN's density-based
+    /// algorithm needs *contrast* between clusters to identify any
+    /// of them as non-noise — a single tightly-packed group of N
+    /// points yields all-noise regardless of N. The fixture provides
+    /// 6 items that the mock embed returns as two distinct clusters
+    /// of 3, which HDBSCAN reliably partitions. Both clusters get
+    /// named by the (single) canned theme response.
+    /// Assert: `themes_named = 2`, all 6 candidates have a non-NULL
+    /// `cluster_id`, audit chain has `ThemeNamed`.
+    #[tokio::test]
+    async fn clustering_and_theme_naming_e2e() {
+        let six_kept_feed = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>FTC</title><link>https://x</link><description>x</description>
+<item>
+  <title>FTC sues data broker A</title>
+  <link>https://www.ftc.gov/a</link>
+  <description>Section 5 data broker enforcement.</description>
+</item>
+<item>
+  <title>FTC announces data broker rule B</title>
+  <link>https://www.ftc.gov/b</link>
+  <description>Data broker registry rule.</description>
+</item>
+<item>
+  <title>FTC investigates data broker C</title>
+  <link>https://www.ftc.gov/c</link>
+  <description>Data broker investigation.</description>
+</item>
+<item>
+  <title>FTC settles data broker case D</title>
+  <link>https://www.ftc.gov/d</link>
+  <description>Data broker settlement reached.</description>
+</item>
+<item>
+  <title>FTC issues data broker order E</title>
+  <link>https://www.ftc.gov/e</link>
+  <description>Data broker compliance order.</description>
+</item>
+<item>
+  <title>FTC closes data broker probe F</title>
+  <link>https://www.ftc.gov/f</link>
+  <description>Data broker probe concluded.</description>
+</item>
+</channel></rss>"#;
+        // Two well-separated clusters of 3 in 2D feature space.
+        let embed_vectors = vec![
+            vec![1.0, 0.0],
+            vec![1.05, 0.05],
+            vec![0.95, -0.05],
+            vec![10.0, 10.0],
+            vec![10.05, 10.05],
+            vec![9.95, 9.95],
+        ];
+        // 1 feed + 6 score requests + 1 embed + 2 theme = 10 minimum.
+        let server = mock_llm_and_feed_server(six_kept_feed, embed_vectors, 20).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let preset_dir = tmp.path().join("preset");
+        let storage_dir = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let sources_toml =
+            format!("[[source]]\nname=\"ftc\"\nendpoint=\"{server}/feed\"\nmethod=\"rss\"\n");
+        write_fixture_preset(&preset_dir, &storage_dir, &["127.0.0.1"], &sources_toml);
+        let interests_path = storage_dir.join("interests.toml");
+        write_interests(&interests_path, r#"keywords = ["data broker"]"#);
+
+        let log: Arc<dyn SessionLog> =
+            Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"));
+
+        let summary = run(config_for_llm_e2e(
+            preset_dir,
+            storage_dir.clone(),
+            interests_path,
+            Some(log.clone()),
+            &server,
+            &server, // same mock answers /api/embed too
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(summary.items_kept, 6);
+        assert_eq!(summary.items_llm_scored, 6);
+        assert_eq!(
+            summary.themes_named, 2,
+            "two well-separated 3-point clusters should produce two themes; failures: {:?}",
+            summary.theme_stage_failures
+        );
+
+        let conn = rusqlite::Connection::open(storage_dir.join("aggregator.db")).unwrap();
+
+        // Both themes carry the LLM-supplied name (mock returns the
+        // same canned name for every theme call).
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM themes ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(names.len(), 2);
+        for n in &names {
+            assert_eq!(n, "FTC enforcement");
+        }
+
+        // All 6 candidates have a non-NULL cluster_id pointing at one
+        // of the themes.
+        let with_cluster: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM candidates WHERE cluster_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(with_cluster, 6);
+
+        // Audit chain has ThemeNamed.
+        let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, SessionEvent::ThemeNamed { .. })),
+            "expected ThemeNamed event in chain"
+        );
     }
 }

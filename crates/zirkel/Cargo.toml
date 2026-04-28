@@ -23,6 +23,7 @@ feed-rs = "2"
 chrono = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
+hdbscan = "0.12"
 
 [dev-dependencies]
 tempfile = { workspace = true }
