@@ -11,8 +11,10 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
+use wirken_agent::llm::{LlmClient, LlmConfig};
 use wirken_agent::rate_limit::RateLimitConfig;
 use wirken_audit::{SessionLog, SqliteSessionLog};
+use wirken_zirkel::embedding::DEFAULT_EMBEDDING_MODEL;
 use wirken_zirkel::orchestrator::{OrchestratorConfig, run as orchestrator_run};
 
 /// `wirken zirkel run` — load the installed Zirkel preset, run the
@@ -50,12 +52,22 @@ pub async fn run() -> Result<()> {
             .map_err(|e| anyhow!("open audit log at {}: {e}", audit_path.display()))?,
     );
 
+    // LLM defaults per docs/zirkel/DESIGN.md: Ollama llama3.1:8b for
+    // scoring + theme naming, nomic-embed-text:v1.5 for embedding.
+    // Both at the local Ollama base URL.
+    let llm_cfg = LlmConfig::ollama("llama3.1:8b");
+    let llm = Arc::new(LlmClient::new(llm_cfg).map_err(|e| anyhow!("construct LLM client: {e}"))?);
+
     let summary = orchestrator_run(OrchestratorConfig {
         preset_dir,
         storage_dir,
         interests_path,
         rate_limit: RateLimitConfig::default(),
         session_log: Some(session_log),
+        llm: Some(llm),
+        llm_api_key: None,
+        ollama_embed_base: "http://127.0.0.1:11434".to_string(),
+        embed_model: DEFAULT_EMBEDDING_MODEL.to_string(),
     })
     .await
     .map_err(|e| anyhow!("zirkel orchestrator: {e}"))?;
@@ -80,9 +92,25 @@ pub async fn run() -> Result<()> {
     println!("  items excluded:      {}", summary.items_excluded);
     println!("  items score 0:       {}", summary.items_score_zero);
     println!("  items kept:          {}", summary.items_kept);
+    println!("  items LLM-scored:    {}", summary.items_llm_scored);
+    println!("  themes named:        {}", summary.themes_named);
+    if !summary.llm_score_failures.is_empty() {
+        println!(
+            "  LLM scoring failures: {}",
+            summary.llm_score_failures.len()
+        );
+    }
+    if !summary.theme_stage_failures.is_empty() {
+        println!(
+            "  theme stage failures: {}",
+            summary.theme_stage_failures.len()
+        );
+    }
     if summary.interests_changed {
         println!("  interests changed:   yes (audit event emitted)");
     }
-    println!("(C-foundation: keyword screen only. LLM relevance scoring is the next slice.)");
+    println!(
+        "(C-LLM: keyword screen + LLM relevance + clustering + theme naming. Digest push is the next slice.)"
+    );
     Ok(())
 }

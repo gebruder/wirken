@@ -69,4 +69,28 @@ pub const AGGREGATOR_MIGRATIONS: &[&str] = &[
         detail       TEXT \
     )",
     "CREATE INDEX idx_skipped_log_run ON skipped_log(run_id)",
+    // 5 — C-LLM additions. The keyword and LLM scores live in
+    // separate columns so a query can filter on either axis. The
+    // keyword column stays a count (`keyword_match_score INTEGER`);
+    // `llm_relevance_score REAL` is the LLM-driven 0–100 rating.
+    // Both nullable on legacy rows; the C-LLM orchestrator pass fills
+    // the LLM column on every keep.
+    "ALTER TABLE candidates ADD COLUMN llm_relevance_score REAL",
+    "ALTER TABLE candidates ADD COLUMN llm_why_surfaced TEXT",
+    // Cluster assignment: NULL for noise / ungrouped items. Real
+    // cluster ids reference `themes.id`. The digest renderer's
+    // "ungrouped" section is the union of NULL-cluster_id rows.
+    "ALTER TABLE candidates ADD COLUMN cluster_id INTEGER",
+    // 6 — themes table. Per-run; cross-run theme stability is
+    // explicitly out of scope (see DESIGN.md). One row per
+    // HDBSCAN cluster, populated after theme naming.
+    "CREATE TABLE themes ( \
+        id           INTEGER PRIMARY KEY AUTOINCREMENT, \
+        run_id       TEXT NOT NULL, \
+        name         TEXT NOT NULL, \
+        member_count INTEGER NOT NULL, \
+        created_at   TEXT NOT NULL DEFAULT (datetime('now')) \
+    )",
+    "CREATE INDEX idx_themes_run ON themes(run_id)",
+    "CREATE INDEX idx_candidates_cluster ON candidates(cluster_id)",
 ];
