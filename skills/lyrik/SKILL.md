@@ -99,7 +99,33 @@ Four axes, scored independently before they combine:
 - Can an attacker reach the entry point
 - Blast radius
 
-Score each high-severity candidate more than once. Each scoring pass receives, alongside the finding and the rubric, the component-filtered enrichment slice (project memory, Jira context, churn/FIXME signals for the file in question) so the score is calibrated to the file's actual history. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales through the `scoring_disagreement` gate. If the rubric does not cleanly tier a finding (rather than scorers disagreeing on it), route to the same gate with a `rubric clarification` tag — the team can refine the rubric in-flight. Do not proceed on silence.
+Score each high-severity candidate more than once. Each scoring pass receives, alongside the finding and the rubric, the component-filtered enrichment slice (project memory, Jira context, churn/FIXME signals for the file in question) so the score is calibrated to the file's actual history.
+
+### Disagreement handling — three-pass noise rejection before tagging
+
+If two passes disagree by more than one severity tier on any axis, **run a third scoring pass** before tagging the candidate. The third pass disambiguates between sampling noise and structural disagreement:
+
+- **2-of-3 agreement.** Two of the three passes converge on the same tier. The agreed tier wins; the diverging pass's rationale is preserved in `scoring_passes` for transparency, but the candidate is tier-assigned and proceeds normally. The disagreement was likely sampling-variance noise; the third pass functions as a tiebreaker, **not** a vote.
+- **3-way disagreement.** All three passes produce different tier assessments. Real signal — route the candidate plus all three rationales through the `scoring_disagreement` gate, tagged by which kind of disagreement:
+  - **`rubric_clarification`** — the rubric does not cleanly tier this finding's class. The team's response is to refine the rubric, then re-score against the refinement.
+  - **`framing_split`** — the finding admits multiple valid interpretations under the current rubric; passes disagree because they read the finding through different threat models. The team's response is **gate-routed disclosed** (see below).
+
+The third-pass tiebreaker is noise rejection (probabilistic outlier elimination), **not** weighted voting or persona-weighted consensus. Do not resolve disagreement via vote-averaging at any stage. Real 3-way disagreement is structural information lyrik is structurally arguing for; route it to the gate with the appropriate tag.
+
+### `framing_split` resolution shape — gate-routed disclosed
+
+When a finding is tagged `framing_split`, the resolution is **gate-routed disclosed**, not picked-and-shipped. The report includes the finding with all rationales and an explicit "team did not resolve" status. Consumers reading the report see all interpretations and decide themselves.
+
+The seemingly natural alternatives are both rejected:
+
+- **"Pick one interpretation and ship it"** — collapses lyrik from advisor-posture to actor-posture by selecting an interpretation as if it were the canonical answer. Silences the structural information that some findings legitimately admit multiple framings under different threat models.
+- **"Ship both interpretations as separate findings"** — breaks funnel accounting (one candidate produces two findings, the `cross_framing_pairs_folded` accounting reverses, double-counting confuses aggregate-reporting consumers).
+
+The rejection rationale is committed before case data accumulates. Future case data will pressure toward picking one (humans want a single answer per finding); the design lock here is what keeps lyrik's posture coherent under that pressure.
+
+Scoring disagreement is distinct from **detector disagreement** at Stage 1 (candidate generation). When a static pre-screen detector and the model-reasoning framing pass produce different candidates, that is upstream of scoring and is not handled by the `scoring_disagreement` gate. See `skills/lyrik/FOLLOWUPS.md` item 12 (static pre-screen + detector provenance) for the detector-level design.
+
+Do not proceed on silence at any gate.
 
 ## Concentration test
 
