@@ -259,6 +259,72 @@ pub enum SessionEvent {
         agent_id: String,
         trigger: Option<String>,
     },
+    /// Zirkel orchestrator: an HTTP fetch went out through the policed
+    /// transport. `source` is the source's name in `sources.toml`;
+    /// `host` is the URL host. `bytes` is the response payload size on
+    /// success, `0` on transport-layer denial. `outcome` distinguishes
+    /// success / `egress_denied` / `rate_limited` / `http_error_<code>`
+    /// / `network_error`.
+    HttpFetch {
+        source: String,
+        host: String,
+        url: String,
+        outcome: String,
+        bytes: u64,
+        run_id: Option<String>,
+    },
+    /// Zirkel: a fetched item passed exclusion + keyword screening and
+    /// landed in the candidates table with its keyword-match score.
+    /// `score` is the count of distinct keyword matches in this slice;
+    /// the LLM-relevance score lives in a separate event under C-LLM.
+    /// `matched_keywords` is the JSON-encoded list, kept verbatim so
+    /// the chain-verifier can replay the screening decision.
+    CandidateScored {
+        run_id: String,
+        candidate_id: i64,
+        keyword_match_score: u32,
+        matched_keywords: String,
+    },
+    /// Zirkel: the user marked a candidate as kept from the digest.
+    /// Emitted by C-Signal when the keep button (or numbered reply) is
+    /// processed.
+    CandidateKept {
+        run_id: String,
+        candidate_id: i64,
+        via: String,
+    },
+    /// Zirkel: the user marked a candidate as skipped, or the
+    /// orchestrator dropped it pre-scoring (exclusion match, score 0,
+    /// dedup hit). `reason` distinguishes user-skipped /
+    /// exclusion_match / score_zero / duplicate_url.
+    CandidateSkipped {
+        run_id: String,
+        url_hash: HashHex,
+        source: String,
+        reason: String,
+    },
+    /// Zirkel: a per-run cluster was named by the LLM (C-LLM scope).
+    ThemeNamed {
+        run_id: String,
+        theme_id: i64,
+        name: String,
+        member_count: u32,
+    },
+    /// Zirkel: the daily digest was rendered and pushed to the
+    /// configured channel (C-Signal scope).
+    DigestPushed {
+        run_id: String,
+        channel_adapter: String,
+        item_count: u32,
+    },
+    /// Zirkel: the interests file changed between runs. `before_hash`
+    /// is the hash recorded on the previous run's snapshot;
+    /// `after_hash` is the current hash. Emitted at the start of every
+    /// run that detects a delta.
+    InterestsEdited {
+        before_hash: HashHex,
+        after_hash: HashHex,
+    },
     /// Sandbox lazily provisioned (item 3 emits this once at first
     /// use).
     SandboxProvisioned { name: String, mode: String },
