@@ -151,3 +151,32 @@ Schema questions:
 - Does the filtered-out set get reported? Operator visibility into "lyrik decided these ADRs were not security-relevant" matters for trust.
 
 Becomes worth building when articulate's context budget is materially eaten by memory content.
+
+## 8. Per-skill `allowed-tools` frontmatter (wirken-level)
+
+Surfaced 2026-04-28 during a scan of the OpenClaw skill registry. OpenClaw skills can declare in their frontmatter:
+
+```yaml
+allowed-tools: Read, Glob, Grep, Bash
+```
+
+This restricts the agent's tool surface during that skill's execution to the named set. A skill that should only read files and run shell commands cannot reach for `web-fetch`, `file-write`, or other tools the agent normally has, even if asked.
+
+Wirken has no equivalent. Today, when the agent runs any bundled skill (lyrik, git, web-fetch, etc.), the full tool surface is available regardless of what the skill needs. For a security-scanning skill that should only read + git-log + dispatch sandboxed scanners, this is a defence-in-depth gap: a malicious skill loaded into `~/.wirken/skills/` (per item 1's load-time-trust gap) could leverage tools the operator didn't expect that skill to use.
+
+**Worked example.** If `~/.wirken/skills/<malicious-skill>/SKILL.md` instructs the agent to web-fetch a remote payload and write it to disk, today the agent complies because both tools are unrestricted. With `allowed-tools: Read, Bash` declared in that skill's frontmatter, the harness would refuse the unexpected `web-fetch` and `file-write` calls.
+
+Schema questions:
+
+- Where does the allowlist live? Per-skill frontmatter is the OpenClaw shape — declared by the skill author. Wirken could mirror that, or could move it to a separate `~/.wirken/skill-policies.json` operator-controlled file (less visible per-skill, but operator can override skill author).
+- What's the default for skills that don't declare? OpenClaw appears to default to all-tools. Wirken could choose to default-deny once skills opt in, but that's a migration burden on the existing 16 bundled skills.
+- How does it interact with bundled skills? Bundled skill frontmatter is signed-into-the-binary; updating frontmatter is a release-cycle change.
+- What's the failure mode? Agent attempts a denied tool — refuse silently, log to audit, surface to operator, hard fail?
+- How does it interact with the SKILL.sig signing flow? The `allowed-tools` declaration is part of the skill content covered by the signature, so there's no extra signing surface.
+
+Concrete and shippable. Affects every skill, not just lyrik. Item 1's load-time-trust-gap and TOCTOU-first-setup cases (latent bucket) reach a different mitigation when this lands: even an attacker-planted skill file is bounded by what its declared `allowed-tools` permit.
+
+**Investigation tickets, not yet FOLLOWUPS items:**
+
+- `disable-model-invocation: true` — OpenClaw frontmatter primitive that prevents auto-invocation from generic prompts. May not be needed in wirken given how invocation works (operator messages a configured channel; agent picks a skill from the system prompt rather than auto-routing). Investigate first before deciding whether to add.
+- `context: fork` — OpenClaw frontmatter that appears to fork a sub-context for skill execution. Speculative; semantics not documented in the OpenClaw skills I read. Investigate first before adding.
