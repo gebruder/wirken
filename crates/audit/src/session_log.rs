@@ -243,6 +243,22 @@ pub enum SessionEvent {
         agent_id: String,
         trigger: Option<String>,
     },
+    /// Skill-permission-block denial recorded by the harness. Distinct
+    /// from `PermissionDenied` (which is tier-based, operator-approval
+    /// shaped). This event fires when an agent's effective per-skill
+    /// `permissions:` profile rejects a request: a tool not in
+    /// `tools.allow`, a host not in `egress.domains`, a path not in
+    /// `filesystem.{read,write}_paths`, or a provider not in
+    /// `inference.allow`. `axis` names which axis fired; `requested`
+    /// is the bare resource string (tool name, hostname, path,
+    /// provider name); the agent's identity and the surrounding
+    /// trigger message are kept for post-hoc audit.
+    SkillPermissionDenied {
+        axis: String,
+        requested: String,
+        agent_id: String,
+        trigger: Option<String>,
+    },
     /// Sandbox lazily provisioned (item 3 emits this once at first
     /// use).
     SandboxProvisioned { name: String, mode: String },
