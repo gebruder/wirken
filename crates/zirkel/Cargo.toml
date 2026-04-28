@@ -9,6 +9,7 @@ description = "Zirkel preset orchestrator: daily-fetch pipeline that runs throug
 [dependencies]
 wirken-agent = { path = "../agent" }
 wirken-audit = { path = "../audit" }
+wirken-ipc = { path = "../ipc" }
 wirken-skill-store = { path = "../skill-store" }
 tokio = { workspace = true }
 reqwest = { workspace = true }

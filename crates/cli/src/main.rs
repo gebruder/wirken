@@ -319,6 +319,36 @@ enum ZirkelCommands {
     /// In Scope B this is a stub that loads the installed preset and
     /// reports it's ready. Scope C wires the fetch pipeline.
     Run,
+    /// Bind the daily digest to an outbound channel + conversation.
+    /// `wirken zirkel run` reads the binding and pushes the digest
+    /// after a successful run; `wirken run`'s agent for the bound
+    /// agent_id picks up the keep/skip interceptor at startup.
+    Bind {
+        /// Channel to push digests to (e.g. `signal`, `slack`).
+        /// Must match an adapter registered with `wirken channel add`.
+        #[arg(long)]
+        channel: String,
+        /// Conversation id within that channel (Signal phone number,
+        /// Slack channel id, etc.).
+        #[arg(long)]
+        conversation: String,
+        /// Agent that owns the keep/skip interceptor for this binding.
+        /// Defaults to `default`. Should match a configured agent_id.
+        #[arg(long, default_value = "default")]
+        agent: String,
+        /// Replace an existing binding with a different target.
+        /// Required when the agent is already bound elsewhere; same-
+        /// target re-binds are always a no-op.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove the digest binding for an agent.
+    Unbind {
+        #[arg(long, default_value = "default")]
+        agent: String,
+    },
+    /// Print the current digest binding (or a "no binding" message).
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -534,6 +564,14 @@ async fn main() -> Result<()> {
         },
         Commands::Zirkel(cmd) => match cmd {
             ZirkelCommands::Run => commands::zirkel::run().await,
+            ZirkelCommands::Bind {
+                channel,
+                conversation,
+                agent,
+                force,
+            } => commands::zirkel::bind(&agent, &channel, &conversation, force).await,
+            ZirkelCommands::Unbind { agent } => commands::zirkel::unbind(&agent).await,
+            ZirkelCommands::Status => commands::zirkel::status().await,
         },
         Commands::Agents(cmd) => match cmd {
             AgentCommands::Add => commands::agents::add().await,

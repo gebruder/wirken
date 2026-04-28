@@ -1233,6 +1233,7 @@ mod wake {
                 identity: None,
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -1568,6 +1569,7 @@ mod wake {
                 identity: None,
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 64);
@@ -1631,6 +1633,7 @@ mod subagent {
                 identity: None,
                 allowed_subagents: parent_ceilings,
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         configs.insert(
@@ -1647,6 +1650,7 @@ mod subagent {
                 identity: None,
                 allowed_subagents: BTreeMap::new(),
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -4598,6 +4602,7 @@ mod per_channel_llm_override {
                 identity: None,
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 4);
@@ -4735,6 +4740,7 @@ mod per_channel_llm_override {
                 identity: None,
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         let factory =
@@ -4887,6 +4893,7 @@ mod org_tool_policy {
                 identity: None,
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
+                extra_interceptors: vec![],
             },
         );
         let factory =
