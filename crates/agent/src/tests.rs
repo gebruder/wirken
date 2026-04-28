@@ -247,6 +247,67 @@ fn load_nonexistent_dir() {
     assert!(skills.is_empty());
 }
 
+/// #76 Phase 4 migration: every bundled SKILL.md must declare an
+/// explicit `permissions:` block. None of them should fall through to
+/// `PermissionsSource::Legacy` once the migration sweep is complete.
+/// Catches silent regressions if a future skill is added without a
+/// block, or if the loader stops parsing the block correctly.
+#[test]
+fn every_bundled_skill_has_explicit_permissions() {
+    let tmp = TempDir::new().unwrap();
+    crate::bundled_skills::install_bundled_skills(tmp.path()).unwrap();
+    // Per-skill load_file so a parse error names the failing skill
+    // rather than silently dropping it from the load_dir count.
+    for entry in std::fs::read_dir(tmp.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_file = path.join("SKILL.md");
+        if !skill_file.exists() {
+            continue;
+        }
+        let skill = SkillLoader::load_file(&skill_file).unwrap_or_else(|e| {
+            panic!(
+                "bundled skill at {} failed to load: {e}",
+                skill_file.display()
+            )
+        });
+        match &skill.permissions {
+            crate::skill_perms::PermissionsSource::Explicit(_) => {}
+            crate::skill_perms::PermissionsSource::Legacy => {
+                panic!(
+                    "bundled skill '{}' has no explicit permissions block — \
+                     migration sweep regression",
+                    skill.name
+                );
+            }
+        }
+    }
+}
+
+/// Migrating to per-skill permissions must not break the merge step
+/// when every bundled skill is loaded together. Detects, in particular,
+/// inference.default conflicts that would block any agent that loads
+/// the full bundle.
+#[test]
+fn bundled_skills_merge_into_a_resolved_effective_profile() {
+    let tmp = TempDir::new().unwrap();
+    crate::bundled_skills::install_bundled_skills(tmp.path()).unwrap();
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    let sources: Vec<_> = skills.iter().map(|s| s.permissions.clone()).collect();
+    let eff = crate::skill_perms::effective_for_skills(&sources)
+        .expect("bundled skills should merge cleanly");
+    // None of the bundled skills declare Legacy, so the merge must
+    // produce Resolved, not Legacy.
+    match eff {
+        crate::skill_perms::EffectiveProfile::Resolved(_) => {}
+        crate::skill_perms::EffectiveProfile::Legacy => {
+            panic!("bundled skills merged to Legacy — at least one missed migration")
+        }
+    }
+}
+
 #[test]
 fn skill_prompt_generation() {
     let skills = vec![

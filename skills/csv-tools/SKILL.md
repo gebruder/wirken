@@ -1,6 +1,13 @@
 ---
 name: csv-tools
 description: Parse and analyze CSV data
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # CSV Tools

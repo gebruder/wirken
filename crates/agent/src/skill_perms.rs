@@ -324,10 +324,11 @@ fn resolve_paths(
             }
             return Err(PermissionsError::FilesystemWildcard);
         }
-        if entry == WORKSPACE_TOKEN {
-            // Kept as-is; the agent expands the token at `attach_skills`
-            // time when the workspace path is known.
-            out.insert(PathBuf::from(WORKSPACE_TOKEN));
+        // `<workspace>` and `<workspace>/<rel>` are kept as-is; the agent
+        // expands the leading token at `attach_skills` time when the
+        // workspace path is known.
+        if entry == WORKSPACE_TOKEN || entry.starts_with(&format!("{WORKSPACE_TOKEN}/")) {
+            out.insert(PathBuf::from(entry));
             continue;
         }
         let expanded = expand_home(entry, home);
@@ -455,7 +456,12 @@ fn expand_workspace_set(set: BTreeSet<PathBuf>, workspace: &Path) -> BTreeSet<Pa
     set.into_iter()
         .map(|p| {
             if p == Path::new(WORKSPACE_TOKEN) {
-                workspace.to_path_buf()
+                return workspace.to_path_buf();
+            }
+            // Strip the leading `<workspace>` component when present and
+            // re-anchor on the actual workspace path.
+            if let Ok(rest) = p.strip_prefix(WORKSPACE_TOKEN) {
+                workspace.join(rest)
             } else {
                 p
             }
@@ -906,6 +912,47 @@ inference:
         assert!(eff.allows_write_path(Path::new("/home/x/work/sub/dir/file.txt")));
         assert!(!eff.allows_write_path(Path::new("/home/x/other/")));
         assert!(!eff.allows_write_path(Path::new("/home/x/")));
+    }
+
+    #[test]
+    fn workspace_token_paths_round_trip_through_parse() {
+        let yaml = r#"
+filesystem:
+  read_paths: ["<workspace>"]
+  write_paths: ["<workspace>/.lyrik", "<workspace>/notes"]
+"#;
+        let p = parse_block(yaml, &root(), home()).unwrap();
+        assert!(
+            p.filesystem
+                .read_paths
+                .contains(&PathBuf::from("<workspace>"))
+        );
+        assert!(
+            p.filesystem
+                .write_paths
+                .contains(&PathBuf::from("<workspace>/.lyrik"))
+        );
+        assert!(
+            p.filesystem
+                .write_paths
+                .contains(&PathBuf::from("<workspace>/notes"))
+        );
+    }
+
+    #[test]
+    fn workspace_token_expands_to_real_workspace() {
+        let yaml = r#"
+filesystem:
+  read_paths: ["<workspace>"]
+  write_paths: ["<workspace>/.lyrik"]
+"#;
+        let p = parse_block(yaml, &root(), home()).unwrap();
+        let workspace = Path::new("/home/x/code/repo");
+        let eff = EffectiveProfile::Resolved(p).expand_workspace(workspace);
+        assert!(eff.allows_read_path(Path::new("/home/x/code/repo/foo.rs")));
+        assert!(eff.allows_write_path(Path::new("/home/x/code/repo/.lyrik/rubric.md")));
+        assert!(!eff.allows_write_path(Path::new("/home/x/code/repo/elsewhere/foo")));
+        assert!(!eff.allows_read_path(Path::new("/some/other/path")));
     }
 
     #[test]

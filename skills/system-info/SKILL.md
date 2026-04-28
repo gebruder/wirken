@@ -1,6 +1,13 @@
 ---
 name: system-info
 description: System information and monitoring
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # System Info
