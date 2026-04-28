@@ -11,6 +11,7 @@ pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
 pub mod preset;
+pub mod rate_limit;
 pub mod runtime;
 pub mod sandbox;
 pub(crate) mod sigv4;

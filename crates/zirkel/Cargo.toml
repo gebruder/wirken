@@ -1,0 +1,21 @@
+[package]
+name = "wirken-zirkel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Zirkel preset orchestrator: daily-fetch pipeline that runs through the policed HTTP transport and writes to the per-skill SQLite store."
+
+[dependencies]
+wirken-agent = { path = "../agent" }
+wirken-skill-store = { path = "../skill-store" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }

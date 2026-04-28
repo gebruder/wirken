@@ -79,6 +79,10 @@ enum Commands {
     #[command(subcommand)]
     Preset(PresetCommands),
 
+    /// Run the Zirkel orchestrator (cron or manual)
+    #[command(subcommand)]
+    Zirkel(ZirkelCommands),
+
     /// Manage scheduled cron jobs
     #[command(subcommand)]
     Cron(CronCommands),
@@ -297,6 +301,24 @@ enum PresetCommands {
         /// Preset name (e.g. `zirkel`)
         name: String,
     },
+    /// Wire a daily cron entry that runs the preset's orchestrator
+    Schedule {
+        /// Preset name
+        name: String,
+    },
+    /// Remove the wirken-managed cron entry for the preset
+    Unschedule {
+        /// Preset name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ZirkelCommands {
+    /// Run the Zirkel orchestrator once (cron or manual entry).
+    /// In Scope B this is a stub that loads the installed preset and
+    /// reports it's ready. Scope C wires the fetch pipeline.
+    Run,
 }
 
 #[derive(Subcommand)]
@@ -507,6 +529,11 @@ async fn main() -> Result<()> {
         Commands::Preset(cmd) => match cmd {
             PresetCommands::List => commands::preset::list().await,
             PresetCommands::Install { name } => commands::preset::install(&name).await,
+            PresetCommands::Schedule { name } => commands::preset::schedule(&name).await,
+            PresetCommands::Unschedule { name } => commands::preset::unschedule(&name).await,
+        },
+        Commands::Zirkel(cmd) => match cmd {
+            ZirkelCommands::Run => commands::zirkel::run().await,
         },
         Commands::Agents(cmd) => match cmd {
             AgentCommands::Add => commands::agents::add().await,
