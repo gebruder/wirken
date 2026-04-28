@@ -7,9 +7,10 @@
 //! - `inference` — which LLM providers this skill needs the agent to call.
 //!
 //! Enforcement is per-agent: the agent computes its effective profile at init
-//! as the union of all loaded skills' declared profiles. A skill with no
-//! `permissions:` block is treated as `Legacy` — the loader warns and the
-//! agent gets the full surface for that skill during the migration window.
+//! as the union of all loaded skills' declared profiles. Every skill must
+//! declare a `permissions:` block — the migration-window soft-warn closed
+//! with the hard-fail flip. The only path that produces
+//! `EffectiveProfile::Legacy` is the empty-attach case (no skills loaded).
 //!
 //! Wildcard `"*"` is supported on `tools`, `egress.domains`, and
 //! `inference.allow`. Filesystem wildcards are rejected: cap-std workspace
@@ -36,18 +37,6 @@ pub struct PermissionProfile {
     pub egress: EgressPolicy,
     pub filesystem: FilesystemPolicy,
     pub inference: InferencePolicy,
-}
-
-/// What the loader produces per-skill.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PermissionsSource {
-    /// The skill declared a `permissions:` block (possibly empty). Empty
-    /// resolves to a fully default-deny profile.
-    Explicit(PermissionProfile),
-    /// The skill omitted the `permissions:` block. Transitional: agent gets
-    /// the full surface and the loader logs a deprecation warning. After the
-    /// migration window flips, missing block becomes a hard load failure.
-    Legacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -378,13 +367,13 @@ fn validate_host(s: &str) -> Result<(), PermissionsError> {
 
 /// Effective per-agent profile after attaching all skills. The agent's
 /// enforcement points consult this; `Legacy` short-circuits all checks
-/// (full surface) for the migration window.
+/// (full surface) and is only reachable when the agent has zero skills
+/// attached. Post-migration-window the loader hard-fails on a missing
+/// `permissions:` block, so every loaded skill carries a profile and
+/// any non-empty attach produces `Resolved`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EffectiveProfile {
-    /// Full surface, no checks. Used when no skills are attached, or when
-    /// any attached skill is `PermissionsSource::Legacy`. Once the migration
-    /// window closes, the loader hard-fails on Legacy and this variant is
-    /// only reachable when zero skills are attached.
+    /// Full surface, no checks. Reached only when zero skills are attached.
     #[default]
     Legacy,
     /// Union of declared profiles. Every enforcement point honors it.
@@ -493,20 +482,16 @@ fn path_under_any(path: &Path, allowed: &BTreeSet<PathBuf>) -> bool {
 }
 
 /// Compute the effective profile for a set of attached skills. Returns
-/// `Legacy` if any skill is `Legacy` or the slice is empty; otherwise
-/// returns `Resolved(merge(...))`. Propagates `inference.default` conflict.
-pub fn effective_for_skills(sources: &[PermissionsSource]) -> Result<EffectiveProfile, MergeError> {
-    if sources.is_empty() {
+/// `Legacy` for the empty case (no skills attached — no enforcement);
+/// otherwise returns `Resolved(merge(...))`. Propagates
+/// `inference.default` conflict.
+pub fn effective_for_skills(
+    profiles: &[PermissionProfile],
+) -> Result<EffectiveProfile, MergeError> {
+    if profiles.is_empty() {
         return Ok(EffectiveProfile::Legacy);
     }
-    let mut profiles = Vec::with_capacity(sources.len());
-    for s in sources {
-        match s {
-            PermissionsSource::Legacy => return Ok(EffectiveProfile::Legacy),
-            PermissionsSource::Explicit(p) => profiles.push(p.clone()),
-        }
-    }
-    Ok(EffectiveProfile::Resolved(merge(&profiles)?))
+    Ok(EffectiveProfile::Resolved(merge(profiles)?))
 }
 
 /// Union-merge a slice of declared per-skill profiles into one effective
@@ -840,22 +825,10 @@ inference:
     }
 
     #[test]
-    fn effective_any_legacy_skill_is_legacy() {
-        let p = profile_with(r#"tools: { allow: ["read_file"] }"#);
-        let sources = vec![PermissionsSource::Explicit(p), PermissionsSource::Legacy];
-        let eff = effective_for_skills(&sources).unwrap();
-        assert_eq!(eff, EffectiveProfile::Legacy);
-    }
-
-    #[test]
-    fn effective_all_explicit_resolves_to_merged() {
+    fn effective_resolves_for_any_non_empty_attach() {
         let a = profile_with(r#"tools: { allow: ["read_file"] }"#);
         let b = profile_with(r#"tools: { allow: ["write_file"] }"#);
-        let sources = vec![
-            PermissionsSource::Explicit(a),
-            PermissionsSource::Explicit(b),
-        ];
-        let eff = effective_for_skills(&sources).unwrap();
+        let eff = effective_for_skills(&[a, b]).unwrap();
         assert!(eff.allows_tool("read_file"));
         assert!(eff.allows_tool("write_file"));
         assert!(!eff.allows_tool("exec"));
@@ -971,11 +944,7 @@ inference:
   default: "privatemode"
 "#,
         );
-        let err = effective_for_skills(&[
-            PermissionsSource::Explicit(a),
-            PermissionsSource::Explicit(b),
-        ])
-        .unwrap_err();
+        let err = effective_for_skills(&[a, b]).unwrap_err();
         assert!(matches!(err, MergeError::DefaultConflict { .. }));
     }
 }
