@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod bundled_presets;
 pub mod bundled_skills;
 pub mod context;
 pub mod conversation;
@@ -9,6 +10,7 @@ pub mod identity;
 pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
+pub mod preset;
 pub mod runtime;
 pub mod sandbox;
 pub(crate) mod sigv4;
