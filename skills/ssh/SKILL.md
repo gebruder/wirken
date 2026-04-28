@@ -1,6 +1,7 @@
 ---
 name: ssh
 description: SSH key management and remote connections
+disable-model-invocation: true
 metadata:
   wirken:
     requires:

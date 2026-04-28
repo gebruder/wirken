@@ -1,6 +1,7 @@
 ---
 name: system-info
 description: System information and monitoring
+disable-model-invocation: false
 permissions:
   tools:
     allow: [exec]

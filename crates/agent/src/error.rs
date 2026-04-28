@@ -97,4 +97,10 @@ pub enum AgentError {
         "egress denied: host '{host}' is not in the agent's effective skill permissions egress allow-set"
     )]
     EgressDenied { host: String },
+
+    /// #79: user typed `/<name>` as a slash invocation but no loaded
+    /// skill has that name. Surfaced to the channel so the user can
+    /// retry with a correct skill name.
+    #[error("unknown skill '/{name}'; loaded skills: {}", known.join(", "))]
+    UnknownSlashSkill { name: String, known: Vec<String> },
 }

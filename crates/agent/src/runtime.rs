@@ -473,6 +473,41 @@ impl Agent {
         skills: Vec<Skill>,
         wasm_skills: Vec<WasmSkill>,
     ) -> Result<(), AgentError> {
+        // Coherence checks (#79):
+        // - Skill names are unique among the loaded set, else `/<name>`
+        //   slash invocation is ambiguous.
+        // - A `disable-model-invocation: true` skill with an empty
+        //   `tools.allow` set is unreachable: slash invocation would
+        //   hand the LLM a skill body and zero tools to use. Fail at
+        //   attach so a permissions edit doesn't silently break
+        //   invocation.
+        let mut seen = BTreeSet::new();
+        for s in &skills {
+            if !seen.insert(s.name.clone()) {
+                return Err(AgentError::SkillLoad(format!(
+                    "duplicate skill name '{}' — `/<name>` slash invocation \
+                     would be ambiguous",
+                    s.name
+                )));
+            }
+        }
+        for s in &skills {
+            if s.disable_model_invocation {
+                let empty = matches!(
+                    &s.permissions.tools.allow,
+                    crate::skill_perms::AllowSet::Set(set) if set.is_empty()
+                );
+                if empty {
+                    return Err(AgentError::SkillLoad(format!(
+                        "skill '{}' is `disable-model-invocation: true` but has \
+                         an empty `permissions.tools.allow` — slash invocation \
+                         would reach a skill with no tools",
+                        s.name
+                    )));
+                }
+            }
+        }
+
         let profiles: Vec<crate::skill_perms::PermissionProfile> =
             skills.iter().map(|s| s.permissions.clone()).collect();
         let effective = crate::skill_perms::effective_for_skills(&profiles)
@@ -538,6 +573,25 @@ impl Agent {
             }
         };
         Some((axis, absolute))
+    }
+
+    /// #79: rewrite a slash-invoked user message so the LLM sees the
+    /// invoked skill's body before the user's actual request. Returns
+    /// the original message unchanged when no slash prefix is present.
+    /// Returns `Err(AgentError::UnknownSlashSkill)` when the prefix
+    /// names a skill that isn't loaded — the channel surfaces this
+    /// back to the user so they can correct the typo.
+    fn preprocess_slash_invocation(&self, message: &str) -> Result<String, AgentError> {
+        match crate::slash::parse(message, &self.skills) {
+            crate::slash::SlashResult::None => Ok(message.to_string()),
+            crate::slash::SlashResult::Invoked { skill, remainder } => {
+                Ok(crate::slash::rewrite_with_skill_body(skill, &remainder))
+            }
+            crate::slash::SlashResult::UnknownSkill { name } => {
+                let known: Vec<String> = self.skills.iter().map(|s| s.name.clone()).collect();
+                Err(AgentError::UnknownSlashSkill { name, known })
+            }
+        }
     }
 
     /// Defence-in-depth gate emitted before each LLM dispatch (#76 Phase
@@ -1018,12 +1072,17 @@ impl Agent {
         // exact conversation prefix that was hashed into LlmRequest.
         self.maybe_log_system_prompt()?;
 
-        self.current_trigger = Some(user_message.to_string());
-        self.conversation.add_user_message(user_message);
+        // #79: detect `/<skill-name>` slash invocation and inline the
+        // named skill's body so the LLM has its instructions for this
+        // turn even though the skill is excluded from the auto-pickable
+        // system prompt.
+        let user_message = self.preprocess_slash_invocation(user_message)?;
+        self.current_trigger = Some(user_message.clone());
+        self.conversation.add_user_message(&user_message);
         self.log_event(
             TrustLevel::User,
             SessionEvent::UserMessage {
-                content: user_message.to_string(),
+                content: user_message,
                 inbound_id: Some(inbound_id),
             },
         )?;
@@ -1256,12 +1315,16 @@ impl Agent {
         // Item 10 follow-up — see process_message_inner.
         self.maybe_log_system_prompt()?;
 
-        self.current_trigger = Some(user_message.to_string());
-        self.conversation.add_user_message(user_message);
+        // #79: same slash-invocation pre-processing as the non-streaming
+        // path. Done before adding to the conversation so the recorded
+        // user message reflects what the LLM actually saw.
+        let user_message = self.preprocess_slash_invocation(user_message)?;
+        self.current_trigger = Some(user_message.clone());
+        self.conversation.add_user_message(&user_message);
         self.log_event(
             TrustLevel::User,
             SessionEvent::UserMessage {
-                content: user_message.to_string(),
+                content: user_message,
                 inbound_id: Some(inbound_id),
             },
         )?;

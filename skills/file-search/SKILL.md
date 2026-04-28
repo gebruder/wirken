@@ -1,6 +1,7 @@
 ---
 name: file-search
 description: Find files and search content across directories
+disable-model-invocation: false
 permissions:
   tools:
     allow: [exec]

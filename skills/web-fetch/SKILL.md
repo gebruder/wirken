@@ -1,6 +1,7 @@
 ---
 name: web-fetch
 description: Fetch and extract content from URLs
+disable-model-invocation: false
 metadata:
   wirken:
     requires:

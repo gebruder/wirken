@@ -1,6 +1,7 @@
 ---
 name: tmux
 description: Manage tmux terminal sessions
+disable-model-invocation: true
 metadata:
   wirken:
     requires:

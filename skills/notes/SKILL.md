@@ -1,6 +1,7 @@
 ---
 name: notes
 description: Create and manage text notes in the workspace
+disable-model-invocation: true
 permissions:
   tools:
     allow: [exec, read_file, write_file, list_files]
