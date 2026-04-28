@@ -1,6 +1,16 @@
 ---
 name: notes
 description: Create and manage text notes in the workspace
+permissions:
+  tools:
+    allow: [exec, read_file, write_file, list_files]
+  egress:
+    mode: deny
+  filesystem:
+    read_paths: ["<workspace>"]
+    write_paths: ["<workspace>"]
+  inference:
+    allow: ["*"]
 ---
 
 # Notes

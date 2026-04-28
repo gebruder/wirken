@@ -5,6 +5,13 @@ metadata:
   wirken:
     requires:
       bins: [docker]
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Docker

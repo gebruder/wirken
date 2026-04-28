@@ -1,6 +1,13 @@
 ---
 name: disk-usage
 description: Analyze disk usage and find large files
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Disk Usage
