@@ -74,7 +74,13 @@ Schema questions:
 - How does the agent decide what is "same root cause" versus "different bugs of the same class"? A causal-tier model call shaped like the dedup causal tier?
 - Does the umbrella inherit the highest member's grade, or get its own?
 
-One worked case so far. Look for the pattern again on mcp-proxy and channel adapters before deciding.
+**Second case**, surfaced 2026-04-28 during the FreeBSD RPCSEC_GSS assessment (run-001).
+
+The kernel-side scope produced 9 distinct candidates with 3 cross-framing pairs folded: `A1/M1` (stack overflow surfaced under both `auth` and `memory_safety`), `A2/R1` (`next_clientid++` race surfaced under both `auth` and `race_condition`), `A6/X3` (service-switch surfaced under both `auth` and `crypto`). Same shape as the vault assessment's pattern — different code-locations of the same root cause, different framings catching the same finding from different angles.
+
+Two cases now across two threat models (vault crypto memory hygiene; FreeBSD kernel RPC handler). The pattern is consistent: cross-framing convergence is the dominant intra-run duplication shape, not different-code-locations-same-root-cause-within-one-framing. That distinction matters for the schema decision: the dedup unit should be the framing-pair fold, not finding-cluster-detection at the post-scoring stage.
+
+Two cases so far. Look for the pattern again on a third surface before locking in the schema.
 
 ## 4. Cross-surface / codebase-wide pattern recognition
 
