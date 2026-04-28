@@ -176,10 +176,10 @@ Schema questions:
 
 Concrete and shippable. Affects every skill, not just lyrik. Item 1's load-time-trust-gap and TOCTOU-first-setup cases (latent bucket) reach a different mitigation when this lands: even an attacker-planted skill file is bounded by what its declared `allowed-tools` permit.
 
-**Investigation tickets, not yet FOLLOWUPS items:**
+**Investigation tickets — resolved 2026-04-28:**
 
-- `disable-model-invocation: true` — OpenClaw frontmatter primitive that prevents auto-invocation from generic prompts. May not be needed in wirken given how invocation works (operator messages a configured channel; agent picks a skill from the system prompt rather than auto-routing). Investigate first before deciding whether to add.
-- `context: fork` — OpenClaw frontmatter that appears to fork a sub-context for skill execution. Speculative; semantics not documented in the OpenClaw skills I read. Investigate first before adding.
+- `disable-model-invocation: true` — investigation closed; the gap is real for lyrik specifically and for future side-effecting skills generally. Promoted to item 13.
+- `context: fork` — investigation closed; parked. 17 skills use it (small sample); usage correlates strongly with `disable-model-invocation: true` on security-shaped skills (itsnishi's `audit-code`, `vet-repo`, `scan-skill` all use both); semantics likely *context-isolation primitive for skills with large outputs* but the OpenClaw skill corpus alone does not pin it down. Resolution requires reading clawhub.com documentation or an OpenClaw client source. Defer until a concrete wirken need surfaces — today's known gap is `disable-model-invocation` (item 13), not context isolation.
 
 ## 10. Capability tokens for skills (wirken-level; research-shaped, distinct from item 8)
 
@@ -505,3 +505,49 @@ The earlier framing of "static pre-screen as token-cost optimisation" conflated 
 ### Worked cases
 
 Lyrik does not yet ship a static pre-screen. The worked-case evidence is **field practice from the OpenClaw scan** — multiple existing skills implement this pattern as standalone. That validates the design at the existence-proof level, but lyrik has no run-001-style direct evidence yet. This stub captures the re-scoped design and reserves the schema fields (`detection_source` enum in item 9). Implementation comes when funded.
+
+## 13. `disable-model-invocation` frontmatter (wirken-level)
+
+Surfaced 2026-04-28 from the OpenClaw scan; investigation promoted from item 8.
+
+### Usage in OpenClaw
+
+449 skills declare `disable-model-invocation: true` or `disable-model-invocation: false` in their frontmatter — substantial enough to call a real pattern, not an outlier convention. The semantic, derivable from usage:
+
+- `disable-model-invocation: true` — the skill must be explicitly invoked by the operator (slash-command form, explicit skill name, or equivalent). The harness will not auto-fire the skill from a generic prompt that matches its description.
+- `disable-model-invocation: false` (or omitted) — the skill is eligible for auto-invocation when its description matches the user's request.
+
+Skills using `disable-model-invocation: true` cluster into three categories:
+
+1. **Side-effecting skills.** Quarantine actions, credential mutations, file writes — anything where unintended invocation has real consequences.
+2. **Resource-expensive skills.** Large model runs, long pipelines, anything that costs significant compute or tokens. Security audit pipelines and repo scans dominate the corpus.
+3. **Slash-command-shaped skills.** `/document-skills` (ryanallen/document-skills), explicit-name-only skills with `argument-hint` patterns — the slash-command primitive in OpenClaw composes with `disable-model-invocation: true` to mean "this skill is invoked by typing `/<name>`, never matched against by description."
+
+### The wirken-side gap
+
+Wirken has no equivalent today. The agent picks a skill from the loaded system prompt based on message-to-description matching. There is no way to declare *"this skill requires explicit invocation; do not auto-fire from generic message matches."*
+
+### Why it matters for lyrik specifically
+
+Lyrik is the third category — explicit-invocation, resource-expensive, side-effecting (writes `.lyrik/` artifacts). A user message like *"audit this code"* could plausibly auto-invoke lyrik in the absence of this primitive, even if the operator's intent was something cheaper. With `disable-model-invocation: true` on lyrik's frontmatter, the operator must explicitly say "lyrik" or use a slash-command form. That matters for: cost containment (lyrik is the largest token consumer of any wirken skill), state-write containment (lyrik writes `.lyrik/state/runs/<run_id>/` which is real disk state), and posture (lyrik is a deliberate-invocation tool, not an opportunistic one).
+
+### Why it matters at wirken level
+
+Future skills that mutate state (quarantine, rotate keys, fix vulns inline, deliver to encrypted channels) will have the same need. `allowed-tools` (item 8) restricts what the agent can do during a skill; `disable-model-invocation` restricts when a skill can fire at all. They are complementary primitives addressing different surfaces of the same threat shape (skill misuse via inappropriate invocation).
+
+### Schema questions
+
+- **Default value when omitted.** OpenClaw appears to default to `false` (auto-fire allowed). Wirken could mirror that (less migration burden) or default to `true` (safer; requires the 16 bundled skills to opt in via `disable-model-invocation: false` for the ones that want auto-fire — git, github, web-fetch, calculator, csv-tools, etc.). Default-to-`false` plus opt-in for explicit-only is the cheap path; default-to-`true` plus opt-out is the safer path.
+- **How does the harness enforce it.** Two options:
+  - **Load-time exclusion.** At skill-load, the harness records explicit-only skills and excludes them from the system prompt's auto-pickable set. Their bodies still load (so the agent knows about them), but the agent doesn't propose them in response to generic messages.
+  - **Invocation-time check.** At every invocation, the harness checks whether the user message is an explicit invocation. Refuses auto-fire if not. Requires distinguishing explicit-vs-generic messages, which is fuzzy.
+  - **Load-time exclusion is cleaner** and aligns with how skills are already injected into the system prompt.
+- **What "explicit invocation" looks like.** Slash commands (`/lyrik`)? Quoted skill names? `@skill-name` mentions? Wirken does not have an established convention. The primitive landing forces this convention.
+- **Interaction with bundled skills.** Of the 16 bundled skills, most want auto-fire (git, github, web-fetch, calculator, csv-tools, file-search, json-tools, notes, process-manager, ssh, system-info, tmux, weather, disk-usage, docker). Lyrik wants explicit-only. So the migration with `default: false` is one-line per bundled skill, except lyrik adds `disable-model-invocation: true` and the others stay default.
+
+### Worked cases
+
+- **Primary worked case: lyrik.** Explicit-only, resource-expensive, side-effecting. The current absence of this primitive means a generic *"audit this code"* message could auto-fire lyrik against an unintended target.
+- **Future worked cases (anticipated):** any skill that emerges from FOLLOWUPS items 8 (allowed-tools), 10 (capability tokens), 11 (runtime-watchdog), or any state-mutating bundled skill that ships post-1.0 of those items.
+
+One real worked case today (lyrik). Concrete and shippable; the primitive is well-precedented in OpenClaw across 449 skills, so the design space is small.
