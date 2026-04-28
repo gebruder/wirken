@@ -13,4 +13,8 @@
 //! No LLM call (relevance scoring is Scope C). No clustering, no theme
 //! naming, no digest push.
 
+pub mod fetcher;
+pub mod interests;
 pub mod orchestrator;
+pub mod schema;
+pub mod score;
