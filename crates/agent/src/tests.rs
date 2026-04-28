@@ -328,6 +328,10 @@ fn bundled_skills_merge_into_a_resolved_effective_profile() {
 
 #[test]
 fn skill_prompt_generation() {
+    // Two auto-invocable skills (disable_model_invocation: false), one
+    // available and one with a missing required binary, plus one
+    // explicit-only skill (disable_model_invocation: true). The prompt
+    // should include only the auto-invocable, available skill.
     let skills = vec![
         Skill {
             name: "weather".into(),
@@ -337,6 +341,7 @@ fn skill_prompt_generation() {
             path: PathBuf::new(),
             available: true,
             permissions: crate::skill_perms::PermissionProfile::default(),
+            disable_model_invocation: false,
         },
         Skill {
             name: "unavailable".into(),
@@ -346,6 +351,17 @@ fn skill_prompt_generation() {
             path: PathBuf::new(),
             available: false,
             permissions: crate::skill_perms::PermissionProfile::default(),
+            disable_model_invocation: false,
+        },
+        Skill {
+            name: "explicit-only".into(),
+            description: "Explicit invocation".into(),
+            required_bins: vec![],
+            body: "Should not appear in auto-prompt".into(),
+            path: PathBuf::new(),
+            available: true,
+            permissions: crate::skill_perms::PermissionProfile::default(),
+            disable_model_invocation: true,
         },
     ];
 
@@ -354,6 +370,7 @@ fn skill_prompt_generation() {
     assert!(prompt.contains("Use curl wttr.in"));
     assert!(!prompt.contains("unavailable"));
     assert!(!prompt.contains("Should not appear"));
+    assert!(!prompt.contains("explicit-only"));
 }
 
 // ---------------------------------------------------------------------------

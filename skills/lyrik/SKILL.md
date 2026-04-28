@@ -1,6 +1,7 @@
 ---
 name: lyrik
 description: Security assessment of a codebase — red team, pentest, variant hunt, regression check
+disable-model-invocation: true
 permissions:
   tools:
     allow: [exec, read_file, write_file, list_files]

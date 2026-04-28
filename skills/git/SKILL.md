@@ -1,6 +1,7 @@
 ---
 name: git
 description: Git version control operations
+disable-model-invocation: true
 metadata:
   wirken:
     requires:

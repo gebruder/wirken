@@ -1,6 +1,7 @@
 ---
 name: json-tools
 description: Parse, query, and transform JSON data
+disable-model-invocation: false
 metadata:
   wirken:
     requires:

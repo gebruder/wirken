@@ -1,6 +1,7 @@
 ---
 name: docker
 description: Docker container management
+disable-model-invocation: true
 metadata:
   wirken:
     requires:
