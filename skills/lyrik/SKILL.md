@@ -123,7 +123,7 @@ The seemingly natural alternatives are both rejected:
 
 The rejection rationale is committed before case data accumulates. Future case data will pressure toward picking one (humans want a single answer per finding); the design lock here is what keeps lyrik's posture coherent under that pressure.
 
-Scoring disagreement is distinct from **detector disagreement** at Stage 1 (candidate generation). When a static pre-screen detector and the model-reasoning framing pass produce different candidates, that is upstream of scoring and is not handled by the `scoring_disagreement` gate. See `skills/lyrik/FOLLOWUPS.md` item 12 (static pre-screen + detector provenance) for the detector-level design.
+Scoring disagreement is distinct from **detector disagreement** at Stage 1 (candidate generation). When a static pre-screen detector and the model-reasoning framing pass produce different candidates, that is upstream of scoring and is not handled by the `scoring_disagreement` gate. See `skills/lyrik/FOLLOWUPS.md` item 5 (static pre-screen + detector provenance) for the detector-level design.
 
 Do not proceed on silence at any gate.
 
