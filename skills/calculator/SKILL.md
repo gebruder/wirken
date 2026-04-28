@@ -1,6 +1,13 @@
 ---
 name: calculator
 description: Math calculations and unit conversions
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Calculator

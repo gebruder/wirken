@@ -1,6 +1,16 @@
 ---
 name: lyrik
 description: Security assessment of a codebase — red team, pentest, variant hunt, regression check
+permissions:
+  tools:
+    allow: [exec, read_file, write_file, list_files]
+  egress:
+    mode: deny
+  filesystem:
+    read_paths: ["<workspace>"]
+    write_paths: ["<workspace>/.lyrik"]
+  inference:
+    allow: ["*"]
 ---
 
 # Lyrik

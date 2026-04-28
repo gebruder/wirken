@@ -5,6 +5,13 @@ metadata:
   wirken:
     requires:
       bins: [git]
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Git

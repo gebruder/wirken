@@ -5,6 +5,13 @@ metadata:
   wirken:
     requires:
       bins: [tmux]
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Tmux

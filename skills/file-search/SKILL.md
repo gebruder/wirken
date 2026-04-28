@@ -1,6 +1,13 @@
 ---
 name: file-search
 description: Find files and search content across directories
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # File Search

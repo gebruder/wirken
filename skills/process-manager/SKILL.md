@@ -1,6 +1,13 @@
 ---
 name: process-manager
 description: Monitor and manage system processes
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Process Manager
