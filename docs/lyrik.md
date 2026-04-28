@@ -12,10 +12,12 @@ Lyrik draws a hard line between operator-level state and per-repo state. Operato
 |---|---|---|
 | Wirken vault | provider API keys, channel adapter credentials | `wirken setup`, `wirken channel add`, `wirken credential add` |
 | `~/.wirken/sandbox.json` | sandbox mode (`off` / `exec-only` / `gvisor`) | `wirken setup`, manual edit |
-| `<repo>/.lyrik/config.json` | scope, model pins per phase, gate destinations, prior-findings path | committed to repo |
+| `<repo>/.lyrik/config.json` | scope, model pins per phase, gate destinations, prior-findings path, memory path | committed to repo |
 | `<repo>/.lyrik/rubric.md` | severity rubric approved at Phase 0 | committed to repo |
-| `<repo>/.lyrik/context.md` | project context approved at Phase 0 | committed to repo |
+| `<repo>/.lyrik/context.md` | project context approved at Phase 0 (with hot zones and per-component history) | committed to repo |
 | `<repo>/.lyrik/prior/` | past CVEs, pentest reports, internal disclosures | committed to repo |
+| `<repo>/.lyrik/memory/` | ADRs, postmortems, threat models, design docs (markdown) | committed to repo |
+| `<repo>/.lyrik/memory/jira.csv` | optional Jira export for project-history enrichment | team policy decides whether to commit |
 
 `.lyrik/config.json` references operator-level resources by name. `phases.score.provider: "privatemode"` resolves through the Wirken vault; `gates.phase_0_signoff.adapter: "slack"` resolves through Wirken's channel registry. Lyrik never sees a credential.
 
@@ -29,7 +31,8 @@ The form of `rubric.md` and `context.md` is whatever the channel renders well �
 4. Review the artifacts in your channel. Approve, amend, or reject. Lyrik does not proceed on silence.
 5. On approval, Lyrik writes `.lyrik/rubric.md` and `.lyrik/context.md` to your repo. Commit them. Subsequent runs skip Phase 0 unless the dependency lockfile hash or framework version fingerprint has changed.
 6. Optional: populate `.lyrik/prior/` with past CVEs, pentest reports, and internal disclosures. The dedup gate reads this directory recursively. Without it, the regression-finding stream stays empty.
-7. Optional: write `.lyrik/config.json`. Without it, Lyrik prompts for routing on each run.
+7. Optional: populate `.lyrik/memory/` with ADRs, postmortems, threat models, and design docs (markdown). Add `.lyrik/memory/jira.csv` if you have a Jira export. Both feed Phase 0's hot-zones and per-component history. Without them, the project context still gets built — just without the history layer.
+8. Optional: write `.lyrik/config.json`. Without it, Lyrik prompts for routing on each run.
 
 ## `.lyrik/config.json` schema
 
@@ -83,6 +86,29 @@ Each gate entry:
 ### `prior_findings_path`
 
 String. Path to the directory containing prior CVEs, pentest reports, and internal disclosures. Absolute, or relative to the repo root. Defaults to `./.lyrik/prior` if absent. The dedup gate reads this directory recursively.
+
+### `memory_path`
+
+String. Path to the project-memory directory holding ADRs, postmortems, threat models, and design docs (markdown). Absolute, or relative to the repo root. Defaults to `./.lyrik/memory` if absent. Phase 0 reads this directory recursively for project-history enrichment. The Jira CSV, if present, is read at `<memory_path>/jira.csv`.
+
+## Enrichment inputs
+
+Phase 0 reads three kinds of input to give the project context real history. All are opt-in: lyrik runs without them, but the resulting context lacks the hot-zones and per-component-history layers that downstream framing and scoring rely on.
+
+| Source | Where | Used for |
+|---|---|---|
+| Markdown project memory | `.lyrik/memory/*.md` (recursive) | ADRs, postmortems, threat models, design docs. Filtered to security-relevant content during articulate. |
+| Git history | the target repo's `.git/` | Security-keyword commits (`git log --grep`), FIXME density (`git grep -c`), churn over the rubric window (`git log --since=... --name-only`), distinct authors per file (`git blame --line-porcelain`). |
+| Jira CSV | `<memory_path>/jira.csv` | Ticket export with required columns `key,summary,description,status,created`; optional `labels,priority,components`. Filtered to security-relevant tickets. |
+
+The articulate phase combines these into two sections of `.lyrik/context.md`:
+
+- **Hot zones.** Files flagged by multiple dimensions (churn × security-keyword commits × Jira tickets × FIXME density). A file flagged on three or four dimensions is a hot zone; one dimension alone is noise.
+- **Per-component history.** For each component identified in the software-identity pass, one short paragraph naming relevant ADRs, postmortems, recent Jira tickets, churn rate, FIXME density.
+
+Framing and scoring phases receive a **component-filtered slice** of this enrichment. A finding in `crates/vault/` gets vault-relevant memory and history; a finding in `crates/mcp-proxy/` gets mcp-proxy-relevant. The slicing is by component path, not by global salience.
+
+The smallest-viable enrichment is intentional: filesystem markdown and a CSV file, no API connectors, no live Jira/GitHub/Linear integrations. Operators who outgrow this surface should file a `skills/lyrik/FOLLOWUPS.md` entry with the worked case.
 
 ## Channel target syntax
 

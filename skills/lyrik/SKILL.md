@@ -10,15 +10,31 @@ Produce a security assessment of a codebase. Lyrik is the form the report takes:
 ## Inputs
 
 - Target: repo path, plus an optional scope override from the user (paths in / out) and an assessment type (`full`, `delta`, `variant_hunt`).
-- Per-repo state: read `.lyrik/config.json` from the target repo for scope, model pins per phase, gate destinations, and the prior-findings path. Read `.lyrik/rubric.md` and `.lyrik/context.md` if they exist; treat them as approved unless invalidated. Read `.lyrik/prior/` for the dedup gate. If the config is missing, ask the user before generating artifacts. See `docs/lyrik.md` for the schema.
-- Prior context (additional): ADRs, postmortems, threat models, security-keyword commit messages, FIXME/TODO/HACK/XXX comments.
+- Per-repo state: read `.lyrik/config.json` from the target repo for scope, model pins per phase, gate destinations, prior-findings path, and memory path. Read `.lyrik/rubric.md` and `.lyrik/context.md` if they exist; treat them as approved unless invalidated. Read `.lyrik/prior/` for the dedup gate. Read `.lyrik/memory/` for project-history enrichment. If the config is missing, ask the user before generating artifacts. See `docs/lyrik.md` for the schema.
 - Confidentiality: pin confidential phases to a Privatemode or Tinfoil provider in `phases.<phase>.provider`. Lyrik references operator-level providers and channel adapters by name; credentials live in the Wirken vault and Lyrik never sees them.
 
 ## Phase 0 — project context and rubric
 
 Produce two artifacts before any candidate is generated.
 
-**Project context.** Software identity (what it is, what it does), language and framework versions, dependency graph summary, entry points, trust boundaries, data flows, auth model, secrets handling surface, network surface. Enrich with hot zones (high churn × security-tagged history) when the inputs allow.
+**Project context.** Software identity (what it is, what it does), language and framework versions, dependency graph summary, entry points, trust boundaries, data flows, auth model, secrets handling surface, network surface.
+
+**Enrichment inputs.** Read these to give the project context real history:
+
+- `.lyrik/memory/*.md` (recursive) — ADRs, postmortems, threat models, design docs. Filter to security-relevant content; do not dump every ADR into the context regardless of topic.
+- Git history on the target repo:
+  - Security-keyword commits: `git log --grep="security\|vuln\|cve\|exploit\|auth\|crypto\|csrf\|xss\|injection\|leak\|bypass" -i --pretty=format:'%h|%ad|%s' --date=short`.
+  - FIXME density per file in scope: `git grep -c "FIXME\|TODO\|HACK\|XXX"`.
+  - Churn per file (last 90 days, or rubric-defined window): `git log --since=90.days --name-only --pretty=format: -- <path>`, counted.
+  - Distinct authors per file (same window): `git blame --line-porcelain <file> | grep ^author | sort -u | wc -l`.
+- `.lyrik/memory/jira.csv` if present — Jira export with at minimum `key,summary,description,status,created`. Optional `labels,priority,components` used when present. Filter to security-relevant tickets by keyword and label.
+
+Combine into:
+
+- **Hot zones.** Files flagged by multiple dimensions (churn × security-keyword commits × Jira tickets × FIXME density). Rank by count of dimensions flagged, not any single metric. A file flagged on three or four dimensions is a hot zone; one dimension alone is noise.
+- **Per-component history.** For each component identified in the software-identity pass, one short paragraph naming relevant ADRs, postmortems, recent Jira tickets, churn rate, FIXME density.
+
+Both go into `.lyrik/context.md`. The framing and scoring phases receive a **component-filtered slice** — a finding in `crates/vault/` gets only vault-relevant memory and history, not the whole codebase's.
 
 **Severity rubric.** Project-specific, not CVSS-shaped. Crash severity depends on whether availability is a security property of *this* software. State the tiers and what falls in each.
 
@@ -36,7 +52,7 @@ Run the framings selected by recon as separate passes over its output. They are 
 
 `prompt_injection` is a distinct trust model from classical injection: untrusted text reaching model context inherits the surrounding prompt's authority, and SQL/shell-shaped sanitization defences do not apply. Cover system-prompt content under attacker influence, tool-output amplification into context, retrieval payload trust, and cross-tool prompt-relay paths.
 
-For each framing run, run two sub-passes and union the candidates: a **careful auditor** (broad, conservative, codes assumptions explicitly) and an **attacker hunting one bug** (narrow, adversarial, fixates on a single hypothesis).
+For each framing run, run two sub-passes and union the candidates: a **careful auditor** (broad, conservative, codes assumptions explicitly) and an **attacker hunting one bug** (narrow, adversarial, fixates on a single hypothesis). Each pass receives the component-filtered enrichment slice from Phase 0 alongside the recon output — relevant ADRs, postmortems, security-keyword commits, recent Jira tickets, churn and FIXME signals for the files under the lens.
 
 ## Scanners (optional)
 
@@ -67,7 +83,7 @@ Four axes, scored independently before they combine:
 - Can an attacker reach the entry point
 - Blast radius
 
-Score each high-severity candidate more than once. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales through the `scoring_disagreement` gate. If the rubric does not cleanly tier a finding (rather than scorers disagreeing on it), route to the same gate with a `rubric clarification` tag — the team can refine the rubric in-flight. Do not proceed on silence.
+Score each high-severity candidate more than once. Each scoring pass receives, alongside the finding and the rubric, the component-filtered enrichment slice (project memory, Jira context, churn/FIXME signals for the file in question) so the score is calibrated to the file's actual history. If two passes disagree by more than one severity tier on any axis, route the candidate plus all rationales through the `scoring_disagreement` gate. If the rubric does not cleanly tier a finding (rather than scorers disagreeing on it), route to the same gate with a `rubric clarification` tag — the team can refine the rubric in-flight. Do not proceed on silence.
 
 ## Concentration test
 

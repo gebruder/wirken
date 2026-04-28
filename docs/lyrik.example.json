@@ -16,5 +16,6 @@
     "scoring_disagreement": { "adapter": "slack",  "target": "#secops-leads" },
     "high_severity_review": { "adapter": "signal", "target": "+15551234567" }
   },
-  "prior_findings_path": "./.lyrik/prior"
+  "prior_findings_path": "./.lyrik/prior",
+  "memory_path": "./.lyrik/memory"
 }
