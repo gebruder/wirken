@@ -1,6 +1,7 @@
 ---
 name: github
 description: GitHub operations via the gh CLI
+disable-model-invocation: true
 metadata:
   wirken:
     requires:

@@ -1,6 +1,7 @@
 ---
 name: process-manager
 description: Monitor and manage system processes
+disable-model-invocation: false
 permissions:
   tools:
     allow: [exec]

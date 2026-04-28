@@ -19,6 +19,13 @@ pub struct Skill {
     /// profiles from all loaded skills into one effective per-agent
     /// profile at `attach_skills` time.
     pub permissions: PermissionProfile,
+    /// Whether the skill is excluded from the LLM's auto-pickable set
+    /// (matches OpenClaw's `disable-model-invocation` field, #79).
+    /// Default `true` — Wirken's posture is that auto-invocation
+    /// requires explicit author opt-in. Auto-invocable skills declare
+    /// `disable-model-invocation: false`. Explicit-only skills are
+    /// reached via `/<skill-name>` slash commands; see [`crate::slash`].
+    pub disable_model_invocation: bool,
 }
 
 /// YAML frontmatter parsed from SKILL.md files.
@@ -31,6 +38,12 @@ struct SkillFrontmatter {
     metadata: Option<serde_json::Value>,
     #[serde(default)]
     permissions: Option<PermissionsBlock>,
+    /// Default `true` (when omitted, skill is explicit-invocation only).
+    /// Mirrors OpenClaw's `disable-model-invocation` semantic. Skills
+    /// must explicitly declare `disable-model-invocation: false` to
+    /// become auto-invocable.
+    #[serde(rename = "disable-model-invocation", default)]
+    disable_model_invocation: Option<bool>,
 }
 
 /// Loads SKILL.md files from a directory.
@@ -106,6 +119,10 @@ impl SkillLoader {
             }
         };
 
+        // Default-true (Wirken's posture: auto-invocation requires
+        // explicit opt-in). #79.
+        let disable_model_invocation = frontmatter.disable_model_invocation.unwrap_or(true);
+
         Ok(Skill {
             name: frontmatter.name.unwrap_or(dir_name),
             description: frontmatter.description.unwrap_or_default(),
@@ -114,20 +131,28 @@ impl SkillLoader {
             path: path.to_path_buf(),
             available,
             permissions,
+            disable_model_invocation,
         })
     }
 
     /// Build a system prompt fragment from loaded skills.
-    /// Only includes skills whose required binaries are available.
+    /// Includes only auto-invocable, available skills. Explicit-only
+    /// skills (`disable-model-invocation: true`) are reached via
+    /// `/<skill-name>` slash commands (#79); their bodies are injected
+    /// into the user message at invocation time, not into the system
+    /// prompt at agent init.
     pub fn build_prompt(skills: &[Skill]) -> String {
-        let available: Vec<&Skill> = skills.iter().filter(|s| s.available).collect();
+        let auto: Vec<&Skill> = skills
+            .iter()
+            .filter(|s| s.available && !s.disable_model_invocation)
+            .collect();
 
-        if available.is_empty() {
+        if auto.is_empty() {
             return String::new();
         }
 
         let mut prompt = String::from("\n\n## Available Skills\n\n");
-        for skill in &available {
+        for skill in &auto {
             prompt.push_str(&format!("### {}\n", skill.name));
             if !skill.description.is_empty() {
                 prompt.push_str(&skill.description);
@@ -155,6 +180,7 @@ fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentE
                 description: None,
                 metadata: None,
                 permissions: None,
+                disable_model_invocation: None,
             },
             content.to_string(),
         ));

@@ -1,6 +1,7 @@
 ---
 name: csv-tools
 description: Parse and analyze CSV data
+disable-model-invocation: false
 permissions:
   tools:
     allow: [exec]
