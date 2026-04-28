@@ -1,8 +1,6 @@
 # Lyrik
 
-Lyrik is the security-assessment skill bundled with Wirken. It produces red-team and pentest assessments of a codebase in the lyric form: every claim stated in the smallest true number of words, every number disclosed with provenance, every finding traceable to the run's audit log.
-
-The skill text itself lives at `~/.wirken/skills/lyrik/SKILL.md` after `wirken setup`. This page is the team-facing setup and configuration guide.
+Lyrik is Wirken's security-assessment skill; this page is the setup and configuration guide — for what Lyrik is and why it exists, see [lyrik-overview.md](lyrik-overview.md).
 
 ## What goes where
 

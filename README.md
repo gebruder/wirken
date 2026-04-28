@@ -180,6 +180,7 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage)
 - [Multi-agent setup](docs/multi-agent.md)
 - [Skills guide](docs/skills.md) (markdown skills, Wasm skills, registry)
+- [Lyrik overview](docs/lyrik-overview.md) (security-assessment skill — what it is and why)
 - [MCP setup](docs/mcp.md)
 - [Security properties](docs/security-properties.md) (OWASP and NIST AI RMF mappings)
 - [Enterprise deployment](docs/enterprise.md) (org config, SIEM, sandbox)
