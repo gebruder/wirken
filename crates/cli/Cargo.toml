@@ -43,6 +43,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 openssl = { workspace = true }
+libc = "0.2"
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

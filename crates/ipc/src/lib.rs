@@ -1,6 +1,7 @@
 mod auth;
 mod channel;
 mod error;
+pub mod orchestrator;
 pub mod transport;
 
 // Generated Cap'n Proto code

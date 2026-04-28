@@ -13,8 +13,10 @@ use wirken_audit::{AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::injection_detect::InjectionDetector;
+use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
+use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AuthenticatedChannel, perform_gateway_handshake};
@@ -284,6 +286,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     identity,
                     allowed_subagents: agent_cfg.allowed_subagents.clone(),
                     sandbox: super::load_sandbox_config(&cfg.data_dir),
+                    extra_interceptors: vec![],
                 },
             );
         }
@@ -369,6 +372,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 identity: default_identity,
                 allowed_subagents: Default::default(),
                 sandbox: super::load_sandbox_config(&cfg.data_dir),
+                extra_interceptors: vec![],
             },
         );
     }
@@ -581,6 +585,53 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         };
         println!("  Org tool policy: allowed={allowed}; blocked={blocked}");
     }
+
+    // --- Wire zirkel keep/skip interceptors -------------------------
+    //
+    // Read zirkel's bindings table once at startup and attach a
+    // KeepSkipInterceptor to each bound agent. Live re-bind doesn't
+    // reach already-running agents — `wirken zirkel bind` warns
+    // when this daemon is up. This loop runs before the factory is
+    // built so the interceptors land in the agent's
+    // extra_interceptors list.
+    let zirkel_db = cfg.data_dir.join("zirkel").join("aggregator.db");
+    if zirkel_db.exists() {
+        match rusqlite::Connection::open(&zirkel_db) {
+            Ok(zconn) => match wirken_zirkel::binding::list_all(&zconn) {
+                Ok(bindings) => {
+                    for binding in bindings {
+                        let Some(static_cfg) = static_configs.get_mut(&binding.agent_id) else {
+                            tracing::warn!(
+                                "zirkel binding for agent '{}' has no matching agent config; \
+                                 keep/skip interceptor not attached. Run `wirken agents add` or \
+                                 fix the binding with `wirken zirkel bind --agent ...`.",
+                                binding.agent_id,
+                            );
+                            continue;
+                        };
+                        match wirken_zirkel::keep_skip_interceptor::KeepSkipInterceptor::open(
+                            &zirkel_db,
+                        ) {
+                            Ok(interceptor) => {
+                                static_cfg.extra_interceptors.push(Arc::new(interceptor));
+                                println!(
+                                    "  Zirkel: keep/skip on agent '{}' (channel '{}')",
+                                    binding.agent_id, binding.channel
+                                );
+                            }
+                            Err(e) => tracing::warn!(
+                                "open keep/skip interceptor at {}: {e}",
+                                zirkel_db.display()
+                            ),
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("list zirkel bindings: {e}"),
+            },
+            Err(e) => tracing::warn!("open zirkel db {}: {e}", zirkel_db.display()),
+        }
+    }
+
     let factory = AgentFactory::with_options(
         static_configs,
         session_log.clone(),
@@ -673,6 +724,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // --- Injection detector (shared, stateless) ---
     let detector = Arc::new(InjectionDetector::new());
 
+    // --- Outbound dispatcher (orchestrator push rendezvous) ---
+    //
+    // Holds the live capnp writer for each connected adapter, keyed
+    // by channel. Per-adapter handlers register on auth and
+    // unregister on disconnect; the orchestrator-push listener below
+    // looks up the writer when forwarding a push.
+    let dispatcher = Arc::new(OutboundDispatcher::new());
+
     // --- Accept adapter connections ---
     let accept_registry = registry.clone();
     let accept_factory = factory.clone();
@@ -680,6 +739,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let accept_sessions = sessions.clone();
     let accept_router = router.clone();
     let accept_detector = detector.clone();
+    let accept_dispatcher = dispatcher.clone();
 
     let accept_handle = tokio::spawn(async move {
         loop {
@@ -691,10 +751,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let sess = accept_sessions.clone();
                     let rtr = accept_router.clone();
                     let det = accept_detector.clone();
+                    let disp = accept_dispatcher.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_adapter_connection(stream, reg, fact, au, sess, rtr, det).await
+                            handle_adapter_connection(stream, reg, fact, au, sess, rtr, det, disp)
+                                .await
                         {
                             tracing::error!("Adapter connection error: {e}");
                         }
@@ -702,6 +764,76 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 }
                 Err(e) => {
                     tracing::error!("Accept error: {e}");
+                }
+            }
+        }
+    });
+
+    // --- Orchestrator-push listener (Zirkel C-Signal) ---
+    //
+    // This is not an adapter — adapters cross a trust boundary, this
+    // doesn't. Local-only outbound channel: the zirkel CLI process
+    // runs as the same UID that owns this data dir, builds its
+    // daily digest, and pushes via this socket. The gateway forwards
+    // each push to the live adapter writer for the named channel.
+    //
+    // Posture: 0600 file perms is the primary gate; SO_PEERCRED on
+    // accept is defense-in-depth in case the perms are accidentally
+    // permissive. JSON line in, JSON line out — no capnp, no
+    // handshake, no signature. See crates/ipc/src/orchestrator.rs.
+    let orchestrator_socket_path = cfg.socket_dir().join("orchestrator.sock");
+    if orchestrator_socket_path.exists() {
+        let _ = std::fs::remove_file(&orchestrator_socket_path);
+    }
+    let orchestrator_listener = UnixListener::bind(&orchestrator_socket_path).context(format!(
+        "Failed to bind orchestrator UDS at {}",
+        orchestrator_socket_path.display()
+    ))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &orchestrator_socket_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .context("Failed to chmod orchestrator socket to 0600")?;
+    }
+    println!(
+        "  Orchestrator socket: {}",
+        orchestrator_socket_path.display()
+    );
+
+    let orchestrator_dispatcher = dispatcher.clone();
+    let orchestrator_audit = audit.clone();
+    // SAFETY: `geteuid` is always-safe FFI; documented as never
+    // failing and never invoking user-space callbacks.
+    let orchestrator_uid = unsafe { libc::geteuid() };
+    let orchestrator_handle = tokio::spawn(async move {
+        loop {
+            match orchestrator_listener.accept().await {
+                Ok((stream, _)) => {
+                    let peer_uid = match stream.peer_cred() {
+                        Ok(c) => c.uid(),
+                        Err(e) => {
+                            tracing::warn!("orchestrator: peer_cred unavailable, refusing: {e}");
+                            continue;
+                        }
+                    };
+                    if peer_uid != orchestrator_uid {
+                        tracing::warn!(
+                            "orchestrator: refusing peer uid={peer_uid} (expected {orchestrator_uid})"
+                        );
+                        continue;
+                    }
+                    let disp = orchestrator_dispatcher.clone();
+                    let au = orchestrator_audit.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_orchestrator_push(stream, disp, au).await {
+                            tracing::error!("orchestrator push handler error: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("orchestrator accept error: {e}");
                 }
             }
         }
@@ -722,6 +854,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     mcp_proxy_handle.abort();
     accept_handle.abort();
+    orchestrator_handle.abort();
     webchat_handle.abort();
     scheduler_handle.abort();
 
@@ -732,12 +865,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // Cleanup sockets
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&mcp_proxy_socket);
+    let _ = std::fs::remove_file(&orchestrator_socket_path);
 
     println!("  Gateway stopped.");
     Ok(())
 }
 
 /// Handle a single adapter connection: handshake, then message loop.
+#[allow(clippy::too_many_arguments)]
 async fn handle_adapter_connection(
     stream: UnixStream,
     registry: Arc<Mutex<AdapterRegistry>>,
@@ -746,6 +881,7 @@ async fn handle_adapter_connection(
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
     detector: Arc<InjectionDetector>,
+    dispatcher: Arc<OutboundDispatcher>,
 ) -> Result<()> {
     let (mut reader, mut writer) = split_stream(stream);
 
@@ -801,6 +937,11 @@ async fn handle_adapter_connection(
 
     let writer = Arc::new(Mutex::new(writer));
 
+    // Register the live writer with the orchestrator-push
+    // dispatcher so zirkel's daily digest (and any other
+    // orchestrator) can find this adapter by channel name.
+    dispatcher.register(authenticated_channel.as_str(), writer.clone());
+
     // Message loop
     let result = message_loop(
         &adapter_id,
@@ -815,6 +956,7 @@ async fn handle_adapter_connection(
     )
     .await;
 
+    dispatcher.unregister(authenticated_channel.as_str());
     registry.lock().await.set_connected(&adapter_id, false);
     audit
         .log(
@@ -825,6 +967,97 @@ async fn handle_adapter_connection(
 
     tracing::info!("Adapter '{adapter_id}' disconnected");
     result
+}
+
+/// Handle one orchestrator-push connection: read one JSON request,
+/// look up the live adapter writer for the requested channel,
+/// forward as a capnp Outbound frame, write one JSON response.
+///
+/// This handler runs only after `peer_cred()` has confirmed the
+/// peer UID matches the gateway's. No further authentication.
+async fn handle_orchestrator_push(
+    stream: UnixStream,
+    dispatcher: Arc<OutboundDispatcher>,
+    audit: Arc<AuditWriter>,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let (reader, mut writer) = stream.into_split();
+    let mut br = BufReader::new(reader);
+    let mut line = String::new();
+    let n = br
+        .read_line(&mut line)
+        .await
+        .context("orchestrator: read request")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let req: OrchestratorPushRequest = match serde_json::from_str(line.trim_end()) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = OrchestratorPushResponse {
+                ok: false,
+                error: Some(format!("invalid request JSON: {e}")),
+            };
+            let _ = write_orchestrator_response(&mut writer, &resp).await;
+            return Ok(());
+        }
+    };
+
+    let resp = match dispatcher.writer_for(&req.channel) {
+        Some(w) => {
+            let mut reply = capnp::message::Builder::new_default();
+            {
+                let fb = reply.init_root::<frame::Builder<'_>>();
+                let mut outbound = fb.init_outbound();
+                outbound.set_conversation_id(&req.conversation_id);
+                outbound.set_text(&req.text);
+                outbound.set_reply_to_id(&req.reply_to_id);
+                outbound.set_metadata("{}");
+            }
+            let mut w = w.lock().await;
+            match w.write_message(&reply).await {
+                Ok(()) => {
+                    let _ = audit
+                        .log(
+                            AuditEvent::new("orchestrator", "message.outbound", &req.text)
+                                .with_channel(&req.channel)
+                                .with_session(&req.conversation_id),
+                        )
+                        .await;
+                    OrchestratorPushResponse {
+                        ok: true,
+                        error: None,
+                    }
+                }
+                Err(e) => OrchestratorPushResponse {
+                    ok: false,
+                    error: Some(format!("write to adapter failed: {e}")),
+                },
+            }
+        }
+        None => OrchestratorPushResponse {
+            ok: false,
+            error: Some(format!("no adapter connected on channel '{}'", req.channel)),
+        },
+    };
+
+    write_orchestrator_response(&mut writer, &resp).await?;
+    Ok(())
+}
+
+async fn write_orchestrator_response(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    resp: &OrchestratorPushResponse,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut line = serde_json::to_string(resp).context("serialize push response")?;
+    line.push('\n');
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .context("write push response")?;
+    writer.shutdown().await.ok();
+    Ok(())
 }
 
 /// Main message loop: read inbound from adapter, route to agent, send response back.

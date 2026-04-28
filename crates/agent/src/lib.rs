@@ -7,6 +7,7 @@ pub mod egress;
 pub mod error;
 pub mod factory;
 pub mod identity;
+pub mod inbound_interceptor;
 pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
