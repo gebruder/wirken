@@ -180,3 +180,28 @@ Concrete and shippable. Affects every skill, not just lyrik. Item 1's load-time-
 
 - `disable-model-invocation: true` — OpenClaw frontmatter primitive that prevents auto-invocation from generic prompts. May not be needed in wirken given how invocation works (operator messages a configured channel; agent picks a skill from the system prompt rather than auto-routing). Investigate first before deciding whether to add.
 - `context: fork` — OpenClaw frontmatter that appears to fork a sub-context for skill execution. Speculative; semantics not documented in the OpenClaw skills I read. Investigate first before adding.
+
+## 10. Capability tokens for skills (wirken-level; research-shaped, distinct from item 8)
+
+Surfaced 2026-04-28 from the broader OpenClaw scan. OpenClaw's `tuanziguardianclaw` skill describes *"skill sandboxes, capability tokens, and real-time auditing"* as a runtime defence layer. The capability-token primitive is structurally distinct from item 8 (allowed-tools) and addresses a different threat model.
+
+**Item 8 (allowed-tools)** is declarative: skill author specifies a tool whitelist in frontmatter, loader enforces at skill-load time. Static binding. Threat model: detect-and-refuse skills that try to use undeclared tools.
+
+**Capability tokens** are runtime-issued, scoped, possibly revocable. The skill receives them at invocation; the skill cannot escalate beyond its capability set, cannot persist tokens across invocations, and the harness can revoke tokens mid-execution if a runtime check fails. Threat model: skill author cannot lie about needs because runtime enforces *what the skill actually does* against a per-invocation capability set.
+
+These are different attacks:
+
+- A skill that lies in its declared `allowed-tools` (item 8) is detected only at install/audit time. Item 10 makes the runtime verify per-call.
+- A skill that needs a privileged capability for a specific operator request can request it dynamically; operator approves; harness issues a scoped token; skill uses; token expires. Item 8 is static — it can't grant something not pre-declared.
+
+Capability-token systems are well-precedented (capability-based OS security, OAuth scopes, AWS IAM session tokens). The design space is large.
+
+Schema questions:
+
+- **Token shape.** Per-invocation? Per-tool-call? Smallest meaningful unit?
+- **Token issuance.** Operator-approval-gated for sensitive capabilities? Auto-issued for declared `allowed-tools` (item 8) overlap?
+- **Revocation.** Mid-execution revocation requires the harness to interrupt running tool calls. Hard. Or revoke-on-next-call only?
+- **Audit.** Every issuance, use, and revocation logs to audit. Token IDs in audit log let post-hoc analysis correlate.
+- **Composition with item 8.** Item 8 is the cheap concrete win; item 10 is the runtime layer atop it. Order: item 8 first, item 10 after item 8 lands and has real adoption.
+
+This is **research-shaped**, not item-8-shaped. Don't bundle into item 8's roadmap. Don't let item 10's existence delay item 8 shipping. Fund a research week separately when prioritised.
