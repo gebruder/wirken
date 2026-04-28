@@ -2,13 +2,16 @@
 name: aggregator
 description: Daily fetch from a fixed public allowlist; score against the user's interests file; cluster into themes; push the digest to the configured channel
 disable-model-invocation: true
-# This skill is never agent-attached. It is loaded by PresetLoader for
-# its permissions block, which the `wirken zirkel run` orchestrator
-# applies to its own policed HTTP and SQLite clients. The tools.allow
-# list below is dead surface from the agent-loop perspective — there
-# is no agent that exposes these tools to an LLM for this skill.
-# The permissions block exists as the orchestrator's policy source,
-# not as an attach manifest. See crates/zirkel/src/orchestrator.rs.
+# The permissions block below is the orchestrator's policy source,
+# not an attach manifest. `wirken zirkel run` is a pure-Rust pipeline
+# that loads this skill via PresetLoader, reads the permissions block,
+# and applies it to its own policed HTTP and SQLite clients. The
+# orchestrator never calls Agent::attach_skills for this skill — the
+# LLM is not in the fetch loop, so there is no agent surfacing tools
+# from an attached aggregator. The tools.allow list below is dead
+# surface from the agent-loop perspective; it stays declared so the
+# permissions block is a complete, signed policy descriptor.
+# See crates/zirkel/src/orchestrator.rs.
 permissions:
   tools:
     allow: [exec, read_file, write_file, list_files]
