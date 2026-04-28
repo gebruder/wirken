@@ -349,6 +349,14 @@ funnel.exploit_attempted     ==  funnel.exploit_promoted_to_1_0 + funnel.exploit
 
 sum(funnel.stopped_at_0_5_reasons.values())  ==  funnel.stopped_at_0_5
 
+# General principle: any parent/sub-map pair where the sub-map enumerates
+# named sub-counts MUST have a sum-to-parent invariant. Adding a new
+# parent/sub-map pair without the corresponding invariant is a schema
+# regression — the producer can populate the sub-map without updating
+# the parent, and the report passes JSON Schema validation but fails
+# reconciliation. Today the only such pair is stopped_at_0_5_reasons /
+# stopped_at_0_5; any future sub-map must add its own invariant here.
+
 count(findings where stream == "regression")           == funnel.deduped_to_regression
 count(findings where stream == "novel")                == funnel.deduped_to_novel
 count(findings where gate_routed.gate == "scoring_disagreement") == funnel.gate_routed_disagreement
@@ -363,7 +371,9 @@ Primary form: `findings[].stable_id` is canonical `"<scope_path>::<file>:<line_s
 
 For cross-SHA diffs (the report-to-report diff ingestion behavior), pair runs by `target.source_state.git_url + target.scope` and match findings by fuzzy `(file, function)` with line-shift fallback. **A `root_cause_hash` was considered and rejected** — hashing LLM-generated description text means the ID changes when the model rewords the same finding, breaking ticketing dedupe. Function-name + AST-shape hash is more robust but heavyweight; defer to consumer side rather than producer side, since AST analysis at producer time is expensive and cross-SHA diff is a less common ingestion path than within-SHA ticketing.
 
-For 1.0: ship the primary stable ID. Document the cross-SHA diff strategy. Don't bake AST hashing into the schema.
+**Brittleness annotation for consumer-side fuzzy matchers.** `line_start` is the brittle component of the stable ID — a finding at line 1158 in run N can be at line 1162 in run N+1 after an unrelated comment block is added above it, even though it's the same finding. Consumer-side fuzzy matchers must weight `function` heavier than `line_start`. The `function` field carries most of the stability; `line_start` is for disambiguation when two findings sit in the same function. Schema-doc consumers writing diff tools should be told this explicitly — the recommended match is `(file, function)` exact + `line_start` proximity within ±N lines for tie-breaking, where N is consumer-tuned.
+
+For 1.0: ship the primary stable ID. Document the cross-SHA diff strategy and the line_start brittleness annotation. Don't bake AST hashing into the schema.
 
 ### `findings[].triage_status` reserved
 
@@ -401,11 +411,11 @@ Required for the report-to-report diff ingestion behavior: tools pair runs by `(
 2. **Stable ID canonicalization.** Define exact escaping for `<scope_path>::<file>:<line_start>:<function>` (colons in file paths, special characters in function names). Edge cases break ticketing dedupe.
 3. **Invariant validator.** Ship a reference validator (`wirken lyrik validate <report.json>`) that any consumer or producer can run to verify reconciliation. Without it, the invariants are documentation, not enforcement.
 
-### Unresolved (does not block 1.0)
+### 1.0 deferrals (resolved as defer-to-1.x; not unresolved)
 
-- Whether `comparison` should be required for runs against public claims, or always optional. Currently optional with documented MAY-include.
-- Whether `audit.events[]` inline summary is a future addition. Currently external via `log_path`.
-- Whether `observations.*` grows new sub-arrays beyond `defensive_choices` in 1.0 or waits for second cases. Currently just `defensive_choices`.
+- **`comparison` block stays optional with documented MAY-include.** Conditional-required fields (e.g., "required when assessing against a public claim") are an ingestion nightmare — every consumer has to implement the conditional logic to validate. Optional with omission is correct. If the public-claims-comparison use case proves load-bearing, 1.1 can promote.
+- **`audit.events[]` inline stays out.** Audit log is referenced via `audit.log_path`. Inlining events would explode payload size for any non-trivial run, and most consumers won't read them. Consumers needing the events fetch the log. 1.1 can add inline events as an optional flag-controlled field.
+- **`observations.*` ships in 1.0 with only `defensive_choices`.** Adding `observations.anti_patterns_avoided` or `observations.design_rationale_inferred` speculatively means committing to a shape before seeing it twice. Document `observations.*` as a reserved namespace; ship 1.0 with only `defensive_choices`. New sub-arrays in 1.x are minor-version bumps.
 
 ### Revisions made in this draft (against an earlier version)
 
@@ -418,3 +428,9 @@ Required for the report-to-report diff ingestion behavior: tools pair runs by `(
 - Sixth ingestion behavior added: report-to-report diff. `qualifier` enum required.
 - `findings[].triage_status` reserved for the CI/CD gating semantics design.
 - Schema URL marked as 1.0 blocker explicitly, not "open question."
+
+## 11. Runtime-watchdog mode (wirken-side roadmap pointer, not lyrik design)
+
+Surfaced 2026-04-28 from the OpenClaw scan. `skillfence` ("Runtime security monitor for OpenClaw skills. Watches what your installed skills actually DO — network calls, file access, credential reads, process activity. Not a scanner. A watchdog.") is a complementary posture to lyrik: lyrik audits *target code*; a runtime-watchdog mode would audit *running skill behavior*. Two postures, both legitimate.
+
+**Roadmap pointer, not a design item.** Research item, not roadmap. Don't expand into a design until there's a concrete user pulling for it.
