@@ -190,7 +190,7 @@ pub struct Agent {
     /// in via [`Self::attach_interceptor`]. The chain runs at the
     /// top of every `process_message` / `process_message_stream`
     /// invocation; first non-`Pass` result wins.
-    interceptors: Vec<Box<dyn crate::inbound_interceptor::InboundInterceptor>>,
+    interceptors: Vec<Arc<dyn crate::inbound_interceptor::InboundInterceptor>>,
 }
 
 impl Agent {
@@ -263,7 +263,7 @@ impl Agent {
             auto_deny_above_tier: None,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
-            interceptors: vec![Box::new(crate::slash::SlashInterceptor)],
+            interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
         })
     }
 
@@ -342,7 +342,7 @@ impl Agent {
             auto_deny_above_tier: None,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
-            interceptors: vec![Box::new(crate::slash::SlashInterceptor)],
+            interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
         })
     }
 
@@ -604,7 +604,7 @@ impl Agent {
     /// the same shape — registration order is the tiebreaker.
     pub fn attach_interceptor(
         &mut self,
-        interceptor: Box<dyn crate::inbound_interceptor::InboundInterceptor>,
+        interceptor: Arc<dyn crate::inbound_interceptor::InboundInterceptor>,
     ) {
         self.interceptors.push(interceptor);
     }

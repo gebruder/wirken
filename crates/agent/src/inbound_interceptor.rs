@@ -81,7 +81,7 @@ pub trait InboundInterceptor: Send + Sync {
 /// and [`Agent::process_message_stream`] — the two callsites that need
 /// to apply the chain identically.
 pub fn run_chain(
-    interceptors: &[Box<dyn InboundInterceptor>],
+    interceptors: &[std::sync::Arc<dyn InboundInterceptor>],
     message: &str,
     ctx: &InterceptorContext<'_>,
 ) -> InterceptResult {
@@ -161,17 +161,19 @@ mod tests {
 
     #[test]
     fn all_pass_returns_pass() {
-        let chain: Vec<Box<dyn InboundInterceptor>> =
-            vec![Box::new(PassThrough), Box::new(PassThrough)];
+        use std::sync::Arc;
+        let chain: Vec<Arc<dyn InboundInterceptor>> =
+            vec![Arc::new(PassThrough), Arc::new(PassThrough)];
         let r = run_chain(&chain, "hello", &ctx());
         assert!(matches!(r, InterceptResult::Pass));
     }
 
     #[test]
     fn rewrites_compose_in_order() {
-        let chain: Vec<Box<dyn InboundInterceptor>> = vec![
-            Box::new(AlwaysRewrite("alpha")),
-            Box::new(AlwaysRewrite("beta")),
+        use std::sync::Arc;
+        let chain: Vec<Arc<dyn InboundInterceptor>> = vec![
+            Arc::new(AlwaysRewrite("alpha")),
+            Arc::new(AlwaysRewrite("beta")),
         ];
         match run_chain(&chain, "start", &ctx()) {
             InterceptResult::Rewrite(s) => assert_eq!(s, "start alpha beta"),
@@ -181,9 +183,10 @@ mod tests {
 
     #[test]
     fn handle_short_circuits_chain() {
-        let chain: Vec<Box<dyn InboundInterceptor>> = vec![
-            Box::new(AlwaysHandle("done")),
-            Box::new(AlwaysRewrite("never-runs")),
+        use std::sync::Arc;
+        let chain: Vec<Arc<dyn InboundInterceptor>> = vec![
+            Arc::new(AlwaysHandle("done")),
+            Arc::new(AlwaysRewrite("never-runs")),
         ];
         match run_chain(&chain, "hello", &ctx()) {
             InterceptResult::Handle { reply, .. } => assert_eq!(reply, "done"),
@@ -193,8 +196,9 @@ mod tests {
 
     #[test]
     fn pass_then_rewrite_yields_rewrite() {
-        let chain: Vec<Box<dyn InboundInterceptor>> =
-            vec![Box::new(PassThrough), Box::new(AlwaysRewrite("end"))];
+        use std::sync::Arc;
+        let chain: Vec<Arc<dyn InboundInterceptor>> =
+            vec![Arc::new(PassThrough), Arc::new(AlwaysRewrite("end"))];
         match run_chain(&chain, "hi", &ctx()) {
             InterceptResult::Rewrite(s) => assert_eq!(s, "hi end"),
             other => panic!("expected Rewrite, got {other:?}"),

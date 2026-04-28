@@ -93,4 +93,45 @@ pub const AGGREGATOR_MIGRATIONS: &[&str] = &[
     )",
     "CREATE INDEX idx_themes_run ON themes(run_id)",
     "CREATE INDEX idx_candidates_cluster ON candidates(cluster_id)",
+    // 7 — C-Signal: per-digest record + per-item position. The
+    // digest renderer (piece 4) writes one `digests` row when it
+    // pushes to the operator's channel, plus one `digest_items` row
+    // per included candidate at the same 1-indexed position the
+    // operator sees in the rendered text. The keep/skip interceptor
+    // (piece 3) resolves a digest by looking up the most recent
+    // unresolved row for the agent and updating each item's
+    // `decision`.
+    //
+    // `agent_id` rather than `(channel, conversation_id)` because
+    // the agent_id is what the InboundInterceptor context already
+    // carries; today's bind keeps a single zirkel-bound conversation
+    // per agent, so the agent scope is sufficient discrimination.
+    "CREATE TABLE digests ( \
+        id            INTEGER PRIMARY KEY AUTOINCREMENT, \
+        run_id        TEXT NOT NULL, \
+        agent_id      TEXT NOT NULL, \
+        sent_at       TEXT NOT NULL DEFAULT (datetime('now')), \
+        resolved_at   TEXT \
+    )",
+    "CREATE INDEX idx_digests_lookup ON digests(agent_id, resolved_at, sent_at)",
+    "CREATE TABLE digest_items ( \
+        digest_id     INTEGER NOT NULL, \
+        idx           INTEGER NOT NULL, \
+        candidate_id  INTEGER NOT NULL, \
+        decision      TEXT, \
+        PRIMARY KEY (digest_id, idx), \
+        FOREIGN KEY (digest_id) REFERENCES digests(id) \
+    )",
+    "CREATE INDEX idx_digest_items_candidate ON digest_items(candidate_id)",
+    // 8 — C-Signal bindings. `wirken zirkel bind` writes one row;
+    // `wirken zirkel run`'s push step reads it. Keyed by `agent_id`
+    // because multi-zirkel is not in scope today (one bound
+    // conversation per agent is the contract); the CLI enforces
+    // idempotency / --force semantics on top.
+    "CREATE TABLE bindings ( \
+        agent_id         TEXT PRIMARY KEY, \
+        channel          TEXT NOT NULL, \
+        conversation_id  TEXT NOT NULL, \
+        bound_at         TEXT NOT NULL DEFAULT (datetime('now')) \
+    )",
 ];

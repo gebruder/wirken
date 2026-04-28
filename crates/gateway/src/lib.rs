@@ -5,6 +5,7 @@ pub mod cron;
 pub mod error;
 pub mod injection_detect;
 pub mod org;
+pub mod outbound_dispatcher;
 pub mod permissions;
 pub mod rate_limit;
 pub mod router;
