@@ -296,12 +296,11 @@ mod tests {
     }
 
     /// Layering correctness: a request to a denied host must fail at
-    /// the egress check WITHOUT consuming rate-limit budget. The
-    /// budget reads zero after the egress reject; a follow-up to an
-    /// allowed host succeeds and the budget shows exactly one
-    /// consumed slot.
+    /// the egress check WITHOUT consuming rate-limit budget. Named
+    /// to match `EgressDenied` so future readers grep this when
+    /// investigating layering questions.
     #[tokio::test]
-    async fn egress_reject_does_not_consume_rate_budget() {
+    async fn egress_denied_does_not_consume_rate_budget() {
         // Cap of 2 on the inner rate limiter so we can detect any
         // accounting that escaped the egress short-circuit.
         let c = EgressClient::with_rate_limit(RateLimitConfig {
