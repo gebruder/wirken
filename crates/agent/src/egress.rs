@@ -1,28 +1,31 @@
 //! Egress allowlist enforcement at the HTTP transport layer.
 //!
-//! [`EgressClient`] wraps `reqwest::Client` and refuses requests whose host
-//! is not in the agent's effective `permissions.egress.domains` allow-set.
-//! The check is host-based, pre-flight, and runs before any TCP connection
-//! is opened — denied hosts cost zero bytes on the wire.
-//!
-//! ## Layering with future rate limiting
-//!
-//! Per the design discussion under #76 (the rescoped permissions block),
-//! a future per-host rate limiter ("Zirkel's `RateLimitedClient`") sits
-//! *between* this client and `reqwest::Client`, NOT outside it:
+//! [`EgressClient`] is the outer transport wrapper:
 //!
 //! ```text
 //! caller → EgressClient → RateLimitedClient → reqwest::Client
 //! ```
 //!
-//! This ordering matters: a request to a denied host short-circuits at
-//! the egress check and never enters the rate-limit budget. Reversing
-//! the layers would have rate-limit accounting paying for requests
-//! that egress was always going to deny.
+//! The egress check runs first — host-based, pre-flight, before any
+//! TCP connection. Denied hosts cost zero bytes on the wire AND zero
+//! against the rate-limit budget. Only after the egress check passes
+//! does the request enter [`crate::rate_limit::RateLimitedClient`],
+//! where per-host daily caps and inter-request jitter are enforced
+//! before the underlying `reqwest::Client` actually issues bytes.
 //!
-//! When `RateLimitedClient` lands, this module's `inner` field becomes
-//! the rate-limited transport; the public surface (the `get`/`post`
-//! methods) is unchanged.
+//! Reversing the layers would have rate-limit accounting paying for
+//! requests egress was always going to deny.
+//!
+//! ## Two construction shapes
+//!
+//! - [`EgressClient::new`] — unrestricted rate limit (cap = u32::MAX,
+//!   no jitter). Used by the agent's tool registry where the LLM
+//!   drives `web_search` / `generate_image` ad hoc; there is no
+//!   daily-budget concept for chat-time tools.
+//! - [`EgressClient::with_rate_limit`] — caller supplies a
+//!   [`crate::rate_limit::RateLimitConfig`]. Used by the daily-fetch
+//!   orchestrator (Zirkel's `wirken zirkel run`) where the budget is
+//!   real and per-source.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
@@ -30,6 +33,7 @@ use std::sync::{Arc, RwLock};
 use reqwest::RequestBuilder;
 use thiserror::Error;
 
+use crate::rate_limit::{RateLimitConfig, RateLimitDenied, RateLimitedClient};
 use crate::skill_perms::{AllowSet, EffectiveProfile, EgressMode};
 
 /// What the wrapper enforces. Computed by [`Agent::attach_skills`] from
@@ -88,19 +92,29 @@ fn host_matches(host: &str, pattern: &str) -> bool {
     false
 }
 
-/// Pre-flight host check around `reqwest::Client`. The wrapper holds
-/// the enforcement policy in shared state so the agent can update it
-/// after attaching skills without rebuilding the client.
+/// Pre-flight host check around the inner [`RateLimitedClient`]. The
+/// wrapper holds the enforcement policy in shared state so the agent
+/// can update it after attaching skills without rebuilding the client.
 #[derive(Clone)]
 pub struct EgressClient {
-    inner: reqwest::Client,
+    inner: RateLimitedClient,
     enforcement: Arc<RwLock<EgressEnforcement>>,
 }
 
 impl EgressClient {
+    /// Construct with an unrestricted rate limit (no daily cap, no
+    /// jitter). Used by the agent's tool registry where chat-time
+    /// LLM-driven HTTP calls have no daily-budget concept.
     pub fn new() -> Self {
+        Self::with_rate_limit(RateLimitConfig::unrestricted_for_tests())
+    }
+
+    /// Construct with a caller-supplied rate-limit config. Used by the
+    /// daily-fetch orchestrator (Zirkel's `wirken zirkel run`) so each
+    /// source's per-day cap is honored at the transport layer.
+    pub fn with_rate_limit(config: RateLimitConfig) -> Self {
         Self {
-            inner: reqwest::Client::new(),
+            inner: RateLimitedClient::new(reqwest::Client::new(), config),
             enforcement: Arc::new(RwLock::new(EgressEnforcement::Unrestricted)),
         }
     }
@@ -114,19 +128,31 @@ impl EgressClient {
     }
 
     /// Pre-flight check: extract host from `url`, return `Err` if not
-    /// allowed. Caller must use the returned `RequestBuilder` rather
-    /// than constructing one against the inner client.
-    pub fn get(&self, url: &str) -> Result<RequestBuilder, EgressDenied> {
-        self.check(url)?;
-        Ok(self.inner.get(url))
+    /// allowed (egress) or if the rate-limit budget is exhausted.
+    /// Caller must use the returned `RequestBuilder` rather than
+    /// constructing one against the inner client.
+    ///
+    /// Async because the inner [`RateLimitedClient`] sleeps on
+    /// inter-request jitter when configured. With the unrestricted
+    /// rate-limit config (the agent default) jitter is zero and the
+    /// call returns synchronously without yielding.
+    pub async fn get(&self, url: &str) -> Result<RequestBuilder, HttpAccessDenied> {
+        self.check_egress(url).map_err(HttpAccessDenied::Egress)?;
+        self.inner
+            .get(url)
+            .await
+            .map_err(HttpAccessDenied::RateLimit)
     }
 
-    pub fn post(&self, url: &str) -> Result<RequestBuilder, EgressDenied> {
-        self.check(url)?;
-        Ok(self.inner.post(url))
+    pub async fn post(&self, url: &str) -> Result<RequestBuilder, HttpAccessDenied> {
+        self.check_egress(url).map_err(HttpAccessDenied::Egress)?;
+        self.inner
+            .post(url)
+            .await
+            .map_err(HttpAccessDenied::RateLimit)
     }
 
-    fn check(&self, url: &str) -> Result<(), EgressDenied> {
+    fn check_egress(&self, url: &str) -> Result<(), EgressDenied> {
         let host = url::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(|s| s.to_string()))
@@ -157,6 +183,18 @@ impl Default for EgressClient {
 )]
 pub struct EgressDenied {
     pub host: String,
+}
+
+/// Unified result for [`EgressClient`] gating. The two variants
+/// distinguish which layer rejected the request — egress allowlist
+/// (outer, runs first) or rate-limit budget (inner, only consulted
+/// after egress passes).
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum HttpAccessDenied {
+    #[error(transparent)]
+    Egress(#[from] EgressDenied),
+    #[error(transparent)]
+    RateLimit(#[from] RateLimitDenied),
 }
 
 #[cfg(test)]
@@ -216,38 +254,78 @@ mod tests {
         assert!(!e.allows("api.other.com"));
     }
 
-    #[test]
-    fn client_get_denies_when_host_not_allowed() {
+    #[tokio::test]
+    async fn client_get_denies_when_host_not_allowed() {
         let c = EgressClient::new();
         c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
             "allowed.example.com".to_string(),
         ])));
-        let err = c.get("https://denied.example.com/foo").unwrap_err();
-        assert_eq!(err.host, "denied.example.com");
+        let err = c.get("https://denied.example.com/foo").await.unwrap_err();
+        assert!(matches!(
+            err,
+            HttpAccessDenied::Egress(EgressDenied { ref host }) if host == "denied.example.com"
+        ));
     }
 
-    #[test]
-    fn client_get_allows_when_host_is_in_allowlist() {
+    #[tokio::test]
+    async fn client_get_allows_when_host_is_in_allowlist() {
         let c = EgressClient::new();
         c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
             "allowed.example.com".to_string(),
         ])));
-        assert!(c.get("https://allowed.example.com/foo").is_ok());
+        assert!(c.get("https://allowed.example.com/foo").await.is_ok());
     }
 
-    #[test]
-    fn client_default_state_is_unrestricted() {
+    #[tokio::test]
+    async fn client_default_state_is_unrestricted() {
         let c = EgressClient::new();
-        assert!(c.get("https://anywhere.example.com/foo").is_ok());
+        assert!(c.get("https://anywhere.example.com/foo").await.is_ok());
     }
 
-    #[test]
-    fn unparseable_url_is_denied() {
+    #[tokio::test]
+    async fn unparseable_url_is_denied() {
         let c = EgressClient::new();
         c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
             "ok.example.com".to_string(),
         ])));
-        let err = c.get("not a url").unwrap_err();
-        assert!(err.host.starts_with("<unparseable"));
+        let err = c.get("not a url").await.unwrap_err();
+        assert!(matches!(
+            err,
+            HttpAccessDenied::Egress(EgressDenied { ref host }) if host.starts_with("<unparseable")
+        ));
+    }
+
+    /// Layering correctness: a request to a denied host must fail at
+    /// the egress check WITHOUT consuming rate-limit budget. The
+    /// budget reads zero after the egress reject; a follow-up to an
+    /// allowed host succeeds and the budget shows exactly one
+    /// consumed slot.
+    #[tokio::test]
+    async fn egress_reject_does_not_consume_rate_budget() {
+        // Cap of 2 on the inner rate limiter so we can detect any
+        // accounting that escaped the egress short-circuit.
+        let c = EgressClient::with_rate_limit(RateLimitConfig {
+            default_daily_cap: 2,
+            jitter_min: std::time::Duration::ZERO,
+            jitter_max: std::time::Duration::ZERO,
+            ..Default::default()
+        });
+        c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
+            "allowed.example.com".to_string(),
+        ])));
+
+        // Three rejected requests to a non-allowlisted host. None
+        // should consume budget — otherwise the cap would be hit
+        // before the legitimate request below.
+        for _ in 0..3 {
+            let err = c.get("https://denied.example.com/x").await.unwrap_err();
+            assert!(matches!(err, HttpAccessDenied::Egress(_)));
+        }
+
+        // Allowed host: should succeed twice, then hit the cap.
+        assert!(c.get("https://allowed.example.com/a").await.is_ok());
+        assert!(c.get("https://allowed.example.com/b").await.is_ok());
+        let err = c.get("https://allowed.example.com/c").await.unwrap_err();
+        assert!(matches!(err, HttpAccessDenied::RateLimit(_)));
     }
 }
