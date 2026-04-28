@@ -282,6 +282,7 @@ Stage 7 — exploit_attempted resolves to: exploit_promoted_to_1_0 OR exploit_fa
       "stable_id": "sys/rpc/rpcsec_gss::sys/rpc/rpcsec_gss/svc_rpcsec_gss.c:1158:svc_rpc_gss_validate",
       "stream": "regression",
       "framing": ["auth", "memory_safety"],
+      "detection_source": "model_reasoning",
       "location": { "file": "sys/rpc/rpcsec_gss/svc_rpcsec_gss.c", "line_start": 1158, "line_end": 1215, "function": "svc_rpc_gss_validate" },
       "title": "Stack overflow in svc_rpc_gss_validate()",
       "summary": "...",
@@ -390,6 +391,24 @@ Closed:
 
 Required for the report-to-report diff ingestion behavior: tools pair runs by `(git_url, scope, qualifier)` and `pre_fix` precedes `post_fix` for the same target.
 
+### `findings[].gate_routed.tag` enum
+
+Closed:
+
+- `rubric_clarification` — the rubric does not cleanly tier this finding's class. The team's response is rubric refinement, then re-score against the refinement. Triggered by 3-way scoring disagreement where the cause is rubric-level, not finding-level.
+- `framing_split` — the finding admits multiple valid interpretations under the current rubric. The team's response is **gate-routed disclosed** — see the Disagreement-handling section in `SKILL.md`. Lyrik does not pick one interpretation and ship it as if there was a single answer; that would collapse advisor-posture to actor-posture and silence structural information lyrik is structurally arguing for.
+- `scope_expansion_required` — the candidate cannot be scored without expanding scope beyond the run plan. The team's response is to either expand scope in a follow-up run or accept the disclosure (A6, D1/D3 from run-001 are the type specimens).
+
+### `findings[].detection_source` enum
+
+Closed:
+
+- `model_reasoning` — produced by the framing pass through model reasoning over the recon output.
+- `static_prescreen` — produced by a deterministic pattern-match detector before the framing pass. Today's lyrik does not yet ship a static pre-screen; this enum value is reserved for the design that lands as item 4.
+- `both` — both detectors produced the candidate. Default for findings the framing pass and any future static pre-screen converge on.
+
+Detector disagreement (only one of the two detectors produces a candidate) is **not** the same as scoring disagreement. It is upstream of scoring (Stage 1, candidate generation). It does not route through the `scoring_disagreement` gate. The detector-level handling lives in item 12 (static pre-screen + detector provenance).
+
 ### Six ingestion behaviors the schema must support
 
 | Behavior | What it reads | How the schema supports it |
@@ -434,3 +453,55 @@ Required for the report-to-report diff ingestion behavior: tools pair runs by `(
 Surfaced 2026-04-28 from the OpenClaw scan. `skillfence` ("Runtime security monitor for OpenClaw skills. Watches what your installed skills actually DO — network calls, file access, credential reads, process activity. Not a scanner. A watchdog.") is a complementary posture to lyrik: lyrik audits *target code*; a runtime-watchdog mode would audit *running skill behavior*. Two postures, both legitimate.
 
 **Roadmap pointer, not a design item.** Research item, not roadmap. Don't expand into a design until there's a concrete user pulling for it.
+
+## 12. Static pre-screen for prompt_injection (Stage 1 detector with provenance, defence in depth)
+
+Surfaced 2026-04-28 from the OpenClaw scan. Multiple existing OpenClaw skills implement deterministic pattern matching for prompt-injection detection — `haoyuwang99/skill-guard`, `jamesouttake/skill-guard`, `0xmerkle/skill-guard-actor` (Lakera Guard wrapper), `eathon/clawscan-v2`, several others. The pattern is well-precedented field practice.
+
+**Re-scoped from an earlier framing.** The earlier framing called this "static pre-screen layered before the framing run to save tokens" — that's wrong. It conflated detector output with scoring output, and treated defence in depth as cost optimisation. The corrected scope below is what this item is for.
+
+### What this is
+
+A deterministic pattern-match detector that runs at **Stage 1 (candidate generation)**, parallel to the model-reasoning framing pass. It produces candidates with the same finding schema as model-reasoning candidates, tagged with `detection_source: "static_prescreen"` (item 9 schema enum).
+
+Pattern categories:
+
+- Hidden HTML comments containing imperative instructions
+- Zero-width Unicode characters in source files
+- Base64 / hex-encoded payloads embedded in comments or strings
+- Role-impersonation strings (`As an AI assistant`, `Ignore previous instructions`, etc.)
+- Dangerous frontmatter combinations in any consumed text resource
+- Encoding/obfuscation patterns (multi-layer encoding, unusual character sets)
+
+Each pattern is documented with rationale and false-positive shape. The screen produces candidates conservatively; the model-reasoning pass evaluates whether each pattern hit reflects a real concern.
+
+### Why defence in depth, not optimisation
+
+Static pattern detection and model-reasoning detection are different detectors with different failure modes:
+
+- **Static detection** is deterministic and brittle: catches known patterns reliably, misses novel ones.
+- **Model reasoning** is semantic and probabilistic: catches semantic intent including novel patterns; occasionally misses obvious patterns due to attention distribution or distraction.
+
+Running both gives defence in depth. The model-reasoning detector is *the thing being attacked* — an attacker who knows lyrik uses model reasoning crafts inputs that exploit attention failures. The static detector catches what model-reasoning misses; model-reasoning catches what static misses. Neither alone is sufficient; both together are stronger than either.
+
+### Detector disagreement is not scoring disagreement
+
+When the static pre-screen produces a candidate and the model-reasoning pass does not (or vice versa), the candidate flows through the funnel with `detection_source` set to whichever detector produced it. **This is not scoring disagreement** — that's the explicit lesson from the disagreement-semantics design (SKILL.md Scoring section).
+
+Detector disagreement is upstream of scoring. It sits at Stage 1. It does not route through `scoring_disagreement`. Detector-tuning is the team's response (do we trust the static screen on this pattern?), not rubric-tuning or framing-decision.
+
+### Open design questions
+
+- **What flag does a detector-only candidate carry?** Currently `detection_source: "static_prescreen"` or `"model_reasoning"` (vs `"both"`). Is that enough, or does a single-detector candidate need additional metadata indicating "the other detector evaluated and disagreed"?
+- **How does the team respond?** Detector-tuning is the answer in principle, but the operational shape (where does the tuning go, how does it persist across runs) is unspecified.
+- **Does single-detector status affect routing?** Should single-detector candidates flow through scoring normally, route to a `detector_review` gate, or get a separate stream? Each option has different implications for funnel accounting.
+- **Scanner outputs (semgrep, gitleaks, etc.) as a third detector class.** Do they take `detection_source: "scanner_<name>"`? The enum needs to handle this if so.
+- **Pattern catalog versioning.** When the static screen's pattern set evolves, runs against the same scope at different points in time will produce different candidate pools. Stable IDs (item 9) need to handle this; how?
+
+### What the disagreement-semantics design gave this item
+
+The earlier framing of "static pre-screen as token-cost optimisation" conflated detector output with scoring output. The disagreement-semantics design (SKILL.md Scoring section) made the distinction explicit: scoring disagreement is at Stage 4; detector disagreement is at Stage 1. They require different handling, different gates (or none), and different schema fields. This item now has a clean scope: static pre-screen as Stage 1 detector with provenance, paired with model-reasoning as a co-detector.
+
+### Worked cases
+
+Lyrik does not yet ship a static pre-screen. The worked-case evidence is **field practice from the OpenClaw scan** — multiple existing skills implement this pattern as standalone. That validates the design at the existence-proof level, but lyrik has no run-001-style direct evidence yet. This stub captures the re-scoped design and reserves the schema fields (`detection_source` enum in item 9). Implementation comes when funded.
