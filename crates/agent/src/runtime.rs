@@ -156,6 +156,13 @@ pub struct Agent {
     /// of the spawn call's `tools` field and the ceiling's
     /// `tool_allowlist`. `None` means no narrowing.
     restrict_tools: Option<BTreeSet<String>>,
+    /// Effective per-skill permissions for this agent, computed at
+    /// `attach_skills` time as the union of every loaded skill's
+    /// declared `permissions:` block. `EffectiveProfile::Legacy` when
+    /// no skills are attached or any attached skill is `Legacy`
+    /// (transitional during the migration window). Enforcement is
+    /// per-agent, not per-skill — see gebruder/wirken#76.
+    effective_permissions: crate::skill_perms::EffectiveProfile,
 }
 
 impl Agent {
@@ -227,6 +234,7 @@ impl Agent {
             subagent_depth: 0,
             auto_deny_above_tier: None,
             restrict_tools: None,
+            effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
         })
     }
 
@@ -304,6 +312,7 @@ impl Agent {
             subagent_depth: 0,
             auto_deny_above_tier: None,
             restrict_tools: None,
+            effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
         })
     }
 
@@ -449,10 +458,59 @@ impl Agent {
     /// [`crate::factory::AgentFactory`] to inject per-agent skills
     /// loaded once at startup, then rebuild the system prompt to
     /// include them.
-    pub fn attach_skills(&mut self, skills: Vec<Skill>, wasm_skills: Vec<WasmSkill>) {
+    pub fn attach_skills(
+        &mut self,
+        skills: Vec<Skill>,
+        wasm_skills: Vec<WasmSkill>,
+    ) -> Result<(), AgentError> {
+        let sources: Vec<crate::skill_perms::PermissionsSource> =
+            skills.iter().map(|s| s.permissions.clone()).collect();
+        let effective = crate::skill_perms::effective_for_skills(&sources)
+            .map_err(|e| AgentError::SkillLoad(format!("permissions merge: {e}")))?;
+        // Expand the `<workspace>` token in filesystem paths now that we
+        // know the workspace.
+        let effective = effective.expand_workspace(self.tools.workspace());
+        // Static check (#76 Phase 2.4): the agent's configured inference
+        // provider must satisfy the merged inference allow-set.
+        // `Legacy` short-circuits — admits any provider.
+        let provider = self.llm.config().provider.clone();
+        if !effective.allows_provider(&provider) {
+            return Err(AgentError::SkillLoad(format!(
+                "agent's inference provider '{provider}' is not in the effective \
+                 skill permissions inference.allow set"
+            )));
+        }
+        self.effective_permissions = effective;
         self.skills = skills;
         self.wasm_skills = wasm_skills;
         self.rebuild_system_prompt();
+        Ok(())
+    }
+
+    /// Defence-in-depth gate emitted before each LLM dispatch (#76 Phase
+    /// 2.4). Redundant with the static check in `attach_skills` for the
+    /// current architecture (the agent's provider is fixed at
+    /// construction), but the spec calls for a per-request check and the
+    /// cost is one method call. If the provider is rejected, an audit
+    /// event is emitted and the call short-circuits.
+    fn check_inference_or_deny(&self) -> Result<(), AgentError> {
+        let provider = &self.llm.config().provider;
+        if self.effective_permissions.allows_provider(provider) {
+            return Ok(());
+        }
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::SkillPermissionDenied {
+                axis: "inference".to_string(),
+                requested: provider.clone(),
+                agent_id: self.id.clone(),
+                trigger: self.current_trigger.clone(),
+            },
+        )?;
+        Err(AgentError::PermissionDenied(format!(
+            "inference provider '{provider}' is not in the agent's effective \
+             skill permissions inference.allow set"
+        )))
     }
 
     /// Attach a signing identity for session attestation. Item 8
@@ -660,6 +718,7 @@ impl Agent {
             tool_calls: None,
         }];
 
+        self.check_inference_or_deny()?;
         match self
             .llm
             .complete(&messages, &[], self.api_key.as_deref())
@@ -1007,6 +1066,7 @@ impl Agent {
                 },
             )?;
 
+            self.check_inference_or_deny()?;
             let started = std::time::Instant::now();
             let response = self
                 .llm
@@ -1221,6 +1281,7 @@ impl Agent {
             // Create a per-round channel for streaming events
             let (round_tx, mut round_rx) = tokio::sync::mpsc::channel(64);
 
+            self.check_inference_or_deny()?;
             // Spawn streaming in background, forward text deltas to caller
             let started = std::time::Instant::now();
             let response = {
@@ -1397,6 +1458,28 @@ impl Agent {
         {
             return Ok(crate::tool::ToolResult {
                 output: format!("tool '{name}' is not in this subagent's allowed tool set"),
+                success: false,
+            });
+        }
+
+        // Per-skill permission profile (#76): the agent's effective
+        // `permissions.tools.allow` filters every tool call. The LLM is
+        // shown only the allowed tools (see `snapshot_tool_defs`), but
+        // we re-check at dispatch in case the LLM ignores the surface.
+        // `EffectiveProfile::Legacy` short-circuits — agents with no
+        // skills attached, or with any Legacy skill, retain full surface.
+        if !self.effective_permissions.allows_tool(name) {
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::SkillPermissionDenied {
+                    axis: "tools".to_string(),
+                    requested: name.to_string(),
+                    agent_id: self.id.clone(),
+                    trigger: self.current_trigger.clone(),
+                },
+            )?;
+            return Ok(crate::tool::ToolResult {
+                output: format!("tool '{name}' is not in the agent's effective skill permissions"),
                 success: false,
             });
         }
@@ -2263,6 +2346,9 @@ impl Agent {
         } else {
             Vec::new()
         };
+        // Per-skill permission profile (#76): only surface tools the
+        // effective profile allows. `Legacy` admits everything.
+        defs.retain(|d| self.effective_permissions.allows_tool(&d.name));
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }

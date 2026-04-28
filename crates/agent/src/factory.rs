@@ -310,7 +310,7 @@ impl AgentFactory {
             cfg.sandbox.clone(),
         )?;
         // Inject the per-agent shared resources.
-        agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone());
+        agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone())?;
         if let Some(perms) = &self.permissions {
             agent.set_permissions(perms.clone());
         }

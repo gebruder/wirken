@@ -22,6 +22,12 @@ use serde::Deserialize;
 use thiserror::Error;
 
 const WILDCARD: &str = "*";
+/// Token in `filesystem.{read,write}_paths` that resolves to the agent's
+/// workspace at attach time. Skills that need general workspace access
+/// (the common case for general-purpose skills) declare
+/// `read_paths: ["<workspace>"]` rather than hard-coding a per-user path
+/// that the skill bundle cannot know.
+pub const WORKSPACE_TOKEN: &str = "<workspace>";
 
 /// Resolved profile after parse + validation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -318,6 +324,12 @@ fn resolve_paths(
             }
             return Err(PermissionsError::FilesystemWildcard);
         }
+        if entry == WORKSPACE_TOKEN {
+            // Kept as-is; the agent expands the token at `attach_skills`
+            // time when the workspace path is known.
+            out.insert(PathBuf::from(WORKSPACE_TOKEN));
+            continue;
+        }
         let expanded = expand_home(entry, home);
         if !expanded.is_absolute() {
             return Err(PermissionsError::NonAbsolutePath(expanded));
@@ -361,6 +373,134 @@ fn validate_host(s: &str) -> Result<(), PermissionsError> {
         return Err(PermissionsError::InvalidHost(s.to_string()));
     }
     Ok(())
+}
+
+/// Effective per-agent profile after attaching all skills. The agent's
+/// enforcement points consult this; `Legacy` short-circuits all checks
+/// (full surface) for the migration window.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum EffectiveProfile {
+    /// Full surface, no checks. Used when no skills are attached, or when
+    /// any attached skill is `PermissionsSource::Legacy`. Once the migration
+    /// window closes, the loader hard-fails on Legacy and this variant is
+    /// only reachable when zero skills are attached.
+    #[default]
+    Legacy,
+    /// Union of declared profiles. Every enforcement point honors it.
+    Resolved(PermissionProfile),
+}
+
+impl EffectiveProfile {
+    pub fn allows_tool(&self, name: &str) -> bool {
+        match self {
+            EffectiveProfile::Legacy => true,
+            EffectiveProfile::Resolved(p) => p.tools.allow.allows(name),
+        }
+    }
+
+    pub fn allows_host(&self, host: &str) -> bool {
+        match self {
+            EffectiveProfile::Legacy => true,
+            EffectiveProfile::Resolved(p) => match p.egress.mode {
+                EgressMode::Allowlist => host_in_set(host, &p.egress.domains),
+                EgressMode::Deny => false,
+            },
+        }
+    }
+
+    pub fn allows_provider(&self, name: &str) -> bool {
+        match self {
+            EffectiveProfile::Legacy => true,
+            EffectiveProfile::Resolved(p) => p.inference.allow.allows(name),
+        }
+    }
+
+    pub fn allows_read_path(&self, path: &Path) -> bool {
+        match self {
+            EffectiveProfile::Legacy => true,
+            EffectiveProfile::Resolved(p) => path_under_any(path, &p.filesystem.read_paths),
+        }
+    }
+
+    pub fn allows_write_path(&self, path: &Path) -> bool {
+        match self {
+            EffectiveProfile::Legacy => true,
+            EffectiveProfile::Resolved(p) => path_under_any(path, &p.filesystem.write_paths),
+        }
+    }
+
+    pub fn inference_default(&self) -> Option<&str> {
+        match self {
+            EffectiveProfile::Legacy => None,
+            EffectiveProfile::Resolved(p) => p.inference.default.as_deref(),
+        }
+    }
+
+    /// Replace every literal `<workspace>` token in filesystem paths with
+    /// the agent's actual workspace. No-op for `Legacy`.
+    pub fn expand_workspace(self, workspace: &Path) -> Self {
+        match self {
+            EffectiveProfile::Legacy => EffectiveProfile::Legacy,
+            EffectiveProfile::Resolved(mut p) => {
+                p.filesystem.write_paths =
+                    expand_workspace_set(p.filesystem.write_paths, workspace);
+                p.filesystem.read_paths = expand_workspace_set(p.filesystem.read_paths, workspace);
+                EffectiveProfile::Resolved(p)
+            }
+        }
+    }
+}
+
+fn expand_workspace_set(set: BTreeSet<PathBuf>, workspace: &Path) -> BTreeSet<PathBuf> {
+    set.into_iter()
+        .map(|p| {
+            if p == Path::new(WORKSPACE_TOKEN) {
+                workspace.to_path_buf()
+            } else {
+                p
+            }
+        })
+        .collect()
+}
+
+fn host_in_set(host: &str, domains: &AllowSet) -> bool {
+    match domains {
+        AllowSet::Wildcard => true,
+        AllowSet::Set(set) => set.iter().any(|pat| host_matches(host, pat)),
+    }
+}
+
+fn host_matches(host: &str, pattern: &str) -> bool {
+    if pattern == host {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        if let Some(dotidx) = host.find('.') {
+            return &host[dotidx + 1..] == suffix;
+        }
+    }
+    false
+}
+
+fn path_under_any(path: &Path, allowed: &BTreeSet<PathBuf>) -> bool {
+    allowed.iter().any(|root| path.starts_with(root))
+}
+
+/// Compute the effective profile for a set of attached skills. Returns
+/// `Legacy` if any skill is `Legacy` or the slice is empty; otherwise
+/// returns `Resolved(merge(...))`. Propagates `inference.default` conflict.
+pub fn effective_for_skills(sources: &[PermissionsSource]) -> Result<EffectiveProfile, MergeError> {
+    if sources.is_empty() {
+        return Ok(EffectiveProfile::Legacy);
+    }
+    let mut profiles = Vec::with_capacity(sources.len());
+    for s in sources {
+        match s {
+            PermissionsSource::Legacy => return Ok(EffectiveProfile::Legacy),
+            PermissionsSource::Explicit(p) => profiles.push(p.clone()),
+        }
+    }
+    Ok(EffectiveProfile::Resolved(merge(&profiles)?))
 }
 
 /// Union-merge a slice of declared per-skill profiles into one effective
@@ -685,5 +825,110 @@ inference:
     fn merge_empty_returns_default_deny() {
         let merged = merge(&[]).unwrap();
         assert_eq!(merged, PermissionProfile::default());
+    }
+
+    #[test]
+    fn effective_no_skills_is_legacy() {
+        let eff = effective_for_skills(&[]).unwrap();
+        assert_eq!(eff, EffectiveProfile::Legacy);
+    }
+
+    #[test]
+    fn effective_any_legacy_skill_is_legacy() {
+        let p = profile_with(r#"tools: { allow: ["read_file"] }"#);
+        let sources = vec![PermissionsSource::Explicit(p), PermissionsSource::Legacy];
+        let eff = effective_for_skills(&sources).unwrap();
+        assert_eq!(eff, EffectiveProfile::Legacy);
+    }
+
+    #[test]
+    fn effective_all_explicit_resolves_to_merged() {
+        let a = profile_with(r#"tools: { allow: ["read_file"] }"#);
+        let b = profile_with(r#"tools: { allow: ["write_file"] }"#);
+        let sources = vec![
+            PermissionsSource::Explicit(a),
+            PermissionsSource::Explicit(b),
+        ];
+        let eff = effective_for_skills(&sources).unwrap();
+        assert!(eff.allows_tool("read_file"));
+        assert!(eff.allows_tool("write_file"));
+        assert!(!eff.allows_tool("exec"));
+    }
+
+    #[test]
+    fn legacy_allows_everything() {
+        let eff = EffectiveProfile::Legacy;
+        assert!(eff.allows_tool("anything"));
+        assert!(eff.allows_host("anywhere.example.com"));
+        assert!(eff.allows_provider("any_provider"));
+        assert!(eff.allows_read_path(Path::new("/tmp/anything")));
+        assert!(eff.allows_write_path(Path::new("/tmp/anywhere")));
+    }
+
+    #[test]
+    fn resolved_egress_deny_mode_blocks_everything() {
+        let p = profile_with("{}"); // default-deny
+        let eff = EffectiveProfile::Resolved(p);
+        assert!(!eff.allows_host("foo.com"));
+    }
+
+    #[test]
+    fn resolved_egress_allowlist_with_specific_host() {
+        let p = profile_with(r#"egress: { mode: "allowlist", domains: ["api.example.com"] }"#);
+        let eff = EffectiveProfile::Resolved(p);
+        assert!(eff.allows_host("api.example.com"));
+        assert!(!eff.allows_host("other.example.com"));
+    }
+
+    #[test]
+    fn resolved_egress_wildcard_label_matches_subdomains() {
+        let p = profile_with(r#"egress: { mode: "allowlist", domains: ["*.example.com"] }"#);
+        let eff = EffectiveProfile::Resolved(p);
+        assert!(eff.allows_host("api.example.com"));
+        assert!(eff.allows_host("foo.example.com"));
+        assert!(!eff.allows_host("example.com"));
+        assert!(!eff.allows_host("api.other.com"));
+    }
+
+    #[test]
+    fn resolved_egress_global_wildcard_matches_anything() {
+        let p = profile_with(r#"egress: { mode: "allowlist", domains: ["*"] }"#);
+        let eff = EffectiveProfile::Resolved(p);
+        assert!(eff.allows_host("anywhere.example.com"));
+    }
+
+    #[test]
+    fn resolved_filesystem_paths_match_under_root() {
+        let p = profile_with(r#"filesystem: { write_paths: ["/home/x/work/"] }"#);
+        let eff = EffectiveProfile::Resolved(p);
+        assert!(eff.allows_write_path(Path::new("/home/x/work/")));
+        assert!(eff.allows_write_path(Path::new("/home/x/work/file.txt")));
+        assert!(eff.allows_write_path(Path::new("/home/x/work/sub/dir/file.txt")));
+        assert!(!eff.allows_write_path(Path::new("/home/x/other/")));
+        assert!(!eff.allows_write_path(Path::new("/home/x/")));
+    }
+
+    #[test]
+    fn effective_propagates_default_conflict() {
+        let a = profile_with(
+            r#"
+inference:
+  allow: ["ollama"]
+  default: "ollama"
+"#,
+        );
+        let b = profile_with(
+            r#"
+inference:
+  allow: ["privatemode"]
+  default: "privatemode"
+"#,
+        );
+        let err = effective_for_skills(&[
+            PermissionsSource::Explicit(a),
+            PermissionsSource::Explicit(b),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, MergeError::DefaultConflict { .. }));
     }
 }
