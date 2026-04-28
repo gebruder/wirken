@@ -108,7 +108,9 @@ This section exists so the team knows the workflow for cases the rubric does not
 
 A bulleted list of constraints that apply to the current run shape but are not permanent rubric content. Examples: kernel runtime out of scope for the exploit-attempt phase; channel adapters simulated; audit log location.
 
-This section is the place where the team disclosures *what this run did and didn't exercise*, so the report's funnel can name those categories explicitly. Distinct from the acknowledged-tensions section because constraints are about *this run*; tensions are about *the project*.
+The canonical home for this content is a separate file at `.lyrik/run-constraints.md`, with the rubric mirroring it under this heading and a `Per .lyrik/run-constraints.md:` pointer. The split lets the rubric stay stable across runs while the constraints file changes per engagement. The articulate phase consumes the constraints file directly; the rubric mirror is for the human reader.
+
+This section is the place where the team discloses *what this run did and didn't exercise*, so the report's funnel can name those categories explicitly (e.g. `stopped_at_0.5_kernel_runtime_oos` as a named line item, not a footnote). Distinct from the acknowledged-tensions section because constraints are about *this run*; tensions are about *the project*.
 
 ## Form
 
@@ -132,10 +134,6 @@ Each refinement commits to git like any code change. PR review is where the team
 - **CVSS-style numerical scoring.** Lyrik produces tier–grade–stream output, not a number. A rubric that tries to compute a CVSS-equivalent is fighting the tool's design.
 - **Editorial commentary.** *"This code is bad"* is not a rubric tier. *"Pre-auth out-of-bounds write of attacker-controlled bytes in kernel context"* is.
 - **Catch-all clauses.** *"Anything else the team considers severe"* is not a tier definition. If the team considers it severe, write the class definition.
-
-## Worked example
-
-The rubric used for the FreeBSD RPCSEC_GSS dogfood run (run-001) follows the seven-section structure documented above. The bundle is not yet published; when it is, this section will link to it. Until then, the section headings used in that rubric — software identification, what is a security property, what is not, tiers (CRITICAL/HIGH/MEDIUM/LOW/INFO each project-specific), acknowledged tensions, rubric-silent cases, run-specific constraints — are themselves the template.
 
 ## See also
 

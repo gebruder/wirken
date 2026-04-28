@@ -33,7 +33,7 @@ Pre-ship defensive review needs more than a findings list. It needs a record of 
 
 ### Your team writes the scoring guide
 
-Severity is what your team has written down and committed to the repository at `.lyrik/rubric.md`. The guide says what counts as critical for your project, what counts as high, what counts as low, which findings are ambiguous on purpose, and which hardening grades apply.
+Severity is what your team has [written down and committed](lyrik-rubric-authoring.md) to the repository at `.lyrik/rubric.md`. The guide says what counts as critical for your project, what counts as high, what counts as low, which findings are ambiguous on purpose, and which hardening grades apply.
 
 Each run scores against the guide your team committed. Different teams write different guides. The same team writes a different guide when the threat model changes.
 

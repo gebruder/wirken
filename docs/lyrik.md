@@ -26,7 +26,7 @@ The form of `rubric.md` and `context.md` is whatever the channel renders well �
 1. Install Wirken — see [getting-started.md](getting-started.md). Pick at least one LLM provider and at least one channel adapter that can carry the gates.
 2. From the assessed repo, message the agent: *"run a lyrik assessment, full type."*
 3. Phase 0 generates the project context and severity rubric, and routes them to `gates.phase_0_signoff`. If `.lyrik/config.json` is missing, Lyrik asks the user to nominate a destination.
-4. Review the artifacts in your channel. Approve, amend, or reject. Lyrik does not proceed on silence.
+4. Review the artifacts in your channel. Approve, amend, or reject. Lyrik does not proceed on silence. For guidance on what good rubric content looks like and what each section is for, see [lyrik-rubric-authoring.md](lyrik-rubric-authoring.md).
 5. On approval, Lyrik writes `.lyrik/rubric.md` and `.lyrik/context.md` to your repo. Commit them. Subsequent runs skip Phase 0 unless the dependency lockfile hash or framework version fingerprint has changed.
 6. Optional: populate `.lyrik/prior/` with past CVEs, pentest reports, and internal disclosures. The dedup gate reads this directory recursively. Without it, the regression-finding stream stays empty.
 7. Optional: populate `.lyrik/memory/` with ADRs, postmortems, threat models, and design docs (markdown). Add `.lyrik/memory/jira.csv` if you have a Jira export. Both feed Phase 0's hot-zones and per-component history. Without them, the project context still gets built — just without the history layer.
