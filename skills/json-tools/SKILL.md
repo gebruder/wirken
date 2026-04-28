@@ -5,6 +5,13 @@ metadata:
   wirken:
     requires:
       bins: [jq]
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # JSON Tools

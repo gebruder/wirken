@@ -5,6 +5,13 @@ metadata:
   wirken:
     requires:
       bins: [curl]
+permissions:
+  tools:
+    allow: [exec]
+  egress:
+    mode: deny
+  inference:
+    allow: ["*"]
 ---
 
 # Web Fetch
