@@ -1,0 +1,112 @@
+# Zirkel source allowlist.
+#
+# The single source of truth for what the aggregator may fetch. Each
+# entry pins a fetch method (RSS / API / scrape) and the host the
+# request goes to. The egress allowlist in `skills/aggregator/SKILL.md`
+# is the same set of hosts; until the loader derives one from the
+# other automatically, both are kept in sync by hand. Adding a source
+# means editing both files in the same commit.
+#
+# Schema is provisional — Scope A only ships the structure. Field
+# semantics get tightened when the fetcher lands.
+
+[[source]]
+class = "papers"
+name = "arxiv-cs-cy"
+host = "export.arxiv.org"
+method = "atom-api"
+endpoint = "https://export.arxiv.org/api/query?search_query=cat:cs.CY&sortBy=submittedDate&sortOrder=descending"
+notes = "arXiv computers-and-society. Public, no key. Honors >= 3s between requests."
+
+[[source]]
+class = "papers"
+name = "arxiv-cs-cr"
+host = "export.arxiv.org"
+method = "atom-api"
+endpoint = "https://export.arxiv.org/api/query?search_query=cat:cs.CR&sortBy=submittedDate&sortOrder=descending"
+notes = "arXiv cryptography-and-security. Same shape as cs-cy."
+
+[[source]]
+class = "papers"
+name = "ssrn-privacy"
+host = "papers.ssrn.com"
+method = "rss"
+endpoint = "https://papers.ssrn.com/sol3/JELJOUR_Results.cfm?form_name=journalBrowse&journal_id=privacy&fmt=rss"
+notes = "SSRN topic RSS. No public API; rate-limited by SSRN."
+
+[[source]]
+class = "regulator"
+name = "ftc-press"
+host = "www.ftc.gov"
+method = "rss"
+endpoint = "https://www.ftc.gov/news-events/news/press-releases/feed"
+
+[[source]]
+class = "regulator"
+name = "fcc-daily"
+host = "www.fcc.gov"
+method = "rss"
+endpoint = "https://www.fcc.gov/news-events/headlines/feed"
+
+[[source]]
+class = "regulator"
+name = "cfpb-blog"
+host = "www.consumerfinance.gov"
+method = "rss"
+endpoint = "https://www.consumerfinance.gov/about-us/blog/feed/"
+
+[[source]]
+class = "regulator"
+name = "hhs-ocr"
+host = "www.hhs.gov"
+method = "rss"
+endpoint = "https://www.hhs.gov/about/news/index.html"
+notes = "HIPAA enforcement actions. RSS endpoint may need verification at fetcher implementation time."
+
+[[source]]
+class = "regulator"
+name = "edpb"
+host = "edpb.europa.eu"
+method = "rss"
+endpoint = "https://edpb.europa.eu/news/news_en.rss"
+
+[[source]]
+class = "regulator"
+name = "ico-uk"
+host = "ico.org.uk"
+method = "rss"
+endpoint = "https://ico.org.uk/about-the-ico/media-centre/news-and-blogs/feed/"
+
+[[source]]
+class = "regulator"
+name = "cnil-fr"
+host = "www.cnil.fr"
+method = "rss"
+endpoint = "https://www.cnil.fr/fr/rss.xml"
+notes = "French content. Relevance scorer must accept multilingual input."
+
+[[source]]
+class = "legislative"
+name = "congress-gov"
+host = "api.congress.gov"
+method = "json-api"
+endpoint = "https://api.congress.gov/v3/"
+auth = "api_key_required"
+notes = "Free key. Stored in vault, never reaches the LLM."
+
+[[source]]
+class = "legislative"
+name = "govinfo-gov"
+host = "api.govinfo.gov"
+method = "json-api"
+endpoint = "https://api.govinfo.gov/"
+auth = "api_key_required"
+notes = "Free key. Federal Register filings, hearing transcripts."
+
+[[source]]
+class = "legislative"
+name = "federal-register"
+host = "www.federalregister.gov"
+method = "json-api"
+endpoint = "https://www.federalregister.gov/api/v1/"
+notes = "Public, no key."

@@ -75,6 +75,10 @@ enum Commands {
     #[command(subcommand)]
     Skills(SkillCommands),
 
+    /// Install and inspect bundled presets
+    #[command(subcommand)]
+    Preset(PresetCommands),
+
     /// Manage scheduled cron jobs
     #[command(subcommand)]
     Cron(CronCommands),
@@ -285,6 +289,17 @@ enum SkillCommands {
 }
 
 #[derive(Subcommand)]
+enum PresetCommands {
+    /// List bundled presets that can be installed
+    List,
+    /// Install a bundled preset to ~/.wirken/presets/<name>/
+    Install {
+        /// Preset name (e.g. `zirkel`)
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum CronCommands {
     /// List scheduled cron jobs
     List {
@@ -488,6 +503,10 @@ async fn main() -> Result<()> {
             SkillCommands::List => commands::skills::list().await,
             SkillCommands::Sign { dir } => commands::skills::sign(&dir).await,
             SkillCommands::Verify { dir } => commands::skills::verify(&dir).await,
+        },
+        Commands::Preset(cmd) => match cmd {
+            PresetCommands::List => commands::preset::list().await,
+            PresetCommands::Install { name } => commands::preset::install(&name).await,
         },
         Commands::Agents(cmd) => match cmd {
             AgentCommands::Add => commands::agents::add().await,
