@@ -1,6 +1,6 @@
 # Lyrik
 
-Lyrik audits a codebase against a scoring guide your team has written. The report shows every finding it considered, which it kept, which it threw out, which it could not decide on, and the reason for each.
+Lyrik audits a codebase against [a scoring guide your team has written](lyrik-rubric-authoring.md). The report shows every finding it considered, which it kept, which it threw out, which it could not decide on, and the reason for each.
 
 ## Who it is for
 
@@ -86,6 +86,7 @@ For the report shape and JSON schema, see `docs/design/lyrik-json-schema.md`.
 ## See also
 
 - `docs/lyrik.md` — setup, configuration, first-run.
+- `docs/lyrik-rubric-authoring.md` — how the team writes and refines `.lyrik/rubric.md`.
 - `docs/design/lyrik-json-schema.md` — JSON output schema; for implementers integrating Lyrik output (SIEM, ticketing, CI/CD), not for operators reading reports.
 - `skills/lyrik/SKILL.md` — the skill itself.
 - `skills/lyrik/FOLLOWUPS.md` — open design questions from real runs.
