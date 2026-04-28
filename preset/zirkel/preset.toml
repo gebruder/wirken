@@ -1,0 +1,24 @@
+# Zirkel preset declaration.
+#
+# A Wirken preset is a curated bundle of skills with a coherent posture —
+# permission profiles, invocation surfaces, and an inference policy that
+# survive merge at attach time. The agent loads the preset's skills as a
+# unit; the per-skill `permissions:` blocks (signed in each SKILL.md
+# frontmatter) merge to the agent's effective profile via the union
+# semantics established in #76.
+#
+# Channel adapter, sources.toml shape, fetcher/cron wiring, and the
+# librarian's retrieval surface are not yet implemented. This file
+# declares what the preset *is*; the loader (Scope A) verifies the
+# bundle is internally coherent. Later scopes wire the runtime pieces.
+
+[preset]
+name = "zirkel"
+description = "Locked-down research aggregator for non-technical users — daily fetch + librarian over the kept set"
+version = "0.1.0"
+
+# Skills bundled with this preset. Each must exist as a subdirectory
+# under `skills/` with a `SKILL.md`. Order is irrelevant — the agent
+# computes the effective profile as a union and skill-name uniqueness
+# is enforced at attach time.
+skills = ["aggregator", "librarian"]

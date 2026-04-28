@@ -9,6 +9,7 @@ pub mod doctor;
 pub mod mcp;
 pub mod mcp_proxy;
 pub mod permission;
+pub mod preset;
 pub mod run;
 pub mod service;
 pub mod session;
