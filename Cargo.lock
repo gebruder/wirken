@@ -6543,8 +6543,10 @@ dependencies = [
  "console",
  "dialoguer",
  "ed25519-dalek",
+ "libc",
  "openssl",
  "reqwest 0.13.2",
+ "rusqlite",
  "rustls 0.23.38",
  "serde",
  "serde_json",
@@ -6696,6 +6698,7 @@ dependencies = [
  "uuid",
  "wirken-agent",
  "wirken-audit",
+ "wirken-ipc",
  "wirken-skill-store",
 ]
 

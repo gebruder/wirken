@@ -144,6 +144,16 @@ pub struct AgentStaticConfig {
     /// `provider.json` (or per-agent config in a future pass). The
     /// factory clones this into every waked Agent's `ToolRegistry`.
     pub sandbox: crate::sandbox::SandboxConfig,
+    /// Additional [`InboundInterceptor`]s registered on every waked
+    /// Agent for this agent_id, in registration order, after the
+    /// built-in slash interceptor. The Arc is shared across wakes —
+    /// interceptors hold their own internal state (SQLite handle,
+    /// etc.) and are `Send + Sync`. Empty by default; the gateway's
+    /// startup wire-up populates this from `wirken_zirkel`'s
+    /// bindings table when zirkel is configured.
+    ///
+    /// [`InboundInterceptor`]: crate::inbound_interceptor::InboundInterceptor
+    pub extra_interceptors: Vec<Arc<dyn crate::inbound_interceptor::InboundInterceptor>>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -330,6 +340,9 @@ impl AgentFactory {
         // the gateway config store.
         agent.attach_factory(self.weak());
         agent.attach_subagent_ceilings(cfg.allowed_subagents.clone());
+        for interceptor in &cfg.extra_interceptors {
+            agent.attach_interceptor(interceptor.clone());
+        }
 
         let arc = Arc::new(AsyncMutex::new(agent));
 
