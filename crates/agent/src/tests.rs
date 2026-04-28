@@ -126,6 +126,7 @@ fn load_skill_from_markdown() {
 name: weather
 description: "Get current weather via wttr.in"
 metadata: { "wirken": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
+permissions: {}
 ---
 
 # Weather Skill
@@ -149,7 +150,12 @@ Use `curl wttr.in/{city}` to get current weather.
 }
 
 #[test]
-fn load_skill_no_frontmatter() {
+fn load_skill_no_frontmatter_fails_post_flip() {
+    // Pre-#76 hard-fail flip, a SKILL.md with no frontmatter loaded
+    // with directory-name fallback. Post-flip, every skill must declare
+    // a `permissions:` block, which requires frontmatter, so no-frontmatter
+    // skills no longer load. SkillLoader::load_dir logs and skips per-file
+    // errors, so the directory-level test sees an empty result.
     let tmp = TempDir::new().unwrap();
     let skill_dir = tmp.path().join("notes");
     std::fs::create_dir(&skill_dir).unwrap();
@@ -160,9 +166,7 @@ fn load_skill_no_frontmatter() {
     .unwrap();
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].name, "notes"); // Falls back to directory name
-    assert!(skills[0].body.contains("Just a plain skill"));
+    assert!(skills.is_empty(), "no-frontmatter skill should be skipped");
 }
 
 #[test]
@@ -175,6 +179,7 @@ fn load_skill_no_required_bins() {
         r#"---
 name: summarize
 description: "Summarize text"
+permissions: {}
 ---
 
 Summarize the given text concisely.
@@ -199,6 +204,7 @@ fn load_skill_missing_bin() {
 name: impossible
 description: "Needs a nonexistent binary"
 metadata: { "openclaw": { "requires": { "bins": ["nonexistent_binary_xyz_999"] } } }
+permissions: {}
 ---
 
 This skill requires a binary that doesn't exist, declared under the
@@ -221,7 +227,9 @@ fn load_multiple_skills() {
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(
             dir.join("SKILL.md"),
-            format!("---\nname: {name}\ndescription: skill {name}\n---\n\nBody of {name}."),
+            format!(
+                "---\nname: {name}\ndescription: skill {name}\npermissions: {{}}\n---\n\nBody of {name}."
+            ),
         )
         .unwrap();
     }
@@ -247,17 +255,14 @@ fn load_nonexistent_dir() {
     assert!(skills.is_empty());
 }
 
-/// #76 Phase 4 migration: every bundled SKILL.md must declare an
-/// explicit `permissions:` block. None of them should fall through to
-/// `PermissionsSource::Legacy` once the migration sweep is complete.
-/// Catches silent regressions if a future skill is added without a
-/// block, or if the loader stops parsing the block correctly.
+/// Every bundled SKILL.md must load successfully. Post-migration-flip
+/// (#76 follow-up), a missing `permissions:` block is a hard load
+/// error rather than a deprecation warning, so this test also catches
+/// any future bundled skill added without a block.
 #[test]
-fn every_bundled_skill_has_explicit_permissions() {
+fn every_bundled_skill_loads_with_a_permissions_block() {
     let tmp = TempDir::new().unwrap();
     crate::bundled_skills::install_bundled_skills(tmp.path()).unwrap();
-    // Per-skill load_file so a parse error names the failing skill
-    // rather than silently dropping it from the load_dir count.
     for entry in std::fs::read_dir(tmp.path()).unwrap() {
         let path = entry.unwrap().path();
         if !path.is_dir() {
@@ -267,23 +272,35 @@ fn every_bundled_skill_has_explicit_permissions() {
         if !skill_file.exists() {
             continue;
         }
-        let skill = SkillLoader::load_file(&skill_file).unwrap_or_else(|e| {
+        SkillLoader::load_file(&skill_file).unwrap_or_else(|e| {
             panic!(
                 "bundled skill at {} failed to load: {e}",
                 skill_file.display()
             )
         });
-        match &skill.permissions {
-            crate::skill_perms::PermissionsSource::Explicit(_) => {}
-            crate::skill_perms::PermissionsSource::Legacy => {
-                panic!(
-                    "bundled skill '{}' has no explicit permissions block — \
-                     migration sweep regression",
-                    skill.name
-                );
-            }
-        }
     }
+}
+
+/// Hard-fail flip (#76 follow-up): a SKILL.md without a `permissions:`
+/// block is a load error, not a deprecation warning. Regression test
+/// against future code that softens this back to a warning.
+#[test]
+fn skill_without_permissions_block_fails_to_load() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("legacy_skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_file = skill_dir.join("SKILL.md");
+    std::fs::write(
+        &skill_file,
+        "---\nname: legacy_skill\ndescription: no permissions block\n---\n\nBody.\n",
+    )
+    .unwrap();
+    let err = SkillLoader::load_file(&skill_file).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("no `permissions:` block"),
+        "expected hard-fail message, got: {msg}"
+    );
 }
 
 /// Migrating to per-skill permissions must not break the merge step
@@ -295,15 +312,16 @@ fn bundled_skills_merge_into_a_resolved_effective_profile() {
     let tmp = TempDir::new().unwrap();
     crate::bundled_skills::install_bundled_skills(tmp.path()).unwrap();
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
-    let sources: Vec<_> = skills.iter().map(|s| s.permissions.clone()).collect();
-    let eff = crate::skill_perms::effective_for_skills(&sources)
+    let profiles: Vec<_> = skills.iter().map(|s| s.permissions.clone()).collect();
+    let eff = crate::skill_perms::effective_for_skills(&profiles)
         .expect("bundled skills should merge cleanly");
-    // None of the bundled skills declare Legacy, so the merge must
-    // produce Resolved, not Legacy.
     match eff {
         crate::skill_perms::EffectiveProfile::Resolved(_) => {}
         crate::skill_perms::EffectiveProfile::Legacy => {
-            panic!("bundled skills merged to Legacy — at least one missed migration")
+            panic!(
+                "bundled skills merged to Legacy — only the empty-attach case \
+                 should produce Legacy"
+            )
         }
     }
 }
@@ -318,7 +336,7 @@ fn skill_prompt_generation() {
             body: "Use curl wttr.in".into(),
             path: PathBuf::new(),
             available: true,
-            permissions: crate::skill_perms::PermissionsSource::Legacy,
+            permissions: crate::skill_perms::PermissionProfile::default(),
         },
         Skill {
             name: "unavailable".into(),
@@ -327,7 +345,7 @@ fn skill_prompt_generation() {
             body: "Should not appear".into(),
             path: PathBuf::new(),
             available: false,
-            permissions: crate::skill_perms::PermissionsSource::Legacy,
+            permissions: crate::skill_perms::PermissionProfile::default(),
         },
     ];
 
@@ -884,7 +902,7 @@ fn agent_loads_skills() {
     std::fs::create_dir(&weather).unwrap();
     std::fs::write(
         weather.join("SKILL.md"),
-        "---\nname: weather\ndescription: get weather\n---\nUse curl wttr.in",
+        "---\nname: weather\ndescription: get weather\npermissions: {}\n---\nUse curl wttr.in",
     )
     .unwrap();
 
