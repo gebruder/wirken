@@ -22,6 +22,16 @@ use wirken_gateway::permissions::{PermissionCheck, PermissionStore, PermissionTi
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
 
+/// Which side of the filesystem axis a built-in tool call exercises.
+/// Used by [`Agent::fs_axis_for_call`] and the dispatch gate (#76 Phase
+/// 2.3). `read_file` / `list_files` are read; `write_file` /
+/// `generate_image` are write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FsAxis {
+    Read,
+    Write,
+}
+
 /// Item 6 slice 1 — hard cap on the depth of `spawn_subagent` calls,
 /// independent of any per-ceiling configuration. Even with badly
 /// configured ceilings the harness refuses to nest deeper than this.
@@ -480,11 +490,54 @@ impl Agent {
                  skill permissions inference.allow set"
             )));
         }
+        // Push the egress enforcement to the tool registry's HTTP client
+        // so built-in tools (web_search, generate_image) honor the agent's
+        // effective egress allow-set (#76 Phase 2.2).
+        self.tools
+            .set_egress_enforcement(crate::egress::EgressEnforcement::from_profile(&effective));
         self.effective_permissions = effective;
         self.skills = skills;
         self.wasm_skills = wasm_skills;
         self.rebuild_system_prompt();
         Ok(())
+    }
+
+    /// Map a tool call to a (filesystem axis, absolutized requested path)
+    /// pair when the tool is a built-in file tool. Returns `None` for tool
+    /// calls that don't touch the filesystem in a path-addressable way
+    /// (`exec`, `web_search`, MCP, Wasm, etc. — `exec` shells out and is
+    /// gated by the tools axis instead). The path is absolutized against
+    /// the agent's workspace so the comparison against the (already
+    /// workspace-expanded) allow-set is apples to apples.
+    fn fs_axis_for_call(&self, name: &str, arguments: &str) -> Option<(FsAxis, PathBuf)> {
+        let axis = match name {
+            "read_file" | "list_files" => FsAxis::Read,
+            "write_file" => FsAxis::Write,
+            // generate_image writes an output file under the workspace.
+            "generate_image" => FsAxis::Write,
+            _ => return None,
+        };
+        let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
+        // `list_files` may omit `path` (defaults to workspace root).
+        // `generate_image` uses `filename` not `path` and writes inside
+        // the workspace; treat the workspace as the requested path so a
+        // skill that allow-listed `<workspace>` can still call it.
+        let raw_path: Option<&str> = match name {
+            "generate_image" => None,
+            _ => args.get("path").and_then(|v| v.as_str()),
+        };
+        let absolute = match raw_path {
+            None => self.tools.workspace().to_path_buf(),
+            Some(p) => {
+                let candidate = PathBuf::from(p);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    self.tools.workspace().join(candidate)
+                }
+            }
+        };
+        Some((axis, absolute))
     }
 
     /// Defence-in-depth gate emitted before each LLM dispatch (#76 Phase
@@ -1484,6 +1537,47 @@ impl Agent {
             });
         }
 
+        // Filesystem gate (#76 Phase 2.3): inner tighter check on top of
+        // the cap-std workspace scope. cap-std refuses absolute paths and
+        // parent traversal at the syscall layer; this gate enforces the
+        // skill-declared `filesystem.{read,write}_paths` allowlist on top
+        // of that. Two-layer defense — cap-std is the outer guarantee,
+        // the permission profile is the inner allowlist. `Legacy`
+        // short-circuits.
+        if let Some((axis, requested)) = self.fs_axis_for_call(name, arguments) {
+            let allowed = match axis {
+                FsAxis::Read => self.effective_permissions.allows_read_path(&requested),
+                FsAxis::Write => self.effective_permissions.allows_write_path(&requested),
+            };
+            if !allowed {
+                let axis_str = match axis {
+                    FsAxis::Read => "filesystem.read",
+                    FsAxis::Write => "filesystem.write",
+                };
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SkillPermissionDenied {
+                        axis: axis_str.to_string(),
+                        requested: requested.display().to_string(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                    },
+                )?;
+                return Ok(crate::tool::ToolResult {
+                    output: format!(
+                        "{} on path '{}' is not in the agent's effective skill permissions {} allow-set",
+                        match axis {
+                            FsAxis::Read => "read",
+                            FsAxis::Write => "write",
+                        },
+                        requested.display(),
+                        axis_str,
+                    ),
+                    success: false,
+                });
+            }
+        }
+
         // Org-level allow/deny check: applied before the tier
         // permission check so a blocked tool never goes to the
         // approval prompt, never touches the sandbox, and never
@@ -1606,7 +1700,32 @@ impl Agent {
         }
 
         // Otherwise, built-in tools.
-        self.tools.execute(name, arguments).await
+        match self.tools.execute(name, arguments).await {
+            Ok(r) => Ok(r),
+            // #76 Phase 2.2: egress denial bubbles up from the
+            // wrapped HTTP client. Emit the audit event here, then
+            // surface a non-success ToolResult to the LLM rather
+            // than propagating the error out of the agent.
+            Err(AgentError::EgressDenied { host }) => {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SkillPermissionDenied {
+                        axis: "egress".to_string(),
+                        requested: host.clone(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                    },
+                )?;
+                Ok(crate::tool::ToolResult {
+                    output: format!(
+                        "egress denied: host '{host}' is not in the agent's \
+                         effective skill permissions egress allow-set"
+                    ),
+                    success: false,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Execute a single tool call and handle permission denials.

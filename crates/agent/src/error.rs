@@ -87,4 +87,14 @@ pub enum AgentError {
     /// `status: "rounds_exceeded"` in the `SubagentResult` envelope.
     #[error("subagent rounds budget exceeded after {rounds} rounds")]
     RoundsExceeded { rounds: usize },
+
+    /// #76 Phase 2.2: a built-in tool tried to reach a host that the
+    /// agent's effective skill permissions egress allow-set rejects.
+    /// The agent's dispatcher catches this variant, emits a
+    /// `SkillPermissionDenied` audit event, and returns a non-success
+    /// `ToolResult` to the LLM rather than propagating the error up.
+    #[error(
+        "egress denied: host '{host}' is not in the agent's effective skill permissions egress allow-set"
+    )]
+    EgressDenied { host: String },
 }
