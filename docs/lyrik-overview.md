@@ -90,4 +90,4 @@ For the report shape and JSON schema, see `docs/design/lyrik-json-schema.md`.
 - `docs/design/lyrik-json-schema.md` — JSON output schema; for implementers integrating Lyrik output (SIEM, ticketing, CI/CD), not for operators reading reports.
 - `skills/lyrik/SKILL.md` — the skill itself.
 - `skills/lyrik/FOLLOWUPS.md` — open design questions from real runs.
-- `wirken.ai/lyrik` — public face (planned).
+- `wirken.ai/lyrik`
