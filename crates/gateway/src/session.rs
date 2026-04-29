@@ -235,10 +235,7 @@ impl SessionStore {
 }
 
 fn generate_session_id() -> String {
-    use rand::Rng;
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
