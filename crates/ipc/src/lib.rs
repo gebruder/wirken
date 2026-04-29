@@ -20,7 +20,7 @@ pub use channel::{AuthenticatedChannel, Channel, ChannelMismatch, SessionHandle,
 pub use error::HandshakeError;
 pub use error::IpcError;
 pub use principal::{ParsePrincipalError, Principal};
-pub use stream::{BoxStream, Stream};
+pub use stream::{BoxStream, Listener, Stream, bind, connect};
 
 #[cfg(unix)]
 pub use stream::test_pair;
