@@ -41,6 +41,7 @@ pub struct AuditQuery {
     pub action: Option<String>,
     pub channel: Option<String>,
     pub actor: Option<String>,
+    pub session: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
     pub limit: Option<usize>,
