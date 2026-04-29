@@ -22,6 +22,7 @@ rusqlite = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 cron = { workspace = true }
 reqwest = { workspace = true }
 base64 = "0.22"
