@@ -1,16 +1,23 @@
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::SigningKey;
+#[cfg(unix)]
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use rand::Rng;
 
+#[cfg(unix)]
 use crate::error::HandshakeError;
+#[cfg(unix)]
 use crate::transport::{FrameReader, FrameWriter};
+#[cfg(unix)]
 use crate::wirken_capnp::frame;
 
+#[cfg(unix)]
 const CHALLENGE_NONCE_SIZE: usize = 32;
 
 /// Domain-separated prefix for handshake signatures. Distinct from
 /// the MCP proxy's `HANDSHAKE_DOMAIN` so a signature from one
 /// handshake cannot be replayed on the other even if the same
 /// signing key is reused across both.
+#[cfg(unix)]
 const HANDSHAKE_DOMAIN: &[u8] = b"wirken-ipc-adapter-handshake-v1\x00";
 
 /// Build the signed payload. `HANDSHAKE_DOMAIN || adapter_id || 0x00 || nonce`.
@@ -21,6 +28,7 @@ const HANDSHAKE_DOMAIN: &[u8] = b"wirken-ipc-adapter-handshake-v1\x00";
 /// matching) would let a sig produced for one adapter verify
 /// under another. The binding is now at the crypto layer, not
 /// only in the lookup.
+#[cfg(unix)]
 fn signed_payload(adapter_id: &str, nonce: &[u8]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(HANDSHAKE_DOMAIN.len() + adapter_id.len() + 1 + nonce.len());
     msg.extend_from_slice(HANDSHAKE_DOMAIN);
@@ -73,6 +81,7 @@ impl AdapterIdentity {
     }
 
     /// Sign a message.
+    #[cfg(unix)]
     fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key.sign(message)
     }
@@ -84,6 +93,7 @@ impl AdapterIdentity {
 /// 2. Sign nonce with Ed25519 private key
 /// 3. Send AuthResponse (public key + signature + adapter ID)
 /// 4. Receive AuthResult (accepted/rejected)
+#[cfg(unix)]
 pub async fn perform_adapter_handshake(
     reader: &mut FrameReader,
     writer: &mut FrameWriter,
@@ -170,6 +180,7 @@ pub async fn perform_adapter_handshake(
 ///
 /// `verify_adapter` is called with (adapter_id, public_key_bytes) and should
 /// return Ok(()) if the adapter is registered and the public key matches.
+#[cfg(unix)]
 pub async fn perform_gateway_handshake<F>(
     reader: &mut FrameReader,
     writer: &mut FrameWriter,
@@ -274,6 +285,7 @@ where
 }
 
 /// Send a rejection result (gateway helper).
+#[cfg(unix)]
 pub async fn send_rejection(writer: &mut FrameWriter, reason: &str) -> Result<(), HandshakeError> {
     let mut msg = capnp::message::Builder::new_default();
     {

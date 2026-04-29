@@ -39,6 +39,31 @@ impl Stream for tokio::net::UnixStream {
     }
 }
 
+// Windows named-pipe Stream impls. The peer-SID extraction lands in
+// the next PR alongside the orchestrator integration and the audit
+// event for refused pushes; for now `peer_principal` returns an
+// `Unsupported` IO error so the trait surface is complete and the
+// crate compiles on windows.
+#[cfg(windows)]
+impl Stream for tokio::net::windows::named_pipe::NamedPipeServer {
+    fn peer_principal(&self) -> Result<Principal, IpcError> {
+        Err(IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "peer_principal not yet implemented for named-pipe server",
+        )))
+    }
+}
+
+#[cfg(windows)]
+impl Stream for tokio::net::windows::named_pipe::NamedPipeClient {
+    fn peer_principal(&self) -> Result<Principal, IpcError> {
+        Err(IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "peer_principal not yet implemented for named-pipe client",
+        )))
+    }
+}
+
 /// Boxed [`Stream`] suitable for sending across tokio tasks.
 pub type BoxStream = Box<dyn Stream + Send>;
 
