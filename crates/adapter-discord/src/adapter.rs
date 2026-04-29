@@ -6,13 +6,14 @@ use serenity::all::{
     ChannelId, Context, CreateMessage, EventHandler, GatewayIntents, Message as DcMessage,
     MessageId, Ready,
 };
-use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::{DiscordFormatter, OutboundFormatter};
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
+use wirken_ipc::{
+    AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
+    split_stream,
+};
 
 use crate::convert;
 use crate::error::DiscordError;
@@ -34,7 +35,7 @@ impl DiscordAdapter {
     /// Connect to the gateway, authenticate, then run the bot.
     pub async fn run(&self, socket_path: &Path) -> Result<(), DiscordError> {
         tracing::info!("Connecting to gateway at {}", socket_path.display());
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = connect(socket_path).await?;
         let (mut reader, mut writer) = split_stream(stream);
 
         tracing::info!("Performing handshake as '{}'", self.identity.adapter_id());
@@ -86,7 +87,7 @@ impl DiscordAdapter {
 
 /// Serenity event handler that forwards Discord messages to the Wirken gateway.
 struct Handler {
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
     bot_id: Arc<Mutex<u64>>,
     http_slot: Arc<Mutex<Option<Arc<serenity::http::Http>>>>,
 }
@@ -118,7 +119,7 @@ impl EventHandler for Handler {
         let mut capnp_msg = capnp::message::Builder::new_default();
         convert::discord_to_inbound(&msg, bot_id, &mut capnp_msg);
 
-        let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = self.writer.lock().await;
+        let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = self.writer.lock().await;
         if let Err(e) = w.write_message(&capnp_msg).await {
             tracing::error!("Failed to send inbound to gateway: {e}");
         } else {
@@ -133,9 +134,9 @@ impl EventHandler for Handler {
 
 /// Handle outbound messages from gateway and send via Discord.
 async fn handle_outbound(
-    mut reader: FrameReader,
+    mut reader: IpcFrameReader,
     http: Arc<Mutex<Option<Arc<serenity::http::Http>>>>,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) {
     loop {
         let msg = match reader.read_message().await {
@@ -214,7 +215,7 @@ async fn handle_outbound(
 
                 let mut result_msg = capnp::message::Builder::new_default();
                 convert::build_outbound_result(&mut result_msg, success, &msg_id, &error);
-                let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
+                let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = writer.lock().await;
                 if let Err(e) = w.write_message(&result_msg).await {
                     tracing::error!("Failed to send outbound result: {e}");
                 }
@@ -230,7 +231,7 @@ enum FrameAction {
 }
 
 /// Send periodic heartbeats to the gateway.
-async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
+async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
     let mut seq = 0u64;
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
 
@@ -241,7 +242,7 @@ async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
         let mut msg = capnp::message::Builder::new_default();
         convert::build_heartbeat(&mut msg, seq);
 
-        let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
+        let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = writer.lock().await;
         if let Err(e) = w.write_message(&msg).await {
             tracing::error!("Heartbeat send failed: {e}");
             break;

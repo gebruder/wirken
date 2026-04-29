@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 wirken-vault = { path = "../vault" }
 wirken-gateway = { path = "../gateway" }
+wirken-ipc = { path = "../ipc" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

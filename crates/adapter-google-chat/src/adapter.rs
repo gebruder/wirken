@@ -2,12 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
+use wirken_ipc::{
+    AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
+    split_stream,
+};
 
 use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert;
@@ -57,7 +59,7 @@ impl GoogleChatAdapter {
     /// Connect to gateway, authenticate, then run the webhook listener.
     pub async fn run(&self, socket_path: &Path) -> Result<(), GoogleChatError> {
         tracing::info!("Connecting to gateway at {}", socket_path.display());
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = connect(socket_path).await?;
         let (mut reader, mut writer) = split_stream(stream);
 
         tracing::info!("Performing handshake as '{}'", self.identity.adapter_id());
@@ -113,7 +115,7 @@ pub(crate) async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
     jwks: &JwksCache,
     expected_aud: &str,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) -> Result<(), GoogleChatError> {
     let mut buf = vec![0u8; 65536];
     let n = stream
@@ -172,9 +174,9 @@ pub(crate) async fn handle_webhook(
 
 /// Handle outbound messages from gateway — POST to Google Chat REST API.
 async fn handle_outbound(
-    mut reader: FrameReader,
+    mut reader: IpcFrameReader,
     service_account_token: String,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) {
     let http = reqwest::Client::new();
 
@@ -270,7 +272,7 @@ enum FrameAction {
     Skip,
 }
 
-async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
+async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
     let mut seq = 0u64;
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
     loop {
