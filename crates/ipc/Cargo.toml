@@ -19,6 +19,15 @@ thiserror = { workspace = true }
 [build-dependencies]
 capnpc = "0.25"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
