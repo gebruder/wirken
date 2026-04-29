@@ -70,6 +70,164 @@ impl SandboxMode {
     }
 }
 
+/// Which interpreter the `exec` tool uses when running commands on
+/// the host (i.e. when `SandboxMode::Off` is configured).
+///
+/// `Auto` is the default and the only sensible choice for
+/// cross-platform skill portability: on unix it always resolves to
+/// `Sh`; on windows it probes PATH in order `sh > powershell > cmd`
+/// so that a skill written against POSIX shell semantics keeps
+/// working when the operator has Git for Windows installed.
+///
+/// Operators can pin a specific shell via `sandbox.json`'s `shell`
+/// field if their skill set assumes a particular interpreter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShellMode {
+    /// Probe PATH at exec time. `sh > powershell > cmd` on windows;
+    /// always `sh` on unix.
+    #[default]
+    Auto,
+    /// POSIX `sh -c`. Available everywhere on unix, and on windows
+    /// when Git for Windows (or another sh implementation) is on
+    /// PATH.
+    Sh,
+    /// PowerShell: prefers `pwsh.exe` (PowerShell Core) and falls
+    /// back to `powershell.exe` (Windows PowerShell 5.1) via
+    /// `-Command`.
+    Powershell,
+    /// `cmd.exe /C`. Windows-native, semantically distinct from sh.
+    Cmd,
+}
+
+impl ShellMode {
+    pub fn from_str_config(s: &str) -> Self {
+        match s {
+            "auto" => Self::Auto,
+            "sh" => Self::Sh,
+            "powershell" | "pwsh" => Self::Powershell,
+            "cmd" => Self::Cmd,
+            "" => Self::default(),
+            _ => {
+                tracing::warn!("Unknown exec shell '{s}', falling back to auto");
+                Self::Auto
+            }
+        }
+    }
+
+    /// Resolve to a concrete shell invocation by probing PATH.
+    /// Returns `None` if no candidate executable is found, in which
+    /// case the `exec` tool refuses rather than guessing.
+    pub fn resolve(self) -> Option<ResolvedShell> {
+        match self {
+            Self::Auto => auto_resolve(),
+            Self::Sh => find_executable("sh").map(|p| ResolvedShell {
+                program: p,
+                arg_flag: "-c",
+                kind: ShellKind::Sh,
+            }),
+            Self::Powershell => find_executable("pwsh")
+                .or_else(|| find_executable("powershell"))
+                .map(|p| ResolvedShell {
+                    program: p,
+                    arg_flag: "-Command",
+                    kind: ShellKind::Powershell,
+                }),
+            Self::Cmd => find_executable("cmd").map(|p| ResolvedShell {
+                program: p,
+                arg_flag: "/C",
+                kind: ShellKind::Cmd,
+            }),
+        }
+    }
+}
+
+/// A resolved shell invocation: which program to run and which flag
+/// it expects before the command string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedShell {
+    pub program: std::path::PathBuf,
+    pub arg_flag: &'static str,
+    pub kind: ShellKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellKind {
+    Sh,
+    Powershell,
+    Cmd,
+}
+
+impl std::fmt::Display for ShellKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sh => write!(f, "sh"),
+            Self::Powershell => write!(f, "powershell"),
+            Self::Cmd => write!(f, "cmd"),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn auto_resolve() -> Option<ResolvedShell> {
+    // sh is part of the POSIX baseline; assume it's at /bin/sh and
+    // let Command resolve via PATH if it isn't.
+    Some(ResolvedShell {
+        program: std::path::PathBuf::from("sh"),
+        arg_flag: "-c",
+        kind: ShellKind::Sh,
+    })
+}
+
+#[cfg(windows)]
+fn auto_resolve() -> Option<ResolvedShell> {
+    if let Some(p) = find_executable("sh") {
+        return Some(ResolvedShell {
+            program: p,
+            arg_flag: "-c",
+            kind: ShellKind::Sh,
+        });
+    }
+    if let Some(p) = find_executable("pwsh").or_else(|| find_executable("powershell")) {
+        return Some(ResolvedShell {
+            program: p,
+            arg_flag: "-Command",
+            kind: ShellKind::Powershell,
+        });
+    }
+    if let Some(p) = find_executable("cmd") {
+        return Some(ResolvedShell {
+            program: p,
+            arg_flag: "/C",
+            kind: ShellKind::Cmd,
+        });
+    }
+    None
+}
+
+/// Walk PATH for an executable named `name`. On windows, tries
+/// `name`, `name.exe`, `name.cmd`, `name.bat` in each directory.
+fn find_executable(name: &str) -> Option<std::path::PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    let extensions: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    for dir in std::env::split_paths(&path_env) {
+        for ext in extensions {
+            let candidate = if ext.is_empty() {
+                dir.join(name)
+            } else {
+                dir.join(format!("{name}{ext}"))
+            };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 /// Configuration for the sandbox.
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -78,6 +236,9 @@ pub struct SandboxConfig {
     pub timeout_secs: u64,
     /// Allow network access from sandbox (default: false).
     pub network: bool,
+    /// Which interpreter the host-exec fallback uses when
+    /// `SandboxMode::Off` is configured. Default `Auto`.
+    pub shell: ShellMode,
 }
 
 impl Default for SandboxConfig {
@@ -87,6 +248,7 @@ impl Default for SandboxConfig {
             image: DEFAULT_IMAGE.into(),
             timeout_secs: 300,
             network: false,
+            shell: ShellMode::Auto,
         }
     }
 }

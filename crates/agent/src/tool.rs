@@ -419,8 +419,15 @@ impl ToolRegistry {
             )));
         }
 
-        let child = tokio::process::Command::new("sh")
-            .arg("-c")
+        let resolved = self.sandbox_config.shell.resolve().ok_or_else(|| {
+            AgentError::Tool(format!(
+                "exec: no shell found for shell mode {:?}; install one of sh / powershell / cmd, or set `\"shell\"` in sandbox.json explicitly",
+                self.sandbox_config.shell
+            ))
+        })?;
+
+        let child = tokio::process::Command::new(&resolved.program)
+            .arg(resolved.arg_flag)
             .arg(&command)
             .current_dir(&self.workspace)
             .stdout(Stdio::piped())

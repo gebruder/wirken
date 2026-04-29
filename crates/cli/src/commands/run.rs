@@ -131,6 +131,30 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .await?;
     println!("  Audit log: {}", cfg.audit_db_path().display());
 
+    // --- Resolve the host-exec shell once at startup ---
+    //
+    // Mode-off and sandbox fallback both invoke `exec` against this
+    // shell. Resolving once means the operator sees one log line and
+    // skill authors writing for cross-platform portability can tell
+    // at a glance whether their researcher's machine picked up sh
+    // (Git for Windows installed) or fell back to powershell/cmd.
+    let host_exec_sandbox = super::load_sandbox_config(&cfg.data_dir);
+    match host_exec_sandbox.shell.resolve() {
+        Some(resolved) => {
+            println!(
+                "  Host exec shell: {} ({})",
+                resolved.kind,
+                resolved.program.display()
+            );
+        }
+        None => {
+            println!(
+                "  Host exec shell: none found ({:?}); the exec tool will refuse to run on this host",
+                host_exec_sandbox.shell
+            );
+        }
+    }
+
     // --- Open the session log alongside the audit log ---
     //
     // Item 1 slice 2 made the audit DB the home of session_events.
