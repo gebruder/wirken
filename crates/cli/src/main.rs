@@ -349,6 +349,19 @@ enum ZirkelCommands {
     },
     /// Print the current digest binding (or a "no binding" message).
     Status,
+    /// Store an api.data.gov API key in the wirken vault for a
+    /// zirkel-bound source. Prompts for the key, validates it
+    /// against the source's API before storing (a typo'd key
+    /// won't survive the round trip).
+    AuthSet {
+        /// Source name as it appears in `sources.toml` (e.g.
+        /// `congress-gov`, `govinfo-gov`).
+        #[arg(long)]
+        source: String,
+    },
+    /// List zirkel-bound API keys currently in the vault (names
+    /// only — values stay encrypted).
+    AuthList,
 }
 
 #[derive(Subcommand)]
@@ -572,6 +585,8 @@ async fn main() -> Result<()> {
             } => commands::zirkel::bind(&agent, &channel, &conversation, force).await,
             ZirkelCommands::Unbind { agent } => commands::zirkel::unbind(&agent).await,
             ZirkelCommands::Status => commands::zirkel::status().await,
+            ZirkelCommands::AuthSet { source } => commands::zirkel::auth_set(&source).await,
+            ZirkelCommands::AuthList => commands::zirkel::auth_list().await,
         },
         Commands::Agents(cmd) => match cmd {
             AgentCommands::Add => commands::agents::add().await,
