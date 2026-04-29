@@ -187,6 +187,54 @@ When a `PermissionStore` is configured on an agent, tool calls are checked again
 
 **Live update:** Permission approvals and revocations take effect immediately (SQLite). New tool-to-action mappings require recompilation.
 
+### Orchestrator Push Peer-Credential Check
+
+**Crate:** `wirken-cli` | **File:** `crates/cli/src/commands/run.rs` (accept loop), `crates/ipc/src/stream.rs` (peer-identity extraction)
+
+The gateway exposes an orchestrator push socket (`~/.wirken/sockets/orchestrator.sock` on unix, a named pipe on windows) used by `wirken zirkel push` and similar tools to deliver outbound messages without going through the per-adapter Ed25519 handshake. Because the socket bypasses adapter authentication, every accepted connection has its peer credentials checked against the gateway's own identity:
+
+- **Unix:** `SO_PEERCRED` returns the connecting process's EUID at accept time (`tokio::net::UnixStream::peer_cred()`). The EUID is wrapped in a `Principal::Uid` and compared with the gateway's own `Principal::Uid(geteuid())`.
+- **Windows:** the named-pipe handle is queried via `GetNamedPipeClientProcessId`, then the client process's user SID is extracted via `OpenProcessToken` + `GetTokenInformation(TokenUser)` + `ConvertSidToStringSidW`. The SID is wrapped in a `Principal::Sid` and compared with the gateway's own user SID. The check happens in gateway code, not at the named-pipe DACL level, so the audit log witnesses the refusal in the same shape as on unix.
+
+The unified peer-identity surface is the `wirken_ipc::Stream::peer_principal()` method, which returns a `Principal` enum:
+
+```rust
+pub enum Principal {
+    Uid(u32),       // unix
+    Sid(String),    // windows
+}
+```
+
+`Principal` displays as a tagged string (`uid:1000` or `sid:S-1-5-21-...`) and serializes through that form, so audit consumers parse one schema regardless of platform.
+
+A refusal emits an `orchestrator.push.refused` audit event with structured detail. Two reason variants exist today:
+
+```json
+{
+  "reason": "principal_mismatch",
+  "expected": "uid:1000",
+  "actual": "uid:1001"
+}
+```
+
+```json
+{
+  "reason": "peer_principal_unavailable",
+  "expected": "uid:1000",
+  "error": "..."
+}
+```
+
+`principal_mismatch` is the load-bearing case: the connecting peer ran as a different user. `peer_principal_unavailable` is the defensive case: the OS could not return peer credentials, so the gateway refuses rather than risk admitting an unverified peer. Both refusals are recorded in the hash-chained audit log; a missing entry is itself a tampering signal.
+
+**File and pipe permissions** are defense-in-depth, not the load-bearing gate: 0600 on the unix socket, owner-only DACL on the windows named pipe. The peer-credential check above is what enforces the cross-user trust boundary; the surface posture protects against accidentally permissive defaults.
+
+**What this protects:** a process running as a different user on the same machine cannot inject orchestrator pushes through this socket, even if file permissions or pipe DACLs are accidentally relaxed. Every refusal is witnessed by the audit log.
+
+**What this does NOT protect:** code running as the same user. The orchestrator socket is a same-user trust boundary; user-level isolation (per-agent unix accounts, separate Windows user profiles) is the operator's responsibility.
+
+**Live update:** N/A — the gateway's own identity is fixed at startup.
+
 ---
 
 ## Live Policy Updates Without Restart

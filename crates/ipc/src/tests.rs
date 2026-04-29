@@ -606,6 +606,21 @@ async fn windows_named_pipe_round_trip() {
     server.read_exact(&mut buf).await.expect("server read");
     assert_eq!(&buf, b"world");
 
+    // peer_principal on the connected server returns the client's
+    // user SID. Same process, so it's the SID of whoever's running
+    // the test runner — we just assert it's a Sid variant of the
+    // expected `S-...` shape.
+    let principal = crate::Stream::peer_principal(&server).expect("peer_principal");
+    match principal {
+        crate::Principal::Sid(ref s) => {
+            assert!(
+                s.starts_with("S-"),
+                "expected SID string starting with 'S-', got {s:?}"
+            );
+        }
+        other => panic!("expected Principal::Sid on windows, got {other:?}"),
+    }
+
     // The Stream trait is implemented for both ends; boxing as trait
     // objects exercises the supertrait bounds at the type level.
     let _server_box: Box<dyn crate::Stream + Send> = Box::new(server);
@@ -614,25 +629,66 @@ async fn windows_named_pipe_round_trip() {
 
 #[cfg(windows)]
 #[tokio::test]
-async fn windows_named_pipe_peer_principal_is_unsupported_for_now() {
+async fn windows_named_pipe_peer_principal_errors_when_no_client() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tokio::net::windows::named_pipe::ServerOptions;
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = format!(r"\\.\pipe\wirken-ipc-stub-{}-{}", std::process::id(), n,);
+    let path = format!(r"\\.\pipe\wirken-ipc-noclient-{}-{}", std::process::id(), n);
 
     let server = ServerOptions::new()
         .first_pipe_instance(true)
         .create(&path)
         .expect("create server pipe");
 
-    // The actual peer-SID extraction lands in the next PR. For now
-    // the trait method returns an Unsupported error so the trait
-    // surface is complete on windows.
+    // No client has connected. GetNamedPipeClientProcessId should
+    // fail; peer_principal must surface that as an IO error rather
+    // than fabricating a principal.
     let result = crate::Stream::peer_principal(&server);
     assert!(
         result.is_err(),
-        "peer_principal should be Err until SID extraction lands"
+        "peer_principal should be Err when no client is connected"
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_named_pipe_client_peer_principal_is_unsupported() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = format!(
+        r"\\.\pipe\wirken-ipc-clientstub-{}-{}",
+        std::process::id(),
+        n
+    );
+
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&path)
+        .expect("create server pipe");
+
+    let path_for_client = path.clone();
+    let client_handle =
+        tokio::task::spawn_blocking(move || ClientOptions::new().open(&path_for_client));
+
+    server.connect().await.expect("server connect");
+    let client = client_handle
+        .await
+        .expect("join client task")
+        .expect("open client pipe");
+
+    let result = crate::Stream::peer_principal(&client);
+    assert!(
+        result.is_err(),
+        "client-side peer_principal is intentionally Err until a caller asks for it"
+    );
+
+    // Drop server and client cleanly.
+    let mut server = server;
+    let _ = server.shutdown().await;
 }
