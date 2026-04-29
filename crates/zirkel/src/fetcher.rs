@@ -1,19 +1,27 @@
-//! RSS / Atom fetcher.
+//! Fetcher trait + RSS/Atom implementation.
 //!
-//! `feed-rs` parses both RSS 2.0 and Atom into a unified `Feed` type.
-//! This module wraps it: HTTP-fetch via the policed
-//! [`wirken_agent::egress::EgressClient`], parse, normalize each
-//! entry into a [`FetchedItem`].
+//! ## The `Fetcher` trait
 //!
-//! ## Why no `Fetcher` trait yet
+//! C-foundation deferred this trait deliberately — one implementation
+//! couldn't tell us what the abstraction should look like. C-API
+//! brings two more (Federal Register JSON, api.data.gov-keyed JSON
+//! for congress.gov + govinfo.gov), and three real consumers stake
+//! the shape: each takes an [`EgressClient`] and a [`SourceConfig`],
+//! produces a `Vec<FetchedItem>`, lets the orchestrator dispatch by
+//! the manifest's `method` field via [`FetcherRegistry`].
 //!
-//! There's exactly one fetcher implementation in this slice. Adding
-//! a trait now would shape the API around a second implementation
-//! that hasn't shipped — exactly the "seam for an uncommitted
-//! boundary" pattern we said no to. The trait lands when the C-API
-//! and C-scrape slices add congress.gov, govinfo.gov, and committee
-//! sites: a real second implementation tells us what the abstraction
-//! should look like.
+//! Auth lives outside the trait. Source manifest entries name a
+//! vault credential by string (added in piece 3); fetchers that
+//! need it resolve the secret at fetch time via their own injected
+//! handle. Keeps the trait clean of secret material and avoids
+//! pre-committing an `Auth` enum shape before the second auth-using
+//! consumer exists.
+//!
+//! ## RSS / Atom
+//!
+//! `feed-rs` parses both RSS 2.0 and Atom into a unified `Feed`
+//! type. [`RssFetcher`] wraps it; the parser surface ([`parse_feed`])
+//! stays module-level so tests exercise the parser without a server.
 //!
 //! ## Failure modes
 //!
@@ -24,12 +32,65 @@
 //!   not attempted — a malformed feed gets logged and skipped at
 //!   the orchestrator level.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use wirken_agent::egress::{EgressClient, HttpAccessDenied};
 
+/// Per-source configuration the orchestrator hands to a [`Fetcher`].
+/// Mirrors the on-disk `sources.toml` shape (no secrets — auth
+/// material is resolved separately at fetch time by fetchers that
+/// need it).
+#[derive(Debug, Clone)]
+pub struct SourceConfig {
+    pub name: String,
+    pub endpoint: String,
+}
+
+/// One pluggable fetcher. The orchestrator dispatches by the
+/// manifest's `method` string via [`FetcherRegistry`]; each impl
+/// produces normalised [`FetchedItem`]s through the policed
+/// [`EgressClient`].
+///
+/// Synchronous-trait via [`async_trait::async_trait`] — fetchers do
+/// I/O, so the simplification of an `async fn` in the trait is
+/// load-bearing.
+#[async_trait]
+pub trait Fetcher: Send + Sync {
+    /// Primary method identifier (e.g. `"rss"`, `"json-federal-register"`).
+    /// Aliases (e.g. `"atom-api"` mapping to the RSS impl) are configured
+    /// at registration; this is the canonical name used in tracing.
+    fn method(&self) -> &'static str;
+
+    /// Documented per-host daily request budget for the API this
+    /// fetcher calls.
+    ///
+    /// `None` means "use the polite Aaron-Swartz-shaped default" —
+    /// today 2/day, the unauthenticated-scraping floor. It does
+    /// **not** mean "no rate limit": every host always passes
+    /// through [`wirken_agent::rate_limit::RateLimitedClient`]; the
+    /// only question is what number gets used.
+    ///
+    /// Authenticated APIs return `Some(n)` matching their published
+    /// quota; the orchestrator merges these into
+    /// [`wirken_agent::rate_limit::RateLimitConfig::per_host_overrides`]
+    /// at startup so each source's host gets its declared budget
+    /// without a per-source TOML override. Encoding the opinion at
+    /// the fetcher level keeps the per-API knowledge with the code
+    /// that knows the API.
+    fn default_rate_limit_per_day(&self) -> Option<u32> {
+        None
+    }
+
+    async fn fetch(
+        &self,
+        http: &EgressClient,
+        source: &SourceConfig,
+    ) -> Result<Vec<FetchedItem>, FetchError>;
+}
+
 /// One normalized item produced by a fetcher.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchedItem {
     pub source_name: String,
     pub url: String,
@@ -37,6 +98,14 @@ pub struct FetchedItem {
     pub abstract_text: String,
     /// RFC 3339 string, or empty if the feed entry had no date.
     pub published_at: String,
+    /// Source-specific metadata as a JSON string. Empty (or `"{}"`)
+    /// for sources without extras (RSS feeds today). The Federal
+    /// Register fetcher stores `{"agencies":[...],"document_number":...}`
+    /// here; congress.gov / govinfo.gov add their own keys.
+    /// Stored verbatim in the `source_metadata` column on
+    /// `candidates`; SQLite's json1 extension can query into it
+    /// without a schema migration.
+    pub source_metadata: String,
 }
 
 #[derive(Debug, Error)]
@@ -59,14 +128,26 @@ pub enum FetchError {
     Parse { url: String, message: String },
 }
 
-/// Fetch a feed and return its items normalized to [`FetchedItem`].
-pub async fn fetch_rss(
-    http: &EgressClient,
-    source_name: &str,
-    url: &str,
-) -> Result<Vec<FetchedItem>, FetchError> {
-    let body = fetch_body(http, url).await?;
-    parse_feed(source_name, url, &body)
+/// RSS 2.0 / Atom fetcher. Same impl handles both formats —
+/// `feed-rs` discriminates the parser internally. Registered under
+/// both `"rss"` and `"atom-api"` method names; arXiv's Atom API and
+/// regulator RSS feeds both end up here.
+pub struct RssFetcher;
+
+#[async_trait]
+impl Fetcher for RssFetcher {
+    fn method(&self) -> &'static str {
+        "rss"
+    }
+
+    async fn fetch(
+        &self,
+        http: &EgressClient,
+        source: &SourceConfig,
+    ) -> Result<Vec<FetchedItem>, FetchError> {
+        let body = fetch_body(http, &source.endpoint).await?;
+        parse_feed(&source.name, &source.endpoint, &body)
+    }
 }
 
 /// HTTP-fetch raw bytes of a feed. Separated from parsing so tests
@@ -138,6 +219,7 @@ pub fn parse_feed(
             title,
             abstract_text,
             published_at,
+            source_metadata: String::new(),
         });
     }
     Ok(out)
