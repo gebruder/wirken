@@ -7,7 +7,7 @@ pub mod siem;
 mod writer;
 
 pub use error::AuditError;
-pub use event::AuditEvent;
+pub use event::{AuditEvent, StoredEvent};
 pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use session_log::{
     HashHex, HexBytes, OwnSession, PermissionDenialRecord, SessionEvent, SessionHandle, SessionId,

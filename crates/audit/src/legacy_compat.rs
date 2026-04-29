@@ -261,6 +261,10 @@ pub(crate) fn query_legacy(
             sql.push_str(&format!(" AND actor = ?{}", bind_values.len() + 1));
             bind_values.push(Box::new(actor.clone()));
         }
+        if let Some(ref session) = q.session {
+            sql.push_str(&format!(" AND session = ?{}", bind_values.len() + 1));
+            bind_values.push(Box::new(session.clone()));
+        }
         if let Some(since) = q.since {
             sql.push_str(&format!(" AND ts >= ?{}", bind_values.len() + 1));
             bind_values.push(Box::new(since.to_rfc3339()));

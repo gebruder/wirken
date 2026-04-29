@@ -143,12 +143,31 @@ enum AuditCommands {
         /// Filter by channel
         #[arg(long)]
         channel: Option<String>,
+        /// Filter by actor
+        #[arg(long)]
+        actor: Option<String>,
+        /// Filter by session id (full canonical form)
+        #[arg(long)]
+        session: Option<String>,
+        /// Filter to events at or after this timestamp (RFC 3339)
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter to events at or before this timestamp (RFC 3339)
+        #[arg(long)]
+        until: Option<String>,
         /// Number of events to show
         #[arg(short = 'n', long, default_value = "50")]
         limit: usize,
+        /// Output format: human (default) or json
+        #[arg(long, default_value = "human")]
+        format: String,
     },
     /// Verify audit log hash chain integrity
-    Verify,
+    Verify {
+        /// Output format: human (default) or json
+        #[arg(long, default_value = "human")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -516,9 +535,19 @@ async fn main() -> Result<()> {
             AuditCommands::Log {
                 action,
                 channel,
+                actor,
+                session,
+                since,
+                until,
                 limit,
-            } => commands::audit::log(action, channel, limit).await,
-            AuditCommands::Verify => commands::audit::verify().await,
+                format,
+            } => {
+                commands::audit::log(
+                    action, channel, actor, session, since, until, limit, &format,
+                )
+                .await
+            }
+            AuditCommands::Verify { format } => commands::audit::verify(&format).await,
         },
         Commands::Sessions(cmd) => match cmd {
             SessionCommands::List { channel, parent } => {
