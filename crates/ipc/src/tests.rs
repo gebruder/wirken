@@ -652,6 +652,40 @@ async fn windows_named_pipe_peer_principal_errors_when_no_client() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Listener trait: bind/connect round-trip
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn listener_round_trip_through_trait_objects() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // On unix the path is a unix-domain socket file; on windows it
+    // gets mapped to a named-pipe name internally by `bind`/`connect`.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("listener-test.sock");
+
+    let mut listener = crate::bind(&path).expect("bind");
+    let path_for_client = path.clone();
+    let server_handle = tokio::spawn(async move {
+        let mut server = listener.accept().await.expect("accept");
+        // Echo one message.
+        let mut buf = [0u8; 5];
+        server.read_exact(&mut buf).await.expect("server read");
+        server.write_all(&buf).await.expect("server write");
+        server.flush().await.expect("server flush");
+    });
+
+    let mut client = crate::connect(&path_for_client).await.expect("connect");
+    client.write_all(b"hello").await.expect("client write");
+    client.flush().await.expect("client flush");
+    let mut buf = [0u8; 5];
+    client.read_exact(&mut buf).await.expect("client read");
+    assert_eq!(&buf, b"hello");
+
+    server_handle.await.expect("join");
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_named_pipe_client_peer_principal_is_unsupported() {

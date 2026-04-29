@@ -7,6 +7,7 @@ license.workspace = true
 description = "Cap'n Proto IPC frames and ed25519-authenticated handshake between the Wirken gateway and adapter processes."
 
 [dependencies]
+async-trait = { workspace = true }
 capnp = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
