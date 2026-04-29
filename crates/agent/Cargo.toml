@@ -37,7 +37,7 @@ futures-util = "0.3"
 # once at ToolRegistry construction, then all read/write/list ops go
 # through Dir methods that refuse paths escaping the workspace. Used
 # instead of hand-rolled canonicalize + symlink_metadata checks.
-cap-std = "3.4"
+cap-std = "4.0"
 # Read-only SQLite handle for the `sqlite_query` librarian tool. The
 # tool opens a per-call connection with `SQLITE_OPEN_READ_ONLY` so
 # writes are refused at the connection layer, not by string-pattern
