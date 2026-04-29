@@ -79,7 +79,9 @@ fn tampered_row_detected() {
 
     let log = AuditLog::open(&db_path).unwrap();
     match log.verify().unwrap() {
-        VerifyResult::Broken { row_id, .. } => assert_eq!(row_id, 5),
+        // SQL row id 5 corresponds to the 5th event in the sentinel
+        // session, which is at seq 4 since per-session seq is 0-indexed.
+        VerifyResult::Broken { seq, .. } => assert_eq!(seq, 4),
         other => panic!("Expected Broken at row 5, got {other:?}"),
     }
 }
@@ -119,7 +121,9 @@ fn tampered_row_data_detected() {
 
     let log = AuditLog::open(&db_path).unwrap();
     match log.verify().unwrap() {
-        VerifyResult::Broken { row_id, .. } => assert_eq!(row_id, 3),
+        // SQL row id 3 corresponds to the 3rd event in the sentinel
+        // session, which is at seq 2 since per-session seq is 0-indexed.
+        VerifyResult::Broken { seq, .. } => assert_eq!(seq, 2),
         other => panic!("Expected Broken at row 3, got {other:?}"),
     }
 }
@@ -789,9 +793,17 @@ mod session {
         }
 
         match log.verify(&h).unwrap() {
-            SessionVerifyResult::Broken { seq, reason } => {
+            SessionVerifyResult::Broken {
+                seq,
+                expected_hash,
+                actual_hash,
+                ..
+            } => {
                 assert_eq!(seq, 1);
-                assert!(reason.contains("leaf_hash"));
+                // leaf_hash mismatch: expected = recomputed hash of
+                // tampered payload, actual = leaf_hash stored in row
+                // (which still matches the original payload).
+                assert_ne!(expected_hash, actual_hash);
             }
             other => panic!("expected Broken at seq 1, got {other:?}"),
         }
@@ -820,12 +832,21 @@ mod session {
         }
 
         match log.verify(&h).unwrap() {
-            SessionVerifyResult::Broken { seq, reason } => {
+            SessionVerifyResult::Broken {
+                seq,
+                expected_hash,
+                actual_hash,
+                ..
+            } => {
                 // The break is detected at seq=0 itself when the
                 // recomputed chain hash doesn't match the stored
                 // (corrupted) hash.
                 assert_eq!(seq, 0);
-                assert!(reason.contains("chain hash"));
+                assert_ne!(expected_hash, actual_hash);
+                assert_eq!(
+                    actual_hash,
+                    "0000000000000000000000000000000000000000000000000000000000000000"
+                );
             }
             other => panic!("expected Broken at seq 0, got {other:?}"),
         }

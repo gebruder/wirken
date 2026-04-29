@@ -60,14 +60,20 @@ pub async fn verify() -> Result<()> {
             println!("  {} rows verified, hash chain intact.", rows_verified);
         }
         VerifyResult::Broken {
-            row_id,
-            expected,
-            found,
+            session_id,
+            seq,
+            expected_hash,
+            actual_hash,
+            verified_count,
         } => {
             println!("  Audit log integrity: BROKEN");
-            println!("  Hash chain broken at row {row_id}.");
-            println!("  Expected: {expected}");
-            println!("  Found:    {found}");
+            println!("  Session: {session_id}");
+            println!("  Hash chain broken at seq {seq}.");
+            println!("  Expected hash: {expected_hash}");
+            println!("  Actual hash:   {actual_hash}");
+            println!(
+                "  {verified_count} events verified before the break; events at and after seq {seq} in this session should not be relied on."
+            );
             println!();
             println!("  The audit log has been tampered with.");
             std::process::exit(1);

@@ -88,8 +88,12 @@ pub async fn run() -> Result<()> {
                     print_ok();
                     println!("    Empty.");
                 }
-                Ok(VerifyResult::Broken { row_id, .. }) => {
-                    print_fail(&format!("  Hash chain broken at row {row_id}!"));
+                Ok(VerifyResult::Broken {
+                    session_id, seq, ..
+                }) => {
+                    print_fail(&format!(
+                        "  Hash chain broken at session {session_id} seq {seq}!"
+                    ));
                     issues += 1;
                 }
                 Err(e) => {
