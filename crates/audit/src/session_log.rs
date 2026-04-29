@@ -475,9 +475,22 @@ pub struct StoredSessionEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionVerifyResult {
-    Ok { rows_verified: usize },
+    Ok {
+        rows_verified: usize,
+    },
     Empty,
-    Broken { seq: u64, reason: String },
+    /// The chain broke at `seq`. `expected_hash` and `actual_hash`
+    /// are the two values that disagreed (which two specifically
+    /// depends on the kind of break — prev_hash, leaf_hash, or chain
+    /// hash mismatch — but consumers receive them as opaque strings).
+    /// `verified_count` is the number of events in this session that
+    /// verified before the break.
+    Broken {
+        seq: u64,
+        expected_hash: String,
+        actual_hash: String,
+        verified_count: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -896,9 +909,9 @@ impl SessionLog for SqliteSessionLog {
             if prev_hash != expected_prev {
                 return Ok(SessionVerifyResult::Broken {
                     seq,
-                    reason: format!(
-                        "prev_hash {prev_hash} does not match expected {expected_prev}"
-                    ),
+                    expected_hash: expected_prev,
+                    actual_hash: prev_hash,
+                    verified_count: count as u64,
                 });
             }
 
@@ -906,9 +919,9 @@ impl SessionLog for SqliteSessionLog {
             if recomputed_leaf != leaf_hash {
                 return Ok(SessionVerifyResult::Broken {
                     seq,
-                    reason: format!(
-                        "leaf_hash {leaf_hash} does not match payload sha256 {recomputed_leaf}"
-                    ),
+                    expected_hash: recomputed_leaf,
+                    actual_hash: leaf_hash,
+                    verified_count: count as u64,
                 });
             }
 
@@ -916,9 +929,9 @@ impl SessionLog for SqliteSessionLog {
             if recomputed_chain != stored_hash {
                 return Ok(SessionVerifyResult::Broken {
                     seq,
-                    reason: format!(
-                        "chain hash {stored_hash} does not match expected {recomputed_chain}"
-                    ),
+                    expected_hash: recomputed_chain,
+                    actual_hash: stored_hash,
+                    verified_count: count as u64,
                 });
             }
 

@@ -316,11 +316,10 @@ pub(crate) fn query_legacy(
 ///
 /// - `Ok { rows_verified }` — total events across all sessions
 /// - `Empty` — no rows in any session
-/// - `Broken { row_id, expected, found }` — first session that
-///   fails. The legacy `row_id` is filled with the inner
-///   [`session_events.id`] of the breaking row when available, or
-///   `0` if we can't recover it cheaply (the per-session verify
-///   reports a `seq`, not an id).
+/// - `Broken { session_id, seq, expected_hash, actual_hash,
+///   verified_count }` — first session that fails. `verified_count`
+///   sums events from sessions that completed verification plus the
+///   per-session count up to (but not including) the breaking event.
 pub(crate) fn verify_legacy(log: &SqliteSessionLog) -> Result<VerifyResult, AuditError> {
     let session_ids = list_session_ids(log)?;
     if session_ids.is_empty() {
@@ -339,12 +338,18 @@ pub(crate) fn verify_legacy(log: &SqliteSessionLog) -> Result<VerifyResult, Audi
                 // entries with zero events shouldn't exist, but
                 // skip rather than fail.
             }
-            SessionVerifyResult::Broken { seq, reason } => {
-                let row_id = lookup_row_id(log, sid, seq)?;
+            SessionVerifyResult::Broken {
+                seq,
+                expected_hash,
+                actual_hash,
+                verified_count,
+            } => {
                 return Ok(VerifyResult::Broken {
-                    row_id,
-                    expected: format!("session={sid} seq={seq}"),
-                    found: reason,
+                    session_id: SessionId::new(sid.clone()),
+                    seq,
+                    expected_hash,
+                    actual_hash,
+                    verified_count: total as u64 + verified_count,
                 });
             }
         }
@@ -369,19 +374,6 @@ fn list_session_ids(log: &SqliteSessionLog) -> Result<Vec<String>, AuditError> {
             out.push(row?);
         }
         Ok(out)
-    })
-}
-
-fn lookup_row_id(log: &SqliteSessionLog, session_id: &str, seq: u64) -> Result<i64, AuditError> {
-    log.with_conn(|conn| {
-        let id: i64 = conn
-            .query_row(
-                "SELECT id FROM session_events WHERE session_id = ?1 AND seq = ?2",
-                params![session_id, seq as i64],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        Ok(id)
     })
 }
 
