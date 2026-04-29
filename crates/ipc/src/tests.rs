@@ -1,7 +1,12 @@
-use crate::auth::{AdapterIdentity, perform_adapter_handshake, perform_gateway_handshake};
+use crate::auth::AdapterIdentity;
+#[cfg(unix)]
+use crate::auth::{perform_adapter_handshake, perform_gateway_handshake};
 use crate::channel::{Channel, Discord, Generic, SessionHandle, SessionId, Telegram};
+#[cfg(unix)]
 use crate::error::HandshakeError;
+#[cfg(unix)]
 use crate::transport::split_stream;
+#[cfg(unix)]
 use crate::wirken_capnp::frame;
 
 // ---------------------------------------------------------------------------
@@ -114,6 +119,7 @@ fn different_identities_have_different_keys() {
 // Transport: frame read/write roundtrip
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn frame_roundtrip_inbound_message() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -158,6 +164,7 @@ async fn frame_roundtrip_inbound_message() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn frame_roundtrip_outbound_message() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -192,6 +199,7 @@ async fn frame_roundtrip_outbound_message() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn frame_roundtrip_heartbeat() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -217,6 +225,7 @@ async fn frame_roundtrip_heartbeat() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn multiple_frames_sequential() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -244,6 +253,7 @@ async fn multiple_frames_sequential() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn connection_closed_detected() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -260,6 +270,7 @@ async fn connection_closed_detected() {
 // Ed25519 handshake over UDS
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 #[tokio::test]
 async fn handshake_success() {
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -295,6 +306,7 @@ async fn handshake_success() {
     assert_eq!(pk, expected_pubkey);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn handshake_rejected_unknown_adapter() {
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -332,6 +344,7 @@ async fn handshake_rejected_unknown_adapter() {
     assert!(matches!(err, HandshakeError::Rejected(_)));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn handshake_wrong_key_rejected() {
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -546,4 +559,80 @@ async fn test_pair_peer_principal_is_uid_variant() {
     // both ends report the same uid.
     assert!(matches!(pa, crate::Principal::Uid(_)));
     assert_eq!(pa, pb);
+}
+
+// ---------------------------------------------------------------------------
+// Windows: named-pipe round-trip smoke
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_named_pipe_round_trip() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = format!(r"\\.\pipe\wirken-ipc-test-{}-{}", std::process::id(), n,);
+
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&path)
+        .expect("create server pipe");
+
+    let path_for_client = path.clone();
+    let client_handle =
+        tokio::task::spawn_blocking(move || ClientOptions::new().open(&path_for_client));
+
+    server.connect().await.expect("server connect");
+    let mut server = server;
+    let mut client = client_handle
+        .await
+        .expect("join client task")
+        .expect("open client pipe");
+
+    server.write_all(b"hello").await.expect("server write");
+    server.flush().await.expect("server flush");
+
+    let mut buf = [0u8; 5];
+    client.read_exact(&mut buf).await.expect("client read");
+    assert_eq!(&buf, b"hello");
+
+    client.write_all(b"world").await.expect("client write");
+    client.flush().await.expect("client flush");
+
+    let mut buf = [0u8; 5];
+    server.read_exact(&mut buf).await.expect("server read");
+    assert_eq!(&buf, b"world");
+
+    // The Stream trait is implemented for both ends; boxing as trait
+    // objects exercises the supertrait bounds at the type level.
+    let _server_box: Box<dyn crate::Stream + Send> = Box::new(server);
+    let _client_box: Box<dyn crate::Stream + Send> = Box::new(client);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_named_pipe_peer_principal_is_unsupported_for_now() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = format!(r"\\.\pipe\wirken-ipc-stub-{}-{}", std::process::id(), n,);
+
+    let server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&path)
+        .expect("create server pipe");
+
+    // The actual peer-SID extraction lands in the next PR. For now
+    // the trait method returns an Unsupported error so the trait
+    // surface is complete on windows.
+    let result = crate::Stream::peer_principal(&server);
+    assert!(
+        result.is_err(),
+        "peer_principal should be Err until SID extraction lands"
+    );
 }
