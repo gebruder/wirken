@@ -419,3 +419,131 @@ fn authenticated_channel_rejects_empty_claim() {
     let auth = AuthenticatedChannel::new("telegram");
     assert!(auth.require_match("").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Principal: tagged-string round trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn principal_uid_display() {
+    assert_eq!(crate::Principal::Uid(1000).to_string(), "uid:1000");
+    assert_eq!(crate::Principal::Uid(0).to_string(), "uid:0");
+}
+
+#[test]
+fn principal_sid_display() {
+    assert_eq!(
+        crate::Principal::Sid("S-1-5-21-1234-5678".into()).to_string(),
+        "sid:S-1-5-21-1234-5678"
+    );
+}
+
+#[test]
+fn principal_parse_uid() {
+    let p: crate::Principal = "uid:1000".parse().unwrap();
+    assert_eq!(p, crate::Principal::Uid(1000));
+}
+
+#[test]
+fn principal_parse_sid() {
+    let p: crate::Principal = "sid:S-1-5-21-1234".parse().unwrap();
+    assert_eq!(p, crate::Principal::Sid("S-1-5-21-1234".into()));
+}
+
+#[test]
+fn principal_parse_rejects_unknown_prefix() {
+    assert!("user:1000".parse::<crate::Principal>().is_err());
+    assert!("1000".parse::<crate::Principal>().is_err());
+    assert!("".parse::<crate::Principal>().is_err());
+}
+
+#[test]
+fn principal_parse_rejects_empty_sid() {
+    assert!("sid:".parse::<crate::Principal>().is_err());
+}
+
+#[test]
+fn principal_parse_rejects_non_numeric_uid() {
+    assert!("uid:abc".parse::<crate::Principal>().is_err());
+    assert!("uid:".parse::<crate::Principal>().is_err());
+    assert!("uid:-1".parse::<crate::Principal>().is_err());
+}
+
+#[test]
+fn principal_round_trip_via_string() {
+    let cases = [
+        crate::Principal::Uid(0),
+        crate::Principal::Uid(u32::MAX),
+        crate::Principal::Sid("S-1-5-21-1234-5678-90".into()),
+    ];
+    for original in cases {
+        let s = original.to_string();
+        let parsed: crate::Principal = s.parse().unwrap();
+        assert_eq!(parsed, original);
+    }
+}
+
+#[test]
+fn principal_serde_uses_tagged_string() {
+    let p = crate::Principal::Uid(1000);
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(json, "\"uid:1000\"");
+
+    let back: crate::Principal = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p);
+}
+
+#[test]
+fn principal_serde_sid_round_trip() {
+    let p = crate::Principal::Sid("S-1-5-21-1234".into());
+    let json = serde_json::to_string(&p).unwrap();
+    assert_eq!(json, "\"sid:S-1-5-21-1234\"");
+
+    let back: crate::Principal = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p);
+}
+
+#[test]
+fn principal_deserialize_rejects_malformed() {
+    let bad = "\"user:1000\"";
+    let result: Result<crate::Principal, _> = serde_json::from_str(bad);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Stream trait + test_pair: in-process duplex through trait objects
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_pair_round_trips_bytes_through_trait_objects() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut a, mut b) = crate::test_pair().expect("test_pair");
+
+    a.write_all(b"ping").await.unwrap();
+    a.flush().await.unwrap();
+
+    let mut buf = [0u8; 4];
+    b.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"ping");
+
+    b.write_all(b"pong").await.unwrap();
+    b.flush().await.unwrap();
+
+    let mut buf = [0u8; 4];
+    a.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, b"pong");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_pair_peer_principal_is_uid_variant() {
+    let (a, b) = crate::test_pair().expect("test_pair");
+    let pa = a.peer_principal().expect("peer_principal a");
+    let pb = b.peer_principal().expect("peer_principal b");
+    // socketpair sockets share the calling process's credentials, so
+    // both ends report the same uid.
+    assert!(matches!(pa, crate::Principal::Uid(_)));
+    assert_eq!(pa, pb);
+}
