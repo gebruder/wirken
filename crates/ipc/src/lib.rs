@@ -2,6 +2,8 @@ mod auth;
 mod channel;
 mod error;
 pub mod orchestrator;
+pub mod principal;
+pub mod stream;
 pub mod transport;
 
 // Generated Cap'n Proto code
@@ -15,7 +17,12 @@ pub use auth::{
 pub use channel::{AuthenticatedChannel, Channel, ChannelMismatch, SessionHandle, SessionId};
 pub use error::HandshakeError;
 pub use error::IpcError;
+pub use principal::{ParsePrincipalError, Principal};
+pub use stream::{BoxStream, Stream};
 pub use transport::{FrameReader, FrameWriter};
+
+#[cfg(unix)]
+pub use stream::test_pair;
 
 // Re-export channel markers for use by adapter crates
 pub mod channels {
