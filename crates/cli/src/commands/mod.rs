@@ -20,7 +20,7 @@ pub mod zirkel;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use wirken_agent::sandbox::{SandboxConfig, SandboxMode};
+use wirken_agent::sandbox::{SandboxConfig, SandboxMode, ShellMode};
 use wirken_gateway::config::GatewayConfig;
 
 /// Resolve the data directory, ensuring it exists.
@@ -78,9 +78,16 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         .get("network")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let shell_str = val.get("shell").and_then(|v| v.as_str()).unwrap_or("");
+    let shell = if shell_str.is_empty() {
+        ShellMode::default()
+    } else {
+        ShellMode::from_str_config(shell_str)
+    };
     SandboxConfig {
         mode,
         network,
+        shell,
         ..Default::default()
     }
 }

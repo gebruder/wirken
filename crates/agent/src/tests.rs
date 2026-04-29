@@ -2036,6 +2036,42 @@ fn sandbox_mode_from_str_config() {
 }
 
 #[test]
+fn shell_mode_from_str_config() {
+    use crate::sandbox::ShellMode;
+
+    assert_eq!(ShellMode::from_str_config("auto"), ShellMode::Auto);
+    assert_eq!(ShellMode::from_str_config("sh"), ShellMode::Sh);
+    assert_eq!(
+        ShellMode::from_str_config("powershell"),
+        ShellMode::Powershell
+    );
+    assert_eq!(ShellMode::from_str_config("pwsh"), ShellMode::Powershell);
+    assert_eq!(ShellMode::from_str_config("cmd"), ShellMode::Cmd);
+    // Empty and unknown both fall back to the default (Auto).
+    assert_eq!(ShellMode::from_str_config(""), ShellMode::Auto);
+    assert_eq!(ShellMode::from_str_config("zsh"), ShellMode::Auto);
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_mode_auto_resolves_to_sh_on_unix() {
+    use crate::sandbox::{ShellKind, ShellMode};
+
+    let resolved = ShellMode::Auto.resolve().expect("auto resolves on unix");
+    assert_eq!(resolved.kind, ShellKind::Sh);
+    assert_eq!(resolved.arg_flag, "-c");
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_mode_explicit_sh_resolves_on_unix() {
+    use crate::sandbox::{ShellKind, ShellMode};
+
+    let resolved = ShellMode::Sh.resolve().expect("sh resolves on unix");
+    assert_eq!(resolved.kind, ShellKind::Sh);
+}
+
+#[test]
 fn sandbox_mode_gvisor_runtime_name() {
     use crate::sandbox::SandboxMode;
 
