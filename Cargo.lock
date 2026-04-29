@@ -6637,6 +6637,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wirken-gateway",
+ "wirken-ipc",
  "wirken-vault",
 ]
 

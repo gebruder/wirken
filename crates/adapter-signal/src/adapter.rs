@@ -13,9 +13,11 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use wirken_adapter_core::{OutboundFormatter, SignalFormatter};
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
+use wirken_ipc::{
+    AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
+    split_stream,
+};
 
 use crate::convert::{self, InboundKind, SignalAllowlist, SignalInbound};
 use crate::error::SignalError;
@@ -160,7 +162,7 @@ impl SignalAdapter {
         }
 
         tracing::info!("Connecting to gateway at {}", gateway_socket.display());
-        let gw_stream = UnixStream::connect(gateway_socket).await?;
+        let gw_stream = connect(gateway_socket).await?;
         let (mut gw_reader, mut gw_writer) = split_stream(gw_stream);
 
         tracing::info!("Performing handshake as '{}'", self.identity.adapter_id());
@@ -550,7 +552,7 @@ async fn read_loop(
 /// to the gateway as a Cap'n Proto inbound frame.
 async fn inbound_pump(
     mut rx: mpsc::Receiver<(SignalInbound, InboundKind)>,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) {
     while let Some((msg, _kind)) = rx.recv().await {
         let mut capnp_msg = capnp::message::Builder::new_default();
@@ -566,9 +568,9 @@ async fn inbound_pump(
 /// `send_message`, and return a result frame upstream so the gateway
 /// can correlate.
 async fn outbound_handler(
-    mut reader: FrameReader,
+    mut reader: IpcFrameReader,
     adapter: Arc<SignalAdapter>,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) {
     loop {
         let msg = match reader.read_message().await {
@@ -628,7 +630,7 @@ async fn outbound_handler(
     }
 }
 
-async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
+async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
     let mut seq = 0u64;
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     loop {

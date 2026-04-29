@@ -3,6 +3,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::net::{UnixListener, UnixStream};
+// UnixStream is still used for the orchestrator-push handler which
+// reads JSON-line requests from the unix-only push socket. The
+// gateway↔adapter capnp path uses wirken_ipc::BoxStream via
+// `bind`/`connect`.
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -17,9 +21,9 @@ use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
 use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{AuthenticatedChannel, Principal, Stream, perform_gateway_handshake};
+use wirken_ipc::{IpcFrameReader, IpcFrameWriter, split_stream};
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -412,13 +416,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .join(", ")
     );
 
-    // --- Setup UDS listener ---
+    // --- Setup IPC listener ---
     let socket_path = cfg.socket_dir().join("gateway.sock");
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
     }
-    let listener = UnixListener::bind(&socket_path)
-        .context(format!("Failed to bind UDS at {}", socket_path.display()))?;
+    let mut listener = wirken_ipc::bind(&socket_path)
+        .context(format!("Failed to bind IPC at {}", socket_path.display()))?;
     println!("  Socket: {}", socket_path.display());
 
     // --- Pre-flight: validate per-adapter vault entries ---
@@ -770,7 +774,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let accept_handle = tokio::spawn(async move {
         loop {
             match listener.accept().await {
-                Ok((stream, _)) => {
+                Ok(stream) => {
                     let reg = accept_registry.clone();
                     let fact = accept_factory.clone();
                     let au = accept_audit.clone();
@@ -934,7 +938,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 /// Handle a single adapter connection: handshake, then message loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_adapter_connection(
-    stream: UnixStream,
+    stream: wirken_ipc::BoxStream,
     registry: Arc<Mutex<AdapterRegistry>>,
     factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
@@ -1133,8 +1137,8 @@ async fn write_orchestrator_response(
 async fn message_loop(
     adapter_id: &str,
     authenticated_channel: &AuthenticatedChannel,
-    reader: &mut FrameReader,
-    writer: Arc<Mutex<FrameWriter>>,
+    reader: &mut IpcFrameReader,
+    writer: Arc<Mutex<IpcFrameWriter>>,
     factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,

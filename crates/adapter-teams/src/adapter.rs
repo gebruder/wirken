@@ -2,12 +2,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
+use wirken_ipc::{
+    AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
+    split_stream,
+};
 
 use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, Activity};
@@ -61,7 +63,7 @@ impl TeamsAdapter {
     /// Connect to the gateway, authenticate, then run the webhook listener.
     pub async fn run(&self, socket_path: &Path) -> Result<(), TeamsError> {
         tracing::info!("Connecting to gateway at {}", socket_path.display());
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = connect(socket_path).await?;
         let (mut reader, mut writer) = split_stream(stream);
 
         tracing::info!("Performing handshake as '{}'", self.identity.adapter_id());
@@ -122,7 +124,7 @@ pub(crate) async fn handle_webhook_request(
     stream: &mut tokio::net::TcpStream,
     bot_id: &str,
     jwks: &JwksCache,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) -> Result<(), TeamsError> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await?;
@@ -181,7 +183,7 @@ pub(crate) async fn handle_webhook_request(
     let mut capnp_msg = capnp::message::Builder::new_default();
     convert::activity_to_inbound(&activity, bot_id, &mut capnp_msg);
 
-    let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
+    let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = writer.lock().await;
     w.write_message(&capnp_msg).await.map_err(TeamsError::Ipc)?;
 
     tracing::debug!(
@@ -194,10 +196,10 @@ pub(crate) async fn handle_webhook_request(
 
 /// Handle outbound messages from gateway — POST to Bot Framework REST API.
 async fn handle_outbound(
-    mut reader: FrameReader,
+    mut reader: IpcFrameReader,
     app_id: String,
     app_password: String,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) {
     let http = reqwest::Client::new();
     // Cache for service URL -> access token
@@ -314,7 +316,7 @@ async fn handle_outbound(
 
                 let mut result_msg = capnp::message::Builder::new_default();
                 convert::build_outbound_result(&mut result_msg, success, &msg_id, &error);
-                let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
+                let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = writer.lock().await;
                 if let Err(e) = w.write_message(&result_msg).await {
                     tracing::error!("Failed to send outbound result: {e}");
                 }
@@ -382,7 +384,7 @@ enum FrameAction {
     Skip,
 }
 
-async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
+async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
     let mut seq = 0u64;
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
 
@@ -393,7 +395,7 @@ async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
         let mut msg = capnp::message::Builder::new_default();
         convert::build_heartbeat(&mut msg, seq);
 
-        let mut w: tokio::sync::MutexGuard<'_, FrameWriter> = writer.lock().await;
+        let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = writer.lock().await;
         if let Err(e) = w.write_message(&msg).await {
             tracing::error!("Heartbeat send failed: {e}");
             break;

@@ -20,9 +20,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+use wirken_ipc::BoxStream;
 
 use wirken_mcp_proxy::wire::{
     AuthChallenge, AuthChallengeKind, AuthResponse, AuthResponseKind, HelloAck, HelloAckKind,
@@ -43,8 +42,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(60);
 /// Connection to the out-of-process MCP proxy, scoped to one agent.
 pub struct McpProxyClient {
     agent_id: String,
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<ReadHalf<BoxStream>>,
+    writer: WriteHalf<BoxStream>,
     next_id: u64,
     cached_tools: Vec<ToolDef>,
     has_servers: bool,
@@ -65,7 +64,7 @@ impl McpProxyClient {
         identity: &AgentIdentity,
     ) -> Result<Self, AgentError> {
         let stream = connect_with_retry(socket_path).await?;
-        let (read_half, write_half) = stream.into_split();
+        let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = BufReader::new(read_half);
         let mut writer = write_half;
 
@@ -234,11 +233,11 @@ impl McpProxyClient {
     }
 }
 
-async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream, AgentError> {
+async fn connect_with_retry(socket_path: &Path) -> Result<BoxStream, AgentError> {
     let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
     let mut last_err = None;
     while std::time::Instant::now() < deadline {
-        match UnixStream::connect(socket_path).await {
+        match wirken_ipc::connect(socket_path).await {
             Ok(stream) => return Ok(stream),
             Err(e) => {
                 last_err = Some(e);
@@ -256,7 +255,9 @@ async fn connect_with_retry(socket_path: &Path) -> Result<UnixStream, AgentError
     )))
 }
 
-async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<String>, AgentError> {
+async fn read_line(
+    reader: &mut BufReader<ReadHalf<BoxStream>>,
+) -> Result<Option<String>, AgentError> {
     let mut buf = Vec::with_capacity(256);
     loop {
         let mut byte = [0u8; 1];
@@ -286,7 +287,7 @@ async fn read_line(reader: &mut BufReader<OwnedReadHalf>) -> Result<Option<Strin
 }
 
 async fn write_line<T: serde::Serialize>(
-    writer: &mut OwnedWriteHalf,
+    writer: &mut WriteHalf<BoxStream>,
     value: &T,
 ) -> Result<(), AgentError> {
     let mut bytes = serde_json::to_vec(value)

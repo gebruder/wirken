@@ -21,13 +21,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Mutex as AsyncMutex;
-use wirken_ipc::transport::FrameWriter;
+use wirken_ipc::IpcFrameWriter;
 
 /// Map of channel → live capnp writer for the currently connected
 /// adapter on that channel.
 #[derive(Default)]
 pub struct OutboundDispatcher {
-    writers: Mutex<HashMap<String, Arc<AsyncMutex<FrameWriter>>>>,
+    writers: Mutex<HashMap<String, Arc<AsyncMutex<IpcFrameWriter>>>>,
 }
 
 impl OutboundDispatcher {
@@ -39,7 +39,7 @@ impl OutboundDispatcher {
     /// registered for that channel, replace it — last-connect wins,
     /// mirroring the in-memory adapter-registry connected-flag
     /// semantics.
-    pub fn register(&self, channel: &str, writer: Arc<AsyncMutex<FrameWriter>>) {
+    pub fn register(&self, channel: &str, writer: Arc<AsyncMutex<IpcFrameWriter>>) {
         self.writers
             .lock()
             .unwrap()
@@ -53,7 +53,7 @@ impl OutboundDispatcher {
 
     /// Look up the live writer for a channel. `None` if no adapter is
     /// currently connected on that channel.
-    pub fn writer_for(&self, channel: &str) -> Option<Arc<AsyncMutex<FrameWriter>>> {
+    pub fn writer_for(&self, channel: &str) -> Option<Arc<AsyncMutex<IpcFrameWriter>>> {
         self.writers.lock().unwrap().get(channel).cloned()
     }
 }
@@ -61,12 +61,12 @@ impl OutboundDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::UnixStream;
+    use wirken_ipc::{IpcFrameWriter, split_stream, test_pair};
 
-    async fn make_writer() -> Arc<AsyncMutex<FrameWriter>> {
-        let (a, _b) = UnixStream::pair().unwrap();
-        let (_r, w) = a.into_split();
-        Arc::new(AsyncMutex::new(FrameWriter::new(w)))
+    async fn make_writer() -> Arc<AsyncMutex<IpcFrameWriter>> {
+        let (a, _b) = test_pair().unwrap();
+        let (_r, w) = split_stream(a);
+        Arc::new(AsyncMutex::new(w))
     }
 
     #[tokio::test]

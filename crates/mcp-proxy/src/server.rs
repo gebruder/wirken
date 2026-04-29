@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::Rng;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
+use wirken_ipc::BoxStream;
 
 use crate::error::ProxyError;
 use crate::mcp_registry::ProxyRegistry;
@@ -37,7 +37,8 @@ pub async fn serve(
         std::fs::create_dir_all(parent)?;
     }
 
-    let listener = UnixListener::bind(&socket_path)?;
+    let mut listener =
+        wirken_ipc::bind(&socket_path).map_err(|e| ProxyError::Io(std::io::Error::other(e)))?;
 
     // Tighten permissions on the socket file. Per-user trust boundary.
     set_socket_perms(&socket_path)?;
@@ -46,7 +47,7 @@ pub async fn serve(
 
     loop {
         match listener.accept().await {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 let reg = registry.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(stream, reg).await {
@@ -56,7 +57,7 @@ pub async fn serve(
             }
             Err(e) => {
                 tracing::error!("MCP proxy accept error: {e}");
-                return Err(ProxyError::Io(e));
+                return Err(ProxyError::Io(std::io::Error::other(e)));
             }
         }
     }
@@ -76,10 +77,10 @@ fn set_socket_perms(_path: &Path) -> Result<(), ProxyError> {
 }
 
 async fn handle_connection(
-    stream: UnixStream,
+    stream: BoxStream,
     registry: Arc<Mutex<ProxyRegistry>>,
 ) -> Result<(), ProxyError> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
 
     // Ed25519 challenge-response. The server speaks first so every
@@ -144,11 +145,15 @@ async fn handle_connection(
 /// authenticated agent_id on success, or a [`ProxyError::Protocol`]
 /// on any failure. Callers drop the connection without writing
 /// anything further on error.
-async fn authenticate(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+async fn authenticate<R, W>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
     registry: &Arc<Mutex<ProxyRegistry>>,
-) -> Result<String, ProxyError> {
+) -> Result<String, ProxyError>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     // 1. Generate and send a fresh challenge.
     let mut nonce = [0u8; CHALLENGE_NONCE_BYTES];
     rand::rng().fill_bytes(&mut nonce);
@@ -247,8 +252,8 @@ async fn dispatch(
 
 /// Read one NDJSON line from the stream, enforcing the size cap.
 /// Returns Ok(None) on clean EOF.
-async fn read_line(
-    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+async fn read_line<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
 ) -> Result<Option<String>, ProxyError> {
     let mut buf = Vec::with_capacity(256);
     loop {
@@ -278,10 +283,11 @@ async fn read_line(
     }
 }
 
-async fn write_line<T: serde::Serialize>(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
-    value: &T,
-) -> Result<(), ProxyError> {
+async fn write_line<W, T>(writer: &mut W, value: &T) -> Result<(), ProxyError>
+where
+    W: AsyncWrite + Unpin,
+    T: serde::Serialize,
+{
     let mut bytes =
         serde_json::to_vec(value).map_err(|e| ProxyError::Protocol(format!("serialize: {e}")))?;
     bytes.push(b'\n');
