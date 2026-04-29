@@ -23,6 +23,7 @@ use wirken_zirkel::digest::{RenderOptions, load_run as load_digest_run, render a
 use wirken_zirkel::digest_log::record_sent;
 use wirken_zirkel::embedding::DEFAULT_EMBEDDING_MODEL;
 use wirken_zirkel::orchestrator::{OrchestratorConfig, run as orchestrator_run};
+#[cfg(unix)]
 use wirken_zirkel::push_client::{PushError, push as push_to_gateway};
 use wirken_zirkel::schema::AGGREGATOR_MIGRATIONS;
 
@@ -145,6 +146,7 @@ pub async fn run() -> Result<()> {
         match load_binding(&conn).map_err(|e| anyhow!("load binding: {e}"))? {
             Some(binding) => {
                 println!();
+                #[cfg(unix)]
                 push_digest_for_run(
                     &cfg.socket_dir().join("orchestrator.sock"),
                     &zirkel_db,
@@ -152,6 +154,13 @@ pub async fn run() -> Result<()> {
                     &binding,
                 )
                 .await?;
+                #[cfg(not(unix))]
+                {
+                    let _ = (&cfg, &zirkel_db, &summary.run_id, &binding);
+                    println!(
+                        "  Digest push skipped: orchestrator-push is Linux/macOS only on this platform."
+                    );
+                }
             }
             None => {
                 println!();
@@ -534,6 +543,7 @@ fn apply_aggregator_migrations(conn: &mut Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn push_digest_for_run(
     orchestrator_socket: &std::path::Path,
     zirkel_db: &std::path::Path,
