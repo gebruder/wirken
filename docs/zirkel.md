@@ -1,6 +1,6 @@
 # Zirkel
 
-**Zirkel**: German, *circle*, *cycle* — also a draughtsman's compass. The Wirken preset that fetches a daily corpus of policy and research material, scores it against the operator's interests file, and pushes a numbered digest the operator resolves with one short reply.
+**Zirkel**: German, *circle*, *cycle*, also a draughtsman's compass. The Wirken preset that fetches a daily corpus of policy and research material, scores it against the operator's interests file, and pushes a numbered digest the operator resolves with one short reply.
 
 This document covers Zirkel's source-fetching architecture and the architectural commitments that constrain what Zirkel can ship as a v1 source. The user-facing CLI surface (`wirken zirkel run`, `wirken zirkel bind`, `wirken zirkel auth-set`) is documented in [cli.md](cli.md); the data flow through the per-skill SQLite, screening, LLM relevance scoring, clustering, theme naming, and digest delivery is documented inline in `crates/zirkel/src/`.
 
@@ -17,7 +17,7 @@ Zirkel's `sources.toml` enumerates each source the operator wants polled. Every 
 | `json-congress-bill`            | api.data.gov key (X-Api-Key)  | api.congress.gov                                 |
 | `json-govinfo-bills`            | api.data.gov key (X-Api-Key)  | api.govinfo.gov                                  |
 
-API keys live in the wirken vault (`zirkel-<source>-api-key` slot, written via `wirken zirkel auth-set`). The orchestrator reads the vault at startup, passes resolved keys to the fetcher's constructor, and the fetcher injects them into the `X-Api-Key` header at request time. Keys never cross the agent or LLM boundary — only the parsed `FetchedItem` flows downstream.
+API keys live in the wirken vault (`zirkel-<source>-api-key` slot, written via `wirken zirkel auth-set`). The orchestrator reads the vault at startup, passes resolved keys to the fetcher's constructor, and the fetcher injects them into the `X-Api-Key` header at request time. Keys never cross the agent or LLM boundary; only the parsed `FetchedItem` flows downstream.
 
 Each fetcher declares a per-host daily request budget via `Fetcher::default_rate_limit_per_day`. The orchestrator merges these into `RateLimitConfig.per_host_overrides` at startup, so authenticated APIs run within their published quotas while unauthenticated hosts stay at the polite 2/day default.
 
@@ -25,7 +25,7 @@ Each fetcher declares a per-host daily request budget via `Fetcher::default_rate
 
 ## What Zirkel does not fetch: SPA-rendered sources
 
-A growing share of public-policy surfaces — many congressional committee schedule pages, several state attorney general news pages, the consumer-facing federalregister.gov pages (the API itself is unaffected) — render their content from JavaScript at view time. Scraping them requires a headless browser (Chrome, Firefox via Playwright, etc.).
+A growing share of public-policy surfaces (many congressional committee schedule pages, several state attorney general news pages, the consumer-facing federalregister.gov pages, though the API itself is unaffected) render their content from JavaScript at view time. Scraping them requires a headless browser (Chrome, Firefox via Playwright, etc.).
 
 **Wirken does not manage a browser process. This is an architectural commitment, not a backlog item.**
 
@@ -33,11 +33,11 @@ A growing share of public-policy surfaces — many congressional committee sched
 
 Three specific reasons, each of which would be sufficient on its own:
 
-**1. A browser bypasses the EgressClient.** Wirken's HTTP transport runs through `wirken_agent::egress::EgressClient`, which enforces the per-skill egress allowlist and the per-host rate-limit budget. Both of those are structural — a fetcher cannot accidentally route around them, because there is no other HTTP client available at the trait layer. A headless Chrome process makes its own outbound requests via its own networking stack. Every guarantee that EgressClient currently holds for free becomes a runtime concern that Wirken would have to enforce by inspecting Chrome's behaviour, which is not something Wirken can do.
+**1. A browser bypasses the EgressClient.** Wirken's HTTP transport runs through `wirken_agent::egress::EgressClient`, which enforces the per-skill egress allowlist and the per-host rate-limit budget. Both of those are structural: a fetcher cannot accidentally route around them, because there is no other HTTP client available at the trait layer. A headless Chrome process makes its own outbound requests via its own networking stack. Every guarantee that EgressClient currently holds for free becomes a runtime concern that Wirken would have to enforce by inspecting Chrome's behaviour, which is not something Wirken can do.
 
-**2. SPA-scraping fails silently.** When a documented JSON API changes its response shape, our typed deserialiser surfaces a `Parse` error at the next fetch. The audit chain has the failure; the operator sees it in `wirken zirkel run`'s summary. When a SPA changes its CSS class names or DOM structure (which it does monthly, on average, at the kind of frontend-developer-led organisations that ship SPAs), a scraper either breaks loudly (best case) or quietly returns nothing for that source until someone notices the absence. Silent absences in a daily digest are exactly the failure mode the lawyer audience can least afford — they don't know what they didn't see.
+**2. SPA-scraping fails silently.** When a documented JSON API changes its response shape, our typed deserialiser surfaces a `Parse` error at the next fetch. The audit chain has the failure; the operator sees it in `wirken zirkel run`'s summary. When a SPA changes its CSS class names or DOM structure (which it does monthly, on average, at the kind of frontend-developer-led organisations that ship SPAs), a scraper either breaks loudly (best case) or quietly returns nothing for that source until someone notices the absence. Silent absences in a daily digest are exactly the failure mode the lawyer audience can least afford: they don't know what they didn't see.
 
-**3. Adding a browser is a category-of-dependency change.** Wirken's runtime dependencies today are: the Rust toolchain, SQLite (bundled), and Ollama (optional, for the LLM passes). A self-contained binary plus a single optional sidecar. Adding Chrome means: a 200MB+ binary that has to be installed and updated separately, a sandbox interaction that is operator-platform-specific (especially on macOS), a lifecycle Wirken has to manage (start, monitor, restart on crash, kill on shutdown), and an attack surface that is roughly the size of the open web. None of that is local to Zirkel — it would change Wirken's deployment model for every operator, including those who never wanted a SPA scraped.
+**3. Adding a browser is a category-of-dependency change.** Wirken's runtime dependencies today are: the Rust toolchain, SQLite (bundled), and Ollama (optional, for the LLM passes). A self-contained binary plus a single optional sidecar. Adding Chrome means: a 200MB+ binary that has to be installed and updated separately, a sandbox interaction that is operator-platform-specific (especially on macOS), a lifecycle Wirken has to manage (start, monitor, restart on crash, kill on shutdown), and an attack surface that is roughly the size of the open web. None of that is local to Zirkel; it would change Wirken's deployment model for every operator, including those who never wanted a SPA scraped.
 
 ### What this means for sources
 
