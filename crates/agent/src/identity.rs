@@ -181,6 +181,17 @@ fn write_secret(path: &Path, contents: &[u8]) -> Result<(), AgentError> {
 
 #[cfg(not(unix))]
 fn write_secret(path: &Path, contents: &[u8]) -> Result<(), AgentError> {
+    // Unix sets the file mode to 0o600 atomically with open(); the
+    // platform we're on doesn't expose that primitive. The agent
+    // identity key is therefore protected only by the user-profile
+    // isolation of the data directory. Surface this once at write
+    // time so the operator notices the posture difference rather
+    // than discovering it during a security review.
+    tracing::warn!(
+        "writing agent identity key {} without 0o600-equivalent file permissions; \
+         relying on user profile isolation for confidentiality",
+        path.display()
+    );
     std::fs::write(path, contents)
         .map_err(|e| AgentError::Identity(format!("write identity key {}: {e}", path.display())))
 }

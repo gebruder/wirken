@@ -257,6 +257,20 @@ mod age_file {
                 fs::set_permissions(self.salt_file_path(), fs::Permissions::from_mode(0o600))?;
             }
 
+            #[cfg(not(unix))]
+            {
+                // No 0o600-equivalent on this platform. The vault
+                // device key relies on user-profile isolation of the
+                // data directory for confidentiality. Warn so the
+                // operator can confirm their threat model accepts
+                // that posture.
+                tracing::warn!(
+                    "vault device key written to {} without 0o600-equivalent ACL; \
+                     relying on user profile isolation for confidentiality",
+                    key_path.display()
+                );
+            }
+
             Ok(())
         }
 
