@@ -268,6 +268,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             // independent of the runtime sandbox selection.
             sandbox: Default::default(),
             extra_interceptors: vec![],
+            zirkel_db_path: None,
         },
     );
     let factory =
