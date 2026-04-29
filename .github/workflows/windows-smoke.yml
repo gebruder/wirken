@@ -1,0 +1,42 @@
+name: Windows Smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  ipc-smoke:
+    name: ipc named-pipe smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+
+      - name: Install Cap'n Proto
+        run: choco install capnproto -y
+
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-ipc-smoke-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build ipc crate
+        run: cargo build -p wirken-ipc --tests
+
+      - name: Run ipc smoke tests
+        run: cargo test -p wirken-ipc
