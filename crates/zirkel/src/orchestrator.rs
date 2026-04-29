@@ -51,7 +51,11 @@ use wirken_agent::llm::LlmClient;
 
 use crate::cluster::{ClusterLabel, cluster as cluster_embeddings, group_by_cluster};
 use crate::embedding::embed_batch;
-use crate::fetcher::{FetchError, FetchedItem, fetch_rss};
+use crate::fetcher::{FetchError, FetchedItem, RssFetcher, SourceConfig};
+use crate::fetcher_congress::CongressBillFetcher;
+use crate::fetcher_federal_register::FederalRegisterFetcher;
+use crate::fetcher_govinfo::GovInfoBillsFetcher;
+use crate::fetcher_registry::FetcherRegistry;
 use crate::interests::{InterestsError, last_snapshot_hash, load as load_interests, snapshot};
 use crate::llm_score::score_candidate;
 use crate::schema::AGGREGATOR_MIGRATIONS;
@@ -102,6 +106,19 @@ pub struct OrchestratorConfig {
     /// [`crate::embedding::DEFAULT_EMBEDDING_MODEL`] in the CLI; tests
     /// can pass any string the mock server will echo.
     pub embed_model: String,
+    /// API keys for the api.data.gov-keyed sources, keyed by source
+    /// name (matches `sources.toml`'s `name` field — e.g.
+    /// `"congress-gov"`, `"govinfo-gov"`). The CLI populates this at
+    /// startup from the wirken vault; the orchestrator registers the
+    /// matching fetcher only when the key is present, otherwise the
+    /// source records as unsupported.
+    ///
+    /// Keys are passed pre-resolved (operator's UID has already
+    /// opened the vault). They never reach the agent / LLM layer:
+    /// the keyed fetchers inject them into the X-Api-Key header at
+    /// fetch time and the resulting [`FetchedItem`] flows downstream
+    /// without the secret material.
+    pub source_api_keys: std::collections::HashMap<String, String>,
 }
 
 /// Outcome of one orchestrator run, by category.
@@ -225,8 +242,72 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
             message: e.to_string(),
         })?;
 
-    // Policed HTTP transport with the aggregator's egress allow-set.
-    let http = EgressClient::with_rate_limit(config.rate_limit.clone());
+    // Fetcher registry: built once per run. RSS handles both
+    // `"rss"` and `"atom-api"` (feed-rs discriminates internally).
+    // Federal Register lands on `"json-federal-register"`. The
+    // api.data.gov-keyed fetchers (Congress, GovInfo) register here
+    // only when their api key is present in
+    // [`OrchestratorConfig::source_api_keys`] — otherwise the source
+    // records as unsupported with a clear message rather than
+    // failing the run.
+    let mut fetchers = FetcherRegistry::new();
+    {
+        let rss: Arc<dyn crate::fetcher::Fetcher> = Arc::new(RssFetcher);
+        fetchers.register("rss", rss.clone());
+        fetchers.register("atom-api", rss);
+        fetchers.register(
+            crate::fetcher_federal_register::METHOD,
+            Arc::new(FederalRegisterFetcher),
+        );
+        if let Some(key) = config.source_api_keys.get("congress-gov") {
+            fetchers.register(
+                crate::fetcher_congress::METHOD,
+                Arc::new(CongressBillFetcher::new(secrecy::SecretString::from(
+                    key.clone(),
+                ))),
+            );
+        }
+        if let Some(key) = config.source_api_keys.get("govinfo-gov") {
+            fetchers.register(
+                crate::fetcher_govinfo::METHOD,
+                Arc::new(GovInfoBillsFetcher::new(secrecy::SecretString::from(
+                    key.clone(),
+                ))),
+            );
+        }
+    }
+
+    // Build the rate-limit config: start from the caller-supplied
+    // base (which carries jitter + global default cap), then for
+    // each manifest source whose registered fetcher declares an
+    // opinion, set the per-host override. This keeps the polite
+    // 2/day default for unauthenticated scraping and lets the
+    // documented-quota APIs run within their published budgets
+    // without per-source TOML fields. Host is derived from the
+    // endpoint URL so the override key matches what
+    // [`wirken_agent::rate_limit::RateLimitedClient`] extracts at
+    // request time.
+    let mut rate_limit = config.rate_limit.clone();
+    for source in &manifest.sources {
+        let Some(fetcher) = fetchers.get(&source.method) else {
+            continue;
+        };
+        let Some(cap) = fetcher.default_rate_limit_per_day() else {
+            continue;
+        };
+        let Some(host) = url::Url::parse(&source.endpoint)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+        else {
+            tracing::warn!(
+                "source '{}' endpoint is not a parseable URL; rate-limit override skipped",
+                source.name
+            );
+            continue;
+        };
+        rate_limit.per_host_overrides.entry(host).or_insert(cap);
+    }
+    let http = EgressClient::with_rate_limit(rate_limit);
     http.set_enforcement(EgressEnforcement::from_profile(
         &wirken_agent::skill_perms::EffectiveProfile::Resolved(profile.clone()),
     ));
@@ -268,45 +349,49 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
     for source in &manifest.sources {
         summary.sources_attempted += 1;
 
-        // Dispatch by method. Foundation slice supports RSS and Atom
-        // (both via feed-rs); api / scrape are recorded as skipped.
-        let items = match source.method.as_str() {
-            "rss" | "atom-api" => match fetch_rss(&http, &source.name, &source.endpoint).await {
-                Ok(items) => {
-                    emit_http_fetch(
-                        config.session_log.as_ref(),
-                        audit_handle.as_ref(),
-                        source,
-                        "ok",
-                        bytes_total(&items),
-                        &run_id,
-                    );
-                    items
-                }
-                Err(e) => {
-                    let outcome = fetch_outcome_label(&e);
-                    emit_http_fetch(
-                        config.session_log.as_ref(),
-                        audit_handle.as_ref(),
-                        source,
-                        &outcome,
-                        0,
-                        &run_id,
-                    );
-                    summary.sources_failed.push(SourceFailure {
-                        source: source.name.clone(),
-                        reason: e.to_string(),
-                    });
-                    continue;
-                }
-            },
-            other => {
-                summary.sources_unsupported.push(source.name.clone());
-                tracing::info!(
-                    "source '{}' uses method '{}' which is unsupported in the C-foundation slice",
-                    source.name,
-                    other
+        // Dispatch by method via the fetcher registry. Methods with
+        // no registered fetcher (today: scrape; tomorrow: anything
+        // not yet wired) record as unsupported and the run continues.
+        let Some(fetcher) = fetchers.get(&source.method) else {
+            summary.sources_unsupported.push(source.name.clone());
+            tracing::info!(
+                "source '{}' uses method '{}' which is not registered (registered: {})",
+                source.name,
+                source.method,
+                fetchers.registered_methods().join(", "),
+            );
+            continue;
+        };
+        let source_cfg = SourceConfig {
+            name: source.name.clone(),
+            endpoint: source.endpoint.clone(),
+        };
+        let items = match fetcher.fetch(&http, &source_cfg).await {
+            Ok(items) => {
+                emit_http_fetch(
+                    config.session_log.as_ref(),
+                    audit_handle.as_ref(),
+                    source,
+                    "ok",
+                    bytes_total(&items),
+                    &run_id,
                 );
+                items
+            }
+            Err(e) => {
+                let outcome = fetch_outcome_label(&e);
+                emit_http_fetch(
+                    config.session_log.as_ref(),
+                    audit_handle.as_ref(),
+                    source,
+                    &outcome,
+                    0,
+                    &run_id,
+                );
+                summary.sources_failed.push(SourceFailure {
+                    source: source.name.clone(),
+                    reason: e.to_string(),
+                });
                 continue;
             }
         };
@@ -411,11 +496,19 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                     } else {
                         Some(item.published_at.clone())
                     };
+                    // Default empty source_metadata to '{}' so the
+                    // column's NOT NULL DEFAULT semantics match the
+                    // value the fetcher passed (or didn't).
+                    let source_metadata: &str = if item.source_metadata.is_empty() {
+                        "{}"
+                    } else {
+                        &item.source_metadata
+                    };
                     store.conn().execute(
                         "INSERT INTO candidates ( \
                             source_name, url, body, run_id, title, published_at, \
-                            matched_keywords, keyword_match_score \
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            matched_keywords, keyword_match_score, source_metadata \
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         rusqlite::params![
                             &item.source_name,
                             &item.url,
@@ -425,6 +518,7 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                             &published_at,
                             &matched_json,
                             keyword_match_score as i64,
+                            source_metadata,
                         ],
                     )?;
                     let candidate_id = store.conn().last_insert_rowid();
@@ -721,6 +815,11 @@ fn collect_run_candidates(
                 title: row.get::<_, String>(3)?,
                 abstract_text: row.get::<_, String>(4)?,
                 published_at: row.get::<_, String>(5)?,
+                // Not loaded — the LLM-scoring rebuild path
+                // doesn't read source_metadata yet. Adding the
+                // column to the SELECT is a future change when a
+                // scoring prompt actually consumes it.
+                source_metadata: String::new(),
             },
         ))
     })?;
@@ -970,6 +1069,7 @@ skills = ["aggregator"]
             llm_api_key: None,
             ollama_embed_base: String::new(),
             embed_model: String::new(),
+            source_api_keys: std::collections::HashMap::new(),
         }
     }
 
@@ -1443,6 +1543,7 @@ skills = ["other"]
             llm_api_key: None,
             ollama_embed_base: embed_base.to_string(),
             embed_model: "nomic-embed-text:v1.5".to_string(),
+            source_api_keys: std::collections::HashMap::new(),
         }
     }
 
