@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: {}
 
 # Minimum permissions at the workflow level. The release job
 # escalates to `contents: write` locally so build jobs can't use
