@@ -134,4 +134,16 @@ pub const AGGREGATOR_MIGRATIONS: &[&str] = &[
         conversation_id  TEXT NOT NULL, \
         bound_at         TEXT NOT NULL DEFAULT (datetime('now')) \
     )",
+    // 9 — C-API: source-specific metadata stashed verbatim from
+    // structured-JSON fetchers. RSS entries write `'{}'`; the
+    // Federal Register fetcher writes
+    // `{"agencies":[...],"document_number":"..."}`. Future fetchers
+    // (congress.gov, govinfo.gov) extend per-source. Stored as a
+    // JSON string so SQLite's json1 extension can query into it
+    // without a schema migration when downstream wants to filter
+    // by agency / type / number.
+    //
+    // Default '{}' (not NULL) so query patterns stay simple — every
+    // row has a parseable JSON object even if empty.
+    "ALTER TABLE candidates ADD COLUMN source_metadata TEXT NOT NULL DEFAULT '{}'",
 ];

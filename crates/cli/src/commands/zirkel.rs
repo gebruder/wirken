@@ -67,6 +67,13 @@ pub async fn run() -> Result<()> {
     let llm_cfg = LlmConfig::ollama("llama3.1:8b");
     let llm = Arc::new(LlmClient::new(llm_cfg).map_err(|e| anyhow!("construct LLM client: {e}"))?);
 
+    // Resolve api.data.gov keys for keyed sources from the vault.
+    // The orchestrator runs as the operator's UID and reads the
+    // vault directly; the keys never reach the agent / LLM layer.
+    // Sources without a key in the vault are recorded as
+    // unsupported by the orchestrator with a clear message.
+    let source_api_keys = resolve_zirkel_source_api_keys(&data_dir);
+
     let summary = orchestrator_run(OrchestratorConfig {
         preset_dir,
         storage_dir,
@@ -77,6 +84,7 @@ pub async fn run() -> Result<()> {
         llm_api_key: None,
         ollama_embed_base: "http://127.0.0.1:11434".to_string(),
         embed_model: DEFAULT_EMBEDDING_MODEL.to_string(),
+        source_api_keys,
     })
     .await
     .map_err(|e| anyhow!("zirkel orchestrator: {e}"))?;
@@ -271,6 +279,227 @@ fn open_zirkel_db() -> Result<Connection> {
     apply_aggregator_migrations(&mut conn)
         .map_err(|e| anyhow!("apply migrations to {}: {e}", db_path.display()))?;
     Ok(conn)
+}
+
+/// `wirken zirkel auth-set --source <name>` — interactive prompt
+/// for an api.data.gov key, validate against the source's API,
+/// store in the wirken vault.
+///
+/// Validation policy: 200 → store; 401/403 → reject without
+/// storing (typo caught at entry); other HTTP error or network
+/// error → warn and store anyway (operator might be airgapped or
+/// hitting a transient blip; storing-conditional-on-network would
+/// trap them at setup).
+pub async fn auth_set(source: &str) -> Result<()> {
+    let validator = match source {
+        "congress-gov" => SourceAuthValidator::Congress,
+        "govinfo-gov" => SourceAuthValidator::GovInfo,
+        other => {
+            return Err(anyhow!(
+                "unknown zirkel source '{other}'. Known sources: congress-gov, govinfo-gov"
+            ));
+        }
+    };
+
+    let key = dialoguer::Password::new()
+        .with_prompt(format!("  API key for {source}"))
+        .interact()
+        .map_err(|e| anyhow!("read API key: {e}"))?;
+    if key.is_empty() {
+        return Err(anyhow!("empty key"));
+    }
+
+    println!("  Validating against {} ...", validator.host());
+    match validator.try_key(&key).await {
+        AuthValidation::Ok => {
+            println!("  ✓ key validates against {}", validator.host());
+        }
+        AuthValidation::Rejected(status) => {
+            return Err(anyhow!(
+                "API key rejected by {}: HTTP {status}. Check the key was copied correctly. Not stored.",
+                validator.host()
+            ));
+        }
+        AuthValidation::Unreachable(reason) => {
+            println!(
+                "  ⚠ {} unreachable ({reason}). Key stored unverified — next \
+                 `wirken zirkel run` will surface validation errors if the key is invalid.",
+                validator.host()
+            );
+        }
+    }
+
+    let cfg = super::config();
+    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, || {
+        dialoguer::Password::new()
+            .with_prompt("  Vault passphrase")
+            .interact()
+            .unwrap_or_default()
+    });
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .map_err(|e| anyhow!("open credential store: {e}"))?;
+    let vault_key_name = format!("zirkel-{source}-api-key");
+    store
+        .store(
+            &vault_key_name,
+            "zirkel",
+            &wirken_vault::VaultSecret::new(key),
+            None,
+            None,
+        )
+        .map_err(|e| anyhow!("store '{vault_key_name}': {e}"))?;
+
+    println!("  Stored as '{vault_key_name}' in the wirken vault.");
+    Ok(())
+}
+
+/// `wirken zirkel auth-list` — print the names of zirkel-bound
+/// vault entries (no values). Helpful for confirming a key is
+/// configured before running.
+pub async fn auth_list() -> Result<()> {
+    let cfg = super::config();
+    if !cfg.vault_db_path().exists() {
+        println!("No vault. Run `wirken zirkel auth-set --source <name>` to create one.");
+        return Ok(());
+    }
+    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, || {
+        dialoguer::Password::new()
+            .with_prompt("  Vault passphrase")
+            .interact()
+            .unwrap_or_default()
+    });
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .map_err(|e| anyhow!("open credential store: {e}"))?;
+    let entries = store.list().map_err(|e| anyhow!("list vault: {e}"))?;
+    let zirkel: Vec<_> = entries
+        .iter()
+        .filter(|e| e.name.starts_with("zirkel-") && e.name.ends_with("-api-key"))
+        .collect();
+    if zirkel.is_empty() {
+        println!(
+            "No zirkel API keys stored. Configure with `wirken zirkel auth-set --source <name>`."
+        );
+        return Ok(());
+    }
+    println!("Zirkel API keys:");
+    for e in zirkel {
+        let source = e
+            .name
+            .strip_prefix("zirkel-")
+            .and_then(|s| s.strip_suffix("-api-key"))
+            .unwrap_or(&e.name);
+        println!("  {source} (stored {})", e.created_at.format("%Y-%m-%d"));
+    }
+    Ok(())
+}
+
+/// Per-source validation target. Each variant knows its host (for
+/// human-readable messages) and a minimal endpoint that costs one
+/// request against the operator's quota.
+enum SourceAuthValidator {
+    Congress,
+    GovInfo,
+}
+
+enum AuthValidation {
+    Ok,
+    /// 401 / 403 — the API definitively rejected the key.
+    Rejected(u16),
+    /// Anything else: network error, 5xx, timeout. Ambiguous —
+    /// the key might be correct but the host is briefly unreachable.
+    Unreachable(String),
+}
+
+impl SourceAuthValidator {
+    fn host(&self) -> &'static str {
+        match self {
+            Self::Congress => "api.congress.gov",
+            Self::GovInfo => "api.govinfo.gov",
+        }
+    }
+
+    fn validation_url(&self) -> &'static str {
+        match self {
+            // Smallest valid request — limit=1 keeps the response
+            // body tiny while still exercising the auth path.
+            Self::Congress => "https://api.congress.gov/v3/bill?limit=1&format=json",
+            Self::GovInfo => "https://api.govinfo.gov/collections?offsetMark=*&pageSize=1",
+        }
+    }
+
+    async fn try_key(&self, key: &str) -> AuthValidation {
+        // Direct reqwest, not the policed EgressClient — auth-set
+        // is operator-side setup, not agent-side. The host is
+        // well-known and the request is one-shot.
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => return AuthValidation::Unreachable(format!("client build: {e}")),
+        };
+        let resp = client
+            .get(self.validation_url())
+            .header("X-Api-Key", key)
+            .send()
+            .await;
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                if r.status().is_success() {
+                    AuthValidation::Ok
+                } else if status == 401 || status == 403 {
+                    AuthValidation::Rejected(status)
+                } else {
+                    AuthValidation::Unreachable(format!("HTTP {status}"))
+                }
+            }
+            Err(e) => AuthValidation::Unreachable(format!("network: {e}")),
+        }
+    }
+}
+
+/// Read the wirken vault and return a map of zirkel-bound source
+/// names → api keys. Vault entries follow the convention
+/// `zirkel-<source>-api-key`. Sources whose entry is absent or
+/// whose retrieve fails simply don't end up in the map; the
+/// orchestrator skips those fetcher registrations and surfaces
+/// "method not registered" if sources.toml references them.
+///
+/// The vault open path silently returns an empty map if no vault
+/// is configured — `wirken zirkel run` is allowed to fire on a
+/// host with only public RSS / Federal Register sources, and
+/// requiring an empty vault to exist would be a footgun.
+fn resolve_zirkel_source_api_keys(
+    data_dir: &std::path::Path,
+) -> std::collections::HashMap<String, String> {
+    use wirken_vault::{CredentialStore, probe_keychain};
+    let mut out = std::collections::HashMap::new();
+
+    let vault_db = data_dir.join("vault.db");
+    if !vault_db.exists() {
+        return out;
+    }
+
+    let keychain = probe_keychain(data_dir, String::new);
+    let Ok(store) = CredentialStore::open(&vault_db, keychain.as_ref()) else {
+        tracing::debug!("zirkel: vault.db present but could not be opened");
+        return out;
+    };
+
+    // Well-known keyed sources. Adding a new keyed source means
+    // adding a row here plus its fetcher registration in
+    // wirken-zirkel's orchestrator.
+    let sources = [
+        ("congress-gov", "zirkel-congress-gov-api-key"),
+        ("govinfo-gov", "zirkel-govinfo-gov-api-key"),
+    ];
+    for (source_name, vault_key) in sources {
+        if let Ok((secret, _)) = store.retrieve(vault_key) {
+            out.insert(source_name.to_string(), secret.expose().to_string());
+        }
+    }
+    out
 }
 
 /// Idempotent migration application — same shape SkillStore uses.

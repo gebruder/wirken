@@ -89,6 +89,7 @@ mod tests {
             title: "FTC sues data broker".to_string(),
             abstract_text: "Section 5 unfairness against ExampleCorp.".to_string(),
             published_at: "2026-04-28T00:00:00Z".to_string(),
+            ..Default::default()
         }
     }
 
