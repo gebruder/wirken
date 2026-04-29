@@ -187,6 +187,17 @@ pub async fn sign(dir: &str) -> Result<()> {
             std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
+        #[cfg(not(unix))]
+        {
+            // No 0o600-equivalent on this platform. The skill signing
+            // key relies on user-profile isolation for confidentiality.
+            tracing::warn!(
+                "skill signing key written to {} without 0o600-equivalent ACL; \
+                 relying on user profile isolation for confidentiality",
+                key_path.display()
+            );
+        }
+
         println!("  Generated new signing keypair.");
         println!("  Public key: {public_hex}");
         println!("  Secret key saved to {}", key_path.display());
