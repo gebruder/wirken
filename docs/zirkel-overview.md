@@ -2,9 +2,9 @@
 
 <img src="img/zirkel-wirken.png" alt="Zirkel" width="400" align="right">
 
-Zirkel is a daily research aggregator that runs on your laptop. You write a small TOML file naming the keywords you care about (and the noise you don't); Zirkel fetches each day's items from a fixed list of public sources — academic preprint servers, journal feeds, regulator press releases, the Federal Register, congressional bill activity — and screens them against your keywords. A short, themed digest arrives in your Signal app at the time of day you set. You reply `keep 1, 3, 5` or `skip all`; the items you keep land in a personal library you can query later by chat — "what did I save this week?", "what have I kept about BIPA?", "what FTC items did I save?"
+Zirkel is a daily research aggregator that runs on your laptop. You write a small TOML file naming the keywords you care about (and the noise you don't); Zirkel fetches each day's items from a fixed list of public sources (academic preprint servers, journal feeds, regulator press releases, the Federal Register, congressional bill activity) and screens them against your keywords. A short, themed digest arrives in your Signal app at the time of day you set. You reply `keep 1, 3, 5` or `skip all`; the items you keep land in a personal library you can query later by chat: "what did I save this week?", "what have I kept about BIPA?", "what FTC items did I save?"
 
-The threat model is the keyword file itself. The list of things you watch reveals what you're working on, who you're tracking, what enforcement action you're preparing for, what scholar you're following before your paper cites them. Zirkel runs locally so that file — and your kept set, and your chat queries — never leaves your machine. Outbound traffic is restricted to a fixed allowlist of named public sources, enforced at the HTTP transport layer.
+The threat model is the keyword file itself. The list of things you watch reveals what you're working on, who you're tracking, what enforcement action you're preparing for, what scholar you're following before your paper cites them. Zirkel runs locally so that file (and your kept set, and your chat queries) never leaves your machine. Outbound traffic is restricted to a fixed allowlist of named public sources, enforced at the HTTP transport layer.
 
 ## Who it is for
 
@@ -22,7 +22,7 @@ Zirkel runs locally, fetches from public sources at human pace, scores against a
 
 ## What Zirkel is not
 
-- Not a continuous scraper. Zirkel runs on a schedule (default daily) and respects published rate limits.
+- Not a continuous scraper. Zirkel polls each configured source once per scheduled run (daily by default).
 - Not a research assistant. The chat surface returns items with citations; it does not summarize, synthesize, or assert claims about what you've kept.
 - Not a citation manager. Zirkel surfaces what you might want to read; tools like Zotero handle what you do read.
 - Not a cloud service. Zirkel is a local CLI plus a Signal channel binding. There is no Zirkel server.
@@ -53,23 +53,23 @@ The file is snapshotted on every run for reproducibility. The interests that pro
 
 Zirkel fetches from a fixed allowlist declared in `presets/zirkel/sources.toml`. The shipped set covers:
 
-**Papers** — SSRN, arXiv (cs.CY and cs.CR).
+**Papers**: SSRN, arXiv (cs.CY and cs.CR).
 
-**Regulators** — FTC, FCC, CFPB, HHS OCR, EDPB, ICO, CNIL. Other RSS-publishing regulators or state attorneys general (e.g. California's `oag.ca.gov/news/feed`, Washington's `atg.wa.gov/news/news-releases-rss`) add at the operator's discretion by editing `sources.toml`.
+**Regulators**: FTC, FCC, CFPB, HHS OCR, EDPB, ICO, CNIL. Other RSS-publishing regulators or state attorneys general (e.g. California's `oag.ca.gov/news/feed`, Washington's `atg.wa.gov/news/news-releases-rss`) add at the operator's discretion by editing `sources.toml`.
 
-**Federal rulemaking, congressional bills, and hearings** — Federal Register API, congress.gov API, govinfo.gov API. The two keyed APIs require a free key from api.data.gov, set via `wirken zirkel auth-set --source congress-gov` (or `govinfo-gov`).
+**Federal rulemaking, congressional bills, and hearings**: Federal Register API, congress.gov API, govinfo.gov API. The two keyed APIs require a free key from api.data.gov, set via `wirken zirkel auth-set --source congress-gov` (or `govinfo-gov`).
 
 The allowlist is the egress allowlist. Aggregator runs cannot reach hosts outside it; the permission system rejects the request before the connection is opened.
 
 ### Rate limits are enforced in transport
 
-Each fetcher declares its rate limit per host. Unauthenticated sources default to two requests per day, jittered, simulating human pacing. Documented APIs run within their published budgets — Federal Register's API is open with no published per-key limit, so Zirkel self-caps at 1,000/day for politeness; congress.gov publishes 5,000/hr and govinfo.gov publishes 36,000/hr (and 1,200/min, 40/sec), but Zirkel self-caps both at 5,000/day, well below the per-hour ceiling and oversized for the daily-fire pattern.
+Each fetcher declares its rate limit per host. Unauthenticated sources default to two requests per day, jittered, simulating human pacing. Documented APIs run within their published budgets. Federal Register's API is open with no published per-key limit, so Zirkel self-caps at 1,000/day for politeness; congress.gov publishes 5,000/hr and govinfo.gov publishes 36,000/hr (and 1,200/min, 40/sec), but Zirkel self-caps both at 5,000/day, well below the per-hour ceiling and oversized for the daily-fire pattern.
 
 The limit is enforced in the HTTP client, not in instructions to the model. Hitting the limit produces a structured failure, not a polite delay request the LLM might ignore.
 
 ### Scoring is two-axis
 
-Each candidate is screened against the interests file (exclusion drops, keyword matches recorded). Survivors are scored a second time by a local LLM via a structured tool call returning a 0–100 relevance score and a one-line "why surfaced" string pointing to the matched keyword.
+Each candidate is screened against the interests file (exclusion drops, keyword matches recorded). Survivors are scored a second time by a local LLM via a structured tool call returning a 0 to 100 relevance score and a one-line "why surfaced" string pointing to the matched keyword.
 
 The two scores coexist as separate columns. A failed LLM pass leaves the keyword score intact; the candidate still surfaces, just without the LLM-derived nuance.
 
@@ -87,14 +87,14 @@ You reply with `keep 3, 5, 7` or `skip all` or any combination of comma-separate
 
 The kept set is queryable by `/librarian` slash command on the bound channel. Six named queries:
 
-- `kept_recent` — items from the last N days
-- `kept_by_keyword` — items whose title or abstract contains a term
-- `kept_by_theme` — items in a named theme
-- `kept_by_source` — items from a specific source
-- `kept_in_run` — all kept items from a specific run
-- `recent_themes` — themes from recent runs with member counts
+- `kept_recent`: items from the last N days
+- `kept_by_keyword`: items whose title or abstract contains a term
+- `kept_by_theme`: items in a named theme
+- `kept_by_source`: items from a specific source
+- `kept_in_run`: all kept items from a specific run
+- `recent_themes`: themes from recent runs with member counts
 
-The LLM picks a query and fills parameters from the natural-language question. It cannot construct free-form SQL — the query name is a JSON-schema enum on the tool definition, so the function-calling layer rejects invalid names at the SDK level. The skill body constrains rendering: titles, URLs, sources, and dates appear verbatim. No paraphrase, no summary, no commentary.
+The LLM picks a query and fills parameters from the natural-language question. It cannot construct free-form SQL. The query name is a JSON-schema enum on the tool definition, so the function-calling layer rejects invalid names at the SDK level. The skill body constrains rendering: titles, URLs, sources, and dates appear verbatim. No paraphrase, no summary, no commentary.
 
 ### Audit trail is tamper-evident
 
@@ -104,10 +104,10 @@ Every fetch, every LLM call, every keep, every skip, every interests edit, every
 
 Zirkel inherits Wirken's per-skill permissions block. The aggregator and librarian each declare their own:
 
-- **Tools** — aggregator gets none (orchestrator-driven, not agent-attached); librarian gets `sqlite_query` only.
-- **Egress** — aggregator's allowlist is the source list plus `127.0.0.1` for local LLM and embedding calls; librarian denies egress entirely.
-- **Filesystem** — aggregator writes to `~/.wirken/zirkel/`; librarian reads the same path, writes nowhere.
-- **Inference** — both allow Ollama (local) and Privatemode (confidential remote). No path ships interests, candidates, scores, or queries to a non-confidential provider.
+- **Tools**: aggregator gets none (orchestrator-driven, not agent-attached); librarian gets `sqlite_query` only.
+- **Egress**: aggregator's allowlist is the source list plus `127.0.0.1` for local LLM and embedding calls; librarian denies egress entirely.
+- **Filesystem**: aggregator writes to `~/.wirken/zirkel/`; librarian reads the same path, writes nowhere.
+- **Inference**: both allow Ollama (local) and Privatemode (confidential remote). No path ships interests, candidates, scores, or queries to a non-confidential provider.
 
 The permissions block is signed as part of the skill's frontmatter. Default-deny on every axis.
 
@@ -125,5 +125,5 @@ For the architectural commitment on browser scraping, see [`docs/zirkel.md`](zir
 
 ## See also
 
-- [`docs/zirkel.md`](zirkel.md) — setup, configuration, the no-headless-browser commitment.
-- [`presets/zirkel/`](../preset/zirkel/) — the preset itself, including `sources.toml` and per-skill SKILL.md frontmatter.
+- [`docs/zirkel.md`](zirkel.md): setup, configuration, the no-headless-browser commitment.
+- [`presets/zirkel/`](../preset/zirkel/): the preset itself, including `sources.toml` and per-skill SKILL.md frontmatter.
