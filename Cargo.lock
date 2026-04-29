@@ -6497,6 +6497,7 @@ dependencies = [
  "lru",
  "rand 0.10.1",
  "reqwest 0.13.2",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",

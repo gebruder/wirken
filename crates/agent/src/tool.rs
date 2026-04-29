@@ -67,6 +67,12 @@ pub struct ToolRegistry {
     /// lifetime of this registry — restart `wirken run` to retry.
     sandbox: tokio::sync::OnceCell<Option<DockerSandbox>>,
     sandbox_config: SandboxConfig,
+    /// Path to the zirkel aggregator SQLite database, set when the
+    /// agent is configured for the librarian skill. `None` means the
+    /// `sqlite_query` tool is unavailable for this agent (it returns
+    /// a clear error rather than silently failing). Set via
+    /// [`Self::set_zirkel_db_path`].
+    zirkel_db_path: Option<PathBuf>,
 }
 
 impl ToolRegistry {
@@ -191,6 +197,43 @@ impl ToolRegistry {
         );
 
         tools.insert(
+            "sqlite_query".into(),
+            ToolDef {
+                name: "sqlite_query".into(),
+                description: "Run a named query against the zirkel kept-items database. \
+                              Returns structured JSON rows verbatim; do not paraphrase \
+                              or summarize the results. Available named queries: \
+                              kept_recent (params: days), kept_by_keyword (params: term), \
+                              kept_by_theme (params: theme), kept_by_source (params: source), \
+                              kept_in_run (params: run_id), recent_themes (params: days)."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "enum": [
+                                "kept_recent",
+                                "kept_by_keyword",
+                                "kept_by_theme",
+                                "kept_by_source",
+                                "kept_in_run",
+                                "recent_themes"
+                            ],
+                            "description": "Name of the query to run"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Parameters per the named query's signature",
+                            "additionalProperties": true
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        );
+
+        tools.insert(
             "generate_image".into(),
             ToolDef {
                 name: "generate_image".into(),
@@ -228,7 +271,17 @@ impl ToolRegistry {
             config,
             sandbox: tokio::sync::OnceCell::new(),
             sandbox_config,
+            zirkel_db_path: None,
         })
+    }
+
+    /// Configure the path the `sqlite_query` librarian tool opens.
+    /// Called by the agent factory when the agent's static config
+    /// names a zirkel-bound database. The tool itself enforces
+    /// read-only access via `SQLITE_OPEN_READ_ONLY`; the path here
+    /// is the only DB the tool will ever touch.
+    pub fn set_zirkel_db_path(&mut self, path: PathBuf) {
+        self.zirkel_db_path = Some(path);
     }
 
     /// Whether the sandbox `OnceCell` has been initialized. Test-only helper
@@ -336,6 +389,7 @@ impl ToolRegistry {
             "write_file" => self.write_file(&args).await,
             "list_files" => self.list_files(&args).await,
             "web_search" => self.web_search(&args).await,
+            "sqlite_query" => self.sqlite_query(&args).await,
             "generate_image" => self.generate_image(&args).await,
             _ => Err(AgentError::ToolNotFound(name.to_string())),
         }
@@ -579,6 +633,66 @@ impl ToolRegistry {
         })
     }
 
+    /// Run a named query against the zirkel kept-items database.
+    ///
+    /// Trust posture (the load-bearing decision for the C-Librarian
+    /// slice): the LLM does not write SQL. It picks one of a small
+    /// set of named queries and fills typed parameters; the tool
+    /// runs the parameterized SQL the librarian skill committed to.
+    /// Free-form SQL would let the LLM hallucinate column names,
+    /// construct unbounded scans, or drift from the audit log's
+    /// expected query shape — exactly the trust posture this slice
+    /// rejects.
+    ///
+    /// The DB connection is opened with `SQLITE_OPEN_READ_ONLY`, so
+    /// a write attempt is refused at the connection layer (not by
+    /// string-pattern checks on the SQL). Caller must have set
+    /// `zirkel_db_path` via [`Self::set_zirkel_db_path`]; otherwise
+    /// the tool returns a clear error.
+    ///
+    /// Output is structured JSON. The librarian skill body
+    /// instructs the LLM to render rows verbatim — title, source,
+    /// date, url — without paraphrase. That's how retrieval-only
+    /// becomes structural rather than aspirational.
+    async fn sqlite_query(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
+        let Some(db_path) = self.zirkel_db_path.clone() else {
+            return Ok(ToolResult {
+                output: "sqlite_query is not configured for this agent (no zirkel database path bound). \
+                         Bind a librarian skill on an agent whose static config sets zirkel_db_path."
+                    .into(),
+                success: false,
+            });
+        };
+
+        let query_name = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AgentError::Tool("missing required 'query' parameter".into()))?
+            .to_string();
+        let params = args
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        // Run blocking SQLite ops on a tokio blocking task so the
+        // async runtime isn't held up by file I/O.
+        let result =
+            tokio::task::spawn_blocking(move || run_named_query(&db_path, &query_name, &params))
+                .await
+                .map_err(|e| AgentError::Tool(format!("sqlite_query task panic: {e}")))?;
+
+        match result {
+            Ok(rows_json) => Ok(ToolResult {
+                output: rows_json,
+                success: true,
+            }),
+            Err(e) => Ok(ToolResult {
+                output: format!("sqlite_query error: {e}"),
+                success: false,
+            }),
+        }
+    }
+
     async fn generate_image(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
         let provider = self.config.provider.as_deref().unwrap_or("unknown");
         if !matches!(provider, "openai" | "custom") {
@@ -708,6 +822,261 @@ struct SearchResult {
 
 /// Map an [`crate::egress::HttpAccessDenied`] from the wrapped HTTP
 /// client into an [`AgentError`]. The agent's tool dispatcher (#76
+/// Run one of the librarian's named queries against the zirkel
+/// database. Read-only by construction (`SQLITE_OPEN_READ_ONLY`);
+/// caller has already verified that the path is configured.
+///
+/// Each branch hardcodes the SQL — the LLM cannot inject column
+/// names or join shape. Parameters are bound positionally so a
+/// hostile param value (which a typo'd name could synthesize)
+/// cannot escape into the query body.
+///
+/// Result is JSON-serialized as `{"rows": [...], "count": N}` for
+/// item-shaped queries, or `{"themes": [...], "count": N}` for the
+/// `recent_themes` query. The librarian skill body tells the LLM
+/// which key to read and to relay rows verbatim — title, source,
+/// date, url — without paraphrase.
+fn run_named_query(
+    db_path: &Path,
+    query_name: &str,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    let conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("open zirkel db: {e}"))?;
+
+    match query_name {
+        "kept_recent" => kept_recent(&conn, params),
+        "kept_by_keyword" => kept_by_keyword(&conn, params),
+        "kept_by_theme" => kept_by_theme(&conn, params),
+        "kept_by_source" => kept_by_source(&conn, params),
+        "kept_in_run" => kept_in_run(&conn, params),
+        "recent_themes" => recent_themes(&conn, params),
+        other => Err(format!(
+            "unknown named query '{other}'. Known: kept_recent, kept_by_keyword, kept_by_theme, kept_by_source, kept_in_run, recent_themes"
+        )),
+    }
+}
+
+/// Cap on rows returned per query. Bounds the response payload so
+/// a query that would otherwise return thousands of rows stays
+/// manageable for the LLM's context. The librarian skill explains
+/// this to the operator: "if you want everything, narrow the
+/// query."
+const KEPT_ROW_LIMIT: i64 = 100;
+const THEMES_ROW_LIMIT: i64 = 50;
+
+fn kept_recent(conn: &rusqlite::Connection, params: &serde_json::Value) -> Result<String, String> {
+    let days = extract_days(params, 7);
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.title, c.source_name, c.url, COALESCE(c.published_at, '') AS pub_date, \
+                    COALESCE(c.llm_why_surfaced, '') AS why, \
+                    d.resolved_at AS kept_at, COALESCE(t.name, '') AS theme \
+             FROM digest_items di \
+             JOIN candidates c ON c.id = di.candidate_id \
+             JOIN digests d ON d.id = di.digest_id \
+             LEFT JOIN themes t ON t.id = c.cluster_id \
+             WHERE di.decision = 'kept' \
+               AND d.resolved_at IS NOT NULL \
+               AND d.resolved_at >= datetime('now', ?1 || ' days') \
+             ORDER BY d.resolved_at DESC, c.llm_relevance_score DESC \
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare kept_recent: {e}"))?;
+    let days_arg = format!("-{days}");
+    let rows = collect_kept_rows(&mut stmt, rusqlite::params![days_arg, KEPT_ROW_LIMIT])?;
+    Ok(serialize_rows("rows", rows))
+}
+
+fn kept_by_keyword(
+    conn: &rusqlite::Connection,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    let term = extract_required_string(params, "term")?;
+    let pattern = format!("%{}%", term.to_lowercase());
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.title, c.source_name, c.url, COALESCE(c.published_at, '') AS pub_date, \
+                    COALESCE(c.llm_why_surfaced, '') AS why, \
+                    d.resolved_at AS kept_at, COALESCE(t.name, '') AS theme \
+             FROM digest_items di \
+             JOIN candidates c ON c.id = di.candidate_id \
+             JOIN digests d ON d.id = di.digest_id \
+             LEFT JOIN themes t ON t.id = c.cluster_id \
+             WHERE di.decision = 'kept' \
+               AND d.resolved_at IS NOT NULL \
+               AND (LOWER(c.title) LIKE ?1 OR LOWER(c.body) LIKE ?1) \
+             ORDER BY d.resolved_at DESC \
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare kept_by_keyword: {e}"))?;
+    let rows = collect_kept_rows(&mut stmt, rusqlite::params![pattern, KEPT_ROW_LIMIT])?;
+    Ok(serialize_rows("rows", rows))
+}
+
+fn kept_by_theme(
+    conn: &rusqlite::Connection,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    let theme = extract_required_string(params, "theme")?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.title, c.source_name, c.url, COALESCE(c.published_at, '') AS pub_date, \
+                    COALESCE(c.llm_why_surfaced, '') AS why, \
+                    d.resolved_at AS kept_at, t.name AS theme \
+             FROM digest_items di \
+             JOIN candidates c ON c.id = di.candidate_id \
+             JOIN digests d ON d.id = di.digest_id \
+             JOIN themes t ON t.id = c.cluster_id \
+             WHERE di.decision = 'kept' \
+               AND d.resolved_at IS NOT NULL \
+               AND LOWER(t.name) = LOWER(?1) \
+             ORDER BY d.resolved_at DESC \
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare kept_by_theme: {e}"))?;
+    let rows = collect_kept_rows(&mut stmt, rusqlite::params![theme, KEPT_ROW_LIMIT])?;
+    Ok(serialize_rows("rows", rows))
+}
+
+fn kept_by_source(
+    conn: &rusqlite::Connection,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    let source = extract_required_string(params, "source")?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.title, c.source_name, c.url, COALESCE(c.published_at, '') AS pub_date, \
+                    COALESCE(c.llm_why_surfaced, '') AS why, \
+                    d.resolved_at AS kept_at, COALESCE(t.name, '') AS theme \
+             FROM digest_items di \
+             JOIN candidates c ON c.id = di.candidate_id \
+             JOIN digests d ON d.id = di.digest_id \
+             LEFT JOIN themes t ON t.id = c.cluster_id \
+             WHERE di.decision = 'kept' \
+               AND d.resolved_at IS NOT NULL \
+               AND c.source_name = ?1 \
+             ORDER BY d.resolved_at DESC \
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare kept_by_source: {e}"))?;
+    let rows = collect_kept_rows(&mut stmt, rusqlite::params![source, KEPT_ROW_LIMIT])?;
+    Ok(serialize_rows("rows", rows))
+}
+
+fn kept_in_run(conn: &rusqlite::Connection, params: &serde_json::Value) -> Result<String, String> {
+    let run_id = extract_required_string(params, "run_id")?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.title, c.source_name, c.url, COALESCE(c.published_at, '') AS pub_date, \
+                    COALESCE(c.llm_why_surfaced, '') AS why, \
+                    d.resolved_at AS kept_at, COALESCE(t.name, '') AS theme \
+             FROM digest_items di \
+             JOIN candidates c ON c.id = di.candidate_id \
+             JOIN digests d ON d.id = di.digest_id \
+             LEFT JOIN themes t ON t.id = c.cluster_id \
+             WHERE di.decision = 'kept' \
+               AND c.run_id = ?1 \
+             ORDER BY c.llm_relevance_score DESC, c.id ASC \
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare kept_in_run: {e}"))?;
+    let rows = collect_kept_rows(&mut stmt, rusqlite::params![run_id, KEPT_ROW_LIMIT])?;
+    Ok(serialize_rows("rows", rows))
+}
+
+fn recent_themes(
+    conn: &rusqlite::Connection,
+    params: &serde_json::Value,
+) -> Result<String, String> {
+    let days = extract_days(params, 7);
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, member_count, run_id, created_at \
+             FROM themes \
+             WHERE created_at >= datetime('now', ?1 || ' days') \
+             ORDER BY created_at DESC, member_count DESC \
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare recent_themes: {e}"))?;
+    let days_arg = format!("-{days}");
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mapped = stmt
+        .query_map(rusqlite::params![days_arg, THEMES_ROW_LIMIT], |row| {
+            Ok(serde_json::json!({
+                "name": row.get::<_, String>(0)?,
+                "member_count": row.get::<_, i64>(1)?,
+                "run_id": row.get::<_, String>(2)?,
+                "created_at": row.get::<_, String>(3)?,
+            }))
+        })
+        .map_err(|e| format!("query recent_themes: {e}"))?;
+    for r in mapped {
+        rows.push(r.map_err(|e| format!("read theme row: {e}"))?);
+    }
+    Ok(serialize_rows("themes", rows))
+}
+
+/// Build the JSON envelope the LLM sees. Always includes `count`
+/// so the librarian skill body can say "you have 5 items kept this
+/// week" without relying on the LLM to count an array.
+fn serialize_rows(key: &str, rows: Vec<serde_json::Value>) -> String {
+    let count = rows.len();
+    let envelope = serde_json::json!({
+        key: rows,
+        "count": count,
+    });
+    serde_json::to_string(&envelope).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn collect_kept_rows<P: rusqlite::Params>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: P,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mapped = stmt
+        .query_map(params, |row| {
+            Ok(serde_json::json!({
+                "title": row.get::<_, String>(0)?,
+                "source": row.get::<_, String>(1)?,
+                "url": row.get::<_, String>(2)?,
+                "date": row.get::<_, String>(3)?,
+                "why_surfaced": row.get::<_, String>(4)?,
+                "kept_at": row.get::<_, String>(5)?,
+                "theme": row.get::<_, String>(6)?,
+            }))
+        })
+        .map_err(|e| format!("query: {e}"))?;
+    let mut out = Vec::new();
+    for r in mapped {
+        out.push(r.map_err(|e| format!("read row: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn extract_days(params: &serde_json::Value, default_days: i64) -> i64 {
+    params
+        .get("days")
+        .and_then(|v| v.as_i64())
+        .filter(|n| *n > 0 && *n <= 365)
+        .unwrap_or(default_days)
+}
+
+fn extract_required_string(params: &serde_json::Value, name: &str) -> Result<String, String> {
+    let s = params
+        .get(name)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing required parameter '{name}' (expected string)"))?
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        return Err(format!("parameter '{name}' must not be empty"));
+    }
+    Ok(s)
+}
+
 /// Phase 2.2) intercepts both variants and emits the appropriate
 /// `SkillPermissionDenied` audit event before surfacing a non-success
 /// `ToolResult`. The agent-tool case (web_search / generate_image)

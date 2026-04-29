@@ -154,6 +154,13 @@ pub struct AgentStaticConfig {
     ///
     /// [`InboundInterceptor`]: crate::inbound_interceptor::InboundInterceptor
     pub extra_interceptors: Vec<Arc<dyn crate::inbound_interceptor::InboundInterceptor>>,
+    /// Path to the zirkel aggregator SQLite database, configured for
+    /// agents that carry the librarian skill. The factory calls
+    /// [`crate::runtime::Agent::attach_zirkel_db`] on every waked
+    /// Agent when this is `Some`. None disables the `sqlite_query`
+    /// tool for the agent (the tool returns a clear error if invoked
+    /// without the path bound).
+    pub zirkel_db_path: Option<PathBuf>,
 }
 
 /// Cache mode resolved at factory construction time. Tests pass it
@@ -342,6 +349,9 @@ impl AgentFactory {
         agent.attach_subagent_ceilings(cfg.allowed_subagents.clone());
         for interceptor in &cfg.extra_interceptors {
             agent.attach_interceptor(interceptor.clone());
+        }
+        if let Some(path) = &cfg.zirkel_db_path {
+            agent.attach_zirkel_db(path.clone());
         }
 
         let arc = Arc::new(AsyncMutex::new(agent));

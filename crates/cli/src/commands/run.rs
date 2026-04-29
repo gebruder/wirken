@@ -287,6 +287,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     allowed_subagents: agent_cfg.allowed_subagents.clone(),
                     sandbox: super::load_sandbox_config(&cfg.data_dir),
                     extra_interceptors: vec![],
+                    zirkel_db_path: None,
                 },
             );
         }
@@ -373,6 +374,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 allowed_subagents: Default::default(),
                 sandbox: super::load_sandbox_config(&cfg.data_dir),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
     }
