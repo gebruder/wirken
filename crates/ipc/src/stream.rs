@@ -207,6 +207,130 @@ mod win {
 /// Boxed [`Stream`] suitable for sending across tokio tasks.
 pub type BoxStream = Box<dyn Stream + Send>;
 
+/// Server-side accept loop for IPC listeners.
+///
+/// The unix impl wraps `tokio::net::UnixListener::accept()`. The
+/// windows impl wraps the named-pipe accept dance: a server
+/// instance is created for each pending connection, `connect()`
+/// awaits the client, and a fresh instance is created for the next
+/// accept. Both impls return a [`BoxStream`] so consumers don't
+/// need to know which platform they're on.
+#[async_trait::async_trait]
+pub trait Listener: Send {
+    async fn accept(&mut self) -> Result<BoxStream, IpcError>;
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Listener for tokio::net::UnixListener {
+    async fn accept(&mut self) -> Result<BoxStream, IpcError> {
+        let (stream, _addr) = tokio::net::UnixListener::accept(self).await?;
+        Ok(Box::new(stream))
+    }
+}
+
+/// Bind an IPC listener at `path`.
+///
+/// On unix `path` is a filesystem path used as a unix-domain
+/// socket. On windows `path` is mapped to a named-pipe name under
+/// `\\.\pipe\` derived from the path's last two components plus a
+/// hash of the full path; this keeps the "one listener per data
+/// dir" property without the operator having to track windows
+/// pipe-namespace details.
+pub fn bind(path: &std::path::Path) -> Result<Box<dyn Listener>, IpcError> {
+    #[cfg(unix)]
+    {
+        let inner = tokio::net::UnixListener::bind(path)?;
+        Ok(Box::new(inner))
+    }
+    #[cfg(windows)]
+    {
+        Ok(Box::new(named_pipe_listener::NamedPipeListener::bind(
+            path,
+        )?))
+    }
+}
+
+/// Connect to an IPC listener at `path`. The path mapping is the
+/// same as [`bind`].
+pub async fn connect(path: &std::path::Path) -> Result<BoxStream, IpcError> {
+    #[cfg(unix)]
+    {
+        let s = tokio::net::UnixStream::connect(path).await?;
+        Ok(Box::new(s))
+    }
+    #[cfg(windows)]
+    {
+        let pipe = named_pipe_listener::pipe_name_for(path);
+        let client = tokio::net::windows::named_pipe::ClientOptions::new().open(pipe)?;
+        Ok(Box::new(client))
+    }
+}
+
+#[cfg(windows)]
+mod named_pipe_listener {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::path::Path;
+
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    use super::{BoxStream, Listener};
+    use crate::error::IpcError;
+
+    /// Map a unix-style path to a windows pipe name. The last
+    /// segment of the path becomes a human-readable suffix; a
+    /// 16-hex-digit hash of the full path makes the name unique
+    /// across data dirs on the same machine.
+    pub(super) fn pipe_name_for(path: &Path) -> String {
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        let hash = hasher.finish();
+        let label = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "wirken".into())
+            .replace(['.', '/', '\\'], "-");
+        format!(r"\\.\pipe\wirken-{label}-{hash:016x}")
+    }
+
+    /// Owns the next pending named-pipe server instance and re-arms
+    /// after each successful accept.
+    pub struct NamedPipeListener {
+        path: String,
+        pending: Option<NamedPipeServer>,
+    }
+
+    impl NamedPipeListener {
+        pub fn bind(path: &Path) -> Result<Self, IpcError> {
+            let pipe_path = pipe_name_for(path);
+            let pending = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe_path)?;
+            Ok(Self {
+                path: pipe_path,
+                pending: Some(pending),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Listener for NamedPipeListener {
+        async fn accept(&mut self) -> Result<BoxStream, IpcError> {
+            let server = self.pending.take().ok_or_else(|| {
+                IpcError::Io(std::io::Error::other(
+                    "NamedPipeListener has no pending instance",
+                ))
+            })?;
+            server.connect().await?;
+            // Pre-arm the next instance so the next accept() can
+            // start awaiting a client immediately.
+            self.pending = Some(ServerOptions::new().create(&self.path)?);
+            Ok(Box::new(server))
+        }
+    }
+}
+
 /// Connected pair of in-process streams for tests.
 ///
 /// Returns two trait objects that share a duplex pipe. On unix this

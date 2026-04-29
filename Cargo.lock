@@ -6604,6 +6604,7 @@ dependencies = [
 name = "wirken-ipc"
 version = "0.9.1"
 dependencies = [
+ "async-trait",
  "capnp",
  "capnpc",
  "ed25519-dalek",
