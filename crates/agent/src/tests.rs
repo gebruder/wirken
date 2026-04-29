@@ -1234,6 +1234,7 @@ mod wake {
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -1570,6 +1571,7 @@ mod wake {
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 64);
@@ -1634,6 +1636,7 @@ mod subagent {
                 allowed_subagents: parent_ceilings,
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         configs.insert(
@@ -1651,6 +1654,7 @@ mod subagent {
                 allowed_subagents: BTreeMap::new(),
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -4603,6 +4607,7 @@ mod per_channel_llm_override {
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 4);
@@ -4741,6 +4746,7 @@ mod per_channel_llm_override {
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         let factory =
@@ -4894,6 +4900,7 @@ mod org_tool_policy {
                 allowed_subagents: Default::default(),
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
+                zirkel_db_path: None,
             },
         );
         let factory =
@@ -5020,5 +5027,627 @@ mod org_tool_policy {
             assert!(!r.output.contains("blocked by org policy"));
             assert!(!r.output.contains("not in the org allowed_tools list"));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C-Librarian piece 1: sqlite_query named-query tool
+// ---------------------------------------------------------------------------
+
+mod sqlite_query {
+    use std::path::PathBuf;
+
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    /// Build a zirkel-shaped fixture DB at `db_path` with two
+    /// resolved digests covering five kept items across two
+    /// runs and two themes. The schema mirrors what
+    /// `wirken_zirkel::schema::AGGREGATOR_MIGRATIONS` produces;
+    /// repeated here so the agent crate doesn't depend on zirkel
+    /// for its own tests.
+    fn seed_fixture_db(db_path: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE candidates ( \
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                source_name TEXT NOT NULL, \
+                url TEXT NOT NULL, \
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')), \
+                body TEXT NOT NULL, \
+                run_id TEXT NOT NULL DEFAULT '', \
+                title TEXT NOT NULL DEFAULT '', \
+                published_at TEXT, \
+                matched_keywords TEXT NOT NULL DEFAULT '[]', \
+                keyword_match_score INTEGER NOT NULL DEFAULT 0, \
+                llm_relevance_score REAL, \
+                llm_why_surfaced TEXT, \
+                cluster_id INTEGER, \
+                source_metadata TEXT NOT NULL DEFAULT '{}' \
+            ); \
+            CREATE TABLE themes ( \
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                run_id TEXT NOT NULL, \
+                name TEXT NOT NULL, \
+                member_count INTEGER NOT NULL, \
+                created_at TEXT NOT NULL DEFAULT (datetime('now')) \
+            ); \
+            CREATE TABLE digests ( \
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                run_id TEXT NOT NULL, \
+                agent_id TEXT NOT NULL, \
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')), \
+                resolved_at TEXT \
+            ); \
+            CREATE TABLE digest_items ( \
+                digest_id INTEGER NOT NULL, \
+                idx INTEGER NOT NULL, \
+                candidate_id INTEGER NOT NULL, \
+                decision TEXT, \
+                PRIMARY KEY (digest_id, idx) \
+            );",
+        )
+        .unwrap();
+
+        // Two themes for run-1.
+        conn.execute(
+            "INSERT INTO themes (id, run_id, name, member_count) VALUES (1, 'run-1', 'Privacy enforcement', 3)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO themes (id, run_id, name, member_count) VALUES (2, 'run-1', 'Cross-border transfers', 2)",
+            [],
+        )
+        .unwrap();
+
+        // Five candidates in run-1.
+        let candidates = [
+            (
+                1,
+                "ftc-press",
+                "https://x/1",
+                "FTC enforcement on adtech",
+                90.0,
+                "consent-banner topic",
+                1i64,
+            ),
+            (
+                2,
+                "ftc-press",
+                "https://x/2",
+                "DPA fines retailer",
+                85.0,
+                "tracking enforcement",
+                1,
+            ),
+            (
+                3,
+                "ico-blog",
+                "https://x/3",
+                "ICO updates cookie guidance",
+                80.0,
+                "regulator guidance",
+                1,
+            ),
+            (
+                4,
+                "eur-lex",
+                "https://x/4",
+                "Adequacy decision review starts",
+                70.0,
+                "transfer-impact assessment",
+                2,
+            ),
+            (
+                5,
+                "edpb-news",
+                "https://x/5",
+                "SCC guidance update",
+                65.0,
+                "follow-up to last quarter",
+                2,
+            ),
+        ];
+        for (id, source, url, title, score, why, cluster) in candidates {
+            conn.execute(
+                "INSERT INTO candidates (id, source_name, url, body, run_id, title, published_at, llm_relevance_score, llm_why_surfaced, cluster_id) \
+                 VALUES (?1, ?2, ?3, ?4, 'run-1', ?5, '2026-04-29', ?6, ?7, ?8)",
+                params![id, source, url, format!("body of {title}"), title, score, why, cluster],
+            )
+            .unwrap();
+        }
+
+        // One resolved digest for agent 'default' covering all 5 items.
+        // 3 kept (ids 1, 3, 4), 2 skipped (ids 2, 5).
+        conn.execute(
+            "INSERT INTO digests (id, run_id, agent_id, sent_at, resolved_at) \
+             VALUES (1, 'run-1', 'default', datetime('now', '-1 day'), datetime('now', '-1 day'))",
+            [],
+        )
+        .unwrap();
+        let decisions = [
+            (1, 1i64, 1i64, "kept"),
+            (1, 2, 2, "skipped"),
+            (1, 3, 3, "kept"),
+            (1, 4, 4, "kept"),
+            (1, 5, 5, "skipped"),
+        ];
+        for (digest_id, idx, candidate_id, decision) in decisions {
+            conn.execute(
+                "INSERT INTO digest_items (digest_id, idx, candidate_id, decision) VALUES (?1, ?2, ?3, ?4)",
+                params![digest_id, idx, candidate_id, decision],
+            )
+            .unwrap();
+        }
+    }
+
+    fn build_registry(db_path: PathBuf) -> ToolRegistry {
+        let tmp_workspace = TempDir::new().unwrap();
+        let mut reg =
+            ToolRegistry::new(tmp_workspace.path().to_path_buf(), ToolConfig::default()).unwrap();
+        reg.set_zirkel_db_path(db_path);
+        // Leak the workspace TempDir — tool tests don't read from
+        // workspace paths and we want the path to remain valid.
+        std::mem::forget(tmp_workspace);
+        reg
+    }
+
+    fn parse_rows(output: &str) -> serde_json::Value {
+        serde_json::from_str(output).expect("output is valid JSON")
+    }
+
+    #[tokio::test]
+    async fn unconfigured_path_returns_clear_error() {
+        let tmp_workspace = TempDir::new().unwrap();
+        let reg =
+            ToolRegistry::new(tmp_workspace.path().to_path_buf(), ToolConfig::default()).unwrap();
+        let r = reg
+            .execute("sqlite_query", r#"{"query":"kept_recent","params":{}}"#)
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn unknown_query_name_errors() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"select_everything","params":{}}"#,
+            )
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("unknown named query"));
+    }
+
+    #[tokio::test]
+    async fn kept_recent_returns_three_kept_rows() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_recent","params":{"days":7}}"#,
+            )
+            .await
+            .unwrap();
+        assert!(r.success, "output: {}", r.output);
+        let parsed = parse_rows(&r.output);
+        assert_eq!(parsed["count"], 3);
+        let rows = parsed["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        // Verbatim fields surfaced — the librarian skill body relies
+        // on these names without paraphrase.
+        let keys: Vec<&str> = rows[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        for required in [
+            "title",
+            "source",
+            "url",
+            "date",
+            "kept_at",
+            "theme",
+            "why_surfaced",
+        ] {
+            assert!(keys.contains(&required), "missing key: {required}");
+        }
+    }
+
+    #[tokio::test]
+    async fn kept_by_keyword_matches_title_substring() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_keyword","params":{"term":"adtech"}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        assert_eq!(parsed["count"], 1);
+        assert_eq!(parsed["rows"][0]["title"], "FTC enforcement on adtech");
+    }
+
+    #[tokio::test]
+    async fn kept_by_keyword_case_insensitive() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_keyword","params":{"term":"ADTECH"}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        assert_eq!(parsed["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn kept_by_theme_returns_only_kept_in_theme() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_theme","params":{"theme":"Privacy enforcement"}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        // Theme has 3 candidates total but only 2 kept (ids 1 and 3;
+        // id 2 was skipped).
+        assert_eq!(parsed["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn kept_by_source_filters_by_source_name() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_source","params":{"source":"ftc-press"}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        // ftc-press has 2 candidates: id 1 (kept) and id 2 (skipped).
+        assert_eq!(parsed["count"], 1);
+        assert_eq!(parsed["rows"][0]["source"], "ftc-press");
+    }
+
+    #[tokio::test]
+    async fn kept_in_run_includes_only_kept_items_from_run() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_in_run","params":{"run_id":"run-1"}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        assert_eq!(parsed["count"], 3);
+    }
+
+    #[tokio::test]
+    async fn kept_by_keyword_missing_term_errors() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute("sqlite_query", r#"{"query":"kept_by_keyword","params":{}}"#)
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("term"));
+    }
+
+    #[tokio::test]
+    async fn kept_by_keyword_empty_term_errors() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_keyword","params":{"term":"   "}}"#,
+            )
+            .await
+            .unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn recent_themes_returns_themes_with_member_count() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"recent_themes","params":{"days":7}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        assert_eq!(parsed["count"], 2);
+        let themes = parsed["themes"].as_array().unwrap();
+        let names: Vec<&str> = themes.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"Privacy enforcement"));
+        assert!(names.contains(&"Cross-border transfers"));
+    }
+
+    #[tokio::test]
+    async fn skipped_items_are_excluded_from_kept_queries() {
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let reg = build_registry(db);
+        // DPA fines (id 2) was skipped; should not surface.
+        let r = reg
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_keyword","params":{"term":"DPA fines"}}"#,
+            )
+            .await
+            .unwrap();
+        let parsed = parse_rows(&r.output);
+        assert_eq!(parsed["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn write_attempt_at_db_layer_is_refused() {
+        // Structural assertion: even if the LLM somehow constructed
+        // a write — which it can't, since SQL is hardcoded — the
+        // connection refuses writes. Direct test of read-only flag.
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agg.db");
+        seed_fixture_db(&db);
+        let conn =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        let err = conn
+            .execute("DELETE FROM candidates WHERE id = 1", [])
+            .unwrap_err();
+        assert!(
+            format!("{err}").to_lowercase().contains("read"),
+            "expected read-only error, got: {err}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// C-Librarian piece 2: end-to-end slash → skill body → sqlite_query → rows
+// ---------------------------------------------------------------------------
+
+mod librarian_e2e {
+    use std::path::Path;
+
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    use crate::inbound_interceptor::{InboundInterceptor, InterceptResult, InterceptorContext};
+    use crate::skill::SkillLoader;
+    use crate::slash::SlashInterceptor;
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    const LIBRARIAN_SKILL_MD: &str = r#"---
+name: librarian
+description: Read-only retrieval over the kept set
+disable-model-invocation: true
+permissions:
+  tools:
+    allow: [sqlite_query]
+  egress:
+    mode: deny
+  filesystem:
+    read_paths: ["~/.wirken/zirkel"]
+    write_paths: []
+  inference:
+    allow: ["*"]
+---
+
+You are the Zirkel librarian. Use sqlite_query with one of: kept_recent, kept_by_keyword, kept_by_theme, kept_by_source, kept_in_run, recent_themes. Render returned rows verbatim — do not paraphrase, do not summarize.
+"#;
+
+    fn write_librarian_skill(skills_dir: &Path) {
+        let lib_dir = skills_dir.join("librarian");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        std::fs::write(lib_dir.join("SKILL.md"), LIBRARIAN_SKILL_MD).unwrap();
+    }
+
+    fn seed_zirkel_db(db_path: &Path) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE candidates ( \
+                id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                source_name TEXT NOT NULL, url TEXT NOT NULL, \
+                fetched_at TEXT NOT NULL DEFAULT (datetime('now')), \
+                body TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '', \
+                title TEXT NOT NULL DEFAULT '', published_at TEXT, \
+                matched_keywords TEXT NOT NULL DEFAULT '[]', \
+                keyword_match_score INTEGER NOT NULL DEFAULT 0, \
+                llm_relevance_score REAL, llm_why_surfaced TEXT, \
+                cluster_id INTEGER, source_metadata TEXT NOT NULL DEFAULT '{}' \
+            ); \
+            CREATE TABLE themes ( \
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, \
+                name TEXT NOT NULL, member_count INTEGER NOT NULL, \
+                created_at TEXT NOT NULL DEFAULT (datetime('now')) \
+            ); \
+            CREATE TABLE digests ( \
+                id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, \
+                agent_id TEXT NOT NULL, \
+                sent_at TEXT NOT NULL DEFAULT (datetime('now')), resolved_at TEXT \
+            ); \
+            CREATE TABLE digest_items ( \
+                digest_id INTEGER NOT NULL, idx INTEGER NOT NULL, \
+                candidate_id INTEGER NOT NULL, decision TEXT, \
+                PRIMARY KEY (digest_id, idx) \
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO candidates (id, source_name, url, body, run_id, title, published_at, llm_relevance_score, llm_why_surfaced) \
+             VALUES (1, 'consumerfinance-blog', 'https://x/1', 'CFPB body', 'run-1', 'CFPB updates blog on small-dollar lending', '2026-04-27', 90.0, 'matches consumer-protection interest')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO candidates (id, source_name, url, body, run_id, title, published_at, llm_relevance_score, llm_why_surfaced) \
+             VALUES (2, 'consumerfinance-blog', 'https://x/2', 'CFPB body 2', 'run-1', 'CFPB issues final rule on overdraft', '2026-04-26', 85.0, 'rulemaking signal')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO candidates (id, source_name, url, body, run_id, title, published_at, llm_relevance_score, llm_why_surfaced) \
+             VALUES (3, 'edpb-news', 'https://x/3', 'EU body', 'run-1', 'EDPB adopts new SCC guidance', '2026-04-25', 70.0, 'cross-border transfers')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO digests (id, run_id, agent_id, sent_at, resolved_at) \
+             VALUES (1, 'run-1', 'default', datetime('now', '-1 day'), datetime('now', '-1 day'))",
+            [],
+        )
+        .unwrap();
+        for (idx, candidate_id) in [(1, 1), (2, 2), (3, 3)] {
+            conn.execute(
+                "INSERT INTO digest_items (digest_id, idx, candidate_id, decision) VALUES (1, ?1, ?2, 'kept')",
+                params![idx as i64, candidate_id as i64],
+            )
+            .unwrap();
+        }
+    }
+
+    /// E2E: operator types `/librarian what did I keep about CFPB`,
+    /// the slash interceptor recognises the prefix, looks up the
+    /// loaded `librarian` skill, and rewrites the message so the
+    /// LLM sees skill body + user request. The agent's tool
+    /// registry has `sqlite_query` available bound to the zirkel
+    /// DB; invoking it returns the kept rows verbatim.
+    #[tokio::test]
+    async fn slash_inlines_librarian_body_and_tool_returns_rows() {
+        let tmp = TempDir::new().unwrap();
+
+        let skills_dir = tmp.path().join("skills");
+        write_librarian_skill(&skills_dir);
+        let skills = SkillLoader::load_dir(&skills_dir).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "librarian");
+        assert!(
+            skills[0].disable_model_invocation,
+            "librarian must be slash-only"
+        );
+
+        let interceptor = SlashInterceptor;
+        let ctx = InterceptorContext {
+            agent_id: "default",
+            skills: &skills,
+        };
+        let result = interceptor.intercept("/librarian what did I keep about CFPB", &ctx);
+        let rewritten = match result {
+            InterceptResult::Rewrite(s) => s,
+            other => panic!("expected Rewrite, got {other:?}"),
+        };
+        assert!(rewritten.contains("# Skill: librarian"));
+        assert!(rewritten.contains("kept_by_keyword"));
+        assert!(rewritten.contains("Render returned rows verbatim"));
+        assert!(rewritten.contains("what did I keep about CFPB"));
+        let body_idx = rewritten.find("kept_by_keyword").unwrap();
+        let request_idx = rewritten.find("what did I keep").unwrap();
+        assert!(
+            body_idx < request_idx,
+            "skill body must precede user request"
+        );
+
+        let db_path = tmp.path().join("zirkel-aggregator.db");
+        seed_zirkel_db(&db_path);
+
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut tools = ToolRegistry::new(workspace, ToolConfig::default()).unwrap();
+        tools.set_zirkel_db_path(db_path);
+
+        let r = tools
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_keyword","params":{"term":"CFPB"}}"#,
+            )
+            .await
+            .unwrap();
+        assert!(r.success, "tool output: {}", r.output);
+
+        let parsed: serde_json::Value = serde_json::from_str(&r.output).unwrap();
+        assert_eq!(parsed["count"], 2);
+        let rows = parsed["rows"].as_array().unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r["title"].as_str().unwrap()).collect();
+        assert!(titles.contains(&"CFPB updates blog on small-dollar lending"));
+        assert!(titles.contains(&"CFPB issues final rule on overdraft"));
+        for row in rows {
+            assert_eq!(row["source"], "consumerfinance-blog");
+            assert!(row["url"].as_str().unwrap().starts_with("https://"));
+            assert!(!row["date"].as_str().unwrap().is_empty());
+            // Non-CFPB item must not surface — no false positives
+            // from the LLM's training-set knowledge.
+            assert_ne!(row["title"], "EDPB adopts new SCC guidance");
+        }
+    }
+
+    /// A keyword that matches no kept item produces an empty result
+    /// set the librarian surfaces plainly. The trust posture's "do
+    /// not invent items" rule has something honest to render —
+    /// count: 0, rows: [].
+    #[tokio::test]
+    async fn keyword_with_no_matches_returns_empty_set() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("zirkel-aggregator.db");
+        seed_zirkel_db(&db_path);
+        let workspace = tmp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut tools = ToolRegistry::new(workspace, ToolConfig::default()).unwrap();
+        tools.set_zirkel_db_path(db_path);
+
+        let r = tools
+            .execute(
+                "sqlite_query",
+                r#"{"query":"kept_by_keyword","params":{"term":"unicorn"}}"#,
+            )
+            .await
+            .unwrap();
+        assert!(r.success);
+        let parsed: serde_json::Value = serde_json::from_str(&r.output).unwrap();
+        assert_eq!(parsed["count"], 0);
+        assert_eq!(parsed["rows"].as_array().unwrap().len(), 0);
     }
 }
