@@ -1,5 +1,7 @@
 # Zirkel
 
+![Zirkel](img/zirkel-wirken.png)
+
 Zirkel aggregates research papers, regulator output, and legislative material against a keyword file you write yourself, then delivers a daily digest you keep or skip from. The kept set is queryable by chat. Nothing leaves your machine except fetches to a fixed public allowlist.
 
 ## Who it is for
