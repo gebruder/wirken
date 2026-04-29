@@ -4,12 +4,14 @@ use std::sync::Arc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixStream};
+use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AdapterIdentity, perform_adapter_handshake};
+use wirken_ipc::{
+    AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
+    split_stream,
+};
 
 use crate::convert::{self, WhatsAppInbound};
 use crate::error::WhatsAppError;
@@ -60,7 +62,7 @@ impl WhatsAppAdapter {
     /// Connect to gateway, authenticate, then run the webhook listener.
     pub async fn run(&self, socket_path: &Path) -> Result<(), WhatsAppError> {
         tracing::info!("Connecting to gateway at {}", socket_path.display());
-        let stream = UnixStream::connect(socket_path).await?;
+        let stream = connect(socket_path).await?;
         let (mut reader, mut writer) = split_stream(stream);
 
         tracing::info!("Performing handshake as '{}'", self.identity.adapter_id());
@@ -113,7 +115,7 @@ async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
     verify_token: &str,
     app_secret: &str,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) -> Result<(), WhatsAppError> {
     let mut buf = vec![0u8; 65536];
     let n = stream
@@ -292,10 +294,10 @@ pub(crate) fn extract_messages(json: &serde_json::Value) -> Option<Vec<WhatsAppI
 
 /// Handle outbound messages from gateway to WhatsApp.
 async fn handle_outbound(
-    mut reader: FrameReader,
+    mut reader: IpcFrameReader,
     access_token: String,
     phone_number_id: String,
-    writer: Arc<Mutex<FrameWriter>>,
+    writer: Arc<Mutex<IpcFrameWriter>>,
 ) {
     let http = reqwest::Client::new();
 
@@ -398,7 +400,7 @@ enum FrameAction {
     Skip,
 }
 
-async fn heartbeat_loop(writer: Arc<Mutex<FrameWriter>>) {
+async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
     let mut seq = 0u64;
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
     loop {
