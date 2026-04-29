@@ -2,11 +2,13 @@
 
 <img src="img/zirkel-wirken.png" alt="Zirkel" width="400" align="right">
 
-Zirkel aggregates research papers, regulator output, and legislative material against a keyword file you write yourself, then delivers a daily digest you keep or skip from. The kept set is queryable by chat. Nothing leaves your machine except fetches to a fixed public allowlist.
+Zirkel is a daily research aggregator that runs on your laptop. You write a small TOML file naming the keywords you care about (and the noise you don't); Zirkel fetches each day's items from a fixed list of public sources — academic preprint servers, journal feeds, regulator press releases, the Federal Register, congressional bill activity — and screens them against your keywords. A short, themed digest arrives in your Signal app at the time of day you set. You reply `keep 1, 3, 5` or `skip all`; the items you keep land in a personal library you can query later by chat — "what did I save this week?", "what have I kept about BIPA?", "what FTC items did I save?"
+
+The threat model is the keyword file itself. The list of things you watch reveals what you're working on, who you're tracking, what enforcement action you're preparing for, what scholar you're following before your paper cites them. Zirkel runs locally so that file — and your kept set, and your chat queries — never leaves your machine. Outbound traffic is restricted to a fixed allowlist of named public sources, enforced at the HTTP transport layer.
 
 ## Who it is for
 
-Researchers, lawyers, and policy people who track a specific domain across many sources and currently lose hours each week to manually checking journal RSS feeds, regulator news pages, agency hearing schedules, and the Federal Register. Practitioners who want a research aggregator that runs on their own machine, against sources they control, at a rate that won't get their account flagged.
+Researchers, lawyers, and policy people who track a specific domain across many sources and currently lose hours each week to manually checking journal RSS feeds, regulator news pages, agency hearing schedules, and the Federal Register. Practitioners who want a research aggregator that runs on their own machine, against sources they control.
 
 It is not for general web monitoring. It is not for users who want an autonomous agent that takes actions on findings. It is not for high-volume scraping of credentialed sources.
 
