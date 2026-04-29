@@ -1,5 +1,7 @@
 # Getting Started
 
+> **Windows users:** see [`windows.md`](windows.md) for the Windows-specific install path and operational notes. The instructions below are for Linux and macOS.
+
 ## Install
 
 Download the binary:
