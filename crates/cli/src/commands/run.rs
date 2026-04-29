@@ -19,7 +19,7 @@ use wirken_gateway::session::SessionStore;
 use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
 use wirken_ipc::transport::{FrameReader, FrameWriter, split_stream};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AuthenticatedChannel, perform_gateway_handshake};
+use wirken_ipc::{AuthenticatedChannel, Principal, Stream, perform_gateway_handshake};
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -808,22 +808,56 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let orchestrator_audit = audit.clone();
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
-    let orchestrator_uid = unsafe { libc::geteuid() };
+    let expected_principal = Principal::Uid(unsafe { libc::geteuid() });
     let orchestrator_handle = tokio::spawn(async move {
         loop {
             match orchestrator_listener.accept().await {
                 Ok((stream, _)) => {
-                    let peer_uid = match stream.peer_cred() {
-                        Ok(c) => c.uid(),
+                    let actual_principal = match stream.peer_principal() {
+                        Ok(p) => p,
                         Err(e) => {
-                            tracing::warn!("orchestrator: peer_cred unavailable, refusing: {e}");
+                            tracing::warn!(
+                                "orchestrator: peer_principal unavailable, refusing: {e}"
+                            );
+                            let _ = orchestrator_audit
+                                .log(
+                                    AuditEvent::new(
+                                        "gateway",
+                                        "orchestrator.push.refused",
+                                        "orchestrator",
+                                    )
+                                    .with_detail(
+                                        serde_json::json!({
+                                            "reason": "peer_principal_unavailable",
+                                            "expected": expected_principal.to_string(),
+                                            "error": e.to_string(),
+                                        }),
+                                    ),
+                                )
+                                .await;
                             continue;
                         }
                     };
-                    if peer_uid != orchestrator_uid {
+                    if actual_principal != expected_principal {
                         tracing::warn!(
-                            "orchestrator: refusing peer uid={peer_uid} (expected {orchestrator_uid})"
+                            "orchestrator: refusing peer {} (expected {})",
+                            actual_principal,
+                            expected_principal
                         );
+                        let _ = orchestrator_audit
+                            .log(
+                                AuditEvent::new(
+                                    "gateway",
+                                    "orchestrator.push.refused",
+                                    "orchestrator",
+                                )
+                                .with_detail(serde_json::json!({
+                                    "reason": "principal_mismatch",
+                                    "expected": expected_principal.to_string(),
+                                    "actual": actual_principal.to_string(),
+                                })),
+                            )
+                            .await;
                         continue;
                     }
                     let disp = orchestrator_dispatcher.clone();
