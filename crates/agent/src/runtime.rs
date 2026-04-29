@@ -463,6 +463,15 @@ impl Agent {
     /// tools and logs them on attach. Operators see this line on
     /// every `wirken run` and can review which names run
     /// unprivileged.
+    /// Configure the path the `sqlite_query` librarian tool opens.
+    /// Called by the factory at wake time when the agent's static
+    /// config names a zirkel-bound database. The librarian skill's
+    /// `tools.allow` list still gates whether the LLM can see the
+    /// tool; this method just tells the tool which file to open.
+    pub fn attach_zirkel_db(&mut self, path: std::path::PathBuf) {
+        self.tools.set_zirkel_db_path(path);
+    }
+
     pub fn attach_mcp(&mut self, client: Arc<tokio::sync::Mutex<McpProxyClient>>) {
         self.mcp = Some(client.clone());
         let agent_id = self.id.clone();
