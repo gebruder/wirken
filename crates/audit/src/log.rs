@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use crate::error::AuditError;
 use crate::event::{AuditEvent, StoredEvent};
 use crate::legacy_compat;
-use crate::session_log::SqliteSessionLog;
+use crate::session_log::{SessionId, SqliteSessionLog};
 
 /// Query parameters for filtering audit events.
 #[derive(Debug, Default)]
@@ -48,20 +48,32 @@ pub struct AuditQuery {
 
 /// Result of hash chain verification.
 ///
-/// Slice 2 changes the underlying semantics: the chain is now
-/// per-session, not global. `Ok::rows_verified` is the total across
-/// every session in `session_events`. `Broken` is reported on the
-/// first session whose chain is broken; `expected` carries the
-/// session id and seq, `found` carries the underlying break reason.
+/// The chain is per-session (one chain per `session_id`).
+/// `Ok::rows_verified` is the total across every session in
+/// `session_events`. `Broken` is reported on the first session whose
+/// chain is broken, with structured fields suitable for citing in a
+/// failure message or downstream tooling.
 #[derive(Debug)]
 pub enum VerifyResult {
     /// All per-session chains are intact.
     Ok { rows_verified: usize },
     /// At least one per-session chain is broken.
     Broken {
-        row_id: i64,
-        expected: String,
-        found: String,
+        /// Session that failed verification.
+        session_id: SessionId,
+        /// Per-session sequence number where the break was
+        /// detected. The events with smaller `seq` in this session
+        /// did verify; events at and after this one cannot be
+        /// relied on.
+        seq: u64,
+        /// Hash value that the verifier computed or expected.
+        expected_hash: String,
+        /// Hash value that was actually present in the row.
+        actual_hash: String,
+        /// Number of events that verified before the break,
+        /// summed across all sessions plus the per-session count
+        /// up to (but not including) the breaking event.
+        verified_count: u64,
     },
     /// No session events present.
     Empty,

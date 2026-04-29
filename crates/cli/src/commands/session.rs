@@ -301,8 +301,15 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
         wirken_audit::SessionVerifyResult::Empty => {
             println!("  chain:               EMPTY");
         }
-        wirken_audit::SessionVerifyResult::Broken { seq, reason } => {
-            println!("  chain:               BROKEN at seq {seq}: {reason}");
+        wirken_audit::SessionVerifyResult::Broken {
+            seq,
+            expected_hash,
+            actual_hash,
+            ..
+        } => {
+            println!(
+                "  chain:               BROKEN at seq {seq}: expected {expected_hash}, got {actual_hash}"
+            );
         }
     }
 

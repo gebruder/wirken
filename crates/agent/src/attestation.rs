@@ -141,7 +141,13 @@ pub fn verify_session_attestations<L: SessionLog + ?Sized>(
     let chain_rows_verified = match chain {
         SessionVerifyResult::Ok { rows_verified } => rows_verified,
         SessionVerifyResult::Empty => 0,
-        SessionVerifyResult::Broken { seq, reason } => {
+        SessionVerifyResult::Broken {
+            seq,
+            expected_hash,
+            actual_hash,
+            verified_count: _,
+        } => {
+            let reason = format!("expected hash {expected_hash}, got {actual_hash}");
             return Ok(AttestationVerifyResult::ChainBroken { seq, reason });
         }
     };
