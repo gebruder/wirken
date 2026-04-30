@@ -76,7 +76,7 @@ dialoguer = "0.12"
 governor = "0.10"
 
 # LRU cache (used by the agent factory)
-lru = "0.16"
+lru = "0.18"
 
 # OAuth2 client (used by the MCP proxy for HTTP MCP servers with OAuth-protected endpoints)
 oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
