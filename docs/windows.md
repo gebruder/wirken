@@ -9,6 +9,7 @@ Wirken targets a researcher / single-user-workstation profile on Windows. The Li
 - **`mode: off` is a viable default.** The host-exec path runs through a configured shell (see [Shell choice](#shell-choice) below). Docker Desktop is supported but not required; the configurable sandbox is on the same code path as Linux/macOS.
 - **Vault uses an age-encrypted file.** Keys are stored in `%APPDATA%\wirken\keychain\` and unlocked with a passphrase. Native Credential Manager / DPAPI integration is on the roadmap; the age-file backend is portable across machines if you keep the passphrase.
 - **`wirken zirkel push` (the orchestrator-push API) is Linux/macOS only.** The push socket is a same-user JSON-line trust boundary that has no analog on Windows; the rest of zirkel works.
+- **The Signal adapter is Linux/macOS only.** It connects to `signal-cli`'s unix-domain socket, which doesn't exist on Windows. The other channel adapters (Telegram, Discord, Slack, Teams, Matrix, WhatsApp, Google Chat) work.
 - **`wirken service` (systemd/launchd installer) is not available.** Run the gateway manually, or schedule it via Task Scheduler.
 - **`wirken cron` (preset cron) is not available.** Use Task Scheduler.
 
