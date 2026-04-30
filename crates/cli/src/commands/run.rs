@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+// UnixListener/UnixStream are still used for the orchestrator-push
+// handler which reads JSON-line requests from the unix-only push
+// socket. The gateway↔adapter capnp path uses wirken_ipc::BoxStream
+// via `bind`/`connect`. Orchestrator-push is documented as Linux/macOS
+// only; the whole block is cfg(unix)-gated.
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-// UnixStream is still used for the orchestrator-push handler which
-// reads JSON-line requests from the unix-only push socket. The
-// gateway↔adapter capnp path uses wirken_ipc::BoxStream via
-// `bind`/`connect`.
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -811,14 +813,25 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // accept is defense-in-depth in case the perms are accidentally
     // permissive. JSON line in, JSON line out — no capnp, no
     // handshake, no signature. See crates/ipc/src/orchestrator.rs.
+    //
+    // Linux/macOS only — Windows uses named pipes for the gateway
+    // capnp path but the orchestrator-push JSON-line socket has no
+    // analog and would have to be redesigned. Out of scope for the
+    // tier-2 Windows release.
+    #[cfg(unix)]
     let orchestrator_socket_path = cfg.socket_dir().join("orchestrator.sock");
-    if orchestrator_socket_path.exists() {
-        let _ = std::fs::remove_file(&orchestrator_socket_path);
+    #[cfg(unix)]
+    {
+        if orchestrator_socket_path.exists() {
+            let _ = std::fs::remove_file(&orchestrator_socket_path);
+        }
     }
+    #[cfg(unix)]
     let orchestrator_listener = UnixListener::bind(&orchestrator_socket_path).context(format!(
         "Failed to bind orchestrator UDS at {}",
         orchestrator_socket_path.display()
     ))?;
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(
@@ -827,16 +840,21 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         )
         .context("Failed to chmod orchestrator socket to 0600")?;
     }
+    #[cfg(unix)]
     println!(
         "  Orchestrator socket: {}",
         orchestrator_socket_path.display()
     );
 
+    #[cfg(unix)]
     let orchestrator_dispatcher = dispatcher.clone();
+    #[cfg(unix)]
     let orchestrator_audit = audit.clone();
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
+    #[cfg(unix)]
     let expected_principal = Principal::Uid(unsafe { libc::geteuid() });
+    #[cfg(unix)]
     let orchestrator_handle = tokio::spawn(async move {
         loop {
             match orchestrator_listener.accept().await {
@@ -918,6 +936,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     mcp_proxy_handle.abort();
     accept_handle.abort();
+    #[cfg(unix)]
     orchestrator_handle.abort();
     webchat_handle.abort();
     scheduler_handle.abort();
@@ -929,6 +948,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // Cleanup sockets
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&mcp_proxy_socket);
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&orchestrator_socket_path);
 
     println!("  Gateway stopped.");
@@ -1039,6 +1059,7 @@ async fn handle_adapter_connection(
 ///
 /// This handler runs only after `peer_cred()` has confirmed the
 /// peer UID matches the gateway's. No further authentication.
+#[cfg(unix)]
 async fn handle_orchestrator_push(
     stream: UnixStream,
     dispatcher: Arc<OutboundDispatcher>,

@@ -6,7 +6,9 @@ use wirken_adapter_discord::DiscordAdapter;
 use wirken_adapter_google_chat::GoogleChatAdapter;
 use wirken_adapter_imessage::IMessageAdapter;
 use wirken_adapter_matrix::MatrixAdapter;
-use wirken_adapter_signal::{SignalAdapter, SignalAllowlist};
+#[cfg(unix)]
+use wirken_adapter_signal::SignalAdapter;
+use wirken_adapter_signal::SignalAllowlist;
 use wirken_adapter_slack::SlackAdapter;
 use wirken_adapter_teams::TeamsAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
@@ -172,34 +174,44 @@ pub async fn run(channel: &str) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("WhatsApp adapter error: {e}"))?;
         }
         "signal" => {
-            let endpoint_name = format!("{channel}-endpoint");
-            let endpoint = store
-                .retrieve(&endpoint_name)
-                .map(|(s, _)| s.expose().to_string())
-                .unwrap_or_else(|_| "/tmp/signal-cli.sock".into());
+            #[cfg(unix)]
+            {
+                let endpoint_name = format!("{channel}-endpoint");
+                let endpoint = store
+                    .retrieve(&endpoint_name)
+                    .map(|(s, _)| s.expose().to_string())
+                    .unwrap_or_else(|_| "/tmp/signal-cli.sock".into());
 
-            let phone_name = format!("{channel}-phone-number");
-            let (phone_val, _) = store
-                .retrieve(&phone_name)
-                .context("No phone number found for 'signal'.")?;
-            let phone_number = phone_val.expose().to_string();
+                let phone_name = format!("{channel}-phone-number");
+                let (phone_val, _) = store
+                    .retrieve(&phone_name)
+                    .context("No phone number found for 'signal'.")?;
+                let phone_number = phone_val.expose().to_string();
 
-            // Fail-closed sender allowlist. Missing vault entry = empty list
-            // = every inbound message is dropped. See docs/channels/signal.md.
-            let allowed_name = format!("{channel}-allowed-senders");
-            let allowlist_csv = store
-                .retrieve(&allowed_name)
-                .map(|(s, _)| s.expose().to_string())
-                .unwrap_or_default();
-            let allowlist = SignalAllowlist::from_csv(&allowlist_csv)
-                .map_err(|e| anyhow::anyhow!("Signal adapter: invalid allowlist entry: {e}"))?;
+                // Fail-closed sender allowlist. Missing vault entry = empty list
+                // = every inbound message is dropped. See docs/channels/signal.md.
+                let allowed_name = format!("{channel}-allowed-senders");
+                let allowlist_csv = store
+                    .retrieve(&allowed_name)
+                    .map(|(s, _)| s.expose().to_string())
+                    .unwrap_or_default();
+                let allowlist = SignalAllowlist::from_csv(&allowlist_csv)
+                    .map_err(|e| anyhow::anyhow!("Signal adapter: invalid allowlist entry: {e}"))?;
 
-            let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist)
-                .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
-            std::sync::Arc::new(adapter)
-                .run(&socket_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
+                let adapter = SignalAdapter::new(identity, endpoint, phone_number, allowlist)
+                    .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
+                std::sync::Arc::new(adapter)
+                    .run(&socket_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Signal adapter error: {e}"))?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (&store, &socket_path, &identity);
+                anyhow::bail!(
+                    "Signal adapter requires a unix-domain socket to signal-cli; not supported on this platform"
+                );
+            }
         }
         "google-chat" => {
             let listen_port: u16 = std::env::var("WIRKEN_GOOGLE_CHAT_PORT")
