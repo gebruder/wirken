@@ -3655,9 +3655,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.2"
+version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3f43e3283ab1488b624b44b0e988d0acea0b3214e694730a055cb6b2efa801"
+checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
 dependencies = [
  "base64",
  "bytes",
@@ -6341,7 +6341,7 @@ dependencies = [
  "capnp",
  "chrono",
  "jsonwebtoken",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -6357,7 +6357,7 @@ name = "wirken-adapter-imessage"
 version = "0.9.1"
 dependencies = [
  "capnp",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -6375,7 +6375,7 @@ dependencies = [
  "anyhow",
  "capnp",
  "chrono",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -6432,7 +6432,7 @@ dependencies = [
  "capnp",
  "chrono",
  "jsonwebtoken",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -6470,7 +6470,7 @@ dependencies = [
  "capnp",
  "chrono",
  "hmac",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "sha2",
@@ -6496,7 +6496,7 @@ dependencies = [
  "hmac",
  "lru",
  "rand 0.10.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6522,7 +6522,7 @@ name = "wirken-audit"
 version = "0.9.1"
 dependencies = [
  "chrono",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6546,7 +6546,7 @@ dependencies = [
  "ed25519-dalek",
  "libc",
  "openssl",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rusqlite",
  "rustls 0.23.38",
  "serde",
@@ -6585,7 +6585,7 @@ dependencies = [
  "ed25519-dalek",
  "governor",
  "rand 0.10.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6629,7 +6629,7 @@ dependencies = [
  "oauth2",
  "open",
  "rand 0.10.1",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "tempfile",
@@ -6690,7 +6690,7 @@ dependencies = [
  "chrono",
  "feed-rs",
  "hdbscan",
- "reqwest 0.13.2",
+ "reqwest 0.13.3",
  "rusqlite",
  "secrecy 0.10.3",
  "serde",
