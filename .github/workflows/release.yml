@@ -156,6 +156,10 @@ jobs:
     name: Create Release
     needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
+    # Only run on tag push — workflow_dispatch has no tag to attach
+    # the draft release to, and we use it just for verifying the
+    # build matrix.
+    if: github.event_name == 'push'
     permissions:
       # Needed by softprops/action-gh-release to create the draft.
       contents: write
