@@ -1130,6 +1130,7 @@ async fn handle_orchestrator_push(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn write_orchestrator_response(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     resp: &OrchestratorPushResponse,
