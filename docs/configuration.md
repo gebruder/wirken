@@ -18,7 +18,7 @@ All configuration lives in `~/.wirken/`. There are no hidden config files or env
 | `mcp.json` | MCP server config (optional) | Manual or org config |
 | `org.url` | Organization config endpoint (optional) | `wirken setup --org` |
 | `skills/` | Installed skills (SKILL.md + optional skill.wasm) | `wirken skills install` or setup |
-| `sockets/` | Unix domain sockets for IPC | `wirken run` |
+| `sockets/` | Unix domain sockets for IPC (Linux/macOS); on Windows the gateway uses named pipes derived from these path stems and the directory holds no live files | `wirken run` |
 | `workspace/` | Default agent workspace (file operations happen here) | `wirken run` |
 
 ## provider.json

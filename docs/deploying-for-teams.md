@@ -13,7 +13,7 @@ Every claim here maps to current behavior. Items that read like team-scale featu
                          ▼
                    ┌───────────┐
                    │  Wirken   │     separate adapter process per channel
-                   │           │     Unix domain socket + ed25519 IPC
+                   │           │     local IPC + ed25519 (UDS / named pipe)
                    │  host     │     XChaCha20-Poly1305 credential vault
                    └─────┬─────┘
                          │  HTTPS (rustls) or WireGuard-tunneled HTTP
@@ -33,7 +33,7 @@ One channel in Wirken maps to one platform workspace. A Slack deployment coverin
 
 ## Credential setup
 
-Credentials live in `~/.wirken/vault.db`, encrypted with XChaCha20-Poly1305. The device key is retrieved from the OS keychain (macOS Keychain, Linux Secret Service) or from an age-encrypted key file with a passphrase-derived wrapping key (Argon2id).
+Credentials live in `~/.wirken/vault.db` (or `%APPDATA%\wirken\vault.db` on Windows), encrypted with XChaCha20-Poly1305. The device key is retrieved from the OS keychain on Linux (Secret Service) and macOS (Keychain), or from an age-encrypted key file with a passphrase-derived wrapping key (Argon2id). Windows uses the age-file backend by default; native Credential Manager integration is on the roadmap.
 
 Each channel stores its platform credentials under a well-known set of vault names:
 
@@ -173,7 +173,7 @@ Startup prints:
   Socket: ~/.wirken/sockets/gateway.sock
 ```
 
-Two adapter processes spawn, one per channel. Each connects back over the Unix domain socket, performs the ed25519 handshake, and begins polling its platform.
+Two adapter processes spawn, one per channel. Each connects back over the local IPC transport (Unix domain socket on Linux/macOS, named pipe on Windows), performs the ed25519 handshake, and begins polling its platform.
 
 ### SIEM
 

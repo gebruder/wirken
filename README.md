@@ -37,7 +37,7 @@ curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | s
 
 The installer then fetches `checksums.sha256` and `checksums.sha256.sig` from the release, verifies the signature with `ssh-keygen -Y verify` against a signing key embedded in the script, and verifies the binary's SHA-256 against the signed checksums. Every failure path is fail-closed: missing signature, missing checksum, mismatched digest, or a machine without `sha256sum`/`shasum` aborts install. The only override is `WIRKEN_ALLOW_UNVERIFIED=1`, which warns on stderr and is documented in [docs/release-signing.md](docs/release-signing.md).
 
-Prebuilt binaries are available for Linux (x86_64, aarch64) and macOS (x86_64, Apple Silicon). The Linux binaries are statically linked against musl with no glibc dependency.
+Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), and Windows 11 (x86_64). The Linux binaries are statically linked against musl with no glibc dependency. Windows users: the bash installer above does not apply; see [docs/windows.md](docs/windows.md) for the Windows install path and the feature-set differences (Signal adapter, orchestrator-push, service installer, and cron presets are Linux/macOS only).
 
 Or build from source (requires Rust 1.85+ and the `capnp` compiler):
 
@@ -47,6 +47,9 @@ sudo apt-get install -y capnproto
 
 # macOS
 brew install capnp
+
+# Windows
+choco install capnproto -y
 
 cargo install --path crates/cli
 ```
