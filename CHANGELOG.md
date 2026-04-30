@@ -8,6 +8,60 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## 1.0.0 — Windows 11; audit CLI user-grade; cross-platform IPC trait surface
+
+The cross-platform release. Wirken now ships a native Windows 11 binary alongside the existing Linux and macOS builds. The audit CLI is user-grade across all three platforms: structured JSON output, citable session IDs, schema versioning, the verify command emits typed failure data. The IPC layer is now expressed as the `wirken_ipc::Stream` and `wirken_ipc::Listener` trait surface; production code talks through the trait, with unix-domain sockets on Linux/macOS and named pipes on Windows behind it.
+
+This is the first release with semver stability commitments. The surfaces called out in [docs/audit-cli.md](docs/audit-cli.md) (`schema_version: 1` JSON shape, `wirken_version` field, session-ID format, `Principal` tagged-string form), in [docs/architecture.md](docs/architecture.md) (the `wirken_ipc` trait surface), and in [docs/cli.md](docs/cli.md) (the command-line surface) are stable within 1.x. Additive changes (new fields, new optional flags, new subcommands) are non-breaking; field removals or shape changes bump the major.
+
+### Windows 11 support
+
+- **Native `wirken-x86_64-pc-windows-msvc.exe`.** Single binary, no installer dependencies beyond Cap'n Proto at build time. Ships in the same release artifacts as the Linux and macOS builds (`8e6cc37`, `dec99e0`). See [docs/windows.md](docs/windows.md) for the install path, SmartScreen behavior, and the documented feature deltas.
+- **Named-pipe IPC with peer-SID enforcement.** The gateway↔adapter and gateway↔mcp-proxy paths use `tokio::net::windows::named_pipe` on Windows behind the same `wirken_ipc::Stream` interface as unix-domain sockets on Linux/macOS. Peer identity at accept time goes through `GetNamedPipeClientProcessId` → `OpenProcessToken` → `GetTokenInformation(TokenUser)` → `ConvertSidToStringSidW`, returning a `Principal::Sid("S-1-5-21-...")`. The check happens in gateway code (audit-witnessable), not at the named-pipe DACL level. See [docs/enforcement-model.md §Orchestrator Push Peer-Credential Check](docs/enforcement-model.md) for the cross-platform principal model. (`b7dd9dd`, `c6f2fa3`, `3f7768e`)
+- **`exec.shell` config knob.** When `sandbox.json` is set to `mode: off` on any platform, the host-exec fallback resolves a shell at gateway startup. Auto-detect order: `sh` → `powershell` → `cmd`. Operators on Windows who install Git for Windows get POSIX-shell semantics for cross-platform skill portability without configuration. The resolved shell is logged at gateway startup. (`9120b1d`)
+- **Documented platform deltas on Windows:** Signal adapter, `wirken zirkel push` (orchestrator-push API), the `wirken service` installer, and `wirken cron` preset installer are Linux/macOS only at compile time. Vault uses the age-encrypted-file backend (native Credential Manager / DPAPI on the roadmap). The Windows binary is unsigned; SmartScreen warns on first run. ([docs/windows.md](docs/windows.md))
+- **CI matrix extended.** A `windows-smoke.yml` workflow exercises the named-pipe Stream impl on every push to main; `release.yml` builds the Windows .exe on every release tag.
+
+### Audit CLI user-grade across all platforms
+
+The audit log was always hash-chained, but the CLI surface was developer-debug shape. This release makes it citable in research and scriptable in compliance pipelines.
+
+- **`wirken audit log` flags.** New flags: `--session <id>`, `--actor <name>`, `--since <iso8601>`, `--until <iso8601>`, `--format human|json`. The underlying `AuditQuery` already supported actor/since/until; this exposes them at the CLI. When `--session <id>` is provided, human output prints a structured session header decomposing the `{agent}/{channel}/{id}` form. (`1869b4e`)
+- **JSON schema with versioning.** Both `wirken audit log --format json` and `wirken audit verify --format json` emit a top-level `schema_version: 1` and `wirken_version` field. Session IDs in JSON are objects (`full`, `agent`, `channel`, `id`) — `full` is the canonical round-trippable form, the decomposed fields are convenience. Unknown future fields may be added; consumers should ignore them. ([docs/audit-cli.md](docs/audit-cli.md))
+- **`VerifyResult::Broken` restructured.** The variant now carries typed fields: `session_id: SessionId`, `seq: u64`, `expected_hash: String`, `actual_hash: String`, `verified_count: u64`. Replaces the prior free-form `(row_id, expected, found)` shape. `wirken audit verify` failure output names the session, the seq, the verified-count up to the break, and exits 1. (`0d4e964`)
+- **Per-session chains documented.** The verify pass walks every session's chain independently; a break in one session is reported with the verified count summed across complete sessions plus the per-session count up to the break.
+
+### IPC trait surface and production migration
+
+- **`wirken_ipc::Stream` and `wirken_ipc::Listener`.** New trait surface. `Stream` composes `AsyncRead + AsyncWrite + Send + Unpin` plus `peer_principal() -> Result<Principal, IpcError>`; `Listener` is async-trait with an `accept() -> BoxStream` method. Implementations for `tokio::net::UnixStream`/`UnixListener` on unix and the named-pipe types on windows live in the IPC crate. (`d45c7d6`, `b7dd9dd`)
+- **`wirken_ipc::bind(path)` and `connect(path)` helpers.** Path-based listener and client construction; on Windows the path is mapped to a deterministic pipe name (last-segment + 16-hex-digit hash of full path) so multiple gateways with different data dirs don't collide.
+- **Generic `FrameReader<R>` and `FrameWriter<W>`.** The capnp framing layer is now generic over `AsyncRead + Unpin` / `AsyncWrite + Unpin`. Production code uses the `IpcFrameReader` / `IpcFrameWriter` aliases over `ReadHalf<BoxStream>` / `WriteHalf<BoxStream>`. (`8e6cc37`)
+- **All ten channel adapters migrated.** The gateway accept loop, mcp-proxy server, outbound dispatcher, and `McpProxyClient` all use the trait surface. Tests stay unix-only; the windows-smoke workflow proves the named-pipe path on every CI run.
+
+### Orchestrator-push audit reconciliation
+
+- **Refused pushes are now witnessed by the audit log.** Prior behavior: cross-uid push refusals on the orchestrator socket emitted a `tracing::warn!` line that was not recorded in the hash-chained log. New behavior: every refusal emits an `orchestrator.push.refused` audit event with structured detail (`reason`, `expected`, `actual`, plus `error` for the unavailable-credential case). Two reason variants today: `principal_mismatch` and `peer_principal_unavailable`. Closes the existing tracing-only gap on Linux/macOS and applies the same shape on Windows. (`3f7768e`)
+- **Peer-identity check expressed as `Stream::peer_principal()`.** The orchestrator accept loop in `wirken-cli` uses the trait method instead of the direct `peer_cred()` call; the result is a `Principal` enum that displays as `uid:N` on unix and `sid:S-1-5-...` on windows. The audit event detail uses the tagged-string form so consumers parse one schema regardless of platform.
+
+### File-permission posture
+
+- **Operator-visible warning on platforms without 0o600.** Vault device key writes, agent identity-key writes, and skill-signing-key writes emit a `tracing::warn!` on platforms (Windows, primarily) where the unix `chmod 0o600` step is unavailable. The keys rely on user-profile isolation of the data directory for confidentiality. Native ACL-on-write is on the roadmap. (`401db72`)
+
+### Other
+
+- **Gateway session-ID format normalized to UUID.** The gateway's `generate_session_id()` previously emitted 32-char hex from `rand::rng().fill_bytes`; now it emits `Uuid::new_v4().to_string()` for visual consistency with zirkel-issued session IDs. Existing audit-log entries under hex IDs remain queryable as opaque strings — the change is forward-only. (`09c5ae2`)
+- **Dependency bumps.** `reqwest` 0.13.2 → 0.13.3 (#90), `slack-morphism` 2.19.0 → 2.20.0 (#91), `open` 5.3.3 → 5.3.4 (#92), `lru` 0.16.3 → 0.18.0 (#94, validated against the agent-factory cache). `cap-std` 4.x bump (#93) deferred — pinned by `wasmtime-wasi 43.0.1`.
+
+### Not committed in 1.0 — explicit roadmap items
+
+These are out-of-scope for the tier-2 Windows release and noted here for completeness:
+
+- DPAPI / native Windows Credential Manager vault backend
+- Code-signed Windows binary
+- Windows service installer (parallel to systemd/launchd)
+- gVisor sandbox on Windows (gVisor doesn't run on Windows)
+- Signal adapter on Windows (signal-cli's transport is unix-only)
+
 ## 0.9.1 — Audit-pass security fixes; doc accuracy
 
 No breaking changes. Five real fixes, all from a single security-audit pass against `e9bc65a`. Operators upgrading from 0.9.0 should pull this release; the env-passthrough escape closed in `5fcf3c1` was a real privilege escalation path.
