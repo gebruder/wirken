@@ -73,7 +73,7 @@ This is not a runtime permission check that can be bypassed — it is a type con
 
 > For a complete mapping of which guarantees are compile-time vs. runtime, see [Enforcement Model](enforcement-model.md).
 
-**IPC transport:** Unix domain sockets via `tokio::net::UnixStream` (tokio 1.50). No TCP, no HTTP between adapter and gateway — eliminates network attack surface.
+**IPC transport:** Local-only duplex streams behind the `wirken_ipc::Stream` trait — Unix domain sockets via `tokio::net::UnixStream` on Linux/macOS, Windows named pipes via `tokio::net::windows::named_pipe` on Windows. No TCP, no HTTP between adapter and gateway — eliminates network attack surface. Peer identity is checked at accept time on both platforms (`SO_PEERCRED` on unix, `GetNamedPipeClientProcessId` + token-SID extraction on windows); see [Enforcement Model](enforcement-model.md) for the cross-platform principal type.
 
 **Process management:** Gateway spawns adapters via `tokio::process::Command`. Each adapter is a separate Rust binary (compiled from the same workspace). Dead adapters detected by UDS EOF + heartbeat timeout, restarted with exponential backoff.
 
@@ -91,6 +91,7 @@ All secrets encrypted at rest using a **device key** derived from the OS keychai
 
 - **macOS:** `security-framework` 3.7 (Keychain Services bindings). Device key stored in Keychain via `SecItemAdd`/`SecItemCopyMatching`, never on filesystem.
 - **Linux:** `secret-service` 5.1 (D-Bus to GNOME Keyring / KDE Wallet). Called from a dedicated blocking thread to avoid tokio deadlocks (known `secret-service` + tokio issue). Fallback for headless: `age`-encrypted file with passphrase derived via `argon2` 0.5 (Argon2id, 64MB memory cost, 3 iterations).
+- **Windows:** `age`-encrypted file with passphrase-derived key (same Argon2id parameters as the Linux headless fallback). Native Credential Manager / DPAPI integration is on the roadmap; the file backend is portable across machines if the operator keeps the passphrase. See [Windows install guide](windows.md#install) for the trade-off.
 - **Credential store:** SQLite database at `~/.wirken/vault.db` via `rusqlite` 0.39 (bundled feature). All secret values encrypted with XChaCha20-Poly1305 via `chacha20poly1305` 0.10 keyed from the device key.
 - **Per-credential metadata:** `created_at`, `expires_at`, `last_used_at`, `rotation_due_at`.
 - **Rotation policy:** API keys flagged for rotation every 90 days. Gateway emits a warning 7 days before expiry. CLI command: `wirken credentials rotate <channel>`.
@@ -346,7 +347,7 @@ curl -fsSL https://wirken.dev/install.sh | sh
 wirken setup
 ```
 
-The install script downloads a precompiled binary for the user's platform (Linux x86_64, Linux aarch64, macOS x86_64, macOS aarch64). Single static binary, no runtime dependencies. No npm.
+The install script downloads a precompiled binary for the user's platform (Linux x86_64, Linux aarch64, macOS x86_64, macOS aarch64). Single static binary, no runtime dependencies. No npm. Windows 11 (x86_64) ships a native binary (`wirken-x86_64-pc-windows-msvc.exe`) installed manually — see [docs/windows.md](windows.md). The bash installer does not run on Windows.
 
 `wirken setup` is a single interactive flow powered by `dialoguer` 0.12:
 
@@ -383,6 +384,7 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | SQLite | `rusqlite` | 0.39 | `bundled` feature compiles SQLite from source. No system dependency. |
 | macOS Keychain | `security-framework` | 3.7 | Direct bindings to Apple Security.framework. |
 | Linux keychain | `secret-service` | 5.1 | D-Bus to GNOME Keyring / KDE Wallet. |
+| Windows-side Win32 | `windows-sys` | 0.52 | Named-pipe peer-SID extraction (`GetNamedPipeClientProcessId` + token user) for the orchestrator-push trust boundary. Vault uses the age-file backend on Windows; native Credential Manager integration is on the roadmap. |
 | AEAD encryption | `chacha20poly1305` | 0.10 | RustCrypto. XChaCha20-Poly1305. Pure Rust, audited. |
 | Secret management | `secrecy` | 0.10 | Prevents accidental logging/serialization of secrets. |
 | Memory zeroing | `zeroize` | 1.8 | Zeroes secret memory on drop. |

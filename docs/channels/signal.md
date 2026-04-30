@@ -4,6 +4,8 @@
 wirken channel add signal
 ```
 
+> **Linux/macOS only.** The Signal adapter speaks newline-delimited JSON-RPC over a Unix-domain socket to a local `signal-cli` daemon. There is no equivalent transport on the Windows build, so the adapter is excluded at compile time. Telegram, Discord, Slack, Teams, Matrix, WhatsApp, and Google Chat work on all three platforms.
+
 Signal is different from every other wirken channel. There is no bot API: you connect by running [signal-cli](https://github.com/AsamK/signal-cli) as a local JSON-RPC daemon and pointing wirken at it. That daemon acts as a real Signal client, under your identity. This page documents how to set it up **and** the exposure that comes with it, so you can decide whether to run it and how to harden it.
 
 > **0.8.0 transport change.** The adapter previously polled signal-cli's HTTP JSON-RPC endpoint with a `receive` call per tick. signal-cli 0.14.x's HTTP daemon auto-consumes inbound messages in the background and rejects concurrent `receive` RPCs, which broke the polling loop. The adapter now speaks newline-delimited JSON-RPC over a Unix socket and consumes `subscribeReceive` notifications the daemon pushes unprompted. Pre-0.8.0 installs that stored an HTTP URL as `signal-endpoint` must re-enter the endpoint via `wirken setup` or `wirken channel add signal`; the adapter rejects HTTP URLs at startup with a migration error.
