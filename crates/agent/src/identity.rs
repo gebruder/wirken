@@ -29,7 +29,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use crate::error::AgentError;
 
@@ -157,8 +157,11 @@ pub fn verify(
     message: &[u8],
     signature: &Signature,
 ) -> Result<(), AgentError> {
+    // SECURITY: verify_strict rejects non-canonical signatures and
+    // small-order/torsion R points. Crypto-walk findings F-Y-3-1,
+    // F-4-T-1, F-C2-F flagged the prior `verify` call as malleable.
     public_key
-        .verify(message, signature)
+        .verify_strict(message, signature)
         .map_err(|_| AgentError::Identity("ed25519 signature verification failed".into()))
 }
 

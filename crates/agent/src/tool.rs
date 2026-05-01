@@ -10,6 +10,31 @@ use crate::error::AgentError;
 use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
 use wirken_gateway::permissions::Action;
 
+/// Maximum bytes a built-in tool will buffer from an HTTP response
+/// body. Mirrors zirkel's `MAX_FETCH_BYTES`. The cap exists so a
+/// hostile or misbehaving upstream cannot drive an unbounded
+/// allocation through the tool dispatcher.
+const MAX_TOOL_BODY_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Stream `resp.body` into a Vec<u8>, refusing to accumulate more
+/// than [`MAX_TOOL_BODY_BYTES`]. Returned errors carry the cap so a
+/// caller can decide whether to surface the limit to the LLM verbatim.
+async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, AgentError> {
+    use futures_util::StreamExt as _;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| AgentError::Tool(format!("read response chunk: {e}")))?;
+        if (buf.len() as u64) + (chunk.len() as u64) > MAX_TOOL_BODY_BYTES {
+            return Err(AgentError::Tool(format!(
+                "response body exceeded {MAX_TOOL_BODY_BYTES}-byte cap; aborting"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// Tool definition for the LLM (OpenAI function calling format).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
@@ -611,10 +636,9 @@ impl ToolRegistry {
             });
         }
 
-        let html = resp
-            .text()
-            .await
-            .map_err(|e| AgentError::Tool(format!("read response: {e}")))?;
+        let body = read_capped(resp).await?;
+        let html = String::from_utf8(body)
+            .map_err(|e| AgentError::Tool(format!("response not utf-8: {e}")))?;
 
         let results = parse_ddg_html(&html, max_results);
 
@@ -772,9 +796,8 @@ impl ToolRegistry {
             });
         }
 
-        let resp_json: serde_json::Value = resp
-            .json()
-            .await
+        let body = read_capped(resp).await?;
+        let resp_json: serde_json::Value = serde_json::from_slice(&body)
             .map_err(|e| AgentError::Tool(format!("parse image response: {e}")))?;
 
         let b64_data = resp_json
@@ -1319,4 +1342,80 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
 /// - `write_file`, `generate_image` — `false` (side-effecting)
 pub fn is_deterministic_tool(name: &str) -> bool {
     matches!(name, "read_file" | "list_files")
+}
+
+#[cfg(test)]
+mod read_capped_tests {
+    use super::{MAX_TOOL_BODY_BYTES, read_capped};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Serves an HTTP/1.1 chunked response that streams past
+    /// MAX_TOOL_BODY_BYTES so the cap engages.
+    async fn one_shot_oversized_chunked() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\n\r\n";
+                let _ = sock.write_all(header.as_bytes()).await;
+                let chunk_data = vec![b'a'; 1024 * 1024];
+                let chunk_size_hex = format!("{:x}\r\n", chunk_data.len());
+                let needed_chunks = (MAX_TOOL_BODY_BYTES / chunk_data.len() as u64) + 2;
+                for _ in 0..needed_chunks {
+                    if sock.write_all(chunk_size_hex.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if sock.write_all(&chunk_data).await.is_err() {
+                        return;
+                    }
+                    if sock.write_all(b"\r\n").await.is_err() {
+                        return;
+                    }
+                }
+                let _ = sock.write_all(b"0\r\n\r\n").await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn read_capped_rejects_body_over_limit() {
+        let url = one_shot_oversized_chunked().await;
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let err = read_capped(resp).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeded") && msg.contains(&MAX_TOOL_BODY_BYTES.to_string()),
+            "expected cap error, got {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_capped_returns_short_body_intact() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = "hello world";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+        let body = read_capped(resp).await.unwrap();
+        assert_eq!(body, b"hello world");
+    }
 }

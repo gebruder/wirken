@@ -45,16 +45,47 @@ const DEFAULT_VERIFY_EVERY_FLUSHES: u64 = 100;
 /// row written under the same loop is ambiguous evidence.
 const MAX_INTEGRITY_FAILURES: u32 = 3;
 
-/// Update the consecutive-integrity-failure counter for a verify-pass
-/// outcome. Returns `true` when the writer should halt.
-fn record_verify_outcome(integrity_failures: &mut u32, intact: bool) -> bool {
-    if intact {
+/// Number of consecutive failed alarm-log writes that halt the
+/// writer. The alarm log is the load-bearing record for chain
+/// integrity (see `run_verify_pass`); if the writer cannot land an
+/// alarm row, every chain-verify failure from then on would be
+/// invisible. Persistent alarm-write failure is therefore treated
+/// the same as persistent integrity failure: refuse to keep going.
+const MAX_ALARM_WRITE_FAILURES: u32 = 3;
+
+/// Result of a single chain-verification pass. Both flags drive
+/// independent halt counters in the flush loop.
+struct VerifyPassOutcome {
+    /// `true` when the chain verified clean (or was empty).
+    intact: bool,
+    /// `true` when the alarm-log write either succeeded or was not
+    /// attempted (intact case). `false` only when the verify pass
+    /// detected a break or error and the subsequent alarm-log
+    /// append failed.
+    alarm_write_ok: bool,
+}
+
+/// Update both halt counters from a verify-pass outcome. Returns
+/// `true` when either counter reached its threshold.
+fn record_verify_outcome(
+    integrity_failures: &mut u32,
+    alarm_write_failures: &mut u32,
+    outcome: &VerifyPassOutcome,
+) -> bool {
+    if outcome.intact {
         *integrity_failures = 0;
-        return false;
+    } else {
+        *integrity_failures = integrity_failures.saturating_add(1);
     }
-    *integrity_failures = integrity_failures.saturating_add(1);
-    let halt = *integrity_failures >= MAX_INTEGRITY_FAILURES;
-    if halt {
+    if outcome.alarm_write_ok {
+        *alarm_write_failures = 0;
+    } else {
+        *alarm_write_failures = alarm_write_failures.saturating_add(1);
+    }
+
+    let integrity_halt = *integrity_failures >= MAX_INTEGRITY_FAILURES;
+    let alarm_halt = *alarm_write_failures >= MAX_ALARM_WRITE_FAILURES;
+    if integrity_halt {
         tracing::error!(
             failures = *integrity_failures,
             threshold = MAX_INTEGRITY_FAILURES,
@@ -63,15 +94,41 @@ fn record_verify_outcome(integrity_failures: &mut u32, intact: bool) -> bool {
              in-chain evidence"
         );
     }
-    halt
+    if alarm_halt {
+        tracing::error!(
+            failures = *alarm_write_failures,
+            threshold = MAX_ALARM_WRITE_FAILURES,
+            "Audit alarm-log write failed in a row; halting writer because \
+             follow-on chain-verify failures would be invisible"
+        );
+    }
+    integrity_halt || alarm_halt
 }
 
+/// Sanity threshold above which `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`
+/// is logged as a warning. The default cadence is 100 flushes; values
+/// past this floor effectively disable continuous verification, so a
+/// reviewer reading the gateway log should see the choice was made
+/// deliberately rather than via a typo.
+const VERIFY_CADENCE_SANITY_CEILING: u64 = 10_000;
+
 fn verify_every_flushes() -> u64 {
-    std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES")
+    let value = std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_VERIFY_EVERY_FLUSHES)
+        .unwrap_or(DEFAULT_VERIFY_EVERY_FLUSHES);
+    if value > VERIFY_CADENCE_SANITY_CEILING {
+        tracing::warn!(
+            value,
+            ceiling = VERIFY_CADENCE_SANITY_CEILING,
+            default = DEFAULT_VERIFY_EVERY_FLUSHES,
+            "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES is set far above the default; \
+             continuous chain verification is effectively disabled. See the \
+             documented escape-hatches table in docs/security-properties.md."
+        );
+    }
+    value
 }
 
 /// Run a chain-verification pass and emit a structured audit event
@@ -85,16 +142,22 @@ fn verify_every_flushes() -> u64 {
 /// in-chain row is defense-in-depth: if it's still there, an honest
 /// chain-walk reader sees both signals; if it isn't, the alarm log
 /// is the surviving record.
-async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> bool {
+async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome {
     match log.verify() {
         Ok(VerifyResult::Ok { rows_verified }) => {
             tracing::debug!(
                 rows_verified,
                 "audit chain verification: ok (continuous pass)"
             );
-            true
+            VerifyPassOutcome {
+                intact: true,
+                alarm_write_ok: true,
+            }
         }
-        Ok(VerifyResult::Empty) => true,
+        Ok(VerifyResult::Empty) => VerifyPassOutcome {
+            intact: true,
+            alarm_write_ok: true,
+        },
         Ok(VerifyResult::Broken {
             session_id,
             seq,
@@ -120,12 +183,16 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> bool {
                 hostname: hostname_best_effort(),
                 gateway_pid: std::process::id(),
             };
-            if let Err(e) = alarms.append(&alarm) {
-                tracing::error!(
-                    "audit alarm-log write failed: {e}. The tracing::error \
-                     above is now the only surviving record."
-                );
-            }
+            let alarm_write_ok = match alarms.append(&alarm) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(
+                        "audit alarm-log write failed: {e}. The tracing::error \
+                         above is now the only surviving record."
+                    );
+                    false
+                }
+            };
             // Defense-in-depth: also try to land an audit row so an
             // honest chain-walk reader sees the failure inline. The
             // alarm log is the load-bearing record above; this is
@@ -142,7 +209,10 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> bool {
             if let Err(e) = log.write_batch(&[event]) {
                 tracing::error!("audit chain_broken event write failed: {e}");
             }
-            false
+            VerifyPassOutcome {
+                intact: false,
+                alarm_write_ok,
+            }
         }
         Err(e) => {
             tracing::error!("audit chain verification errored: {e}");
@@ -156,8 +226,11 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> bool {
                 hostname: hostname_best_effort(),
                 gateway_pid: std::process::id(),
             };
-            let _ = alarms.append(&alarm);
-            false
+            let alarm_write_ok = alarms.append(&alarm).is_ok();
+            VerifyPassOutcome {
+                intact: false,
+                alarm_write_ok,
+            }
         }
     }
 }
@@ -249,6 +322,7 @@ async fn flush_loop(
     let verify_cadence = verify_every_flushes();
     let mut flushes_since_verify: u64 = 0;
     let mut integrity_failures: u32 = 0;
+    let mut alarm_write_failures: u32 = 0;
 
     loop {
         tokio::select! {
@@ -262,8 +336,12 @@ async fn flush_loop(
                 }
                 flushes_since_verify = flushes_since_verify.saturating_add(1);
                 if flushes_since_verify >= verify_cadence {
-                    let intact = run_verify_pass(&log, &alarms).await;
-                    if record_verify_outcome(&mut integrity_failures, intact) {
+                    let outcome = run_verify_pass(&log, &alarms).await;
+                    if record_verify_outcome(
+                        &mut integrity_failures,
+                        &mut alarm_write_failures,
+                        &outcome,
+                    ) {
                         break;
                     }
                     flushes_since_verify = 0;
@@ -411,8 +489,12 @@ mod tests {
         }
         let log = AuditLog::open(&db_path).unwrap();
         let alarms = AlarmLog::new(tmp.path());
-        let intact = run_verify_pass(&log, &alarms).await;
-        assert!(!intact, "expected break to be detected");
+        let outcome = run_verify_pass(&log, &alarms).await;
+        assert!(!outcome.intact, "expected break to be detected");
+        assert!(
+            outcome.alarm_write_ok,
+            "alarm-log write should have succeeded with a writable temp dir"
+        );
 
         // The alarm log is the load-bearing record.
         let alarm_records = alarms.read_all().unwrap();
@@ -437,29 +519,86 @@ mod tests {
         );
     }
 
+    fn ok_outcome() -> VerifyPassOutcome {
+        VerifyPassOutcome {
+            intact: true,
+            alarm_write_ok: true,
+        }
+    }
+
+    fn broken_outcome(alarm_write_ok: bool) -> VerifyPassOutcome {
+        VerifyPassOutcome {
+            intact: false,
+            alarm_write_ok,
+        }
+    }
+
     #[test]
     fn integrity_failures_reset_on_intact_pass() {
-        let mut c = 1;
-        assert!(!record_verify_outcome(&mut c, true));
-        assert_eq!(c, 0);
+        let mut integrity = 1;
+        let mut alarm = 0;
+        assert!(!record_verify_outcome(
+            &mut integrity,
+            &mut alarm,
+            &ok_outcome()
+        ));
+        assert_eq!(integrity, 0);
     }
 
     #[test]
-    fn three_consecutive_failures_signal_halt() {
-        let mut c = 0;
-        assert!(!record_verify_outcome(&mut c, false));
-        assert!(!record_verify_outcome(&mut c, false));
-        assert!(record_verify_outcome(&mut c, false));
+    fn three_consecutive_integrity_failures_signal_halt() {
+        let mut integrity = 0;
+        let mut alarm = 0;
+        let outcome = broken_outcome(true);
+        assert!(!record_verify_outcome(&mut integrity, &mut alarm, &outcome));
+        assert!(!record_verify_outcome(&mut integrity, &mut alarm, &outcome));
+        assert!(record_verify_outcome(&mut integrity, &mut alarm, &outcome));
     }
 
     #[test]
-    fn intact_pass_between_failures_resets_counter() {
-        let mut c = 0;
-        record_verify_outcome(&mut c, false);
-        record_verify_outcome(&mut c, false);
-        record_verify_outcome(&mut c, true);
-        assert_eq!(c, 0);
-        assert!(!record_verify_outcome(&mut c, false));
+    fn three_consecutive_alarm_write_failures_signal_halt_even_with_chain_intact() {
+        // The alarm log is the load-bearing record on a chain break.
+        // Reaching the alarm-write halt threshold without intervening
+        // chain-verify failures must still close the writer; otherwise
+        // the next chain break would land an alarm into the void.
+        let mut integrity = 0;
+        let mut alarm = 0;
+        // Force the alarm-write half of the outcome to false even
+        // though the chain reports broken (alarm_write_ok flips
+        // independently). With chain broken on every pass we'd hit
+        // integrity halt by the third call; mix in two intact passes
+        // so the integrity counter resets and only the alarm counter
+        // climbs.
+        for i in 0..MAX_ALARM_WRITE_FAILURES {
+            // Synthetic: chain intact, alarm write failed. This shape
+            // is unreachable from `run_verify_pass` (intact path
+            // doesn't write an alarm), but the counter logic must
+            // still treat the input correctly because `run_verify_pass`
+            // could grow a "verify-error with successful alarm" path
+            // in the future, and the failing-alarm side of the gate
+            // belongs to this helper.
+            let outcome = VerifyPassOutcome {
+                intact: true,
+                alarm_write_ok: false,
+            };
+            let halt = record_verify_outcome(&mut integrity, &mut alarm, &outcome);
+            if i + 1 < MAX_ALARM_WRITE_FAILURES {
+                assert!(!halt, "should not halt yet at {} failures", i + 1);
+            } else {
+                assert!(halt, "must halt at {} failures", i + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn intact_pass_with_alarm_ok_resets_both_counters() {
+        let mut integrity = 0;
+        let mut alarm = 0;
+        record_verify_outcome(&mut integrity, &mut alarm, &broken_outcome(false));
+        record_verify_outcome(&mut integrity, &mut alarm, &broken_outcome(false));
+        record_verify_outcome(&mut integrity, &mut alarm, &ok_outcome());
+        assert_eq!(integrity, 0);
+        assert_eq!(alarm, 0);
     }
 
     #[tokio::test]
@@ -495,11 +634,12 @@ mod tests {
         }
         let log = AuditLog::open(&db_path).unwrap();
         let alarms = AlarmLog::new(tmp.path());
-        let mut counter = 0u32;
+        let mut integrity = 0u32;
+        let mut alarm = 0u32;
         let mut halted = false;
         for _ in 0..MAX_INTEGRITY_FAILURES {
-            let intact = run_verify_pass(&log, &alarms).await;
-            if record_verify_outcome(&mut counter, intact) {
+            let outcome = run_verify_pass(&log, &alarms).await;
+            if record_verify_outcome(&mut integrity, &mut alarm, &outcome) {
                 halted = true;
                 break;
             }
@@ -508,6 +648,71 @@ mod tests {
             halted,
             "expected halt within {MAX_INTEGRITY_FAILURES} passes"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn three_failed_alarm_writes_drive_halt_decision() {
+        // chmod 0o000 the alarm log so AlarmLog::append fails. With a
+        // tampered chain triggering verify-pass failures, the
+        // alarm-write counter climbs in lockstep with integrity. Both
+        // halt at MAX=3; this asserts the behavior holds end-to-end.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new("actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        // Tamper a row so each verify pass detects a break and tries
+        // to append an alarm.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let new_payload = serde_json::to_string(&serde_json::json!({
+                "kind": "audit_legacy",
+                "actor": "actor",
+                "action": "HACKED",
+                "target": "t",
+                "channel": "",
+                "detail": null,
+            }))
+            .unwrap();
+            conn.execute(
+                "UPDATE session_events SET payload = ?1 WHERE id = 3",
+                rusqlite::params![new_payload],
+            )
+            .unwrap();
+        }
+
+        // Pre-create the alarm log file with no permission bits so
+        // AlarmLog::append's open(O_APPEND | O_CREAT) hits EACCES.
+        let alarm_path = tmp.path().join("audit-alarms.log");
+        std::fs::write(&alarm_path, b"").unwrap();
+        std::fs::set_permissions(&alarm_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let mut integrity = 0u32;
+        let mut alarm = 0u32;
+        let mut halted = false;
+        for _ in 0..MAX_ALARM_WRITE_FAILURES {
+            let outcome = run_verify_pass(&log, &alarms).await;
+            assert!(!outcome.intact);
+            assert!(
+                !outcome.alarm_write_ok,
+                "alarm append should fail with chmod 0o000"
+            );
+            if record_verify_outcome(&mut integrity, &mut alarm, &outcome) {
+                halted = true;
+                break;
+            }
+        }
+        // Restore perms so TempDir cleanup can remove the file.
+        let _ = std::fs::set_permissions(&alarm_path, std::fs::Permissions::from_mode(0o600));
+        assert!(halted);
     }
 
     #[tokio::test]

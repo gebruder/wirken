@@ -40,25 +40,117 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!("  ──────────────");
     println!();
 
+    // --- Start audit writer (with optional SIEM forwarding) ---
+    //
+    // Fail-closed: if the writer cannot start, abort startup before
+    // any other side effect runs (org-config apply, vault open, the
+    // adapter sockets). The org-config apply path emits applying /
+    // applied / apply-failed audit events, so it must not run until
+    // the writer exists.
+    let siem_config = load_siem_config(&cfg);
+    let (audit_writer, audit_handle) = AuditWriter::with_siem(&cfg.audit_db_path(), siem_config)
+        .context("Failed to start audit writer")?;
+    let audit = Arc::new(audit_writer);
+
+    audit
+        .log(AuditEvent::new("gateway", "gateway.start", "daemon"))
+        .await?;
+    println!("  Audit log: {}", cfg.audit_db_path().display());
+
     // --- Refresh org config if configured ---
     //
-    // Hold onto the list of applied sections so we can emit a single
-    // `org-config.applied` audit event after the writer is constructed
-    // below. Org-config refresh runs before AuditWriter::with_siem
-    // because the SIEM and provider config it lands are inputs to that
-    // construction; deferring the audit row is the simpler shape.
-    let mut org_config_applied: Vec<String> = Vec::new();
+    // Emits org-config.applying before any write, then either
+    // org-config.applied with the section list, or
+    // org-config.apply-failed with the partial section list and the
+    // failed section name. Both events carry the org URL and the
+    // WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG state at refresh time so an
+    // operator can reconstruct the trust posture from the audit row
+    // alone.
     if let Some(org_url) = wirken_gateway::org::load_org_url(&cfg.data_dir) {
+        let allow_unsigned = matches!(
+            std::env::var("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG").as_deref(),
+            Ok("1")
+        );
+        let pubkey_fingerprint = org_pubkey_fingerprint(&cfg.data_dir);
+        audit
+            .log(
+                AuditEvent::new(
+                    "gateway",
+                    "org-config.applying",
+                    cfg.data_dir.display().to_string(),
+                )
+                .with_detail(serde_json::json!({
+                    "org_url": org_url,
+                    "pubkey_fingerprint": pubkey_fingerprint,
+                    "allow_unsigned": allow_unsigned,
+                })),
+            )
+            .await?;
+
         match wirken_gateway::org::fetch_org_config(&org_url, &cfg.data_dir).await {
             Ok(org) => match wirken_gateway::org::apply_org_config(&cfg.data_dir, &org, true) {
-                Ok(applied) if !applied.is_empty() => {
-                    println!("  Org config refreshed: {}", applied.join(", "));
-                    org_config_applied = applied;
+                Ok(applied) => {
+                    if !applied.is_empty() {
+                        println!("  Org config refreshed: {}", applied.join(", "));
+                        if applied.iter().any(|s| s == "siem") {
+                            tracing::warn!(
+                                "Org config refresh landed a new siem.json; the in-process \
+                                 audit writer was constructed before this update and will \
+                                 only pick it up on the next `wirken run`."
+                            );
+                        }
+                    }
+                    audit
+                        .log(
+                            AuditEvent::new(
+                                "gateway",
+                                "org-config.applied",
+                                cfg.data_dir.display().to_string(),
+                            )
+                            .with_detail(serde_json::json!({
+                                "sections": applied,
+                            })),
+                        )
+                        .await?;
                 }
-                _ => {}
+                Err(failure) => {
+                    tracing::warn!(
+                        "Org config apply failed at section {}: {}",
+                        failure.section,
+                        failure.error
+                    );
+                    audit
+                        .log(
+                            AuditEvent::new(
+                                "gateway",
+                                "org-config.apply-failed",
+                                cfg.data_dir.display().to_string(),
+                            )
+                            .with_detail(serde_json::json!({
+                                "applied_before_failure": failure.applied,
+                                "failed_section": failure.section,
+                                "error": failure.error,
+                            })),
+                        )
+                        .await?;
+                }
             },
             Err(e) => {
                 tracing::warn!("Org config refresh failed: {e}");
+                audit
+                    .log(
+                        AuditEvent::new(
+                            "gateway",
+                            "org-config.apply-failed",
+                            cfg.data_dir.display().to_string(),
+                        )
+                        .with_detail(serde_json::json!({
+                            "applied_before_failure": Vec::<String>::new(),
+                            "failed_section": "fetch",
+                            "error": e,
+                        })),
+                    )
+                    .await?;
             }
         }
     }
@@ -134,31 +226,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     }
 
-    // --- Start audit writer (with optional SIEM forwarding) ---
-    let siem_config = load_siem_config(&cfg);
-    let (audit_writer, audit_handle) = AuditWriter::with_siem(&cfg.audit_db_path(), siem_config)
-        .context("Failed to start audit writer")?;
-    let audit = Arc::new(audit_writer);
-
-    audit
-        .log(AuditEvent::new("gateway", "gateway.start", "daemon"))
-        .await?;
-    if !org_config_applied.is_empty() {
-        audit
-            .log(
-                AuditEvent::new(
-                    "gateway",
-                    "org-config.applied",
-                    cfg.data_dir.display().to_string(),
-                )
-                .with_detail(serde_json::json!({
-                    "sections": org_config_applied,
-                })),
-            )
-            .await?;
-    }
-    println!("  Audit log: {}", cfg.audit_db_path().display());
-
     // --- Resolve the host-exec shell once at startup ---
     //
     // Mode-off and sandbox fallback both invoke `exec` against this
@@ -190,17 +257,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // That shell can read and rewrite every trust file under the data
     // directory: `tool_policy.json`, `sandbox.json`, `org.url`,
     // `org-config-pubkey.pub`, `audit.db`, `vault.db`,
-    // `agents/<id>/identity.key`. A change to any of those files
-    // takes effect at the next gateway start. This is the documented
-    // operator-controlled trust boundary, not a bug, but operators
-    // running with `exec=Off` should know which files are reachable.
+    // `agents/<id>/identity.key`, `audit-alarms.log`. A change to any
+    // of those files takes effect at the next gateway start. This is
+    // the documented operator-controlled trust boundary, not a bug,
+    // but operators running with `exec=Off` should know which files
+    // are reachable.
     if host_exec_sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
         tracing::warn!(
             data_dir = %cfg.data_dir.display(),
             "sandbox mode is Off — `exec` tool shells out at the wirken UID and can \
              read or rewrite trust files under the data dir: tool_policy.json, \
              sandbox.json, org.url, org-config-pubkey.pub, audit.db, vault.db, \
-             agents/<id>/identity.key. See README and docs/security-properties.md."
+             agents/<id>/identity.key, audit-alarms.log. See README and \
+             docs/security-properties.md."
         );
     }
 
@@ -1770,6 +1839,20 @@ mod inventory_tests {
 /// Sentinel tokens expire (typically 1 hour); refresh by rewriting
 /// this file from a sidecar before expiry. Wirken does not manage
 /// Azure AD token lifecycle.
+/// First 16 hex chars of the org-config trust anchor at
+/// `<data_dir>/org-config-pubkey.pub`. Returned as `None` when the
+/// file is absent (the operator opted into unsigned mode). Used as a
+/// short identifier in the `org-config.applying` audit row so a
+/// reviewer can correlate a refresh against which trust anchor was
+/// in effect at the time without having to read the whole file.
+fn org_pubkey_fingerprint(data_dir: &std::path::Path) -> Option<String> {
+    let path = data_dir.join(wirken_gateway::org::ORG_CONFIG_PUBKEY_FILE);
+    let body = std::fs::read_to_string(&path).ok()?;
+    let trimmed = body.trim();
+    let fp: String = trimmed.chars().take(16).collect();
+    if fp.is_empty() { None } else { Some(fp) }
+}
+
 fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemConfig> {
     let path = cfg.siem_config_path();
     if !path.exists() {
