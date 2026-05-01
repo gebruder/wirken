@@ -2,7 +2,7 @@ use crate::VaultError;
 use crate::secret::VaultSecret;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
 };
 use rand::Rng;
 use zeroize::Zeroizing;
@@ -13,7 +13,16 @@ const NONCE_SIZE: usize = 24;
 /// Encrypt a plaintext secret using XChaCha20-Poly1305.
 /// Returns nonce || ciphertext.
 /// The key must be a 64-char hex string (encoding 32 bytes).
-pub fn encrypt(plaintext: &VaultSecret, key: &VaultSecret) -> Result<Vec<u8>, VaultError> {
+///
+/// `name` is bound into the AEAD additional-authenticated-data field
+/// so a ciphertext can only be decrypted under the same name. Pasting
+/// a row's ciphertext under a different `name` (a "splice" attack)
+/// fails the AEAD tag check rather than silently re-keying the slot.
+pub fn encrypt(
+    name: &str,
+    plaintext: &VaultSecret,
+    key: &VaultSecret,
+) -> Result<Vec<u8>, VaultError> {
     let key_bytes = Zeroizing::new(
         hex_decode(key.expose())
             .map_err(|e| VaultError::Encryption(format!("invalid hex key: {e}")))?,
@@ -33,7 +42,13 @@ pub fn encrypt(plaintext: &VaultSecret, key: &VaultSecret) -> Result<Vec<u8>, Va
     let nonce = XNonce::from_slice(&nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.expose().as_bytes())
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext.expose().as_bytes(),
+                aad: name.as_bytes(),
+            },
+        )
         .map_err(|e| VaultError::Encryption(e.to_string()))?;
 
     // Prepend nonce to ciphertext
@@ -46,7 +61,10 @@ pub fn encrypt(plaintext: &VaultSecret, key: &VaultSecret) -> Result<Vec<u8>, Va
 /// Decrypt a nonce || ciphertext blob using XChaCha20-Poly1305.
 /// Returns the plaintext as a VaultSecret (zeroed on drop).
 /// The key must be a 64-char hex string (encoding 32 bytes).
-pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, VaultError> {
+///
+/// `name` must match the value passed to [`encrypt`] for the same
+/// row. A mismatch fails the AEAD tag check.
+pub fn decrypt(name: &str, encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, VaultError> {
     if encrypted.len() < NONCE_SIZE {
         return Err(VaultError::Decryption(
             "ciphertext too short to contain nonce".into(),
@@ -71,7 +89,13 @@ pub fn decrypt(encrypted: &[u8], key: &VaultSecret) -> Result<VaultSecret, Vault
     let ciphertext = &encrypted[NONCE_SIZE..];
 
     let plaintext_bytes = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(
+            nonce,
+            Payload {
+                msg: ciphertext,
+                aad: name.as_bytes(),
+            },
+        )
         .map_err(|e| VaultError::Decryption(e.to_string()))?;
 
     let plaintext =

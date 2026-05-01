@@ -233,30 +233,143 @@ pub async fn sign(dir: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn verify(dir: &str) -> Result<()> {
-    let skill_dir = std::path::Path::new(dir);
+/// Outcome of `wirken skills verify` after applying the strict-mode
+/// gate to a `VerifyResult`. The CLI maps `Fail` to `exit(1)`; tests
+/// exercise the matrix via this enum without spawning a process.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum VerifyOutcome {
+    Ok,
+    Fail,
+}
 
-    match skill_registry::verify_skill_self_signed(skill_dir)? {
+pub(crate) fn decide_verify_outcome(result: &VerifyResult, strict: bool) -> VerifyOutcome {
+    match result {
+        VerifyResult::Valid { .. } => {
+            // Self-signed only proves internal consistency. Without a
+            // registry-anchored expected key the signer is whoever
+            // generated the bundle, not necessarily a trusted
+            // publisher. Default mode warns; --strict refuses.
+            if strict {
+                VerifyOutcome::Fail
+            } else {
+                VerifyOutcome::Ok
+            }
+        }
+        VerifyResult::Invalid => VerifyOutcome::Fail,
+        VerifyResult::Unsigned => {
+            if strict {
+                VerifyOutcome::Fail
+            } else {
+                VerifyOutcome::Ok
+            }
+        }
+    }
+}
+
+pub async fn verify(dir: &str, strict: bool) -> Result<()> {
+    let skill_dir = std::path::Path::new(dir);
+    let result = skill_registry::verify_skill_self_signed(skill_dir)?;
+    let outcome = decide_verify_outcome(&result, strict);
+
+    match &result {
         VerifyResult::Valid { signer } => {
             println!("  Signature: SELF-SIGNED (bundle key matches bundle signature)");
             println!("  Signer: {signer}");
-            println!(
-                "  Note: this only checks the bundle is internally consistent. To check \
-                 the signer key matches a trusted publisher, use \
-                 `wirken skills install <name>` against the registry, which pins the \
-                 expected key from the registry index entry."
-            );
+            if outcome == VerifyOutcome::Fail {
+                println!(
+                    "  --strict: refusing self-signed bundle. Install via \
+                     `wirken skills install <name>` so the registry index pins \
+                     the expected signer key."
+                );
+            } else {
+                tracing::warn!(
+                    "verify: self-signed bundle at {} accepted; pass --strict to fail \
+                     on bundles without registry-anchored trust",
+                    skill_dir.display()
+                );
+                println!(
+                    "  Note: this only checks the bundle is internally consistent. To check \
+                     the signer key matches a trusted publisher, use \
+                     `wirken skills install <name>` against the registry, which pins the \
+                     expected key from the registry index entry, or re-run with --strict."
+                );
+            }
         }
         VerifyResult::Invalid => {
             println!("  Signature: INVALID");
             println!("  The skill content has been modified after signing.");
-            std::process::exit(1);
         }
         VerifyResult::Unsigned => {
             println!("  Not signed.");
+            if outcome == VerifyOutcome::Fail {
+                println!("  --strict: refusing unsigned bundle.");
+            } else {
+                tracing::warn!(
+                    "verify: unsigned bundle at {} accepted; pass --strict to fail \
+                     on bundles without a signature",
+                    skill_dir.display()
+                );
+            }
         }
     }
+
+    if outcome == VerifyOutcome::Fail {
+        std::process::exit(1);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod verify_outcome_tests {
+    use super::{VerifyOutcome, VerifyResult, decide_verify_outcome};
+
+    fn valid() -> VerifyResult {
+        VerifyResult::Valid {
+            signer: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn valid_non_strict_passes() {
+        assert_eq!(decide_verify_outcome(&valid(), false), VerifyOutcome::Ok);
+    }
+
+    #[test]
+    fn valid_strict_fails() {
+        assert_eq!(decide_verify_outcome(&valid(), true), VerifyOutcome::Fail);
+    }
+
+    #[test]
+    fn invalid_non_strict_fails() {
+        assert_eq!(
+            decide_verify_outcome(&VerifyResult::Invalid, false),
+            VerifyOutcome::Fail
+        );
+    }
+
+    #[test]
+    fn invalid_strict_fails() {
+        assert_eq!(
+            decide_verify_outcome(&VerifyResult::Invalid, true),
+            VerifyOutcome::Fail
+        );
+    }
+
+    #[test]
+    fn unsigned_non_strict_passes() {
+        assert_eq!(
+            decide_verify_outcome(&VerifyResult::Unsigned, false),
+            VerifyOutcome::Ok
+        );
+    }
+
+    #[test]
+    fn unsigned_strict_fails() {
+        assert_eq!(
+            decide_verify_outcome(&VerifyResult::Unsigned, true),
+            VerifyOutcome::Fail
+        );
+    }
 }
 
 async fn fetch_index() -> Result<SkillIndex> {

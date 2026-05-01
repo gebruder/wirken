@@ -10,11 +10,32 @@ Designed against the [OWASP Top 10 for Agentic AI](https://genai.owasp.org/resou
 | AG05 | Identity spoofing | Per-adapter Ed25519 challenge-response handshake over the local IPC transport (Unix domain sockets on Linux/macOS, Windows named pipes on Windows); signature covers `(domain || adapter_id || nonce)` so the signed payload binds the identity cryptographically, not only through the pubkey-registration lookup. After handshake the gateway resolves the adapter's channel from the registry and wraps it in `AuthenticatedChannel`; every inbound frame's self-declared channel is matched against that value, and cross-channel frames are rejected with an `adapter.channel_mismatch` audit event. Compile-time channel isolation: `SessionHandle<Telegram>` and `SessionHandle<Discord>` are different types; the compiler rejects cross-channel access. |
 | AG07 | Multi-agent manipulation | Each channel adapter runs as a separate OS process. If an adapter is compromised, the blast radius is one channel. IPC boundary prevents lateral movement. Child agents spawned via `spawn_subagent` run under capability-attenuated ceilings: tool allowlist intersection, clamped permission tier, max rounds, max runtime, headless (no interactive approvals). Hard depth cap of 4 prevents nesting cycles. |
 | AG08 | Runaway loops | Agent tool call loop capped at 20 rounds per turn. Child agents have a separate per-ceiling `max_rounds` budget. Shell exec timeout at 300s. Rate limiting on all sources including loopback, with no localhost exemption. |
-| AG09 | Insufficient logging | Every agent action logged as a typed session event to an append-only, per-session hash-chained SQLite table before execution. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the session log offline and re-checks hashes. 90-day retention with configurable pruning. Real-time SIEM forwarding to Datadog, Splunk HEC, Microsoft Sentinel (Logs Ingestion API), or webhook. Prompt injection detection flags inbound messages with threat indicators. Permission denials logged with full context: tool, tier, agent, trigger message. |
+| AG09 | Insufficient logging | Every agent action logged as a typed session event to an append-only, per-session hash-chained SQLite table before execution. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the session log offline and re-checks hashes. 90-day retention with configurable pruning. Real-time SIEM forwarding to Datadog, Splunk HEC, Microsoft Sentinel (Logs Ingestion API), or webhook. Prompt injection detection flags inbound messages with threat indicators. Permission denials logged with full context: tool, tier, agent, trigger message. **Out-of-chain alarm sink:** continuous chain verification writes integrity alarms to `<data_dir>/audit-alarms.log` (mode 0o600, append-only, one JSON record per line) **before** attempting an in-chain `audit.chain_broken` row. The alarm log is the load-bearing record because an attacker who tampered the SQLite chain can also tamper any follow-up row in the same chain; the alarm-log file is independent of `audit.db` and surviving alarms are surfaced by `wirken doctor`. |
 | | Credential security | XChaCha20-Poly1305 encryption at rest, keyed from OS keychain on Linux/macOS (macOS Keychain / libsecret) with an age-encrypted file fallback. Windows uses the age-file backend; native Credential Manager / DPAPI integration is on the roadmap. Per-credential expiry and rotation. `secrecy` + `zeroize` ensure that logging or serializing a secret is a compile error. Key material zeroed after use. |
 | | Transport security | HTTPS enforced at transport level for all LLM and Matrix connections (non-localhost). Cap'n Proto IPC with 16MB frame limit, 512M word traversal limit, 64-level nesting limit. |
 | | Supply chain | Skill signatures verified against registry-provided Ed25519 key, not a bundled key. Release binaries include SHA-256 checksums; installer verifies before installing. CI runs clippy with `-D warnings`, fmt check, and full test suite on every push. |
 | | Confidential inference | Tinfoil and Privatemode providers run open-source LLMs inside hardware TEEs (AMD SEV-SNP, Intel TDX, NVIDIA H100 CC). Prompts encrypted end-to-end, protected against software attacks on infrastructure. |
+
+## Documented escape hatches
+
+The defaults in the table above are deliberately strict. A handful of
+environment variables and config knobs let an operator opt out of a
+specific check. Each is opt-in (the default posture is the secure one),
+emits a `tracing::warn!` line every time it engages, and leaves the
+operator on the hook for whatever the relaxed posture loses.
+
+The "operational footprint" column lists what the operator has to
+arrange to flip the bit persistently. A one-shot env var on the
+command line is not durable across reboots, so the practical answers
+are a systemd `EnvironmentFile`, a shell `rc` export, or a wrapper
+script that invokes `wirken run`.
+
+| Knob | What it disables | Operational footprint |
+|------|------------------|------------------------|
+| `WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1` | Skips Ed25519 verification of the org-config bundle pulled from the policy URL. The bundle is then trusted purely on the basis of HTTPS + URL pinning. | systemd `EnvironmentFile`, `~/.bashrc` export, or wrapper script. The gateway logs a warn line on every fetch. |
+| `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` | Allows `wirken skills install` to land a registry skill that has no `signer_key` in the index entry, removing the registry-anchored trust pin. | Same options. The install path emits a warn and the resulting bundle stays unsigned on disk. |
+| `sandbox.json` set to `mode: off` | Runs the `exec` tool directly on the host at the wirken UID instead of inside a Docker / gVisor / Wasm sandbox. Without sandbox-level confinement the only remaining gate is the agent's permission tier. | Edit `<data_dir>/sandbox.json` once. Persists across restarts. Gateway warns at startup whenever it engages. |
+| `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1` | Removes the `Origin` header check on the webchat `/api/chat` endpoint. Same-host non-browser callers (curl, scripts) can drive the agent; same-UID becomes the sole trust boundary. | Same options as the unsigned-* variables. Gateway emits a warn at startup. |
 
 ## NIST AI Risk Management Framework mapping
 

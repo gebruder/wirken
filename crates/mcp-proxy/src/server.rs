@@ -31,7 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::Rng;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
@@ -232,7 +232,7 @@ where
     let signature = Signature::from_bytes(&sig_bytes);
     let signed = handshake_signed_payload(&response.agent_id, &nonce);
     verifying_key
-        .verify(&signed, &signature)
+        .verify_strict(&signed, &signature)
         .map_err(|_| ProxyError::Protocol("ed25519 signature verification failed".into()))?;
 
     Ok(response.agent_id)

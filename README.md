@@ -155,6 +155,15 @@ Agents can delegate bounded subtasks to child agents via `spawn_subagent`. The o
 - **Out-of-process credential isolation.** MCP credentials (bearer tokens, OAuth2 client secrets) live in a separate proxy process. The agent process never sees them. The vault is XChaCha20-Poly1305, keyed from the OS keychain; `secrecy` + `zeroize` make logging a secret a compile error.
 - **Capability-attenuated multi-agent.** The LLM cannot widen a child agent's permissions. The operator sets the ceiling; the harness intersects, clamps, and enforces. Children run headless with no interactive approvals.
 
+A handful of operator-controlled escape hatches relax specific
+defaults: `WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1`,
+`WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, `sandbox.json` mode `off`, and
+`WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1`. Each emits a `tracing::warn!`
+whenever it engages and is documented under "Documented escape
+hatches" in the security-properties doc. Persistent flips need a
+systemd `EnvironmentFile`, shell `rc` export, or wrapper script so the
+operator's intent is durable across reboots.
+
 Full OWASP and NIST AI RMF mappings: [docs/security-properties.md](docs/security-properties.md)
 
 ## Enterprise deployment

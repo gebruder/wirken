@@ -235,7 +235,7 @@ pub fn verify_session_attestations<L: SessionLog + ?Sized>(
         sig_arr.copy_from_slice(&sig_bytes);
         let sig = Signature::from_bytes(&sig_arr);
 
-        if let Err(e) = ed25519_dalek::Verifier::verify(verifying_key, &signed_msg, &sig) {
+        if let Err(e) = verifying_key.verify_strict(&signed_msg, &sig) {
             return Ok(AttestationVerifyResult::Broken {
                 attestation_seq: row.seq,
                 attestations_verified_before: attestations_verified,

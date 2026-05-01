@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -139,7 +139,7 @@ pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, Gatewa
     let verifying_key = VerifyingKey::from_bytes(&key_arr)
         .map_err(|e| GatewayError::Config(format!("invalid pub key: {e}")))?;
 
-    match verifying_key.verify(&hash, &signature) {
+    match verifying_key.verify_strict(&hash, &signature) {
         Ok(()) => Ok(VerifyResult::Valid {
             signer: key_hex.trim().to_string(),
         }),
@@ -196,7 +196,7 @@ pub fn verify_skill_with_expected_key(
     let verifying_key = VerifyingKey::from_bytes(&key_arr)
         .map_err(|e| GatewayError::Config(format!("invalid pub key: {e}")))?;
 
-    match verifying_key.verify(&hash, &signature) {
+    match verifying_key.verify_strict(&hash, &signature) {
         Ok(()) => Ok(VerifyResult::Valid {
             signer: expected_key_hex.trim().to_string(),
         }),
@@ -320,6 +320,37 @@ mod tests {
         let key2 = random_signing_key();
         let pub_hex = hex_encode(&key2.verifying_key().to_bytes());
         std::fs::write(skill_dir.join("SKILL.pub"), &pub_hex).unwrap();
+
+        match verify_skill_self_signed(&skill_dir).unwrap() {
+            VerifyResult::Invalid => {}
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_canonical_s_signature_rejected() {
+        // Regression: the verifier path uses `verify_strict`, which
+        // rejects signatures whose `s` scalar is outside the canonical
+        // range [0, L). The skill verifier must surface this as
+        // `Invalid`, not bubble up a panic or accept it. Take a real
+        // signature, force the high byte of `s` to 0xff so the scalar
+        // is far above L, and assert rejection.
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("malleable");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "body").unwrap();
+
+        let signing_key = random_signing_key();
+        sign_skill(&skill_dir, &signing_key).unwrap();
+
+        let sig_path = skill_dir.join("SKILL.sig");
+        let sig_hex = std::fs::read_to_string(&sig_path).unwrap();
+        let mut sig_bytes = hex_decode(sig_hex.trim()).unwrap();
+        // s lives in the upper 32 bytes of the 64-byte signature in
+        // little-endian. The top byte at index 63 forced to 0xff
+        // pushes s above L unambiguously.
+        sig_bytes[63] = 0xff;
+        std::fs::write(&sig_path, hex_encode(&sig_bytes)).unwrap();
 
         match verify_skill_self_signed(&skill_dir).unwrap() {
             VerifyResult::Invalid => {}

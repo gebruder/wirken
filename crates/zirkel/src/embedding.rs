@@ -53,6 +53,11 @@ pub enum EmbeddingError {
     Decode(#[from] serde_json::Error),
     #[error("embed response shape mismatch: expected {expected} embeddings, got {actual}")]
     ShapeMismatch { expected: usize, actual: usize },
+    #[error(
+        "embed response from {url} exceeded {limit}-byte cap; aborting decode to avoid \
+         unbounded allocation"
+    )]
+    BodyTooLarge { url: String, limit: u64 },
 }
 
 #[derive(Debug, Serialize)]
@@ -119,10 +124,28 @@ pub async fn embed_batch(
             status: status.as_u16(),
         });
     }
-    let parsed: EmbedResponse = resp.json().await.map_err(|e| EmbeddingError::Network {
-        url: url.clone(),
-        source: e,
-    })?;
+    // Cap the response body. A misbehaving or compromised Ollama
+    // peer could otherwise feed arbitrary bytes into `serde_json`,
+    // expanding to whatever the deserializer chooses to allocate. The
+    // cap matches the global fetch ceiling; a real embedding response
+    // for hundreds of inputs is well under it.
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    use futures_util::StreamExt as _;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| EmbeddingError::Network {
+            url: url.clone(),
+            source: e,
+        })?;
+        if (buf.len() as u64) + (chunk.len() as u64) > crate::fetcher::MAX_FETCH_BYTES {
+            return Err(EmbeddingError::BodyTooLarge {
+                url,
+                limit: crate::fetcher::MAX_FETCH_BYTES,
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    let parsed: EmbedResponse = serde_json::from_slice(&buf)?;
     if parsed.embeddings.len() != texts.len() {
         return Err(EmbeddingError::ShapeMismatch {
             expected: texts.len(),
@@ -234,5 +257,55 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, EmbeddingError::Denied { .. }));
+    }
+
+    /// Serves a chunked HTTP response of zero bytes that streams past
+    /// `MAX_FETCH_BYTES` so the cap engages before the deserializer
+    /// sees the body.
+    async fn one_shot_oversized_chunked() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let header = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+                let _ = sock.write_all(header.as_bytes()).await;
+                // 1 MiB of `a` per chunk; emit until we cross the cap.
+                let chunk_data = vec![b'a'; 1024 * 1024];
+                let chunk_size_hex = format!("{:x}\r\n", chunk_data.len());
+                let needed_chunks = (crate::fetcher::MAX_FETCH_BYTES / chunk_data.len() as u64) + 2;
+                for _ in 0..needed_chunks {
+                    if sock.write_all(chunk_size_hex.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if sock.write_all(&chunk_data).await.is_err() {
+                        return;
+                    }
+                    if sock.write_all(b"\r\n").await.is_err() {
+                        return;
+                    }
+                }
+                let _ = sock.write_all(b"0\r\n\r\n").await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn body_over_cap_is_rejected_before_decode() {
+        let base = one_shot_oversized_chunked().await;
+        let c = allowlist_localhost();
+        let err = embed_one(&c, &base, DEFAULT_EMBEDDING_MODEL, "x")
+            .await
+            .unwrap_err();
+        match err {
+            EmbeddingError::BodyTooLarge { limit, .. } => {
+                assert_eq!(limit, crate::fetcher::MAX_FETCH_BYTES);
+            }
+            other => panic!("expected BodyTooLarge, got {other:?}"),
+        }
     }
 }

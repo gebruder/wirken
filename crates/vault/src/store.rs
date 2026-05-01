@@ -67,6 +67,8 @@ impl CredentialStore {
         };
 
         precreate_owner_only(db_path)?;
+        precreate_owner_only(&with_suffix(db_path, "-wal"))?;
+        precreate_owner_only(&with_suffix(db_path, "-shm"))?;
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -89,6 +91,8 @@ impl CredentialStore {
     /// Used in tests and for FD-based credential passing.
     pub fn open_with_key(db_path: &Path, device_key: VaultSecret) -> Result<Self, VaultError> {
         precreate_owner_only(db_path)?;
+        precreate_owner_only(&with_suffix(db_path, "-wal"))?;
+        precreate_owner_only(&with_suffix(db_path, "-shm"))?;
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -116,7 +120,7 @@ impl CredentialStore {
         expires_at: Option<DateTime<Utc>>,
         rotation_due_at: Option<DateTime<Utc>>,
     ) -> Result<(), VaultError> {
-        let encrypted = encrypt(secret, &self.device_key)?;
+        let encrypted = encrypt(name, secret, &self.device_key)?;
         let now = Utc::now().to_rfc3339();
 
         self.conn.execute(
@@ -193,7 +197,7 @@ impl CredentialStore {
             params![now, name],
         )?;
 
-        let secret = decrypt(&encrypted, &self.device_key)?;
+        let secret = decrypt(name, &encrypted, &self.device_key)?;
         Ok((secret, meta))
     }
 
@@ -283,7 +287,7 @@ impl CredentialStore {
             .query_row(params![name], |row| row.get(0))
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
 
-        let encrypted = encrypt(new_secret, &self.device_key)?;
+        let encrypted = encrypt(name, new_secret, &self.device_key)?;
         let now = Utc::now().to_rfc3339();
 
         self.conn.execute(
@@ -337,6 +341,13 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {
                 e.to_string(),
             )))
         })
+}
+
+/// Build a sibling path by appending `suffix` to `path`'s file name.
+fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
 }
 
 /// Pre-create the SQLite file with mode 0o600 on unix so SQLite's

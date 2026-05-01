@@ -42,7 +42,7 @@
 //! ```
 
 use base64::Engine;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -101,7 +101,7 @@ fn verify_org_config_signature(
     sig_arr.copy_from_slice(&sig_bytes);
     let sig = Signature::from_bytes(&sig_arr);
     pubkey
-        .verify(body, &sig)
+        .verify_strict(body, &sig)
         .map_err(|e| format!("signature verification failed: {e}"))
 }
 
@@ -115,7 +115,11 @@ fn unsigned_allowed() -> bool {
 /// Write `contents` to `path` with mode 0o600 on unix. On non-unix
 /// platforms falls back to `std::fs::write` and emits a tracing warning
 /// noting that owner-only file permissions could not be enforced.
-fn write_with_secret_perms(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+///
+/// Public so `wirken-cli`'s setup flow lands the same posture as the
+/// org-config refresh path; both write the same set of trust files
+/// under the data directory and should not differ in mode.
+pub fn write_with_secret_perms(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -251,9 +255,13 @@ pub async fn fetch_org_config(url: &str, data_dir: &Path) -> Result<OrgConfig, S
     serde_json::from_slice::<OrgConfig>(&body).map_err(|e| format!("parse org config: {e}"))
 }
 
-/// Save the org endpoint URL for periodic refresh.
+/// Save the org endpoint URL for periodic refresh. The file ends up at
+/// `<data_dir>/org.url` with mode 0o600 on unix; the URL itself is not
+/// secret but the `exec=Off` audit (`docs/security-properties.md`)
+/// names it as one of the trust files an unsandboxed shell can rewrite,
+/// so it follows the same posture as the other org-config files.
 pub fn save_org_url(data_dir: &Path, url: &str) -> std::io::Result<()> {
-    std::fs::write(data_dir.join("org.url"), url)
+    write_with_secret_perms(&data_dir.join("org.url"), url.as_bytes())
 }
 
 /// Load the saved org endpoint URL.
@@ -457,6 +465,32 @@ mod tests {
     }
 
     #[test]
+    fn apply_org_config_returns_all_applied_section_names() {
+        // The CLI's `run` command emits an `org-config.applied` audit
+        // event with this Vec as a structured field. Lock in the names
+        // so a reviewer scanning the audit log sees a known vocabulary.
+        let tmp = TempDir::new().unwrap();
+        let org = OrgConfig {
+            provider: Some(serde_json::json!({"provider": "ollama", "model": "x"})),
+            siem: Some(serde_json::json!({"target": "datadog"})),
+            mcp: Some(serde_json::json!({"servers": {}})),
+            permissions: Some(OrgPermissions {
+                sandbox_mode: Some("gvisor".into()),
+                allowed_tools: vec!["read_file".into()],
+                blocked_tools: vec![],
+            }),
+            ..Default::default()
+        };
+        let applied = apply_org_config(tmp.path(), &org, true).unwrap();
+        for name in ["provider", "siem", "mcp", "sandbox", "tool_policy"] {
+            assert!(
+                applied.contains(&name.to_string()),
+                "expected {name} in {applied:?}"
+            );
+        }
+    }
+
+    #[test]
     fn load_tool_policy_returns_none_for_missing_file() {
         let tmp = TempDir::new().unwrap();
         assert!(load_tool_policy(tmp.path()).is_none());
@@ -567,6 +601,24 @@ mod tests {
         std::fs::write(tmp.path().join(ORG_CONFIG_PUBKEY_FILE), "deadbeef").unwrap();
         let err = load_org_pubkey(tmp.path()).unwrap_err();
         assert!(err.contains("expected 64 hex chars"), "got {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_with_secret_perms_lands_0o600_for_setup_files() {
+        // The CLI setup flow writes provider.json, sandbox.json, and
+        // updates provider.json with channel_overrides via this same
+        // helper. Exercise the helper directly on those filenames so
+        // the perms property is locked in regardless of the
+        // interactive caller.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        for name in ["provider.json", "sandbox.json", "channel_overrides.json"] {
+            let path = tmp.path().join(name);
+            write_with_secret_perms(&path, b"{}").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{name}: expected 0o600, got 0o{mode:o}");
+        }
     }
 
     #[cfg(unix)]

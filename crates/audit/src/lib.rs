@@ -1,3 +1,4 @@
+pub mod alarm_log;
 mod error;
 mod event;
 mod legacy_compat;
@@ -6,6 +7,7 @@ mod session_log;
 pub mod siem;
 mod writer;
 
+pub use alarm_log::{AlarmLog, AlarmRecord};
 pub use error::AuditError;
 pub use event::{AuditEvent, StoredEvent};
 pub use log::{AuditLog, AuditQuery, VerifyResult};

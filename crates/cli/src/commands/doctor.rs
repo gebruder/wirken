@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use super::config;
-use wirken_audit::{AuditLog, VerifyResult};
+use wirken_audit::{AlarmLog, AuditLog, VerifyResult};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 
 pub async fn run() -> Result<()> {
@@ -126,6 +126,11 @@ pub async fn run() -> Result<()> {
                                 "    {sessions_checked} sessions, \
                                  {attestations_verified} attestation signatures verified."
                             );
+                            println!(
+                                "    Note: this verifies internal consistency only. The signer key \
+                                 carried on each attestation is the agent's own identity key; an \
+                                 operator-pinned trust anchor is not yet wired up."
+                            );
                         }
                         Ok(other) => {
                             print_fail(&format!("  {other:?}"));
@@ -150,6 +155,40 @@ pub async fn run() -> Result<()> {
     } else {
         print_ok();
         println!("    Not created yet (starts on first event).");
+    }
+
+    // Out-of-chain alarm log. Surfaces continuous-verify integrity
+    // alarms even when the in-chain audit row was tampered along
+    // with the rest of the chain.
+    let alarm_log = AlarmLog::new(&cfg.data_dir);
+    print_check("Audit alarm log", &alarm_log.path().display().to_string());
+    match alarm_log.read_all() {
+        Ok(records) if records.is_empty() => {
+            print_ok();
+            println!("    No alarms.");
+        }
+        Ok(records) => {
+            print_fail(&format!("  {} integrity alarm(s) on file", records.len()));
+            for r in records.iter().take(5) {
+                println!(
+                    "    [{}] {} session={} seq={} expected={} actual={}",
+                    r.timestamp,
+                    r.alarm_type,
+                    r.session_id.as_deref().unwrap_or("-"),
+                    r.seq.map(|s| s.to_string()).unwrap_or_else(|| "-".into()),
+                    r.expected_hash.as_deref().unwrap_or("-"),
+                    r.actual_hash.as_deref().unwrap_or("-"),
+                );
+            }
+            if records.len() > 5 {
+                println!("    ... and {} more", records.len() - 5);
+            }
+            issues += 1;
+        }
+        Err(e) => {
+            print_fail(&format!("  {e}"));
+            issues += 1;
+        }
     }
 
     // Check sandbox runtimes
