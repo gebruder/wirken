@@ -57,14 +57,11 @@ jobs:
               strip target/${{ matrix.target }}/release/wirken || true
           fi
 
-      - name: Rename binary
-        run: mv target/${{ matrix.target }}/release/wirken wirken-${{ matrix.target }}
-
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wirken-${{ matrix.target }}
-          path: wirken-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/wirken
 
   build-macos:
     name: Build macOS (${{ matrix.target }})
@@ -102,14 +99,11 @@ jobs:
       - name: Strip binary
         run: strip target/${{ matrix.target }}/release/wirken
 
-      - name: Rename binary
-        run: mv target/${{ matrix.target }}/release/wirken wirken-${{ matrix.target }}
-
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wirken-${{ matrix.target }}
-          path: wirken-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/wirken
 
   build-windows:
     name: Build Windows (x86_64-pc-windows-msvc)
@@ -139,18 +133,11 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target x86_64-pc-windows-msvc -p wirken-cli
 
-      - name: Rename binary
-        run: |
-          Move-Item `
-            target\x86_64-pc-windows-msvc\release\wirken.exe `
-            wirken-x86_64-pc-windows-msvc.exe
-        shell: pwsh
-
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wirken-x86_64-pc-windows-msvc
-          path: wirken-x86_64-pc-windows-msvc.exe
+          path: target/x86_64-pc-windows-msvc/release/wirken.exe
 
   release:
     name: Create Release
@@ -173,9 +160,23 @@ jobs:
 
       - name: Collect binaries and generate checksums
         run: |
+          # Each artifact zip contains the cargo-output binary name
+          # (`wirken` on Unix, `wirken.exe` on Windows). Stage them
+          # into release/ under the verbose-suffix name install.sh
+          # expects (`wirken-${TARGET}` on Unix,
+          # `wirken-x86_64-pc-windows-msvc.exe` on Windows). The
+          # artifact zips themselves keep clean inner filenames so a
+          # user who downloads one directly gets `wirken[.exe]`
+          # without needing to rename.
           mkdir -p release
           for dir in artifacts/wirken-*/; do
-            cp "$dir"wirken-* release/
+            triple="${dir#artifacts/wirken-}"
+            triple="${triple%/}"
+            if [ -f "${dir}wirken.exe" ]; then
+              cp "${dir}wirken.exe" "release/wirken-${triple}.exe"
+            else
+              cp "${dir}wirken" "release/wirken-${triple}"
+            fi
           done
           cd release
           sha256sum wirken-* > checksums.sha256
