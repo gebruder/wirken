@@ -25,11 +25,15 @@ For research work where reproducibility and auditability matter more than contai
 
 Download the latest release binary from [github.com/gebruder/wirken/releases](https://github.com/gebruder/wirken/releases):
 
-- `wirken-x86_64-pc-windows-msvc.exe`
+- `wirken-x86_64-pc-windows-msvc.zip`
 
-Place it on your `PATH` (e.g. in `%USERPROFILE%\bin\`) and rename to `wirken.exe`.
+1. Unzip. The zip contains `wirken.exe` directly.
+2. Open a terminal in the folder containing `wirken.exe`.
+3. Run `.\wirken.exe setup` to configure, then `.\wirken.exe run` to start the gateway.
 
 The binary is unsigned. On first run, Windows SmartScreen will warn that the publisher is unverified; click "More info" then "Run anyway". This is expected. Code signing is on the roadmap.
+
+Optional: place `wirken.exe` somewhere on your `PATH` (e.g. `%USERPROFILE%\bin\`) so subsequent commands can use plain `wirken setup` / `wirken run`.
 
 To build from source:
 
