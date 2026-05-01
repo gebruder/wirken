@@ -100,6 +100,59 @@ pub async fn log(
     }
 }
 
+pub async fn verify_attestations() -> Result<()> {
+    let cfg = config();
+    let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;
+    let session_log = audit.session_log();
+    let session_ids = audit.list_session_ids()?;
+    let result =
+        wirken_agent::attestation::verify_recent_attestations(session_log.as_ref(), &session_ids)
+            .map_err(|e| anyhow::anyhow!("attestation verification: {e}"))?;
+    use wirken_agent::attestation::RecentAttestationResult;
+    match result {
+        RecentAttestationResult::Ok {
+            sessions_checked,
+            attestations_verified,
+        } => {
+            println!("  Attestation verification: OK");
+            println!(
+                "  {sessions_checked} sessions with attestations checked, \
+                 {attestations_verified} signatures verified."
+            );
+            println!(
+                "  Note: this verifies internal consistency only. The signer key \
+                 carried on each attestation is the agent's own identity key; an \
+                 operator-pinned trust anchor is not yet wired up."
+            );
+        }
+        RecentAttestationResult::ChainBroken {
+            session_id,
+            seq,
+            reason,
+        } => {
+            println!("  Attestation verification: SESSION CHAIN BROKEN");
+            println!("  Session: {session_id}");
+            println!("  Seq: {seq}");
+            println!("  Reason: {reason}");
+            std::process::exit(1);
+        }
+        RecentAttestationResult::Broken {
+            session_id,
+            attestation_seq,
+            attestations_verified_before,
+            reason,
+        } => {
+            println!("  Attestation verification: BROKEN");
+            println!("  Session: {session_id}");
+            println!("  Attestation seq: {attestation_seq}");
+            println!("  Verified before break: {attestations_verified_before}");
+            println!("  Reason: {reason}");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
 pub async fn verify(format: &str) -> Result<()> {
     let cfg = config();
     let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;

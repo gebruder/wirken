@@ -106,6 +106,47 @@ pub async fn run() -> Result<()> {
                 issues += 1;
             }
         }
+
+        // Attestation chain check across all sessions.
+        print_check("Attestation chain", "all sessions");
+        match AuditLog::open(&cfg.audit_db_path()) {
+            Ok(log) => match log.list_session_ids() {
+                Ok(ids) => {
+                    let session_log = log.session_log();
+                    match wirken_agent::attestation::verify_recent_attestations(
+                        session_log.as_ref(),
+                        &ids,
+                    ) {
+                        Ok(wirken_agent::attestation::RecentAttestationResult::Ok {
+                            sessions_checked,
+                            attestations_verified,
+                        }) => {
+                            print_ok();
+                            println!(
+                                "    {sessions_checked} sessions, \
+                                 {attestations_verified} attestation signatures verified."
+                            );
+                        }
+                        Ok(other) => {
+                            print_fail(&format!("  {other:?}"));
+                            issues += 1;
+                        }
+                        Err(e) => {
+                            print_fail(&format!("  {e}"));
+                            issues += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    print_fail(&format!("  list session ids: {e}"));
+                    issues += 1;
+                }
+            },
+            Err(e) => {
+                print_fail(&format!("  {e}"));
+                issues += 1;
+            }
+        }
     } else {
         print_ok();
         println!("    Not created yet (starts on first event).");

@@ -283,3 +283,113 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
 fn map_audit_err(e: AuditError) -> AgentError {
     AgentError::Identity(format!("session log: {e}"))
 }
+
+/// Walk every session in `session_log` and verify each session's
+/// embedded attestations against the `signer_pubkey` carried on the
+/// attestation event itself.
+///
+/// **Trust model:** this verifies internal consistency — that each
+/// attestation's signature was produced by the key claimed on the
+/// event, and that the chain_head_hash matches the row at
+/// chain_head_seq. It does *not* anchor to an out-of-band trust
+/// source. An attacker who rotates the agent's identity key on disk
+/// and re-signs the entire transcript end-to-end will pass this
+/// check. Operator-pinned signer keys are required for stronger
+/// guarantees; that work is a separate item.
+///
+/// Returns the aggregate result. The first session whose attestations
+/// fail to verify produces a `Broken` result and the walk stops there.
+pub fn verify_recent_attestations(
+    session_log: &dyn SessionLog,
+    session_ids: &[String],
+) -> Result<RecentAttestationResult, AgentError> {
+    let mut sessions_checked: usize = 0;
+    let mut attestations_verified: usize = 0;
+    for sid in session_ids {
+        let handle = session_log.handle_for(wirken_audit::SessionId::new(sid.clone()));
+        let pubkey = match find_session_pubkey(session_log, &handle)? {
+            Some(k) => k,
+            None => {
+                // No attestation in this session — nothing to verify.
+                continue;
+            }
+        };
+        sessions_checked += 1;
+        match verify_session_attestations(session_log, &handle, &pubkey)? {
+            AttestationVerifyResult::Ok {
+                attestations_verified: n,
+                ..
+            } => {
+                attestations_verified += n;
+            }
+            AttestationVerifyResult::ChainBroken { seq, reason } => {
+                return Ok(RecentAttestationResult::ChainBroken {
+                    session_id: sid.clone(),
+                    seq,
+                    reason,
+                });
+            }
+            AttestationVerifyResult::Broken {
+                attestation_seq,
+                attestations_verified_before,
+                reason,
+            } => {
+                return Ok(RecentAttestationResult::Broken {
+                    session_id: sid.clone(),
+                    attestation_seq,
+                    attestations_verified_before,
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(RecentAttestationResult::Ok {
+        sessions_checked,
+        attestations_verified,
+    })
+}
+
+/// Aggregate result of [`verify_recent_attestations`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecentAttestationResult {
+    Ok {
+        sessions_checked: usize,
+        attestations_verified: usize,
+    },
+    ChainBroken {
+        session_id: String,
+        seq: u64,
+        reason: String,
+    },
+    Broken {
+        session_id: String,
+        attestation_seq: u64,
+        attestations_verified_before: usize,
+        reason: String,
+    },
+}
+
+fn find_session_pubkey(
+    log: &dyn SessionLog,
+    session: &SessionHandle<OwnSession>,
+) -> Result<Option<VerifyingKey>, AgentError> {
+    let rows = log.get_since(session, 0).map_err(map_audit_err)?;
+    for row in rows.iter().rev() {
+        if let SessionEvent::Attestation { signer_pubkey, .. } = &row.event {
+            let bytes = decode_hex(&signer_pubkey.0)
+                .map_err(|e| AgentError::Identity(format!("attestation pubkey hex: {e}")))?;
+            if bytes.len() != 32 {
+                return Err(AgentError::Identity(format!(
+                    "attestation pubkey length {} != 32",
+                    bytes.len()
+                )));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            let key = VerifyingKey::from_bytes(&arr)
+                .map_err(|e| AgentError::Identity(format!("invalid attestation pubkey: {e}")))?;
+            return Ok(Some(key));
+        }
+    }
+    Ok(None)
+}

@@ -5,7 +5,7 @@ use tokio::time::{Duration, interval};
 
 use crate::error::AuditError;
 use crate::event::AuditEvent;
-use crate::log::AuditLog;
+use crate::log::{AuditLog, VerifyResult};
 use crate::siem::{SiemConfig, SiemForwarder};
 
 /// Batched audit writer that accepts events via a channel and flushes
@@ -27,6 +27,73 @@ const CHANNEL_CAPACITY: usize = 4096;
 // audit events are silently lost.
 const MAX_CONSECUTIVE_FAILURES: u32 = 8;
 const MAX_BUFFER_ON_FAILURE: usize = BATCH_SIZE * 16;
+
+/// Number of successful flushes between continuous chain-verification
+/// passes. The flush loop calls `AuditLog::verify` every Nth flush so a
+/// chain break detected by a process other than the operator's CLI
+/// shows up at most this many flushes after it occurred. Configurable
+/// via `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`.
+const DEFAULT_VERIFY_EVERY_FLUSHES: u64 = 100;
+
+fn verify_every_flushes() -> u64 {
+    std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_VERIFY_EVERY_FLUSHES)
+}
+
+/// Run a chain-verification pass and emit a structured audit event when
+/// the chain is broken. Returns true if the chain is intact (or empty),
+/// false if a break was detected.
+async fn run_verify_pass(log: &AuditLog) -> bool {
+    match log.verify() {
+        Ok(VerifyResult::Ok { rows_verified }) => {
+            tracing::debug!(
+                rows_verified,
+                "audit chain verification: ok (continuous pass)"
+            );
+            true
+        }
+        Ok(VerifyResult::Empty) => true,
+        Ok(VerifyResult::Broken {
+            session_id,
+            seq,
+            expected_hash,
+            actual_hash,
+            verified_count,
+        }) => {
+            tracing::error!(
+                session = %session_id,
+                seq,
+                verified_count,
+                expected_hash = %expected_hash,
+                actual_hash = %actual_hash,
+                "audit chain BROKEN — continuous verification detected tampering"
+            );
+            let event = AuditEvent::new("audit", "audit.chain_broken", "audit.db").with_detail(
+                serde_json::json!({
+                    "session": session_id.as_str(),
+                    "seq": seq,
+                    "expected_hash": expected_hash,
+                    "actual_hash": actual_hash,
+                    "verified_count": verified_count,
+                }),
+            );
+            // Single-event batch so the failure is itself audit-witnessed.
+            // Best-effort: if this write also fails, the tracing::error
+            // above is the surviving evidence.
+            if let Err(e) = log.write_batch(&[event]) {
+                tracing::error!("audit chain_broken event write failed: {e}");
+            }
+            false
+        }
+        Err(e) => {
+            tracing::error!("audit chain verification errored: {e}");
+            false
+        }
+    }
+}
 
 impl AuditWriter {
     /// Create a new audit writer that flushes to the given database path.
@@ -103,6 +170,8 @@ async fn flush_loop(
     let mut buffer: Vec<AuditEvent> = Vec::with_capacity(BATCH_SIZE);
     let mut tick = interval(FLUSH_INTERVAL);
     let mut consecutive_failures: u32 = 0;
+    let verify_cadence = verify_every_flushes();
+    let mut flushes_since_verify: u64 = 0;
 
     loop {
         tokio::select! {
@@ -113,6 +182,11 @@ async fn flush_loop(
                         .await
                 {
                     break;
+                }
+                flushes_since_verify = flushes_since_verify.saturating_add(1);
+                if flushes_since_verify >= verify_cadence {
+                    run_verify_pass(&log).await;
+                    flushes_since_verify = 0;
                 }
             }
             // New event received
@@ -219,6 +293,55 @@ mod tests {
         assert!(
             buffer.is_empty(),
             "buffer must clear after a successful flush"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_verify_pass_emits_chain_broken_event_on_corruption() {
+        // Write some events, drop the log, corrupt one row's payload,
+        // reopen, run a verify pass. The pass should detect the break
+        // and append an `audit.chain_broken` event to the log.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new("actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        // Tamper with row 3's payload directly — same shape as the
+        // existing audit/src/tests.rs `tampered_row_data_detected` test.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let new_payload = serde_json::to_string(&serde_json::json!({
+                "kind": "audit_legacy",
+                "actor": "actor",
+                "action": "HACKED",
+                "target": "t",
+                "channel": "",
+                "detail": null,
+            }))
+            .unwrap();
+            conn.execute(
+                "UPDATE session_events SET payload = ?1 WHERE id = 3",
+                rusqlite::params![new_payload],
+            )
+            .unwrap();
+        }
+        let log = AuditLog::open(&db_path).unwrap();
+        let intact = run_verify_pass(&log).await;
+        assert!(!intact, "expected break to be detected");
+
+        let events = log
+            .query(&AuditQuery {
+                action: Some("audit.chain_broken".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            !events.is_empty(),
+            "expected audit.chain_broken event to be appended"
         );
     }
 

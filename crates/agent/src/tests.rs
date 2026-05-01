@@ -371,6 +371,12 @@ fn skill_prompt_generation() {
     assert!(!prompt.contains("unavailable"));
     assert!(!prompt.contains("Should not appear"));
     assert!(!prompt.contains("explicit-only"));
+    // Provenance envelope: every auto-included skill body is wrapped
+    // in BEGIN/END UNTRUSTED SKILL delimiters and a top-level preamble
+    // tells the model the content is third-party.
+    assert!(prompt.contains("BEGIN UNTRUSTED SKILL: weather"));
+    assert!(prompt.contains("END UNTRUSTED SKILL: weather"));
+    assert!(prompt.contains("third-party"));
 }
 
 // ---------------------------------------------------------------------------

@@ -56,8 +56,5 @@ pub async fn fetch_with_api_key(
             status: status.as_u16(),
         });
     }
-    resp.text().await.map_err(|e| FetchError::Network {
-        url: url.to_string(),
-        source: e,
-    })
+    crate::fetcher::read_capped_text(url, resp).await
 }

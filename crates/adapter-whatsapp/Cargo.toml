@@ -19,6 +19,7 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 sha2 = { workspace = true }
 hmac = "0.12"
+subtle = "2.6"
 
 [dev-dependencies]
 tempfile = { workspace = true }

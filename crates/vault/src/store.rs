@@ -66,6 +66,7 @@ impl CredentialStore {
             }
         };
 
+        precreate_owner_only(db_path)?;
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -87,6 +88,7 @@ impl CredentialStore {
     /// Open a credential store with a directly provided device key.
     /// Used in tests and for FD-based credential passing.
     pub fn open_with_key(db_path: &Path, device_key: VaultSecret) -> Result<Self, VaultError> {
+        precreate_owner_only(db_path)?;
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -335,4 +337,44 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {
                 e.to_string(),
             )))
         })
+}
+
+/// Pre-create the SQLite file with mode 0o600 on unix so SQLite's
+/// own `Connection::open` does not land a default-umask 0o644 file.
+/// No-op when the path already exists; emits a warning on non-unix
+/// where the chmod equivalent is unavailable.
+fn precreate_owner_only(path: &Path) -> Result<(), VaultError> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| VaultError::Keychain(format!("create parent: {e}")))?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| VaultError::Keychain(format!("create {}: {e}", path.display())))?;
+    }
+    #[cfg(not(unix))]
+    {
+        tracing::warn!(
+            "creating vault database at {} without 0o600-equivalent file permissions; \
+             relying on user profile isolation for confidentiality",
+            path.display()
+        );
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| VaultError::Keychain(format!("create {}: {e}", path.display())))?;
+    }
+    Ok(())
 }

@@ -107,8 +107,23 @@ pub async fn install(name: &str) -> Result<()> {
             }
             VerifyResult::Unsigned => {}
         }
+    } else if matches!(
+        std::env::var("WIRKEN_ALLOW_UNSIGNED_SKILLS").as_deref(),
+        Ok("1")
+    ) {
+        tracing::warn!(
+            "WIRKEN_ALLOW_UNSIGNED_SKILLS=1: installing '{}' without a registry-anchored \
+             signer key; the bundle's provenance is unverified",
+            entry.name
+        );
+        println!("  Warning: skill is unsigned (WIRKEN_ALLOW_UNSIGNED_SKILLS=1).");
     } else {
-        println!("  Warning: skill is unsigned.");
+        std::fs::remove_dir_all(&skill_dir)?;
+        anyhow::bail!(
+            "Skill '{}' has no signer_key in the registry index; refusing to install. \
+             Set WIRKEN_ALLOW_UNSIGNED_SKILLS=1 to opt in.",
+            entry.name
+        );
     }
 
     println!("  Installed to {}", skill_dir.display());
@@ -142,8 +157,8 @@ pub async fn list() -> Result<()> {
     for skill in &skills {
         let available = if skill.available { "yes" } else { "no" };
         let skill_dir = skill.path.parent().unwrap_or(&skills_dir);
-        let signed = match skill_registry::verify_skill(skill_dir) {
-            Ok(VerifyResult::Valid { .. }) => "yes",
+        let signed = match skill_registry::verify_skill_self_signed(skill_dir) {
+            Ok(VerifyResult::Valid { .. }) => "self-signed",
             Ok(VerifyResult::Invalid) => "INVALID",
             _ => "no",
         };
@@ -221,10 +236,16 @@ pub async fn sign(dir: &str) -> Result<()> {
 pub async fn verify(dir: &str) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
 
-    match skill_registry::verify_skill(skill_dir)? {
+    match skill_registry::verify_skill_self_signed(skill_dir)? {
         VerifyResult::Valid { signer } => {
-            println!("  Signature: VALID");
+            println!("  Signature: SELF-SIGNED (bundle key matches bundle signature)");
             println!("  Signer: {signer}");
+            println!(
+                "  Note: this only checks the bundle is internally consistent. To check \
+                 the signer key matches a trusted publisher, use \
+                 `wirken skills install <name>` against the registry, which pins the \
+                 expected key from the registry index entry."
+            );
         }
         VerifyResult::Invalid => {
             println!("  Signature: INVALID");

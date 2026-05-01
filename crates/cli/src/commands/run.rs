@@ -42,7 +42,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Refresh org config if configured ---
     if let Some(org_url) = wirken_gateway::org::load_org_url(&cfg.data_dir) {
-        match wirken_gateway::org::fetch_org_config(&org_url).await {
+        match wirken_gateway::org::fetch_org_config(&org_url, &cfg.data_dir).await {
             Ok(org) => match wirken_gateway::org::apply_org_config(&cfg.data_dir, &org, true) {
                 Ok(applied) if !applied.is_empty() => {
                     println!("  Org config refreshed: {}", applied.join(", "));
@@ -159,6 +159,27 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 host_exec_sandbox.shell
             );
         }
+    }
+
+    // --- exec=Off posture warning ---
+    //
+    // When `sandbox.json` configures `mode: off`, the `exec` tool
+    // shells out at the wirken UID without any container or chroot.
+    // That shell can read and rewrite every trust file under the data
+    // directory: `tool_policy.json`, `sandbox.json`, `org.url`,
+    // `org-config-pubkey.pub`, `audit.db`, `vault.db`,
+    // `agents/<id>/identity.key`. A change to any of those files
+    // takes effect at the next gateway start. This is the documented
+    // operator-controlled trust boundary, not a bug, but operators
+    // running with `exec=Off` should know which files are reachable.
+    if host_exec_sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
+        tracing::warn!(
+            data_dir = %cfg.data_dir.display(),
+            "sandbox mode is Off — `exec` tool shells out at the wirken UID and can \
+             read or rewrite trust files under the data dir: tool_policy.json, \
+             sandbox.json, org.url, org-config-pubkey.pub, audit.db, vault.db, \
+             agents/<id>/identity.key. See README and docs/security-properties.md."
+        );
     }
 
     // --- Open the session log alongside the audit log ---
@@ -425,6 +446,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     let mut listener = wirken_ipc::bind(&socket_path)
         .context(format!("Failed to bind IPC at {}", socket_path.display()))?;
+    // Defense-in-depth file-permission posture: the load-bearing gate
+    // is the Ed25519 adapter handshake, but matching the orchestrator
+    // and mcp-proxy sockets' 0o600 chmod closes the cross-user same-
+    // host attack surface that the parent dir's umask alone might
+    // leave open.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .context("Failed to chmod gateway socket to 0600")?;
+    }
     println!("  Socket: {}", socket_path.display());
 
     // --- Pre-flight: validate per-adapter vault entries ---
@@ -503,6 +535,35 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             }
         });
         adapter_handles.push(handle);
+    }
+
+    // --- MCP server inventory warning ---
+    //
+    // The agent's per-tool gate at runtime checks the MCP tool *name*
+    // against the operator's permission tier; the gate does not bound
+    // the MCP child process's own behavior. MCP children spawn at the
+    // wirken UID with no chroot, no uid drop, no syscall sandbox, and
+    // can read or write any file the wirken user can. Operators
+    // installing third-party MCP servers should treat them with the
+    // same trust as a binary they would run directly. List configured
+    // servers at startup so the inventory is operator-visible.
+    {
+        let mcp_config_path = cfg.data_dir.join("mcp.json");
+        if mcp_config_path.exists()
+            && let Ok(body) = std::fs::read_to_string(&mcp_config_path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&body)
+            && let Some(servers) = val.get("servers").and_then(|s| s.as_object())
+            && !servers.is_empty()
+        {
+            let names: Vec<&str> = servers.keys().map(|s| s.as_str()).collect();
+            tracing::warn!(
+                servers = ?names,
+                "MCP servers configured: each runs at the wirken UID with no \
+                 process sandbox; the agent's per-tool permission gate checks tool \
+                 names only, not child process behavior. Install only from trusted \
+                 sources. See docs/security-properties.md."
+            );
+        }
     }
 
     // --- Spawn MCP proxy ---
@@ -674,6 +735,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     );
 
     // --- Webchat ---
+    if matches!(
+        std::env::var("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN").as_deref(),
+        Ok("1")
+    ) {
+        tracing::warn!(
+            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1: webchat /api/chat accepts requests \
+             without an Origin header. Same-host non-browser callers (curl, scripts) \
+             can drive the agent — same UID is the only trust boundary."
+        );
+    }
     let webchat_port = port.unwrap_or(18790);
     let webchat_factory = factory.clone();
     let webchat_audit = audit.clone();
@@ -773,10 +844,36 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let accept_detector = detector.clone();
     let accept_dispatcher = dispatcher.clone();
 
+    // SAFETY: `geteuid` is always-safe FFI; documented as never
+    // failing and never invoking user-space callbacks.
+    #[cfg(unix)]
+    let gateway_expected_principal = Principal::Uid(unsafe { libc::geteuid() });
     let accept_handle = tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
+                    // Defense-in-depth peer-credential check. Gateway
+                    // accepts only same-UID adapter processes; the
+                    // Ed25519 handshake is still the load-bearing
+                    // identity gate but a different-UID peer is a
+                    // structural error worth rejecting before paying
+                    // the handshake cost.
+                    #[cfg(unix)]
+                    match stream.peer_principal() {
+                        Ok(actual) if actual == gateway_expected_principal => {}
+                        Ok(actual) => {
+                            tracing::warn!(
+                                "gateway: refusing peer {} (expected {})",
+                                actual,
+                                gateway_expected_principal
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!("gateway: peer_principal unavailable, refusing: {e}");
+                            continue;
+                        }
+                    }
                     let reg = accept_registry.clone();
                     let fact = accept_factory.clone();
                     let au = accept_audit.clone();

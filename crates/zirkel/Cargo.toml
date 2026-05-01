@@ -12,6 +12,7 @@ wirken-audit = { path = "../audit" }
 wirken-ipc = { path = "../ipc" }
 wirken-skill-store = { path = "../skill-store" }
 async-trait = { workspace = true }
+futures-util = "0.3"
 secrecy = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }

@@ -857,6 +857,7 @@ fn fetch_outcome_label(e: &FetchError) -> String {
         FetchError::HttpStatus { status, .. } => format!("http_error_{}", status),
         FetchError::Network { .. } => "network_error".to_string(),
         FetchError::Parse { .. } => "parse_error".to_string(),
+        FetchError::TooLarge { .. } => "body_too_large".to_string(),
     }
 }
 

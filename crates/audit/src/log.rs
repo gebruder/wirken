@@ -134,6 +134,13 @@ impl AuditLog {
         legacy_compat::query_legacy(&self.inner, q)
     }
 
+    /// Return every distinct session id present in `session_events`.
+    /// Used by the attestation-verification routines to walk all
+    /// sessions without re-implementing the SQL.
+    pub fn list_session_ids(&self) -> Result<Vec<String>, AuditError> {
+        legacy_compat::list_session_ids(&self.inner)
+    }
+
     /// Verify every per-session chain in `session_events`.
     pub fn verify(&self) -> Result<VerifyResult, AuditError> {
         legacy_compat::verify_legacy(&self.inner)

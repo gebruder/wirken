@@ -18,7 +18,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     let org_applied = if let Some(ref url) = org_url {
         println!("  Fetching organization config from {url}...");
-        match wirken_gateway::org::fetch_org_config(url).await {
+        match wirken_gateway::org::fetch_org_config(url, &data).await {
             Ok(org) => {
                 wirken_gateway::org::save_org_url(&data, url).context("Failed to save org URL")?;
                 match wirken_gateway::org::apply_org_config(&data, &org, false) {
