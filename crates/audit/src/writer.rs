@@ -112,23 +112,77 @@ fn record_verify_outcome(
 /// deliberately rather than via a typo.
 const VERIFY_CADENCE_SANITY_CEILING: u64 = 10_000;
 
-fn verify_every_flushes() -> u64 {
-    let value = std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .unwrap_or(DEFAULT_VERIFY_EVERY_FLUSHES);
-    if value > VERIFY_CADENCE_SANITY_CEILING {
-        tracing::warn!(
-            value,
-            ceiling = VERIFY_CADENCE_SANITY_CEILING,
-            default = DEFAULT_VERIFY_EVERY_FLUSHES,
-            "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES is set far above the default; \
-             continuous chain verification is effectively disabled. See the \
-             documented escape-hatches table in docs/security-properties.md."
-        );
+/// Classification of the `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES` env var.
+/// Pulled out into a pure function so the warn-policy is testable
+/// without tracing-subscriber capture.
+#[derive(Debug, PartialEq, Eq)]
+enum VerifyCadenceOutcome {
+    /// Env var unset; default applies. No warn.
+    UnsetUseDefault,
+    /// Env var set but does not parse as a u64. Warn and fall back.
+    /// Carries the raw input string so the warn can echo it back to
+    /// the operator.
+    MalformedUseDefault(String),
+    /// Env var parsed to 0, which would mean "verify every zero
+    /// flushes" — nonsensical. Warn and fall back.
+    ZeroUseDefault,
+    /// Value accepted but past the sanity ceiling.
+    AcceptedHigh(u64),
+    /// Value accepted within the sanity ceiling.
+    Accepted(u64),
+}
+
+fn classify_verify_cadence(raw: Result<String, std::env::VarError>) -> VerifyCadenceOutcome {
+    match raw {
+        Err(_) => VerifyCadenceOutcome::UnsetUseDefault,
+        Ok(s) => match s.parse::<u64>() {
+            Err(_) => VerifyCadenceOutcome::MalformedUseDefault(s),
+            Ok(0) => VerifyCadenceOutcome::ZeroUseDefault,
+            Ok(n) if n > VERIFY_CADENCE_SANITY_CEILING => VerifyCadenceOutcome::AcceptedHigh(n),
+            Ok(n) => VerifyCadenceOutcome::Accepted(n),
+        },
     }
-    value
+}
+
+fn verify_every_flushes() -> u64 {
+    match classify_verify_cadence(std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES")) {
+        VerifyCadenceOutcome::UnsetUseDefault => DEFAULT_VERIFY_EVERY_FLUSHES,
+        VerifyCadenceOutcome::MalformedUseDefault(raw) => {
+            tracing::warn!(
+                env_var = "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES",
+                value = %raw,
+                default_used = DEFAULT_VERIFY_EVERY_FLUSHES,
+                "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES is set but does not parse as \
+                 a non-negative integer; falling back to the default cadence. \
+                 Continuous chain verification engages on every {DEFAULT_VERIFY_EVERY_FLUSHES} \
+                 flushes."
+            );
+            DEFAULT_VERIFY_EVERY_FLUSHES
+        }
+        VerifyCadenceOutcome::ZeroUseDefault => {
+            tracing::warn!(
+                env_var = "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES",
+                value = 0,
+                default_used = DEFAULT_VERIFY_EVERY_FLUSHES,
+                "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES=0 would mean 'verify every \
+                 zero flushes' which is nonsensical; falling back to the default \
+                 cadence."
+            );
+            DEFAULT_VERIFY_EVERY_FLUSHES
+        }
+        VerifyCadenceOutcome::AcceptedHigh(n) => {
+            tracing::warn!(
+                value = n,
+                ceiling = VERIFY_CADENCE_SANITY_CEILING,
+                default = DEFAULT_VERIFY_EVERY_FLUSHES,
+                "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES is set far above the default; \
+                 continuous chain verification is effectively disabled. See the \
+                 documented escape-hatches table in docs/security-properties.md."
+            );
+            n
+        }
+        VerifyCadenceOutcome::Accepted(n) => n,
+    }
 }
 
 /// Run a chain-verification pass and emit a structured audit event
@@ -182,6 +236,7 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome
                 actual_hash: Some(actual_hash.clone()),
                 hostname: hostname_best_effort(),
                 gateway_pid: std::process::id(),
+                hmac: None,
             };
             let alarm_write_ok = match alarms.append(&alarm) {
                 Ok(()) => true,
@@ -225,6 +280,7 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome
                 actual_hash: Some(e.to_string()),
                 hostname: hostname_best_effort(),
                 gateway_pid: std::process::id(),
+                hmac: None,
             };
             let alarm_write_ok = alarms.append(&alarm).is_ok();
             VerifyPassOutcome {
@@ -240,13 +296,26 @@ impl AuditWriter {
     /// Spawns a background tokio task for batched writes.
     /// Returns the writer handle and a join handle for the flush task.
     pub fn new(db_path: &Path) -> Result<(Self, tokio::task::JoinHandle<()>), AuditError> {
-        Self::with_siem(db_path, None)
+        Self::with_siem_and_alarm_key(db_path, None, None)
     }
 
     /// Create a new audit writer with optional SIEM forwarding.
+    /// Alarm log runs in unsigned mode.
     pub fn with_siem(
         db_path: &Path,
         siem_config: Option<SiemConfig>,
+    ) -> Result<(Self, tokio::task::JoinHandle<()>), AuditError> {
+        Self::with_siem_and_alarm_key(db_path, siem_config, None)
+    }
+
+    /// Create a new audit writer with optional SIEM forwarding and an
+    /// optional HMAC signing key for the alarm log. When the key is
+    /// `None` the alarm log runs in unsigned mode and the caller is
+    /// expected to surface a prominent warn elsewhere.
+    pub fn with_siem_and_alarm_key(
+        db_path: &Path,
+        siem_config: Option<SiemConfig>,
+        alarm_log_key: Option<Vec<u8>>,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), AuditError> {
         // Verify database can be opened
         let _ = AuditLog::open(db_path)?;
@@ -260,7 +329,10 @@ impl AuditWriter {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
-        let alarms = AlarmLog::new(&alarm_dir);
+        let alarms = match alarm_log_key {
+            Some(key) => AlarmLog::with_signing_key(&alarm_dir, key),
+            None => AlarmLog::new(&alarm_dir),
+        };
         let forwarder = match siem_config {
             Some(cfg) => Some(SiemForwarder::new(cfg).map_err(AuditError::SiemConfig)?),
             None => None,
@@ -503,8 +575,8 @@ mod tests {
             1,
             "expected one chain_broken alarm, got {alarm_records:?}"
         );
-        assert_eq!(alarm_records[0].alarm_type, "chain_broken");
-        assert_eq!(alarm_records[0].seq, Some(2));
+        assert_eq!(alarm_records[0].record.alarm_type, "chain_broken");
+        assert_eq!(alarm_records[0].record.seq, Some(2));
 
         // Defense-in-depth: the in-chain audit row should also be there.
         let events = log
@@ -531,6 +603,59 @@ mod tests {
             intact: false,
             alarm_write_ok,
         }
+    }
+
+    #[test]
+    fn verify_cadence_unset_uses_default_silently() {
+        assert_eq!(
+            classify_verify_cadence(Err(std::env::VarError::NotPresent)),
+            VerifyCadenceOutcome::UnsetUseDefault
+        );
+    }
+
+    #[test]
+    fn verify_cadence_malformed_warns_and_falls_back() {
+        let outcome = classify_verify_cadence(Ok("not-a-number".into()));
+        assert!(
+            matches!(outcome, VerifyCadenceOutcome::MalformedUseDefault(ref s) if s == "not-a-number"),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn verify_cadence_negative_text_warns_as_malformed() {
+        // u64 parse rejects the leading '-'; fold this into the
+        // malformed bucket so the operator sees the same warn shape.
+        let outcome = classify_verify_cadence(Ok("-5".into()));
+        assert!(
+            matches!(outcome, VerifyCadenceOutcome::MalformedUseDefault(_)),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn verify_cadence_zero_warns_and_falls_back() {
+        assert_eq!(
+            classify_verify_cadence(Ok("0".into())),
+            VerifyCadenceOutcome::ZeroUseDefault
+        );
+    }
+
+    #[test]
+    fn verify_cadence_normal_value_accepted_silently() {
+        assert_eq!(
+            classify_verify_cadence(Ok("250".into())),
+            VerifyCadenceOutcome::Accepted(250)
+        );
+    }
+
+    #[test]
+    fn verify_cadence_above_ceiling_warns_but_accepts() {
+        let high = VERIFY_CADENCE_SANITY_CEILING + 1;
+        assert_eq!(
+            classify_verify_cadence(Ok(high.to_string())),
+            VerifyCadenceOutcome::AcceptedHigh(high)
+        );
     }
 
     #[test]

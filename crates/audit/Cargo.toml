@@ -9,6 +9,7 @@ description = "Per-session SHA-256 hash-chained audit log for Wirken, with SIEM 
 [dependencies]
 rusqlite = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

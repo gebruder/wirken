@@ -38,6 +38,7 @@ script that invokes `wirken run`.
 | `sandbox.json` set to `mode: off` | Runs the `exec` tool directly on the host at the wirken UID instead of inside a Docker / gVisor / Wasm sandbox. Without sandbox-level confinement the only remaining gate is the agent's permission tier. | Edit `<data_dir>/sandbox.json` once. Persists across restarts. Gateway warns at startup whenever it engages. |
 | `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1` | Removes the `Origin` header check on the webchat `/api/chat` endpoint. Same-host non-browser callers (curl, scripts) can drive the agent; same-UID becomes the sole trust boundary. | Same options as the unsigned-* variables. Gateway emits a warn at startup. |
 | `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES=N` | Sets the number of flush cycles between continuous chain-verification passes (default 100). Values above 10,000 effectively disable the in-process verifier so a chain break is only caught at the next operator-run `wirken audit verify`. | Same options. The value-above-10,000 case emits a warn at startup; smaller departures from default do not. |
+| `WIRKEN_ALLOW_STALE_ORG_CONFIG=1` | Accepts a signed org-config bundle even when `signed_at + max_age_seconds < now` (or when `signed_at` is in the future, which usually means clock skew or replay). The signature itself is still verified; only the freshness window is bypassed. | Same options as the unsigned-* variables. Each bypass emits a warn carrying the bundle's age and the configured `max_age_seconds`. |
 
 ### Audit-writer halt counters are per-process
 

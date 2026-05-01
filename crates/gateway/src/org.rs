@@ -112,6 +112,64 @@ fn unsigned_allowed() -> bool {
     )
 }
 
+fn stale_allowed() -> bool {
+    matches!(
+        std::env::var("WIRKEN_ALLOW_STALE_ORG_CONFIG").as_deref(),
+        Ok("1")
+    )
+}
+
+/// Reject a bundle whose `signed_at` is older than `max_age_seconds`.
+/// Both fields must be present for the freshness check to engage; a
+/// bundle without either is treated as having no freshness claim.
+/// Returns `Ok(())` when fresh OR when the operator opted into stale
+/// acceptance via `WIRKEN_ALLOW_STALE_ORG_CONFIG=1` (which logs a
+/// warn). Errors otherwise with a structured message.
+fn check_org_config_freshness(config: &OrgConfig) -> Result<(), String> {
+    let (signed_at, max_age) = match (config.signed_at, config.max_age_seconds) {
+        (Some(ts), Some(age)) => (ts, age),
+        _ => return Ok(()),
+    };
+    let now = chrono::Utc::now();
+    let age_seconds = (now - signed_at).num_seconds();
+    if age_seconds < 0 {
+        // Clock skew: bundle claims to be from the future. Reject
+        // unless the operator opted into stale-mode (which we treat
+        // as "trust the bundle", same as the past-stale case).
+        if stale_allowed() {
+            tracing::warn!(
+                signed_at = %signed_at,
+                now = %now,
+                "WIRKEN_ALLOW_STALE_ORG_CONFIG=1: accepting org-config bundle whose \
+                 signed_at is in the future (clock skew or replay)"
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "org config signed_at {signed_at} is in the future (now {now}); \
+             refusing. Set WIRKEN_ALLOW_STALE_ORG_CONFIG=1 to opt out"
+        ));
+    }
+    if (age_seconds as u64) > max_age {
+        if stale_allowed() {
+            tracing::warn!(
+                age_seconds,
+                max_age_seconds = max_age,
+                signed_at = %signed_at,
+                "WIRKEN_ALLOW_STALE_ORG_CONFIG=1: accepting org-config bundle past \
+                 its max_age_seconds; the bundle's freshness window has expired"
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "org config bundle is stale: signed_at {signed_at} is {age_seconds}s old, \
+             max_age_seconds is {max_age}. Refresh the upstream signed bundle, or \
+             set WIRKEN_ALLOW_STALE_ORG_CONFIG=1 to opt out"
+        ));
+    }
+    Ok(())
+}
+
 /// Write `contents` to `path` with mode 0o600 on unix. On non-unix
 /// platforms falls back to `std::fs::write` and emits a tracing warning
 /// noting that owner-only file permissions could not be enforced.
@@ -176,6 +234,23 @@ pub struct OrgConfig {
     /// Skill policy.
     #[serde(default)]
     pub skills: Option<OrgSkillPolicy>,
+
+    /// RFC 3339 timestamp when this config bundle was signed. Lives
+    /// inside the signed body so a same-UID attacker who replaces the
+    /// HTTP response cannot trim it without invalidating the
+    /// signature. Optional for back-compat with older bundles; the
+    /// gateway treats `None` as "no freshness claim" and falls back
+    /// to whatever the operator set via `WIRKEN_ALLOW_STALE_ORG_CONFIG`.
+    #[serde(default)]
+    pub signed_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// Maximum age in seconds the gateway will accept for this
+    /// bundle. Together with `signed_at`, lets an org pin a TTL on
+    /// signed config so a paused-then-resumed adversary can't replay
+    /// an old bundle indefinitely. Honored only when `signed_at` is
+    /// also set.
+    #[serde(default)]
+    pub max_age_seconds: Option<u64>,
 }
 
 /// Organization-level permission controls.
@@ -257,7 +332,17 @@ pub async fn fetch_org_config(url: &str, data_dir: &Path) -> Result<OrgConfig, S
         verify_org_config_signature(&body, &sig, &pubkey)?;
     }
 
-    serde_json::from_slice::<OrgConfig>(&body).map_err(|e| format!("parse org config: {e}"))
+    let config =
+        serde_json::from_slice::<OrgConfig>(&body).map_err(|e| format!("parse org config: {e}"))?;
+
+    // Freshness binding. Both fields live inside the signed body, so
+    // a tampered timestamp fails the signature check above before we
+    // reach this gate. The gate exists for the legitimate-but-stale
+    // case: a bundle whose signature is valid but whose declared
+    // `signed_at` + `max_age_seconds` window has expired.
+    check_org_config_freshness(&config)?;
+
+    Ok(config)
 }
 
 /// Save the org endpoint URL for periodic refresh. The file ends up at
@@ -424,6 +509,138 @@ pub fn load_tool_policy(data_dir: &Path) -> Option<OrgPermissions> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn fresh_config_with_age(
+        signed_at: chrono::DateTime<chrono::Utc>,
+        max_age_secs: u64,
+    ) -> OrgConfig {
+        OrgConfig {
+            signed_at: Some(signed_at),
+            max_age_seconds: Some(max_age_secs),
+            ..Default::default()
+        }
+    }
+
+    /// Reset both stale-related env vars between tests so default
+    /// behavior is deterministic. The escape hatches are process-wide
+    /// `std::env::var` reads; we run tests serially via a Mutex to
+    /// avoid clobbering each other.
+    fn with_no_stale_env<F: FnOnce()>(f: F) {
+        // Save and clear.
+        let prior = std::env::var("WIRKEN_ALLOW_STALE_ORG_CONFIG").ok();
+        // SAFETY: tests use this only in a serialized harness; see
+        // STALE_ENV_LOCK below.
+        unsafe {
+            std::env::remove_var("WIRKEN_ALLOW_STALE_ORG_CONFIG");
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WIRKEN_ALLOW_STALE_ORG_CONFIG", v),
+                None => std::env::remove_var("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
+            }
+        }
+    }
+
+    fn with_stale_env<F: FnOnce()>(f: F) {
+        let prior = std::env::var("WIRKEN_ALLOW_STALE_ORG_CONFIG").ok();
+        unsafe {
+            std::env::set_var("WIRKEN_ALLOW_STALE_ORG_CONFIG", "1");
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WIRKEN_ALLOW_STALE_ORG_CONFIG", v),
+                None => std::env::remove_var("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
+            }
+        }
+    }
+
+    /// Serialize tests that mutate WIRKEN_ALLOW_STALE_ORG_CONFIG so
+    /// they don't race against each other under `cargo test`'s default
+    /// multi-threaded harness.
+    static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn freshness_check_passes_when_fields_absent() {
+        let cfg = OrgConfig::default();
+        assert!(check_org_config_freshness(&cfg).is_ok());
+    }
+
+    #[test]
+    fn freshness_check_passes_within_window() {
+        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        with_no_stale_env(|| {
+            let cfg =
+                fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(60), 3600);
+            assert!(check_org_config_freshness(&cfg).is_ok());
+        });
+    }
+
+    #[test]
+    fn freshness_check_rejects_stale_without_escape() {
+        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        with_no_stale_env(|| {
+            let cfg =
+                fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
+            let err = check_org_config_freshness(&cfg).unwrap_err();
+            assert!(err.contains("stale"), "got {err}");
+        });
+    }
+
+    #[test]
+    fn freshness_check_accepts_stale_with_escape_hatch() {
+        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        with_stale_env(|| {
+            let cfg =
+                fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
+            assert!(check_org_config_freshness(&cfg).is_ok());
+        });
+    }
+
+    #[test]
+    fn freshness_check_rejects_future_signed_at() {
+        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        with_no_stale_env(|| {
+            let cfg =
+                fresh_config_with_age(chrono::Utc::now() + chrono::Duration::seconds(7200), 3600);
+            let err = check_org_config_freshness(&cfg).unwrap_err();
+            assert!(err.contains("future"), "got {err}");
+        });
+    }
+
+    #[test]
+    fn signed_payload_with_freshness_round_trips_signature() {
+        // The freshness fields live inside the signed body, so a
+        // round-trip through verify must accept the canonical bytes
+        // and reject any mutation of either field.
+        use ed25519_dalek::{Signer, SigningKey};
+        let mut secret = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret);
+        let sk = SigningKey::from_bytes(&secret);
+        let pk = sk.verifying_key();
+
+        let cfg = OrgConfig {
+            signed_at: Some(chrono::Utc::now()),
+            max_age_seconds: Some(3600),
+            ..Default::default()
+        };
+        let body = serde_json::to_vec(&cfg).unwrap();
+        let sig = sk.sign(&body);
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+        // Pristine body verifies.
+        verify_org_config_signature(&body, &sig_b64, &pk).expect("pristine body must verify");
+
+        // Mutate the timestamp field in the body; signature must fail.
+        let mutated = String::from_utf8(body.clone()).unwrap().replacen(
+            "\"max_age_seconds\":3600",
+            "\"max_age_seconds\":99999",
+            1,
+        );
+        let err = verify_org_config_signature(mutated.as_bytes(), &sig_b64, &pk).unwrap_err();
+        assert!(err.contains("signature verification failed"), "got {err}");
+    }
 
     #[test]
     fn apply_org_config_writes_sandbox_json_from_permissions() {
