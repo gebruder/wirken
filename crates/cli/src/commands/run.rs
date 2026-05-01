@@ -90,10 +90,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // operator can reconstruct the trust posture from the audit row
     // alone.
     if let Some(org_url) = wirken_gateway::org::load_org_url(&cfg.data_dir) {
-        let allow_unsigned = matches!(
-            std::env::var("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG").as_deref(),
-            Ok("1")
-        );
+        let allow_unsigned =
+            wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG");
         let pubkey_fingerprint = org_pubkey_fingerprint(&cfg.data_dir);
         audit
             .log(
@@ -219,6 +217,25 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let cred_name = format!("{provider}-api-key");
         match store.retrieve(&cred_name) {
             Ok((secret, _)) => Some(secret.expose().to_string()),
+            Err(wirken_vault::VaultError::Decryption(_)) => {
+                // AEAD-tag mismatch on a credential that was stored
+                // before the AAD-binding change in 26b1f8e. Older
+                // vault.db files cannot be decrypted by the current
+                // build; the operator has to re-store the credential
+                // (or remove the file) for the gateway to make
+                // forward progress on a non-Ollama provider.
+                tracing::warn!(
+                    vault = %cfg.vault_db_path().display(),
+                    "vault decryption failed for '{cred_name}': vault.db at the path \
+                     above uses a pre-26b1f8e AEAD format. Decryption will fail for \
+                     every credential stored before the upgrade. Remove the file and \
+                     re-run `wirken setup` (or re-add channels via `wirken channel add`) \
+                     to re-store credentials under the new format. The gateway will \
+                     continue starting but the {provider} provider has no usable API \
+                     key until the vault is reset."
+                );
+                None
+            }
             Err(_) => {
                 tracing::warn!("No API key found for '{provider}'");
                 None
@@ -867,14 +884,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     );
 
     // --- Webchat ---
-    if matches!(
-        std::env::var("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN").as_deref(),
-        Ok("1")
-    ) {
+    if wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN") {
         tracing::warn!(
-            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1: webchat /api/chat accepts requests \
+            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN: webchat /api/chat accepts requests \
              without an Origin header. Same-host non-browser callers (curl, scripts) \
-             can drive the agent — same UID is the only trust boundary."
+             can drive the agent. Same UID is the only trust boundary."
         );
     }
     let webchat_port = port.unwrap_or(18790);
