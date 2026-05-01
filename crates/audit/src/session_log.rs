@@ -592,8 +592,12 @@ pub struct SqliteSessionLog {
 
 impl SqliteSessionLog {
     /// Open or create a session log at `db_path`. Creates the
-    /// `session_events` table if it does not exist.
+    /// `session_events` table if it does not exist. On unix, when the
+    /// file is created here, it is created with mode 0o600 — SQLite's
+    /// `Connection::open` does not honor a custom umask/mode, so the
+    /// file is pre-created with `OpenOptions::mode(0o600)` first.
     pub fn open(db_path: &Path) -> Result<Self, AuditError> {
+        precreate_owner_only(db_path)?;
         let conn = Connection::open(db_path)?;
         Self::init_schema(&conn)?;
         Ok(Self {
@@ -1143,4 +1147,48 @@ fn trust_from_str(s: &str) -> Result<TrustLevel, AuditError> {
             "unknown trust level in session_events: {other}"
         ))),
     }
+}
+
+/// On unix, ensure `path` exists with mode 0o600 before SQLite opens
+/// it. SQLite's open routine creates the file with default umask
+/// permissions and does not expose a hook to change the mode at
+/// creation time, so the only way to land 0o600 is to create the file
+/// first ourselves and let SQLite open the existing handle. No-op on
+/// non-unix; emits a warning the first time a database is opened
+/// without an owner-only equivalent.
+fn precreate_owner_only(path: &Path) -> Result<(), AuditError> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AuditError::SiemConfig(format!("create parent {}: {e}", parent.display()))
+            })?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| AuditError::SiemConfig(format!("create {}: {e}", path.display())))?;
+    }
+    #[cfg(not(unix))]
+    {
+        tracing::warn!(
+            "creating audit database at {} without 0o600-equivalent file permissions; \
+             relying on user profile isolation for confidentiality",
+            path.display()
+        );
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| AuditError::SiemConfig(format!("create {}: {e}", path.display())))?;
+    }
+    Ok(())
 }

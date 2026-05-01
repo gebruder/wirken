@@ -195,7 +195,18 @@ async fn handle_verification(
     let token = params.get("hub.verify_token").copied().unwrap_or("");
     let challenge = params.get("hub.challenge").copied().unwrap_or("");
 
-    if mode == "subscribe" && token == verify_token {
+    // The verify_token is a long-lived shared secret Meta echoes back
+    // in `?hub.verify_token=`. A `==` short-circuits at the first
+    // mismatched byte and leaks token length / common-prefix timing
+    // to a tunnel-front attacker; constant-time compare on equal-
+    // length byte slices closes that side channel.
+    let token_matches = if token.len() == verify_token.len() {
+        use subtle::ConstantTimeEq;
+        token.as_bytes().ct_eq(verify_token.as_bytes()).into()
+    } else {
+        false
+    };
+    if mode == "subscribe" && token_matches {
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             challenge.len(),

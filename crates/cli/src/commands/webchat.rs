@@ -199,16 +199,20 @@ pub async fn serve(
                     return;
                 }
 
-                // CSRF defence: an `Origin` header from a browser must
-                // match the WebChat origin. A page on attacker.com that
-                // POSTs to http://127.0.0.1:18790/api/chat would carry
-                // `Origin: https://attacker.com`; without this check the
-                // browser's same-origin policy blocks the SSE response
-                // read but the agent still runs the prompt and bills
-                // the operator's API key. Missing `Origin` is allowed
-                // because non-browser clients (curl, scripts) don't
-                // send it; browsers always do on cross-origin POSTs
-                // with `Content-Type: application/json`.
+                // CSRF defence: a browser request must carry an
+                // `Origin` header matching the WebChat origin. A page
+                // on attacker.com that POSTs to
+                // http://127.0.0.1:18790/api/chat would carry
+                // `Origin: https://attacker.com`; without this check
+                // the browser's same-origin policy blocks the SSE
+                // response read but the agent still runs the prompt
+                // and bills the operator's API key.
+                //
+                // `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1` opts out for
+                // non-browser scripts that don't send Origin (curl,
+                // shell pipelines). When that mode is active the
+                // gateway logs a warning at startup; the `Origin`
+                // header is still validated when present.
                 let origin = request
                     .lines()
                     .find_map(|l| {
@@ -216,9 +220,25 @@ pub async fn serve(
                             .or_else(|| l.strip_prefix("origin: "))
                     })
                     .map(|s| s.trim().to_string());
-                if let Some(o) = &origin {
-                    if !is_webchat_origin(o, port) {
+                let allow_missing_origin = matches!(
+                    std::env::var("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN").as_deref(),
+                    Ok("1")
+                );
+                match origin.as_deref() {
+                    Some(o) if is_webchat_origin(o, port) => {}
+                    Some(_) => {
                         let resp = r#"{"error":"forbidden origin"}"#;
+                        let response = format!(
+                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                    None if allow_missing_origin => {}
+                    None => {
+                        let resp = r#"{"error":"missing origin header"}"#;
                         let response = format!(
                             "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                             resp.len(),

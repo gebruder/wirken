@@ -41,8 +41,104 @@
 //! }
 //! ```
 
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Filename in the gateway data directory that holds the operator-pinned
+/// Ed25519 public key used to verify org-config responses. The file
+/// contains a 64-character lowercase hex string with optional surrounding
+/// whitespace.
+pub const ORG_CONFIG_PUBKEY_FILE: &str = "org-config-pubkey.pub";
+
+/// HTTP header carrying the Ed25519 signature over the raw response
+/// body. Base64-encoded, no whitespace.
+pub const ORG_CONFIG_SIGNATURE_HEADER: &str = "X-Wirken-Org-Signature";
+
+fn load_org_pubkey(data_dir: &Path) -> Result<VerifyingKey, String> {
+    let path = data_dir.join(ORG_CONFIG_PUBKEY_FILE);
+    let body = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "read {}: {e} (place a 64-char hex-encoded ed25519 public key here, \
+             or set WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1 to opt out)",
+            path.display()
+        )
+    })?;
+    let hex_str = body.trim();
+    if hex_str.len() != 64 {
+        return Err(format!(
+            "{}: expected 64 hex chars, got {} chars",
+            path.display(),
+            hex_str.len()
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in hex_str.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk)
+            .map_err(|_| format!("{}: non-utf8 hex byte at offset {i}", path.display()))?;
+        bytes[i] = u8::from_str_radix(s, 16)
+            .map_err(|_| format!("{}: invalid hex byte '{s}' at offset {i}", path.display()))?;
+    }
+    VerifyingKey::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn verify_org_config_signature(
+    body: &[u8],
+    sig_b64: &str,
+    pubkey: &VerifyingKey,
+) -> Result<(), String> {
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.trim())
+        .map_err(|e| format!("decode signature: {e}"))?;
+    if sig_bytes.len() != 64 {
+        return Err(format!(
+            "signature length: expected 64 bytes, got {}",
+            sig_bytes.len()
+        ));
+    }
+    let mut sig_arr = [0u8; 64];
+    sig_arr.copy_from_slice(&sig_bytes);
+    let sig = Signature::from_bytes(&sig_arr);
+    pubkey
+        .verify(body, &sig)
+        .map_err(|e| format!("signature verification failed: {e}"))
+}
+
+fn unsigned_allowed() -> bool {
+    matches!(
+        std::env::var("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG").as_deref(),
+        Ok("1")
+    )
+}
+
+/// Write `contents` to `path` with mode 0o600 on unix. On non-unix
+/// platforms falls back to `std::fs::write` and emits a tracing warning
+/// noting that owner-only file permissions could not be enforced.
+fn write_with_secret_perms(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .mode(0o600)
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)?;
+        f.write_all(contents)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        tracing::warn!(
+            "writing {} without 0o600-equivalent file permissions; \
+             relying on user profile isolation for confidentiality",
+            path.display()
+        );
+        std::fs::write(path, contents)
+    }
+}
 
 /// Organization config pulled from a central endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -101,8 +197,18 @@ pub struct OrgSkillPolicy {
     pub blocked: Vec<String>,
 }
 
-/// Fetch org config from a URL.
-pub async fn fetch_org_config(url: &str) -> Result<OrgConfig, String> {
+/// Fetch org config from a URL and verify it against the operator-pinned
+/// Ed25519 public key at `<data_dir>/org-config-pubkey.pub`.
+///
+/// The endpoint must serve the response body together with a detached
+/// Ed25519 signature in the `X-Wirken-Org-Signature` HTTP header,
+/// base64-encoded, computed over the raw body bytes. The body is parsed
+/// only after signature verification succeeds.
+///
+/// Verification can be disabled by setting
+/// `WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1`. Each fetch in that mode emits
+/// a `tracing::warn!` so the operator-visible posture is unmistakable.
+pub async fn fetch_org_config(url: &str, data_dir: &Path) -> Result<OrgConfig, String> {
     let http = reqwest::Client::new();
     let resp = http
         .get(url)
@@ -115,9 +221,34 @@ pub async fn fetch_org_config(url: &str) -> Result<OrgConfig, String> {
         return Err(format!("org config returned HTTP {}", resp.status()));
     }
 
-    resp.json::<OrgConfig>()
+    let sig_header = resp
+        .headers()
+        .get(ORG_CONFIG_SIGNATURE_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let body = resp
+        .bytes()
         .await
-        .map_err(|e| format!("parse org config: {e}"))
+        .map_err(|e| format!("read org config body: {e}"))?;
+
+    if unsigned_allowed() {
+        tracing::warn!(
+            "WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1: skipping org-config signature \
+             verification — the response body is trusted as-is"
+        );
+    } else {
+        let sig = sig_header.ok_or_else(|| {
+            format!(
+                "org config response missing {ORG_CONFIG_SIGNATURE_HEADER} header; \
+                 set WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1 to opt out"
+            )
+        })?;
+        let pubkey = load_org_pubkey(data_dir)?;
+        verify_org_config_signature(&body, &sig, &pubkey)?;
+    }
+
+    serde_json::from_slice::<OrgConfig>(&body).map_err(|e| format!("parse org config: {e}"))
 }
 
 /// Save the org endpoint URL for periodic refresh.
@@ -147,9 +278,11 @@ pub fn apply_org_config(
     if let Some(ref provider) = org.provider {
         let path = data_dir.join("provider.json");
         if force || !path.exists() {
-            std::fs::write(
+            write_with_secret_perms(
                 &path,
-                serde_json::to_string_pretty(provider).unwrap_or_default(),
+                serde_json::to_string_pretty(provider)
+                    .unwrap_or_default()
+                    .as_bytes(),
             )
             .map_err(|e| format!("write provider.json: {e}"))?;
             applied.push("provider".into());
@@ -160,9 +293,11 @@ pub fn apply_org_config(
     if let Some(ref siem) = org.siem {
         let path = data_dir.join("siem.json");
         if force || !path.exists() {
-            std::fs::write(
+            write_with_secret_perms(
                 &path,
-                serde_json::to_string_pretty(siem).unwrap_or_default(),
+                serde_json::to_string_pretty(siem)
+                    .unwrap_or_default()
+                    .as_bytes(),
             )
             .map_err(|e| format!("write siem.json: {e}"))?;
             applied.push("siem".into());
@@ -173,8 +308,13 @@ pub fn apply_org_config(
     if let Some(ref mcp) = org.mcp {
         let path = data_dir.join("mcp.json");
         if force || !path.exists() {
-            std::fs::write(&path, serde_json::to_string_pretty(mcp).unwrap_or_default())
-                .map_err(|e| format!("write mcp.json: {e}"))?;
+            write_with_secret_perms(
+                &path,
+                serde_json::to_string_pretty(mcp)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            )
+            .map_err(|e| format!("write mcp.json: {e}"))?;
             applied.push("mcp".into());
         }
     }
@@ -190,9 +330,11 @@ pub fn apply_org_config(
         let path = data_dir.join("sandbox.json");
         if force || !path.exists() {
             let body = serde_json::json!({ "mode": mode });
-            std::fs::write(
+            write_with_secret_perms(
                 &path,
-                serde_json::to_string_pretty(&body).unwrap_or_default(),
+                serde_json::to_string_pretty(&body)
+                    .unwrap_or_default()
+                    .as_bytes(),
             )
             .map_err(|e| format!("write sandbox.json: {e}"))?;
             applied.push("sandbox".into());
@@ -212,9 +354,11 @@ pub fn apply_org_config(
                 "allowed_tools": perms.allowed_tools,
                 "blocked_tools": perms.blocked_tools,
             });
-            std::fs::write(
+            write_with_secret_perms(
                 &path,
-                serde_json::to_string_pretty(&body).unwrap_or_default(),
+                serde_json::to_string_pretty(&body)
+                    .unwrap_or_default()
+                    .as_bytes(),
             )
             .map_err(|e| format!("write tool_policy.json: {e}"))?;
             applied.push("tool_policy".into());
@@ -340,5 +484,121 @@ mod tests {
         let body = std::fs::read_to_string(tmp.path().join("sandbox.json")).unwrap();
         let val: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(val["mode"].as_str(), Some("exec-only"));
+    }
+
+    // ---------------------------------------------------------------
+    // Signature verification
+    // ---------------------------------------------------------------
+
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn write_pubkey_file(dir: &Path, key: &VerifyingKey) {
+        let bytes = key.to_bytes();
+        let mut hex = String::with_capacity(64);
+        for b in bytes {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        std::fs::write(dir.join(ORG_CONFIG_PUBKEY_FILE), hex).unwrap();
+    }
+
+    #[test]
+    fn signature_verifies_with_pinned_key() {
+        let tmp = TempDir::new().unwrap();
+        let mut bytes = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes);
+        let signing = SigningKey::from_bytes(&bytes);
+        write_pubkey_file(tmp.path(), &signing.verifying_key());
+
+        let body = b"{}";
+        let sig = signing.sign(body);
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+        let pubkey = load_org_pubkey(tmp.path()).unwrap();
+        verify_org_config_signature(body, &sig_b64, &pubkey).unwrap();
+    }
+
+    #[test]
+    fn signature_rejected_with_wrong_key() {
+        let tmp = TempDir::new().unwrap();
+        let mut bytes_a = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes_a);
+        let signing_a = SigningKey::from_bytes(&bytes_a);
+        let mut bytes_b = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes_b);
+        let signing_b = SigningKey::from_bytes(&bytes_b);
+        write_pubkey_file(tmp.path(), &signing_b.verifying_key());
+
+        let body = b"{}";
+        let sig = signing_a.sign(body);
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+
+        let pubkey = load_org_pubkey(tmp.path()).unwrap();
+        let err = verify_org_config_signature(body, &sig_b64, &pubkey).unwrap_err();
+        assert!(err.contains("verification failed"), "got {err}");
+    }
+
+    #[test]
+    fn signature_rejected_when_malformed() {
+        let tmp = TempDir::new().unwrap();
+        let mut bytes = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut bytes);
+        let signing = SigningKey::from_bytes(&bytes);
+        write_pubkey_file(tmp.path(), &signing.verifying_key());
+        let pubkey = load_org_pubkey(tmp.path()).unwrap();
+
+        // Wrong length
+        let err = verify_org_config_signature(b"{}", "AAAA", &pubkey).unwrap_err();
+        assert!(err.contains("signature length"), "got {err}");
+        // Not base64
+        let err = verify_org_config_signature(b"{}", "@@@@", &pubkey).unwrap_err();
+        assert!(err.contains("decode signature"), "got {err}");
+    }
+
+    #[test]
+    fn pubkey_file_missing_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let err = load_org_pubkey(tmp.path()).unwrap_err();
+        assert!(err.contains(ORG_CONFIG_PUBKEY_FILE), "got {err}");
+    }
+
+    #[test]
+    fn pubkey_file_wrong_length_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(ORG_CONFIG_PUBKEY_FILE), "deadbeef").unwrap();
+        let err = load_org_pubkey(tmp.path()).unwrap_err();
+        assert!(err.contains("expected 64 hex chars"), "got {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_org_config_writes_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let org = OrgConfig {
+            siem: Some(serde_json::json!({"target": "datadog", "api_key": "redacted"})),
+            mcp: Some(serde_json::json!({"servers": {}})),
+            provider: Some(serde_json::json!({"provider": "openai", "model": "gpt-4o"})),
+            permissions: Some(OrgPermissions {
+                sandbox_mode: Some("gvisor".into()),
+                allowed_tools: vec!["read_file".into()],
+                blocked_tools: vec![],
+            }),
+            ..Default::default()
+        };
+        apply_org_config(tmp.path(), &org, true).unwrap();
+        for name in [
+            "provider.json",
+            "siem.json",
+            "mcp.json",
+            "sandbox.json",
+            "tool_policy.json",
+        ] {
+            let mode = std::fs::metadata(tmp.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name}: expected 0o600, got 0o{mode:o}");
+        }
     }
 }

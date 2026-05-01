@@ -1,11 +1,32 @@
 //! Unix domain socket server. Listens for agent connections, runs the
-//! NDJSON wire protocol from `wire.rs`, dispatches to `ProxyRegistry`.
+//! NDJSON wire protocol from `wire.rs`, dispatches to [`ProxyRegistry`].
 //!
 //! Protocol version 2 authenticates every connecting agent via an
 //! Ed25519 challenge-response handshake. The filesystem ACL on the
 //! socket file (mode 0600 in the user's data directory) is a second
 //! line of defense — the authoritative trust boundary is the
 //! registered public key for each agent_id in the [`ProxyRegistry`].
+//!
+//! ## MCP child trust model
+//!
+//! MCP servers configured in `mcp.json` are spawned by this proxy as
+//! direct child processes (`StdioTransport::spawn`). Children run at
+//! the wirken UID with no chroot, no uid drop, no syscall sandbox,
+//! and no resource limits. The agent's per-tool permission gate
+//! ([`runtime::execute_tool`](../../agent/src/runtime.rs)) checks the
+//! MCP tool *name* against the configured permission tier; the gate
+//! does **not** bound the child's own behavior once spawned. A child
+//! can read `~/.wirken/audit.db`, rotate `~/.wirken/agents/<id>/identity.key`,
+//! exfiltrate `~/.wirken/vault.db`, or open its own outbound network
+//! connections, all without crossing any wirken-side gate.
+//!
+//! Treat each MCP server install as equivalent to running its binary
+//! directly. Operators are responsible for trusting the source.
+//! `mcp_transport.rs::StdioTransport::spawn` clears the child's env
+//! and re-applies a small allowlist plus the per-MCP `env` from
+//! `mcp.json`, so `WIRKEN_VAULT_PASSPHRASE` and other harness env
+//! does not leak into the child; that does not change the
+//! filesystem-level trust posture above.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

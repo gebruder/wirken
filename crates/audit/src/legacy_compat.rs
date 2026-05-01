@@ -368,7 +368,7 @@ pub(crate) fn verify_legacy(log: &SqliteSessionLog) -> Result<VerifyResult, Audi
     }
 }
 
-fn list_session_ids(log: &SqliteSessionLog) -> Result<Vec<String>, AuditError> {
+pub(crate) fn list_session_ids(log: &SqliteSessionLog) -> Result<Vec<String>, AuditError> {
     log.with_conn(|conn| {
         let mut stmt =
             conn.prepare("SELECT DISTINCT session_id FROM session_events ORDER BY session_id ASC")?;

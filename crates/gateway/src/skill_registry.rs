@@ -82,9 +82,22 @@ pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, 
     Ok(sig_hex)
 }
 
-/// Verify a skill's signature. Returns Ok(true) if valid, Ok(false) if
-/// no signature present, Err if signature is present but invalid.
-pub fn verify_skill(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
+/// Verify a skill's signature against `SKILL.pub` bundled in the skill
+/// directory itself.
+///
+/// **Trust model:** this is *self-signed* verification — the public key
+/// comes from the same directory whose contents it is verifying. Anyone
+/// with write access to the skill directory can replace `SKILL.md`,
+/// `SKILL.sig`, and `SKILL.pub` together with their own keypair and
+/// pass this check. Use [`verify_skill_with_expected_key`] when the
+/// expected signer key is anchored out-of-band (registry index entry,
+/// operator-pinned key file, etc.).
+///
+/// Callers presenting the result to operators should label it
+/// "self-signed" rather than "valid" — `VerifyResult::Valid` here means
+/// "the bundle's signature checks against the bundle's own key", not
+/// "the bundle came from a trusted publisher".
+pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
     let skill_md = skill_dir.join("SKILL.md");
     let sig_path = skill_dir.join("SKILL.sig");
     let key_path = skill_dir.join("SKILL.pub");
@@ -255,7 +268,7 @@ mod tests {
         assert!(skill_dir.join("SKILL.sig").exists());
         assert!(skill_dir.join("SKILL.pub").exists());
 
-        match verify_skill(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir).unwrap() {
             VerifyResult::Valid { .. } => {}
             other => panic!("expected Valid, got {other:?}"),
         }
@@ -268,7 +281,7 @@ mod tests {
         std::fs::create_dir(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), "---\nname: test\n---\nbody").unwrap();
 
-        match verify_skill(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir).unwrap() {
             VerifyResult::Unsigned => {}
             other => panic!("expected Unsigned, got {other:?}"),
         }
@@ -287,7 +300,7 @@ mod tests {
         // Tamper with the content
         std::fs::write(skill_dir.join("SKILL.md"), "TAMPERED content").unwrap();
 
-        match verify_skill(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -308,7 +321,7 @@ mod tests {
         let pub_hex = hex_encode(&key2.verifying_key().to_bytes());
         std::fs::write(skill_dir.join("SKILL.pub"), &pub_hex).unwrap();
 
-        match verify_skill(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir).unwrap() {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
@@ -396,11 +409,44 @@ mod tests {
 
         sign_skill(&skill_dir, &signing_key).unwrap();
 
-        match verify_skill(&skill_dir).unwrap() {
+        match verify_skill_self_signed(&skill_dir).unwrap() {
             VerifyResult::Valid { signer } => {
                 assert_eq!(signer.len(), 64);
             }
             other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_with_expected_key_accepts_matching_anchor() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("anchored");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: a\n---\nbody").unwrap();
+        let signing = random_signing_key();
+        sign_skill(&skill_dir, &signing).unwrap();
+        let sig_hex = std::fs::read_to_string(skill_dir.join("SKILL.sig")).unwrap();
+        let key_hex = hex_encode(&signing.verifying_key().to_bytes());
+        match verify_skill_with_expected_key(&skill_dir, sig_hex.trim(), &key_hex).unwrap() {
+            VerifyResult::Valid { .. } => {}
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_with_expected_key_rejects_mismatched_anchor() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("anchored");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: a\n---\nbody").unwrap();
+        let signing_a = random_signing_key();
+        sign_skill(&skill_dir, &signing_a).unwrap();
+        let sig_hex = std::fs::read_to_string(skill_dir.join("SKILL.sig")).unwrap();
+        let signing_b = random_signing_key();
+        let other_key_hex = hex_encode(&signing_b.verifying_key().to_bytes());
+        match verify_skill_with_expected_key(&skill_dir, sig_hex.trim(), &other_key_hex).unwrap() {
+            VerifyResult::Invalid => {}
+            other => panic!("expected Invalid, got {other:?}"),
         }
     }
 }

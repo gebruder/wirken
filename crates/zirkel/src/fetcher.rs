@@ -126,7 +126,15 @@ pub enum FetchError {
     },
     #[error("parse error for {url}: {message}")]
     Parse { url: String, message: String },
+    #[error("response body for {url} exceeded {limit} byte cap")]
+    TooLarge { url: String, limit: u64 },
 }
+
+/// Maximum response body size for zirkel fetchers. A hostile or
+/// misconfigured upstream feed cannot stream multi-GB into a `String`
+/// past this limit; the fetch returns [`FetchError::TooLarge`] as soon
+/// as the running byte total crosses the cap.
+pub const MAX_FETCH_BYTES: u64 = 32 * 1024 * 1024;
 
 /// RSS 2.0 / Atom fetcher. Same impl handles both formats —
 /// `feed-rs` discriminates the parser internally. Registered under
@@ -168,9 +176,38 @@ pub async fn fetch_body(http: &EgressClient, url: &str) -> Result<String, FetchE
             status: status.as_u16(),
         });
     }
-    resp.text().await.map_err(|e| FetchError::Network {
+    read_capped_text(url, resp).await
+}
+
+/// Read a response body into a `String`, refusing to allocate past
+/// [`MAX_FETCH_BYTES`]. Streams chunks and aborts as soon as the
+/// running byte total exceeds the cap; a hostile upstream cannot
+/// trick the fetcher into committing memory for an unbounded body.
+pub(crate) async fn read_capped_text(
+    url: &str,
+    resp: reqwest::Response,
+) -> Result<String, FetchError> {
+    use futures_util::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| FetchError::Network {
+            url: url.to_string(),
+            source: e,
+        })?;
+        total = total.saturating_add(chunk.len() as u64);
+        if total > MAX_FETCH_BYTES {
+            return Err(FetchError::TooLarge {
+                url: url.to_string(),
+                limit: MAX_FETCH_BYTES,
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|e| FetchError::Parse {
         url: url.to_string(),
-        source: e,
+        message: format!("response body is not valid utf-8: {e}"),
     })
 }
 

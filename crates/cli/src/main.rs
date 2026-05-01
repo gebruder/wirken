@@ -168,6 +168,8 @@ enum AuditCommands {
         #[arg(long, default_value = "human")]
         format: String,
     },
+    /// Verify session attestation signatures across every session
+    VerifyAttestations,
 }
 
 #[derive(Subcommand)]
@@ -548,6 +550,7 @@ async fn main() -> Result<()> {
                 .await
             }
             AuditCommands::Verify { format } => commands::audit::verify(&format).await,
+            AuditCommands::VerifyAttestations => commands::audit::verify_attestations().await,
         },
         Commands::Sessions(cmd) => match cmd {
             SessionCommands::List { channel, parent } => {

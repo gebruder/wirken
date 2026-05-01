@@ -16,6 +16,30 @@
 //! Reversing the layers would have rate-limit accounting paying for
 //! requests egress was always going to deny.
 //!
+//! ## What `EgressClient` covers — and what it does not
+//!
+//! `EgressClient` mediates only the agent built-in tools that go
+//! through it: `web_search` and `generate_image`. The following
+//! outbound paths bypass `EgressClient` and do **not** consult the
+//! skill-set egress allowlist:
+//!
+//! - **`exec` shell sink.** When `sandbox.json` is `mode: off`, the
+//!   host shell runs `curl`, `wget`, `nc`, etc. directly. Egress is
+//!   determined by the OS, not by wirken.
+//! - **MCP children.** MCP servers spawned by the proxy open their
+//!   own outbound network connections.
+//! - **LLM HTTP.** The LLM client constructs its own `reqwest::Client`
+//!   so the agent can keep talking to the configured provider even
+//!   when the operator's egress rules are tight; provider host is
+//!   gated by name (`provider.json::base_url`) but not by the egress
+//!   allowlist.
+//!
+//! Operators wanting hard egress control should run wirken inside a
+//! network namespace, container with restricted egress, or with
+//! iptables/firewall rules at the OS level. The skill-side
+//! `egress.allow` list is a defense-in-depth control on the built-in
+//! tools, not a network boundary.
+//!
 //! ## Two construction shapes
 //!
 //! - [`EgressClient::new`] — unrestricted rate limit (cap = u32::MAX,
