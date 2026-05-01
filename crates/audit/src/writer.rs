@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, interval};
 
+use crate::alarm_log::{AlarmLog, AlarmRecord, hostname_best_effort, now_rfc3339};
 use crate::error::AuditError;
 use crate::event::AuditEvent;
 use crate::log::{AuditLog, VerifyResult};
@@ -35,6 +36,36 @@ const MAX_BUFFER_ON_FAILURE: usize = BATCH_SIZE * 16;
 /// via `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`.
 const DEFAULT_VERIFY_EVERY_FLUSHES: u64 = 100;
 
+/// Number of consecutive failed chain-verification passes that halt
+/// the writer. Once the counter reaches this many, the flush loop
+/// breaks and `rx` drops, so subsequent `log` calls return
+/// `ChannelClosed`. Persistent integrity failure is treated as a
+/// halt-the-show condition rather than a redirect-to-side-channel
+/// because once the in-chain story is unrecoverable, every further
+/// row written under the same loop is ambiguous evidence.
+const MAX_INTEGRITY_FAILURES: u32 = 3;
+
+/// Update the consecutive-integrity-failure counter for a verify-pass
+/// outcome. Returns `true` when the writer should halt.
+fn record_verify_outcome(integrity_failures: &mut u32, intact: bool) -> bool {
+    if intact {
+        *integrity_failures = 0;
+        return false;
+    }
+    *integrity_failures = integrity_failures.saturating_add(1);
+    let halt = *integrity_failures >= MAX_INTEGRITY_FAILURES;
+    if halt {
+        tracing::error!(
+            failures = *integrity_failures,
+            threshold = MAX_INTEGRITY_FAILURES,
+            "Audit chain verification failed in a row; halting writer so \
+             callers observe ChannelClosed and stop accumulating ambiguous \
+             in-chain evidence"
+        );
+    }
+    halt
+}
+
 fn verify_every_flushes() -> u64 {
     std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES")
         .ok()
@@ -43,10 +74,18 @@ fn verify_every_flushes() -> u64 {
         .unwrap_or(DEFAULT_VERIFY_EVERY_FLUSHES)
 }
 
-/// Run a chain-verification pass and emit a structured audit event when
-/// the chain is broken. Returns true if the chain is intact (or empty),
-/// false if a break was detected.
-async fn run_verify_pass(log: &AuditLog) -> bool {
+/// Run a chain-verification pass and emit a structured audit event
+/// when the chain is broken. Returns true if the chain is intact
+/// (or empty), false if a break was detected.
+///
+/// Failure path writes the alarm to the out-of-chain `audit-alarms.log`
+/// **first** — that file is the load-bearing evidence because an
+/// attacker who tampered the SQLite chain can also tamper any
+/// follow-up `audit.chain_broken` row written into the same chain. The
+/// in-chain row is defense-in-depth: if it's still there, an honest
+/// chain-walk reader sees both signals; if it isn't, the alarm log
+/// is the surviving record.
+async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> bool {
     match log.verify() {
         Ok(VerifyResult::Ok { rows_verified }) => {
             tracing::debug!(
@@ -71,6 +110,26 @@ async fn run_verify_pass(log: &AuditLog) -> bool {
                 actual_hash = %actual_hash,
                 "audit chain BROKEN — continuous verification detected tampering"
             );
+            let alarm = AlarmRecord {
+                timestamp: now_rfc3339(),
+                alarm_type: "chain_broken".into(),
+                session_id: Some(session_id.as_str().to_string()),
+                seq: Some(seq),
+                expected_hash: Some(expected_hash.clone()),
+                actual_hash: Some(actual_hash.clone()),
+                hostname: hostname_best_effort(),
+                gateway_pid: std::process::id(),
+            };
+            if let Err(e) = alarms.append(&alarm) {
+                tracing::error!(
+                    "audit alarm-log write failed: {e}. The tracing::error \
+                     above is now the only surviving record."
+                );
+            }
+            // Defense-in-depth: also try to land an audit row so an
+            // honest chain-walk reader sees the failure inline. The
+            // alarm log is the load-bearing record above; this is
+            // best-effort.
             let event = AuditEvent::new("audit", "audit.chain_broken", "audit.db").with_detail(
                 serde_json::json!({
                     "session": session_id.as_str(),
@@ -80,9 +139,6 @@ async fn run_verify_pass(log: &AuditLog) -> bool {
                     "verified_count": verified_count,
                 }),
             );
-            // Single-event batch so the failure is itself audit-witnessed.
-            // Best-effort: if this write also fails, the tracing::error
-            // above is the surviving evidence.
             if let Err(e) = log.write_batch(&[event]) {
                 tracing::error!("audit chain_broken event write failed: {e}");
             }
@@ -90,6 +146,17 @@ async fn run_verify_pass(log: &AuditLog) -> bool {
         }
         Err(e) => {
             tracing::error!("audit chain verification errored: {e}");
+            let alarm = AlarmRecord {
+                timestamp: now_rfc3339(),
+                alarm_type: "verify_error".into(),
+                session_id: None,
+                seq: None,
+                expected_hash: None,
+                actual_hash: Some(e.to_string()),
+                hostname: hostname_best_effort(),
+                gateway_pid: std::process::id(),
+            };
+            let _ = alarms.append(&alarm);
             false
         }
     }
@@ -113,11 +180,19 @@ impl AuditWriter {
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let path = db_path.to_path_buf();
+        // The alarm log lives in the same directory as the audit
+        // database. AuditLog::open already created the parent dir if
+        // it didn't exist.
+        let alarm_dir = path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let alarms = AlarmLog::new(&alarm_dir);
         let forwarder = match siem_config {
             Some(cfg) => Some(SiemForwarder::new(cfg).map_err(AuditError::SiemConfig)?),
             None => None,
         };
-        let handle = tokio::spawn(flush_loop(rx, path, forwarder));
+        let handle = tokio::spawn(flush_loop(rx, path, forwarder, alarms));
 
         Ok((Self { tx }, handle))
     }
@@ -143,6 +218,7 @@ async fn flush_loop(
     mut rx: mpsc::Receiver<AuditEvent>,
     db_path: PathBuf,
     forwarder: Option<SiemForwarder>,
+    alarms: AlarmLog,
 ) {
     // Open the audit log once for the lifetime of the flush loop and
     // reuse the connection across every flush. The previous flush()
@@ -172,6 +248,7 @@ async fn flush_loop(
     let mut consecutive_failures: u32 = 0;
     let verify_cadence = verify_every_flushes();
     let mut flushes_since_verify: u64 = 0;
+    let mut integrity_failures: u32 = 0;
 
     loop {
         tokio::select! {
@@ -185,7 +262,10 @@ async fn flush_loop(
                 }
                 flushes_since_verify = flushes_since_verify.saturating_add(1);
                 if flushes_since_verify >= verify_cadence {
-                    run_verify_pass(&log).await;
+                    let intact = run_verify_pass(&log, &alarms).await;
+                    if record_verify_outcome(&mut integrity_failures, intact) {
+                        break;
+                    }
                     flushes_since_verify = 0;
                 }
             }
@@ -330,9 +410,21 @@ mod tests {
             .unwrap();
         }
         let log = AuditLog::open(&db_path).unwrap();
-        let intact = run_verify_pass(&log).await;
+        let alarms = AlarmLog::new(tmp.path());
+        let intact = run_verify_pass(&log, &alarms).await;
         assert!(!intact, "expected break to be detected");
 
+        // The alarm log is the load-bearing record.
+        let alarm_records = alarms.read_all().unwrap();
+        assert_eq!(
+            alarm_records.len(),
+            1,
+            "expected one chain_broken alarm, got {alarm_records:?}"
+        );
+        assert_eq!(alarm_records[0].alarm_type, "chain_broken");
+        assert_eq!(alarm_records[0].seq, Some(2));
+
+        // Defense-in-depth: the in-chain audit row should also be there.
         let events = log
             .query(&AuditQuery {
                 action: Some("audit.chain_broken".into()),
@@ -342,6 +434,79 @@ mod tests {
         assert!(
             !events.is_empty(),
             "expected audit.chain_broken event to be appended"
+        );
+    }
+
+    #[test]
+    fn integrity_failures_reset_on_intact_pass() {
+        let mut c = 1;
+        assert!(!record_verify_outcome(&mut c, true));
+        assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn three_consecutive_failures_signal_halt() {
+        let mut c = 0;
+        assert!(!record_verify_outcome(&mut c, false));
+        assert!(!record_verify_outcome(&mut c, false));
+        assert!(record_verify_outcome(&mut c, false));
+    }
+
+    #[test]
+    fn intact_pass_between_failures_resets_counter() {
+        let mut c = 0;
+        record_verify_outcome(&mut c, false);
+        record_verify_outcome(&mut c, false);
+        record_verify_outcome(&mut c, true);
+        assert_eq!(c, 0);
+        assert!(!record_verify_outcome(&mut c, false));
+    }
+
+    #[tokio::test]
+    async fn three_failed_verify_passes_drive_halt_decision() {
+        // End-to-end: tamper the chain, then run verify passes against
+        // the live AuditLog three times. The halt-decision helper must
+        // signal halt by the third pass so the flush loop breaks.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new("actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let new_payload = serde_json::to_string(&serde_json::json!({
+                "kind": "audit_legacy",
+                "actor": "actor",
+                "action": "HACKED",
+                "target": "t",
+                "channel": "",
+                "detail": null,
+            }))
+            .unwrap();
+            conn.execute(
+                "UPDATE session_events SET payload = ?1 WHERE id = 3",
+                rusqlite::params![new_payload],
+            )
+            .unwrap();
+        }
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let mut counter = 0u32;
+        let mut halted = false;
+        for _ in 0..MAX_INTEGRITY_FAILURES {
+            let intact = run_verify_pass(&log, &alarms).await;
+            if record_verify_outcome(&mut counter, intact) {
+                halted = true;
+                break;
+            }
+        }
+        assert!(
+            halted,
+            "expected halt within {MAX_INTEGRITY_FAILURES} passes"
         );
     }
 

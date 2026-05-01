@@ -41,11 +41,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!();
 
     // --- Refresh org config if configured ---
+    //
+    // Hold onto the list of applied sections so we can emit a single
+    // `org-config.applied` audit event after the writer is constructed
+    // below. Org-config refresh runs before AuditWriter::with_siem
+    // because the SIEM and provider config it lands are inputs to that
+    // construction; deferring the audit row is the simpler shape.
+    let mut org_config_applied: Vec<String> = Vec::new();
     if let Some(org_url) = wirken_gateway::org::load_org_url(&cfg.data_dir) {
         match wirken_gateway::org::fetch_org_config(&org_url, &cfg.data_dir).await {
             Ok(org) => match wirken_gateway::org::apply_org_config(&cfg.data_dir, &org, true) {
                 Ok(applied) if !applied.is_empty() => {
                     println!("  Org config refreshed: {}", applied.join(", "));
+                    org_config_applied = applied;
                 }
                 _ => {}
             },
@@ -135,6 +143,20 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     audit
         .log(AuditEvent::new("gateway", "gateway.start", "daemon"))
         .await?;
+    if !org_config_applied.is_empty() {
+        audit
+            .log(
+                AuditEvent::new(
+                    "gateway",
+                    "org-config.applied",
+                    cfg.data_dir.display().to_string(),
+                )
+                .with_detail(serde_json::json!({
+                    "sections": org_config_applied,
+                })),
+            )
+            .await?;
+    }
     println!("  Audit log: {}", cfg.audit_db_path().display());
 
     // --- Resolve the host-exec shell once at startup ---
@@ -555,9 +577,27 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             && let Some(servers) = val.get("servers").and_then(|s| s.as_object())
             && !servers.is_empty()
         {
-            let names: Vec<&str> = servers.keys().map(|s| s.as_str()).collect();
+            // Surface the command path the operator configured next to
+            // the server name. The command is the binary that will be
+            // spawned at the wirken UID; pairing the name with the path
+            // lets the operator spot a tampered or shadowed entry from
+            // the startup line alone, without re-reading mcp.json.
+            //
+            // Long paths get trimmed at 80 chars to keep the warn line
+            // legible; the on-disk config remains canonical.
+            let inventory: Vec<String> = servers
+                .iter()
+                .map(|(name, body)| {
+                    let cmd = body
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<no command>");
+                    let trimmed = trim_command_for_inventory(cmd);
+                    format!("{name}={trimmed}")
+                })
+                .collect();
             tracing::warn!(
-                servers = ?names,
+                servers = ?inventory,
                 "MCP servers configured: each runs at the wirken UID with no \
                  process sandbox; the agent's per-tool permission gate checks tool \
                  names only, not child process behavior. Install only from trusted \
@@ -867,10 +907,42 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                                 actual,
                                 gateway_expected_principal
                             );
+                            let _ = accept_audit
+                                .log(
+                                    AuditEvent::new(
+                                        "gateway",
+                                        "gateway.peer.refused",
+                                        "gateway-socket",
+                                    )
+                                    .with_detail(
+                                        serde_json::json!({
+                                            "reason": "principal_mismatch",
+                                            "expected": gateway_expected_principal.to_string(),
+                                            "actual": actual.to_string(),
+                                        }),
+                                    ),
+                                )
+                                .await;
                             continue;
                         }
                         Err(e) => {
                             tracing::warn!("gateway: peer_principal unavailable, refusing: {e}");
+                            let _ = accept_audit
+                                .log(
+                                    AuditEvent::new(
+                                        "gateway",
+                                        "gateway.peer.refused",
+                                        "gateway-socket",
+                                    )
+                                    .with_detail(
+                                        serde_json::json!({
+                                            "reason": "peer_principal_unavailable",
+                                            "expected": gateway_expected_principal.to_string(),
+                                            "error": e.to_string(),
+                                        }),
+                                    ),
+                                )
+                                .await;
                             continue;
                         }
                     }
@@ -1611,6 +1683,64 @@ fn truncate(s: &str, max: usize) -> String {
         cut -= 1;
     }
     format!("{}...", &s[..cut])
+}
+
+/// Width budget for the MCP startup-inventory command paths. Long
+/// paths get a leading ellipsis so the trailing binary name stays
+/// visible; the on-disk `mcp.json` is canonical.
+const MCP_INVENTORY_WIDTH: usize = 80;
+
+fn trim_command_for_inventory(cmd: &str) -> String {
+    if cmd.chars().count() <= MCP_INVENTORY_WIDTH {
+        return cmd.to_string();
+    }
+    let mut acc = String::with_capacity(MCP_INVENTORY_WIDTH + 3);
+    acc.push_str("...");
+    let take = MCP_INVENTORY_WIDTH.saturating_sub(3);
+    let suffix: String = cmd
+        .chars()
+        .rev()
+        .take(take)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    acc.push_str(&suffix);
+    acc
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::{MCP_INVENTORY_WIDTH, trim_command_for_inventory};
+
+    #[test]
+    fn short_command_passes_through() {
+        let cmd = "/usr/bin/uvx";
+        assert_eq!(trim_command_for_inventory(cmd), cmd);
+    }
+
+    #[test]
+    fn boundary_command_passes_through() {
+        let cmd = "x".repeat(MCP_INVENTORY_WIDTH);
+        assert_eq!(trim_command_for_inventory(&cmd), cmd);
+    }
+
+    #[test]
+    fn long_command_keeps_tail() {
+        let cmd = format!("/{}", "x".repeat(200));
+        let trimmed = trim_command_for_inventory(&cmd);
+        assert!(trimmed.starts_with("..."));
+        assert!(trimmed.chars().count() <= MCP_INVENTORY_WIDTH);
+        assert!(trimmed.ends_with(&"x".repeat(20)));
+    }
+
+    #[test]
+    fn multibyte_long_command_does_not_panic() {
+        let cmd = "ä".repeat(200);
+        let trimmed = trim_command_for_inventory(&cmd);
+        assert!(trimmed.starts_with("..."));
+        assert!(trimmed.chars().count() <= MCP_INVENTORY_WIDTH);
+    }
 }
 
 /// Load SIEM forwarding config from ~/.wirken/siem.json.

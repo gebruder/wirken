@@ -45,8 +45,8 @@ fn encrypt_decrypt_roundtrip() {
     let key = generate_key();
     let plaintext = VaultSecret::new("super-secret-api-key".into());
 
-    let encrypted = encrypt(&plaintext, &key).unwrap();
-    let decrypted = decrypt(&encrypted, &key).unwrap();
+    let encrypted = encrypt("name", &plaintext, &key).unwrap();
+    let decrypted = decrypt("name", &encrypted, &key).unwrap();
 
     assert_eq!(decrypted.expose(), "super-secret-api-key");
 }
@@ -56,15 +56,15 @@ fn encrypt_produces_different_ciphertext_each_time() {
     let key = generate_key();
     let plaintext = VaultSecret::new("same-input".into());
 
-    let enc1 = encrypt(&plaintext, &key).unwrap();
-    let enc2 = encrypt(&plaintext, &key).unwrap();
+    let enc1 = encrypt("n", &plaintext, &key).unwrap();
+    let enc2 = encrypt("n", &plaintext, &key).unwrap();
 
     // Different nonces → different ciphertext
     assert_ne!(enc1, enc2);
 
     // But both decrypt to the same plaintext
-    assert_eq!(decrypt(&enc1, &key).unwrap().expose(), "same-input");
-    assert_eq!(decrypt(&enc2, &key).unwrap().expose(), "same-input");
+    assert_eq!(decrypt("n", &enc1, &key).unwrap().expose(), "same-input");
+    assert_eq!(decrypt("n", &enc2, &key).unwrap().expose(), "same-input");
 }
 
 #[test]
@@ -73,21 +73,21 @@ fn decrypt_with_wrong_key_fails() {
     let key2 = generate_key();
     let plaintext = VaultSecret::new("secret".into());
 
-    let encrypted = encrypt(&plaintext, &key1).unwrap();
-    let result = decrypt(&encrypted, &key2);
+    let encrypted = encrypt("n", &plaintext, &key1).unwrap();
+    let result = decrypt("n", &encrypted, &key2);
 
     assert!(result.is_err());
 }
 
 #[test]
 fn decrypt_truncated_ciphertext_fails() {
-    let result = decrypt(&[0u8; 10], &generate_key());
+    let result = decrypt("n", &[0u8; 10], &generate_key());
     assert!(result.is_err());
 }
 
 #[test]
 fn decrypt_empty_ciphertext_fails() {
-    let result = decrypt(&[], &generate_key());
+    let result = decrypt("n", &[], &generate_key());
     assert!(result.is_err());
 }
 
@@ -97,8 +97,32 @@ fn encrypt_with_wrong_key_length_fails() {
     let bad_key = VaultSecret::new("abcdef0123".into());
     let plaintext = VaultSecret::new("value".into());
 
-    let result = encrypt(&plaintext, &bad_key);
+    let result = encrypt("n", &plaintext, &bad_key);
     assert!(result.is_err());
+}
+
+#[test]
+fn decrypt_with_mismatched_name_fails() {
+    let key = generate_key();
+    let plaintext = VaultSecret::new("api-key".into());
+    let encrypted = encrypt("foo", &plaintext, &key).unwrap();
+    let result = decrypt("bar", &encrypted, &key);
+    assert!(
+        result.is_err(),
+        "AEAD must reject decrypt under a different name"
+    );
+}
+
+#[test]
+fn ciphertext_splice_across_names_fails() {
+    // Encrypt under "foo", attempt to decrypt under "bar". The AEAD
+    // tag binds the name; a splice that pastes "foo" ciphertext into
+    // a row keyed "bar" must not yield the "foo" plaintext.
+    let key = generate_key();
+    let foo_secret = VaultSecret::new("foo-secret".into());
+    let foo_ct = encrypt("foo", &foo_secret, &key).unwrap();
+    let result = decrypt("bar", &foo_ct, &key);
+    assert!(result.is_err(), "splice must be rejected");
 }
 
 #[test]
@@ -480,4 +504,31 @@ fn full_flow_age_keychain_to_store() {
     let store2 = CredentialStore::open(&tmp.path().join("vault.db"), &kc).unwrap();
     let (retrieved, _) = store2.retrieve("int-test").unwrap();
     assert_eq!(retrieved.expose(), "integration-secret");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_lands_0o600_on_db_and_wal_and_shm_after_first_transaction() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("vault.db");
+    let store = CredentialStore::open_with_key(&db_path, generate_key()).unwrap();
+    let secret = VaultSecret::new("permcheck".into());
+    store.store("k", "ch", &secret, None, None).unwrap();
+
+    for suffix in ["", "-wal", "-shm"] {
+        let mut p = db_path.as_os_str().to_owned();
+        p.push(suffix);
+        let p = std::path::PathBuf::from(p);
+        if !p.exists() {
+            continue;
+        }
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode,
+            0o600,
+            "{}: expected 0o600, got 0o{mode:o}",
+            p.display()
+        );
+    }
 }

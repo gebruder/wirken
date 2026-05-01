@@ -194,6 +194,10 @@ mod age_file {
 
     const SALT_SIZE: usize = 32;
 
+    /// AAD bound into the device-key wrap. Pins the keychain slot to
+    /// its context so a credential ciphertext cannot be substituted.
+    const KEYCHAIN_AAD: &str = "wirken/keychain/device-key";
+
     /// Age-file keychain that stores the device key encrypted with a
     /// passphrase-derived key in a local file.
     pub struct AgeFileKeychain {
@@ -240,8 +244,11 @@ mod age_file {
             // Derive wrapping key from passphrase + salt
             let wrapping_key = self.derive_wrapping_key(&salt)?;
 
-            // Encrypt the device key
-            let encrypted = encrypt(key, &wrapping_key)?;
+            // Encrypt the device key. The AAD pins the ciphertext to
+            // the keychain context — a credential blob from the main
+            // store cannot decrypt into the keychain slot (and vice
+            // versa) because the AEAD tag would not match.
+            let encrypted = encrypt(KEYCHAIN_AAD, key, &wrapping_key)?;
 
             // Write salt and encrypted key
             fs::write(self.salt_file_path(), salt)?;
@@ -281,7 +288,7 @@ mod age_file {
                 .map_err(|e| VaultError::Keychain(format!("read key file: {e}")))?;
 
             let wrapping_key = self.derive_wrapping_key(&salt)?;
-            decrypt(&encrypted, &wrapping_key)
+            decrypt(KEYCHAIN_AAD, &encrypted, &wrapping_key)
         }
 
         fn delete_device_key(&self) -> Result<(), VaultError> {

@@ -598,6 +598,13 @@ impl SqliteSessionLog {
     /// file is pre-created with `OpenOptions::mode(0o600)` first.
     pub fn open(db_path: &Path) -> Result<Self, AuditError> {
         precreate_owner_only(db_path)?;
+        // SQLite WAL mode also creates `-wal` and `-shm` sidecar files
+        // alongside the database. They contain pages in flight and must
+        // share the database's confidentiality posture; pre-create them
+        // at 0o600 so SQLite reuses our handle rather than creating its
+        // own with default umask permissions.
+        precreate_owner_only(&with_suffix(db_path, "-wal"))?;
+        precreate_owner_only(&with_suffix(db_path, "-shm"))?;
         let conn = Connection::open(db_path)?;
         Self::init_schema(&conn)?;
         Ok(Self {
@@ -1149,6 +1156,14 @@ fn trust_from_str(s: &str) -> Result<TrustLevel, AuditError> {
     }
 }
 
+/// Build a sibling path by appending `suffix` to `path`'s file name.
+/// `with_suffix("/x/y/audit.db", "-wal")` returns `/x/y/audit.db-wal`.
+fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
+}
+
 /// On unix, ensure `path` exists with mode 0o600 before SQLite opens
 /// it. SQLite's open routine creates the file with default umask
 /// permissions and does not expose a hook to change the mode at
@@ -1191,4 +1206,46 @@ fn precreate_owner_only(path: &Path) -> Result<(), AuditError> {
             .map_err(|e| AuditError::SiemConfig(format!("create {}: {e}", path.display())))?;
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod precreate_perms_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    #[test]
+    fn open_lands_0o600_on_db_and_wal_and_shm_after_first_transaction() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let log = SqliteSessionLog::open(&db_path).unwrap();
+
+        // Force a write so SQLite materializes the WAL/SHM files. The
+        // schema-init runs in `open` but the WAL/SHM sidecars are not
+        // necessarily fully populated until a real transaction commits.
+        let h = log.handle_for(SessionId::new("perm-test"));
+        log.append(
+            &h,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "hi".into(),
+                inbound_id: None,
+            },
+        )
+        .unwrap();
+
+        for suffix in ["", "-wal", "-shm"] {
+            let p = with_suffix(&db_path, suffix);
+            if !p.exists() {
+                continue;
+            }
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o600,
+                "{}: expected 0o600, got 0o{mode:o}",
+                p.display()
+            );
+        }
+    }
 }

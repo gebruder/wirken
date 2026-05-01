@@ -43,6 +43,12 @@ pub enum AgentError {
     #[error("skill load error: {0}")]
     SkillLoad(String),
 
+    #[error(
+        "skill {name} contains an envelope-collision substring in {field} \
+         and would forge the BEGIN/END UNTRUSTED SKILL boundary"
+    )]
+    EnvelopeCollision { name: String, field: &'static str },
+
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 

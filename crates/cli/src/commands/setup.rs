@@ -361,9 +361,9 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             provider_config["region"] = serde_json::Value::String(r.clone());
         }
         let config_path = data.join("provider.json");
-        std::fs::write(
+        wirken_gateway::org::write_with_secret_perms(
             &config_path,
-            serde_json::to_string_pretty(&provider_config)?,
+            serde_json::to_string_pretty(&provider_config)?.as_bytes(),
         )?;
     } // end of else (manual provider setup)
 
@@ -505,9 +505,9 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 .interact()?;
         let mode = pick_setup_sandbox_mode(runsc_detected, accept_upgrade);
         let body = serde_json::json!({ "mode": mode });
-        std::fs::write(
-            data.join("sandbox.json"),
-            serde_json::to_string_pretty(&body)?,
+        wirken_gateway::org::write_with_secret_perms(
+            &data.join("sandbox.json"),
+            serde_json::to_string_pretty(&body)?.as_bytes(),
         )
         .context("Failed to write sandbox.json")?;
         println!("  Sandbox: {mode}");
@@ -920,9 +920,9 @@ async fn configure_channel_overrides(
     }
 
     provider_json["channel_overrides"] = serde_json::Value::Object(overrides);
-    std::fs::write(
+    wirken_gateway::org::write_with_secret_perms(
         &provider_path,
-        serde_json::to_string_pretty(&provider_json)?,
+        serde_json::to_string_pretty(&provider_json)?.as_bytes(),
     )
     .context("Failed to write provider.json")?;
     Ok(())

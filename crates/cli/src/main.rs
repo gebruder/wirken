@@ -310,6 +310,12 @@ enum SkillCommands {
     Verify {
         /// Path to skill directory
         dir: String,
+        /// Treat self-signed bundles as a verification failure. The
+        /// default verifies the bundle is internally consistent; in
+        /// `--strict` mode an unsigned or only-self-signed bundle
+        /// exits 1, requiring out-of-band trust anchoring.
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -599,7 +605,7 @@ async fn main() -> Result<()> {
             SkillCommands::Install { name } => commands::skills::install(&name).await,
             SkillCommands::List => commands::skills::list().await,
             SkillCommands::Sign { dir } => commands::skills::sign(&dir).await,
-            SkillCommands::Verify { dir } => commands::skills::verify(&dir).await,
+            SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
         },
         Commands::Preset(cmd) => match cmd {
             PresetCommands::List => commands::preset::list().await,

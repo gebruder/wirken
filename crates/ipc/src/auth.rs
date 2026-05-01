@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::Rng;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -261,7 +261,7 @@ where
     let signature = Signature::from_bytes(&sig_bytes);
     let payload = signed_payload(&adapter_id, &nonce);
     verifying_key
-        .verify(&payload, &signature)
+        .verify_strict(&payload, &signature)
         .map_err(|_| HandshakeError::InvalidSignature)?;
 
     // 5. Send success
