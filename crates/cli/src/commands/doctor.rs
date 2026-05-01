@@ -173,16 +173,17 @@ pub async fn run() -> Result<()> {
         }
     };
     print_check("Audit alarm log", &alarm_log.path().display().to_string());
-    if !alarm_log.is_signed() {
-        println!(
-            "    Note: HMAC key unavailable; running in unsigned-read mode. \
-             Records show as NoKey or Unsigned regardless of writer state."
-        );
-    }
+    let signed = alarm_log.is_signed();
     match alarm_log.read_all() {
         Ok(records) if records.is_empty() => {
             print_ok();
             println!("    No alarms.");
+            if !signed {
+                println!(
+                    "    Note: HMAC key unavailable; running in unsigned-read mode. \
+                     Records will show as NoKey or Unsigned when present."
+                );
+            }
         }
         Ok(records) => {
             let tampered = records
@@ -217,6 +218,12 @@ pub async fn run() -> Result<()> {
             }
             if records.len() > 5 {
                 println!("    ... and {} more", records.len() - 5);
+            }
+            if !signed {
+                println!(
+                    "    Note: HMAC key unavailable; integrity verdicts shown as \
+                     NoKey reflect the reader's posture, not the writer's."
+                );
             }
             issues += 1;
         }

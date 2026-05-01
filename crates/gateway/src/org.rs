@@ -105,18 +105,44 @@ fn verify_org_config_signature(
         .map_err(|e| format!("signature verification failed: {e}"))
 }
 
+/// Parse a boolean-shaped environment variable used as an
+/// escape-hatch gate. Recognizes `"1"`, `"true"`, `"yes"`, and
+/// `"on"` (case-insensitive) as truthy. Recognizes the unset case
+/// and `"0"`, `"false"`, `"no"`, `"off"`, empty as falsy. Any other
+/// non-empty value is treated as falsy and emits a `tracing::warn!`
+/// so an operator who typo'd `"yEs!"` or `"enable"` sees their
+/// intent did not engage rather than discovering it months later.
+pub fn parse_boolean_escape(name: &str) -> bool {
+    let raw = match std::env::var(name) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => {
+            tracing::warn!(
+                env_var = name,
+                value = %raw,
+                "{name} is set but not a recognized boolean (1/true/yes/on or \
+                 0/false/no/off, case-insensitive); treating as unset"
+            );
+            false
+        }
+    }
+}
+
 fn unsigned_allowed() -> bool {
-    matches!(
-        std::env::var("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG").as_deref(),
-        Ok("1")
-    )
+    parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG")
 }
 
 fn stale_allowed() -> bool {
-    matches!(
-        std::env::var("WIRKEN_ALLOW_STALE_ORG_CONFIG").as_deref(),
-        Ok("1")
-    )
+    parse_boolean_escape("WIRKEN_ALLOW_STALE_ORG_CONFIG")
 }
 
 /// Reject a bundle whose `signed_at` is older than `max_age_seconds`.
@@ -560,6 +586,76 @@ mod tests {
     /// they don't race against each other under `cargo test`'s default
     /// multi-threaded harness.
     static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Same idea as STALE_ENV_LOCK but for the boolean-escape parser
+    /// tests, which set and read a dedicated env var name.
+    static BOOL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_test_env<F: FnOnce()>(name: &str, value: Option<&str>, f: F) {
+        let prior = std::env::var(name).ok();
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_boolean_escape_unset_is_false() {
+        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        with_test_env("WIRKEN_TEST_PARSE_BOOL", None, || {
+            assert!(!parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"));
+        });
+    }
+
+    #[test]
+    fn parse_boolean_escape_recognizes_truthy_variants() {
+        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for value in [
+            "1", "true", "TRUE", "True", "yes", "Yes", "on", "ON", "  on  ",
+        ] {
+            with_test_env("WIRKEN_TEST_PARSE_BOOL", Some(value), || {
+                assert!(
+                    parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"),
+                    "value {value:?} should be truthy"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn parse_boolean_escape_recognizes_falsy_variants() {
+        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for value in ["0", "false", "FALSE", "no", "off", "Off", ""] {
+            with_test_env("WIRKEN_TEST_PARSE_BOOL", Some(value), || {
+                assert!(
+                    !parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"),
+                    "value {value:?} should be falsy"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn parse_boolean_escape_unrecognized_treated_as_false() {
+        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        for value in ["enable", "y", "n", "yEs!", "garbage", "2"] {
+            with_test_env("WIRKEN_TEST_PARSE_BOOL", Some(value), || {
+                assert!(
+                    !parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"),
+                    "value {value:?} should not engage the gate"
+                );
+            });
+        }
+    }
 
     #[test]
     fn freshness_check_passes_when_fields_absent() {

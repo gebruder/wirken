@@ -220,10 +220,8 @@ pub async fn serve(
                             .or_else(|| l.strip_prefix("origin: "))
                     })
                     .map(|s| s.trim().to_string());
-                let allow_missing_origin = matches!(
-                    std::env::var("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN").as_deref(),
-                    Ok("1")
-                );
+                let allow_missing_origin =
+                    wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN");
                 match origin.as_deref() {
                     Some(o) if is_webchat_origin(o, port) => {}
                     Some(_) => {

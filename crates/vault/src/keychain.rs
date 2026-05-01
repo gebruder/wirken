@@ -84,6 +84,24 @@ pub fn load_or_create_alarm_log_key(keychain: &dyn Keychain) -> Result<Vec<u8>, 
         }
         // Length mismatch is treated as missing; regenerate.
     }
+    // On the age-file backend the wrapping key derives from the
+    // operator's passphrase. If the keychain has not been unlocked
+    // (no device key stored yet, or the caller passed an empty
+    // passphrase before the operator was prompted), generating a
+    // fresh aux key now would write `aux-<name>.age` encrypted under
+    // whatever empty/wrong passphrase is currently in scope —
+    // providing no integrity defense. Refuse the create path in
+    // that state; the caller falls back to unsigned alarm-log mode
+    // and emits a prominent warn. OS keychains (macOS / Linux) do
+    // not have this problem because their wrapping is OS-managed.
+    if keychain.kind() == KeychainKind::AgeFile && keychain.retrieve_device_key().is_err() {
+        return Err(VaultError::Keychain(
+            "age-file keychain not unlocked; will not create alarm-log aux key \
+             under an empty passphrase. Open the vault first (or run `wirken \
+             setup`) so the device key is reachable."
+                .into(),
+        ));
+    }
     let mut key = [0u8; 32];
     rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
     keychain.store_aux_key(ALARM_LOG_KEY_NAME, &key)?;

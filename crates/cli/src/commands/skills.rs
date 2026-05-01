@@ -121,10 +121,7 @@ pub async fn install(name: &str) -> Result<()> {
             }
             VerifyResult::Unsigned => {}
         }
-    } else if matches!(
-        std::env::var("WIRKEN_ALLOW_UNSIGNED_SKILLS").as_deref(),
-        Ok("1")
-    ) {
+    } else if wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_SKILLS") {
         tracing::warn!(
             "WIRKEN_ALLOW_UNSIGNED_SKILLS=1: installing '{}' without a registry-anchored \
              signer key; the bundle's provenance is unverified",
