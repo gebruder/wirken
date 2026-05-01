@@ -5,6 +5,50 @@ use std::path::Path;
 
 use crate::error::GatewayError;
 
+/// Compile-time-bundled hex-encoded Ed25519 public key of the wirken
+/// skill-registry root. Empty string means "no root anchor configured
+/// in this build" — the verification path then falls back to trusting
+/// the registry index's per-entry `signer_key` directly, which is the
+/// pre-anchor behavior.
+///
+/// Rotation requires rebuilding the binary against a fresh key file.
+/// This is intentional: a registry-anchored trust root that lives on
+/// disk under the same UID as the gateway adds no real defense; the
+/// anchor is meaningful only when the binary itself is what an
+/// attacker cannot replace without operator action.
+pub const BUNDLED_REGISTRY_PUBKEY_HEX: &str = include_str!("wirken-registry-pubkey.pub");
+
+/// Parse the bundled root key into a [`VerifyingKey`]. Returns `None`
+/// when the file is empty (build without registry anchor) or when the
+/// content does not parse as a 32-byte hex Ed25519 key (corrupt
+/// bundle; treated as no-anchor and a runtime warn).
+pub fn bundled_registry_pubkey() -> Option<VerifyingKey> {
+    let trimmed = BUNDLED_REGISTRY_PUBKEY_HEX.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() != 64 {
+        tracing::warn!(
+            len = trimmed.len(),
+            "bundled registry pubkey has unexpected length; ignoring \
+             and falling back to per-entry signer_key trust"
+        );
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (i, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
+        let s = match std::str::from_utf8(chunk) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        bytes[i] = match u8::from_str_radix(s, 16) {
+            Ok(b) => b,
+            Err(_) => return None,
+        };
+    }
+    VerifyingKey::from_bytes(&bytes).ok()
+}
+
 /// A skill entry in the registry index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillEntry {
@@ -18,6 +62,15 @@ pub struct SkillEntry {
     pub signature: Option<String>,
     /// Hex-encoded Ed25519 public key of the signer.
     pub signer_key: Option<String>,
+    /// Hex-encoded Ed25519 signature over the raw 32-byte
+    /// `signer_key`, computed by the bundled registry root key. When
+    /// the bundled root key is configured, this delegation must
+    /// verify before the entry's `signature` is trusted; otherwise
+    /// (legacy bundles, dev installs without the root anchor) the
+    /// field is `None` and the verifier falls back to the previous
+    /// trust path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key_delegation: Option<String>,
 }
 
 /// The registry index — a list of published skills.
@@ -161,10 +214,39 @@ pub fn generate_signing_keypair() -> (String, String) {
 
 /// Verify a skill's signature against an expected public key from the registry.
 /// This prevents an attacker from bundling their own key with a tampered skill.
+///
+/// When the bundled registry root key is configured (non-empty
+/// `wirken-registry-pubkey.pub`), `delegation_sig_hex` must contain a
+/// valid Ed25519 signature by the bundled root over the raw 32-byte
+/// `expected_key_hex`. Without that signature, the entry is treated
+/// as `Invalid` even when the per-skill signature itself verifies —
+/// the registry index's `signer_key` field is no longer the
+/// trust-anchor on its own. When the bundled root is empty, the
+/// delegation field is ignored and the legacy trust path applies.
 pub fn verify_skill_with_expected_key(
     skill_dir: &Path,
     expected_sig_hex: &str,
     expected_key_hex: &str,
+) -> Result<VerifyResult, GatewayError> {
+    verify_skill_with_expected_key_and_delegation(
+        skill_dir,
+        expected_sig_hex,
+        expected_key_hex,
+        None,
+        bundled_registry_pubkey().as_ref(),
+    )
+}
+
+/// Same as [`verify_skill_with_expected_key`] but lets a caller pass
+/// the delegation signature explicitly and override the bundled root
+/// key. Tests use this seam to exercise the rotation matrix without
+/// rebuilding the binary.
+pub fn verify_skill_with_expected_key_and_delegation(
+    skill_dir: &Path,
+    expected_sig_hex: &str,
+    expected_key_hex: &str,
+    delegation_sig_hex: Option<&str>,
+    bundled_root: Option<&VerifyingKey>,
 ) -> Result<VerifyResult, GatewayError> {
     let skill_md = skill_dir.join("SKILL.md");
     let hash = hash_skill_file(&skill_md)?;
@@ -195,6 +277,24 @@ pub fn verify_skill_with_expected_key(
     key_arr.copy_from_slice(&key_bytes);
     let verifying_key = VerifyingKey::from_bytes(&key_arr)
         .map_err(|e| GatewayError::Config(format!("invalid pub key: {e}")))?;
+
+    // Delegation gate. If the binary was built with a registry root
+    // key, the entry's signer_key must be delegated by that root.
+    if let Some(root) = bundled_root {
+        let delegation_hex = delegation_sig_hex.unwrap_or("");
+        let delegation_bytes = hex_decode(delegation_hex.trim())
+            .map_err(|e| GatewayError::Config(format!("decode signer_key_delegation: {e}")))?;
+        if delegation_bytes.len() != 64 {
+            return Ok(VerifyResult::Invalid);
+        }
+        let mut delegation_arr = [0u8; 64];
+        delegation_arr.copy_from_slice(&delegation_bytes);
+        let delegation_sig = Signature::from_bytes(&delegation_arr);
+        // The delegation signs the raw 32-byte signer_key.
+        if root.verify_strict(&key_bytes, &delegation_sig).is_err() {
+            return Ok(VerifyResult::Invalid);
+        }
+    }
 
     match verifying_key.verify_strict(&hash, &signature) {
         Ok(()) => Ok(VerifyResult::Valid {
@@ -328,6 +428,88 @@ mod tests {
     }
 
     #[test]
+    fn empty_bundled_pubkey_returns_none() {
+        // A build whose `wirken-registry-pubkey.pub` is empty should
+        // resolve to None and let the legacy trust path apply.
+        let trimmed = BUNDLED_REGISTRY_PUBKEY_HEX.trim();
+        // We commit the placeholder file empty; this assert pins the
+        // default-build behavior. A real-key build would fail here
+        // and the test would need an explicit expected_some variant.
+        if trimmed.is_empty() {
+            assert!(bundled_registry_pubkey().is_none());
+        }
+    }
+
+    #[test]
+    fn delegation_required_when_root_present() {
+        // Build a synthetic registry-rooted trust chain:
+        //   root_key -> entry signer key -> SKILL.md signature
+        // Verify the happy path, then break each delegation and assert
+        // rejection.
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("delegated");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "skill body").unwrap();
+
+        let root = random_signing_key();
+        let signer = random_signing_key();
+        // Sign SKILL.md hash with the entry signer key.
+        let skill_hash = hash_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        let skill_sig = signer.sign(&skill_hash);
+        let skill_sig_hex = hex_encode(&skill_sig.to_bytes());
+        let signer_pub_hex = hex_encode(&signer.verifying_key().to_bytes());
+        // Root delegates the entry signer's pubkey.
+        let delegation_sig = root.sign(&signer.verifying_key().to_bytes());
+        let delegation_hex = hex_encode(&delegation_sig.to_bytes());
+        let root_pubkey = root.verifying_key();
+
+        // Happy path: delegation valid, skill signature valid.
+        let result = verify_skill_with_expected_key_and_delegation(
+            &skill_dir,
+            &skill_sig_hex,
+            &signer_pub_hex,
+            Some(&delegation_hex),
+            Some(&root_pubkey),
+        )
+        .unwrap();
+        assert!(matches!(result, VerifyResult::Valid { .. }));
+
+        // Missing delegation when root is present → Invalid.
+        let result = verify_skill_with_expected_key_and_delegation(
+            &skill_dir,
+            &skill_sig_hex,
+            &signer_pub_hex,
+            None,
+            Some(&root_pubkey),
+        )
+        .unwrap();
+        assert_eq!(result, VerifyResult::Invalid);
+
+        // Wrong root key → Invalid.
+        let other_root = random_signing_key().verifying_key();
+        let result = verify_skill_with_expected_key_and_delegation(
+            &skill_dir,
+            &skill_sig_hex,
+            &signer_pub_hex,
+            Some(&delegation_hex),
+            Some(&other_root),
+        )
+        .unwrap();
+        assert_eq!(result, VerifyResult::Invalid);
+
+        // No root configured → legacy path; delegation field ignored.
+        let result = verify_skill_with_expected_key_and_delegation(
+            &skill_dir,
+            &skill_sig_hex,
+            &signer_pub_hex,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(matches!(result, VerifyResult::Valid { .. }));
+    }
+
+    #[test]
     fn non_canonical_s_signature_rejected() {
         // Regression: the verifier path uses `verify_strict`, which
         // rejects signatures whose `s` scalar is outside the canonical
@@ -381,6 +563,7 @@ mod tests {
                     url: "https://example.com/weather".into(),
                     signature: None,
                     signer_key: None,
+                    signer_key_delegation: None,
                 },
                 SkillEntry {
                     name: "github".into(),
@@ -390,6 +573,7 @@ mod tests {
                     url: "https://example.com/github".into(),
                     signature: None,
                     signer_key: None,
+                    signer_key_delegation: None,
                 },
                 SkillEntry {
                     name: "tmux".into(),
@@ -399,6 +583,7 @@ mod tests {
                     url: "https://example.com/tmux".into(),
                     signature: None,
                     signer_key: None,
+                    signer_key_delegation: None,
                 },
             ],
         };

@@ -47,9 +47,32 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // adapter sockets). The org-config apply path emits applying /
     // applied / apply-failed audit events, so it must not run until
     // the writer exists.
+    //
+    // The alarm-log HMAC key is loaded from the keychain (or
+    // generated and stored on first run). Failure here is non-fatal:
+    // the writer falls back to unsigned-mode and emits a prominent
+    // warn so an operator can confirm the trust posture. Doctor
+    // surfaces unsigned alarm records as `NoKey` instead of
+    // `Verified`.
+    let alarm_log_key = {
+        let kc = probe_keychain(&cfg.data_dir, String::new);
+        match wirken_vault::load_or_create_alarm_log_key(kc.as_ref()) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "alarm log running in UNSIGNED mode: could not load or store \
+                     the HMAC signing key in the keychain. Tampered alarm records \
+                     will not be detected by `wirken doctor`."
+                );
+                None
+            }
+        }
+    };
     let siem_config = load_siem_config(&cfg);
-    let (audit_writer, audit_handle) = AuditWriter::with_siem(&cfg.audit_db_path(), siem_config)
-        .context("Failed to start audit writer")?;
+    let (audit_writer, audit_handle) =
+        AuditWriter::with_siem_and_alarm_key(&cfg.audit_db_path(), siem_config, alarm_log_key)
+            .context("Failed to start audit writer")?;
     let audit = Arc::new(audit_writer);
 
     audit

@@ -2,9 +2,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 
 use wirken_agent::skill::SkillLoader;
-use wirken_gateway::skill_registry::{
-    self, SkillIndex, VerifyResult, generate_signing_keypair, verify_skill_with_expected_key,
-};
+use wirken_gateway::skill_registry::{self, SkillIndex, VerifyResult, generate_signing_keypair};
 
 use super::config;
 
@@ -92,8 +90,19 @@ pub async fn install(name: &str) -> Result<()> {
 
     // Verify signature against the registry's expected key (not a bundled SKILL.pub).
     // This prevents an attacker from signing a tampered skill with their own key.
+    // When the binary carries a bundled registry root key, the entry's
+    // `signer_key` must be delegated by that root via the
+    // `signer_key_delegation` field; otherwise the install is refused.
     if let (Some(sig_hex), Some(key_hex)) = (&entry.signature, &entry.signer_key) {
-        match verify_skill_with_expected_key(&skill_dir, sig_hex, key_hex)? {
+        let delegation = entry.signer_key_delegation.as_deref();
+        let result = wirken_gateway::skill_registry::verify_skill_with_expected_key_and_delegation(
+            &skill_dir,
+            sig_hex,
+            key_hex,
+            delegation,
+            wirken_gateway::skill_registry::bundled_registry_pubkey().as_ref(),
+        )?;
+        match result {
             VerifyResult::Valid { signer } => {
                 // Write sig/pub files for future local verification
                 std::fs::write(skill_dir.join("SKILL.sig"), sig_hex)?;
@@ -103,7 +112,12 @@ pub async fn install(name: &str) -> Result<()> {
             VerifyResult::Invalid => {
                 // Remove the skill — signature didn't verify
                 std::fs::remove_dir_all(&skill_dir)?;
-                anyhow::bail!("Signature verification failed! Skill not installed.");
+                anyhow::bail!(
+                    "Signature verification failed! Skill not installed. \
+                     If the registry index lacks a `signer_key_delegation` \
+                     field this build expects (registry root anchor enabled), \
+                     the index needs to be re-signed by the upstream registry."
+                );
             }
             VerifyResult::Unsigned => {}
         }

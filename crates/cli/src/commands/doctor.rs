@@ -1,8 +1,9 @@
 use anyhow::Result;
 
 use super::config;
-use wirken_audit::{AlarmLog, AuditLog, VerifyResult};
+use wirken_audit::{AlarmLog, AlarmVerifyStatus, AuditLog, VerifyResult};
 use wirken_gateway::adapter_registry::AdapterRegistry;
+use wirken_vault::probe_keychain;
 
 pub async fn run() -> Result<()> {
     println!();
@@ -159,19 +160,53 @@ pub async fn run() -> Result<()> {
 
     // Out-of-chain alarm log. Surfaces continuous-verify integrity
     // alarms even when the in-chain audit row was tampered along
-    // with the rest of the chain.
-    let alarm_log = AlarmLog::new(&cfg.data_dir);
+    // with the rest of the chain. Try to load the HMAC signing key
+    // from the keychain; on success, doctor shows per-record verify
+    // status. On failure (missing OS keychain, no passphrase
+    // available), doctor reads in unsigned mode and surfaces the
+    // posture.
+    let alarm_log = {
+        let kc = probe_keychain(&cfg.data_dir, String::new);
+        match wirken_vault::load_or_create_alarm_log_key(kc.as_ref()) {
+            Ok(key) => AlarmLog::with_signing_key(&cfg.data_dir, key),
+            Err(_) => AlarmLog::new(&cfg.data_dir),
+        }
+    };
     print_check("Audit alarm log", &alarm_log.path().display().to_string());
+    if !alarm_log.is_signed() {
+        println!(
+            "    Note: HMAC key unavailable; running in unsigned-read mode. \
+             Records show as NoKey or Unsigned regardless of writer state."
+        );
+    }
     match alarm_log.read_all() {
         Ok(records) if records.is_empty() => {
             print_ok();
             println!("    No alarms.");
         }
         Ok(records) => {
-            print_fail(&format!("  {} integrity alarm(s) on file", records.len()));
-            for r in records.iter().take(5) {
+            let tampered = records
+                .iter()
+                .filter(|v| v.status == AlarmVerifyStatus::Tampered)
+                .count();
+            if tampered > 0 {
+                print_fail(&format!(
+                    "  {} alarm(s); {tampered} TAMPERED",
+                    records.len()
+                ));
+            } else {
+                print_fail(&format!("  {} integrity alarm(s) on file", records.len()));
+            }
+            for v in records.iter().take(5) {
+                let r = &v.record;
+                let badge = match v.status {
+                    AlarmVerifyStatus::Verified => "[verified]",
+                    AlarmVerifyStatus::NoKey => "[no-key]",
+                    AlarmVerifyStatus::Unsigned => "[unsigned]",
+                    AlarmVerifyStatus::Tampered => "[TAMPERED]",
+                };
                 println!(
-                    "    [{}] {} session={} seq={} expected={} actual={}",
+                    "    {badge} [{}] {} session={} seq={} expected={} actual={}",
                     r.timestamp,
                     r.alarm_type,
                     r.session_id.as_deref().unwrap_or("-"),
