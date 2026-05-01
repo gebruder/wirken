@@ -452,7 +452,7 @@ fn load_file_refuses_envelope_token_in_body() {
     assert!(
         matches!(
             err,
-            crate::error::AgentError::EnvelopeCollision { ref field, .. } if *field == "body"
+            crate::error::AgentError::EnvelopeCollision { field, .. } if field == "body"
         ),
         "got {err:?}"
     );
@@ -478,7 +478,7 @@ fn load_file_refuses_envelope_token_in_name() {
     assert!(
         matches!(
             err,
-            crate::error::AgentError::EnvelopeCollision { ref field, .. } if *field == "name"
+            crate::error::AgentError::EnvelopeCollision { field, .. } if field == "name"
         ),
         "got {err:?}"
     );
@@ -501,8 +501,8 @@ fn load_file_refuses_envelope_token_in_description() {
     assert!(
         matches!(
             err,
-            crate::error::AgentError::EnvelopeCollision { ref field, .. }
-                if *field == "description"
+            crate::error::AgentError::EnvelopeCollision { field, .. }
+                if field == "description"
         ),
         "got {err:?}"
     );

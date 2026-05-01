@@ -330,6 +330,41 @@ pub async fn verify(dir: &str, strict: bool) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_index() -> Result<SkillIndex> {
+    let url = std::env::var("WIRKEN_SKILLS_INDEX").unwrap_or_else(|_| DEFAULT_INDEX_URL.into());
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .get(&url)
+        .send()
+        .await
+        .context(format!("Failed to fetch skill index from {url}"))?;
+
+    if !resp.status().is_success() {
+        // Return empty index if registry is unavailable
+        tracing::warn!(
+            "Skill index unavailable (HTTP {}), using empty index",
+            resp.status()
+        );
+        return Ok(SkillIndex { skills: vec![] });
+    }
+
+    resp.json::<SkillIndex>()
+        .await
+        .context("Failed to parse skill index")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut cut = max.saturating_sub(3);
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...", &s[..cut])
+}
+
 #[cfg(test)]
 mod verify_outcome_tests {
     use super::{VerifyOutcome, VerifyResult, decide_verify_outcome};
@@ -381,39 +416,4 @@ mod verify_outcome_tests {
             VerifyOutcome::Fail
         );
     }
-}
-
-async fn fetch_index() -> Result<SkillIndex> {
-    let url = std::env::var("WIRKEN_SKILLS_INDEX").unwrap_or_else(|_| DEFAULT_INDEX_URL.into());
-
-    let http = reqwest::Client::new();
-    let resp = http
-        .get(&url)
-        .send()
-        .await
-        .context(format!("Failed to fetch skill index from {url}"))?;
-
-    if !resp.status().is_success() {
-        // Return empty index if registry is unavailable
-        tracing::warn!(
-            "Skill index unavailable (HTTP {}), using empty index",
-            resp.status()
-        );
-        return Ok(SkillIndex { skills: vec![] });
-    }
-
-    resp.json::<SkillIndex>()
-        .await
-        .context("Failed to parse skill index")
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut cut = max.saturating_sub(3);
-    while !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}...", &s[..cut])
 }
