@@ -31,7 +31,7 @@ url = "2"
 base64 = "0.22"
 bollard = { workspace = true }
 wasmtime = { workspace = true }
-wasmtime-wasi = "43.0.1"
+wasmtime-wasi = "43.0.2"
 futures-util = "0.3"
 # Capability-based filesystem handle for the agent workspace. Opened
 # once at ToolRegistry construction, then all read/write/list ops go
