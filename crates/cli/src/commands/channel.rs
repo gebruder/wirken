@@ -380,6 +380,21 @@ fn resolve_token(channel: &str, flag: Option<&str>, secret: bool) -> Result<Stri
     if let Ok(v) = std::env::var(&env_var) {
         let v = v.trim().to_string();
         if !v.is_empty() {
+            // Token came from the process environment rather than an
+            // interactive prompt. Operators who rely on this branch
+            // for unattended setup should know it landed: env vars
+            // are visible in /proc/<pid>/environ to other processes
+            // running at the same UID, and a stale exported value can
+            // silently overwrite a freshly minted credential. The
+            // value still ends up encrypted in the vault; this only
+            // logs the source.
+            tracing::warn!(
+                channel = %channel,
+                env_var = %env_var,
+                "{env_var} resolved from process environment; the value will be \
+                 encrypted in the vault but the env var is visible to other \
+                 processes at the same UID for the lifetime of this shell"
+            );
             return Ok(v);
         }
     }
@@ -418,6 +433,17 @@ fn resolve_with_validation(
         let v = v.trim().to_string();
         if !v.is_empty() {
             validate(&v).with_context(|| format!("Invalid {env_var} env var"))?;
+            // See `resolve_token` for why env-var sourcing is logged.
+            // Same posture: the value lands in the vault, but the env
+            // var was readable by anything sharing the UID up to this
+            // point.
+            tracing::warn!(
+                env_var = %env_var,
+                label = %label,
+                "{env_var} resolved from process environment; the value will be \
+                 encrypted in the vault but the env var is visible to other \
+                 processes at the same UID for the lifetime of this shell"
+            );
             return Ok(v);
         }
     }

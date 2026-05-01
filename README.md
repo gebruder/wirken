@@ -157,10 +157,12 @@ Agents can delegate bounded subtasks to child agents via `spawn_subagent`. The o
 
 A handful of operator-controlled escape hatches relax specific
 defaults: `WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG=1`,
-`WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, `sandbox.json` mode `off`, and
-`WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1`. Each emits a `tracing::warn!`
-whenever it engages and is documented under "Documented escape
-hatches" in the security-properties doc. Persistent flips need a
+`WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, `sandbox.json` mode `off`,
+`WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1`, and
+`WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES=N` (the last raises the
+continuous-verify cadence; values above 10,000 effectively disable
+the in-process verifier and emit a warn). Each is documented under
+"Documented escape hatches" in the security-properties doc. Persistent flips need a
 systemd `EnvironmentFile`, shell `rc` export, or wrapper script so the
 operator's intent is durable across reboots.
 

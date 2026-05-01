@@ -123,7 +123,7 @@ pub fn write_with_secret_perms(path: &Path, contents: &[u8]) -> std::io::Result<
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let mut f = std::fs::OpenOptions::new()
             .mode(0o600)
             .create(true)
@@ -131,6 +131,11 @@ pub fn write_with_secret_perms(path: &Path, contents: &[u8]) -> std::io::Result<
             .write(true)
             .open(path)?;
         f.write_all(contents)?;
+        // OpenOptions::mode only applies on file creation. A
+        // pre-existing file would keep its previous (looser) mode on
+        // rewrite. Re-chmod unconditionally so an upgrade path that
+        // ever landed a 0o644 file converges back to 0o600.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(())
     }
     #[cfg(not(unix))]
@@ -272,28 +277,68 @@ pub fn load_org_url(data_dir: &Path) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
+/// Failure return for [`apply_org_config`]. Carries the partial
+/// list of sections that were applied before the failure so callers
+/// can emit a structured `org-config.apply-failed` audit row showing
+/// which writes already landed.
+#[derive(Debug, Clone)]
+pub struct ApplyError {
+    /// Sections that were written successfully before the failure.
+    pub applied: Vec<String>,
+    /// Section name that failed, e.g. `"sandbox"` or `"tool_policy"`.
+    pub section: String,
+    /// Display string for the underlying I/O / serialization error.
+    pub error: String,
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "apply org config section {}: {}",
+            self.section, self.error
+        )
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
 /// Apply org config to the local data directory.
 /// Writes provider.json, siem.json, mcp.json as appropriate.
 /// Does not overwrite files that already exist unless force is true.
+///
+/// On a per-section failure the partial list of already-applied
+/// sections is returned alongside the failed section name. The caller
+/// uses this to emit a structured audit row so an operator can
+/// reconstruct what landed before the abort.
 pub fn apply_org_config(
     data_dir: &Path,
     org: &OrgConfig,
     force: bool,
-) -> Result<Vec<String>, String> {
-    let mut applied = Vec::new();
+) -> Result<Vec<String>, ApplyError> {
+    let mut applied: Vec<String> = Vec::new();
+
+    fn write_section(
+        applied: &mut Vec<String>,
+        section: &str,
+        path: &Path,
+        body: &[u8],
+    ) -> Result<(), ApplyError> {
+        write_with_secret_perms(path, body).map_err(|e| ApplyError {
+            applied: applied.clone(),
+            section: section.into(),
+            error: e.to_string(),
+        })?;
+        applied.push(section.into());
+        Ok(())
+    }
 
     // Provider
     if let Some(ref provider) = org.provider {
         let path = data_dir.join("provider.json");
         if force || !path.exists() {
-            write_with_secret_perms(
-                &path,
-                serde_json::to_string_pretty(provider)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            )
-            .map_err(|e| format!("write provider.json: {e}"))?;
-            applied.push("provider".into());
+            let body = serde_json::to_string_pretty(provider).unwrap_or_default();
+            write_section(&mut applied, "provider", &path, body.as_bytes())?;
         }
     }
 
@@ -301,14 +346,8 @@ pub fn apply_org_config(
     if let Some(ref siem) = org.siem {
         let path = data_dir.join("siem.json");
         if force || !path.exists() {
-            write_with_secret_perms(
-                &path,
-                serde_json::to_string_pretty(siem)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            )
-            .map_err(|e| format!("write siem.json: {e}"))?;
-            applied.push("siem".into());
+            let body = serde_json::to_string_pretty(siem).unwrap_or_default();
+            write_section(&mut applied, "siem", &path, body.as_bytes())?;
         }
     }
 
@@ -316,14 +355,8 @@ pub fn apply_org_config(
     if let Some(ref mcp) = org.mcp {
         let path = data_dir.join("mcp.json");
         if force || !path.exists() {
-            write_with_secret_perms(
-                &path,
-                serde_json::to_string_pretty(mcp)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            )
-            .map_err(|e| format!("write mcp.json: {e}"))?;
-            applied.push("mcp".into());
+            let body = serde_json::to_string_pretty(mcp).unwrap_or_default();
+            write_section(&mut applied, "mcp", &path, body.as_bytes())?;
         }
     }
 
@@ -337,15 +370,9 @@ pub fn apply_org_config(
     {
         let path = data_dir.join("sandbox.json");
         if force || !path.exists() {
-            let body = serde_json::json!({ "mode": mode });
-            write_with_secret_perms(
-                &path,
-                serde_json::to_string_pretty(&body)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            )
-            .map_err(|e| format!("write sandbox.json: {e}"))?;
-            applied.push("sandbox".into());
+            let body = serde_json::to_string_pretty(&serde_json::json!({ "mode": mode }))
+                .unwrap_or_default();
+            write_section(&mut applied, "sandbox", &path, body.as_bytes())?;
         }
     }
 
@@ -358,18 +385,12 @@ pub fn apply_org_config(
     {
         let path = data_dir.join("tool_policy.json");
         if force || !path.exists() {
-            let body = serde_json::json!({
+            let body = serde_json::to_string_pretty(&serde_json::json!({
                 "allowed_tools": perms.allowed_tools,
                 "blocked_tools": perms.blocked_tools,
-            });
-            write_with_secret_perms(
-                &path,
-                serde_json::to_string_pretty(&body)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            )
-            .map_err(|e| format!("write tool_policy.json: {e}"))?;
-            applied.push("tool_policy".into());
+            }))
+            .unwrap_or_default();
+            write_section(&mut applied, "tool_policy", &path, body.as_bytes())?;
         }
     }
 
@@ -601,6 +622,25 @@ mod tests {
         std::fs::write(tmp.path().join(ORG_CONFIG_PUBKEY_FILE), "deadbeef").unwrap();
         let err = load_org_pubkey(tmp.path()).unwrap_err();
         assert!(err.contains("expected 64 hex chars"), "got {err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_with_secret_perms_chmods_existing_loose_file_back_to_0o600() {
+        // Regression: OpenOptions::mode is only honored on file
+        // creation. If an upgrade window ever produced a file at
+        // 0o644, a subsequent write through this helper must converge
+        // it back to 0o600 rather than silently inherit the loose
+        // mode.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("provider.json");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_with_secret_perms(&path, b"new").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0o600, got 0o{mode:o}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
     }
 
     #[cfg(unix)]

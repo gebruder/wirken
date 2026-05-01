@@ -26,7 +26,9 @@ Channel markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`
 **What the compiler prevents:**
 - A Telegram adapter cannot construct `SessionHandle<Discord>` -- the type parameter is wrong.
 - A function accepting `SessionHandle<Telegram>` cannot be called with `SessionHandle<Discord>`.
-- Cross-channel routing mistakes are caught at compile time, not in production.
+- Cross-channel routing mistakes in code that uses `SessionHandle<C>` are caught at compile time.
+
+**Status of the production message path:** The `SessionHandle<C: Channel>` API and its negative-test scaffolding (regression-tested in `crates/ipc/src/tests.rs:20-30`) exist at the type-system level but are not yet threaded through the production gateway routing path. Production frames carry a `String`-typed channel discriminator on the `AuthenticatedChannel` value resolved at handshake time, and cross-channel mismatch is rejected at runtime via the `adapter.channel_mismatch` audit event rather than at compile time. The phantom-type rollout that retires the `String` discriminator is tracked as I-W-1 in the audit deferred list.
 
 **What this does NOT cover:** The runtime decision of which agent handles which channel. That is a routing policy (see Runtime section).
 
@@ -118,8 +120,8 @@ The three-tier permission model is backed by SQLite:
 | Tier | Behavior | Example Actions |
 |---|---|---|
 | Tier 1 | Always allowed | Workspace file access, web search |
-| Tier 2 | First-use approval, 30-day expiry | Shell exec (by pattern), external file access |
-| Tier 3 | Always prompt | Credential access, destructive ops, cron creation |
+| Tier 2 | First-use approval, 30-day expiry | A curated allowlist of shell-inspection verbs (ls / cat / grep / stat / pwd / whoami / ...), external file access. See AG01 in [security-properties.md](security-properties.md) for the canonical list. There is no documented Tier-2 exec escape hatch -- shell wrappers, language interpreters with `-c`/`-e` eval, and build/deploy tools default to Tier 3. |
+| Tier 3 | Always prompt | Credential access, destructive ops, cron creation, every shell verb outside the Tier 2 inspection-verb allowlist |
 
 **Live update:** `PermissionStore::approve()` and `PermissionStore::revoke()` take effect immediately -- they are SQLite writes checked on every permission query. No restart required.
 
@@ -283,7 +285,7 @@ These are naturally dynamic. An operator granting shell access to an agent at 2 
 
 | Guarantee | Enforcement | Crate | Key Type / Function |
 |---|---|---|---|
-| Channel isolation | Compile-time | `wirken-ipc` | `SessionHandle<C: Channel>`, `PhantomData<C>` |
+| Channel isolation (handle API) | Compile-time | `wirken-ipc` | `SessionHandle<C: Channel>`, `PhantomData<C>` (type-system layer; production routing still uses a `String`-typed `AuthenticatedChannel` discriminator with runtime mismatch detection) |
 | No credential logging | Compile-time | `wirken-vault` | `VaultSecret` (no `Debug` / `Display`) |
 | No credential serialization | Compile-time | `wirken-vault` | `VaultSecret` (no `Serialize`) |
 | No credential copying | Compile-time | `wirken-vault` | `VaultSecret` (no `Clone`) |
