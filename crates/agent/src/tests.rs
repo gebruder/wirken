@@ -757,7 +757,7 @@ fn parse_text_response() {
         }]
     });
 
-    let response = crate::llm::parse_completion_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_completion_response(&body).unwrap();
     match response {
         LlmResponse::Text(text) => assert_eq!(text, "Hello! How can I help?"),
         other => panic!("expected Text, got {other:?}"),
@@ -783,7 +783,7 @@ fn parse_tool_call_response() {
         }]
     });
 
-    let response = crate::llm::parse_completion_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_completion_response(&body).unwrap();
     match response {
         LlmResponse::ToolCalls(calls) => {
             assert_eq!(calls.len(), 1);
@@ -806,7 +806,7 @@ fn parse_empty_response() {
         }]
     });
 
-    let response = crate::llm::parse_completion_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_completion_response(&body).unwrap();
     assert!(matches!(response, LlmResponse::Empty));
 }
 
@@ -825,7 +825,7 @@ fn parse_anthropic_text_response() {
         "stop_reason": "end_turn"
     });
 
-    let response = crate::llm::parse_anthropic_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_anthropic_response(&body).unwrap();
     match response {
         LlmResponse::Text(text) => assert_eq!(text, "Hello! How can I help you today?"),
         other => panic!("expected Text, got {other:?}"),
@@ -844,7 +844,7 @@ fn parse_anthropic_tool_use_response() {
         "stop_reason": "tool_use"
     });
 
-    let response = crate::llm::parse_anthropic_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_anthropic_response(&body).unwrap();
     match response {
         LlmResponse::ToolCalls(calls) => {
             assert_eq!(calls.len(), 1);
@@ -867,7 +867,7 @@ fn parse_anthropic_mixed_response() {
     });
 
     // Tool calls take priority over text
-    let response = crate::llm::parse_anthropic_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_anthropic_response(&body).unwrap();
     assert!(matches!(response, LlmResponse::ToolCalls(_)));
 }
 
@@ -886,7 +886,7 @@ fn parse_gemini_text_response() {
         }]
     });
 
-    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_gemini_response(&body).unwrap();
     match response {
         LlmResponse::Text(text) => assert_eq!(text, "Hello from Gemini!"),
         other => panic!("expected Text, got {other:?}"),
@@ -909,7 +909,7 @@ fn parse_gemini_function_call_response() {
         }]
     });
 
-    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_gemini_response(&body).unwrap();
     match response {
         LlmResponse::ToolCalls(calls) => {
             assert_eq!(calls.len(), 1);
@@ -935,7 +935,7 @@ fn parse_gemini_mixed_response() {
         }]
     });
 
-    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_gemini_response(&body).unwrap();
     assert!(matches!(response, LlmResponse::ToolCalls(_)));
 }
 
@@ -950,7 +950,7 @@ fn parse_gemini_empty_response() {
         }]
     });
 
-    let response = crate::llm::parse_gemini_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_gemini_response(&body).unwrap();
     assert!(matches!(response, LlmResponse::Empty));
 }
 
@@ -970,7 +970,7 @@ fn parse_bedrock_text_response() {
         "stopReason": "end_turn"
     });
 
-    let response = crate::llm::parse_bedrock_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_bedrock_response(&body).unwrap();
     match response {
         LlmResponse::Text(text) => assert_eq!(text, "Hello from Bedrock!"),
         other => panic!("expected Text, got {other:?}"),
@@ -995,7 +995,7 @@ fn parse_bedrock_tool_use_response() {
         "stopReason": "tool_use"
     });
 
-    let response = crate::llm::parse_bedrock_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_bedrock_response(&body).unwrap();
     match response {
         LlmResponse::ToolCalls(calls) => {
             assert_eq!(calls.len(), 1);
@@ -1022,8 +1022,92 @@ fn parse_bedrock_mixed_response() {
         "stopReason": "tool_use"
     });
 
-    let response = crate::llm::parse_bedrock_response(&body).unwrap();
+    let (response, _usage) = crate::llm::parse_bedrock_response(&body).unwrap();
     assert!(matches!(response, LlmResponse::ToolCalls(_)));
+}
+
+// ---------------------------------------------------------------------------
+// Token-usage extraction (wirken-anthropic-token-usage-capture)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn anthropic_usage_extracted_with_cache_fields() {
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": "ok" }],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 1234,
+            "output_tokens": 567,
+            "cache_creation_input_tokens": 800,
+            "cache_read_input_tokens": 9000
+        }
+    });
+    let (_, usage) = crate::llm::parse_anthropic_response(&body).unwrap();
+    assert_eq!(usage.input_tokens, 1234);
+    assert_eq!(usage.output_tokens, 567);
+    assert_eq!(usage.cache_creation_input_tokens, 800);
+    assert_eq!(usage.cache_read_input_tokens, 9000);
+}
+
+#[test]
+fn anthropic_usage_absent_yields_zeros() {
+    let body = serde_json::json!({
+        "content": [{ "type": "text", "text": "ok" }],
+        "stop_reason": "end_turn"
+    });
+    let (_, usage) = crate::llm::parse_anthropic_response(&body).unwrap();
+    assert_eq!(usage.input_tokens, 0);
+    assert_eq!(usage.output_tokens, 0);
+    assert_eq!(usage.cache_creation_input_tokens, 0);
+    assert_eq!(usage.cache_read_input_tokens, 0);
+}
+
+#[test]
+fn openai_usage_extracted_from_prompt_and_completion_tokens() {
+    let body = serde_json::json!({
+        "choices": [{ "message": { "role": "assistant", "content": "ok" } }],
+        "usage": { "prompt_tokens": 42, "completion_tokens": 17 }
+    });
+    let (_, usage) = crate::llm::parse_completion_response(&body).unwrap();
+    assert_eq!(usage.input_tokens, 42);
+    assert_eq!(usage.output_tokens, 17);
+    assert_eq!(usage.cache_creation_input_tokens, 0);
+    assert_eq!(usage.cache_read_input_tokens, 0);
+}
+
+/// The ollama OpenAI-compat path does not populate a usage block.
+/// Capture must default cleanly to zero rather than crash or error.
+#[test]
+fn openai_usage_absent_yields_zeros_for_ollama_compat() {
+    let body = serde_json::json!({
+        "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
+    });
+    let (_, usage) = crate::llm::parse_completion_response(&body).unwrap();
+    assert_eq!(usage.input_tokens, 0);
+    assert_eq!(usage.output_tokens, 0);
+}
+
+#[test]
+fn gemini_usage_extracted_from_usage_metadata() {
+    let body = serde_json::json!({
+        "candidates": [{ "content": { "parts": [{"text": "ok"}], "role": "model" } }],
+        "usageMetadata": { "promptTokenCount": 81, "candidatesTokenCount": 19 }
+    });
+    let (_, usage) = crate::llm::parse_gemini_response(&body).unwrap();
+    assert_eq!(usage.input_tokens, 81);
+    assert_eq!(usage.output_tokens, 19);
+}
+
+#[test]
+fn bedrock_usage_extracted_from_usage_block() {
+    let body = serde_json::json!({
+        "output": { "message": { "role": "assistant", "content": [{"text": "ok"}] } },
+        "stopReason": "end_turn",
+        "usage": { "inputTokens": 250, "outputTokens": 75 }
+    });
+    let (_, usage) = crate::llm::parse_bedrock_response(&body).unwrap();
+    assert_eq!(usage.input_tokens, 250);
+    assert_eq!(usage.output_tokens, 75);
 }
 
 // ---------------------------------------------------------------------------
@@ -4302,6 +4386,8 @@ mod verify {
                 finish_reason: "text".into(),
                 tokens_in: 0,
                 tokens_out: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
                 latency_ms: 1,
             },
         )

@@ -163,7 +163,7 @@ pub async fn call_structured<T: DeserializeOwned>(
             tool_calls: None,
         },
     ];
-    let resp = llm
+    let (resp, _usage) = llm
         .complete(&messages, &[tool], api_key)
         .await
         .map_err(SyntheticToolError::Llm)?;

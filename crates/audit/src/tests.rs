@@ -925,6 +925,8 @@ mod session {
                     finish_reason: "end_turn".into(),
                     tokens_in: 100,
                     tokens_out: 50,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
                     latency_ms: 1234,
                 },
             ),
@@ -1138,5 +1140,90 @@ mod session {
             }
             other => panic!("expected PermissionDenied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn llm_response_round_trips_with_cache_fields() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::LlmResponse {
+                request_id: "req-cache".into(),
+                finish_reason: "end_turn".into(),
+                tokens_in: 1234,
+                tokens_out: 567,
+                cache_creation_input_tokens: 800,
+                cache_read_input_tokens: 9000,
+                latency_ms: 42,
+            },
+        )
+        .unwrap();
+        let events = log.get_range(&h, 0..1).unwrap();
+        match &events[0].event {
+            SessionEvent::LlmResponse {
+                tokens_in,
+                tokens_out,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                ..
+            } => {
+                assert_eq!(*tokens_in, 1234);
+                assert_eq!(*tokens_out, 567);
+                assert_eq!(*cache_creation_input_tokens, 800);
+                assert_eq!(*cache_read_input_tokens, 9000);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_response_deserializes_without_cache_fields() {
+        // Legacy rows written before the cache fields were added
+        // (and rows from non-anthropic providers, which never carry
+        // cache info) must still deserialize; both fields default
+        // to zero.
+        let legacy = r#"{"kind":"llm_response","request_id":"req-1","finish_reason":"end_turn","tokens_in":100,"tokens_out":50,"latency_ms":1234}"#;
+        let event: SessionEvent = serde_json::from_str(legacy).unwrap();
+        match event {
+            SessionEvent::LlmResponse {
+                tokens_in,
+                tokens_out,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                ..
+            } => {
+                assert_eq!(tokens_in, 100);
+                assert_eq!(tokens_out, 50);
+                assert_eq!(cache_creation_input_tokens, 0);
+                assert_eq!(cache_read_input_tokens, 0);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_response_omits_zero_cache_fields_on_serialize() {
+        // The skip_serializing_if predicate keeps the wire format
+        // tight for non-cached responses (every openai/gemini/bedrock
+        // response, plus any anthropic response with no cache hit).
+        let event = SessionEvent::LlmResponse {
+            request_id: "r".into(),
+            finish_reason: "end_turn".into(),
+            tokens_in: 10,
+            tokens_out: 5,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            latency_ms: 1,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            !json.contains("cache_creation_input_tokens"),
+            "zero cache_creation_input_tokens should be skipped: {json}"
+        );
+        assert!(
+            !json.contains("cache_read_input_tokens"),
+            "zero cache_read_input_tokens should be skipped: {json}"
+        );
     }
 }

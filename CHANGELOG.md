@@ -10,6 +10,32 @@ tagged.
 
 ## Unreleased
 
+### Audit
+
+- LLM-response events in the session log now carry token-usage
+  metadata. `SessionEvent::LlmResponse` records `tokens_in`,
+  `tokens_out`, plus two new optional fields
+  `cache_creation_input_tokens` and `cache_read_input_tokens`
+  (anthropic prompt-cache fills only). Each provider's
+  non-streaming completion path extracts the usage block from the
+  HTTP response: anthropic from `usage.{input_tokens,
+  output_tokens, cache_creation_input_tokens,
+  cache_read_input_tokens}`, OpenAI-compat from
+  `usage.{prompt_tokens, completion_tokens}`, gemini from
+  `usageMetadata.{promptTokenCount, candidatesTokenCount}`,
+  bedrock from `usage.{inputTokens, outputTokens}`. Endpoints that
+  do not populate a usage block — including the ollama
+  OpenAI-compat path — record zeros and do not error. Old logs
+  written before this change continue to deserialize cleanly; the
+  cache fields default to zero. The streaming dispatch does not
+  yet capture usage and writes zeros; bench mode and
+  economics-reporting runs must use the non-streaming path until
+  the `wirken-streaming-token-usage` follow-up ships (see
+  `skills/lyrik/FOLLOWUPS.md` §5). This closes the gap surfaced by
+  run-005 against the canonical AVB pin where the session log
+  recorded `tokens_in: 0, tokens_out: 0` for every anthropic
+  response.
+
 ### Lyrik
 
 - The findings.json shape Lyrik runs emit is now pinned. The skill
