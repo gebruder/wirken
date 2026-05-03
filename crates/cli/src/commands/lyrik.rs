@@ -240,7 +240,10 @@ async fn dispatch_via_agent_runtime(
     expected_findings: &Path,
 ) -> Result<()> {
     let pin = resolve_phase_pin(config)?;
-    let llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+    let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+    if let Some(cw) = pin.context_window {
+        llm_config.context_window = cw as usize;
+    }
 
     let cfg = super::config();
 
@@ -497,6 +500,13 @@ struct PhasePin {
     provider: String,
     model: String,
     base_url: String,
+    /// Optional per-pin context window override. When set, replaces
+    /// the per-provider default from `LlmConfig::from_provider`.
+    /// Lets a config pin a model with a non-default context window
+    /// (e.g. an ollama model that needs a smaller window than the
+    /// 32K default, or a custom OpenAI-compat endpoint with a known
+    /// larger window) without touching the agent crate.
+    context_window: Option<u32>,
 }
 
 fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
@@ -526,10 +536,15 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
         .map(String::from)
         .or_else(|| provider_default_base_url(&provider).map(String::from))
         .ok_or_else(|| anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`"))?;
+    let context_window = pin_obj
+        .get("context_window")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok());
     Ok(PhasePin {
         provider,
         model,
         base_url,
+        context_window,
     })
 }
 
@@ -762,5 +777,51 @@ mod tests {
     fn provider_default_unknown_returns_none() {
         assert_eq!(provider_default_base_url("not-a-provider"), None);
         assert_eq!(provider_default_base_url(""), None);
+    }
+
+    use super::resolve_phase_pin;
+
+    #[test]
+    fn resolve_phase_pin_returns_context_window_when_set() {
+        let cfg = serde_json::json!({
+            "phases": {
+                "framing": {
+                    "provider": "ollama",
+                    "model": "qwen2.5:7b",
+                    "context_window": 65536u64
+                }
+            }
+        });
+        let pin = resolve_phase_pin(&cfg).unwrap();
+        assert_eq!(pin.context_window, Some(65_536));
+        assert_eq!(pin.provider, "ollama");
+        assert_eq!(pin.base_url, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn resolve_phase_pin_omits_context_window_when_absent() {
+        let cfg = serde_json::json!({
+            "phases": {
+                "framing": {"provider": "ollama", "model": "qwen2.5:7b"}
+            }
+        });
+        let pin = resolve_phase_pin(&cfg).unwrap();
+        assert_eq!(pin.context_window, None);
+    }
+
+    #[test]
+    fn resolve_phase_pin_rejects_negative_context_window() {
+        let cfg = serde_json::json!({
+            "phases": {
+                "framing": {
+                    "provider": "ollama",
+                    "model": "qwen2.5:7b",
+                    "context_window": -1
+                }
+            }
+        });
+        let pin = resolve_phase_pin(&cfg).unwrap();
+        // u64 conversion fails for negatives; pin treats as absent.
+        assert_eq!(pin.context_window, None);
     }
 }
