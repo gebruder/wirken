@@ -1,0 +1,28 @@
+avb_id,framing_primary,framing_secondary,asi_category,notes
+AGENT-001,injection,prompt_injection,ASI-02,placeholder; oracle pinned at AVB_PIN.txt
+AGENT-004,secrets,supply_chain,ASI-05,Markdown-embedded credential; placeholder
+AGENT-010,prompt_injection,injection,ASI-01,generic prompt-injection oracle entry
+AGENT-027,prompt_injection,,ASI-01,LangChain-specific prompt-injection oracle entry
+AGENT-029,supply_chain,secrets,ASI-04,overly broad filesystem access oracle
+AGENT-030,supply_chain,,ASI-04,unverified server sources oracle
+AGENT-031,secrets,,ASI-05,sensitive environment variable exposure oracle
+AGENT-032,supply_chain,,ASI-04,missing sandboxing oracle
+AGENT-033,auth,,ASI-05,missing authentication oracle
+AGENT-034,injection,prompt_injection,ASI-02,tool input validation oracle
+AGENT-040,supply_chain,,ASI-04,schema security oracle
+AGENT-042,supply_chain,,ASI-04,excessive server counts oracle
+AGENT-043,auth,supply_chain,ASI-05,daemon-detection rule (TypeScript)
+AGENT-044,auth,,ASI-05,NOPASSWD sudoers oracle
+AGENT-045,auth,,ASI-05,CAP_SYS_ADMIN oracle
+AGENT-046,secrets,,ASI-05,system credential store access oracle
+AGENT-047,supply_chain,,ASI-04,subprocess execution without sandboxing oracle
+AGENT-054,supply_chain,,ASI-04,baseline drift oracle
+AGENT-055,supply_chain,,ASI-04,cross-server tool shadowing oracle
+AGENT-056,prompt_injection,supply_chain,ASI-09,tool description poisoning oracle
+AGENT-057,injection,prompt_injection,ASI-02,argument injection oracle
+
+# This file is a placeholder. The canonical mapping is derived from
+# AVB upstream's per-sample oracle metadata once cloned. Each row
+# above has framing_primary set so the harness can look up the
+# expected Lyrik framing for each AGENT-N entry; secondary is the
+# cross-framing pair if the sample admits more than one lens.

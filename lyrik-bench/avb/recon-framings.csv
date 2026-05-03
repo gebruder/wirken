@@ -1,0 +1,4 @@
+avb_set,active,skipped
+A,"injection,prompt_injection,supply_chain","crypto,race_condition,memory_safety,deserialization,secrets"
+B,"supply_chain,prompt_injection,secrets,auth","crypto,race_condition,memory_safety,injection,deserialization"
+C,"secrets,auth,injection,prompt_injection","crypto,race_condition,memory_safety,deserialization,supply_chain"
