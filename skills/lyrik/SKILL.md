@@ -14,20 +14,35 @@ permissions:
     allow: ["*"]
 ---
 
-# Lyrik (minimal)
+# Lyrik (minimal + recon)
 
-Find one auth-related finding in the codebase under `<workspace>` and write it to a single staging file. The runner aggregates that file into the canonical `findings.json`. This is the smallest viable assessment shape — one framing, one finding, one write — used to validate the runner pipeline end-to-end before broader assessment forms re-enable.
+Find one auth-related finding in the codebase under `<workspace>` and write it to a single staging file. The runner aggregates that file into the canonical `findings.json`. This is the smallest viable assessment shape with recon — one framing, one finding, one write, one mandatory pass over the source — used to validate the runner pipeline before broader assessment forms re-enable.
 
-Out of scope in this minimal mode: Phase 0 (context, rubric), recon, multi-framing, two-pass union, dedup, multi-pass scoring, concentration index, gate routing, exploit adapter. They return as separate slices once the minimal pipeline is confirmed working.
+Out of scope in this mode: Phase 0 (context, rubric), multi-framing, two-pass union, dedup, multi-pass scoring, concentration index, gate routing, exploit adapter. They return as separate slices.
 
-## Steps
+## Recon (mandatory, before any finding)
+
+The minimal-skill mode without recon produced fabricated paths — the model emitted findings against files that don't exist in the workspace. This section closes that hole. **Before emitting any finding, you must read at least one source file in scope, and the file you cite in `location.file` must be a file you have actually opened in this turn.** Inventing paths is the failure mode this section exists to prevent.
+
+Recon steps:
 
 1. **Read scope.** Open `.lyrik/config.json` if present; honor `scope.include` and `scope.exclude` glob lists. Otherwise treat the whole workspace as in-scope. Skip `.git/` and `.lyrik/` regardless.
-2. **List files in scope.** Walk the workspace, picking source files (`.py`, `.js`, `.ts`, `.go`, `.rs`, `.c`, `.h`, `.java`, `.rb`). For tiny workspaces, every file is fair game.
-3. **Pick one file likely to carry an auth concern.** Heuristics: filename or directory contains `auth`, `login`, `session`, `acl`, `permission`, `role`, `admin`, `token`. Otherwise, any file that exposes callable surfaces or builds prompts that mix trusted/untrusted text. With nothing better, pick the largest source file in scope.
-4. **Read the file.** Identify one auth concern. The framing is broad — anything that affects who can do what, or what privileges propagate without verification, counts: missing access check before a privileged operation, hardcoded credentials, weak comparison (`==` of secrets), broken-by-default permission posture, untrusted input inheriting elevated authority (e.g., user-controlled string folded into a system prompt scope), tool surfaces invoked without per-caller authorization. If the file genuinely has no auth concern, write the smallest defensible finding anyway with `tier: INFO` and a rationale that names the absence — the goal of the minimal pipeline is to exercise emission, not to invent vulnerabilities.
-5. **Stage the finding.** Write the finding object to `.lyrik/state/runs/<run-id>/staging/findings/finding-001.json` via `write_file`. One file, one finding, this minimal mode emits exactly one. Do **not** write `findings.json` directly — the runner aggregates `staging/findings/*.json` into the final file.
-6. **Return briefly.** Reply with one short sentence naming the file and the concern. The runner takes over aggregation.
+
+2. **List files in scope.** Use `list_files(<dir>)` starting at the workspace root. For tiny workspaces (a handful of files), one `list_files(".")` suffices. For larger ones, descend into subdirectories whose names suggest auth-relevant content (`auth/`, `session/`, `acl/`, `permission/`, `admin/`, `user/`, `login/`, `token/`, `crypto/`).
+
+3. **Pick a candidate file.** Prefer source files (`.py`, `.js`, `.ts`, `.go`, `.rs`, `.c`, `.h`, `.java`, `.rb`) whose name or directory matches the heuristics above. With nothing matching, pick the largest source file in scope. With only one source file, pick that one.
+
+4. **Read it in full** via `read_file(<path>)`. If `read_file` returns an error, pick a different file from the listing and retry. Do not synthesize content; do not write a finding against a path you couldn't read.
+
+5. **Locate the framing target.** From the file content, find one auth concern. The framing is broad — anything that affects who can do what, or what privileges propagate without verification, counts: missing access check before a privileged operation, hardcoded credentials, weak comparison (`==` of secrets), broken-by-default permission posture, untrusted input inheriting elevated authority (e.g., user-controlled string folded into a system prompt scope), tool surfaces invoked without per-caller authorization. If the file genuinely has no auth concern, write the smallest defensible finding with `tier: INFO` and a `summary` that names the absence — the goal is to exercise the pipeline truthfully, not to invent vulnerabilities.
+
+Recon's only artifact is "the file path and line range you'll cite in the finding." No separate context document, no rubric, no per-component history. Those return in later slices.
+
+## Emission
+
+6. **Stage the finding.** Write the finding object to `.lyrik/state/runs/<run-id>/staging/findings/finding-001.json` via `write_file`. One file, one finding, this minimal-plus-recon mode emits exactly one. The `location.file` must be the path you read in step 4. Do **not** write `findings.json` directly — the runner aggregates `staging/findings/*.json` into the final file.
+
+7. **Return briefly.** Reply with one short sentence naming the file and the concern. The runner takes over aggregation.
 
 ## Finding shape
 
