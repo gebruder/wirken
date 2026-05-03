@@ -28,7 +28,7 @@ lyrik-bench/
 *-bench/
 
 # Audit work and drafts
-audit/
+/audit/
 drafts/
 *.draft.md
 audit-*.md
@@ -43,4 +43,4 @@ audit.log
 # Private / out-of-scope subdirectories
 private/
 *-private/
-analysis/
+/analysis/
