@@ -81,3 +81,22 @@ This is a real finding *about Wirken*, not about webchat or mcp-proxy individual
 A lyrik report that surfaces a structural finding requires lyrik to **keep state across assessments of the same codebase** — and to compare candidate findings against past findings *for clustering by structural similarity*, not just for suppression-or-routing as the dedup gate currently does. This is distinct from intra-run clustering (item 3) — the lifecycle and storage are different.
 
 Two cases so far. Three or four more before the design question is ripe. The shape is the highest-value capability the lyrik form can plausibly carry — worth more design weight than any of items 1–3.
+
+## 5. Streaming token-usage capture (wirken-streaming-token-usage)
+
+Surfaced 2026-05-03 by the `wirken-anthropic-token-usage-capture` slice.
+Wirken's non-streaming dispatch now captures the provider's `usage`
+block (input/output tokens, plus anthropic-specific cache fields) and
+records it in `SessionEvent::LlmResponse`. The streaming dispatch
+(`LlmClient::complete_stream`) does not — it returns
+`LlmResponse` only and writes `Usage::default()` (zeros) into the log.
+Each provider's streaming protocol carries usage in different events
+(anthropic in the final `message_delta`, OpenAI in the final SSE chunk
+when `stream_options.include_usage = true`); capturing it requires
+provider-specific event parsing.
+
+**Constraint until this slice ships**: bench mode and
+economics-reporting runs must use non-streaming dispatch. Streaming
+returns `Usage::default()` and would silently under-report token cost;
+any cost number computed off a streaming session is wrong by the full
+input/output count.

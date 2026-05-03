@@ -884,7 +884,7 @@ impl Agent {
             .complete(&messages, &[], self.api_key.as_deref())
             .await
         {
-            Ok(LlmResponse::Text(summary)) => {
+            Ok((LlmResponse::Text(summary), _usage)) => {
                 // Replace the Compaction message content with the
                 // model summary + a note that it was model-generated.
                 let existing = self
@@ -1264,7 +1264,7 @@ impl Agent {
 
             self.check_inference_or_deny()?;
             let started = std::time::Instant::now();
-            let response = self
+            let (response, usage) = self
                 .llm
                 .complete(
                     self.conversation.messages(),
@@ -1278,8 +1278,10 @@ impl Agent {
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
-                    tokens_in: 0,
-                    tokens_out: 0,
+                    tokens_in: usage.input_tokens,
+                    tokens_out: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
                 },
             )?;
@@ -1538,13 +1540,22 @@ impl Agent {
                 result?
             };
             let latency_ms = started.elapsed().as_millis() as u64;
+            // Streaming path does not yet capture usage. The
+            // wirken-streaming-token-usage follow-up captures usage
+            // from each provider's streaming events. Until then,
+            // bench mode and economics-reporting runs must use the
+            // non-streaming dispatch above; this path under-reports
+            // by recording zeros.
+            let usage = crate::llm::Usage::default();
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
-                    tokens_in: 0,
-                    tokens_out: 0,
+                    tokens_in: usage.input_tokens,
+                    tokens_out: usage.output_tokens,
+                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
                 },
             )?;

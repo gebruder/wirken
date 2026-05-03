@@ -220,11 +220,24 @@ pub enum SessionEvent {
         messages_hash: HashHex,
     },
     /// LLM response metadata.
+    ///
+    /// `tokens_in` and `tokens_out` come from the provider's usage
+    /// block. `cache_creation_input_tokens` and
+    /// `cache_read_input_tokens` are anthropic-specific (prompt
+    /// caching) and stay zero for other providers; both are
+    /// defaulted on deserialize so logs written before these fields
+    /// existed continue to read cleanly. Endpoints that do not
+    /// populate a usage block (some custom OpenAI-compatible servers,
+    /// including ollama) record zeros across the board.
     LlmResponse {
         request_id: String,
         finish_reason: String,
         tokens_in: u32,
         tokens_out: u32,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        cache_creation_input_tokens: u32,
+        #[serde(default, skip_serializing_if = "is_zero_u32")]
+        cache_read_input_tokens: u32,
         latency_ms: u64,
     },
     /// Permission denial recorded by the harness. `action_key` is
@@ -1111,6 +1124,10 @@ fn append_inner(
 
 fn canonicalize_payload(event: &SessionEvent) -> Result<Vec<u8>, AuditError> {
     Ok(serde_json::to_vec(event)?)
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
