@@ -101,7 +101,12 @@ impl LlmConfig {
         }
     }
 
-    /// Ollama defaults (local)
+    /// Ollama defaults (local). 32_768 is the safe intersection
+    /// across qwen2.5, llama3.1, llama3.2, mistral, and gemma. Models
+    /// with smaller native context get clamped by ollama itself when
+    /// `num_ctx` is requested over its native maximum; larger models
+    /// (rare in current local releases) need an explicit override
+    /// via the lyrik config's `phases.<phase>.context_window`.
     pub fn ollama(model: &str) -> Self {
         Self {
             provider: "ollama".into(),
@@ -111,7 +116,7 @@ impl LlmConfig {
             temperature: 0.7,
             region: None,
             tools_enabled: true,
-            context_window: 8_192,
+            context_window: 32_768,
         }
     }
 
@@ -165,7 +170,7 @@ impl LlmConfig {
             "anthropic" => 200_000,
             "gemini" => 1_000_000,
             "bedrock" => 200_000,
-            "ollama" => 8_192,
+            "ollama" => 32_768,
             _ => 32_000,
         };
         Self {
@@ -327,8 +332,49 @@ impl LlmClient {
             "anthropic" => self.complete_anthropic(messages, tools, api_key).await,
             "gemini" => self.complete_gemini(messages, tools, api_key).await,
             "bedrock" => self.complete_bedrock(messages, tools, api_key).await,
+            "ollama" => self.complete_ollama(messages, tools).await,
             _ => self.complete_openai(messages, tools, api_key).await,
         }
+    }
+
+    /// Ollama native `/api/chat` completion. The OpenAI-compat bridge
+    /// at `/v1/chat/completions` silently drops `options.num_ctx`,
+    /// which means a 32K context declaration in [`LlmConfig`] is
+    /// fiction over that path — ollama serves the model under its 4K
+    /// (or 2K) default, and large prompts (e.g. a Lyrik SKILL.md
+    /// body plus tool specs) get truncated invisibly. The native
+    /// endpoint honors `options.num_ctx`, so the declared window is
+    /// what the model actually receives.
+    async fn complete_ollama(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<(LlmResponse, Usage), AgentError> {
+        let url = ollama_chat_url(&self.config.base_url);
+        let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
+        let body = build_ollama_request_body(&self.config, messages_json, tools);
+
+        let response = self
+            .send_with_retry(|| {
+                self.http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
+        }
+
+        let response_body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        parse_ollama_response(&response_body)
     }
 
     /// OpenAI-compatible completion (OpenAI, Ollama, custom endpoints).
@@ -870,15 +916,130 @@ pub(crate) fn build_openai_request_body(
         body["tools"] = serde_json::Value::Array(tools_json);
     }
     if config.provider == "ollama" {
-        // Ollama defaults `num_ctx` to 2048 in its OpenAI-compat
-        // bridge, which silently truncates large prompts (e.g. a
-        // Lyrik SKILL.md body) and yields an empty response. Request
-        // the model's native context limit. Ollama caps to whatever
-        // the model actually supports, so an oversized request
-        // narrows safely rather than erroring.
-        body["options"] = serde_json::json!({ "num_ctx": 32768 });
+        // Defense-in-depth: ollama configs that go through the
+        // OpenAI-compat path (e.g. tests, custom-routed callers) still
+        // get `num_ctx` injected. The native `/api/chat` path used by
+        // [`LlmClient::complete_ollama`] is the canonical route; the
+        // compat bridge silently drops this anyway, but emitting it
+        // keeps the request shape consistent with what ollama
+        // documents.
+        body["options"] = serde_json::json!({ "num_ctx": config.context_window });
     }
     body
+}
+
+/// Construct the URL for ollama's native `/api/chat` endpoint, given a
+/// `base_url` that may include a trailing `/v1` (the OpenAI-compat
+/// bridge path) or end with `/`. The native endpoint sits at
+/// `<host>/api/chat` regardless of the configured base.
+pub(crate) fn ollama_chat_url(base_url: &str) -> String {
+    let host = base_url
+        .trim_end_matches('/')
+        .trim_end_matches("/v1")
+        .trim_end_matches('/');
+    format!("{host}/api/chat")
+}
+
+/// Build the request body for ollama's native `/api/chat` endpoint.
+/// Differences from OpenAI-compat: `max_tokens` and `temperature`
+/// move into `options`; `num_predict` is the ollama spelling of
+/// max-tokens; `num_ctx` declares the model context window so ollama
+/// loads the model with that window rather than its 4K (or 2K)
+/// default.
+pub(crate) fn build_ollama_request_body(
+    config: &LlmConfig,
+    messages_json: Vec<serde_json::Value>,
+    tools: &[ToolDef],
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "messages": messages_json,
+        "options": {
+            "num_ctx": config.context_window,
+            "num_predict": config.max_tokens,
+            "temperature": config.temperature,
+        },
+        "stream": false,
+    });
+    if !tools.is_empty() {
+        let tools_json: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::Value::Array(tools_json);
+    }
+    body
+}
+
+/// Parse an ollama `/api/chat` response into [`LlmResponse`] +
+/// [`Usage`]. Ollama tool_calls do not carry an `id` field, so the
+/// parser synthesizes a stable index-keyed id (`call_0`, `call_1`,
+/// …); the rest of the agent pipeline uses the synthesized id to
+/// match later tool-result messages to their requests. Tool-call
+/// arguments may arrive as a JSON object (ollama's native shape) or
+/// as a JSON-encoded string; both are normalized to the
+/// JSON-encoded-string shape that [`crate::conversation::ToolCallRequest`] holds.
+pub fn parse_ollama_response(body: &serde_json::Value) -> Result<(LlmResponse, Usage), AgentError> {
+    let message = body
+        .get("message")
+        .ok_or_else(|| AgentError::Llm("no message in ollama response".into()))?;
+
+    let usage = Usage {
+        input_tokens: body
+            .get("prompt_eval_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32,
+        output_tokens: body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+    };
+
+    if let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
+        let calls: Vec<ToolCallRequest> = tool_calls
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tc)| {
+                let func = tc.get("function")?;
+                let name = func.get("name")?.as_str()?.to_string();
+                // Arguments may be a string (JSON-encoded) or an object.
+                let arguments = match func.get("arguments") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(v) => serde_json::to_string(v).ok()?,
+                    None => return None,
+                };
+                let id = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("call_{i}"));
+                Some(ToolCallRequest {
+                    id,
+                    name,
+                    arguments,
+                })
+            })
+            .collect();
+        if !calls.is_empty() {
+            return Ok((LlmResponse::ToolCalls(calls), usage));
+        }
+    }
+
+    if let Some(content) = message.get("content").and_then(|c| c.as_str())
+        && !content.is_empty()
+    {
+        return Ok((LlmResponse::Text(content.to_string()), usage));
+    }
+
+    Ok((LlmResponse::Empty, usage))
 }
 
 pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {

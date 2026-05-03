@@ -742,6 +742,131 @@ fn openai_request_body_omits_num_ctx_for_non_ollama() {
     }
 }
 
+#[test]
+fn ollama_chat_url_strips_v1_suffix() {
+    use crate::llm::ollama_chat_url;
+    assert_eq!(
+        ollama_chat_url("http://localhost:11434/v1"),
+        "http://localhost:11434/api/chat"
+    );
+    assert_eq!(
+        ollama_chat_url("http://localhost:11434/v1/"),
+        "http://localhost:11434/api/chat"
+    );
+}
+
+#[test]
+fn ollama_chat_url_handles_no_v1_suffix() {
+    use crate::llm::ollama_chat_url;
+    assert_eq!(
+        ollama_chat_url("http://localhost:11434"),
+        "http://localhost:11434/api/chat"
+    );
+    assert_eq!(
+        ollama_chat_url("http://localhost:11434/"),
+        "http://localhost:11434/api/chat"
+    );
+}
+
+#[test]
+fn ollama_request_body_carries_num_ctx_from_config() {
+    use crate::llm::build_ollama_request_body;
+    let mut cfg = LlmConfig::ollama("qwen2.5:7b");
+    cfg.context_window = 65_536;
+    let body = build_ollama_request_body(&cfg, vec![], &[]);
+    assert_eq!(body["options"]["num_ctx"], serde_json::json!(65_536));
+    assert_eq!(body["options"]["num_predict"], serde_json::json!(4096));
+    assert_eq!(body["model"], serde_json::json!("qwen2.5:7b"));
+    assert_eq!(body["stream"], serde_json::json!(false));
+    assert!(
+        body.get("tools").is_none(),
+        "no tools means no `tools` key on the request"
+    );
+}
+
+#[test]
+fn ollama_request_body_includes_tools_when_present() {
+    use crate::llm::build_ollama_request_body;
+    use crate::tool::ToolDef;
+    let cfg = LlmConfig::ollama("qwen2.5:7b");
+    let tools = vec![ToolDef {
+        name: "echo".into(),
+        description: "Echo input.".into(),
+        parameters: serde_json::json!({"type": "object"}),
+    }];
+    let body = build_ollama_request_body(&cfg, vec![], &tools);
+    let arr = body.get("tools").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["type"], serde_json::json!("function"));
+    assert_eq!(arr[0]["function"]["name"], serde_json::json!("echo"));
+}
+
+#[test]
+fn parse_ollama_response_text() {
+    use crate::llm::{LlmResponse, parse_ollama_response};
+    let body = serde_json::json!({
+        "model": "qwen2.5:7b",
+        "message": {"role": "assistant", "content": "hello"},
+        "done": true,
+        "prompt_eval_count": 50,
+        "eval_count": 10,
+    });
+    let (resp, usage) = parse_ollama_response(&body).unwrap();
+    match resp {
+        LlmResponse::Text(s) => assert_eq!(s, "hello"),
+        other => panic!("expected text, got {other:?}"),
+    }
+    assert_eq!(usage.input_tokens, 50);
+    assert_eq!(usage.output_tokens, 10);
+}
+
+#[test]
+fn parse_ollama_response_tool_calls_synthesizes_id() {
+    use crate::llm::{LlmResponse, parse_ollama_response};
+    let body = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"function": {"name": "read_file", "arguments": {"path": "/etc/hostname"}}},
+                {"function": {"name": "list_files", "arguments": "{\"path\":\".\"}"}}
+            ]
+        },
+        "done": true,
+        "prompt_eval_count": 200,
+        "eval_count": 30,
+    });
+    let (resp, usage) = parse_ollama_response(&body).unwrap();
+    match resp {
+        LlmResponse::ToolCalls(calls) => {
+            assert_eq!(calls.len(), 2);
+            // First call: arguments arrived as object; parser serializes to string.
+            assert_eq!(calls[0].id, "call_0");
+            assert_eq!(calls[0].name, "read_file");
+            let parsed: serde_json::Value = serde_json::from_str(&calls[0].arguments).unwrap();
+            assert_eq!(parsed["path"], serde_json::json!("/etc/hostname"));
+            // Second call: arguments already a string; parser preserves it.
+            assert_eq!(calls[1].id, "call_1");
+            assert_eq!(calls[1].name, "list_files");
+            assert_eq!(calls[1].arguments, "{\"path\":\".\"}");
+        }
+        other => panic!("expected tool calls, got {other:?}"),
+    }
+    assert_eq!(usage.input_tokens, 200);
+    assert_eq!(usage.output_tokens, 30);
+}
+
+#[test]
+fn parse_ollama_response_empty_message_yields_empty() {
+    use crate::llm::{LlmResponse, parse_ollama_response};
+    let body = serde_json::json!({
+        "message": {"role": "assistant", "content": ""},
+        "done": true,
+    });
+    let (resp, _) = parse_ollama_response(&body).unwrap();
+    assert!(matches!(resp, LlmResponse::Empty));
+}
+
 // ---------------------------------------------------------------------------
 // LLM response parsing
 // ---------------------------------------------------------------------------
