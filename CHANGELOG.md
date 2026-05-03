@@ -22,6 +22,21 @@ tagged.
   masking them with a silent re-seal. Found via Lyrik dogfooding
   during slice 7b2.5b bench validation.
 
+- Lyrik core runs now cap findings at grade 0.5. Grade 1.0
+  requires evidence at rung 7 (`crash_reproduced`) or higher,
+  which only the optional sandboxed exploit adapter produces. A
+  core run that emits grade 1.0 without an adapter artifact
+  (`exploit_artifact` field) is a finding-shape error; the grade
+  is corrected at report-render time and the rationale is
+  preserved so the operator can see what the model claimed vs
+  what it could actually defend. Found in run-005 against the
+  canonical AVB pin: claude-sonnet-4 emitted "PoC succeeded —
+  arbitrary code execution confirmed" rationales on three
+  findings without ever running a PoC, because the rationale is
+  text and the model's training favors decisive language. The
+  grade field is the load-bearing column and now caps to what the
+  run can actually defend.
+
 ## 1.0.0 — Windows 11; audit CLI user-grade; cross-platform IPC trait surface
 
 The cross-platform release. Wirken now ships a native Windows 11 binary alongside the existing Linux and macOS builds. The audit CLI is user-grade across all three platforms: structured JSON output, citable session IDs, schema versioning, the verify command emits typed failure data. The IPC layer is now expressed as the `wirken_ipc::Stream` and `wirken_ipc::Listener` trait surface; production code talks through the trait, with unix-domain sockets on Linux/macOS and named pipes on Windows behind it.
