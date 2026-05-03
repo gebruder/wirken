@@ -82,6 +82,15 @@ tagged.
   grade field is the load-bearing column and now caps to what the
   run can actually defend.
 
+### Fixed
+
+- Binary version string read 1.0.0 in the v1.0.1 release
+  artifacts. Cargo.toml package version was not bumped before
+  tagging. Corrected in subsequent builds. The released v1.0.1
+  binaries and signatures are immutable; users running
+  `wirken --version` against the released artifacts will see
+  1.0.0 until they upgrade past the next release.
+
 ## 1.0.0 — Windows 11; audit CLI user-grade; cross-platform IPC trait surface
 
 The cross-platform release. Wirken now ships a native Windows 11 binary alongside the existing Linux and macOS builds. The audit CLI is user-grade across all three platforms: structured JSON output, citable session IDs, schema versioning, the verify command emits typed failure data. The IPC layer is now expressed as the `wirken_ipc::Stream` and `wirken_ipc::Listener` trait surface; production code talks through the trait, with unix-domain sockets on Linux/macOS and named pipes on Windows behind it.
