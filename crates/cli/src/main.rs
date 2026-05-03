@@ -87,6 +87,10 @@ enum Commands {
     #[command(subcommand)]
     Cron(CronCommands),
 
+    /// Lyrik security-assessment skill commands
+    #[command(subcommand)]
+    Lyrik(LyrikCommands),
+
     /// Send a message to an agent
     #[command(name = "ask")]
     Ask {
@@ -100,6 +104,22 @@ enum Commands {
 
     /// Run diagnostics
     Doctor,
+}
+
+#[derive(Subcommand)]
+enum LyrikCommands {
+    /// Emit a Lyrik report in the requested format.
+    Report {
+        /// Output format. Currently only `sarif` is supported.
+        #[arg(long, default_value = "sarif")]
+        format: String,
+        /// Run-id under `.lyrik/state/runs/<run-id>/` in the current directory.
+        #[arg(long)]
+        run: String,
+        /// Output file path. Parent directory is created if missing.
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -672,5 +692,12 @@ async fn main() -> Result<()> {
         },
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
         Commands::Doctor => commands::doctor::run().await,
+        Commands::Lyrik(cmd) => match cmd {
+            LyrikCommands::Report {
+                format,
+                run,
+                output,
+            } => commands::lyrik::report(&format, &run, &output).await,
+        },
     }
 }
