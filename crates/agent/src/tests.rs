@@ -714,6 +714,34 @@ fn llm_config_custom() {
     assert_eq!(config.base_url, "http://my-server:8080/v1");
 }
 
+#[test]
+fn openai_request_body_injects_num_ctx_for_ollama() {
+    use crate::llm::build_openai_request_body;
+    let cfg = LlmConfig::ollama("qwen2.5:7b");
+    let body = build_openai_request_body(&cfg, vec![], &[]);
+    assert_eq!(
+        body["options"]["num_ctx"],
+        serde_json::json!(32768),
+        "ollama provider must request the model's native context window"
+    );
+}
+
+#[test]
+fn openai_request_body_omits_num_ctx_for_non_ollama() {
+    use crate::llm::build_openai_request_body;
+    for cfg in [
+        LlmConfig::openai("gpt-4o"),
+        LlmConfig::custom("http://other:8080/v1", "some-model"),
+    ] {
+        let body = build_openai_request_body(&cfg, vec![], &[]);
+        assert!(
+            body.get("options").is_none(),
+            "{}: options.num_ctx must not be sent to non-ollama providers",
+            cfg.provider
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LLM response parsing
 // ---------------------------------------------------------------------------
