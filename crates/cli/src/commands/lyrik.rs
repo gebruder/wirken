@@ -403,6 +403,12 @@ async fn dispatch_via_agent_runtime(
     .context("aggregate rubric")?;
     aggregate_findings(&staging.join("findings"), expected_findings, run_id)
         .context("aggregate findings")?;
+    // remove_dir succeeds only if empty — exactly the semantics we
+    // want for cleaning up the parent staging/ once each subdir
+    // aggregator has removed its own. A non-empty parent (partial
+    // failure or unfamiliar staging contents) is left alone for the
+    // operator to inspect.
+    let _ = std::fs::remove_dir(&staging);
 
     if !expected_findings.exists() {
         anyhow::bail!(
