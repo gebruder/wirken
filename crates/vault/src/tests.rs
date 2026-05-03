@@ -248,7 +248,9 @@ fn credential_store_propagates_non_decryption_keychain_error() {
             Err(crate::VaultError::Keychain("auto-create reached".into()))
         }
         fn retrieve_device_key(&self) -> Result<VaultSecret, crate::VaultError> {
-            Err(crate::VaultError::Keychain("simulated permission denied".into()))
+            Err(crate::VaultError::Keychain(
+                "simulated permission denied".into(),
+            ))
         }
         fn delete_device_key(&self) -> Result<(), crate::VaultError> {
             unreachable!()
@@ -264,7 +266,9 @@ fn credential_store_propagates_non_decryption_keychain_error() {
                 "the original keychain error must propagate verbatim; got: {msg}"
             );
         }
-        Ok(_) => panic!("CredentialStore::open silently auto-created under a non-NotInitialized error"),
+        Ok(_) => {
+            panic!("CredentialStore::open silently auto-created under a non-NotInitialized error")
+        }
         Err(other) => panic!("expected the original Keychain error to propagate; got {other:?}"),
     }
 }

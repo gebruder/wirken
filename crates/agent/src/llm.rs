@@ -965,9 +965,7 @@ pub fn parse_anthropic_response(
 }
 
 /// Parse a Google Gemini generateContent response.
-pub fn parse_gemini_response(
-    body: &serde_json::Value,
-) -> Result<(LlmResponse, Usage), AgentError> {
+pub fn parse_gemini_response(body: &serde_json::Value) -> Result<(LlmResponse, Usage), AgentError> {
     let parts = body
         .get("candidates")
         .and_then(|c| c.as_array())

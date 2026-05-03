@@ -325,9 +325,7 @@ mod linux {
                 // No item under (wirken, device-key) is the legitimate
                 // first-run case — route to CredentialStore::open's
                 // auto-create arm via KeychainNotInitialized.
-                let item = items
-                    .first()
-                    .ok_or(VaultError::KeychainNotInitialized)?;
+                let item = items.first().ok_or(VaultError::KeychainNotInitialized)?;
                 let secret = item
                     .get_secret()
                     .map_err(|e| VaultError::Keychain(format!("D-Bus get secret: {e}")))?;

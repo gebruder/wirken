@@ -52,9 +52,12 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let run_dir = target.join(".lyrik").join("state").join("runs").join(run_id);
-    std::fs::create_dir_all(&run_dir)
-        .with_context(|| format!("create {}", run_dir.display()))?;
+    let run_dir = target
+        .join(".lyrik")
+        .join("state")
+        .join("runs")
+        .join(run_id);
+    std::fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
 
     let mut audit = AuditLogger::open(&run_dir.join("audit.log"), run_id, bench_mode)?;
 
@@ -114,8 +117,7 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
             )?;
         }
         None => {
-            dispatch_via_agent_runtime(target, run_id, &config, &mut audit, &findings_dest)
-                .await?;
+            dispatch_via_agent_runtime(target, run_id, &config, &mut audit, &findings_dest).await?;
         }
     }
 
@@ -159,8 +161,7 @@ async fn dispatch_via_agent_runtime(
     expected_findings: &Path,
 ) -> Result<()> {
     let pin = resolve_phase_pin(config)?;
-    let llm_config =
-        LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+    let llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
 
     let cfg = super::config();
 
@@ -183,8 +184,7 @@ async fn dispatch_via_agent_runtime(
     };
 
     let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
-        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
-            .context("open session log")?,
+        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).context("open session log")?,
     );
 
     // Workspace for the agent IS the target. The agent reads source
@@ -199,8 +199,8 @@ async fn dispatch_via_agent_runtime(
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
-    let perms = PermissionStore::open(&cfg.permissions_db_path())
-        .context("open permission store")?;
+    let perms =
+        PermissionStore::open(&cfg.permissions_db_path()).context("open permission store")?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 
     let skills_dir = cfg.data_dir.join("skills");
@@ -305,9 +305,7 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
             "anthropic" => Some("https://api.anthropic.com/v1".to_string()),
             _ => None,
         })
-        .ok_or_else(|| {
-            anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`"))?;
     Ok(PhasePin {
         provider,
         model,
@@ -349,8 +347,7 @@ pub async fn report(
     if let Some(parent) = output.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     std::fs::write(output, body).with_context(|| format!("write {}", output.display()))?;
     println!("wrote {}", output.display());
@@ -387,31 +384,6 @@ fn rewrite_top_level_run_id(body: &str, new_run_id: &str) -> Result<String> {
     out.push_str(new_run_id);
     out.push_str(&body[value_end..]);
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rewrite_top_level_run_id;
-
-    #[test]
-    fn rewrite_top_level_run_id_replaces_only_the_value_bytes() {
-        let body = r#"{
-  "run_id": "old-id",
-  "produced_at": "2026-05-03T10:30:00Z"
-}"#;
-        let out = rewrite_top_level_run_id(body, "sample/run-001").unwrap();
-        assert!(out.contains("\"run_id\": \"sample/run-001\""));
-        assert!(out.contains("\"produced_at\": \"2026-05-03T10:30:00Z\""));
-        // Byte-length difference is exactly len("sample/run-001") - len("old-id")
-        let delta = "sample/run-001".len() as isize - "old-id".len() as isize;
-        assert_eq!(out.len() as isize - body.len() as isize, delta);
-    }
-
-    #[test]
-    fn rewrite_top_level_run_id_errors_when_field_absent() {
-        let body = r#"{"produced_at": "2026"}"#;
-        assert!(rewrite_top_level_run_id(body, "x").is_err());
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,5 +428,30 @@ impl AuditLogger {
         writeln!(self.file, "{}", serde_json::to_string(&record)?)
             .with_context(|| "write audit record")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_top_level_run_id;
+
+    #[test]
+    fn rewrite_top_level_run_id_replaces_only_the_value_bytes() {
+        let body = r#"{
+  "run_id": "old-id",
+  "produced_at": "2026-05-03T10:30:00Z"
+}"#;
+        let out = rewrite_top_level_run_id(body, "sample/run-001").unwrap();
+        assert!(out.contains("\"run_id\": \"sample/run-001\""));
+        assert!(out.contains("\"produced_at\": \"2026-05-03T10:30:00Z\""));
+        // Byte-length difference is exactly len("sample/run-001") - len("old-id")
+        let delta = "sample/run-001".len() as isize - "old-id".len() as isize;
+        assert_eq!(out.len() as isize - body.len() as isize, delta);
+    }
+
+    #[test]
+    fn rewrite_top_level_run_id_errors_when_field_absent() {
+        let body = r#"{"produced_at": "2026"}"#;
+        assert!(rewrite_top_level_run_id(body, "x").is_err());
     }
 }
