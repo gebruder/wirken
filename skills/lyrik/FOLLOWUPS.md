@@ -26,13 +26,6 @@ The `decrypt` function returns plaintext via `cipher.decrypt` as `Vec<u8>` that 
 
 `install_bundled_skills` skips skills whose path already exists. An attacker who plants `~/.wirken/skills/<name>/` *before* the operator's first `wirken setup` run keeps their version forever — subsequent setups skip the directory unconditionally. Realistic attacker-precedes-operator scenarios (compromised CI image, shared machine, restored-from-backup state). Graded 0 today (atypical threat model), HIGH if attacker-precedes-operator is in scope.
 
-Schema questions for whoever picks this up:
-
-- Does `latent` get its own report stream, or extend the existing grade scheme (e.g. `0/H` — "graded zero now, would be H if condition X")?
-- How does the agent identify the "condition X" that flips a finding live? Pattern-match on bind addresses, install-time checks, hardcoded permissions assumptions? Explicit operator-named threat models in the rubric?
-- How does latent interact with regression? A latent finding later realized by a config change is structurally similar to the reintroduction case the regression stream already names.
-- What's the dedup story across runs? If the same latent finding is rediscovered every assessment until the underlying code is fixed, does it suppress after first sighting, or does it keep appearing as a steady-state warning?
-
 Four cases now across three threat models (network surface config, crypto memory hygiene, skill-loader trust timing). Pattern is consistent: graded 0 against the named threat model, HIGH in a single-step expansion. One or two more cases before the design question is ripe.
 
 ## 2. Hardening stream alongside novel and regression
@@ -51,13 +44,6 @@ The four-axis scorer is built for vulnerability findings — *is this a real bug
 **One more case**, surfaced 2026-04-28 during dogfood on `crates/agent/src/skill.rs`:
 
 - `parse_frontmatter` reads the entire SKILL.md and runs `serde_yaml::from_str` on the frontmatter slice with no size cap. A 100 MB SKILL.md or a YAML bomb DoSes the loader. Same shape as the mcp-proxy `MAX_FRAME_BYTES` finding: a hardcoded-or-absent input size cap on a parser that should refuse oversized input early.
-
-Schema questions:
-
-- Should the report carry a third `hardening` stream alongside `novel` and `regression`?
-- If yes, what scoring shape applies? Hardening findings don't have a "real bug" axis; they are proposals.
-- Does the dedup gate apply? Across runs, the same hardening finding rediscovered every assessment until the underlying API is fixed is still useful as a steady-state warning, but at lower volume than novel findings.
-- How is hardening prioritised in the report? Vulnerabilities first is obvious; hardening clusters second, ordered by what?
 
 Six worked cases now across three threat models (vault crypto, mcp-proxy protocol, skill loader). The pattern is consistent — *API/config shape that makes misuse easy, not exploitable today* — and is distinct from both novel-vulnerability and latent-config-dependent. Decision threshold solidly passed: schema design can be made cleanly in a single session of design work when picked up.
 
@@ -94,64 +80,4 @@ This is a real finding *about Wirken*, not about webchat or mcp-proxy individual
 
 A lyrik report that surfaces a structural finding requires lyrik to **keep state across assessments of the same codebase** — and to compare candidate findings against past findings *for clustering by structural similarity*, not just for suppression-or-routing as the dedup gate currently does. This is distinct from intra-run clustering (item 3) — the lifecycle and storage are different.
 
-Schema questions:
-
-- Where does cross-assessment state live? `.lyrik/` per-repo already carries rubric and context; a `patterns/` subdirectory holding previously-observed structural findings is plausible.
-- How does the agent decide a new finding matches a structural pattern? Causal-tier model call against past structural findings, similar in shape to the dedup causal tier but with different intent.
-- Should the report carry a fourth stream (`structural`) alongside `novel`, `regression`, and (eventually) `hardening`? Or should structural findings be a tag on existing-stream findings ("this novel finding is the third instance of pattern X across this codebase")?
-- Cadence: structural findings tend to be slow-moving — the "rate-bound every trust-crossing" pattern won't be fixed in one PR. Does each assessment re-surface them at full salience, or do they decay to a steady-state warning?
-
 Two cases so far. Three or four more before the design question is ripe. The shape is the highest-value capability the lyrik form can plausibly carry — worth more design weight than any of items 1–3.
-
-## 5. Static pre-screen for prompt_injection (Stage 1 detector with provenance, defence in depth)
-
-Surfaced 2026-04-28 from the OpenClaw scan. Multiple existing OpenClaw skills implement deterministic pattern matching for prompt-injection detection — `haoyuwang99/skill-guard`, `jamesouttake/skill-guard`, `0xmerkle/skill-guard-actor` (Lakera Guard wrapper), `eathon/clawscan-v2`, several others. The pattern is well-precedented field practice.
-
-**Re-scoped from an earlier framing.** The earlier framing called this "static pre-screen layered before the framing run to save tokens" — that's wrong. It conflated detector output with scoring output, and treated defence in depth as cost optimisation. The corrected scope below is what this item is for.
-
-### What this is
-
-A deterministic pattern-match detector that runs at **Stage 1 (candidate generation)**, parallel to the model-reasoning framing pass. It produces candidates with the same finding schema as model-reasoning candidates, tagged with `detection_source: "static_prescreen"` (see `docs/design/lyrik-json-schema.md`).
-
-Pattern categories:
-
-- Hidden HTML comments containing imperative instructions
-- Zero-width Unicode characters in source files
-- Base64 / hex-encoded payloads embedded in comments or strings
-- Role-impersonation strings (`As an AI assistant`, `Ignore previous instructions`, etc.)
-- Dangerous frontmatter combinations in any consumed text resource
-- Encoding/obfuscation patterns (multi-layer encoding, unusual character sets)
-
-Each pattern is documented with rationale and false-positive shape. The screen produces candidates conservatively; the model-reasoning pass evaluates whether each pattern hit reflects a real concern.
-
-### Why defence in depth, not optimisation
-
-Static pattern detection and model-reasoning detection are different detectors with different failure modes:
-
-- **Static detection** is deterministic and brittle: catches known patterns reliably, misses novel ones.
-- **Model reasoning** is semantic and probabilistic: catches semantic intent including novel patterns; occasionally misses obvious patterns due to attention distribution or distraction.
-
-Running both gives defence in depth. The model-reasoning detector is *the thing being attacked* — an attacker who knows lyrik uses model reasoning crafts inputs that exploit attention failures. The static detector catches what model-reasoning misses; model-reasoning catches what static misses. Neither alone is sufficient; both together are stronger than either.
-
-### Detector disagreement is not scoring disagreement
-
-When the static pre-screen produces a candidate and the model-reasoning pass does not (or vice versa), the candidate flows through the funnel with `detection_source` set to whichever detector produced it. **This is not scoring disagreement** — that's the explicit lesson from the disagreement-semantics design (SKILL.md Scoring section).
-
-Detector disagreement is upstream of scoring. It sits at Stage 1. It does not route through `scoring_disagreement`. Detector-tuning is the team's response (do we trust the static screen on this pattern?), not rubric-tuning or framing-decision.
-
-### Open design questions
-
-- **What flag does a detector-only candidate carry?** Currently `detection_source: "static_prescreen"` or `"model_reasoning"` (vs `"both"`). Is that enough, or does a single-detector candidate need additional metadata indicating "the other detector evaluated and disagreed"?
-- **How does the team respond?** Detector-tuning is the answer in principle, but the operational shape (where does the tuning go, how does it persist across runs) is unspecified.
-- **Does single-detector status affect routing?** Should single-detector candidates flow through scoring normally, route to a `detector_review` gate, or get a separate stream? Each option has different implications for funnel accounting.
-- **Scanner outputs (semgrep, gitleaks, etc.) as a third detector class.** Do they take `detection_source: "scanner_<name>"`? The enum needs to handle this if so.
-- **Pattern catalog versioning.** When the static screen's pattern set evolves, runs against the same scope at different points in time will produce different candidate pools. Stable IDs (per `docs/design/lyrik-json-schema.md`) need to handle this; how?
-
-### What the disagreement-semantics design gave this item
-
-The earlier framing of "static pre-screen as token-cost optimisation" conflated detector output with scoring output. The disagreement-semantics design (SKILL.md Scoring section) made the distinction explicit: scoring disagreement is at Stage 4; detector disagreement is at Stage 1. They require different handling, different gates (or none), and different schema fields. This item now has a clean scope: static pre-screen as Stage 1 detector with provenance, paired with model-reasoning as a co-detector.
-
-### Worked cases
-
-Lyrik does not yet ship a static pre-screen. The worked-case evidence is **field practice from the OpenClaw scan** — multiple existing skills implement this pattern as standalone. That validates the design at the existence-proof level, but lyrik has no run-001-style direct evidence yet. This stub captures the re-scoped design and reserves the schema fields (`detection_source` enum in `docs/design/lyrik-json-schema.md`). Implementation comes when funded.
-
