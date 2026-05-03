@@ -10,6 +10,12 @@
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use wirken_agent::Agent;
+use wirken_agent::llm::LlmConfig;
+use wirken_gateway::permissions::PermissionStore;
+use wirken_vault::{CredentialStore, probe_keychain};
 
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -81,10 +87,10 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
         );
     }
 
-    // Skill dispatch. Until the agent runtime is wired, the runner
-    // accepts a fixture path that bootstraps the run-state with a
-    // pre-produced findings.json. Audit records still emit so the
-    // reproduction exercises the full envelope.
+    // Skill dispatch. Default path: invoke the wirken Agent runtime
+    // against the model pin in the target's .lyrik/config.json and
+    // run the Lyrik skill phases end-to-end. The fixture path remains
+    // for CI reproduction without spending tokens.
     let findings_dest = run_dir.join("findings.json");
     match use_fixture {
         Some(fixture) => {
@@ -108,15 +114,8 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
             )?;
         }
         None => {
-            audit.emit(
-                "lyrik.dispatch",
-                serde_json::json!({"mode": "agent_runtime", "status": "not_wired"}),
-            )?;
-            anyhow::bail!(
-                "agent-runtime skill dispatch is not wired in this slice; \
-                 supply --use-fixture <path> for reproduction mode (slice 7b1) \
-                 until the agent dispatch slice (7b2) lands"
-            );
+            dispatch_via_agent_runtime(target, run_id, &config, &mut audit, &findings_dest)
+                .await?;
         }
     }
 
@@ -141,6 +140,178 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
     println!("findings written to {}", findings_dest.display());
     println!("audit log at {}", run_dir.join("audit.log").display());
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent-runtime dispatch
+// ---------------------------------------------------------------------------
+
+/// Dispatch the Lyrik skill via wirken's Agent runtime. Reads the
+/// model pin from the target's `.lyrik/config.json` (preferring
+/// `phases.framing`, falling back to `phases.score`/`phases.recon`),
+/// builds an Agent with workspace = target, loads bundled skills
+/// from `<data_dir>/skills/`, and sends the assessment prompt.
+async fn dispatch_via_agent_runtime(
+    target: &Path,
+    run_id: &str,
+    config: &serde_json::Value,
+    audit: &mut AuditLogger,
+    expected_findings: &Path,
+) -> Result<()> {
+    let pin = resolve_phase_pin(config)?;
+    let llm_config =
+        LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+
+    let cfg = super::config();
+
+    let api_key = if pin.provider != "ollama" {
+        let keychain = probe_keychain(&cfg.data_dir, super::cached_vault_passphrase);
+        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("open credential store")?;
+        let cred_name = format!("{}-api-key", pin.provider);
+        match store.retrieve(&cred_name) {
+            Ok((secret, _)) => Some(secret.expose().to_string()),
+            Err(e) => anyhow::bail!(
+                "API key '{cred_name}' missing from vault: {e}; \
+                 add it with `wirken credentials add {cred_name}` \
+                 or change the target's .lyrik/config.json pin"
+            ),
+        }
+    } else {
+        None
+    };
+
+    let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
+        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("open session log")?,
+    );
+
+    // Workspace for the agent IS the target. The agent reads source
+    // files from there and writes findings.json back into the target's
+    // `.lyrik/state/runs/<run-id>/` per the Lyrik skill instructions.
+    let mut agent = Agent::new_with_sandbox(
+        format!("lyrik-{}", run_id.replace('/', "-")),
+        target.to_path_buf(),
+        llm_config,
+        api_key,
+        session_log,
+        super::load_sandbox_config(&cfg.data_dir),
+    )?;
+
+    let perms = PermissionStore::open(&cfg.permissions_db_path())
+        .context("open permission store")?;
+    agent.set_permissions(Arc::new(Mutex::new(perms)));
+
+    let skills_dir = cfg.data_dir.join("skills");
+    let skills_loaded = if skills_dir.is_dir() {
+        match agent.load_skills(&skills_dir) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("load_skills({}) failed: {e}", skills_dir.display());
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    audit.emit(
+        "lyrik.dispatch.started",
+        serde_json::json!({
+            "mode": "agent_runtime",
+            "provider": pin.provider,
+            "model": pin.model,
+            "base_url": pin.base_url,
+            "skills_dir": skills_dir.display().to_string(),
+            "skills_loaded": skills_loaded,
+            "workspace": target.display().to_string(),
+        }),
+    )?;
+
+    // /lyrik triggers the SlashInterceptor which prepends the skill
+    // body. The remainder gives run-specific parameters the methodology
+    // does not encode.
+    let prompt = format!(
+        "/lyrik Run a full assessment on the codebase in this workspace. \
+         Run-id: `{run_id}`. Bench mode is enabled: phase_0_signoff and \
+         high_severity_review auto-approve, do not wait for human signoff. \
+         Write the final findings.json to \
+         `.lyrik/state/runs/{run_id}/findings.json` with rung and deferral \
+         fields on every finding per the report contract."
+    );
+
+    let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
+    let result = agent
+        .process_message(&prompt, inbound_id)
+        .await
+        .context("agent.process_message returned an error")?;
+
+    audit.emit(
+        "lyrik.dispatch.completed",
+        serde_json::json!({
+            "mode": "agent_runtime",
+            "response_len": result.response.len(),
+            "denials": result.denials.len(),
+        }),
+    )?;
+
+    if !expected_findings.exists() {
+        anyhow::bail!(
+            "agent ran but findings.json was not written at {} \
+             (the skill instructs the agent to write this file; check the \
+             agent response: {:?})",
+            expected_findings.display(),
+            result.response.chars().take(500).collect::<String>()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct PhasePin {
+    provider: String,
+    model: String,
+    base_url: String,
+}
+
+fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
+    let phases = config
+        .get("phases")
+        .ok_or_else(|| anyhow::anyhow!("config has no `phases` block"))?;
+    let pin_obj = phases
+        .get("framing")
+        .or_else(|| phases.get("score"))
+        .or_else(|| phases.get("recon"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("config.phases has neither framing, score, nor recon entries")
+        })?;
+    let provider = pin_obj
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("phase pin missing `provider`"))?
+        .to_string();
+    let model = pin_obj
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("phase pin missing `model`"))?
+        .to_string();
+    let base_url = pin_obj
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| match provider.as_str() {
+            "ollama" => Some("http://localhost:11434/v1".to_string()),
+            "anthropic" => Some("https://api.anthropic.com/v1".to_string()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`")
+        })?;
+    Ok(PhasePin {
+        provider,
+        model,
+        base_url,
+    })
 }
 
 // ---------------------------------------------------------------------------
