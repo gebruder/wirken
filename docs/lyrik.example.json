@@ -17,5 +17,6 @@
     "high_severity_review": { "adapter": "signal", "target": "+15551234567" }
   },
   "prior_findings_path": "./.lyrik/prior",
-  "memory_path": "./.lyrik/memory"
+  "memory_path": "./.lyrik/memory",
+  "bench_mode": false
 }

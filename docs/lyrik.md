@@ -89,6 +89,17 @@ String. Path to the directory containing prior CVEs, pentest reports, and intern
 
 String. Path to the project-memory directory holding ADRs, postmortems, threat models, and design docs (markdown). Absolute, or relative to the repo root. Defaults to `./.lyrik/memory` if absent. Phase 0 reads this directory recursively for project-history enrichment. The Jira CSV, if present, is read at `<memory_path>/jira.csv`.
 
+### `bench_mode`
+
+Boolean. Defaults to `false`. When `true`, two human gates are short-circuited so the run can complete without an interactive reviewer:
+
+- `phase_0_signoff` auto-approves the rubric and context. The committed `.lyrik/rubric.md` is treated as approved without routing to the gate adapter.
+- `high_severity_review` auto-approves delivery for grade 1.0 findings. The reviewer step is recorded but not waited on.
+
+The `scoring_disagreement` gate is **not** short-circuited. Three-way disagreement still routes through the gate to a benchmark-side log file rather than a channel adapter; the disagreement count remains a metric.
+
+Both auto-approvals emit audit records with `signoff.decision: "auto_bench"` so consumers can distinguish bench runs from production runs after the fact. Only set this on benchmark or batch-evaluation targets; production runs should leave it `false`.
+
 ## Enrichment inputs
 
 Phase 0 reads three kinds of input to give the project context real history. All are opt-in: lyrik runs without them, but the resulting context lacks the hot-zones and per-component-history layers that downstream framing and scoring rely on.
