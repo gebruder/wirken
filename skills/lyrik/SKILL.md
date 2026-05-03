@@ -156,6 +156,41 @@ Run only on findings graded 0.5 (correct class, unverified reachability). Run in
 - **0.5** — correct class, location or reachability unverified.
 - **1.0** — correct root cause, correct location, exploit demonstrated reachable.
 
+**Core Lyrik runs cap at grade 0.5.** Grade 1.0 requires evidence at rung 7 (`crash_reproduced`) or higher, which only the optional sandboxed exploit adapter produces. A core Lyrik run that has not invoked the adapter has no source of grade-1.0 evidence; emitting grade 1.0 anyway is a finding-shape error, not a defensible verdict. If the rationale text claims "PoC succeeded" or "exploit demonstrated" without a corresponding adapter-emitted artifact, the grade is corrected to 0.5 at report-render time and the rationale is preserved as-is so the operator can see what the model claimed and what it could actually defend.
+
+This caps a real failure mode: the model is happy to write "PoC succeeded — arbitrary code execution confirmed" in its rationale text without ever running a PoC, because the rationale is text and the model's training favors decisive language. The grade field is the load-bearing column; cap it to what the run can actually defend.
+
+### Worked grade examples
+
+A finding at rung 4 (`root_cause_explained`) inside a core Lyrik run:
+
+```json
+{
+  "id": "F001",
+  "title": "Code injection via eval() in analyze_data tool",
+  "location": "agent.py:18",
+  "rung": "root_cause_explained",
+  "grade": 0.5,
+  "rationale": "The analyze_data tool accepts arbitrary Python expressions and executes them via eval(). No input validation. Reachability via tool-call dispatch is documented; verification of an actual exploit is out of scope for this run."
+}
+```
+
+The same finding after the optional sandboxed exploit adapter runs and produces a successful PoC:
+
+```json
+{
+  "id": "F001",
+  "title": "Code injection via eval() in analyze_data tool",
+  "location": "agent.py:18",
+  "rung": "exploit_demonstrated",
+  "grade": 1.0,
+  "rationale": "...",
+  "exploit_artifact": ".lyrik/state/runs/<run-id>/poc/F001.exploit.log"
+}
+```
+
+The grade-1.0 row carries an `exploit_artifact` field pointing at the adapter's output. Without that field, grade 1.0 is not defensible from a core run.
+
 ## Report
 
 ### Output contract
