@@ -163,7 +163,7 @@ Run only on findings graded 0.5 (correct class, unverified reachability). Run in
 Every Lyrik report **MUST** contain:
 
 - **Summary opening** — the regression-stream finding (if any), novel-stream count, gate-routed count, concentration-index reading.
-- **Findings, by stream** — novel findings with grade, scorer rationales, exploit result if any; regression findings each pointing at the past finding they match and the commit that was supposed to fix the prior.
+- **Findings, by stream** — novel findings with grade, scorer rationales, exploit result if any; regression findings each pointing at the past finding they match and the commit that was supposed to fix the prior. Every finding carries its terminal **rung** (one of `suspicion`, `static_corroboration`, `property_violated`, `root_cause_explained`, `variant_observed`, `patch_localized`) and its **deferral reason** (`null` when no deferral applied; otherwise one of `scope_bound`, `rubric_clarification`, `rubric_silent`). Both fields ride together: `rung 1, deferral null` reads differently from `rung 1, deferral scope_bound`.
 - **Gate-routed deferrals** — every item routed to `scoring_disagreement` or scope-bound disclosed with its deferral reason. Never tier-invented.
 - **Funnel disclosure** — every category count, with the numbers reconciled. Including run-specific named line items where they apply (e.g. `stopped_at_0.5_kernel_runtime_oos`).
 - **Concentration index** — measurement with leave-top-N-out methodology stated.
