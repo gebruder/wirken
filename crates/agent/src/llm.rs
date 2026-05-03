@@ -245,31 +245,7 @@ impl LlmClient {
         let url = format!("{}/chat/completions", self.config.base_url);
 
         let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
-
-        let mut body = serde_json::json!({
-            "model": self.config.model,
-            "messages": messages_json,
-            "max_tokens": self.config.max_tokens,
-            "temperature": self.config.temperature,
-            "stream": false,
-        });
-
-        if !tools.is_empty() {
-            let tools_json: Vec<serde_json::Value> = tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::Value::Array(tools_json);
-        }
+        let body = build_openai_request_body(&self.config, messages_json, tools);
 
         let mut request = self
             .http
@@ -766,6 +742,50 @@ impl LlmClient {
     pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.http
     }
+}
+
+/// Build the JSON body for the OpenAI-compatible chat-completion
+/// request. Extracted from [`LlmClient::complete_openai`] so unit
+/// tests can verify the body shape (notably the ollama-side
+/// `options.num_ctx` injection) without a live HTTP round-trip.
+pub(crate) fn build_openai_request_body(
+    config: &LlmConfig,
+    messages_json: Vec<serde_json::Value>,
+    tools: &[ToolDef],
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": config.model,
+        "messages": messages_json,
+        "max_tokens": config.max_tokens,
+        "temperature": config.temperature,
+        "stream": false,
+    });
+    if !tools.is_empty() {
+        let tools_json: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.parameters,
+                    }
+                })
+            })
+            .collect();
+        body["tools"] = serde_json::Value::Array(tools_json);
+    }
+    if config.provider == "ollama" {
+        // Ollama defaults `num_ctx` to 2048 in its OpenAI-compat
+        // bridge, which silently truncates large prompts (e.g. a
+        // Lyrik SKILL.md body) and yields an empty response. Request
+        // the model's native context limit. Ollama caps to whatever
+        // the model actually supports, so an oversized request
+        // narrows safely rather than erroring.
+        body["options"] = serde_json::json!({ "num_ctx": 32768 });
+    }
+    body
 }
 
 pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {
