@@ -18,10 +18,9 @@ permissions:
   egress:
     mode: allowlist
     domains:
-      # The egress allowlist is the same set as sources.toml. Until the
-      # loader derives one from the other, both are maintained by hand
-      # in this preset. Adding a source means editing both files in the
-      # same commit. Mismatch is an attach-time error in a later scope.
+      # The egress allowlist is the same set as sources.toml. Both are
+      # maintained by hand in this preset. Adding a source means editing
+      # both files in the same commit.
       #
       # Ollama embedding endpoint: 127.0.0.1 is in the allowlist
       # specifically so the orchestrator's POST to <ollama>/api/embed
@@ -54,7 +53,7 @@ permissions:
 
 Fires once per day on a cron the operator configures. Performs a strict-pipeline run over the source allowlist:
 
-1. Fetch each source in `sources.toml` via the declared method (RSS / API / rate-limited scrape). The HTTP wrapper enforces the egress allowlist and (in a later scope) the per-host rate limit.
+1. Fetch each source in `sources.toml` via the declared method (RSS / API / rate-limited scrape). The HTTP wrapper enforces the egress allowlist.
 2. Normalize fetched items into candidate records: `title`, `source`, `date`, `url`, `body_excerpt`, `citation_json`.
 3. Skip if the candidate's content hash is already in the seen set.
 4. Score the candidate's relevance against the user's interests file (`~/.wirken/zirkel/interests.toml`). Output: a float in `[0, 1]` plus a one-line `why_surfaced` rationale that names the matched interest.
@@ -79,7 +78,3 @@ The aggregator and librarian share this state; both skills are scoped to the sam
 - `sources.toml` (preset-level, alongside `preset.toml`) — the addressable public set of sources.
 - `interests.toml` (per-user, in `~/.wirken/zirkel/`) — concepts, keywords, exclusions, optional source weight tweaks.
 - Channel adapter pin and target (configured at preset install).
-
-## What runtime pieces are not yet implemented
-
-The runtime fetcher, scheduled-run wiring, SQLite schema, and clustering integration are deferred to follow-up scopes. This skill declares the contract; the agent attaches it as part of the Zirkel preset; a later scope makes the daily run actually fire.

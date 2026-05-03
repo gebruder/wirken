@@ -6,11 +6,6 @@
 # unit; the per-skill `permissions:` blocks (signed in each SKILL.md
 # frontmatter) merge to the agent's effective profile via the union
 # semantics established in #76.
-#
-# Channel adapter, sources.toml shape, fetcher/cron wiring, and the
-# librarian's retrieval surface are not yet implemented. This file
-# declares what the preset *is*; the loader (Scope A) verifies the
-# bundle is internally coherent. Later scopes wire the runtime pieces.
 
 [preset]
 name = "zirkel"
