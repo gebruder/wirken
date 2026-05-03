@@ -100,3 +100,40 @@ economics-reporting runs must use non-streaming dispatch. Streaming
 returns `Usage::default()` and would silently under-report token cost;
 any cost number computed off a streaming session is wrong by the full
 input/output count.
+
+## 6. Per-finding field caps (lyrik-skill-per-finding-field-caps)
+
+Surfaced 2026-05-03 during the `lyrik-skill-staged-emission` audit.
+
+The staged-emission slice bounds *the assessment* by writing one
+finding per file. It does not bound *one finding*. Per-finding fields
+that can grow without an explicit cap:
+
+- `scoring_passes[*].rationale` — one paragraph per pass; with three
+  passes on a high-severity disagreement candidate, ~500–1500 tokens.
+- `patch_localized.hunks[*].insertedContent` — multi-line patches; a
+  finding that proposes a non-trivial fix can carry ~500–2000 tokens
+  here.
+- `summary` — one-paragraph; well-bounded in practice.
+- `property_template.proposition` + `slots` — small, well-bounded.
+
+A finding stacking three scoring rationales plus a multi-hunk patch
+plus a long summary can reach 2–3K tokens of JSON. Within the staged
+write that is one `content` argument, still bounded but on the upper
+end of what providers reliably construct.
+
+Trigger condition for the slice: at least one observed run where a
+single finding exceeds 2K tokens in JSON form. Then:
+
+- Cap each `scoring_passes[*].rationale` to ~500 tokens; longer goes
+  to a side file (`staging/findings/finding-NNN.rationale-K.md`) and
+  the JSON references the path.
+- Cap each `patch_localized.hunks[*].insertedContent` over a threshold
+  to a side file (`staging/findings/finding-NNN.patch-K.diff`) and the
+  JSON references the path.
+- Runner aggregator copies side files alongside the run dir at
+  aggregation time.
+
+Worked example: queue when observed. The `lyrik-skill-staged-emission`
+slice does not address this; the per-finding write itself is already
+bounded enough that this is a second-order concern.
