@@ -470,9 +470,10 @@ mod jwt {
     // Static 2048-bit RSA test keypair. See the twin constant in
     // adapter-teams for the rationale (no runtime keygen, no rand
     // 0.8 dep). Test-only, not used in production.
-    const TEST_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_private.pem");
+    const TEST_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_private_TEST_FIXTURE_DO_NOT_USE.pem");
     const TEST_PUBLIC_PEM: &[u8] = include_bytes!("test_rsa_public.pem");
-    const ATTACKER_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_attacker_private.pem");
+    const ATTACKER_PRIVATE_PEM: &[u8] =
+        include_bytes!("test_rsa_attacker_private_TEST_FIXTURE_DO_NOT_USE.pem");
 
     fn keypair() -> (EncodingKey, DecodingKey) {
         let enc = EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM).unwrap();

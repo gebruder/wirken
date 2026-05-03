@@ -509,12 +509,13 @@ mod jwt {
     // depend on a runtime RSA keygen (which required pulling rand
     // 0.8 in under an alias and tripped RUSTSEC-2026-0097). This
     // key is test-only and not reused in any production path.
-    const TEST_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_private.pem");
+    const TEST_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_private_TEST_FIXTURE_DO_NOT_USE.pem");
     const TEST_PUBLIC_PEM: &[u8] = include_bytes!("test_rsa_public.pem");
     /// Second, independently generated 2048-bit RSA key used to
     /// exercise the "foreign signer" path in validation tests. Its
     /// public half is never trusted.
-    const ATTACKER_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_attacker_private.pem");
+    const ATTACKER_PRIVATE_PEM: &[u8] =
+        include_bytes!("test_rsa_attacker_private_TEST_FIXTURE_DO_NOT_USE.pem");
 
     fn keypair() -> (EncodingKey, DecodingKey) {
         let enc = EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM).unwrap();
