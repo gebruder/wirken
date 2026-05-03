@@ -8,6 +8,20 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## Unreleased
+
+### Security
+
+- Vault no longer silently seals under empty passphrase. Setup
+  commands now fail-closed when stdin is not a TTY and
+  `WIRKEN_VAULT_PASSPHRASE` is unset, instead of caching an empty
+  string. The credential store refuses to initialize a keychain
+  under an empty passphrase. The auto-create branch in
+  `CredentialStore::open` is narrowed to only the
+  keychain-not-initialized case, surfacing other errors instead of
+  masking them with a silent re-seal. Found via Lyrik dogfooding
+  during slice 7b2.5b bench validation.
+
 ## 1.0.0 — Windows 11; audit CLI user-grade; cross-platform IPC trait surface
 
 The cross-platform release. Wirken now ships a native Windows 11 binary alongside the existing Linux and macOS builds. The audit CLI is user-grade across all three platforms: structured JSON output, citable session IDs, schema versioning, the verify command emits typed failure data. The IPC layer is now expressed as the `wirken_ipc::Stream` and `wirken_ipc::Listener` trait surface; production code talks through the trait, with unix-domain sockets on Linux/macOS and named pipes on Windows behind it.

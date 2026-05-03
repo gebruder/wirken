@@ -14,6 +14,14 @@ pub enum VaultError {
     #[error("keychain error: {0}")]
     Keychain(String),
 
+    /// The keychain has not yet been initialized. Distinct from
+    /// `Keychain(...)` so `CredentialStore::open` can narrowly auto-
+    /// create a fresh device key on legitimate first run, while every
+    /// other keychain error propagates to the caller. See the
+    /// vault-no-empty-seal slice rationale.
+    #[error("keychain not initialized")]
+    KeychainNotInitialized,
+
     #[error("credential not found: {0}")]
     NotFound(String),
 

@@ -159,7 +159,8 @@ fn strip_one_trailing_newline(mut s: String) -> String {
 pub async fn remove(name: &str) -> Result<()> {
     let cfg = config();
 
-    let keychain = probe_keychain(&cfg.data_dir, super::cached_vault_passphrase);
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;

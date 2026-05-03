@@ -202,6 +202,92 @@ fn age_keychain_wrong_passphrase_fails() {
 }
 
 #[test]
+fn age_keychain_store_device_key_refuses_empty_passphrase() {
+    // vault-no-empty-seal: empty passphrase derives a deterministic
+    // wrapping key any other process can reproduce; sealing under it
+    // is no protection. The historical silent-empty-seal failure
+    // mode (dialoguer Err swallowed via unwrap_or_default → "" →
+    // store_device_key("")) is what this guard blocks.
+    let tmp = TempDir::new().unwrap();
+    let kc = AgeFileKeychain::new(tmp.path().join("keychain"), "".into());
+    let key = generate_key();
+    let result = kc.store_device_key(&key);
+    match result {
+        Err(crate::VaultError::Keychain(msg)) => {
+            assert!(
+                msg.contains("empty passphrase"),
+                "error message must name the empty-passphrase reason; got: {msg}"
+            );
+        }
+        other => panic!("expected Keychain(empty passphrase) error, got {other:?}"),
+    }
+    // Confirm the keychain files were NOT written.
+    assert!(!tmp.path().join("keychain").join("device-key.age").exists());
+    assert!(!tmp.path().join("keychain").join("device-key.salt").exists());
+}
+
+#[test]
+fn credential_store_propagates_non_decryption_keychain_error() {
+    // vault-no-empty-seal: CredentialStore::open's auto-create branch
+    // narrowed to KeychainNotInitialized only. Any other backend
+    // error (permission denied, IO, etc.) propagates so the operator
+    // decides what to do, instead of being masked by a silent re-seal
+    // under whatever passphrase is in scope.
+    use crate::keychain::KeychainKind;
+
+    struct ErroringKeychain;
+    impl Keychain for ErroringKeychain {
+        fn kind(&self) -> KeychainKind {
+            KeychainKind::AgeFile
+        }
+        fn store_device_key(&self, _: &VaultSecret) -> Result<(), crate::VaultError> {
+            // Auto-create branch must NOT be reached under the new
+            // narrowing; if it is, the test's assertion will fail
+            // because the open will return Ok(_). Returning an Err
+            // here makes the regression louder.
+            Err(crate::VaultError::Keychain("auto-create reached".into()))
+        }
+        fn retrieve_device_key(&self) -> Result<VaultSecret, crate::VaultError> {
+            Err(crate::VaultError::Keychain("simulated permission denied".into()))
+        }
+        fn delete_device_key(&self) -> Result<(), crate::VaultError> {
+            unreachable!()
+        }
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let result = CredentialStore::open(&tmp.path().join("vault.db"), &ErroringKeychain);
+    match result {
+        Err(crate::VaultError::Keychain(msg)) => {
+            assert!(
+                msg.contains("simulated permission denied"),
+                "the original keychain error must propagate verbatim; got: {msg}"
+            );
+        }
+        Ok(_) => panic!("CredentialStore::open silently auto-created under a non-NotInitialized error"),
+        Err(other) => panic!("expected the original Keychain error to propagate; got {other:?}"),
+    }
+}
+
+#[test]
+fn age_keychain_retrieve_returns_not_initialized_when_files_absent() {
+    // vault-no-empty-seal: retrieve_device_key now distinguishes
+    // "files absent" (legitimate first run) from "files exist but
+    // unreadable" (permission, IO). Only the former routes to
+    // CredentialStore::open's auto-create branch.
+    let tmp = TempDir::new().unwrap();
+    let kc = AgeFileKeychain::new(tmp.path().join("keychain"), "p".into());
+    // VaultSecret intentionally does not implement Debug, so we can't
+    // {:?}-print the Result; match instead and panic with the error
+    // variant when present.
+    match kc.retrieve_device_key() {
+        Err(crate::VaultError::KeychainNotInitialized) => {}
+        Err(other) => panic!("expected KeychainNotInitialized for absent files; got {other:?}"),
+        Ok(_) => panic!("expected KeychainNotInitialized for absent files; got Ok(<secret>)"),
+    }
+}
+
+#[test]
 fn age_keychain_reports_correct_kind() {
     let tmp = TempDir::new().unwrap();
     let kc = AgeFileKeychain::new(tmp.path(), "pass".into());

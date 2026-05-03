@@ -165,7 +165,8 @@ async fn dispatch_via_agent_runtime(
     let cfg = super::config();
 
     let api_key = if pin.provider != "ollama" {
-        let keychain = probe_keychain(&cfg.data_dir, super::cached_vault_passphrase);
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("open credential store")?;
         let cred_name = format!("{}-api-key", pin.provider);

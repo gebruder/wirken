@@ -45,10 +45,11 @@ impl CredentialStore {
     ///
     /// On `VaultError::Decryption` from `retrieve_device_key` — an existing
     /// keychain file that won't unwrap with the supplied passphrase — this
-    /// refuses to overwrite. Any other error (missing file, missing keyring
-    /// entry) is treated as "first run" and generates a fresh device key.
-    /// Without that guard a wrong-passphrase open silently re-keyed the
-    /// keychain and orphaned every prior row.
+    /// refuses to overwrite. Only `VaultError::KeychainNotInitialized` (no
+    /// device key has been stored yet on this backend) routes to the
+    /// auto-create branch. Every other backend error propagates so the
+    /// operator decides what to do, instead of being masked by a silent
+    /// re-seal.
     pub fn open(db_path: &Path, keychain: &dyn Keychain) -> Result<Self, VaultError> {
         let device_key = match keychain.retrieve_device_key() {
             Ok(key) => key,
@@ -59,11 +60,12 @@ impl CredentialStore {
                         .into(),
                 ));
             }
-            Err(_) => {
+            Err(VaultError::KeychainNotInitialized) => {
                 let key = generate_key();
                 keychain.store_device_key(&key)?;
                 key
             }
+            Err(other) => return Err(other),
         };
 
         precreate_owner_only(db_path)?;

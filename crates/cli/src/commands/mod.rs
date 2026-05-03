@@ -304,22 +304,36 @@ pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
 /// the first open. Routing every prompt through this helper keeps a
 /// single derivation across the whole invocation, and `wirken run`
 /// already propagates the same env var to spawned adapters.
-pub fn cached_vault_passphrase() -> String {
-    if let Ok(p) = std::env::var("WIRKEN_VAULT_PASSPHRASE") {
-        if !p.is_empty() {
-            return p;
-        }
+///
+/// Returns `Err` when no env value is set and `dialoguer::Password`
+/// can't reach a TTY. The previous behavior swallowed that error via
+/// `unwrap_or_default()`, returning an empty string and producing the
+/// silent-empty-seal failure mode (vault sealed under `""` because no
+/// real passphrase ever reached the keychain). Callers now propagate
+/// the error; setup refuses to proceed without a passphrase rather
+/// than caching empty.
+pub fn cached_vault_passphrase() -> anyhow::Result<String> {
+    if let Ok(p) = std::env::var("WIRKEN_VAULT_PASSPHRASE")
+        && !p.is_empty()
+    {
+        return Ok(p);
     }
     let p = dialoguer::Password::new()
         .with_prompt("  Vault passphrase")
         .interact()
-        .unwrap_or_default();
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "could not prompt for vault passphrase ({e}); run \
+                 interactively at a TTY, or supply WIRKEN_VAULT_PASSPHRASE \
+                 in the environment"
+            )
+        })?;
     // Setup runs single-threaded before any adapter or agent spawn, so
     // there are no concurrent readers of the process environment here.
     unsafe {
         std::env::set_var("WIRKEN_VAULT_PASSPHRASE", &p);
     }
-    p
+    Ok(p)
 }
 
 /// Read a secret value (API key, token) with asterisk masking.
@@ -365,6 +379,29 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::default());
+    }
+
+    /// vault-no-empty-seal: when WIRKEN_VAULT_PASSPHRASE holds a
+    /// non-empty value, cached_vault_passphrase returns it without
+    /// touching the prompt path. Tests run with stdin not a TTY, so
+    /// the dialoguer fallback would error; the env-cache hit short-
+    /// circuits that.
+    #[test]
+    fn cached_vault_passphrase_returns_env_value_when_set() {
+        // SAFETY: the cargo test harness for this binary crate runs
+        // tests in parallel by default, so we must use a unique env
+        // var name per test if we touch globals. cached_vault_passphrase
+        // reads exactly WIRKEN_VAULT_PASSPHRASE; serialise via the
+        // function's contract.
+        unsafe {
+            std::env::set_var("WIRKEN_VAULT_PASSPHRASE", "test-passphrase-cache-hit");
+        }
+        let p = cached_vault_passphrase()
+            .expect("env-set non-empty must return Ok");
+        assert_eq!(p, "test-passphrase-cache-hit");
+        unsafe {
+            std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
+        }
     }
 
     #[test]
