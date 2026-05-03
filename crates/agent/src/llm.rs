@@ -1,7 +1,10 @@
+use std::sync::{Arc, Mutex};
+
 use serde::{Deserialize, Serialize};
 
 use crate::conversation::{Message, Role, ToolCallRequest};
 use crate::error::AgentError;
+use crate::recovery::{MAX_RATE_LIMIT_RETRIES, RecoveryObserver, RetryDecision, classify_429};
 use crate::tool::ToolDef;
 
 /// LLM provider configuration.
@@ -206,6 +209,14 @@ pub struct Usage {
 pub struct LlmClient {
     config: LlmConfig,
     http: reqwest::Client,
+    /// Recovery observer registered by the harness (lyrik dispatch
+    /// runner, …). Receives per-attempt rate-limit notifications from
+    /// `send_with_retry` so the harness can emit audit records as
+    /// retries happen, not only at the end. Mutex (rather than
+    /// RwLock) because the field is set rarely and never held across
+    /// awaits — the lock is acquired, the inner `Arc` cloned out, and
+    /// released before the observer's hooks run.
+    observer: Mutex<Option<Arc<dyn RecoveryObserver>>>,
 }
 
 impl LlmClient {
@@ -229,7 +240,76 @@ impl LlmClient {
             .build()
             .map_err(|e| AgentError::Http(format!("HTTP client: {e}")))?;
 
-        Ok(Self { config, http })
+        Ok(Self {
+            config,
+            http,
+            observer: Mutex::new(None),
+        })
+    }
+
+    /// Register a recovery observer. Replaces any previously set
+    /// observer. The observer's `on_rate_limited` and
+    /// `on_rate_limit_exhausted` hooks are called from
+    /// `send_with_retry` as 429 retries are scheduled and exhausted.
+    pub fn set_recovery_observer(&self, observer: Arc<dyn RecoveryObserver>) {
+        *self.observer.lock().unwrap() = Some(observer);
+    }
+
+    /// Send a request through `build` with HTTP-429 retry/backoff.
+    /// `build` is called fresh per attempt — `reqwest::RequestBuilder`
+    /// is not cheaply cloneable across awaits, and Bedrock requires a
+    /// freshly-signed `x-amz-date` header on every retry, so the
+    /// closure's job is to rebuild the request each time including any
+    /// per-attempt signing.
+    ///
+    /// 429 responses retry with backoff up to
+    /// [`MAX_RATE_LIMIT_RETRIES`] attempts. Any other status (success
+    /// or non-429 error) is returned to the caller unchanged. Network
+    /// errors propagate immediately (no retry) so a wedged client
+    /// doesn't sit in a backoff loop.
+    async fn send_with_retry<F>(&self, mut build: F) -> Result<reqwest::Response, AgentError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        let mut attempt: u32 = 1;
+        loop {
+            let resp = build()
+                .send()
+                .await
+                .map_err(|e| AgentError::Http(e.to_string()))?;
+            if resp.status().as_u16() != 429 {
+                return Ok(resp);
+            }
+            let status_u16 = resp.status().as_u16();
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+            // Drop the response body so the connection can be reused.
+            drop(resp);
+            if attempt >= MAX_RATE_LIMIT_RETRIES {
+                if let Some(obs) = self.observer.lock().unwrap().clone() {
+                    obs.on_rate_limit_exhausted(attempt);
+                }
+                return Err(AgentError::RateLimitExhausted { attempts: attempt });
+            }
+            let delay_ms = match classify_429(status_u16, retry_after.as_deref(), attempt) {
+                RetryDecision::Retry { delay_ms } => delay_ms,
+                RetryDecision::NoRetry => {
+                    // classify_429 always returns Retry for 429; reaching this
+                    // branch is a contract violation. Surface as an Llm error.
+                    return Err(AgentError::Llm(
+                        "classify_429 returned NoRetry for status 429".into(),
+                    ));
+                }
+            };
+            if let Some(obs) = self.observer.lock().unwrap().clone() {
+                obs.on_rate_limited(attempt, delay_ms, status_u16);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            attempt += 1;
+        }
     }
 
     /// Send a chat completion request.
@@ -263,20 +343,19 @@ impl LlmClient {
         let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
         let body = build_openai_request_body(&self.config, messages_json, tools);
 
-        let mut request = self
-            .http
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body);
-
-        if let Some(key) = api_key {
-            request = request.header("Authorization", format!("Bearer {key}"));
-        }
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| AgentError::Http(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| {
+                let mut req = self
+                    .http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body);
+                if let Some(key) = api_key {
+                    req = req.header("Authorization", format!("Bearer {key}"));
+                }
+                req
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -413,22 +492,19 @@ impl LlmClient {
             body["tools"] = serde_json::Value::Array(tools_json);
         }
 
-        let mut request = self
-            .http
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("anthropic-version", "2023-06-01");
-
-        if let Some(key) = api_key {
-            request = request.header("x-api-key", key);
-        }
-
-        let request = request.json(&body);
-
-        let response = request
-            .send()
-            .await
-            .map_err(|e| AgentError::Http(e.to_string()))?;
+        let response = self
+            .send_with_retry(|| {
+                let mut req = self
+                    .http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("anthropic-version", "2023-06-01");
+                if let Some(key) = api_key {
+                    req = req.header("x-api-key", key);
+                }
+                req.json(&body)
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -558,14 +634,14 @@ impl LlmClient {
         }
 
         let response = self
-            .http
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("x-goog-api-key", key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentError::Http(e.to_string()))?;
+            .send_with_retry(|| {
+                self.http
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("x-goog-api-key", key)
+                    .json(&body)
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -709,31 +785,32 @@ impl LlmClient {
         let parsed_url =
             url::Url::parse(&url).map_err(|e| AgentError::Llm(format!("invalid URL: {e}")))?;
 
-        let auth_headers = crate::sigv4::sign(
-            access_key,
-            secret_key,
-            session_token,
-            region,
-            "bedrock",
-            "POST",
-            &parsed_url,
-            &body_bytes,
-        );
-
-        let mut request = self
-            .http
-            .post(&url)
-            .header("Content-Type", "application/json");
-
-        for (name, value) in &auth_headers {
-            request = request.header(name.as_str(), value.as_str());
-        }
-
-        let response = request
-            .body(body_bytes)
-            .send()
-            .await
-            .map_err(|e| AgentError::Http(e.to_string()))?;
+        // SigV4 timestamps live in the headers, so each retry must
+        // re-sign — a stale `x-amz-date` over five minutes old gets a
+        // 403 from Bedrock. The closure rebuilds the auth headers per
+        // attempt.
+        let response = self
+            .send_with_retry(|| {
+                let auth_headers = crate::sigv4::sign(
+                    access_key,
+                    secret_key,
+                    session_token,
+                    region,
+                    "bedrock",
+                    "POST",
+                    &parsed_url,
+                    &body_bytes,
+                );
+                let mut req = self
+                    .http
+                    .post(&url)
+                    .header("Content-Type", "application/json");
+                for (name, value) in &auth_headers {
+                    req = req.header(name.as_str(), value.as_str());
+                }
+                req.body(body_bytes.clone())
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();

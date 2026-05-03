@@ -109,4 +109,11 @@ pub enum AgentError {
     /// retry with a correct skill name.
     #[error("unknown skill '/{name}'; loaded skills: {}", known.join(", "))]
     UnknownSlashSkill { name: String, known: Vec<String> },
+
+    /// agent-runtime-error-recovery: provider returned HTTP 429 on
+    /// every retry. The dispatch helper bubbles this up so callers
+    /// (lyrik, bench harness, …) can record `lyrik.dispatch.failed`
+    /// and emit an empty findings.json so the failure counts.
+    #[error("rate limit exhausted after {attempts} attempts")]
+    RateLimitExhausted { attempts: u32 },
 }

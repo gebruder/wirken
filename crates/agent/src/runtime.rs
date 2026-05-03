@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
@@ -191,6 +191,18 @@ pub struct Agent {
     /// top of every `process_message` / `process_message_stream`
     /// invocation; first non-`Pass` result wins.
     interceptors: Vec<Arc<dyn crate::inbound_interceptor::InboundInterceptor>>,
+    /// agent-runtime-error-recovery: per-turn counter for tool
+    /// argument-validation failures, keyed by tool name. Reset at the
+    /// top of every `process_message_inner`. After
+    /// [`crate::recovery::MAX_TOOL_VALIDATION_RETRIES`] failures for
+    /// the same tool name within a turn, the agent gets a "tool
+    /// unavailable" synthetic [`crate::tool::ToolResult`] and the
+    /// counter prevents further attempts on the same tool this turn.
+    tool_validation_failures: HashMap<String, u32>,
+    /// agent-runtime-error-recovery: forwarded to [`crate::llm::LlmClient`]
+    /// at registration time, and consulted by the validation-failure
+    /// branch in [`Self::execute_and_record_tool`].
+    recovery_observer: Option<Arc<dyn crate::recovery::RecoveryObserver>>,
 }
 
 impl Agent {
@@ -264,6 +276,8 @@ impl Agent {
             restrict_tools: None,
             effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
+            tool_validation_failures: HashMap::new(),
+            recovery_observer: None,
         })
     }
 
@@ -343,6 +357,8 @@ impl Agent {
             restrict_tools: None,
             effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
+            tool_validation_failures: HashMap::new(),
+            recovery_observer: None,
         })
     }
 
@@ -423,6 +439,15 @@ impl Agent {
     /// denial event written to the session log.
     pub fn set_org_permissions(&mut self, org: Arc<wirken_gateway::org::OrgPermissions>) {
         self.org_permissions = Some(org);
+    }
+
+    /// Register a recovery observer. Forwarded to the
+    /// [`crate::llm::LlmClient`] for HTTP-429 retry/exhaustion hooks
+    /// and consulted in `execute_and_record_tool` for tool-validation
+    /// retry/exhaustion hooks. Replaces any previously set observer.
+    pub fn set_recovery_observer(&mut self, observer: Arc<dyn crate::recovery::RecoveryObserver>) {
+        self.llm.set_recovery_observer(observer.clone());
+        self.recovery_observer = Some(observer);
     }
 
     /// Connect to the out-of-process MCP proxy and load this agent's
@@ -1119,6 +1144,11 @@ impl Agent {
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             return Ok(replay);
         }
+
+        // agent-runtime-error-recovery: reset the per-turn
+        // tool-validation counter so a tool that hit its retry cap on
+        // a previous turn gets a fresh budget on this one.
+        self.tool_validation_failures.clear();
 
         // Item 10 follow-up — record the current system prompt (if
         // it drifted) so the verifier can later reconstruct the
@@ -1962,6 +1992,17 @@ impl Agent {
                     success: false,
                 }
             }
+            // agent-runtime-error-recovery: argument-validation
+            // failures from the registry (`AgentError::Tool`) are
+            // recoverable — feed the error back as a non-success
+            // ToolResult so the model can retry with corrected
+            // arguments. Per-turn counter, capped at
+            // MAX_TOOL_VALIDATION_RETRIES; after that the tool is
+            // reported unavailable for the rest of the turn so the
+            // agent stops looping on the same broken call.
+            Err(AgentError::Tool(msg)) => {
+                self.synthesize_validation_failure_result(&call.name, &msg)
+            }
             Err(e) => return Err(e),
         };
         tracing::debug!(
@@ -1971,6 +2012,55 @@ impl Agent {
             truncate(&result.output, 200)
         );
         Ok(result)
+    }
+
+    /// Convert an `AgentError::Tool` (argument validation, missing
+    /// required field, type mismatch) into a synthetic non-success
+    /// [`crate::tool::ToolResult`] that flows back into the
+    /// conversation. The first
+    /// [`crate::recovery::MAX_TOOL_VALIDATION_RETRIES`] attempts on a
+    /// given tool name return a "re-issue with corrected arguments"
+    /// message; the next attempt returns a "tool unavailable for the
+    /// remainder of this turn" message so the agent doesn't loop.
+    /// Counter is keyed by tool name and reset at the top of every
+    /// `process_message_inner`.
+    pub(crate) fn synthesize_validation_failure_result(
+        &mut self,
+        tool: &str,
+        msg: &str,
+    ) -> crate::tool::ToolResult {
+        let counter = self
+            .tool_validation_failures
+            .entry(tool.to_string())
+            .or_insert(0);
+        *counter += 1;
+        let attempt = *counter;
+        if let Some(ref obs) = self.recovery_observer {
+            obs.on_tool_validation_failed(tool, attempt, msg);
+        }
+        if attempt > crate::recovery::MAX_TOOL_VALIDATION_RETRIES {
+            if let Some(ref obs) = self.recovery_observer {
+                obs.on_tool_validation_exhausted(tool, attempt - 1);
+            }
+            return crate::tool::ToolResult {
+                output: format!(
+                    "tool '{tool}' failed argument validation {} times this turn; \
+                     it is unavailable for the remainder of this turn. \
+                     Proceed without it.",
+                    attempt - 1
+                ),
+                success: false,
+            };
+        }
+        crate::tool::ToolResult {
+            output: format!(
+                "tool '{tool}' rejected the call: {msg}. \
+                 Re-issue the call with corrected arguments. \
+                 Attempt {attempt} of {}.",
+                crate::recovery::MAX_TOOL_VALIDATION_RETRIES
+            ),
+            success: false,
+        }
     }
 
     /// Item 6 slice 2: fan-out for multiple spawn_subagent calls

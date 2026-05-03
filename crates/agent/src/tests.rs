@@ -5952,3 +5952,139 @@ You are the Zirkel librarian. Use sqlite_query with one of: kept_recent, kept_by
         assert_eq!(parsed["rows"].as_array().unwrap().len(), 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// agent-runtime-error-recovery: tool-validation feedback
+// ---------------------------------------------------------------------------
+
+mod recovery_tool_validation {
+    use super::*;
+    use crate::recovery::{MAX_TOOL_VALIDATION_RETRIES, RecoveryObserver};
+    use std::sync::Mutex;
+
+    /// Captures hook calls so tests can assert order and contents.
+    #[derive(Default)]
+    struct CapturingObserver {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl RecoveryObserver for CapturingObserver {
+        fn on_rate_limited(&self, attempt: u32, retry_after_ms: u64, status: u16) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("rl:{attempt}:{retry_after_ms}:{status}"));
+        }
+        fn on_rate_limit_exhausted(&self, attempts: u32) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("rl_exhausted:{attempts}"));
+        }
+        fn on_tool_validation_failed(&self, tool: &str, attempt: u32, message: &str) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("tv:{tool}:{attempt}:{message}"));
+        }
+        fn on_tool_validation_exhausted(&self, tool: &str, attempts: u32) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("tv_exhausted:{tool}:{attempts}"));
+        }
+    }
+
+    fn fresh_agent() -> crate::runtime::Agent {
+        let tmp = TempDir::new().unwrap();
+        crate::runtime::Agent::new(
+            "rec-test".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            test_session_log(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn first_failure_returns_synthetic_result_naming_the_attempt() {
+        let mut agent = fresh_agent();
+        let r =
+            agent.synthesize_validation_failure_result("write_file", "missing 'content' argument");
+        assert!(!r.success);
+        assert!(r.output.contains("write_file"));
+        assert!(r.output.contains("missing 'content' argument"));
+        assert!(r.output.contains("Re-issue"));
+        assert!(
+            r.output
+                .contains(&format!("Attempt 1 of {MAX_TOOL_VALIDATION_RETRIES}"))
+        );
+    }
+
+    #[test]
+    fn fourth_attempt_returns_unavailable_and_omits_retry_advice() {
+        let mut agent = fresh_agent();
+        for _ in 0..MAX_TOOL_VALIDATION_RETRIES {
+            let r = agent.synthesize_validation_failure_result("write_file", "bad arg");
+            assert!(r.output.contains("Re-issue"));
+        }
+        let r = agent.synthesize_validation_failure_result("write_file", "bad arg");
+        assert!(!r.success);
+        assert!(
+            r.output
+                .contains("unavailable for the remainder of this turn")
+        );
+        assert!(!r.output.contains("Re-issue"));
+        assert!(
+            r.output
+                .contains(&format!("{MAX_TOOL_VALIDATION_RETRIES} times"))
+        );
+    }
+
+    #[test]
+    fn counter_keyed_by_tool_name_independent_per_tool() {
+        let mut agent = fresh_agent();
+        // Three failures on write_file.
+        for _ in 0..3 {
+            let _ = agent.synthesize_validation_failure_result("write_file", "bad");
+        }
+        // First failure on read_file: still attempt 1.
+        let r = agent.synthesize_validation_failure_result("read_file", "bad");
+        assert!(
+            r.output
+                .contains(&format!("Attempt 1 of {MAX_TOOL_VALIDATION_RETRIES}"))
+        );
+    }
+
+    #[test]
+    fn observer_receives_per_attempt_events_then_exhaustion() {
+        let mut agent = fresh_agent();
+        let obs = Arc::new(CapturingObserver::default());
+        agent.set_recovery_observer(obs.clone());
+
+        for _ in 0..MAX_TOOL_VALIDATION_RETRIES {
+            let _ = agent.synthesize_validation_failure_result("write_file", "missing content");
+        }
+        // Fourth call → exhaustion event AND a final on_tool_validation_failed
+        // before exhaustion (the counter increments first, then the
+        // hooks fire in `failed` then `exhausted` order — see
+        // `synthesize_validation_failure_result`).
+        let _ = agent.synthesize_validation_failure_result("write_file", "missing content");
+
+        let events = obs.events.lock().unwrap();
+        // Three "Re-issue"-class events plus one exhaustion-trigger
+        // event = 4 `tv:` records, then 1 `tv_exhausted` record.
+        let tv_count = events.iter().filter(|e| e.starts_with("tv:")).count();
+        let exh_count = events
+            .iter()
+            .filter(|e| e.starts_with("tv_exhausted:"))
+            .count();
+        assert_eq!(tv_count, 4, "events: {events:?}");
+        assert_eq!(exh_count, 1, "events: {events:?}");
+        assert_eq!(
+            events.last().unwrap(),
+            &format!("tv_exhausted:write_file:{MAX_TOOL_VALIDATION_RETRIES}")
+        );
+    }
+}

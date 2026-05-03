@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use wirken_agent::Agent;
+use wirken_agent::AgentError;
 use wirken_agent::llm::LlmConfig;
+use wirken_agent::recovery::RecoveryObserver;
 use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
@@ -148,6 +150,83 @@ pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Res
 // Agent-runtime dispatch
 // ---------------------------------------------------------------------------
 
+/// Translates [`wirken_agent::recovery::RecoveryObserver`] hooks into
+/// audit records on the lyrik run's audit.log. The audit handle is
+/// independent of the runner's primary `AuditLogger` (a `try_clone()`
+/// of the same file) so the observer can write while the dispatch
+/// holds `&mut agent`.
+struct LyrikRecoveryObserver {
+    audit: Mutex<AuditLogger>,
+}
+
+impl RecoveryObserver for LyrikRecoveryObserver {
+    fn on_rate_limited(&self, attempt: u32, retry_after_ms: u64, status: u16) {
+        if let Ok(mut a) = self.audit.lock() {
+            let _ = a.emit(
+                "lyrik.dispatch.rate_limited",
+                serde_json::json!({
+                    "attempt": attempt,
+                    "retry_after_ms": retry_after_ms,
+                    "status": status,
+                }),
+            );
+        }
+    }
+    fn on_rate_limit_exhausted(&self, attempts: u32) {
+        if let Ok(mut a) = self.audit.lock() {
+            let _ = a.emit(
+                "lyrik.dispatch.failed",
+                serde_json::json!({
+                    "reason": "rate_limit_exhausted",
+                    "attempts": attempts,
+                }),
+            );
+        }
+    }
+    fn on_tool_validation_failed(&self, tool: &str, attempt: u32, message: &str) {
+        if let Ok(mut a) = self.audit.lock() {
+            let _ = a.emit(
+                "lyrik.tool.validation_failed",
+                serde_json::json!({
+                    "tool": tool,
+                    "attempt": attempt,
+                    "message": message,
+                }),
+            );
+        }
+    }
+    fn on_tool_validation_exhausted(&self, tool: &str, attempts: u32) {
+        if let Ok(mut a) = self.audit.lock() {
+            let _ = a.emit(
+                "lyrik.tool.failed",
+                serde_json::json!({
+                    "tool": tool,
+                    "attempts": attempts,
+                }),
+            );
+        }
+    }
+}
+
+/// Write a canonical empty `findings.json` to `path`. Called when
+/// dispatch failed before the agent could produce real findings (today:
+/// rate-limit exhaustion). Lets the bench harness count the failure
+/// instead of silently losing the run.
+fn write_empty_findings(path: &Path, run_id: &str) -> Result<()> {
+    let body = serde_json::json!({
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "produced_at": chrono::Utc::now().to_rfc3339(),
+        "findings": [],
+    });
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&body)?)
+        .with_context(|| format!("write empty findings to {}", path.display()))?;
+    Ok(())
+}
+
 /// Dispatch the Lyrik skill via wirken's Agent runtime. Reads the
 /// model pin from the target's `.lyrik/config.json` (preferring
 /// `phases.framing`, falling back to `phases.score`/`phases.recon`),
@@ -229,6 +308,22 @@ async fn dispatch_via_agent_runtime(
         }),
     )?;
 
+    // agent-runtime-error-recovery: register a recovery observer so
+    // 429 retries and tool-validation failures land in the same audit
+    // log as the rest of the run. The observer carries a separate
+    // AuditLogger handle that appends to the same file (the file is
+    // opened with append=true; concurrent writers are safe at the
+    // line granularity of single `writeln!` calls).
+    let observer_audit = AuditLogger {
+        file: audit.file.try_clone().context("clone audit file handle")?,
+        run_id: audit.run_id.clone(),
+        bench_mode: audit.bench_mode,
+    };
+    let observer: Arc<dyn RecoveryObserver> = Arc::new(LyrikRecoveryObserver {
+        audit: Mutex::new(observer_audit),
+    });
+    agent.set_recovery_observer(observer);
+
     // /lyrik triggers the SlashInterceptor which prepends the skill
     // body. The remainder gives run-specific parameters the methodology
     // does not encode.
@@ -242,10 +337,24 @@ async fn dispatch_via_agent_runtime(
     );
 
     let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
-    let result = agent
-        .process_message(&prompt, inbound_id)
-        .await
-        .context("agent.process_message returned an error")?;
+    let result = match agent.process_message(&prompt, inbound_id).await {
+        Ok(r) => r,
+        Err(AgentError::RateLimitExhausted { attempts }) => {
+            // Observer already emitted lyrik.dispatch.failed via
+            // on_rate_limit_exhausted. Write an empty findings.json
+            // so the bench harness can count the failure rather than
+            // silently lose the run.
+            tracing::warn!(
+                "rate limit exhausted after {attempts} attempts; \
+                 writing empty findings.json"
+            );
+            write_empty_findings(expected_findings, run_id)?;
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context("agent.process_message returned an error"));
+        }
+    };
 
     audit.emit(
         "lyrik.dispatch.completed",

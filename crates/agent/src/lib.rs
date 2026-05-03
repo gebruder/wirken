@@ -13,6 +13,7 @@ pub mod llm_stream;
 pub mod mcp;
 pub mod preset;
 pub mod rate_limit;
+pub mod recovery;
 pub mod runtime;
 pub mod sandbox;
 pub(crate) mod sigv4;
@@ -26,6 +27,9 @@ pub use context::ContextEngine;
 pub use error::{AgentError, PermissionDenialContext};
 pub use factory::{AgentFactory, AgentStaticConfig, ChannelOverride, session_id_for};
 pub use identity::AgentIdentity;
+pub use recovery::{
+    MAX_RATE_LIMIT_RETRIES, MAX_TOOL_VALIDATION_RETRIES, RecoveryObserver, RetryDecision,
+};
 pub use runtime::{
     Agent, DivergenceRecord, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult, VerifyReport,
 };
