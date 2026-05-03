@@ -22,15 +22,51 @@ const LYRIK_INFO_URI: &str = "https://lyrik.wirken.ai";
 
 /// Nine framings, the analytic-class rules. Stable across runs.
 const FRAMINGS: &[(&str, &str, &str)] = &[
-    ("auth", "AuthFraming", "Authentication and authorization: missing checks, broken authorization, replay, session fixation, identity confusion."),
-    ("crypto", "CryptoFraming", "Cryptographic primitive misuse: nonce reuse, non-constant-time compare, malleable signature verification, KDF misuse, AEAD AAD misuse, downgrade."),
-    ("injection", "InjectionFraming", "Classical injection: SQL, shell, command, log."),
-    ("deserialization", "DeserializationFraming", "Untrusted-data deserialization across pickle, JSON, YAML, MessagePack, etc."),
-    ("memory_safety", "MemorySafetyFraming", "Memory-safety bugs: out-of-bounds, use-after-free, integer overflow into bounds calculation."),
-    ("secrets", "SecretsFraming", "Credential leakage: serialization, logging, environment exposure, storage hygiene."),
-    ("supply_chain", "SupplyChainFraming", "Supply chain compromise paths: dependency, build, signing anchor, plugin/skill load."),
-    ("race_condition", "RaceConditionFraming", "Concurrency-related findings: TOCTOU, lock-elision, atomicity gap on shared state."),
-    ("prompt_injection", "PromptInjectionFraming", "Untrusted text reaching model context: system-prompt content, tool-output amplification, retrieval payload trust, cross-tool prompt-relay."),
+    (
+        "auth",
+        "AuthFraming",
+        "Authentication and authorization: missing checks, broken authorization, replay, session fixation, identity confusion.",
+    ),
+    (
+        "crypto",
+        "CryptoFraming",
+        "Cryptographic primitive misuse: nonce reuse, non-constant-time compare, malleable signature verification, KDF misuse, AEAD AAD misuse, downgrade.",
+    ),
+    (
+        "injection",
+        "InjectionFraming",
+        "Classical injection: SQL, shell, command, log.",
+    ),
+    (
+        "deserialization",
+        "DeserializationFraming",
+        "Untrusted-data deserialization across pickle, JSON, YAML, MessagePack, etc.",
+    ),
+    (
+        "memory_safety",
+        "MemorySafetyFraming",
+        "Memory-safety bugs: out-of-bounds, use-after-free, integer overflow into bounds calculation.",
+    ),
+    (
+        "secrets",
+        "SecretsFraming",
+        "Credential leakage: serialization, logging, environment exposure, storage hygiene.",
+    ),
+    (
+        "supply_chain",
+        "SupplyChainFraming",
+        "Supply chain compromise paths: dependency, build, signing anchor, plugin/skill load.",
+    ),
+    (
+        "race_condition",
+        "RaceConditionFraming",
+        "Concurrency-related findings: TOCTOU, lock-elision, atomicity gap on shared state.",
+    ),
+    (
+        "prompt_injection",
+        "PromptInjectionFraming",
+        "Untrusted text reaching model context: system-prompt content, tool-output amplification, retrieval payload trust, cross-tool prompt-relay.",
+    ),
 ];
 
 // ===========================================================================
@@ -500,10 +536,7 @@ fn build_result(f: &Finding, run_id: &str) -> SarifResult {
 /// when the input carries it; otherwise the replacement spans the
 /// deleted region with empty inserted content. The fix description
 /// names the property the patch validates, when known.
-fn build_fixes(
-    patch: Option<&PatchLocalized>,
-    template: Option<&PropertyTemplate>,
-) -> Vec<Fix> {
+fn build_fixes(patch: Option<&PatchLocalized>, template: Option<&PropertyTemplate>) -> Vec<Fix> {
     let Some(p) = patch else {
         return Vec::new();
     };
@@ -511,7 +544,9 @@ fn build_fixes(
         return Vec::new();
     }
     let description_text = match template.and_then(|t| t.proposition.as_deref()) {
-        Some(prop) => format!("Patch localizes the diff to the property's line range. Validates property: {prop}"),
+        Some(prop) => format!(
+            "Patch localizes the diff to the property's line range. Validates property: {prop}"
+        ),
         None => "Patch localizes the diff to the property's line range.".to_string(),
     };
     let artifact_changes = p
@@ -608,7 +643,7 @@ fn resolve_deferral(
         DeferralInput::Object { reason } => reason.as_deref(),
     });
     let from_gate = gate_routed.and_then(|g| {
-        g.tag.as_deref().or_else(|| match g.gate.as_deref() {
+        g.tag.as_deref().or(match g.gate.as_deref() {
             Some("scope_bound") => Some("scope_bound"),
             _ => None,
         })
@@ -777,12 +812,17 @@ mod tests {
         assert_eq!(change.artifact_location.uri, "file.c");
         assert_eq!(change.replacements[0].deleted_region.start_line, 1158);
         assert_eq!(change.replacements[0].deleted_region.end_line, 1163);
-        assert!(change.replacements[0]
-            .inserted_content
-            .text
-            .contains("oa_length"));
+        assert!(
+            change.replacements[0]
+                .inserted_content
+                .text
+                .contains("oa_length")
+        );
         let props = serde_json::to_value(&r.properties).unwrap();
-        assert_eq!(props["lyrik"]["patch_localized"]["validates_property"], true);
+        assert_eq!(
+            props["lyrik"]["patch_localized"]["validates_property"],
+            true
+        );
         assert_eq!(
             props["lyrik"]["patch_localized"]["hunks"][0]["startLine"],
             1158

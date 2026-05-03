@@ -396,8 +396,7 @@ mod tests {
         unsafe {
             std::env::set_var("WIRKEN_VAULT_PASSPHRASE", "test-passphrase-cache-hit");
         }
-        let p = cached_vault_passphrase()
-            .expect("env-set non-empty must return Ok");
+        let p = cached_vault_passphrase().expect("env-set non-empty must return Ok");
         assert_eq!(p, "test-passphrase-cache-hit");
         unsafe {
             std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
