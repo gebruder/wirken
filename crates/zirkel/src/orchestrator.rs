@@ -1374,6 +1374,10 @@ skills = ["other"]
     /// - `/v1/chat/completions` → returns an OpenAI-shaped tool_call
     ///   response. Tool name is detected from the request body so
     ///   the same server can stand in for both score and theme calls.
+    /// - `/api/chat` → ollama-native chat endpoint; returns an
+    ///   ollama-shaped tool_call response. The wirken-agent ollama
+    ///   dispatch (3080207) routes `provider: "ollama"` here instead
+    ///   of through the OpenAI-compat bridge.
     /// - `/api/embed` → returns canned vectors.
     ///
     /// Stays alive serving up to `max_requests` connections, then
@@ -1415,6 +1419,16 @@ skills = ["other"]
                         // Unrecognized — fail loudly so the test
                         // shows what shape the request actually had.
                         panic!("mock LLM saw no known synthetic-tool name in request body: {body}")
+                    }
+                } else if req.contains("POST /api/chat") {
+                    if body.contains("zirkel_score_candidate") {
+                        canned_score_response_ollama()
+                    } else if body.contains("zirkel_name_theme") {
+                        canned_theme_response_ollama()
+                    } else {
+                        panic!(
+                            "mock LLM saw no known synthetic-tool name in /api/chat body: {body}"
+                        )
                     }
                 } else if req.contains("POST /api/embed") {
                     canned_embed_response(&embed_vectors)
@@ -1492,6 +1506,60 @@ skills = ["other"]
     },
     "finish_reason": "tool_calls"
   }]
+}"#
+        .to_string()
+    }
+
+    /// Ollama-native shape for the same score response. Differences
+    /// from OpenAI: single `message` block (no `choices` array);
+    /// `tool_calls[].function.arguments` is a JSON object, not a
+    /// JSON-encoded string; no `id` field on tool_calls (the wirken
+    /// ollama parser synthesizes `call_0`, `call_1`); `done: true`
+    /// instead of `finish_reason`.
+    fn canned_score_response_ollama() -> String {
+        r#"{
+  "model": "llama3.1:8b",
+  "created_at": "2026-01-01T00:00:00Z",
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [{
+      "function": {
+        "name": "zirkel_score_candidate",
+        "arguments": {
+          "score": 80,
+          "why_surfaced": "matched 'data broker' — substantively about FTC enforcement against a broker",
+          "matched_keyword": "data broker"
+        }
+      }
+    }]
+  },
+  "done": true,
+  "prompt_eval_count": 50,
+  "eval_count": 30
+}"#
+        .to_string()
+    }
+
+    fn canned_theme_response_ollama() -> String {
+        r#"{
+  "model": "llama3.1:8b",
+  "created_at": "2026-01-01T00:00:00Z",
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [{
+      "function": {
+        "name": "zirkel_name_theme",
+        "arguments": {
+          "name": "FTC enforcement"
+        }
+      }
+    }]
+  },
+  "done": true,
+  "prompt_eval_count": 50,
+  "eval_count": 10
 }"#
         .to_string()
     }
