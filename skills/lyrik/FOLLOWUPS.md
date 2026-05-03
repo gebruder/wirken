@@ -137,3 +137,50 @@ single finding exceeds 2K tokens in JSON form. Then:
 Worked example: queue when observed. The `lyrik-skill-staged-emission`
 slice does not address this; the per-finding write itself is already
 bounded enough that this is a second-order concern.
+
+## 7. Ollama 7B-class models cannot validate multi-framing emission
+
+Surfaced 2026-05-03 during the `lyrik-add-second-framing` slice.
+
+`qwen2.5:7b` (via ollama native `/api/chat`) cannot reliably emit
+multi-finding tool-call sequences under the multi-framing skill body.
+Two failure modes were observed back-to-back on the same target (AVB
+`sample-paper-listing-1/source`, agent.py with V1 injection + V2 auth):
+
+- **Soft skill wording** ("identify each vulnerability per applicable framing"):
+  model emitted the findings as a markdown-formatted assistant message
+  with `### Auth Framing\n1. **Vulnerability:** …` shape and made
+  zero `write_file` calls. Run output: 8600-char prose response, no
+  staging files, runner bails.
+
+- **Strong tool-call-only discipline** ("your assistant message contains
+  only a terminal sentence; every vulnerability is a `write_file`
+  call, no exceptions"): model overcorrected and emitted neither
+  prose nor tool calls. Run output: 13-char acknowledgment-shaped
+  response ("no response" head), no staging files, runner bails.
+
+The discipline language calibration that produces tool-call output on
+multi-finding scenarios appears narrower than 7B parameter models can
+reliably target. Single-finding cases work in either setting (the
+prior `lyrik-add-scoring` slice validated cleanly because one finding
+maps unambiguously to one `write_file`). Multi-finding requires the
+model to enter a loop of tool calls without describing the loop in
+prose; 7B models drop one of the two channels entirely.
+
+**Trigger:** drop ollama qwen2.5:7b (and presumably similar-sized
+local models) as a *multi-framing* validation surface. Single-framing
+ollama validation still works and is the baseline gate. Multi-framing
+validation runs against frontier providers (anthropic sonnet, openai
+gpt-5) on small targets like the AVB sample for cost.
+
+**Possible fixes** (ordered by likely effectiveness, none committed):
+
+- Frontier-only multi-framing for now. Doc-level fix.
+- One framing at a time: invoke the agent twice, once per framing,
+  with framing-specific prompts. Loses the cross-framing coupling
+  (same line under two framings emitting two findings) but gives 7B
+  models a tractable shape.
+- Per-finding sub-agents: spawn a child agent per identified
+  vulnerability whose only job is "emit one finding." Removes the
+  multi-call loop from the parent's responsibility. Heavier
+  infrastructure; only worth it if there's another driver.
