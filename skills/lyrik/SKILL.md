@@ -14,29 +14,49 @@ permissions:
     allow: ["*"]
 ---
 
-# Lyrik (minimal + recon + scoring)
+# Lyrik (recon + multi-framing + scoring)
 
-Find one auth-related finding in the codebase under `<workspace>`, score it across four axes via two independent passes, and write the result to a single staging file. The runner aggregates that file into the canonical `findings.json`. This adds two-pass scoring on top of the minimal-plus-recon shape — the model produces real judgment about severity and reachability, not just a label.
+Run a security assessment of the codebase under `<workspace>` across two framings — `auth` and `injection` — and emit one finding per identified vulnerability per applicable framing. Each finding is scored across four axes by two independent passes. The runner aggregates the staging directory into the canonical `findings.json`.
 
-Out of scope in this mode: Phase 0 (context document, separate rubric file), multi-framing, two-pass framing union (the two passes here are *scoring*, not framing), three-pass disagreement gate and resolution, dedup, concentration index, gate-routed disclosed, exploit adapter. They return as separate slices.
+Out of scope in this mode: Phase 0 (context document, separate rubric file), framings beyond `auth` and `injection`, two-pass framing union (the two passes here are *scoring*, not framing), three-pass scoring-disagreement gate and resolution, dedup, concentration index, gate-routed disclosed, exploit adapter. They return as separate slices.
 
 ## Recon (mandatory, before any finding)
 
-The minimal-skill mode without recon produced fabricated paths — the model emitted findings against files that don't exist in the workspace. This section closes that hole. **Before emitting any finding, you must read at least one source file in scope, and the file you cite in `location.file` must be a file you have actually opened in this turn.** Inventing paths is the failure mode this section exists to prevent.
+**Before emitting any finding, you must read at least one source file in scope, and every path you cite in `location.file` must be a file you have actually opened in this turn.** Inventing paths is the failure mode this section exists to prevent.
 
 Recon steps:
 
 1. **Read scope.** Open `.lyrik/config.json` if present; honor `scope.include` and `scope.exclude` glob lists. Otherwise treat the whole workspace as in-scope. Skip `.git/` and `.lyrik/` regardless.
 
-2. **List files in scope.** Use `list_files(<dir>)` starting at the workspace root. For tiny workspaces (a handful of files), one `list_files(".")` suffices. For larger ones, descend into subdirectories whose names suggest auth-relevant content (`auth/`, `session/`, `acl/`, `permission/`, `admin/`, `user/`, `login/`, `token/`, `crypto/`).
+2. **List files in scope.** Use `list_files(<dir>)` starting at the workspace root. For tiny workspaces (a handful of files), one `list_files(".")` suffices. For larger ones, descend into subdirectories whose names suggest content under either framing — auth-relevant (`auth/`, `session/`, `acl/`, `permission/`, `admin/`, `user/`, `login/`, `token/`, `crypto/`) or injection-relevant (`api/`, `handler/`, `parser/`, `eval`, `exec`, `shell`, `query`, files exposing string-interpolated commands or SQL).
 
-3. **Pick a candidate file.** Prefer source files (`.py`, `.js`, `.ts`, `.go`, `.rs`, `.c`, `.h`, `.java`, `.rb`) whose name or directory matches the heuristics above. With nothing matching, pick the largest source file in scope. With only one source file, pick that one.
+3. **Read the candidate files** via `read_file(<path>)`. For tiny workspaces, read every source file. For larger ones, read at least one file matching each framing's heuristics. If `read_file` returns an error, pick a different file. Do not synthesize content; do not cite a path you couldn't read.
 
-4. **Read it in full** via `read_file(<path>)`. If `read_file` returns an error, pick a different file from the listing and retry. Do not synthesize content; do not write a finding against a path you couldn't read.
+4. **Select which framings apply.** From what you read, decide which framings have signal in the codebase:
+   - **`auth`** activates if the code contains anything that affects who can do what, or how privileges propagate (callable surfaces with no per-caller authorization, hardcoded credentials, weak comparison of secrets, untrusted input folded into elevated-authority scope such as a system prompt, broken-by-default access posture).
+   - **`injection`** activates if the code contains an interpreter-shaped sink that can take attacker-influenced data (`eval`, `exec`, `shell=True` subprocess, dynamic SQL string concatenation, format-string-on-user-input, deserialization of untrusted data, command construction via string concatenation).
+   - Both can apply to the same file. Both can apply to the same line in different framings (e.g., `eval(user_input)` is an `injection` concern and is also an `auth` concern under "untrusted input inheriting elevated authority"). When the same line carries weight under both framings, emit one finding under each framing rather than picking one — the runner will see two findings sharing a `location` and that is the correct shape.
+   - If recon shows neither framing applies, emit one `tier: INFO` finding under whichever framing fits least badly, with a `summary` that names the absence — exercise the pipeline truthfully rather than invent vulnerabilities.
 
-5. **Locate the framing target.** From the file content, find one auth concern. The framing is broad — anything that affects who can do what, or what privileges propagate without verification, counts: missing access check before a privileged operation, hardcoded credentials, weak comparison (`==` of secrets), broken-by-default permission posture, untrusted input inheriting elevated authority (e.g., user-controlled string folded into a system prompt scope), tool surfaces invoked without per-caller authorization. If the file genuinely has no auth concern, write the smallest defensible finding with `tier: INFO` and a `summary` that names the absence — the goal is to exercise the pipeline truthfully, not to invent vulnerabilities.
+5. **Route each observed vulnerability to a `write_file` call, immediately.** When you observe a vulnerability matching an active framing, your next action is `write_file(path=".lyrik/state/runs/<run-id>/staging/findings/finding-NNN.json", content=<finding object>)`. Then continue to the next vulnerability or the next file. Do not list, summarize, describe, or annotate vulnerabilities in your assistant message — every vulnerability is a `write_file` call, no exceptions.
 
-Recon's only artifact is "the file path and line range you'll cite in the finding." No separate context document, no per-component history. Those return in later slices.
+Recon's only artifacts are the file paths, line ranges, and framing assignments cited inside the staged finding objects. No separate context document, no per-component history. Those return in later slices.
+
+## Framings
+
+### `auth`
+
+Anything that affects who can do what, or what privileges propagate without verification. Worked classes: missing access check before a privileged operation; hardcoded credentials; weak comparison (`==` of secrets); broken-by-default permission posture; untrusted input inheriting elevated authority (e.g., user-controlled string folded into a system prompt scope); tool surfaces invoked without per-caller authorization.
+
+The framing is *who can do this*, not *what bytes go where*.
+
+### `injection`
+
+Untrusted data reaching an interpreter without separation. Worked classes: `eval` of caller-controlled string; `exec` of caller-controlled string; `subprocess(..., shell=True)` with caller-controlled command; SQL built via string concatenation rather than parameter binding; format-string applied to caller-controlled template; deserialization of attacker-influenced bytes (pickle, YAML with unsafe loaders, custom binary formats with executable callbacks); template engines with autoescape disabled receiving caller-controlled markup.
+
+The framing is *attacker-controlled bytes flow into an interpreter that grants them effect*. The classical sanitization defenses (escape, parameter-bind, type-check) apply.
+
+Note: `prompt_injection` is a distinct framing (untrusted text reaching model context inheriting the surrounding prompt's authority); it is **not in scope for this mode** — it returns when the framings list re-expands.
 
 ## Inline rubric
 
@@ -67,11 +87,18 @@ Each pass records its axis verdicts plus a `rationale` paragraph (two to four se
 
 **Deriving `grade`:** core Lyrik runs cap at `0.5` because no exploit adapter has been invoked. The current slice keeps `grade: 0.5` for any finding where both passes mark `real_bug: yes` and `reachable: yes`. Anything else gets `grade: 0`.
 
-## Emission
+## Emission discipline (the only output channel for findings)
 
-6. **Stage the finding.** Write the finding object to `.lyrik/state/runs/<run-id>/staging/findings/finding-001.json` via `write_file`. One file, one finding, this minimal-plus-recon mode emits exactly one. The `location.file` must be the path you read in step 4. Do **not** write `findings.json` directly — the runner aggregates `staging/findings/*.json` into the final file.
+**Findings are emitted exclusively as `write_file` tool calls.** The runner reads only the staged files; any finding content placed in your assistant message is lost and irrecoverable. Prose-shaped output is not a finding.
 
-7. **Return briefly.** Reply with one short sentence naming the file and the concern. The runner takes over aggregation.
+Concretely:
+
+- Each vulnerability you observe becomes one `write_file(path=".lyrik/state/runs/<run-id>/staging/findings/finding-NNN.json", content=<finding object>)` call. Make the call as soon as you observe the vulnerability.
+- The calls are **sequential and discrete**. The first vulnerability writes to `finding-001.json`. The next writes to `finding-002.json`. The third writes to `finding-003.json`. And so on. Each is one call. They are not batched, summarized, or planned-out-loud first.
+- Your assistant message for this turn contains a single terminal sentence — for example, `Findings emitted to staging.` That is the entire message. No headings, no bullets, no per-finding summaries, no framing-by-framing lists.
+- If you find yourself starting to write `### Auth Framing` or `**Vulnerability:**` or any markdown heading or list in your assistant message, stop. The next action is `write_file`, not prose.
+
+This is a hard constraint. The runner is incapable of reading your assistant message; the file aggregator is what produces `findings.json`. The terminal sentence exists only to acknowledge the turn is complete.
 
 ## Finding shape
 
@@ -80,9 +107,9 @@ The staged file holds one finding object — same shape as one element of the ca
 ```json
 {
   "id": "F001",
-  "stable_id": "auth::<relative-file>:<line>",
+  "stable_id": "<framing>::<relative-file>:<line>",
   "stream": "novel",
-  "framing": ["auth"],
+  "framing": ["<one of: auth, injection>"],
   "location": {
     "file": "<relative path under workspace>",
     "line_start": <integer, 1-based>
@@ -120,9 +147,18 @@ Field rules:
 - `deferral` is `null` in this minimal-plus-recon-plus-scoring mode.
 - `scoring_passes` is a two-element array. Each element carries `real_bug`, `reachable`, `attacker_reach`, `blast_radius`, and a `rationale` paragraph.
 - `scoring_disagreement` is `true` only when the two passes disagree by more than one step on any axis. False otherwise.
+- `framing` is a one-element array containing exactly one of `"auth"` or `"injection"` in this mode (additional framings re-enable in later slices). The same vulnerability under two framings emits as two separate findings, each with a single-element `framing` array.
+- `id` increments per finding (`F001`, `F002`, …), matching the staging filename ordinal. `stable_id` follows `<framing>::<relative-file>:<line>`.
 
 ## Path format
 
 `<run-id>` substitutes whatever the runner passes as the run-id parameter. The skill receives it via the runner's prompt; do not invent it.
 
-Final write path: `.lyrik/state/runs/<run-id>/staging/findings/finding-001.json`. The directory is created on first write — `write_file` will create parents as needed.
+Final write paths, in the order they are produced:
+
+- First vulnerability observed: `.lyrik/state/runs/<run-id>/staging/findings/finding-001.json`
+- Second: `.lyrik/state/runs/<run-id>/staging/findings/finding-002.json`
+- Third: `.lyrik/state/runs/<run-id>/staging/findings/finding-003.json`
+- And so on, zero-padded three digits.
+
+The directory is created on first write — `write_file` will create parents as needed.
