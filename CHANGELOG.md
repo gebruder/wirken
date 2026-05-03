@@ -10,6 +10,34 @@ tagged.
 
 ## Unreleased
 
+## [1.0.2] — 2026-05-04
+
+### Agent runtime
+
+- 429 backoff with jitter on `LlmClient`; max 5 retries, honors `Retry-After`. Tool-validation errors return a synthetic non-success `ToolResult` to the agent; max 3 retries per tool name per turn. `RecoveryObserver` trait surfaces both behaviors. New `AgentError::RateLimitExhausted` on exhaustion.
+
+### Lyrik
+
+- findings.json, `.lyrik/context.md`, and `.lyrik/rubric.md` are emitted as per-section staged writes under `<run-dir>/staging/findings/`, `staging/context/`, and `staging/rubric/`; the runner aggregates and removes the staging dirs.
+
+- Skill activates two framings (`auth`, `injection`) selected by recon. Two-pass scoring with axes `real_bug`, `reachable`, `attacker_reach`, `blast_radius`, plus an inline 5-tier rubric. `scoring_disagreement: true` when passes diverge by more than one step on any axis.
+
+- Recon mandatory before emission: the path cited in `location.file` must be one the agent opened in the turn.
+
+### Provider configuration
+
+- Default `base_url` per provider when `phases.<phase>.base_url` is unset: `openai`, `anthropic`, `gemini`, `ollama`, `tinfoil`, `privatemode`. `bedrock` still requires `region`.
+
+- Ollama dispatch uses native `/api/chat` and sends `options.num_ctx`. Default ollama `context_window` bumped from 8192 to 32768. Optional `phases.<phase>.context_window` override in lyrik config.
+
+- Ollama `tool_calls[].function.arguments` is sent as a JSON object (the native shape), not a JSON-encoded string.
+
+### Fixed
+
+- `wirken --version` reports the actual built version. The v1.0.1 binaries reported `1.0.0` because Cargo.toml was not bumped before tagging.
+
+- wirken-zirkel orchestrator e2e mock now serves both `/v1/chat/completions` and `/api/chat` so the ollama-native dispatch path resolves under the test (`7a475b3`).
+
 ## [1.0.1] — 2026-05-03
 
 ### Audit
