@@ -524,17 +524,39 @@ fn resolve_phase_pin(config: &serde_json::Value) -> Result<PhasePin> {
         .get("base_url")
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or_else(|| match provider.as_str() {
-            "ollama" => Some("http://localhost:11434/v1".to_string()),
-            "anthropic" => Some("https://api.anthropic.com/v1".to_string()),
-            _ => None,
-        })
+        .or_else(|| provider_default_base_url(&provider).map(String::from))
         .ok_or_else(|| anyhow::anyhow!("phase pin for provider `{provider}` missing `base_url`"))?;
     Ok(PhasePin {
         provider,
         model,
         base_url,
     })
+}
+
+/// Default `base_url` per provider, used when `phases.<phase>.base_url`
+/// is absent from `.lyrik/config.json`. An explicit `base_url` always
+/// wins.
+///
+/// Bedrock is intentionally absent — the AWS SDK's endpoint resolution
+/// derives the URL from the region, and Lyrik plumbs the region
+/// through `LlmConfig::region` instead of `base_url`. Configs pinning
+/// `bedrock` must still set `base_url` explicitly.
+///
+/// Privatemode's default points at the local proxy
+/// (`http://localhost:8080/v1`), matching the operator-side setup
+/// described in `docs/reference/privatemode.md`. Tinfoil points at
+/// `https://inference.tinfoil.sh/v1`, matching the constructor in
+/// `crates/agent/src/llm.rs`.
+pub(crate) fn provider_default_base_url(provider: &str) -> Option<&'static str> {
+    match provider {
+        "openai" => Some("https://api.openai.com/v1"),
+        "anthropic" => Some("https://api.anthropic.com/v1"),
+        "gemini" => Some("https://generativelanguage.googleapis.com/v1"),
+        "ollama" => Some("http://localhost:11434/v1"),
+        "tinfoil" => Some("https://inference.tinfoil.sh/v1"),
+        "privatemode" => Some("http://localhost:8080/v1"),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -677,5 +699,68 @@ mod tests {
     fn rewrite_top_level_run_id_errors_when_field_absent() {
         let body = r#"{"produced_at": "2026"}"#;
         assert!(rewrite_top_level_run_id(body, "x").is_err());
+    }
+
+    use super::provider_default_base_url;
+
+    #[test]
+    fn provider_default_openai() {
+        assert_eq!(
+            provider_default_base_url("openai"),
+            Some("https://api.openai.com/v1")
+        );
+    }
+
+    #[test]
+    fn provider_default_anthropic() {
+        assert_eq!(
+            provider_default_base_url("anthropic"),
+            Some("https://api.anthropic.com/v1")
+        );
+    }
+
+    #[test]
+    fn provider_default_gemini() {
+        assert_eq!(
+            provider_default_base_url("gemini"),
+            Some("https://generativelanguage.googleapis.com/v1")
+        );
+    }
+
+    #[test]
+    fn provider_default_ollama() {
+        assert_eq!(
+            provider_default_base_url("ollama"),
+            Some("http://localhost:11434/v1")
+        );
+    }
+
+    #[test]
+    fn provider_default_tinfoil() {
+        assert_eq!(
+            provider_default_base_url("tinfoil"),
+            Some("https://inference.tinfoil.sh/v1")
+        );
+    }
+
+    #[test]
+    fn provider_default_privatemode() {
+        assert_eq!(
+            provider_default_base_url("privatemode"),
+            Some("http://localhost:8080/v1")
+        );
+    }
+
+    #[test]
+    fn provider_default_bedrock_returns_none() {
+        // Bedrock derives its endpoint from the AWS region; no static
+        // default. Configs pinning bedrock must still set base_url.
+        assert_eq!(provider_default_base_url("bedrock"), None);
+    }
+
+    #[test]
+    fn provider_default_unknown_returns_none() {
+        assert_eq!(provider_default_base_url("not-a-provider"), None);
+        assert_eq!(provider_default_base_url(""), None);
     }
 }
