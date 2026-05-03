@@ -10,6 +10,8 @@ tagged.
 
 ## Unreleased
 
+## [1.0.1] — 2026-05-03
+
 ### Audit
 
 - LLM-response events in the session log now carry token-usage
