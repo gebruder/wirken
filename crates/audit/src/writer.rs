@@ -370,7 +370,7 @@ async fn flush_loop(
     // re-opened SQLite on every tick (every 50ms or 100 events),
     // paying the per-connection cost — pragma setup, idempotent
     // schema migration, AuditLog construction — for nothing. With WAL
-    // + busy_timeout from #599bb61, one persistent connection is the
+    // + busy_timeout from #9445e27, one persistent connection is the
     // right shape: writes are serialized inside the
     // SqliteSessionLog's own Mutex<Connection>, and the busy_timeout
     // covers contention with the agent's separate session-log handle

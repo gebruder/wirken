@@ -1376,7 +1376,7 @@ skills = ["other"]
     ///   the same server can stand in for both score and theme calls.
     /// - `/api/chat` → ollama-native chat endpoint; returns an
     ///   ollama-shaped tool_call response. The wirken-agent ollama
-    ///   dispatch (3080207) routes `provider: "ollama"` here instead
+    ///   dispatch (4b3ab48) routes `provider: "ollama"` here instead
     ///   of through the OpenAI-compat bridge.
     /// - `/api/embed` → returns canned vectors.
     ///
