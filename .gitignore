@@ -23,6 +23,24 @@ target
 
 .claude/
 
-# AVB benchmark upstream clone (separate repo, not tracked here)
-lyrik-bench/avb/upstream/
-lyrik-bench/avb/state/
+# Bench harnesses live in sibling repos under ~/code/
+lyrik-bench/
+*-bench/
+
+# Audit work and drafts
+audit/
+drafts/
+*.draft.md
+audit-*.md
+findings-*.md
+
+# Lyrik run artifacts (per-target-repo state, never tracked here)
+.lyrik/
+*.sarif
+findings.json
+audit.log
+
+# Private / out-of-scope subdirectories
+private/
+*-private/
+analysis/
