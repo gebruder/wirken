@@ -65,7 +65,48 @@ Both go into `.lyrik/context.md`. The framing and scoring phases receive a **com
 
 **Severity rubric.** Project-specific, not CVSS-shaped. Crash severity depends on whether availability is a security property of *this* software. State the tiers and what falls in each.
 
-Deliver both through the `phase_0_signoff` gate and wait for explicit sign-off before continuing. Do not proceed on silence. On approval, write `.lyrik/rubric.md` and `.lyrik/context.md` to the target repo so the team can commit them. Skip Phase 0 generation on subsequent runs unless the dependency lockfile hash or framework version fingerprint has changed.
+Deliver both through the `phase_0_signoff` gate and wait for explicit sign-off before continuing. Do not proceed on silence. On approval, emit context and rubric via the staged pattern below; the runner aggregates the staging directories into `.lyrik/context.md` and `.lyrik/rubric.md` at the target repo so the team can commit them. Skip Phase 0 generation on subsequent runs unless the dependency lockfile hash or framework version fingerprint has changed.
+
+### Staged emission for Phase 0
+
+Both `.lyrik/context.md` and `.lyrik/rubric.md` are emitted via
+staged per-section writes. The runner aggregates the staging
+directories into the final files.
+
+`context.md` sections — write each as a separate file under
+`.lyrik/state/runs/<run-id>/staging/context/`:
+
+- `01-software-identity.md`
+- `02-language-framework.md`
+- `03-dep-graph.md`
+- `04-entry-points.md`
+- `05-trust-boundaries.md`
+- `06-data-flows.md`
+- `07-auth-model.md`
+- `08-secrets.md`
+- `09-network.md`
+- `10-hot-zones.md`
+- `11-component-<name>.md` for each component identified (use a
+  slug-form name; multiple components produce multiple files
+  with the `11-` prefix and different slugs).
+
+`rubric.md` sections — write each as a separate file under
+`.lyrik/state/runs/<run-id>/staging/rubric/`:
+
+- `00-axes.md` — preamble describing the four scoring axes.
+- `01-critical.md`, `02-high.md`, `03-medium.md`, `04-low.md`,
+  `05-info.md` — one file per tier definition.
+
+The runner concatenates each staging directory in lexicographic
+order (with two blank lines between sections) and writes the
+final `.lyrik/context.md` and `.lyrik/rubric.md` to the target
+repo. Staging directories are deleted after successful aggregation.
+**Do not write `.lyrik/context.md` or `.lyrik/rubric.md` directly.**
+The runner refuses to accept a direct write when the corresponding
+staging directory is non-empty.
+
+Why staged: see "Why staged" under the findings emission section
+below; the rationale is the same.
 
 ## Recon
 
@@ -220,9 +261,46 @@ The report **MUST NOT**:
 
 Each finding is rendered in the smallest true number of words.
 
-### findings.json shape
+### Emission — staged per-finding writes
 
-The structured `findings.json` artifact is the source of truth that
+Findings are emitted **one file per finding** into the `staging/findings/`
+directory. The runner aggregates the directory into the final
+`findings.json` after the assessment turn returns.
+
+```
+write_file(
+  path=".lyrik/state/runs/<run-id>/staging/findings/finding-NNN.json",
+  content="<single finding JSON object>"
+)
+```
+
+`NNN` is a zero-padded three-digit ordinal (`001`, `002`, …) so
+lexicographic sort matches numeric order. The content is one finding
+object — the same shape as one element of the final `findings`
+array, including all required fields documented below. **Do not write
+`findings.json` directly.** The runner refuses to accept a directly-written
+`findings.json` when `staging/findings/` is non-empty, and aggregates
+`staging/findings/*.json` into the final artifact itself.
+
+#### Why staged
+
+A single `write_file` call carrying the full assessment (or context,
+or rubric) as one large content argument has been observed to truncate
+or mis-construct on long-context turns. Per-section writes keep each
+`content` argument small and bounded — by the size of one finding for
+findings, by the size of one context section for context, by the size
+of one rubric tier for rubric. Each is reliably constructible by the
+model regardless of provider.
+
+After all findings are written, the assessment is complete — return a
+short summary in the assistant message; the runner takes over the
+aggregation and any cleanup. The same applies to Phase 0 emission:
+write all context sections and rubric tiers to their staging
+directories, then return; the runner aggregates.
+
+### findings.json shape (post-aggregation)
+
+The aggregated `findings.json` is the source of truth that
 the SARIF emitter and the bench tooling consume. Its shape is pinned
 by `lyrik-bench/avb/SCHEMA.md` (v1.0). The bench enforces the schema
 on every run.

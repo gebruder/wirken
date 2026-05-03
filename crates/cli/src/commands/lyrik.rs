@@ -331,9 +331,19 @@ async fn dispatch_via_agent_runtime(
         "/lyrik Run a full assessment on the codebase in this workspace. \
          Run-id: `{run_id}`. Bench mode is enabled: phase_0_signoff and \
          high_severity_review auto-approve, do not wait for human signoff. \
-         Write the final findings.json to \
-         `.lyrik/state/runs/{run_id}/findings.json` with rung and deferral \
-         fields on every finding per the report contract."
+         \
+         Emission is staged — see the SKILL.md \"Staged emission\" \
+         instructions. Findings: write each finding to \
+         `.lyrik/state/runs/{run_id}/staging/findings/finding-NNN.json` \
+         (zero-padded ordinal; one finding per file; rung and deferral \
+         fields required). Phase 0 context: write each section to \
+         `.lyrik/state/runs/{run_id}/staging/context/<NN>-<section>.md`. \
+         Phase 0 rubric: write each tier to \
+         `.lyrik/state/runs/{run_id}/staging/rubric/<NN>-<tier>.md` plus \
+         `00-axes.md`. Do not write `findings.json`, `.lyrik/context.md`, \
+         or `.lyrik/rubric.md` directly — the runner aggregates the \
+         staging directories into the final files after the assessment \
+         turn returns."
     );
 
     let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
@@ -365,15 +375,120 @@ async fn dispatch_via_agent_runtime(
         }),
     )?;
 
+    // Staged emission aggregation. Each emission has its own
+    // `staging/<kind>/` subdirectory. The runner aggregates each in
+    // lexicographic order and writes to the canonical destination.
+    // Missing or empty staging dirs are skipped — Phase 0 may legitimately
+    // emit nothing on subsequent runs (see SKILL.md skip-Phase-0 rule),
+    // and `staging/findings/` may be absent if the agent wrote
+    // findings.json directly via the legacy single-write path.
+    let run_dir = target
+        .join(".lyrik")
+        .join("state")
+        .join("runs")
+        .join(run_id);
+    let staging = run_dir.join("staging");
+    aggregate_phase0_section(
+        &staging.join("context"),
+        &target.join(".lyrik").join("context.md"),
+    )
+    .context("aggregate context")?;
+    aggregate_phase0_section(
+        &staging.join("rubric"),
+        &target.join(".lyrik").join("rubric.md"),
+    )
+    .context("aggregate rubric")?;
+    aggregate_findings(&staging.join("findings"), expected_findings, run_id)
+        .context("aggregate findings")?;
+
     if !expected_findings.exists() {
         anyhow::bail!(
             "agent ran but findings.json was not written at {} \
-             (the skill instructs the agent to write this file; check the \
-             agent response: {:?})",
+             (skill emits to staging/findings/finding-NNN.json; the \
+             runner aggregates them. Neither path produced output. \
+             Agent response head: {:?})",
             expected_findings.display(),
             result.response.chars().take(500).collect::<String>()
         );
     }
+    Ok(())
+}
+
+/// Aggregate one Phase 0 staging directory (context or rubric) into a
+/// single markdown file. Empty or missing source directories are
+/// no-ops — the destination is left untouched, which preserves any
+/// prior `.lyrik/context.md` or `.lyrik/rubric.md` from earlier runs.
+/// On success the source directory is removed.
+fn aggregate_phase0_section(source: &Path, dest: &Path) -> Result<()> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(source)
+        .with_context(|| format!("read {}", source.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "md"))
+        .collect();
+    if entries.is_empty() {
+        let _ = std::fs::remove_dir(source);
+        return Ok(());
+    }
+    entries.sort();
+    let mut out = String::new();
+    for (i, p) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n");
+        }
+        let body = std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+        out.push_str(body.trim_end());
+        out.push('\n');
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(dest, out).with_context(|| format!("write {}", dest.display()))?;
+    std::fs::remove_dir_all(source)
+        .with_context(|| format!("remove staging dir {}", source.display()))?;
+    Ok(())
+}
+
+/// Aggregate `staging/findings/finding-NNN.json` files into the final
+/// `findings.json`. Empty or missing source directory is a no-op so a
+/// directly-written findings.json (legacy path) still works. On
+/// success the staging directory is removed.
+fn aggregate_findings(source: &Path, dest: &Path, run_id: &str) -> Result<()> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(source)
+        .with_context(|| format!("read {}", source.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    if entries.is_empty() {
+        let _ = std::fs::remove_dir(source);
+        return Ok(());
+    }
+    entries.sort();
+    let mut findings = Vec::with_capacity(entries.len());
+    for p in &entries {
+        let body = std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .with_context(|| format!("parse staged finding {}", p.display()))?;
+        findings.push(parsed);
+    }
+    let body = serde_json::json!({
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "produced_at": chrono::Utc::now().to_rfc3339(),
+        "findings": findings,
+    });
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(dest, serde_json::to_string_pretty(&body)?)
+        .with_context(|| format!("write {}", dest.display()))?;
+    std::fs::remove_dir_all(source)
+        .with_context(|| format!("remove staging dir {}", source.display()))?;
     Ok(())
 }
 
