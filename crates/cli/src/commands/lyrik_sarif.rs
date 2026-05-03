@@ -107,6 +107,27 @@ struct Finding {
     gate_routed: Option<GateRouted>,
     #[serde(default)]
     dedup_match: Option<DedupMatch>,
+    #[serde(default)]
+    patch_localized: Option<PatchLocalized>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct PatchLocalized {
+    #[serde(default)]
+    hunks: Vec<Hunk>,
+    #[serde(default)]
+    validates_property: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct Hunk {
+    uri: String,
+    #[serde(rename = "startLine")]
+    start_line: u32,
+    #[serde(rename = "endLine")]
+    end_line: u32,
+    #[serde(default, rename = "insertedContent")]
+    inserted_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,6 +277,30 @@ struct SarifResult {
     #[serde(rename = "partialFingerprints")]
     partial_fingerprints: serde_json::Value,
     properties: serde_json::Value,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fixes: Vec<Fix>,
+}
+
+#[derive(Debug, Serialize)]
+struct Fix {
+    description: Text,
+    #[serde(rename = "artifactChanges")]
+    artifact_changes: Vec<ArtifactChange>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactChange {
+    #[serde(rename = "artifactLocation")]
+    artifact_location: ArtifactLocation,
+    replacements: Vec<Replacement>,
+}
+
+#[derive(Debug, Serialize)]
+struct Replacement {
+    #[serde(rename = "deletedRegion")]
+    deleted_region: Region,
+    #[serde(rename = "insertedContent")]
+    inserted_content: Text,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,8 +456,18 @@ fn build_result(f: &Finding, run_id: &str) -> SarifResult {
                 "gate": g.gate,
                 "tag": g.tag,
             })),
+            "patch_localized": f.patch_localized.as_ref().map(|p| serde_json::json!({
+                "hunks": p.hunks.iter().map(|h| serde_json::json!({
+                    "uri": h.uri,
+                    "startLine": h.start_line,
+                    "endLine": h.end_line,
+                })).collect::<Vec<_>>(),
+                "validates_property": p.validates_property,
+            })),
         }
     });
+
+    let fixes = build_fixes(f.patch_localized.as_ref(), f.property_template.as_ref());
 
     let partial_fingerprints = serde_json::json!({
         "lyrik/finding_stable_id/v1": f.stable_id,
@@ -436,7 +491,54 @@ fn build_result(f: &Finding, run_id: &str) -> SarifResult {
         }],
         partial_fingerprints,
         properties,
+        fixes,
     }
+}
+
+/// Build SARIF-native `fixes[]` from the patch_localized hunks.
+/// Lyrik is diagnostic-only: the suggested replacement text is included
+/// when the input carries it; otherwise the replacement spans the
+/// deleted region with empty inserted content. The fix description
+/// names the property the patch validates, when known.
+fn build_fixes(
+    patch: Option<&PatchLocalized>,
+    template: Option<&PropertyTemplate>,
+) -> Vec<Fix> {
+    let Some(p) = patch else {
+        return Vec::new();
+    };
+    if p.hunks.is_empty() {
+        return Vec::new();
+    }
+    let description_text = match template.and_then(|t| t.proposition.as_deref()) {
+        Some(prop) => format!("Patch localizes the diff to the property's line range. Validates property: {prop}"),
+        None => "Patch localizes the diff to the property's line range.".to_string(),
+    };
+    let artifact_changes = p
+        .hunks
+        .iter()
+        .map(|h| ArtifactChange {
+            artifact_location: ArtifactLocation {
+                uri: h.uri.clone(),
+                uri_base_id: "%SRCROOT%",
+            },
+            replacements: vec![Replacement {
+                deleted_region: Region {
+                    start_line: h.start_line,
+                    end_line: h.end_line,
+                },
+                inserted_content: Text {
+                    text: h.inserted_content.clone().unwrap_or_default(),
+                },
+            }],
+        })
+        .collect();
+    vec![Fix {
+        description: Text {
+            text: description_text,
+        },
+        artifact_changes,
+    }]
 }
 
 fn level_for_tier(tier: Option<&str>) -> Level {
@@ -632,6 +734,86 @@ mod tests {
         let props = serde_json::to_value(&sarif.runs[0].results[0].properties).unwrap();
         assert_eq!(props["lyrik"]["rung"]["name"], "suspicion");
         assert_eq!(props["lyrik"]["rung"]["number"], 1);
+    }
+
+    #[test]
+    fn patch_localized_emits_sarif_fixes_and_properties_bag() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("findings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "run_id": "r",
+                "produced_at": "2026-05-03T00:00:00Z",
+                "findings": [{
+                    "id": "A1",
+                    "stable_id": "s",
+                    "framing": ["auth"],
+                    "location": {"file": "file.c", "line_start": 1158, "line_end": 1163},
+                    "rung": "patch_localized",
+                    "property_template": {
+                        "proposition": "every <write to X> must be preceded by <bound check on Y>"
+                    },
+                    "patch_localized": {
+                        "hunks": [
+                            {"uri": "file.c", "startLine": 1158, "endLine": 1163, "insertedContent": "if (oa->oa_length > sizeof(rpchdr) - 8) return FALSE;\n"}
+                        ],
+                        "validates_property": true
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let sarif = build_sarif(&path, "0.0.0").unwrap();
+        let r = &sarif.runs[0].results[0];
+        assert_eq!(r.fixes.len(), 1, "one fix expected");
+        let fix = &r.fixes[0];
+        assert!(
+            fix.description.text.contains("Validates property"),
+            "fix description must reference the validated property"
+        );
+        assert_eq!(fix.artifact_changes.len(), 1);
+        let change = &fix.artifact_changes[0];
+        assert_eq!(change.artifact_location.uri, "file.c");
+        assert_eq!(change.replacements[0].deleted_region.start_line, 1158);
+        assert_eq!(change.replacements[0].deleted_region.end_line, 1163);
+        assert!(change.replacements[0]
+            .inserted_content
+            .text
+            .contains("oa_length"));
+        let props = serde_json::to_value(&r.properties).unwrap();
+        assert_eq!(props["lyrik"]["patch_localized"]["validates_property"], true);
+        assert_eq!(
+            props["lyrik"]["patch_localized"]["hunks"][0]["startLine"],
+            1158
+        );
+    }
+
+    #[test]
+    fn no_patch_localized_emits_no_fixes_array() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("findings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "run_id": "r",
+                "produced_at": "2026-05-03T00:00:00Z",
+                "findings": [{
+                    "id": "X",
+                    "stable_id": "s",
+                    "framing": ["injection"],
+                    "location": {"file": "x.py", "line_start": 1}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let sarif = build_sarif(&path, "0.0.0").unwrap();
+        // serializing a SARIF result with empty fixes should drop the field
+        let v = serde_json::to_value(&sarif.runs[0].results[0]).unwrap();
+        assert!(
+            v.get("fixes").is_none(),
+            "fixes should be absent when no patch_localized is present"
+        );
     }
 
     #[test]
