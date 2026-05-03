@@ -159,8 +159,20 @@ mod macos {
 
         fn retrieve_device_key(&self) -> Result<VaultSecret, VaultError> {
             let _g = lock().lock().unwrap_or_else(|p| p.into_inner());
-            let bytes = get_generic_password(SERVICE, ACCOUNT)
-                .map_err(|e| VaultError::Keychain(format!("macOS Keychain retrieve: {e}")))?;
+            let bytes = match get_generic_password(SERVICE, ACCOUNT) {
+                Ok(b) => b,
+                Err(e) => {
+                    // errSecItemNotFound is -25300; a missing item is
+                    // the legitimate first-run case and routes to
+                    // CredentialStore::open's auto-create arm.
+                    if e.code() == -25300 {
+                        return Err(VaultError::KeychainNotInitialized);
+                    }
+                    return Err(VaultError::Keychain(format!(
+                        "macOS Keychain retrieve: {e}"
+                    )));
+                }
+            };
             let s = String::from_utf8(bytes)
                 .map_err(|e| VaultError::Keychain(format!("macOS Keychain decode: {e}")))?;
             Ok(VaultSecret::new(s))
@@ -310,9 +322,12 @@ mod linux {
                     .search_items(attributes.into_iter().collect())
                     .map_err(|e| VaultError::Keychain(format!("D-Bus search: {e}")))?;
 
-                let item = items.first().ok_or_else(|| {
-                    VaultError::Keychain("device key not found in Secret Service".into())
-                })?;
+                // No item under (wirken, device-key) is the legitimate
+                // first-run case — route to CredentialStore::open's
+                // auto-create arm via KeychainNotInitialized.
+                let item = items
+                    .first()
+                    .ok_or(VaultError::KeychainNotInitialized)?;
                 let secret = item
                     .get_secret()
                     .map_err(|e| VaultError::Keychain(format!("D-Bus get secret: {e}")))?;
@@ -448,6 +463,22 @@ mod age_file {
         }
 
         fn store_device_key(&self, key: &VaultSecret) -> Result<(), VaultError> {
+            // Refuse to seal under an empty passphrase. Empty derives a
+            // deterministic argon2 wrapping key that any other process
+            // running this code can reproduce; sealing under it is no
+            // protection. The historical silent-empty-seal failure mode
+            // (dialoguer Err swallowed via `unwrap_or_default()` →
+            // empty passphrase → keychain sealed) is the case this
+            // refusal blocks. See the vault-no-empty-seal slice.
+            if self.passphrase.expose().is_empty() {
+                return Err(VaultError::Keychain(
+                    "refusing to seal vault device key under an empty \
+                     passphrase. Configure WIRKEN_VAULT_PASSPHRASE or \
+                     run interactively so a real passphrase reaches \
+                     the keychain backend."
+                        .into(),
+                ));
+            }
             // Ensure directory exists
             fs::create_dir_all(&self.path)?;
 
@@ -496,10 +527,26 @@ mod age_file {
         }
 
         fn retrieve_device_key(&self) -> Result<VaultSecret, VaultError> {
-            let salt = fs::read(self.salt_file_path())
-                .map_err(|e| VaultError::Keychain(format!("read salt: {e}")))?;
-            let encrypted = fs::read(self.key_file_path())
-                .map_err(|e| VaultError::Keychain(format!("read key file: {e}")))?;
+            // Distinguish "no keychain file yet" (legitimate first run)
+            // from "file exists but unreadable" (permission, IO, race).
+            // The first case routes to `CredentialStore::open`'s narrow
+            // auto-create branch via `KeychainNotInitialized`. The
+            // second propagates as `Keychain(...)`, refusing to silently
+            // re-key over the operator's existing state.
+            let salt = match fs::read(self.salt_file_path()) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(VaultError::KeychainNotInitialized);
+                }
+                Err(e) => return Err(VaultError::Keychain(format!("read salt: {e}"))),
+            };
+            let encrypted = match fs::read(self.key_file_path()) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(VaultError::KeychainNotInitialized);
+                }
+                Err(e) => return Err(VaultError::Keychain(format!("read key file: {e}"))),
+            };
 
             let wrapping_key = self.derive_wrapping_key(&salt)?;
             decrypt(KEYCHAIN_AAD, &encrypted, &wrapping_key)

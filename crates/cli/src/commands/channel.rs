@@ -148,7 +148,8 @@ async fn add_signal(cfg: &GatewayConfig, data: &std::path::Path) -> Result<()> {
     // writes share the same cached vault passphrase.
     register_channel("signal", &creds.endpoint, cfg, data).await?;
 
-    let keychain = probe_keychain(data, super::cached_vault_passphrase);
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
     store_signal_creds(&store, &creds)?;
@@ -563,7 +564,8 @@ pub async fn remove(channel: &str) -> Result<()> {
     // unwrapped (e.g. the operator re-keyed the vault), the registry
     // entry still goes away and the encrypted rows can be cleared with
     // `wirken credentials remove <name>`.
-    let keychain = probe_keychain(&cfg.data_dir, super::cached_vault_passphrase);
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
     let removed = match CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
         Ok(store) => store.delete_by_channel(channel).unwrap_or(0),
         Err(_) => 0,
@@ -587,7 +589,8 @@ pub async fn register_channel(
     // Store token in vault. Use the shared cached-passphrase helper so
     // the immediately-following per-channel detail writes in `setup`
     // re-derive the same wrapping key.
-    let keychain = probe_keychain(data, super::cached_vault_passphrase);
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
