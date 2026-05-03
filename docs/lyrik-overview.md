@@ -1,5 +1,7 @@
 # Lyrik
 
+<img src="img/lyrik-wirken.png" alt="Lyrik" width="400" align="right">
+
 Lyrik audits a codebase against [a scoring guide your team has written](lyrik-rubric-authoring.md). The report shows every finding it considered, which it kept, which it threw out, which it could not decide on, and the reason for each.
 
 ## Who it is for
