@@ -76,6 +76,17 @@ Run top to bottom. Replace `0.7.4` with the target version.
    ```bash
    cargo update -w
    ```
+   Scan published docs for prose hardcoded to the previous series. Skip
+   for patch bumps. Replace `0.6` with the prior minor.
+   ```bash
+   git grep -nE "0\.6\.[0-9x]+|0\.6 " -- README.md SECURITY.md docs/ \
+       | grep -vE 'docs/release-process\.md|docs/release-signing\.md|CHANGELOG\.md' \
+       || true
+   ```
+   Eyeball the hits and fix any prose still hardcoded to the prior
+   series. Common offenders: `SECURITY.md` supported-versions table,
+   `README.md` status section and gateway banner example. Stage edits
+   alongside the bump.
 
 3. **Commit and push the bump. Wait for CI green on main.**
    ```bash
