@@ -108,14 +108,31 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum LyrikCommands {
+    /// Drive Lyrik phases against a target directory.
+    Run {
+        /// Path to the target directory containing `.lyrik/config.json`.
+        #[arg(long)]
+        target: std::path::PathBuf,
+        /// Run-id; supports nested form `<sample>/run-<N>`.
+        #[arg(long)]
+        run: String,
+        /// Reproduction mode: copy this findings.json into the run-state
+        /// directory instead of dispatching the Lyrik skill via the agent
+        /// runtime. Required until the agent-dispatch wiring lands.
+        #[arg(long)]
+        use_fixture: Option<std::path::PathBuf>,
+    },
     /// Emit a Lyrik report in the requested format.
     Report {
         /// Output format. Currently only `sarif` is supported.
         #[arg(long, default_value = "sarif")]
         format: String,
-        /// Run-id under `.lyrik/state/runs/<run-id>/` in the current directory.
+        /// Path to findings.json. Mutually exclusive with `--run`.
         #[arg(long)]
-        run: String,
+        findings: Option<std::path::PathBuf>,
+        /// Run-id under `<cwd>/.lyrik/state/runs/<run-id>/`. Mutually exclusive with `--findings`.
+        #[arg(long)]
+        run: Option<String>,
         /// Output file path. Parent directory is created if missing.
         #[arg(long)]
         output: std::path::PathBuf,
@@ -693,11 +710,19 @@ async fn main() -> Result<()> {
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
         Commands::Doctor => commands::doctor::run().await,
         Commands::Lyrik(cmd) => match cmd {
+            LyrikCommands::Run {
+                target,
+                run,
+                use_fixture,
+            } => commands::lyrik::run(&target, &run, use_fixture.as_deref()).await,
             LyrikCommands::Report {
                 format,
+                findings,
                 run,
                 output,
-            } => commands::lyrik::report(&format, &run, &output).await,
+            } => {
+                commands::lyrik::report(&format, findings.as_deref(), run.as_deref(), &output).await
+            }
         },
     }
 }
