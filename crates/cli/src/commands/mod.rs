@@ -7,6 +7,7 @@ pub mod credential;
 pub mod cron;
 pub mod doctor;
 pub mod lyrik;
+pub mod lyrik_sarif;
 pub mod mcp;
 pub mod mcp_proxy;
 pub mod permission;
