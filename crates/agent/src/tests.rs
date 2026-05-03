@@ -857,6 +857,33 @@ fn parse_ollama_response_tool_calls_synthesizes_id() {
 }
 
 #[test]
+fn ollama_request_body_normalizes_tool_call_args_to_objects() {
+    use crate::llm::build_ollama_request_body;
+    let cfg = LlmConfig::ollama("qwen2.5:7b");
+    // Assistant message with a prior tool call. message_to_json
+    // would emit arguments as a JSON-encoded string (OpenAI shape).
+    let messages = vec![serde_json::json!({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_0",
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "arguments": "{\"path\":\".lyrik/config.json\"}"
+            }
+        }]
+    })];
+    let body = build_ollama_request_body(&cfg, messages, &[]);
+    let args = &body["messages"][0]["tool_calls"][0]["function"]["arguments"];
+    assert!(
+        args.is_object(),
+        "ollama path must serialize arguments as an object; got: {args}"
+    );
+    assert_eq!(args["path"], serde_json::json!(".lyrik/config.json"));
+}
+
+#[test]
 fn parse_ollama_response_empty_message_yields_empty() {
     use crate::llm::{LlmResponse, parse_ollama_response};
     let body = serde_json::json!({

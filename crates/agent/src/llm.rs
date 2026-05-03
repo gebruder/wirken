@@ -928,6 +928,28 @@ pub(crate) fn build_openai_request_body(
     body
 }
 
+/// Walk one message and convert any `tool_calls[].function.arguments`
+/// from JSON-encoded string form (the OpenAI shape) to parsed JSON
+/// value form (the ollama shape). Non-tool-call messages and messages
+/// whose arguments don't parse as JSON are returned unchanged.
+fn normalize_tool_call_args_for_ollama(mut msg: serde_json::Value) -> serde_json::Value {
+    if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+        for tc in tool_calls.iter_mut() {
+            let parsed = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+            if let Some(parsed_args) = parsed
+                && let Some(func) = tc.get_mut("function")
+            {
+                func["arguments"] = parsed_args;
+            }
+        }
+    }
+    msg
+}
+
 /// Construct the URL for ollama's native `/api/chat` endpoint, given a
 /// `base_url` that may include a trailing `/v1` (the OpenAI-compat
 /// bridge path) or end with `/`. The native endpoint sits at
@@ -951,6 +973,17 @@ pub(crate) fn build_ollama_request_body(
     messages_json: Vec<serde_json::Value>,
     tools: &[ToolDef],
 ) -> serde_json::Value {
+    // Ollama's `/api/chat` expects `tool_calls[].function.arguments`
+    // as a JSON object. The shared `message_to_json` helper emits it
+    // as a JSON-encoded string (the OpenAI shape). Walk the messages
+    // and parse the argument string back to a value so ollama's
+    // request-body parser doesn't bail with "Value looks like object,
+    // but can't find closing '}'" when it tries to read the encoded
+    // string as a nested object.
+    let messages_json: Vec<serde_json::Value> = messages_json
+        .into_iter()
+        .map(normalize_tool_call_args_for_ollama)
+        .collect();
     let mut body = serde_json::json!({
         "model": config.model,
         "messages": messages_json,
