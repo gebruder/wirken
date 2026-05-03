@@ -10,6 +10,23 @@ tagged.
 
 ## Unreleased
 
+### Lyrik
+
+- The findings.json shape Lyrik runs emit is now pinned. The skill
+  prompt requires `schema_version: "1.0"` at the top level, a flat
+  `findings` array (stream membership lives on each finding under
+  `stream`), an object-shaped `location`, and uppercase `tier`
+  values (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW` / `INFO`). The
+  full schema lives in `lyrik-bench/avb/SCHEMA.md`; the skill
+  references it and shows a worked example. Run-005 was caught
+  emitting a nested `findings: {novel/regression/gate_routed}`
+  shape with string-form locations and capitalized severity
+  strings; the SARIF emitter expects the canonical shape and
+  failed to deserialize. Pinning closes that gap. The emitter is
+  unchanged in this slice — it already accepted the canonical
+  shape — and now dispatches on `schema_version` for future
+  schema bumps.
+
 ### Security
 
 - Vault no longer silently seals under empty passphrase. Setup

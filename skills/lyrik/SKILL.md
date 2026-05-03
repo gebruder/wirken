@@ -220,6 +220,71 @@ The report **MUST NOT**:
 
 Each finding is rendered in the smallest true number of words.
 
+### findings.json shape
+
+The structured `findings.json` artifact is the source of truth that
+the SARIF emitter and the bench tooling consume. Its shape is pinned
+by `lyrik-bench/avb/SCHEMA.md` (v1.0). The bench enforces the schema
+on every run.
+
+Key constraints. Read SCHEMA.md for the full set; what follows is
+the shape every Lyrik run **must** produce:
+
+- Top-level `schema_version: "1.0"` (string, required). The emitter
+  dispatches on this field.
+- `findings` is a **flat array**, not a nested object. Stream
+  membership lives on each finding under `stream` (one of `novel`,
+  `regression`, `gate_routed`).
+- Each finding requires: `id`, `stable_id`, `stream`, `framing` (a
+  non-empty array from the nine framings), `location.file`,
+  `location.line_start`, `tier` (uppercase enum: `CRITICAL` / `HIGH`
+  / `MEDIUM` / `LOW` / `INFO`), `grade` (one of `0`, `0.5`, `1.0`),
+  `rung` (one of the six rung names), and `deferral` (`null` or one
+  of the three deferral reasons).
+- `location` is an **object**: `{file, line_start, line_end?, function?}`.
+  Not a `"file:line"` string.
+- Severity carries on `tier` (uppercase). Not `severity` with a
+  capitalized word.
+
+Worked example (one finding; see SCHEMA.md for the full set of
+recommended fields):
+
+```json
+{
+  "schema_version": "1.0",
+  "run_id": "sample-paper-listing-1/run-N",
+  "produced_at": "2026-05-03T10:30:00Z",
+  "findings": [
+    {
+      "id": "F001",
+      "stable_id": "source::source/agent.py:21:analyze_data",
+      "stream": "novel",
+      "framing": ["injection"],
+      "detection_source": "model_reasoning",
+      "location": { "file": "source/agent.py", "line_start": 20, "line_end": 22, "function": "analyze_data" },
+      "title": "eval() of caller-controlled string",
+      "summary": "analyze_data is decorated @tool; the body calls eval(expr) on the unsanitized argument.",
+      "tier": "CRITICAL",
+      "grade": 0.5,
+      "rung": "patch_localized",
+      "deferral": null,
+      "property_template": {
+        "proposition": "every <interpreter call X on caller-controlled string> must be preceded by <validation Y>",
+        "slots": { "X": "eval(expr) at agent.py:22", "Y": "ast.literal_eval or allowlist grammar" }
+      },
+      "patch_localized": {
+        "hunks": [{ "uri": "source/agent.py", "startLine": 20, "endLine": 22, "insertedContent": "..." }],
+        "validates_property": true
+      }
+    }
+  ]
+}
+```
+
+When the schema bumps to a new version, the bench's SCHEMA.md and
+this section update together; an updated SARIF emitter accepts both
+versions for one release cycle, then drops the prior version.
+
 ### Delivery
 
 Deliver the bundle through the configured channel adapter. Each 1.0-grade finding pauses at the `high_severity_review` gate before delivery — a human reviewer signs off on the destination, redirects to a different channel, or holds. There is no auto-routing of 1.0-grade findings, encrypted channel or otherwise. Lyrik does not auto-disclose to vendors — that is a human action.
