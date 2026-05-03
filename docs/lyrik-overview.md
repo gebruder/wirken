@@ -48,8 +48,7 @@ This is the structural rebuttal to "we found N high-severity bugs." A finding co
 Every finding is scored by two passes. If the two disagree by more than one severity level, a third pass runs. If two of the three agree, that score wins; both rationales are kept in the report. If all three disagree, the finding is sent for human review with the kind of disagreement tagged:
 
 - The scoring guide does not clearly cover this kind of finding. The team updates the guide and re-scores.
-- The finding can be read more than one way under the current guide. The team ships the finding with both readings.
-- The finding cannot be scored without expanding the audit's scope.
+- The finding admits more than one valid reading under the current guide. The report routes it through the human-review gate with all rationales and an explicit "team did not resolve" status. The reader sees every interpretation and decides; lyrik does not pick one reading or split the finding into separate items.
 
 Disagreement is recorded, not averaged.
 
