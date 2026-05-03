@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Reject staging product-named filenames and AI-tool dotfile paths,
+# and reject .gitignore additions that reference AI-tool tokens.
+#
+# Install: scripts/git-hooks/install.sh
+set -euo pipefail
+
+fail=0
+report() {
+	printf 'pre-commit: %s\n' "$1" >&2
+	fail=1
+}
+
+# Caps tokens anchored at start of a path component, separator-bounded.
+# Matches CLAUDE.md, AGENTS.md, GEMINI.json, CURSOR-rules, ANTHROPIC_NOTES,
+# but not crates/cli/src/commands/agents.rs (lowercase).
+banned_caps='^(CLAUDE|ANTHROPIC|AGENTS|CURSOR|COPILOT|GEMINI)([._\-]|$)'
+
+# Dotfile path components: .claude, .cursor, .copilot, .aider (any case).
+# Matches .claude/, .cursor/anything, .cursorrules, .aider.conf.yml.
+banned_dot='^\.(claude|cursor|copilot|aider)'
+
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+
+for f in "${staged[@]}"; do
+	[ -z "$f" ] && continue
+	IFS='/' read -ra parts <<<"$f"
+	for p in "${parts[@]}"; do
+		if printf '%s' "$p" | grep -qE "$banned_caps"; then
+			report "AI-tool config filename in path: $f (component: $p)"
+		fi
+		if printf '%s' "$p" | grep -qiE "$banned_dot"; then
+			report "AI-tool dotfile path: $f (component: $p)"
+		fi
+	done
+done
+
+# .gitignore added-line scan (only ADDED lines, grandfathers existing entries).
+if printf '%s\n' "${staged[@]}" | grep -qE '(^|/)\.gitignore$'; then
+	added=$(git diff --cached -U0 -- '*.gitignore' '.gitignore' | grep -E '^\+[^+]' || true)
+	if printf '%s\n' "$added" | grep -qiE '\b(claude|anthropic|cursor|copilot|gemini|aider)\b'; then
+		printf 'pre-commit: .gitignore added line references AI-tool token:\n' >&2
+		printf '%s\n' "$added" | grep -iE '\b(claude|anthropic|cursor|copilot|gemini|aider)\b' >&2
+		fail=1
+	fi
+fi
+
+exit $fail

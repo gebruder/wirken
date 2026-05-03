@@ -7,7 +7,7 @@ repo_root=$(git rev-parse --show-toplevel)
 src_dir="$repo_root/scripts/git-hooks"
 dest_dir="$repo_root/.git/hooks"
 
-for hook in commit-msg; do
+for hook in commit-msg pre-commit; do
 	src="$src_dir/$hook"
 	dest="$dest_dir/$hook"
 	if [ -e "$dest" ] && [ ! -L "$dest" ]; then

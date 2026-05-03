@@ -7,6 +7,7 @@ set -euo pipefail
 msg_file="${1:?usage: commit-msg <path>}"
 msg=$(cat "$msg_file")
 payload=$(printf '%s\n' "$msg" | grep -v '^#' || true)
+subject=$(printf '%s\n' "$payload" | head -n 1)
 
 fail=0
 report() {
@@ -18,8 +19,20 @@ if printf '%s' "$payload" | grep -qE '(/home/|/Users/)[a-z]'; then
 	report 'absolute home path in message; use $REPO or a relative path'
 fi
 
-if printf '%s' "$payload" | grep -qiE '^Co-Authored-By:|^Generated with '; then
-	report 'Attribution rule violation.'
+if printf '%s' "$payload" | grep -qiE 'Co-Authored-By:'; then
+	report 'attribution trailer (Co-Authored-By)'
+fi
+
+if printf '%s' "$payload" | grep -qiE '^Generated with '; then
+	report 'attribution trailer (Generated with)'
+fi
+
+if printf '%s' "$subject" | grep -qiE '^(generated|written|created|authored).{0,20}(with|by).{0,20}(claude|anthropic|cursor|copilot|gemini)'; then
+	report 'subject suggests AI authorship attribution'
+fi
+
+if printf '%s' "$subject" | grep -q '^🤖'; then
+	report 'subject starts with 🤖'
 fi
 
 if [ $fail -ne 0 ]; then
