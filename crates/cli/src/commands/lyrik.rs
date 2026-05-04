@@ -514,20 +514,21 @@ async fn dispatch_via_agent_runtime(
         &target.join(".lyrik").join("rubric.md"),
     )
     .context("aggregate rubric")?;
-    let mut finding_sources: Vec<PathBuf> = Vec::new();
+    let mut finding_sources: Vec<(Option<String>, PathBuf)> = Vec::new();
     let top_findings = staging.join("findings");
     if top_findings.is_dir() {
-        finding_sources.push(top_findings);
+        finding_sources.push((None, top_findings));
     }
     if let Some(wc) = walks_cfg.as_ref() {
         for w in &wc.walks {
             let p = staging.join(w).join("findings");
             if p.is_dir() {
-                finding_sources.push(p);
+                finding_sources.push((Some(w.clone()), p));
             }
         }
     }
-    aggregate_findings_multi(&finding_sources, expected_findings, run_id)
+    let dedup_active = walks_cfg.is_some();
+    aggregate_findings_multi(&finding_sources, expected_findings, run_id, dedup_active)
         .context("aggregate findings")?;
     // remove_dir succeeds only if empty — exactly the semantics we
     // want for cleaning up the parent staging/ once each subdir
@@ -857,17 +858,28 @@ async fn dispatch_walks_concurrent(
     Ok(outcomes)
 }
 
-/// Aggregate findings from one or more source directories into the
-/// canonical `findings.json`. The single-source [`aggregate_findings`]
-/// is the one-call slice; this multi-source variant covers the
-/// per-walk path where each walk emits to its own
-/// `staging/<walk-name>/findings/` subtree. Concatenates ordered by
-/// (source-index, filename) so the merge is deterministic.
-/// Dedup is commit 3.
-fn aggregate_findings_multi(sources: &[PathBuf], dest: &Path, run_id: &str) -> Result<()> {
-    let mut findings = Vec::new();
-    let mut consumed = Vec::new();
-    for source in sources {
+/// Aggregate findings from one or more source directories into
+/// the canonical `findings.json`. Each source is a (walk_name,
+/// dir) pair: `walk_name` is `None` for the top-level
+/// `staging/findings/` (one-call slice), `Some(walk)` for per-walk
+/// staging subdirs.
+///
+/// When `dedup_active` is true (per-walk path), findings sharing a
+/// `(location.file, location.line_start)` key collapse to one
+/// merged record: framings union, tier rises to the highest of the
+/// inputs, `dedup_disagreement: true` when input tiers differ,
+/// `dedup_sources: [walk_name, ...]` lists every walk that
+/// contributed. When false (one-call path), every staged finding
+/// is preserved verbatim.
+fn aggregate_findings_multi(
+    sources: &[(Option<String>, PathBuf)],
+    dest: &Path,
+    run_id: &str,
+    dedup_active: bool,
+) -> Result<()> {
+    let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
+    let mut consumed: Vec<PathBuf> = Vec::new();
+    for (walk_name, source) in sources {
         if !source.is_dir() {
             continue;
         }
@@ -882,15 +894,22 @@ fn aggregate_findings_multi(sources: &[PathBuf], dest: &Path, run_id: &str) -> R
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
             let parsed: serde_json::Value = serde_json::from_str(&body)
                 .with_context(|| format!("parse staged finding {}", p.display()))?;
-            findings.push(parsed);
+            tagged.push((walk_name.clone(), parsed));
         }
         if !entries.is_empty() {
             consumed.push(source.clone());
         }
     }
-    if findings.is_empty() && consumed.is_empty() {
+    if tagged.is_empty() && consumed.is_empty() {
         return Ok(());
     }
+
+    let findings: Vec<serde_json::Value> = if dedup_active {
+        dedup_findings(tagged)
+    } else {
+        tagged.into_iter().map(|(_, f)| f).collect()
+    };
+
     let body = serde_json::json!({
         "schema_version": "1.0",
         "run_id": run_id,
@@ -907,6 +926,152 @@ fn aggregate_findings_multi(sources: &[PathBuf], dest: &Path, run_id: &str) -> R
             .with_context(|| format!("remove staging dir {}", source.display()))?;
     }
     Ok(())
+}
+
+/// Numeric severity ordering used by the dedup tier-rises rule.
+/// Higher number is more severe. Unknown tier maps to 0 so a
+/// malformed input does not silently dominate well-formed peers.
+fn tier_severity(tier: &str) -> u32 {
+    match tier {
+        "CRITICAL" => 5,
+        "HIGH" => 4,
+        "MEDIUM" => 3,
+        "LOW" => 2,
+        "INFO" => 1,
+        _ => 0,
+    }
+}
+
+/// Collapse findings sharing a `(location.file, location.line_start)`
+/// key into one merged record per the dedup contract documented on
+/// [`aggregate_findings_multi`]. Findings without a usable location
+/// key (missing file or line_start) pass through unchanged so a
+/// malformed input does not collide with everything else under a
+/// shared default key.
+pub(super) fn dedup_findings(
+    tagged: Vec<(Option<String>, serde_json::Value)>,
+) -> Vec<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<(Option<String>, serde_json::Value)>> = BTreeMap::new();
+    let mut passthrough: Vec<serde_json::Value> = Vec::new();
+
+    for (walk_name, finding) in tagged {
+        let key = location_key(&finding);
+        match key {
+            Some(k) => {
+                if !groups.contains_key(&k) {
+                    order.push(k.clone());
+                }
+                groups.entry(k).or_default().push((walk_name, finding));
+            }
+            None => passthrough.push(finding),
+        }
+    }
+
+    let mut out = Vec::with_capacity(order.len() + passthrough.len());
+    for key in order {
+        let mut group = groups.remove(&key).expect("key from order list");
+        if group.len() == 1 {
+            // Solo finding: still tag dedup_sources for traceability when a
+            // walk_name was supplied; leave the rest of the record alone.
+            let (walk_name, mut f) = group.pop().expect("len 1");
+            if let Some(name) = walk_name
+                && let Some(obj) = f.as_object_mut()
+            {
+                obj.entry("dedup_sources".to_string())
+                    .or_insert(serde_json::json!([name]));
+            }
+            out.push(f);
+            continue;
+        }
+        out.push(merge_finding_group(group));
+    }
+    out.extend(passthrough);
+    out
+}
+
+/// Merge two or more findings sharing the same location. Framings
+/// collapse to a sorted unique union. Tier rises to the highest of
+/// the inputs; `dedup_disagreement: true` when inputs disagreed.
+/// `dedup_sources` lists each contributing walk name in
+/// first-seen order. The first finding's other fields (id,
+/// stable_id, summary, etc.) are kept as the canonical record so
+/// downstream consumers still have one stable identifier per
+/// finding.
+fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde_json::Value {
+    let mut framings: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut sources: Vec<String> = Vec::new();
+    let mut top_severity = 0u32;
+    let mut top_tier = String::new();
+    let mut tiers_disagree = false;
+
+    for (walk_name, f) in &group {
+        if let Some(arr) = f.get("framing").and_then(|v| v.as_array()) {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    framings.insert(s.to_string());
+                }
+            }
+        }
+        if let Some(walk) = walk_name
+            && !sources.contains(walk)
+        {
+            sources.push(walk.clone());
+        }
+        if let Some(t) = f.get("tier").and_then(|v| v.as_str()) {
+            let sev = tier_severity(t);
+            if sev > 0 && top_severity > 0 && t != top_tier {
+                tiers_disagree = true;
+            }
+            if sev > top_severity {
+                top_severity = sev;
+                top_tier = t.to_string();
+            }
+        }
+    }
+
+    let (_, mut canonical) = group.into_iter().next().expect("group non-empty");
+    if let Some(obj) = canonical.as_object_mut() {
+        if !framings.is_empty() {
+            obj.insert(
+                "framing".to_string(),
+                serde_json::Value::Array(
+                    framings
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if !sources.is_empty() {
+            obj.insert(
+                "dedup_sources".to_string(),
+                serde_json::Value::Array(
+                    sources.into_iter().map(serde_json::Value::String).collect(),
+                ),
+            );
+        }
+        if !top_tier.is_empty() {
+            obj.insert("tier".to_string(), serde_json::Value::String(top_tier));
+        }
+        obj.insert(
+            "dedup_disagreement".to_string(),
+            serde_json::Value::Bool(tiers_disagree),
+        );
+    }
+    canonical
+}
+
+fn location_key(finding: &serde_json::Value) -> Option<String> {
+    let loc = finding.get("location")?;
+    let file = loc.get("file").and_then(|v| v.as_str())?;
+    let line = loc
+        .get("line_start")
+        .and_then(|v| v.as_u64())
+        .or_else(|| loc.get("line").and_then(|v| v.as_u64()))?;
+    Some(format!("{file}:{line}"))
 }
 
 /// Aggregate `staging/findings/finding-NNN.json` files into the final
@@ -1279,5 +1444,170 @@ mod tests {
         let pin = resolve_phase_pin(&cfg).unwrap();
         // u64 conversion fails for negatives; pin treats as absent.
         assert_eq!(pin.context_window, None);
+    }
+
+    use super::dedup_findings;
+    use super::tier_severity;
+
+    #[test]
+    fn tier_severity_orders_canonical_tiers() {
+        assert!(tier_severity("CRITICAL") > tier_severity("HIGH"));
+        assert!(tier_severity("HIGH") > tier_severity("MEDIUM"));
+        assert!(tier_severity("MEDIUM") > tier_severity("LOW"));
+        assert!(tier_severity("LOW") > tier_severity("INFO"));
+        assert_eq!(tier_severity("UNKNOWN"), 0);
+    }
+
+    fn finding(file: &str, line: u64, framing: &str, tier: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": "F001",
+            "stable_id": format!("{framing}::{file}:{line}"),
+            "framing": [framing],
+            "location": {"file": file, "line_start": line},
+            "title": "stub",
+            "summary": "stub",
+            "tier": tier,
+        })
+    }
+
+    #[test]
+    fn dedup_collapses_same_location_across_walks() {
+        let tagged = vec![
+            (
+                Some("sink-walk".into()),
+                finding("src/a.rs", 10, "auth", "MEDIUM"),
+            ),
+            (
+                Some("graph-walk".into()),
+                finding("src/a.rs", 10, "injection", "HIGH"),
+            ),
+        ];
+        let merged = dedup_findings(tagged);
+        assert_eq!(merged.len(), 1);
+        let m = &merged[0];
+        let framings: Vec<&str> = m
+            .get("framing")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(framings.contains(&"auth"));
+        assert!(framings.contains(&"injection"));
+        assert_eq!(m.get("tier").and_then(|v| v.as_str()), Some("HIGH"));
+        assert_eq!(
+            m.get("dedup_disagreement").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let sources: Vec<&str> = m
+            .get("dedup_sources")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(sources.contains(&"sink-walk"));
+        assert!(sources.contains(&"graph-walk"));
+    }
+
+    #[test]
+    fn dedup_does_not_mark_disagreement_when_tiers_match() {
+        let tagged = vec![
+            (
+                Some("sink-walk".into()),
+                finding("src/a.rs", 10, "auth", "HIGH"),
+            ),
+            (
+                Some("graph-walk".into()),
+                finding("src/a.rs", 10, "injection", "HIGH"),
+            ),
+        ];
+        let merged = dedup_findings(tagged);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0]
+                .get("dedup_disagreement")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_locations_apart() {
+        let tagged = vec![
+            (
+                Some("sink-walk".into()),
+                finding("src/a.rs", 10, "auth", "HIGH"),
+            ),
+            (
+                Some("sink-walk".into()),
+                finding("src/a.rs", 11, "auth", "HIGH"),
+            ),
+            (
+                Some("sink-walk".into()),
+                finding("src/b.rs", 10, "auth", "HIGH"),
+            ),
+        ];
+        let merged = dedup_findings(tagged);
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn dedup_solo_finding_records_dedup_sources_when_walk_known() {
+        let tagged = vec![(
+            Some("sink-walk".into()),
+            finding("src/a.rs", 10, "auth", "HIGH"),
+        )];
+        let merged = dedup_findings(tagged);
+        assert_eq!(merged.len(), 1);
+        let s = merged[0]
+            .get("dedup_sources")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].as_str(), Some("sink-walk"));
+    }
+
+    #[test]
+    fn dedup_passthrough_for_finding_without_location_key() {
+        let mut malformed = finding("src/a.rs", 10, "auth", "HIGH");
+        malformed.as_object_mut().unwrap().remove("location");
+        let tagged = vec![
+            (Some("sink-walk".into()), malformed),
+            (
+                Some("sink-walk".into()),
+                finding("src/a.rs", 10, "auth", "HIGH"),
+            ),
+        ];
+        let merged = dedup_findings(tagged);
+        // The malformed finding cannot collide on the location key,
+        // so it passes through unchanged alongside the normal one.
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn dedup_higher_tier_wins() {
+        for (a_tier, b_tier, expected) in [
+            ("LOW", "CRITICAL", "CRITICAL"),
+            ("HIGH", "MEDIUM", "HIGH"),
+            ("INFO", "LOW", "LOW"),
+        ] {
+            let tagged = vec![
+                (
+                    Some("sink-walk".into()),
+                    finding("src/a.rs", 10, "auth", a_tier),
+                ),
+                (
+                    Some("graph-walk".into()),
+                    finding("src/a.rs", 10, "auth", b_tier),
+                ),
+            ];
+            let merged = dedup_findings(tagged);
+            assert_eq!(
+                merged[0].get("tier").and_then(|v| v.as_str()),
+                Some(expected),
+                "{a_tier} vs {b_tier} should resolve to {expected}"
+            );
+        }
     }
 }
