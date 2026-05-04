@@ -1227,3 +1227,395 @@ mod session {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Chain-head signing regressions
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod chain_head_signing {
+    use std::sync::Arc;
+
+    use rusqlite::params;
+
+    use crate::log::{AuditLog, VerifyResult};
+    use crate::session_log::{
+        ChainHeadReason, SessionEvent, SessionHandle, SessionId, SessionLog, SqliteSessionLog,
+        TrustLevel,
+    };
+    use crate::signing::{AuditSigningKey, CHAIN_HEAD_SCHEMA_VERSION, build_signed_message};
+
+    fn user_msg(s: &str) -> SessionEvent {
+        SessionEvent::UserMessage {
+            content: s.into(),
+            inbound_id: None,
+        }
+    }
+
+    fn fresh_signed() -> (
+        Arc<SqliteSessionLog>,
+        SessionHandle<crate::session_log::OwnSession>,
+        Arc<AuditSigningKey>,
+    ) {
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = SqliteSessionLog::open_in_memory_with_signer(signer.clone()).unwrap();
+        let log = Arc::new(log);
+        let h = log.handle_for(SessionId::new("sig-sess"));
+        (log, h, signer)
+    }
+
+    /// Session-start fires a SessionStart head on the first append.
+    /// Verifier confirms one signed head and zero invalid signatures.
+    #[test]
+    fn session_start_emits_signed_chain_head() {
+        let (log, h, signer) = fresh_signed();
+        log.append(&h, TrustLevel::User, user_msg("hello")).unwrap();
+
+        let rows = log.get_since(&h, 0).unwrap();
+        assert_eq!(rows.len(), 2, "regular event then SessionStart head");
+        match &rows[1].event {
+            SessionEvent::ChainHead {
+                reason,
+                signing_key_id,
+                schema_version,
+                ..
+            } => {
+                assert_eq!(*reason, ChainHeadReason::SessionStart);
+                assert_eq!(*schema_version, CHAIN_HEAD_SCHEMA_VERSION);
+                assert_eq!(signing_key_id.0, signer.key_id_hex());
+            }
+            other => panic!("expected ChainHead at seq 1, got {other:?}"),
+        }
+
+        let sig = log.verify_signatures(&h).unwrap();
+        assert_eq!(sig.signed_heads_count, 1);
+        assert!(sig.first_invalid.is_none());
+        assert_eq!(sig.signing_key_ids_seen.len(), 1);
+    }
+
+    /// Tampering with a ChainHead's claimed current_chain_hash makes
+    /// the signature payload mismatch the row's stored chain hash.
+    /// The verifier hard-fails on signature check.
+    #[test]
+    fn tampered_chain_head_current_hash_rejected_by_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let inner = log.session_log();
+        let handle = inner.handle_for(SessionId::new("tampered"));
+        inner
+            .append(&handle, TrustLevel::User, user_msg("first"))
+            .unwrap();
+
+        // Locate the SessionStart head and corrupt its current_chain_hash
+        // claim by editing the payload JSON directly. The chain hash and
+        // leaf hash on the row are recomputed so the chain check itself
+        // still passes; only the signature pass surfaces the break.
+        let conn = inner.raw_conn_for_test().lock().unwrap();
+        let (id, payload, prev_hash): (i64, String, String) = conn
+            .query_row(
+                "SELECT id, payload, prev_hash FROM session_events
+                 WHERE session_id = 'tampered' AND seq = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let mut payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        payload_json["current_chain_hash"] = serde_json::Value::String("a".repeat(64));
+        let new_payload = serde_json::to_string(&payload_json).unwrap();
+        let new_leaf = sha256_hex(new_payload.as_bytes());
+        let new_chain = chain_hash(&prev_hash, &new_leaf);
+        conn.execute(
+            "UPDATE session_events
+             SET payload = ?1, leaf_hash = ?2, hash = ?3
+             WHERE id = ?4",
+            params![new_payload, new_leaf, new_chain, id],
+        )
+        .unwrap();
+        drop(conn);
+
+        match log.verify().unwrap() {
+            VerifyResult::SignatureInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("current_chain_hash") || reason.contains("ed25519"),
+                    "reason should cite the failing check, got: {reason}"
+                );
+            }
+            other => panic!("expected SignatureInvalid, got {other:?}"),
+        }
+    }
+
+    /// Removing every ChainHead row from a session is a hard fail
+    /// under --require-signed. Without --require-signed the verifier
+    /// reports the session as transition-era.
+    #[test]
+    fn missing_chain_head_hard_fails_under_require_signed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let inner = log.session_log();
+        let handle = inner.handle_for(SessionId::new("losing-heads"));
+        inner
+            .append(&handle, TrustLevel::User, user_msg("alpha"))
+            .unwrap();
+        inner
+            .append(&handle, TrustLevel::User, user_msg("beta"))
+            .unwrap();
+
+        // Strip every ChainHead row. The chain over the surviving
+        // events still needs to recompute correctly, so we rebuild
+        // each leaf/prev/chain hash from the surviving payloads.
+        let conn = inner.raw_conn_for_test().lock().unwrap();
+        conn.execute(
+            "DELETE FROM session_events
+             WHERE session_id = 'losing-heads'
+               AND payload LIKE '%\"chain_head\"%'",
+            [],
+        )
+        .unwrap();
+        // Renumber + rehash the survivors as a fresh chain so
+        // verify() does not fail on chain integrity before reaching
+        // the signature pass.
+        let surviving: Vec<(i64, u64, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, seq, payload FROM session_events
+                     WHERE session_id = 'losing-heads'
+                     ORDER BY seq ASC",
+                )
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)? as u64,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap();
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let mut prev = String::new();
+        for (idx, (id, _old_seq, payload)) in surviving.iter().enumerate() {
+            let leaf = sha256_hex(payload.as_bytes());
+            let chain = chain_hash(&prev, &leaf);
+            conn.execute(
+                "UPDATE session_events
+                 SET seq = ?1, leaf_hash = ?2, prev_hash = ?3, hash = ?4
+                 WHERE id = ?5",
+                params![idx as i64, leaf, prev.clone(), chain.clone(), id],
+            )
+            .unwrap();
+            prev = chain;
+        }
+        drop(conn);
+
+        match log.verify().unwrap() {
+            VerifyResult::Ok {
+                sessions_with_no_signed_heads,
+                signed_heads_count,
+                ..
+            } => {
+                assert_eq!(sessions_with_no_signed_heads, 1);
+                assert_eq!(signed_heads_count, 0);
+            }
+            other => panic!("transition-era verify expected Ok, got {other:?}"),
+        }
+
+        match log.verify_require_signed().unwrap() {
+            VerifyResult::MissingChainHead { session_id, .. } => {
+                assert_eq!(session_id.as_str(), "losing-heads");
+            }
+            other => panic!("require-signed verify expected MissingChainHead, got {other:?}"),
+        }
+    }
+
+    /// Signing-key rotation across two sessions: each session is
+    /// signed by a different key, the verifier accepts both, and
+    /// signing_key_ids_seen contains both ids.
+    #[test]
+    fn signing_key_rotation_across_two_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer_a = Arc::new(AuditSigningKey::generate());
+        let signer_b = Arc::new(AuditSigningKey::generate());
+        assert_ne!(signer_a.key_id_hex(), signer_b.key_id_hex());
+
+        // First session under signer A.
+        {
+            let log = AuditLog::open_with_signer(&db_path, signer_a.clone()).unwrap();
+            let inner = log.session_log();
+            let h = inner.handle_for(SessionId::new("rot-A"));
+            inner.append(&h, TrustLevel::User, user_msg("a-1")).unwrap();
+        }
+        // Second session under signer B against the same DB.
+        {
+            let log = AuditLog::open_with_signer(&db_path, signer_b.clone()).unwrap();
+            let inner = log.session_log();
+            let h = inner.handle_for(SessionId::new("rot-B"));
+            inner.append(&h, TrustLevel::User, user_msg("b-1")).unwrap();
+        }
+
+        let log = AuditLog::open_with_signer(&db_path, signer_a.clone()).unwrap();
+        match log.verify().unwrap() {
+            VerifyResult::Ok {
+                signing_key_ids_seen,
+                signed_heads_count,
+                ..
+            } => {
+                assert_eq!(signed_heads_count, 2);
+                assert_eq!(signing_key_ids_seen.len(), 2);
+                assert!(signing_key_ids_seen.contains(&signer_a.key_id_hex()));
+                assert!(signing_key_ids_seen.contains(&signer_b.key_id_hex()));
+            }
+            other => panic!("rotation verify expected Ok, got {other:?}"),
+        }
+    }
+
+    /// Cadence path 1: append-count trigger fires before any
+    /// wall-clock elapsed. The SessionStart head at iter 0 resets
+    /// the counter to 0, so iters 1..=1000 are what bump the
+    /// counter against the >= 1000 threshold; the loop runs 1001
+    /// times so the threshold is reached on the last iteration.
+    #[test]
+    fn cadence_appends_path_emits_checkpoint() {
+        let (log, h, _signer) = fresh_signed();
+        for i in 0..=1000 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("m{i}")))
+                .unwrap();
+        }
+
+        let rows = log.get_since(&h, 0).unwrap();
+        let chain_heads: Vec<&crate::session_log::SessionEvent> = rows
+            .iter()
+            .map(|r| &r.event)
+            .filter(|e| matches!(e, SessionEvent::ChainHead { .. }))
+            .collect();
+        assert!(
+            chain_heads.len() >= 2,
+            "expected SessionStart + at least one Checkpoint head, got {} heads",
+            chain_heads.len()
+        );
+        let has_checkpoint = chain_heads.iter().any(|e| {
+            matches!(
+                e,
+                SessionEvent::ChainHead {
+                    reason: ChainHeadReason::Checkpoint,
+                    ..
+                }
+            )
+        });
+        assert!(has_checkpoint, "expected at least one Checkpoint head");
+    }
+
+    /// Cadence path 2: wall-clock trigger fires before the append
+    /// counter reaches 1000. Backdate the session's last_head_ts by
+    /// 6 minutes (above the 5-minute threshold), then a single
+    /// append is enough to trip a Checkpoint head.
+    #[test]
+    fn cadence_wall_clock_path_emits_checkpoint() {
+        let (log, h, _signer) = fresh_signed();
+        log.append(&h, TrustLevel::User, user_msg("warm")).unwrap();
+        // After SessionStart there are two rows. Backdate so the next
+        // append's checkpoint_due check sees > 5 minutes elapsed.
+        log.backdate_checkpoint_for_test(h.id().as_str(), 360);
+        log.append(&h, TrustLevel::User, user_msg("triggers"))
+            .unwrap();
+
+        let rows = log.get_since(&h, 0).unwrap();
+        let checkpoint_count = rows
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.event,
+                    SessionEvent::ChainHead {
+                        reason: ChainHeadReason::Checkpoint,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            checkpoint_count, 1,
+            "elapsed-time path should emit exactly one Checkpoint head"
+        );
+    }
+
+    /// Shutdown emission: emit_chain_head(SessionEnd) writes a
+    /// signed terminal head. Mirrors the gateway's SIGTERM path.
+    #[test]
+    fn session_end_emit_writes_signed_terminal_head() {
+        let (log, h, signer) = fresh_signed();
+        log.append(&h, TrustLevel::User, user_msg("only-msg"))
+            .unwrap();
+        let seq = log
+            .emit_chain_head(&h, ChainHeadReason::SessionEnd)
+            .unwrap()
+            .expect("signer present");
+
+        let rows = log.get_since(&h, 0).unwrap();
+        let last = rows.last().unwrap();
+        assert_eq!(last.seq, seq);
+        match &last.event {
+            SessionEvent::ChainHead {
+                reason,
+                signing_key_id,
+                ..
+            } => {
+                assert_eq!(*reason, ChainHeadReason::SessionEnd);
+                assert_eq!(signing_key_id.0, signer.key_id_hex());
+            }
+            other => panic!("expected ChainHead, got {other:?}"),
+        }
+
+        let sig = log.verify_signatures(&h).unwrap();
+        assert_eq!(sig.unsigned_tail_len, 0);
+        assert!(sig.first_invalid.is_none());
+    }
+
+    /// Build_signed_message round-trip used by tampering tests:
+    /// confirms the verifier's canonical layout matches signing.
+    #[test]
+    fn signed_message_layout_round_trip() {
+        let key = AuditSigningKey::generate();
+        let sig = key.sign_chain_head((10, 20), "deadbeef", "feedface");
+        let msg = build_signed_message((10, 20), "deadbeef", "feedface", CHAIN_HEAD_SCHEMA_VERSION);
+        use ed25519_dalek::Verifier;
+        key.verifying_key().verify(&msg, &sig).unwrap();
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(bytes);
+        let out = h.finalize();
+        let mut s = String::with_capacity(out.len() * 2);
+        for b in out.iter() {
+            use std::fmt::Write;
+            write!(&mut s, "{b:02x}").unwrap();
+        }
+        s
+    }
+
+    fn chain_hash(prev: &str, leaf: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(prev.as_bytes());
+        h.update(leaf.as_bytes());
+        let out = h.finalize();
+        let mut s = String::with_capacity(out.len() * 2);
+        for b in out.iter() {
+            use std::fmt::Write;
+            write!(&mut s, "{b:02x}").unwrap();
+        }
+        s
+    }
+}

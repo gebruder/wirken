@@ -1018,6 +1018,22 @@ impl SqliteSessionLog {
         &self.conn
     }
 
+    /// Test-only: backdate a session's last_head_ts so the
+    /// wall-clock checkpoint trigger fires on the next append even
+    /// when the per-append counter is well below 1000. Used by the
+    /// regression test that exercises the elapsed-time path of the
+    /// cadence independently of the append-count path.
+    #[cfg(test)]
+    pub(crate) fn backdate_checkpoint_for_test(&self, session_id: &str, secs_ago: i64) {
+        let mut map = self
+            .checkpoint_state
+            .lock()
+            .expect("checkpoint state mutex");
+        if let Some(state) = map.get_mut(session_id) {
+            state.last_head_ts = Utc::now() - chrono::Duration::seconds(secs_ago);
+        }
+    }
+
     /// Walk this session and verify every `ChainHead` signature.
     /// Builds the canonical signed message from each `ChainHead`'s
     /// claimed sequence range and chain hashes, then checks the
