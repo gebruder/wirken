@@ -38,10 +38,11 @@
 //!
 //! [`AuditWriter`]: crate::AuditWriter
 
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -49,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::AuditError;
+use crate::signing::{AuditSigningKey, CHAIN_HEAD_SCHEMA_VERSION};
 
 // ---------------------------------------------------------------------------
 // Sealed scope marker
@@ -172,6 +174,26 @@ pub enum TrustLevel {
 // ---------------------------------------------------------------------------
 // Event payload
 // ---------------------------------------------------------------------------
+
+/// Why a [`SessionEvent::ChainHead`] was emitted. The verifier treats
+/// every reason uniformly; the field exists so a reviewer can tell
+/// the boundary kind apart from a checkpoint without re-deriving it
+/// from sequence cadence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainHeadReason {
+    /// First event in a fresh session.
+    SessionStart,
+    /// Explicit session-close head, also emitted on graceful gateway
+    /// shutdown.
+    SessionEnd,
+    /// Cadence-driven head: every 1000 appends or 5 minutes of
+    /// wall-clock since the last head, whichever comes first.
+    Checkpoint,
+    /// Audit-log file rotation. Emitted before the rotate so the
+    /// pre-rotate file ends with a signed head.
+    Rotation,
+}
 
 /// One event in a session transcript.
 ///
@@ -372,6 +394,34 @@ pub enum SessionEvent {
         chain_head_hash: HashHex,
         signature: HexBytes,
         signer_pubkey: HashHex,
+    },
+    /// Gateway-keyed signature over a contiguous range of this
+    /// session's chain. Emitted at session boundaries and on a
+    /// checkpoint cadence so an offline verifier with the gateway's
+    /// audit public key can prove the recorded hashes are this
+    /// gateway's record. Distinct from `Attestation`, which uses a
+    /// per-agent identity key.
+    ///
+    /// `sequence_range` covers `[start, end]` inclusive: the seqs of
+    /// the events the head anchors. `prev_chain_hash` is the chain
+    /// hash at `start - 1`, or the empty string when this head
+    /// covers from seq 0. `current_chain_hash` is the chain hash at
+    /// `end`. The signature is over the canonical message defined in
+    /// [`crate::signing::build_signed_message`] and binds in
+    /// [`crate::signing::CHAIN_HEAD_SCHEMA_VERSION`] so a future
+    /// payload-layout bump does not silently invalidate old heads.
+    /// `signing_key_id` is the hex-encoded 32-byte Ed25519 public
+    /// key that produced the signature; the verifier reads it from
+    /// the event itself for offline replay.
+    ChainHead {
+        reason: ChainHeadReason,
+        sequence_range_start: u64,
+        sequence_range_end: u64,
+        prev_chain_hash: HashHex,
+        current_chain_hash: HashHex,
+        signature: HexBytes,
+        signing_key_id: HashHex,
+        schema_version: u32,
     },
     /// Item 10 follow-up — the harness records its current effective
     /// system prompt as a session event before the first
@@ -597,10 +647,59 @@ pub struct PermissionDenialRecord {
 // SQLite implementation
 // ---------------------------------------------------------------------------
 
+/// Per-session counters that drive the chain-head checkpoint cadence.
+/// One entry per session id this log has appended to since open.
+#[derive(Debug, Clone, Copy)]
+struct SessionCheckpointState {
+    /// Wall clock when the most recent ChainHead for this session was
+    /// emitted. Set at session-start so the 5-minute window starts on
+    /// the first append, not on `Utc::now()` of `open`.
+    last_head_ts: DateTime<Utc>,
+    /// Count of ordinary appends (any variant other than ChainHead)
+    /// since the most recent ChainHead. Reset to zero each time a
+    /// ChainHead lands.
+    appends_since_head: u64,
+    /// Sequence at which the most recent ChainHead landed, or
+    /// [`SeqRangeStart::Pending`] when no head has been written yet.
+    last_head_seq: SeqRangeStart,
+}
+
+/// Sequence range start tracking. Distinguishes the initial state
+/// (no ChainHead emitted yet, the next head covers from seq 0) from
+/// the post-emission state (next head covers from `seq + 1`).
+#[derive(Debug, Clone, Copy)]
+enum SeqRangeStart {
+    /// No ChainHead has been written for this session in this
+    /// process lifetime. The next head's sequence range starts at 0.
+    Pending,
+    /// A ChainHead has been written. The next head covers from
+    /// `seq + 1`.
+    AtSeq(u64),
+}
+
+/// Default checkpoint cadence: emit a ChainHead after this many
+/// ordinary appends since the last head, even when wall-clock has
+/// not elapsed.
+const CHECKPOINT_APPENDS: u64 = 1000;
+
+/// Default checkpoint cadence: emit a ChainHead after this much
+/// wall-clock has elapsed since the last head, even on a quiet
+/// session.
+const CHECKPOINT_WALL_CLOCK_SECS: i64 = 5 * 60;
+
 /// SQLite-backed [`SessionLog`]. Uses WAL mode and an interior
 /// `Mutex<Connection>` to allow `&self` access from multiple threads.
 pub struct SqliteSessionLog {
     conn: Mutex<Connection>,
+    /// Optional gateway-keyed audit signer. When `Some`, ChainHead
+    /// records are emitted automatically at session boundaries and
+    /// on the cadence defined by [`CHECKPOINT_APPENDS`] /
+    /// [`CHECKPOINT_WALL_CLOCK_SECS`]. When `None`, ChainHead
+    /// emission is opt-in via [`SqliteSessionLog::emit_chain_head`].
+    signer: Option<Arc<AuditSigningKey>>,
+    /// Per-session checkpoint state. Holds the cadence counters that
+    /// decide whether the post-append path emits a ChainHead.
+    checkpoint_state: Mutex<HashMap<String, SessionCheckpointState>>,
 }
 
 impl SqliteSessionLog {
@@ -610,6 +709,26 @@ impl SqliteSessionLog {
     /// `Connection::open` does not honor a custom umask/mode, so the
     /// file is pre-created with `OpenOptions::mode(0o600)` first.
     pub fn open(db_path: &Path) -> Result<Self, AuditError> {
+        Self::open_inner(db_path, None)
+    }
+
+    /// Open or create a session log at `db_path` with an audit
+    /// signing key. ChainHead records are emitted at session
+    /// boundaries (first append in a fresh session, explicit
+    /// [`SqliteSessionLog::emit_chain_head`] calls) and on the
+    /// checkpoint cadence (every 1000 appends or 5 minutes of
+    /// wall-clock since the last head, whichever comes first).
+    pub fn open_with_signer(
+        db_path: &Path,
+        signer: Arc<AuditSigningKey>,
+    ) -> Result<Self, AuditError> {
+        Self::open_inner(db_path, Some(signer))
+    }
+
+    fn open_inner(
+        db_path: &Path,
+        signer: Option<Arc<AuditSigningKey>>,
+    ) -> Result<Self, AuditError> {
         precreate_owner_only(db_path)?;
         // SQLite WAL mode also creates `-wal` and `-shm` sidecar files
         // alongside the database. They contain pages in flight and must
@@ -622,6 +741,8 @@ impl SqliteSessionLog {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            signer,
+            checkpoint_state: Mutex::new(HashMap::new()),
         })
     }
 
@@ -631,7 +752,214 @@ impl SqliteSessionLog {
         Self::init_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            signer: None,
+            checkpoint_state: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// In-memory session log with an audit signing key (test helper).
+    pub fn open_in_memory_with_signer(signer: Arc<AuditSigningKey>) -> Result<Self, AuditError> {
+        let conn = Connection::open_in_memory()?;
+        Self::init_schema(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            signer: Some(signer),
+            checkpoint_state: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Emit a `ChainHead` event for `handle` with the given reason.
+    /// Returns the sequence number of the appended ChainHead, or
+    /// `None` when this log has no signer configured (callers that
+    /// expect signed heads should hold an `Arc<AuditSigningKey>`
+    /// already, so observing `None` here is a configuration bug
+    /// rather than a runtime condition).
+    ///
+    /// Idempotent only with respect to its own row: calling twice
+    /// in a row writes two ChainHead rows. Callers that want
+    /// "emit-if-not-just-emitted" semantics should track that
+    /// state themselves.
+    pub fn emit_chain_head(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+        reason: ChainHeadReason,
+    ) -> Result<Option<u64>, AuditError> {
+        let signer = match self.signer.as_ref() {
+            Some(s) => s.clone(),
+            None => return Ok(None),
+        };
+        let conn = self.conn.lock().expect("session log mutex");
+        let seq = self.append_chain_head_locked(&conn, handle, reason, &signer)?;
+        Ok(Some(seq))
+    }
+
+    /// Internal: compose and insert a ChainHead row inside the
+    /// caller's connection lock. Updates the checkpoint state on
+    /// success.
+    fn append_chain_head_locked(
+        &self,
+        conn: &Connection,
+        handle: &SessionHandle<OwnSession>,
+        reason: ChainHeadReason,
+        signer: &AuditSigningKey,
+    ) -> Result<u64, AuditError> {
+        // Snapshot the current chain state. The ChainHead covers the
+        // range from `last_head_seq + 1` (or 0) up to the current
+        // session head. `current_chain_hash` is the chain hash at
+        // that head; `prev_chain_hash` is the chain hash at the row
+        // immediately before the range start, or empty for the very
+        // first head.
+        let last_seq: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
+                params![handle.id.as_str()],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        let last_seq = last_seq.map(|n| n as u64);
+
+        let state = self.read_checkpoint_state(handle.id.as_str());
+        let range_start = match state.last_head_seq {
+            SeqRangeStart::Pending => 0u64,
+            SeqRangeStart::AtSeq(s) => s + 1,
+        };
+
+        let (range_end, current_chain_hash) = match last_seq {
+            Some(s) => {
+                let h: String = conn.query_row(
+                    "SELECT hash FROM session_events
+                     WHERE session_id = ?1 AND seq = ?2",
+                    params![handle.id.as_str(), s as i64],
+                    |row| row.get(0),
+                )?;
+                (s, h)
+            }
+            None => {
+                // The session has no rows yet. Emit a ChainHead at
+                // seq 0 covering the empty range. `current_chain_hash`
+                // is the empty string; signature still binds the
+                // schema_version + reason context.
+                (0u64, String::new())
+            }
+        };
+
+        let prev_chain_hash = if range_start == 0 {
+            String::new()
+        } else {
+            // chain hash at the row immediately before the new head's
+            // covered range. This is the chain hash recorded on the
+            // previous ChainHead row, by construction.
+            conn.query_row(
+                "SELECT hash FROM session_events
+                 WHERE session_id = ?1 AND seq = ?2",
+                params![handle.id.as_str(), (range_start - 1) as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+        };
+
+        let sig = signer.sign_chain_head(
+            (range_start, range_end),
+            &prev_chain_hash,
+            &current_chain_hash,
+        );
+
+        let event = SessionEvent::ChainHead {
+            reason,
+            sequence_range_start: range_start,
+            sequence_range_end: range_end,
+            prev_chain_hash: HashHex(prev_chain_hash),
+            current_chain_hash: HashHex(current_chain_hash),
+            signature: HexBytes::from_bytes(&sig.to_bytes()),
+            signing_key_id: HashHex(signer.key_id_hex()),
+            schema_version: CHAIN_HEAD_SCHEMA_VERSION,
+        };
+
+        let next_seq = append_inner(conn, handle, TrustLevel::System, event, None)?;
+        self.update_checkpoint_state(handle.id.as_str(), next_seq, Utc::now());
+        Ok(next_seq)
+    }
+
+    fn read_checkpoint_state(&self, session_id: &str) -> SessionCheckpointState {
+        let map = self
+            .checkpoint_state
+            .lock()
+            .expect("checkpoint state mutex");
+        map.get(session_id)
+            .copied()
+            .unwrap_or(SessionCheckpointState {
+                last_head_ts: Utc::now(),
+                appends_since_head: 0,
+                last_head_seq: SeqRangeStart::Pending,
+            })
+    }
+
+    fn update_checkpoint_state(&self, session_id: &str, head_seq: u64, ts: DateTime<Utc>) {
+        let mut map = self
+            .checkpoint_state
+            .lock()
+            .expect("checkpoint state mutex");
+        map.insert(
+            session_id.to_string(),
+            SessionCheckpointState {
+                last_head_ts: ts,
+                appends_since_head: 0,
+                last_head_seq: SeqRangeStart::AtSeq(head_seq),
+            },
+        );
+    }
+
+    fn bump_appends_since_head(&self, session_id: &str) {
+        let mut map = self
+            .checkpoint_state
+            .lock()
+            .expect("checkpoint state mutex");
+        let entry = map
+            .entry(session_id.to_string())
+            .or_insert(SessionCheckpointState {
+                last_head_ts: Utc::now(),
+                appends_since_head: 0,
+                last_head_seq: SeqRangeStart::Pending,
+            });
+        entry.appends_since_head = entry.appends_since_head.saturating_add(1);
+    }
+
+    /// Decide whether the post-append cadence has tripped and
+    /// returns a reason if it has. Pure read of state plus a clock
+    /// check; the caller mutates state via the emission path.
+    fn checkpoint_due(&self, session_id: &str, now: DateTime<Utc>) -> Option<ChainHeadReason> {
+        let state = self.read_checkpoint_state(session_id);
+        let elapsed = (now - state.last_head_ts).num_seconds();
+        if state.appends_since_head >= CHECKPOINT_APPENDS || elapsed >= CHECKPOINT_WALL_CLOCK_SECS {
+            return Some(ChainHeadReason::Checkpoint);
+        }
+        None
+    }
+
+    /// Detect a fresh session at append time. A session is fresh when
+    /// the in-memory checkpoint state has no entry for it AND the
+    /// underlying table has no rows. Both conditions are required:
+    /// in-memory absence alone fires on every gateway restart, which
+    /// would emit duplicate SessionStart heads.
+    fn is_session_start(&self, conn: &Connection, session_id: &str) -> bool {
+        let map = self
+            .checkpoint_state
+            .lock()
+            .expect("checkpoint state mutex");
+        if map.contains_key(session_id) {
+            return false;
+        }
+        drop(map);
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM session_events WHERE session_id = ?1 LIMIT 1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        exists.is_none()
     }
 
     /// Test-only access to the inner connection. Used by tampering
@@ -728,11 +1056,11 @@ impl SqliteSessionLog {
         f(&conn)
     }
 
-    /// Append an event with a caller-supplied timestamp. Used by the
-    /// migration code in [`crate::legacy_compat`] to preserve the
-    /// original `audit_events.ts` values when copying legacy rows
-    /// into `session_events`. Production callers should use
-    /// [`SessionLog::append`] which stamps `Utc::now()`.
+    /// Append an event with a caller-supplied timestamp. Used by
+    /// [`crate::legacy_compat`] to preserve the original
+    /// `audit_events.ts` values when wrapping legacy events. Live
+    /// flushes also reach this through `write_legacy`, so the
+    /// chain-head cadence applies here too.
     pub(crate) fn append_with_ts(
         &self,
         handle: &SessionHandle<OwnSession>,
@@ -740,8 +1068,53 @@ impl SqliteSessionLog {
         event: SessionEvent,
         ts: DateTime<Utc>,
     ) -> Result<u64, AuditError> {
+        self.append_with_cadence(handle, trust, event, Some(ts))
+    }
+
+    /// Shared body for the public append paths. Wraps `append_inner`
+    /// with chain-head cadence: emits a `SessionStart` head when the
+    /// event is the first row in a fresh session, and a `Checkpoint`
+    /// head when the per-session cadence trips.
+    fn append_with_cadence(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+        trust: TrustLevel,
+        event: SessionEvent,
+        ts_override: Option<DateTime<Utc>>,
+    ) -> Result<u64, AuditError> {
+        // Skip cadence on incoming ChainHead events. The caller is
+        // already driving emission; layering another head on top
+        // would diverge from the canonical "head every N or T,
+        // whichever comes first" cadence.
+        let is_chain_head = matches!(event, SessionEvent::ChainHead { .. });
+
         let conn = self.conn.lock().expect("session log mutex");
-        append_inner(&conn, handle, trust, event, Some(ts))
+
+        let session_id = handle.id.as_str().to_string();
+        let fresh =
+            !is_chain_head && self.signer.is_some() && self.is_session_start(&conn, &session_id);
+
+        let next_seq = append_inner(&conn, handle, trust, event, ts_override)?;
+        if !is_chain_head {
+            self.bump_appends_since_head(&session_id);
+        }
+
+        if let Some(signer) = self.signer.clone() {
+            if fresh {
+                self.append_chain_head_locked(
+                    &conn,
+                    handle,
+                    ChainHeadReason::SessionStart,
+                    &signer,
+                )?;
+            } else if !is_chain_head {
+                if let Some(reason) = self.checkpoint_due(&session_id, Utc::now()) {
+                    self.append_chain_head_locked(&conn, handle, reason, &signer)?;
+                }
+            }
+        }
+
+        Ok(next_seq)
     }
 
     fn init_schema(conn: &Connection) -> Result<(), AuditError> {
@@ -796,8 +1169,7 @@ impl SessionLog for SqliteSessionLog {
         trust: TrustLevel,
         event: SessionEvent,
     ) -> Result<u64, AuditError> {
-        let conn = self.conn.lock().expect("session log mutex");
-        append_inner(&conn, handle, trust, event, None)
+        self.append_with_cadence(handle, trust, event, None)
     }
 
     fn get_range(

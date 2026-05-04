@@ -6648,7 +6648,9 @@ name = "wirken-audit"
 version = "1.0.2"
 dependencies = [
  "chrono",
+ "ed25519-dalek",
  "hmac 0.12.1",
+ "rand 0.10.1",
  "reqwest 0.13.3",
  "rusqlite",
  "serde",
