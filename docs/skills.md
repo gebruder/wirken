@@ -29,9 +29,26 @@ Get weather using wttr.in.
 The frontmatter fields:
 - `name`: Skill name (falls back to directory name)
 - `description`: One-line description
+- `disable-model-invocation`: Boolean. Defaults to `true`. See "Auto-invocation vs explicit invocation" below.
 - `metadata.wirken.requires.bins`: Required binaries. The skill is marked unavailable if any are missing. `metadata.openclaw.requires.bins` is accepted as a deprecated alias.
 
 Wirken ships with 16 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
+
+### Auto-invocation vs explicit invocation
+
+Skills are explicit-invocation by default. The agent does not auto-fire a skill from a generic prompt that matches its description; the operator (or the skill's wrapper, like the Lyrik runner) invokes it by name with a slash prefix.
+
+A skill becomes auto-invocable only by declaring `disable-model-invocation: false` in its frontmatter. The auto-pickable set is built at skill-load time and is excluded from the system prompt for any skill where the field is `true` or absent.
+
+Explicit invocation form:
+
+```
+/<skill-name> <remainder of the user message>
+```
+
+The slash interceptor matches `^/<name>(\s|$)` strictly. A bare `/`, a slash in the middle of a sentence, or a leading-slash URL fragment are not invocations. An unknown skill name with a slash prefix is rejected loudly rather than treated as plain text, so a typo never silently falls through to an LLM that has no skill body for it.
+
+Default-true is Wirken's posture: auto-fire requires explicit author opt-in. Side-effecting skills (state mutation, file writes), resource-expensive skills (long pipelines, large model runs), and command-shaped skills (`/lyrik`, `/<walk-name>`, etc.) are the canonical fits for the default. Add `disable-model-invocation: false` only when a skill is safe to auto-fire on a description match alone.
 
 ## Wasm skills
 
