@@ -89,6 +89,51 @@ String. Path to the directory containing prior CVEs, pentest reports, and intern
 
 String. Path to the project-memory directory holding ADRs, postmortems, threat models, and design docs (markdown). Absolute, or relative to the repo root. Defaults to `./.lyrik/memory` if absent. Phase 0 reads this directory recursively for project-history enrichment. The Jira CSV, if present, is read at `<memory_path>/jira.csv`.
 
+### `walks` and `max_concurrent_walks`
+
+Optional. Opts a run into per-walk dispatch: instead of one `/lyrik` agent turn covering both framings serially, the runner spawns one agent turn per named walk and runs them concurrently against the same target. The output is a single deduped `findings.json`.
+
+```json
+{
+  "walks": ["sink-walk", "chain-walk", "graph-walk"],
+  "max_concurrent_walks": 4
+}
+```
+
+`walks` is an array of walk skill names. The validator runs at config-parse time, before any LLM call, and hard-fails when:
+
+- the array is empty (the way to skip Lyrik is to not run it, not to set `walks: []`),
+- a name is not in the canonical set (`chain-walk`, `crypto-walk`, `differential-walk`, `doc-walk`, `fuzz-walk`, `graph-walk`, `invariant-walk`, `sink-walk`),
+- the named walk skill is not installed at `~/.claude/skills/<walk-name>/SKILL.md`.
+
+`max_concurrent_walks` defaults to `4` when absent. Tuned to the conservative end of common provider rate limits; operators on higher tiers can raise it. Values above the selected walk count are no-ops; values of `0` are rejected.
+
+Walk dispatch shape:
+
+- Each walk runs as its own `tokio::spawn` task gated by a `Semaphore` with `max_concurrent_walks` permits.
+- Every walk's Agent shares the run-level session id (`lyrik-<run-id>`), so all walk turns land in one signed audit chain regardless of how many run in parallel.
+- Per-walk staging at `.lyrik/state/runs/<run-id>/staging/<walk-name>/{context,rubric,findings}/`. The runner aggregates per-walk findings into the canonical `findings.json` after every walk turn returns.
+- Walk skills are operator-installed in the Claude-style skill tree. The runner stages them with synthesized wirken-shaped frontmatter under `<run-dir>/walks-skills/<walk-name>/SKILL.md` so the slash interceptor finds `/<walk-name>` as a first-class skill.
+
+Dedup contract on the merged `findings.json`:
+
+- Findings sharing `(location.file, location.line_start)` collapse to one entry.
+- `framing` becomes the sorted unique union of input framings.
+- `tier` rises to the highest of the inputs (`CRITICAL` > `HIGH` > `MEDIUM` > `LOW` > `INFO`).
+- `dedup_disagreement: true` when input tiers differ. `false` otherwise. The first finding's `summary`, `id`, and `stable_id` survive as the canonical record.
+- `dedup_sources: ["sink-walk", "graph-walk"]` lists every walk that contributed in first-seen order.
+
+Findings without a `location.file` and `location.line_start` pass through unchanged so a malformed input does not collapse against everything else under a default key.
+
+Exit code:
+
+- `0`: at least one walk returned `success`, no permission denials.
+- non-zero: any walk hit a permission denial (operator intent, never silently merged into partial success), or every selected walk failed transient.
+
+Per-walk outcome lands in the audit log as `lyrik.walk.started` and `lyrik.walk.completed` rows regardless of run-level exit. Even a non-zero exit produces a partial `findings.json` so the operator can review what landed.
+
+When `walks` is absent, the runner takes the existing one-call slice path: a single `/lyrik` turn, no per-walk staging, no dedup. Operators opt in when they want the parallelism.
+
 ### `bench_mode`
 
 Boolean. Defaults to `false`. When `true`, two human gates are short-circuited so the run can complete without an interactive reviewer:
