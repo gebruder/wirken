@@ -1610,4 +1610,171 @@ mod tests {
             );
         }
     }
+
+    use super::aggregate_findings_multi;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use wirken_audit::{
+        AuditSigningKey, ChainHeadReason, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
+        TrustLevel, VerifyResult,
+    };
+
+    fn write_finding(dir: &std::path::Path, name: &str, content: &serde_json::Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(name),
+            serde_json::to_string_pretty(content).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Two walks emit findings under per-walk staging trees: one
+    /// finding shared by both walks (same file:line, different
+    /// framing) and one finding unique to a single walk. The
+    /// aggregator collapses the shared one and keeps the unique
+    /// one, producing a findings.json with two entries plus the
+    /// dedup contract on the merged record.
+    #[test]
+    fn aggregate_findings_multi_dedups_per_walk_inputs() {
+        let tmp = tempdir().unwrap();
+        let staging = tmp.path().join("staging");
+        let sink_dir = staging.join("sink-walk").join("findings");
+        let graph_dir = staging.join("graph-walk").join("findings");
+
+        write_finding(
+            &sink_dir,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "MEDIUM"),
+        );
+        write_finding(
+            &sink_dir,
+            "finding-002.json",
+            &finding("src/c.rs", 42, "auth", "LOW"),
+        );
+        write_finding(
+            &graph_dir,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "injection", "HIGH"),
+        );
+
+        let dest = tmp.path().join("findings.json");
+        let sources = vec![
+            (Some("sink-walk".to_string()), sink_dir),
+            (Some("graph-walk".to_string()), graph_dir),
+        ];
+        aggregate_findings_multi(&sources, &dest, "sample/run-007", true).unwrap();
+
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        let arr = body.get("findings").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(arr.len(), 2, "shared location collapses to one entry");
+        let merged = arr
+            .iter()
+            .find(|f| f.pointer("/location/file").and_then(|v| v.as_str()) == Some("src/a.rs"))
+            .unwrap();
+        assert_eq!(merged.get("tier").and_then(|v| v.as_str()), Some("HIGH"));
+        let framings: Vec<&str> = merged
+            .get("framing")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(framings.contains(&"auth"));
+        assert!(framings.contains(&"injection"));
+        let sources_arr: Vec<&str> = merged
+            .get("dedup_sources")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(sources_arr.contains(&"sink-walk"));
+        assert!(sources_arr.contains(&"graph-walk"));
+    }
+
+    /// One-call aggregation with `dedup_active = false`: two
+    /// findings sharing the same location stay as two entries
+    /// (legacy behaviour for the operator who has not opted into
+    /// per-walk dispatch).
+    #[test]
+    fn aggregate_findings_multi_keeps_duplicates_when_dedup_disabled() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("staging").join("findings");
+        write_finding(
+            &dir,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "HIGH"),
+        );
+        write_finding(
+            &dir,
+            "finding-002.json",
+            &finding("src/a.rs", 10, "injection", "HIGH"),
+        );
+        let dest = tmp.path().join("findings.json");
+        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-008", false).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        let arr = body.get("findings").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(arr.len(), 2);
+    }
+
+    /// Multiple appends sharing one session_id (the shape that N
+    /// concurrent walks produce against the run-level Lyrik
+    /// session) verify clean against the signing key and report
+    /// at least one signed chain head.
+    #[test]
+    fn signed_session_survives_n_walk_appends() {
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = SqliteSessionLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let session_id = "lyrik-test-run".to_string();
+        let handle = log.handle_for(SessionId::new(session_id.clone()));
+
+        // Eight appends with the same session_id, simulating one
+        // event per walk in a fan-out run.
+        for i in 0..8 {
+            log.append(
+                &handle,
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: format!("walk-{i}"),
+                    inbound_id: None,
+                },
+            )
+            .unwrap();
+        }
+
+        // Cap with an explicit SessionEnd head as the runner does
+        // after dispatch returns.
+        log.emit_chain_head(&handle, ChainHeadReason::SessionEnd)
+            .unwrap();
+
+        let sig = log.verify_signatures(&handle).unwrap();
+        assert!(sig.first_invalid.is_none());
+        assert!(
+            sig.signed_heads_count >= 1,
+            "expected at least one signed head, got {}",
+            sig.signed_heads_count
+        );
+        assert_eq!(sig.signing_key_ids_seen.len(), 1);
+        assert_eq!(sig.signing_key_ids_seen[0], signer.key_id_hex());
+
+        // Open an AuditLog facade and run the full verify to
+        // confirm the legacy verify shape survives signed rows.
+        drop(log);
+        let audit = wirken_audit::AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        match audit.verify().unwrap() {
+            VerifyResult::Ok {
+                signed_heads_count,
+                signing_key_ids_seen,
+                ..
+            } => {
+                assert!(signed_heads_count >= 1);
+                assert_eq!(signing_key_ids_seen.len(), 1);
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
 }
