@@ -277,25 +277,50 @@ async fn dispatch_via_agent_runtime(
         None
     };
 
-    let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
-        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).context("open session log")?,
-    );
+    // Inherit the gateway's signed audit chain. ChainHead records
+    // bracket the run: the SessionStart head fires implicitly on
+    // the first append by the Agent runtime; the runner emits an
+    // explicit SessionEnd head after every walk turn returns. All
+    // walk turns share the same session_id (the per-run agent id)
+    // so they land in one signed chain.
+    let audit_signer = match wirken_audit::AuditSigningKey::load_or_create(&cfg.data_dir) {
+        Ok(k) => Some(Arc::new(k)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "lyrik run will use an unsigned audit chain: could not load or generate \
+                 the gateway audit signing key"
+            );
+            None
+        }
+    };
+    let session_log_concrete: Arc<wirken_audit::SqliteSessionLog> =
+        Arc::new(match audit_signer.clone() {
+            Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
+                .context("open session log with signer")?,
+            None => wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+                .context("open session log")?,
+        });
+    let session_log: Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
+
+    let agent_id = format!("lyrik-{}", run_id.replace('/', "-"));
 
     // Workspace for the agent IS the target. The agent reads source
     // files from there and writes findings.json back into the target's
     // `.lyrik/state/runs/<run-id>/` per the Lyrik skill instructions.
     let mut agent = Agent::new_with_sandbox(
-        format!("lyrik-{}", run_id.replace('/', "-")),
+        agent_id.clone(),
         target.to_path_buf(),
-        llm_config,
-        api_key,
-        session_log,
+        llm_config.clone(),
+        api_key.clone(),
+        session_log.clone(),
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
     let perms =
         PermissionStore::open(&cfg.permissions_db_path()).context("open permission store")?;
-    agent.set_permissions(Arc::new(Mutex::new(perms)));
+    let perms_arc = Arc::new(Mutex::new(perms));
+    agent.set_permissions(perms_arc.clone());
 
     let skills_dir = cfg.data_dir.join("skills");
     let skills_loaded = if skills_dir.is_dir() {
@@ -379,11 +404,37 @@ async fn dispatch_via_agent_runtime(
     //     operators who haven't opted into walks.
     let total_response_len: usize;
     let total_denials: usize;
+    let walk_outcomes: Option<Vec<WalkOutcome>>;
     match walks_cfg.as_ref() {
         Some(wc) => {
-            let outcomes = dispatch_walks_serial(&mut agent, &wc.walks, run_id, audit).await?;
+            // Build per-spawn dependencies. Each walk constructs its
+            // own Agent (different LLM conversation, different tool
+            // state) but shares the run-level session_id, the
+            // session log, the permission store, the recovery
+            // observer, and the LLM config. Sharing the session_id
+            // is what makes "one session, N walk turns" land in a
+            // single signed chain.
+            let outcomes = dispatch_walks_concurrent(
+                wc.walks.clone(),
+                wc.max_concurrent_walks,
+                agent_id.clone(),
+                target.to_path_buf(),
+                run_id.to_string(),
+                llm_config.clone(),
+                api_key.clone(),
+                session_log.clone(),
+                super::load_sandbox_config(&cfg.data_dir),
+                perms_arc.clone(),
+                skills_dir.clone(),
+                walks_staged_dir
+                    .clone()
+                    .expect("walks_staged_dir is Some when walks_cfg is Some"),
+                audit,
+            )
+            .await?;
             total_response_len = outcomes.iter().map(|o| o.response_len).sum();
             total_denials = outcomes.iter().map(|o| o.denials).sum();
+            walk_outcomes = Some(outcomes);
         }
         None => {
             let prompt = format!(
@@ -423,6 +474,7 @@ async fn dispatch_via_agent_runtime(
             };
             total_response_len = result.response.len();
             total_denials = result.denials.len();
+            walk_outcomes = None;
         }
     }
 
@@ -484,6 +536,36 @@ async fn dispatch_via_agent_runtime(
     // operator to inspect.
     let _ = std::fs::remove_dir(&staging);
 
+    // Cap the run with a SessionEnd ChainHead so the signed chain
+    // ends on a signature, not an unsigned tail. Loud non-fatal:
+    // failure here records an audit row and the verifier surfaces
+    // the abnormal close under --require-signed.
+    if audit_signer.is_some() {
+        let handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id.clone()));
+        let session_log_close = session_log_concrete.clone();
+        let close_result = tokio::task::spawn_blocking(move || {
+            session_log_close.emit_chain_head(&handle, wirken_audit::ChainHeadReason::SessionEnd)
+        })
+        .await;
+        match close_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "lyrik shutdown could not emit SessionEnd ChainHead");
+                audit.emit(
+                    "lyrik.session_end.failed",
+                    serde_json::json!({"error": e.to_string()}),
+                )?;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "SessionEnd emission task panicked");
+                audit.emit(
+                    "lyrik.session_end.failed",
+                    serde_json::json!({"error": e.to_string()}),
+                )?;
+            }
+        }
+    }
+
     if !expected_findings.exists() {
         anyhow::bail!(
             "agent ran but findings.json was not written at {} \
@@ -494,6 +576,40 @@ async fn dispatch_via_agent_runtime(
             total_response_len
         );
     }
+
+    // Exit-code policy for per-walk dispatch. Permission denial in
+    // any walk is operator intent ("don't let this run"), routes to
+    // a non-zero exit even when other walks succeeded. All walks
+    // failed (transient) is also non-zero. Otherwise zero. The
+    // dedup pass writes findings.json unconditionally so a
+    // non-zero exit still leaves the partial artifact for review.
+    if let Some(outcomes) = walk_outcomes.as_ref() {
+        let any_denial = outcomes
+            .iter()
+            .any(|o| matches!(o.status, WalkStatus::PermissionDenial { .. }));
+        let any_success = outcomes
+            .iter()
+            .any(|o| matches!(o.status, WalkStatus::Success));
+        if any_denial {
+            let denied_walks: Vec<&str> = outcomes
+                .iter()
+                .filter(|o| matches!(o.status, WalkStatus::PermissionDenial { .. }))
+                .map(|o| o.walk_name.as_str())
+                .collect();
+            anyhow::bail!(
+                "lyrik aborted by permission denial in {} walk(s): {}; \
+                 partial findings.json was written for review",
+                denied_walks.len(),
+                denied_walks.join(", ")
+            );
+        }
+        if !any_success {
+            anyhow::bail!(
+                "every selected walk failed (transient); see lyrik.walk.completed audit rows"
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -559,62 +675,158 @@ pub(super) enum WalkStatus {
     PermissionDenial { reason: String },
 }
 
-/// Run each selected walk one at a time, in the order the operator
-/// listed them in `walks: [...]`. Records a `lyrik.walk.*` audit
-/// row per turn. Always returns a per-walk outcome list, even when
-/// individual walks fail. The caller decides the run's exit status
-/// from the outcome set.
-async fn dispatch_walks_serial(
-    agent: &mut Agent,
-    walks: &[String],
-    run_id: &str,
+/// Run every selected walk concurrently, gated by a Semaphore
+/// with `max_concurrent` permits. Each walk constructs its own
+/// Agent (separate LLM conversation, separate tool state) but
+/// every Agent is built with the same `agent_id`, which means
+/// every walk's events land in the same SessionLog session. The
+/// chain stays unbroken across N concurrent appenders because
+/// rusqlite serializes writers.
+///
+/// Per-walk audit rows go through the parent's AuditLogger by
+/// returning the records from each spawn; the parent emits them
+/// after the join. `lyrik.walk.started` / `lyrik.walk.completed`
+/// shape unchanged from the serial baseline.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_walks_concurrent(
+    walks: Vec<String>,
+    max_concurrent: u32,
+    agent_id: String,
+    target: PathBuf,
+    run_id: String,
+    llm_config: LlmConfig,
+    api_key: Option<String>,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
+    sandbox: wirken_agent::sandbox::SandboxConfig,
+    permissions: Arc<Mutex<PermissionStore>>,
+    skills_dir: PathBuf,
+    walks_staged_dir: PathBuf,
     audit: &mut AuditLogger,
 ) -> Result<Vec<WalkOutcome>> {
-    let mut outcomes = Vec::with_capacity(walks.len());
+    use tokio::sync::Semaphore;
+
+    let permits = std::cmp::max(1, std::cmp::min(max_concurrent, walks.len() as u32));
+    let sem = Arc::new(Semaphore::new(permits as usize));
+
+    let mut handles: Vec<(String, tokio::task::JoinHandle<WalkOutcome>)> =
+        Vec::with_capacity(walks.len());
     for name in walks {
         audit.emit(
             "lyrik.walk.started",
             serde_json::json!({"walk": name, "run_id": run_id}),
         )?;
-        let prompt = build_walk_prompt(name, run_id);
-        let inbound_id = format!("lyrik-walk-{}-{}", name, uuid::Uuid::new_v4());
-        let outcome = match agent.process_message(&prompt, inbound_id).await {
-            Ok(r) => {
-                let denial_count = r.denials.len();
-                if denial_count > 0 {
-                    // Permission-denial-during-walk is operator
-                    // intent ("don't let this run"), not a transient
-                    // failure. Per-walk outcome captures it; commit
-                    // 2 routes any denial to a non-zero exit code.
-                    WalkOutcome {
-                        walk_name: name.clone(),
-                        status: WalkStatus::PermissionDenial {
-                            reason: format!("{denial_count} denial(s)"),
+
+        let sem_handle = sem.clone();
+        let agent_id_t = agent_id.clone();
+        let target_t = target.clone();
+        let run_id_t = run_id.clone();
+        let llm_config_t = llm_config.clone();
+        let api_key_t = api_key.clone();
+        let session_log_t = session_log.clone();
+        let sandbox_t = sandbox.clone();
+        let permissions_t = permissions.clone();
+        let skills_dir_t = skills_dir.clone();
+        let walks_staged_dir_t = walks_staged_dir.clone();
+        let walk_name = name.clone();
+
+        let h = tokio::spawn(async move {
+            // Permit drops on task exit (success or panic) so a
+            // failed walk does not starve later walks of capacity.
+            let _permit = sem_handle.acquire_owned().await.expect("semaphore closed");
+
+            let mut local_agent = match Agent::new_with_sandbox(
+                agent_id_t.clone(),
+                target_t.clone(),
+                llm_config_t,
+                api_key_t,
+                session_log_t,
+                sandbox_t,
+            ) {
+                Ok(a) => a,
+                Err(e) => {
+                    return WalkOutcome {
+                        walk_name: walk_name.clone(),
+                        status: WalkStatus::TransientFailure {
+                            reason: format!("agent_construct: {e}"),
                         },
-                        response_len: r.response.len(),
-                        denials: denial_count,
-                    }
-                } else {
-                    WalkOutcome {
-                        walk_name: name.clone(),
-                        status: WalkStatus::Success,
-                        response_len: r.response.len(),
+                        response_len: 0,
                         denials: 0,
+                    };
+                }
+            };
+            local_agent.set_permissions(permissions_t);
+
+            if skills_dir_t.is_dir()
+                && let Err(e) = local_agent.load_skills(&skills_dir_t)
+            {
+                tracing::warn!(
+                    "load_skills({}) failed in walk {walk_name}: {e}",
+                    skills_dir_t.display()
+                );
+            }
+            if let Err(e) = local_agent.extend_skills(&walks_staged_dir_t) {
+                return WalkOutcome {
+                    walk_name: walk_name.clone(),
+                    status: WalkStatus::TransientFailure {
+                        reason: format!("extend_skills: {e}"),
+                    },
+                    response_len: 0,
+                    denials: 0,
+                };
+            }
+
+            let prompt = build_walk_prompt(&walk_name, &run_id_t);
+            let inbound_id = format!("lyrik-walk-{}-{}", walk_name, uuid::Uuid::new_v4());
+            match local_agent.process_message(&prompt, inbound_id).await {
+                Ok(r) => {
+                    let denial_count = r.denials.len();
+                    if denial_count > 0 {
+                        WalkOutcome {
+                            walk_name: walk_name.clone(),
+                            status: WalkStatus::PermissionDenial {
+                                reason: format!("{denial_count} denial(s)"),
+                            },
+                            response_len: r.response.len(),
+                            denials: denial_count,
+                        }
+                    } else {
+                        WalkOutcome {
+                            walk_name: walk_name.clone(),
+                            status: WalkStatus::Success,
+                            response_len: r.response.len(),
+                            denials: 0,
+                        }
                     }
                 }
-            }
-            Err(AgentError::RateLimitExhausted { attempts }) => WalkOutcome {
-                walk_name: name.clone(),
-                status: WalkStatus::TransientFailure {
-                    reason: format!("rate_limit_exhausted after {attempts} attempts"),
+                Err(AgentError::RateLimitExhausted { attempts }) => WalkOutcome {
+                    walk_name: walk_name.clone(),
+                    status: WalkStatus::TransientFailure {
+                        reason: format!("rate_limit_exhausted after {attempts} attempts"),
+                    },
+                    response_len: 0,
+                    denials: 0,
                 },
-                response_len: 0,
-                denials: 0,
-            },
-            Err(e) => WalkOutcome {
+                Err(e) => WalkOutcome {
+                    walk_name: walk_name.clone(),
+                    status: WalkStatus::TransientFailure {
+                        reason: e.to_string(),
+                    },
+                    response_len: 0,
+                    denials: 0,
+                },
+            }
+        });
+        handles.push((name, h));
+    }
+
+    let mut outcomes = Vec::with_capacity(handles.len());
+    for (name, h) in handles {
+        let outcome = match h.await {
+            Ok(o) => o,
+            Err(join_err) => WalkOutcome {
                 walk_name: name.clone(),
                 status: WalkStatus::TransientFailure {
-                    reason: e.to_string(),
+                    reason: format!("join: {join_err}"),
                 },
                 response_len: 0,
                 denials: 0,
