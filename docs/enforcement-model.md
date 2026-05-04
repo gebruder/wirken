@@ -155,6 +155,18 @@ Two rate limiters, both in-memory:
 
 **Live update:** Rate limit state resets on gateway restart. Thresholds are set at startup via `GatewayConfig`.
 
+### Audit Chain-Head Signatures
+
+**Crate:** `wirken-audit` | **Files:** `crates/audit/src/signing.rs`, `crates/audit/src/session_log.rs` (`SessionEvent::ChainHead`)
+
+The per-session SHA-256 hash chain gives tamper evidence for every event. The chain-head signature anchors the chain itself: at session boundaries (`SessionStart`, `SessionEnd`), on a checkpoint cadence (every 1000 ordinary appends or 5 minutes of wall-clock since the last head, whichever fires first), and on log rotation, the gateway writes a `ChainHead` event signed under a per-gateway Ed25519 key. The signed payload covers `(sequence_range_start, sequence_range_end, prev_chain_hash, current_chain_hash, schema_version)` under the `wirken/audit-chain-head/v1` domain separator. The signing key lives at `<data_dir>/audit/audit-signing.{key,pub}`, mode 0600 on Unix, distinct from the IPC handshake keypair and from per-agent attestation identities.
+
+**What the signature protects against:** writer rewriting history (an operator with raw SQLite access cannot forge new heads without the signing key), and storage-layer tampering (a corrupted or substituted chain row breaks either the chain hash recomputation or the signature payload). An offline verifier with the public key from `<data_dir>/audit/audit-signing.pub` runs `wirken audit verify --require-signed` and gets a verdict that does not depend on trusting the gateway process.
+
+**What the signature does not protect against:** a malicious gateway that signs a fabricated chain in real time. The audit signing key is held by the same process that writes the chain, so a compromised gateway can record any sequence of events and sign it. The signature is meaningful for offline replay and for tamper detection by a third party reading the database; it is not a guarantee of fidelity to ground truth at write time. Operator-pinned trust anchors and out-of-band publication of public keys are separate items.
+
+**Live update:** Key rotation creates a new `<data_dir>/audit/audit-signing.{key,pub}` and a fresh gateway start picks it up. The verifier accepts heads signed by any key whose public part is embedded on the row, and reports the set of distinct ids as `signing_key_ids_seen` so a rotation across sessions is visible.
+
 ### SIEM Forwarding
 
 **Crate:** `wirken-audit` | **File:** `crates/audit/src/siem.rs`
@@ -300,6 +312,7 @@ These are naturally dynamic. An operator granting shell access to an agent at 2 
 | Rate limiting (control plane) | Runtime | `wirken-gateway` | `ControlPlaneRateLimiter` |
 | Audit logging | Runtime | `wirken-audit` | `AuditWriter::log()` |
 | Audit hash chain | Runtime | `wirken-audit` | `AuditLog::write_batch()`, SHA-256 chain |
+| Audit chain-head signatures | Runtime | `wirken-audit` | `SessionEvent::ChainHead`, `AuditSigningKey`, Ed25519 over `signing::build_signed_message` |
 | SIEM forwarding | Runtime | `wirken-audit` | `SiemForwarder::forward()` |
 | Skill availability | Runtime | `wirken-agent` | `SkillLoader::load_dir()` |
 | Wasm resource limits | Runtime | `wirken-agent` | `WasmSkill::execute()`, fuel + memory cap |
