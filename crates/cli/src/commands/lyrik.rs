@@ -19,6 +19,11 @@ use wirken_agent::recovery::RecoveryObserver;
 use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
+use super::lyrik_walks::{
+    build_walk_prompt, default_walks_source_dir, ensure_walk_staging, parse_walks_config,
+    stage_walk_skills,
+};
+
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------
@@ -239,6 +244,13 @@ async fn dispatch_via_agent_runtime(
     audit: &mut AuditLogger,
     expected_findings: &Path,
 ) -> Result<()> {
+    // Per-walk parallelism opt-in. Parsed and validated here so a
+    // misconfigured walks list fails before any LLM call. The
+    // one-call slice (no `walks` field in config) keeps the
+    // existing single-prompt /lyrik dispatch path.
+    let walks_source_dir = default_walks_source_dir();
+    let walks_cfg = parse_walks_config(config, &walks_source_dir).context("parse walks config")?;
+
     let pin = resolve_phase_pin(config)?;
     let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
     if let Some(cw) = pin.context_window {
@@ -298,15 +310,45 @@ async fn dispatch_via_agent_runtime(
         0
     };
 
+    // When per-walk dispatch is enabled, stage the selected walk
+    // SKILLs under the run directory with synthesized wirken
+    // frontmatter, then merge them into the agent's loaded skills.
+    // Each walk becomes a `/<walk-name>` slash invocation with the
+    // operator's installed body intact.
+    let run_dir_for_staging = target
+        .join(".lyrik")
+        .join("state")
+        .join("runs")
+        .join(run_id);
+    let walks_staged_dir = match walks_cfg.as_ref() {
+        Some(wc) => {
+            ensure_walk_staging(&run_dir_for_staging, &wc.walks)
+                .context("ensure per-walk staging dirs")?;
+            let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir_for_staging)
+                .context("stage walk skills")?;
+            agent
+                .extend_skills(&staged)
+                .with_context(|| format!("extend agent skills from {}", staged.display()))?;
+            Some(staged)
+        }
+        None => None,
+    };
+
     audit.emit(
         "lyrik.dispatch.started",
         serde_json::json!({
-            "mode": "agent_runtime",
+            "mode": match walks_cfg.as_ref() {
+                Some(_) => "per_walk",
+                None => "agent_runtime",
+            },
             "provider": pin.provider,
             "model": pin.model,
             "base_url": pin.base_url,
             "skills_dir": skills_dir.display().to_string(),
             "skills_loaded": skills_loaded,
+            "walks_staged_dir": walks_staged_dir.as_ref().map(|p| p.display().to_string()),
+            "walks": walks_cfg.as_ref().map(|c| c.walks.clone()),
+            "max_concurrent_walks": walks_cfg.as_ref().map(|c| c.max_concurrent_walks),
             "workspace": target.display().to_string(),
         }),
     )?;
@@ -327,64 +369,83 @@ async fn dispatch_via_agent_runtime(
     });
     agent.set_recovery_observer(observer);
 
-    // /lyrik triggers the SlashInterceptor which prepends the skill
-    // body. The remainder gives run-specific parameters the methodology
-    // does not encode.
-    let prompt = format!(
-        "/lyrik Run a full assessment on the codebase in this workspace. \
-         Run-id: `{run_id}`. Bench mode is enabled: phase_0_signoff and \
-         high_severity_review auto-approve, do not wait for human signoff. \
-         \
-         Emission is staged — see the SKILL.md \"Staged emission\" \
-         instructions. Findings: write each finding to \
-         `.lyrik/state/runs/{run_id}/staging/findings/finding-NNN.json` \
-         (zero-padded ordinal; one finding per file; rung and deferral \
-         fields required). Phase 0 context: write each section to \
-         `.lyrik/state/runs/{run_id}/staging/context/<NN>-<section>.md`. \
-         Phase 0 rubric: write each tier to \
-         `.lyrik/state/runs/{run_id}/staging/rubric/<NN>-<tier>.md` plus \
-         `00-axes.md`. Do not write `findings.json`, `.lyrik/context.md`, \
-         or `.lyrik/rubric.md` directly — the runner aggregates the \
-         staging directories into the final files after the assessment \
-         turn returns."
-    );
-
-    let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
-    let result = match agent.process_message(&prompt, inbound_id).await {
-        Ok(r) => r,
-        Err(AgentError::RateLimitExhausted { attempts }) => {
-            // Observer already emitted lyrik.dispatch.failed via
-            // on_rate_limit_exhausted. Write an empty findings.json
-            // so the bench harness can count the failure rather than
-            // silently lose the run.
-            tracing::warn!(
-                "rate limit exhausted after {attempts} attempts; \
-                 writing empty findings.json"
+    // Dispatch. Two paths:
+    //   - per_walk: one agent turn per selected walk, serial in
+    //     commit 1; concurrent in commit 2. Each walk emits to its
+    //     own staging/<walk-name>/ subtree, the runner aggregates
+    //     across walks below.
+    //   - one_call: the existing single /lyrik turn covers both
+    //     framings inside one prompt. Unchanged behaviour for
+    //     operators who haven't opted into walks.
+    let total_response_len: usize;
+    let total_denials: usize;
+    match walks_cfg.as_ref() {
+        Some(wc) => {
+            let outcomes = dispatch_walks_serial(&mut agent, &wc.walks, run_id, audit).await?;
+            total_response_len = outcomes.iter().map(|o| o.response_len).sum();
+            total_denials = outcomes.iter().map(|o| o.denials).sum();
+        }
+        None => {
+            let prompt = format!(
+                "/lyrik Run a full assessment on the codebase in this workspace. \
+                 Run-id: `{run_id}`. Bench mode is enabled: phase_0_signoff and \
+                 high_severity_review auto-approve, do not wait for human signoff. \
+                 \
+                 Emission is staged. See the SKILL.md \"Staged emission\" \
+                 instructions. Findings: write each finding to \
+                 `.lyrik/state/runs/{run_id}/staging/findings/finding-NNN.json` \
+                 (zero-padded ordinal; one finding per file; rung and deferral \
+                 fields required). Phase 0 context: write each section to \
+                 `.lyrik/state/runs/{run_id}/staging/context/<NN>-<section>.md`. \
+                 Phase 0 rubric: write each tier to \
+                 `.lyrik/state/runs/{run_id}/staging/rubric/<NN>-<tier>.md` plus \
+                 `00-axes.md`. Do not write `findings.json`, `.lyrik/context.md`, \
+                 or `.lyrik/rubric.md` directly. The runner aggregates the \
+                 staging directories into the final files after the assessment \
+                 turn returns."
             );
-            write_empty_findings(expected_findings, run_id)?;
-            return Ok(());
+            let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
+            let result = match agent.process_message(&prompt, inbound_id).await {
+                Ok(r) => r,
+                Err(AgentError::RateLimitExhausted { attempts }) => {
+                    tracing::warn!(
+                        "rate limit exhausted after {attempts} attempts; \
+                         writing empty findings.json"
+                    );
+                    write_empty_findings(expected_findings, run_id)?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(
+                        anyhow::Error::from(e).context("agent.process_message returned an error")
+                    );
+                }
+            };
+            total_response_len = result.response.len();
+            total_denials = result.denials.len();
         }
-        Err(e) => {
-            return Err(anyhow::Error::from(e).context("agent.process_message returned an error"));
-        }
-    };
+    }
 
     audit.emit(
         "lyrik.dispatch.completed",
         serde_json::json!({
-            "mode": "agent_runtime",
-            "response_len": result.response.len(),
-            "denials": result.denials.len(),
+            "mode": match walks_cfg.as_ref() {
+                Some(_) => "per_walk",
+                None => "agent_runtime",
+            },
+            "response_len": total_response_len,
+            "denials": total_denials,
         }),
     )?;
 
     // Staged emission aggregation. Each emission has its own
     // `staging/<kind>/` subdirectory. The runner aggregates each in
     // lexicographic order and writes to the canonical destination.
-    // Missing or empty staging dirs are skipped — Phase 0 may legitimately
-    // emit nothing on subsequent runs (see SKILL.md skip-Phase-0 rule),
-    // and `staging/findings/` may be absent if the agent wrote
-    // findings.json directly via the legacy single-write path.
+    // Missing or empty staging dirs are skipped: Phase 0 may
+    // legitimately emit nothing on subsequent runs (see SKILL.md
+    // skip-Phase-0 rule), and `staging/findings/` may be absent if
+    // the agent wrote findings.json directly via the legacy
+    // single-write path.
     let run_dir = target
         .join(".lyrik")
         .join("state")
@@ -401,7 +462,20 @@ async fn dispatch_via_agent_runtime(
         &target.join(".lyrik").join("rubric.md"),
     )
     .context("aggregate rubric")?;
-    aggregate_findings(&staging.join("findings"), expected_findings, run_id)
+    let mut finding_sources: Vec<PathBuf> = Vec::new();
+    let top_findings = staging.join("findings");
+    if top_findings.is_dir() {
+        finding_sources.push(top_findings);
+    }
+    if let Some(wc) = walks_cfg.as_ref() {
+        for w in &wc.walks {
+            let p = staging.join(w).join("findings");
+            if p.is_dir() {
+                finding_sources.push(p);
+            }
+        }
+    }
+    aggregate_findings_multi(&finding_sources, expected_findings, run_id)
         .context("aggregate findings")?;
     // remove_dir succeeds only if empty — exactly the semantics we
     // want for cleaning up the parent staging/ once each subdir
@@ -413,11 +487,11 @@ async fn dispatch_via_agent_runtime(
     if !expected_findings.exists() {
         anyhow::bail!(
             "agent ran but findings.json was not written at {} \
-             (skill emits to staging/findings/finding-NNN.json; the \
+             (skill emits to staging/<walk?>/findings/finding-NNN.json; the \
              runner aggregates them. Neither path produced output. \
-             Agent response head: {:?})",
+             Total response length across turns: {})",
             expected_findings.display(),
-            result.response.chars().take(500).collect::<String>()
+            total_response_len
         );
     }
     Ok(())
@@ -460,10 +534,174 @@ fn aggregate_phase0_section(source: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Per-walk dispatch outcome. Captured per turn and rolled up into
+/// the runner's overall exit decision (commit 2 wires the exit
+/// logic). The shape is committed in commit 1 so commit 2's
+/// `tokio::spawn` rewrite can collect outcomes from the spawn join
+/// handles without changing the surface.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // status/response_len/denials drive commit 2's exit policy; walk_name is the dedup_sources tag.
+pub(super) struct WalkOutcome {
+    pub walk_name: String,
+    pub status: WalkStatus,
+    pub response_len: usize,
+    pub denials: usize,
+}
+
+/// Outcome class. The runner collapses any
+/// [`WalkStatus::PermissionDenial`] into a non-zero exit; transient
+/// failures roll up under "partial success" when at least one walk
+/// produced findings (commit 2 wires that policy).
+#[derive(Debug, Clone)]
+pub(super) enum WalkStatus {
+    Success,
+    TransientFailure { reason: String },
+    PermissionDenial { reason: String },
+}
+
+/// Run each selected walk one at a time, in the order the operator
+/// listed them in `walks: [...]`. Records a `lyrik.walk.*` audit
+/// row per turn. Always returns a per-walk outcome list, even when
+/// individual walks fail. The caller decides the run's exit status
+/// from the outcome set.
+async fn dispatch_walks_serial(
+    agent: &mut Agent,
+    walks: &[String],
+    run_id: &str,
+    audit: &mut AuditLogger,
+) -> Result<Vec<WalkOutcome>> {
+    let mut outcomes = Vec::with_capacity(walks.len());
+    for name in walks {
+        audit.emit(
+            "lyrik.walk.started",
+            serde_json::json!({"walk": name, "run_id": run_id}),
+        )?;
+        let prompt = build_walk_prompt(name, run_id);
+        let inbound_id = format!("lyrik-walk-{}-{}", name, uuid::Uuid::new_v4());
+        let outcome = match agent.process_message(&prompt, inbound_id).await {
+            Ok(r) => {
+                let denial_count = r.denials.len();
+                if denial_count > 0 {
+                    // Permission-denial-during-walk is operator
+                    // intent ("don't let this run"), not a transient
+                    // failure. Per-walk outcome captures it; commit
+                    // 2 routes any denial to a non-zero exit code.
+                    WalkOutcome {
+                        walk_name: name.clone(),
+                        status: WalkStatus::PermissionDenial {
+                            reason: format!("{denial_count} denial(s)"),
+                        },
+                        response_len: r.response.len(),
+                        denials: denial_count,
+                    }
+                } else {
+                    WalkOutcome {
+                        walk_name: name.clone(),
+                        status: WalkStatus::Success,
+                        response_len: r.response.len(),
+                        denials: 0,
+                    }
+                }
+            }
+            Err(AgentError::RateLimitExhausted { attempts }) => WalkOutcome {
+                walk_name: name.clone(),
+                status: WalkStatus::TransientFailure {
+                    reason: format!("rate_limit_exhausted after {attempts} attempts"),
+                },
+                response_len: 0,
+                denials: 0,
+            },
+            Err(e) => WalkOutcome {
+                walk_name: name.clone(),
+                status: WalkStatus::TransientFailure {
+                    reason: e.to_string(),
+                },
+                response_len: 0,
+                denials: 0,
+            },
+        };
+        let status_label = match &outcome.status {
+            WalkStatus::Success => "success",
+            WalkStatus::TransientFailure { .. } => "transient_failure",
+            WalkStatus::PermissionDenial { .. } => "permission_denial",
+        };
+        let reason = match &outcome.status {
+            WalkStatus::Success => None,
+            WalkStatus::TransientFailure { reason } => Some(reason.clone()),
+            WalkStatus::PermissionDenial { reason } => Some(reason.clone()),
+        };
+        audit.emit(
+            "lyrik.walk.completed",
+            serde_json::json!({
+                "walk": name,
+                "status": status_label,
+                "reason": reason,
+                "response_len": outcome.response_len,
+                "denials": outcome.denials,
+            }),
+        )?;
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
+}
+
+/// Aggregate findings from one or more source directories into the
+/// canonical `findings.json`. The single-source [`aggregate_findings`]
+/// is the one-call slice; this multi-source variant covers the
+/// per-walk path where each walk emits to its own
+/// `staging/<walk-name>/findings/` subtree. Concatenates ordered by
+/// (source-index, filename) so the merge is deterministic.
+/// Dedup is commit 3.
+fn aggregate_findings_multi(sources: &[PathBuf], dest: &Path, run_id: &str) -> Result<()> {
+    let mut findings = Vec::new();
+    let mut consumed = Vec::new();
+    for source in sources {
+        if !source.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(source)
+            .with_context(|| format!("read {}", source.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        entries.sort();
+        for p in &entries {
+            let body =
+                std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+            let parsed: serde_json::Value = serde_json::from_str(&body)
+                .with_context(|| format!("parse staged finding {}", p.display()))?;
+            findings.push(parsed);
+        }
+        if !entries.is_empty() {
+            consumed.push(source.clone());
+        }
+    }
+    if findings.is_empty() && consumed.is_empty() {
+        return Ok(());
+    }
+    let body = serde_json::json!({
+        "schema_version": "1.0",
+        "run_id": run_id,
+        "produced_at": chrono::Utc::now().to_rfc3339(),
+        "findings": findings,
+    });
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::write(dest, serde_json::to_string_pretty(&body)?)
+        .with_context(|| format!("write {}", dest.display()))?;
+    for source in consumed {
+        std::fs::remove_dir_all(&source)
+            .with_context(|| format!("remove staging dir {}", source.display()))?;
+    }
+    Ok(())
+}
+
 /// Aggregate `staging/findings/finding-NNN.json` files into the final
 /// `findings.json`. Empty or missing source directory is a no-op so a
 /// directly-written findings.json (legacy path) still works. On
 /// success the staging directory is removed.
+#[allow(dead_code)]
 fn aggregate_findings(source: &Path, dest: &Path, run_id: &str) -> Result<()> {
     if !source.is_dir() {
         return Ok(());

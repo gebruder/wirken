@@ -857,6 +857,27 @@ impl Agent {
         Ok(self.skills.len())
     }
 
+    /// Load additional skills from a directory and merge with the
+    /// existing set. Same shape as [`load_skills`] except it
+    /// extends rather than replaces. Duplicate skill names from the
+    /// new directory shadow earlier-loaded skills (last-write-wins
+    /// is the right shape for per-run staged adapters that wrap an
+    /// existing skill body). The system prompt is rebuilt at the
+    /// end. Returns the total skill count after the merge.
+    pub fn extend_skills(&mut self, dir: &std::path::Path) -> Result<usize, AgentError> {
+        let added = SkillLoader::load_dir(dir)?;
+        for s in added {
+            if let Some(existing) = self.skills.iter_mut().find(|x| x.name == s.name) {
+                *existing = s;
+            } else {
+                self.skills.push(s);
+            }
+        }
+        self.skills.sort_by(|a, b| a.name.cmp(&b.name));
+        self.rebuild_system_prompt();
+        Ok(self.skills.len())
+    }
+
     /// Item 4 slice 2.5 — if fit() just trimmed substantive content,
     /// call the LLM to produce a free-text summary and replace the
     /// deterministic aggregate in the Role::Compaction message. The
