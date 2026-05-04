@@ -70,9 +70,34 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     };
     let siem_config = load_siem_config(&cfg);
-    let (audit_writer, audit_handle) =
-        AuditWriter::with_siem_and_alarm_key(&cfg.audit_db_path(), siem_config, alarm_log_key)
-            .context("Failed to start audit writer")?;
+
+    // Load the gateway's audit chain-head signing key. Distinct
+    // from any per-adapter IPC key and from per-agent attestation
+    // keys: this one signs ChainHead records over the audit chain
+    // so an offline verifier with the published public key can
+    // anchor the recorded hashes to this gateway. Generated on
+    // first run, persisted at <data_dir>/audit/audit-signing.key.
+    let audit_signer = match wirken_audit::AuditSigningKey::load_or_create(&cfg.data_dir) {
+        Ok(k) => Some(Arc::new(k)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "audit chain-head signing disabled: could not load or generate \
+                 the gateway audit signing key. Chain heads will not be emitted; \
+                 operators relying on offline-verifiable signatures should fix \
+                 the underlying file-permission or disk error and restart."
+            );
+            None
+        }
+    };
+
+    let (audit_writer, audit_handle) = AuditWriter::with_siem_alarm_and_audit_signer(
+        &cfg.audit_db_path(),
+        siem_config,
+        alarm_log_key,
+        audit_signer.clone(),
+    )
+    .context("Failed to start audit writer")?;
     let audit = Arc::new(audit_writer);
 
     audit
@@ -322,10 +347,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // wake() which reads them back. Each agent gets its own session
     // id of `agent_id` for now; per-conversation session ids land
     // with wake().
-    let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
-        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+    let session_log_concrete = match audit_signer.clone() {
+        Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
             .context("Failed to open session log")?,
-    );
+        None => wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("Failed to open session log")?,
+    };
+    let session_log_for_shutdown = Arc::new(session_log_concrete);
+    let session_log: Arc<dyn wirken_audit::SessionLog> = session_log_for_shutdown.clone();
 
     // --- Open stores ---
     let registry = Arc::new(Mutex::new(
@@ -1205,7 +1234,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .log(AuditEvent::new("gateway", "gateway.stop", "daemon"))
         .await?;
 
-    // Abort adapter processes
+    // Abort adapter processes before emitting SessionEnd ChainHeads
+    // so no concurrent appends race the shutdown signature.
     for handle in adapter_handles {
         handle.abort();
     }
@@ -1215,6 +1245,75 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     orchestrator_handle.abort();
     webchat_handle.abort();
     scheduler_handle.abort();
+
+    // Emit a SessionEnd ChainHead per active session so a clean
+    // shutdown leaves a signed terminal head rather than an
+    // unsigned tail. Failure here is loud and non-fatal to the
+    // shutdown sequence: the writer still flushes, and the
+    // verifier reports the unsigned tail under --require-signed
+    // so an operator can correlate the abnormal close.
+    if audit_signer.is_some() {
+        use wirken_audit::SessionLog as _;
+        let session_log_for_close = session_log_for_shutdown.clone();
+        let close_result = tokio::task::spawn_blocking(move || {
+            let mut emitted = 0usize;
+            let mut errors = 0usize;
+            let session_ids = match session_log_for_close.list_session_ids() {
+                Ok(ids) => ids,
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "audit shutdown could not enumerate sessions for SessionEnd ChainHead emission; \
+                         the audit log will end with an unsigned tail and the verifier will surface it"
+                    );
+                    return (0usize, 1usize);
+                }
+            };
+            for sid in session_ids {
+                let handle = session_log_for_close.handle_for(wirken_audit::SessionId::new(sid.clone()));
+                match session_log_for_close
+                    .emit_chain_head(&handle, wirken_audit::ChainHeadReason::SessionEnd)
+                {
+                    Ok(Some(_)) => emitted += 1,
+                    Ok(None) => {}
+                    Err(e) => {
+                        errors += 1;
+                        tracing::error!(
+                            session = %sid,
+                            error = %e,
+                            "audit shutdown could not emit SessionEnd ChainHead; \
+                             this session will end with an unsigned tail"
+                        );
+                    }
+                }
+            }
+            (emitted, errors)
+        })
+        .await
+        .unwrap_or((0, 1));
+        let (emitted, errors) = close_result;
+        tracing::info!(
+            emitted,
+            errors,
+            "audit shutdown SessionEnd emission complete"
+        );
+        if errors > 0 {
+            // Loud non-fatal: do not exit nonzero from a well-formed
+            // ctrl_c path, but record the unsigned tail in the audit
+            // chain so the verifier surfaces it.
+            audit
+                .log(
+                    AuditEvent::new("gateway", "gateway.stop_unsigned_tail", "audit").with_detail(
+                        serde_json::json!({
+                            "emitted": emitted,
+                            "errors": errors,
+                        }),
+                    ),
+                )
+                .await
+                .ok();
+        }
+    }
 
     // Drop audit writer to flush remaining events
     drop(audit);

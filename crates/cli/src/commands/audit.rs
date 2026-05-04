@@ -11,7 +11,14 @@ use super::config;
 /// Bump when the output shape changes in a way that breaks
 /// existing consumers; the doc page (`docs/audit-cli.md`)
 /// describes what's stable per version.
-const SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds chain-head signature reporting on `verify --format json`:
+/// the `signed_heads_count`, `unsigned_heads_count`,
+/// `invalid_signatures_count`, `signing_key_ids_seen`,
+/// `sessions_with_no_signed_heads`, and `unsigned_tail_max_len`
+/// fields, plus two new `result` values: `signature_invalid` and
+/// `missing_chain_head`. Existing v1 fields stay where they were.
+const SCHEMA_VERSION: u32 = 2;
 
 const WIRKEN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -153,14 +160,18 @@ pub async fn verify_attestations() -> Result<()> {
     Ok(())
 }
 
-pub async fn verify(format: &str) -> Result<()> {
+pub async fn verify(format: &str, require_signed: bool) -> Result<()> {
     let cfg = config();
     let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;
-    let result = audit.verify()?;
+    let result = if require_signed {
+        audit.verify_require_signed()?
+    } else {
+        audit.verify()?
+    };
 
     match format {
-        "json" => print_verify_json(&result),
-        "human" | "" => print_verify_human(&result),
+        "json" => print_verify_json(&result, require_signed),
+        "human" | "" => print_verify_human(&result, require_signed),
         other => anyhow::bail!("--format must be 'human' or 'json', got '{other}'"),
     }
 }
@@ -217,11 +228,46 @@ fn print_log_human(
     Ok(())
 }
 
-fn print_verify_human(result: &VerifyResult) -> Result<()> {
+fn print_verify_human(result: &VerifyResult, require_signed: bool) -> Result<()> {
     match result {
-        VerifyResult::Ok { rows_verified } => {
+        VerifyResult::Ok {
+            rows_verified,
+            sessions_total,
+            signed_heads_count,
+            unsigned_heads_count: _,
+            invalid_signatures_count: _,
+            sessions_with_no_signed_heads,
+            signing_key_ids_seen,
+            unsigned_tail_max_len,
+        } => {
             println!("  Audit log integrity: OK");
-            println!("  {rows_verified} rows verified, hash chain intact.");
+            println!(
+                "  {rows_verified} rows verified across {sessions_total} sessions, hash chain intact."
+            );
+            println!("  Chain-head signatures: {signed_heads_count} verified.");
+            if !signing_key_ids_seen.is_empty() {
+                println!(
+                    "  Signing key ids seen: {}",
+                    signing_key_ids_seen.join(", ")
+                );
+            }
+            if *sessions_with_no_signed_heads > 0 {
+                if require_signed {
+                    // Cannot reach here under require_signed; that
+                    // path returns MissingChainHead. Belt-and-braces.
+                    println!(
+                        "  WARN: {sessions_with_no_signed_heads} sessions have no signed ChainHead rows."
+                    );
+                } else {
+                    println!(
+                        "  Transition-era sessions (no signed heads): {sessions_with_no_signed_heads}. \
+                         Pass --require-signed to fail on these."
+                    );
+                }
+            }
+            if *unsigned_tail_max_len > 0 {
+                println!("  Unsigned tail (max events past last head): {unsigned_tail_max_len}.");
+            }
         }
         VerifyResult::Broken {
             session_id,
@@ -240,6 +286,39 @@ fn print_verify_human(result: &VerifyResult) -> Result<()> {
             );
             println!();
             println!("  The audit log has been tampered with.");
+            std::process::exit(1);
+        }
+        VerifyResult::SignatureInvalid {
+            session_id,
+            seq,
+            signing_key_id,
+            reason,
+            verified_count,
+            invalid_signatures_count: _,
+        } => {
+            println!("  Audit log integrity: SIGNATURE INVALID");
+            println!("  Session: {session_id}");
+            println!("  Offending ChainHead seq: {seq}");
+            println!("  Signing key id: {signing_key_id}");
+            println!("  Reason: {reason}");
+            println!(
+                "  {verified_count} events verified across earlier sessions before the invalid signature."
+            );
+            println!();
+            println!("  The chain head signature does not anchor the recorded chain.");
+            std::process::exit(1);
+        }
+        VerifyResult::MissingChainHead {
+            session_id,
+            rows,
+            verified_count,
+        } => {
+            println!("  Audit log integrity: MISSING CHAIN HEAD");
+            println!("  Session: {session_id}");
+            println!("  Rows in session: {rows}");
+            println!("  {verified_count} events verified across earlier sessions before this gap.");
+            println!();
+            println!("  --require-signed is set and this session has no signed ChainHead rows.");
             std::process::exit(1);
         }
         VerifyResult::Empty => {
@@ -284,18 +363,36 @@ fn print_log_json(
     Ok(())
 }
 
-fn print_verify_json(result: &VerifyResult) -> Result<()> {
+fn print_verify_json(result: &VerifyResult, require_signed: bool) -> Result<()> {
     let body = match result {
-        VerifyResult::Ok { rows_verified } => json!({
+        VerifyResult::Ok {
+            rows_verified,
+            sessions_total,
+            signed_heads_count,
+            unsigned_heads_count,
+            invalid_signatures_count,
+            sessions_with_no_signed_heads,
+            signing_key_ids_seen,
+            unsigned_tail_max_len,
+        } => json!({
             "schema_version": SCHEMA_VERSION,
             "wirken_version": WIRKEN_VERSION,
             "result": "ok",
             "rows_verified": rows_verified,
+            "sessions_total": sessions_total,
+            "signed_heads_count": signed_heads_count,
+            "unsigned_heads_count": unsigned_heads_count,
+            "invalid_signatures_count": invalid_signatures_count,
+            "sessions_with_no_signed_heads": sessions_with_no_signed_heads,
+            "signing_key_ids_seen": signing_key_ids_seen,
+            "unsigned_tail_max_len": unsigned_tail_max_len,
+            "require_signed": require_signed,
         }),
         VerifyResult::Empty => json!({
             "schema_version": SCHEMA_VERSION,
             "wirken_version": WIRKEN_VERSION,
             "result": "empty",
+            "require_signed": require_signed,
         }),
         VerifyResult::Broken {
             session_id,
@@ -312,10 +409,48 @@ fn print_verify_json(result: &VerifyResult) -> Result<()> {
             "expected_hash": expected_hash,
             "actual_hash": actual_hash,
             "verified_count": verified_count,
+            "require_signed": require_signed,
+        }),
+        VerifyResult::SignatureInvalid {
+            session_id,
+            seq,
+            signing_key_id,
+            reason,
+            verified_count,
+            invalid_signatures_count,
+        } => json!({
+            "schema_version": SCHEMA_VERSION,
+            "wirken_version": WIRKEN_VERSION,
+            "result": "signature_invalid",
+            "session": SessionView::from_session_string(session_id.as_str()),
+            "seq": seq,
+            "signing_key_id": signing_key_id,
+            "reason": reason,
+            "verified_count": verified_count,
+            "invalid_signatures_count": invalid_signatures_count,
+            "require_signed": require_signed,
+        }),
+        VerifyResult::MissingChainHead {
+            session_id,
+            rows,
+            verified_count,
+        } => json!({
+            "schema_version": SCHEMA_VERSION,
+            "wirken_version": WIRKEN_VERSION,
+            "result": "missing_chain_head",
+            "session": SessionView::from_session_string(session_id.as_str()),
+            "rows": rows,
+            "verified_count": verified_count,
+            "require_signed": require_signed,
         }),
     };
     println!("{}", serde_json::to_string_pretty(&body)?);
-    if matches!(result, VerifyResult::Broken { .. }) {
+    if matches!(
+        result,
+        VerifyResult::Broken { .. }
+            | VerifyResult::SignatureInvalid { .. }
+            | VerifyResult::MissingChainHead { .. }
+    ) {
         std::process::exit(1);
     }
     Ok(())

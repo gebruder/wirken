@@ -33,7 +33,7 @@ fn hash_chain_integrity_on_sequential_writes() {
     }
 
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 100),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 100),
         other => panic!("Expected Ok, got {other:?}"),
     }
 }
@@ -49,7 +49,7 @@ fn hash_chain_integrity_on_batch_write() {
     log.write_batch(&events).unwrap();
 
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 1000),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 1000),
         other => panic!("Expected Ok, got {other:?}"),
     }
 }
@@ -310,7 +310,7 @@ fn migration_of_legacy_table_copies_rows_under_sentinel() {
 
     // Verify still works on the migrated chain.
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 3),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 3),
         other => panic!("expected Ok(3), got {other:?}"),
     }
 
@@ -427,7 +427,7 @@ fn multiple_batches_maintain_chain() {
 
     // Verify chain across both batches
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 100),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 100),
         other => panic!("Expected Ok with 100 rows, got {other:?}"),
     }
 }
@@ -477,7 +477,7 @@ async fn writer_flushes_events() {
 
     // Verify hash chain
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 10),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 10),
         other => panic!("Expected Ok, got {other:?}"),
     }
 }
@@ -503,7 +503,7 @@ async fn writer_batch_flush_at_capacity() {
     assert_eq!(results.len(), 250);
 
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 250),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 250),
         other => panic!("Expected Ok, got {other:?}"),
     }
 }
@@ -527,7 +527,7 @@ async fn writer_1000_events_hash_chain_intact() {
 
     let log = AuditLog::open(&db_path).unwrap();
     match log.verify().unwrap() {
-        VerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 1000),
+        VerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 1000),
         other => panic!("Expected Ok with 1000, got {other:?}"),
     }
 }
@@ -665,7 +665,7 @@ mod session {
 
         // The chain is still intact after the delete + marker.
         match log.verify(&h).unwrap() {
-            SessionVerifyResult::Ok { rows_verified } => {
+            SessionVerifyResult::Ok { rows_verified, .. } => {
                 // seqs 0, 1, 2 survive + the Rewind marker at 3 = 4 rows
                 assert_eq!(rows_verified, 4);
             }
@@ -766,7 +766,7 @@ mod session {
                 .unwrap();
         }
         match log.verify(&h).unwrap() {
-            SessionVerifyResult::Ok { rows_verified } => assert_eq!(rows_verified, 50),
+            SessionVerifyResult::Ok { rows_verified, .. } => assert_eq!(rows_verified, 50),
             other => panic!("expected Ok(50), got {other:?}"),
         }
     }

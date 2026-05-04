@@ -324,23 +324,33 @@ pub(crate) fn query_legacy(
 ///   verified_count }` — first session that fails. `verified_count`
 ///   sums events from sessions that completed verification plus the
 ///   per-session count up to (but not including) the breaking event.
-pub(crate) fn verify_legacy(log: &SqliteSessionLog) -> Result<VerifyResult, AuditError> {
+pub(crate) fn verify_legacy(
+    log: &SqliteSessionLog,
+    require_signed: bool,
+) -> Result<VerifyResult, AuditError> {
     let session_ids = list_session_ids(log)?;
     if session_ids.is_empty() {
         return Ok(VerifyResult::Empty);
     }
 
     let mut total = 0usize;
+    let mut sessions_total = 0usize;
+    let mut signed_heads_count = 0usize;
+    let mut sessions_with_no_signed_heads = 0usize;
+    let mut signing_key_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut unsigned_tail_max_len = 0usize;
+
     for sid in &session_ids {
         let handle = log.handle_for(SessionId::new(sid.clone()));
+
+        // Phase 1: chain integrity. Unchanged from the pre-signing
+        // verifier; signature checks run on top of an intact chain.
         match log.verify(&handle)? {
             SessionVerifyResult::Ok { rows_verified } => {
                 total += rows_verified;
             }
             SessionVerifyResult::Empty => {
-                // Session has no rows — distinct sessions table
-                // entries with zero events shouldn't exist, but
-                // skip rather than fail.
+                continue;
             }
             SessionVerifyResult::Broken {
                 seq,
@@ -357,6 +367,43 @@ pub(crate) fn verify_legacy(log: &SqliteSessionLog) -> Result<VerifyResult, Audi
                 });
             }
         }
+
+        sessions_total += 1;
+
+        // Phase 2: signatures. An invalid signature is always a
+        // hard fail. A session with zero ChainHead rows is a
+        // hard fail only when require_signed is set; otherwise it
+        // is counted as transition-era.
+        let sigres = log.verify_signatures(&handle)?;
+        if let Some(detail) = sigres.first_invalid {
+            return Ok(VerifyResult::SignatureInvalid {
+                session_id: SessionId::new(sid.clone()),
+                seq: detail.seq,
+                signing_key_id: detail.signing_key_id,
+                reason: detail.reason,
+                verified_count: total as u64,
+                invalid_signatures_count: 1,
+            });
+        }
+
+        if sigres.signed_heads_count == 0 {
+            if require_signed {
+                return Ok(VerifyResult::MissingChainHead {
+                    session_id: SessionId::new(sid.clone()),
+                    rows: sigres.session_total_events as u64,
+                    verified_count: total as u64,
+                });
+            }
+            sessions_with_no_signed_heads += 1;
+        }
+
+        signed_heads_count += sigres.signed_heads_count;
+        for k in sigres.signing_key_ids_seen {
+            signing_key_ids.insert(k);
+        }
+        if sigres.unsigned_tail_len > unsigned_tail_max_len {
+            unsigned_tail_max_len = sigres.unsigned_tail_len;
+        }
     }
 
     if total == 0 {
@@ -364,6 +411,13 @@ pub(crate) fn verify_legacy(log: &SqliteSessionLog) -> Result<VerifyResult, Audi
     } else {
         Ok(VerifyResult::Ok {
             rows_verified: total,
+            sessions_total,
+            signed_heads_count,
+            unsigned_heads_count: 0,
+            invalid_signatures_count: 0,
+            sessions_with_no_signed_heads,
+            signing_key_ids_seen: signing_key_ids.into_iter().collect(),
+            unsigned_tail_max_len,
         })
     }
 }

@@ -34,6 +34,7 @@ use crate::error::AuditError;
 use crate::event::{AuditEvent, StoredEvent};
 use crate::legacy_compat;
 use crate::session_log::{SessionId, SqliteSessionLog};
+use crate::signing::AuditSigningKey;
 
 /// Query parameters for filtering audit events.
 #[derive(Debug, Default)]
@@ -51,13 +52,50 @@ pub struct AuditQuery {
 ///
 /// The chain is per-session (one chain per `session_id`).
 /// `Ok::rows_verified` is the total across every session in
-/// `session_events`. `Broken` is reported on the first session whose
-/// chain is broken, with structured fields suitable for citing in a
-/// failure message or downstream tooling.
+/// `session_events`. Signature aggregates count `ChainHead` rows and
+/// the distinct keys that signed them across every session.
+/// `Broken`, `SignatureInvalid`, and `MissingChainHead` are reported
+/// on the first session that fails the relevant check; the verifier
+/// short-circuits on the first failure.
 #[derive(Debug)]
 pub enum VerifyResult {
-    /// All per-session chains are intact.
-    Ok { rows_verified: usize },
+    /// All per-session chains are intact and every observed
+    /// signature verified. Signature counters are zero on
+    /// transition-era logs that have no `ChainHead` rows.
+    Ok {
+        /// Total number of session-event rows verified across all
+        /// sessions.
+        rows_verified: usize,
+        /// Number of sessions inspected.
+        sessions_total: usize,
+        /// Number of `ChainHead` rows whose signature verified.
+        signed_heads_count: usize,
+        /// Number of `ChainHead` rows that did not carry a
+        /// signature. Always zero under the current schema since
+        /// every `ChainHead` is signed by construction. Reserved
+        /// for forward-compat with a future variant.
+        unsigned_heads_count: usize,
+        /// Number of `ChainHead` rows whose signature did not
+        /// verify. Always zero in this variant: an invalid
+        /// signature is a hard fail and surfaces as
+        /// `SignatureInvalid`.
+        invalid_signatures_count: usize,
+        /// Number of sessions that contained zero `ChainHead`
+        /// rows. Non-zero values indicate transition-era sessions
+        /// that were appended before the gateway started signing
+        /// chain heads. With `--require-signed` set, the verifier
+        /// hard-fails on this condition rather than reporting it
+        /// here.
+        sessions_with_no_signed_heads: usize,
+        /// Distinct hex-encoded `signing_key_id` values observed,
+        /// sorted ascending. Length > 1 indicates a key rotation
+        /// across the verified window.
+        signing_key_ids_seen: Vec<String>,
+        /// Largest `unsigned_tail_len` observed across sessions.
+        /// Operators can use this to surface stale tails without
+        /// failing the verify outright.
+        unsigned_tail_max_len: usize,
+    },
     /// At least one per-session chain is broken.
     Broken {
         /// Session that failed verification.
@@ -76,6 +114,40 @@ pub enum VerifyResult {
         /// up to (but not including) the breaking event.
         verified_count: u64,
     },
+    /// A `ChainHead` row's Ed25519 signature did not verify, or its
+    /// claimed `prev_chain_hash` / `current_chain_hash` did not
+    /// match the stored chain hashes at the cited sequence numbers.
+    /// Always a hard fail. The chain check completed successfully
+    /// for this session before the signature pass uncovered the
+    /// break.
+    SignatureInvalid {
+        session_id: SessionId,
+        /// `seq` of the offending `ChainHead` row.
+        seq: u64,
+        /// Hex-encoded `signing_key_id` from the row.
+        signing_key_id: String,
+        /// Verdict reason: which specific check failed.
+        reason: String,
+        /// Number of events that verified across all sessions
+        /// before the signature break.
+        verified_count: u64,
+        /// Count of invalid signatures observed before bailing.
+        /// Always 1 in this variant since the verifier
+        /// short-circuits on the first invalid signature; the
+        /// field is here so JSON consumers see the counter on
+        /// every result kind.
+        invalid_signatures_count: usize,
+    },
+    /// The session has no `ChainHead` rows and `--require-signed`
+    /// is set. The chain check itself passed.
+    MissingChainHead {
+        session_id: SessionId,
+        /// Number of rows in the session.
+        rows: u64,
+        /// Number of events that verified across all sessions
+        /// before the missing-head break.
+        verified_count: u64,
+    },
     /// No session events present.
     Empty,
 }
@@ -92,6 +164,20 @@ impl AuditLog {
     /// table layout to the new `session_events` table + view.
     pub fn open(db_path: &Path) -> Result<Self, AuditError> {
         let inner = SqliteSessionLog::open(db_path)?;
+        legacy_compat::migrate_legacy_audit_events(&inner)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Open or create an audit log at `db_path` with an audit
+    /// signing key. ChainHead records are emitted on the cadence
+    /// defined in [`crate::session_log`].
+    pub fn open_with_signer(
+        db_path: &Path,
+        signer: Arc<AuditSigningKey>,
+    ) -> Result<Self, AuditError> {
+        let inner = SqliteSessionLog::open_with_signer(db_path, signer)?;
         legacy_compat::migrate_legacy_audit_events(&inner)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -142,8 +228,19 @@ impl AuditLog {
     }
 
     /// Verify every per-session chain in `session_events`.
+    /// Accepts unsigned (transition-era) sessions; missing
+    /// `ChainHead` rows are reported in the `Ok` variant rather
+    /// than failed.
     pub fn verify(&self) -> Result<VerifyResult, AuditError> {
-        legacy_compat::verify_legacy(&self.inner)
+        legacy_compat::verify_legacy(&self.inner, false)
+    }
+
+    /// Verify every per-session chain in `session_events` with
+    /// `--require-signed` semantics. Sessions that have zero
+    /// `ChainHead` rows hard-fail with `MissingChainHead`. All
+    /// other behaviour matches [`AuditLog::verify`].
+    pub fn verify_require_signed(&self) -> Result<VerifyResult, AuditError> {
+        legacy_compat::verify_legacy(&self.inner, true)
     }
 
     /// Prune events older than `retention_days`. Per-session chains

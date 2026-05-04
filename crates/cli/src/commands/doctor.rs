@@ -81,9 +81,16 @@ pub async fn run() -> Result<()> {
     if cfg.audit_db_path().exists() {
         match AuditLog::open(&cfg.audit_db_path()) {
             Ok(log) => match log.verify() {
-                Ok(VerifyResult::Ok { rows_verified }) => {
+                Ok(VerifyResult::Ok {
+                    rows_verified,
+                    signed_heads_count,
+                    ..
+                }) => {
                     print_ok();
-                    println!("    {rows_verified} events, hash chain intact.");
+                    println!(
+                        "    {rows_verified} events, hash chain intact, \
+                         {signed_heads_count} signed chain heads."
+                    );
                 }
                 Ok(VerifyResult::Empty) => {
                     print_ok();
@@ -95,6 +102,25 @@ pub async fn run() -> Result<()> {
                     print_fail(&format!(
                         "  Hash chain broken at session {session_id} seq {seq}!"
                     ));
+                    issues += 1;
+                }
+                Ok(VerifyResult::SignatureInvalid {
+                    session_id,
+                    seq,
+                    signing_key_id,
+                    ..
+                }) => {
+                    print_fail(&format!(
+                        "  Chain head signature invalid at session {session_id} seq {seq} \
+                         (key {signing_key_id})"
+                    ));
+                    issues += 1;
+                }
+                Ok(VerifyResult::MissingChainHead { session_id, .. }) => {
+                    // Doctor runs in transition mode (no
+                    // --require-signed), so this branch is reachable
+                    // only when the verifier's caller asked for it.
+                    print_fail(&format!("  Session {session_id} has no signed chain heads"));
                     issues += 1;
                 }
                 Err(e) => {

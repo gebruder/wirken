@@ -8,6 +8,7 @@ use crate::error::AuditError;
 use crate::event::AuditEvent;
 use crate::log::{AuditLog, VerifyResult};
 use crate::siem::{SiemConfig, SiemForwarder};
+use crate::signing::AuditSigningKey;
 
 /// Batched audit writer that accepts events via a channel and flushes
 /// to SQLite every 50ms or 100 events, whichever comes first.
@@ -198,7 +199,7 @@ fn verify_every_flushes() -> u64 {
 /// is the surviving record.
 async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome {
     match log.verify() {
-        Ok(VerifyResult::Ok { rows_verified }) => {
+        Ok(VerifyResult::Ok { rows_verified, .. }) => {
             tracing::debug!(
                 rows_verified,
                 "audit chain verification: ok (continuous pass)"
@@ -209,6 +210,47 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome
             }
         }
         Ok(VerifyResult::Empty) => VerifyPassOutcome {
+            intact: true,
+            alarm_write_ok: true,
+        },
+        Ok(VerifyResult::SignatureInvalid {
+            session_id,
+            seq,
+            signing_key_id,
+            reason,
+            verified_count,
+            invalid_signatures_count: _,
+        }) => {
+            tracing::error!(
+                session = %session_id,
+                seq,
+                verified_count,
+                signing_key_id = %signing_key_id,
+                reason = %reason,
+                "audit chain BROKEN: invalid chain-head signature detected"
+            );
+            let alarm = AlarmRecord {
+                timestamp: now_rfc3339(),
+                alarm_type: "signature_invalid".into(),
+                session_id: Some(session_id.as_str().to_string()),
+                seq: Some(seq),
+                expected_hash: Some(signing_key_id.clone()),
+                actual_hash: Some(reason.clone()),
+                hostname: hostname_best_effort(),
+                gateway_pid: std::process::id(),
+                hmac: None,
+            };
+            let alarm_write_ok = alarms.append(&alarm).is_ok();
+            VerifyPassOutcome {
+                intact: false,
+                alarm_write_ok,
+            }
+        }
+        Ok(VerifyResult::MissingChainHead { .. }) => VerifyPassOutcome {
+            // Continuous verification runs in transition mode, so a
+            // missing ChainHead is informational and does not halt
+            // the writer. Operators who want hard-fail on missing
+            // heads run `wirken audit verify --require-signed`.
             intact: true,
             alarm_write_ok: true,
         },
@@ -317,8 +359,26 @@ impl AuditWriter {
         siem_config: Option<SiemConfig>,
         alarm_log_key: Option<Vec<u8>>,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), AuditError> {
-        // Verify database can be opened
-        let _ = AuditLog::open(db_path)?;
+        Self::with_siem_alarm_and_audit_signer(db_path, siem_config, alarm_log_key, None)
+    }
+
+    /// Full constructor: SIEM, alarm-log HMAC key, and audit
+    /// chain-head signing key. When `audit_signer` is `Some`,
+    /// chain-head emission applies on the legacy-event flush path
+    /// just as it does on direct typed-event appends.
+    pub fn with_siem_alarm_and_audit_signer(
+        db_path: &Path,
+        siem_config: Option<SiemConfig>,
+        alarm_log_key: Option<Vec<u8>>,
+        audit_signer: Option<Arc<AuditSigningKey>>,
+    ) -> Result<(Self, tokio::task::JoinHandle<()>), AuditError> {
+        // Verify database can be opened. Use the signed open path
+        // when a signer is supplied so the cadence sees the
+        // database from the start.
+        let _ = match audit_signer.clone() {
+            Some(s) => AuditLog::open_with_signer(db_path, s)?,
+            None => AuditLog::open(db_path)?,
+        };
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let path = db_path.to_path_buf();
@@ -337,7 +397,7 @@ impl AuditWriter {
             Some(cfg) => Some(SiemForwarder::new(cfg).map_err(AuditError::SiemConfig)?),
             None => None,
         };
-        let handle = tokio::spawn(flush_loop(rx, path, forwarder, alarms));
+        let handle = tokio::spawn(flush_loop(rx, path, forwarder, alarms, audit_signer));
 
         Ok((Self { tx }, handle))
     }
@@ -364,6 +424,7 @@ async fn flush_loop(
     db_path: PathBuf,
     forwarder: Option<SiemForwarder>,
     alarms: AlarmLog,
+    audit_signer: Option<Arc<AuditSigningKey>>,
 ) {
     // Open the audit log once for the lifetime of the flush loop and
     // reuse the connection across every flush. The previous flush()
@@ -380,11 +441,17 @@ async fn flush_loop(
     // returns ChannelClosed on the first log() call, which is the
     // signal the agent observes to refuse to continue (same shape as
     // the persistent-failure halt below).
-    let log = match AuditLog::open(&db_path) {
-        Ok(l) => Arc::new(l),
-        Err(e) => {
-            tracing::error!("Audit log open failed at flush_loop start: {e}");
-            return;
+    let log = {
+        let opened = match audit_signer.clone() {
+            Some(s) => AuditLog::open_with_signer(&db_path, s),
+            None => AuditLog::open(&db_path),
+        };
+        match opened {
+            Ok(l) => Arc::new(l),
+            Err(e) => {
+                tracing::error!("Audit log open failed at flush_loop start: {e}");
+                return;
+            }
         }
     };
 

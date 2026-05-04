@@ -556,6 +556,54 @@ pub enum SessionVerifyResult {
     },
 }
 
+/// Per-session signature-verification result. Pulled out from the
+/// chain-only [`SessionVerifyResult`] so the chain check stays
+/// composable with the existing verifier shape and a signature pass
+/// is a separate, additive method on [`SqliteSessionLog`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionSignatureVerifyResult {
+    /// Number of `ChainHead` rows in this session whose Ed25519
+    /// signature verified against the embedded `signing_key_id`.
+    pub signed_heads_count: usize,
+    /// Number of `ChainHead` rows whose claimed
+    /// `current_chain_hash` matched the actual stored chain hash at
+    /// `sequence_range_end`. Always equal to `signed_heads_count`
+    /// in the success case; tracked separately so a future audit
+    /// can distinguish a signature-only break from a hash-claim
+    /// break.
+    pub matched_heads_count: usize,
+    /// Hex-encoded distinct signing keys observed in this session,
+    /// sorted ascending. Used to surface key rotation in the
+    /// aggregate verifier output.
+    pub signing_key_ids_seen: Vec<String>,
+    /// Last `sequence_range_end` covered by a signed head, or
+    /// `None` when this session has no `ChainHead` rows.
+    pub last_head_end_seq: Option<u64>,
+    /// Sequence number of the last `ChainHead` row itself, or
+    /// `None` when this session has no `ChainHead` rows.
+    pub last_head_seq: Option<u64>,
+    /// Number of rows after the last signed head. Zero when the
+    /// last row in the session is a `ChainHead`.
+    pub unsigned_tail_len: usize,
+    /// Total rows in the session.
+    pub session_total_events: usize,
+    /// First invalid signature observed, if any. The session-level
+    /// caller treats any invalid signature as a hard fail.
+    pub first_invalid: Option<InvalidSignatureDetail>,
+}
+
+/// Details of the first invalid `ChainHead` signature in a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidSignatureDetail {
+    /// `seq` of the offending `ChainHead` row.
+    pub seq: u64,
+    /// Hex-encoded `signing_key_id` from the row.
+    pub signing_key_id: String,
+    /// Short reason: bad signature, mismatched current_chain_hash,
+    /// mismatched prev_chain_hash, malformed key, schema mismatch.
+    pub reason: String,
+}
+
 // ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
@@ -970,6 +1018,204 @@ impl SqliteSessionLog {
         &self.conn
     }
 
+    /// Walk this session and verify every `ChainHead` signature.
+    /// Builds the canonical signed message from each `ChainHead`'s
+    /// claimed sequence range and chain hashes, then checks the
+    /// embedded signature with the embedded `signing_key_id`. Also
+    /// confirms the `current_chain_hash` claim matches the stored
+    /// chain hash at the row at `sequence_range_end`, and the
+    /// `prev_chain_hash` claim matches the stored hash at
+    /// `sequence_range_start - 1` (or empty when start is 0).
+    ///
+    /// Returns aggregated counts, the set of distinct signing key
+    /// ids observed, and the unsigned-tail length. The first
+    /// invalid signature short-circuits the walk and is reported in
+    /// `first_invalid` with a verdict reason.
+    pub fn verify_signatures(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+    ) -> Result<SessionSignatureVerifyResult, AuditError> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let rows = self.session_rows(handle)?;
+        let total = rows.len();
+        let mut result = SessionSignatureVerifyResult {
+            session_total_events: total,
+            ..Default::default()
+        };
+        if rows.is_empty() {
+            return Ok(result);
+        }
+
+        let mut last_head_idx: Option<usize> = None;
+        let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        for (idx, row) in rows.iter().enumerate() {
+            let SessionEvent::ChainHead {
+                sequence_range_start,
+                sequence_range_end,
+                prev_chain_hash,
+                current_chain_hash,
+                signature,
+                signing_key_id,
+                schema_version,
+                ..
+            } = &row.event
+            else {
+                continue;
+            };
+
+            if *schema_version != crate::signing::CHAIN_HEAD_SCHEMA_VERSION {
+                result.first_invalid = Some(InvalidSignatureDetail {
+                    seq: row.seq,
+                    signing_key_id: signing_key_id.0.clone(),
+                    reason: format!(
+                        "chain head schema_version {} != verifier {}",
+                        schema_version,
+                        crate::signing::CHAIN_HEAD_SCHEMA_VERSION
+                    ),
+                });
+                return Ok(result);
+            }
+
+            // current_chain_hash must match stored hash at sequence_range_end
+            // (or be empty when the session was empty at head time).
+            let actual_current = rows
+                .iter()
+                .find(|r| r.seq == *sequence_range_end)
+                .map(|r| r.hash.0.clone())
+                .unwrap_or_default();
+            if !current_chain_hash.0.is_empty() && current_chain_hash.0 != actual_current {
+                result.first_invalid = Some(InvalidSignatureDetail {
+                    seq: row.seq,
+                    signing_key_id: signing_key_id.0.clone(),
+                    reason: format!(
+                        "current_chain_hash claim {} does not match stored hash {} at seq {}",
+                        current_chain_hash.0, actual_current, sequence_range_end
+                    ),
+                });
+                return Ok(result);
+            }
+
+            // prev_chain_hash must match stored hash at start - 1, or be
+            // empty when the head covers from seq 0.
+            if *sequence_range_start == 0 {
+                if !prev_chain_hash.0.is_empty() {
+                    result.first_invalid = Some(InvalidSignatureDetail {
+                        seq: row.seq,
+                        signing_key_id: signing_key_id.0.clone(),
+                        reason: "prev_chain_hash must be empty when sequence_range_start is 0"
+                            .into(),
+                    });
+                    return Ok(result);
+                }
+            } else {
+                let prev_seq = sequence_range_start - 1;
+                let actual_prev = rows
+                    .iter()
+                    .find(|r| r.seq == prev_seq)
+                    .map(|r| r.hash.0.clone())
+                    .unwrap_or_default();
+                if prev_chain_hash.0 != actual_prev {
+                    result.first_invalid = Some(InvalidSignatureDetail {
+                        seq: row.seq,
+                        signing_key_id: signing_key_id.0.clone(),
+                        reason: format!(
+                            "prev_chain_hash claim {} does not match stored hash {} at seq {}",
+                            prev_chain_hash.0, actual_prev, prev_seq
+                        ),
+                    });
+                    return Ok(result);
+                }
+            }
+
+            // Decode the signing key and signature.
+            let pk_bytes = match decode_hex(&signing_key_id.0) {
+                Ok(b) if b.len() == 32 => b,
+                _ => {
+                    result.first_invalid = Some(InvalidSignatureDetail {
+                        seq: row.seq,
+                        signing_key_id: signing_key_id.0.clone(),
+                        reason: "signing_key_id is not 32 bytes of hex".into(),
+                    });
+                    return Ok(result);
+                }
+            };
+            let mut pk_arr = [0u8; 32];
+            pk_arr.copy_from_slice(&pk_bytes);
+            let verifying_key = match VerifyingKey::from_bytes(&pk_arr) {
+                Ok(k) => k,
+                Err(e) => {
+                    result.first_invalid = Some(InvalidSignatureDetail {
+                        seq: row.seq,
+                        signing_key_id: signing_key_id.0.clone(),
+                        reason: format!("signing_key_id decode: {e}"),
+                    });
+                    return Ok(result);
+                }
+            };
+
+            let sig_bytes = match decode_hex(&signature.0) {
+                Ok(b) if b.len() == 64 => b,
+                _ => {
+                    result.first_invalid = Some(InvalidSignatureDetail {
+                        seq: row.seq,
+                        signing_key_id: signing_key_id.0.clone(),
+                        reason: "signature is not 64 bytes of hex".into(),
+                    });
+                    return Ok(result);
+                }
+            };
+            let mut sig_arr = [0u8; 64];
+            sig_arr.copy_from_slice(&sig_bytes);
+            let sig = Signature::from_bytes(&sig_arr);
+
+            let payload = crate::signing::build_signed_message(
+                (*sequence_range_start, *sequence_range_end),
+                &prev_chain_hash.0,
+                &current_chain_hash.0,
+                *schema_version,
+            );
+            if verifying_key.verify(&payload, &sig).is_err() {
+                result.first_invalid = Some(InvalidSignatureDetail {
+                    seq: row.seq,
+                    signing_key_id: signing_key_id.0.clone(),
+                    reason: "ed25519 chain head signature did not verify".into(),
+                });
+                return Ok(result);
+            }
+
+            result.signed_heads_count += 1;
+            result.matched_heads_count += 1;
+            keys.insert(signing_key_id.0.clone());
+            last_head_idx = Some(idx);
+            result.last_head_seq = Some(row.seq);
+            result.last_head_end_seq = Some(*sequence_range_end);
+        }
+
+        result.signing_key_ids_seen = keys.into_iter().collect();
+        result.unsigned_tail_len = match last_head_idx {
+            Some(i) => total.saturating_sub(i + 1),
+            None => total,
+        };
+        Ok(result)
+    }
+
+    fn session_rows(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+    ) -> Result<Vec<StoredSessionEvent>, AuditError> {
+        let conn = self.conn.lock().expect("session log mutex");
+        let raw = collect_rows(
+            &conn,
+            "SELECT id, session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash
+             FROM session_events
+             WHERE session_id = ?1
+             ORDER BY seq ASC",
+            params![handle.id.as_str()],
+        )?;
+        raw.into_iter().map(parse_row).collect()
+    }
+
     /// Scan every session for `PermissionDenied` events belonging to
     /// `agent_id`. Returns one row per stored event, most recent
     /// first. Used by `wirken permissions list-pending` to build its
@@ -1021,6 +1267,21 @@ impl SqliteSessionLog {
                 }
             })
             .collect()
+    }
+
+    /// Distinct session ids present in `session_events`, ordered
+    /// ascending. Used at gateway shutdown to enumerate which
+    /// sessions need a `SessionEnd` chain head before flush.
+    pub fn list_session_ids(&self) -> Result<Vec<String>, AuditError> {
+        let conn = self.conn.lock().expect("session log mutex");
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT session_id FROM session_events ORDER BY session_id ASC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     /// Item 6 slice 2: list child session IDs whose session_id
@@ -1522,6 +1783,16 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(&mut s, "{b:02x}").expect("write to String");
     }
     s
+}
+
+fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
+    if !hex.len().is_multiple_of(2) {
+        return Err("odd-length hex".into());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
 }
 
 fn trust_to_str(t: TrustLevel) -> &'static str {

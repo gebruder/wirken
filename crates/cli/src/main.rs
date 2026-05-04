@@ -204,6 +204,14 @@ enum AuditCommands {
         /// Output format: human (default) or json
         #[arg(long, default_value = "human")]
         format: String,
+        /// Hard-fail on any session that has zero signed ChainHead
+        /// rows. Without this flag, transition-era sessions
+        /// recorded before chain-head signing was wired in are
+        /// reported in counts and the verify exits zero. Always
+        /// hard-fail on an invalid signature regardless of this
+        /// flag.
+        #[arg(long)]
+        require_signed: bool,
     },
     /// Verify session attestation signatures across every session
     VerifyAttestations,
@@ -592,7 +600,10 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            AuditCommands::Verify { format } => commands::audit::verify(&format).await,
+            AuditCommands::Verify {
+                format,
+                require_signed,
+            } => commands::audit::verify(&format, require_signed).await,
             AuditCommands::VerifyAttestations => commands::audit::verify_attestations().await,
         },
         Commands::Sessions(cmd) => match cmd {
