@@ -86,11 +86,17 @@ pub async fn run() -> Result<()> {
         ollama_embed_base: "http://127.0.0.1:11434".to_string(),
         embed_model: DEFAULT_EMBEDDING_MODEL.to_string(),
         source_api_keys,
-        // Perspective expansion is opt-in. The CLI does not yet
-        // surface a flag for it; until a CLI knob lands, the
-        // librarian path runs identically to the pre-perspective
-        // build (no expansion, no expansion_id, no audit variant).
-        perspectives_enabled: false,
+        // Perspective-guided query expansion is on by default at
+        // the CLI surface. With `topic` unset and the cap params at
+        // zero the orchestrator falls through to the default fetch
+        // loop (build_perspective_passes treats missing topic and
+        // zero planned fan-out as a skip), so the librarian path
+        // is observationally unchanged until a future CLI knob
+        // surfaces topic + cap configuration. Flipping the flag
+        // here is the predicate for that follow-up: the slice 1
+        // mechanism is committed and downstream code can rely on
+        // the audit-event shape.
+        perspectives_enabled: true,
         topic: None,
         max_perspectives: 0,
         max_related_topics: 0,
