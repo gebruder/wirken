@@ -492,6 +492,127 @@ fn bot_mention_no_mention_at_all() {
 }
 
 // ---------------------------------------------------------------------------
+// Q3 regression: a Slack thread with mixed senders never leaks
+// non-mentioning content into the gateway.
+//
+// Maps to CVE-2026-41358 (CWE-346) "Slack thread context bypass
+// sender allowlist" and GHSA-7hrg-5w46-5r2x duplicate.
+//
+// Wirken's Slack adapter receives one push event per message
+// (`crates/adapter-slack/src/adapter.rs:177`). Each event is
+// gated by `should_process` (`crates/adapter-slack/src/convert.rs:56`)
+// before being forwarded to the gateway. Non-mentioning channel
+// messages are dropped at the adapter; they cannot enter the
+// agent's per-conversation session as thread history because
+// they never reach the gateway in the first place.
+//
+// The adapter does not fetch thread history from Slack — there is
+// no path from a non-mentioning sender's message into the model
+// context.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn thread_with_mixed_senders_only_mentioning_messages_pass_gate() {
+    // Simulate three messages in the same Slack thread:
+    //   t=1.0: alice (no mention) — drop at adapter
+    //   t=2.0: bob (with `<@U_BOT> help`) — forward
+    //   t=3.0: carol (no mention) — drop at adapter
+    //
+    // The gate is `should_process`. We assert exactly one of the
+    // three would be forwarded.
+    let alice = SlackInbound {
+        message_ts: "1.0".into(),
+        user_id: "U_ALICE".into(),
+        user_name: "alice".into(),
+        channel_id: "C_THREAD".into(),
+        text: "anyone got a moment?".into(),
+        thread_ts: Some("1.0".into()),
+        is_dm: false,
+        bot_mentioned: false,
+        files: vec![],
+    };
+    let bob = SlackInbound {
+        message_ts: "2.0".into(),
+        user_id: "U_BOB".into(),
+        user_name: "bob".into(),
+        channel_id: "C_THREAD".into(),
+        text: "<@U_BOT> can you summarize this thread?".into(),
+        thread_ts: Some("1.0".into()),
+        is_dm: false,
+        bot_mentioned: true,
+        files: vec![],
+    };
+    let carol = SlackInbound {
+        message_ts: "3.0".into(),
+        user_id: "U_CAROL".into(),
+        user_name: "carol".into(),
+        channel_id: "C_THREAD".into(),
+        text: "I'll check the doc and report back".into(),
+        thread_ts: Some("1.0".into()),
+        is_dm: false,
+        bot_mentioned: false,
+        files: vec![],
+    };
+
+    assert!(
+        !convert::should_process(&alice),
+        "alice's non-mention must be dropped"
+    );
+    assert!(convert::should_process(&bob), "bob's mention must pass");
+    assert!(
+        !convert::should_process(&carol),
+        "carol's non-mention must be dropped"
+    );
+
+    // The forwarded frame for bob carries thread_ts in metadata
+    // (`crates/adapter-slack/src/convert.rs:42-44`), so an agent
+    // that wanted thread history could reconstruct the pointer.
+    // But Wirken's adapter does NOT call any Slack history API —
+    // alice's and carol's content remains invisible to the agent.
+    let mut bob_frame = capnp::message::Builder::new_default();
+    convert::slack_to_inbound(&bob, &mut bob_frame);
+    let reader = bob_frame.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::Inbound(ib) => {
+            let ib = ib.unwrap();
+            let meta = ib.get_metadata().unwrap().to_str().unwrap();
+            // thread_ts is in metadata for the agent to reference,
+            // not as a fetch instruction.
+            assert!(
+                meta.contains("\"thread_ts\""),
+                "thread_ts must be carried in metadata for context, not used to fetch: {meta}"
+            );
+            // Sanity: the text we forwarded is bob's, not alice's
+            // or carol's.
+            let text = ib.get_text().unwrap().to_str().unwrap();
+            assert!(text.contains("summarize"));
+            assert!(!text.contains("got a moment"));
+            assert!(!text.contains("check the doc"));
+        }
+        _ => panic!("expected Inbound"),
+    }
+}
+
+#[test]
+fn dm_passes_gate_regardless_of_mention() {
+    // Companion: DMs always pass with or without mention. Pinning
+    // this so a future tightening of `should_process` does not
+    // accidentally break 1:1 DMs by requiring `<@bot>` in DMs too.
+    let dm_no_mention = SlackInbound {
+        message_ts: "1.0".into(),
+        user_id: "U_DM".into(),
+        user_name: "dm-user".into(),
+        channel_id: "D_DM".into(),
+        text: "no mention but still 1:1".into(),
+        thread_ts: None,
+        is_dm: true,
+        bot_mentioned: false,
+        files: vec![],
+    };
+    assert!(convert::should_process(&dm_no_mention));
+}
+
+// ---------------------------------------------------------------------------
 // from_push_event — echo-loop and noise filtering, thread_ts capture.
 // Fixtures use serde_json::from_value to build SlackPushEventCallback the
 // same way slack-morphism receives it over WSS, so the parse path is the
