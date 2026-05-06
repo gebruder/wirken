@@ -10,6 +10,251 @@ tagged.
 
 ## Unreleased
 
+## [1.1.0] - 2026-05-06
+
+Minor bump. Audit gains per-gateway chain-head signing. Lyrik gains
+concurrent walk dispatch with per-walk dedup against a single signed
+session. Zirkel gains perspective-guided query expansion, on by
+default at the CLI surface. The session-log wire format gains new
+variants and optional fields, all forward-compat under the existing
+serde envelope.
+
+### Audit
+
+- Chain-head signing wired through the session log. New
+  `SessionEvent::ChainHead` variant carries the sequence range,
+  prev and current chain hashes, an Ed25519 signature, and the
+  hex-encoded signing public key. Signatures bind the
+  schema-version-1 layout under the `wirken/audit-chain-head/v1`
+  domain. A per-gateway Ed25519 identity lives at
+  `<data_dir>/audit/audit-signing.{key,pub}` (mode 0600 on Unix);
+  it is distinct from the IPC handshake keypair and the per-agent
+  attestation identity so a compromise of one does not invalidate
+  the others. `SqliteSessionLog::open_with_signer` writes a
+  `SessionStart` head on the first append to a fresh session and
+  a `Checkpoint` head every 1000 appends or 5 minutes of
+  wall-clock since the last head, whichever comes first. The
+  gateway emits an explicit `SessionEnd` head on graceful
+  shutdown via `emit_chain_head(SessionEnd)`. Callers without a
+  signer write no head rows; existing logs accumulated before
+  signing land as transition-era and continue to verify under the
+  default `verify` (`5101a6b`).
+
+- Verification surface and CLI flag. `SqliteSessionLog::verify_signatures`
+  walks every `ChainHead` row in a session and checks four
+  properties: schema version matches the verifier, claimed
+  `current_chain_hash` matches the stored hash at
+  `sequence_range_end`, claimed `prev_chain_hash` matches the
+  stored hash at `sequence_range_start - 1`, and the embedded
+  Ed25519 signature verifies under the embedded `signing_key_id`.
+  Two new `VerifyResult` variants: `SignatureInvalid` (always
+  hard fail) and `MissingChainHead` (hard fail under
+  `--require-signed`). `wirken audit verify` takes
+  `--require-signed`. Without it, sessions that have zero
+  `ChainHead` rows are counted as transition-era and verify
+  exits zero; with it, sessions missing heads hard-fail. Invalid
+  signatures are always hard fail. JSON output `schema_version`
+  bumps to 2 and adds `signed_heads_count`, `unsigned_heads_count`,
+  `invalid_signatures_count`, `signing_key_ids_seen`,
+  `sessions_with_no_signed_heads`, `unsigned_tail_max_len`
+  (`afad069`).
+
+- `docs/enforcement-model.md` describes what chain-head signing
+  protects against (a writer rewriting history, storage tampering)
+  and what it does not (a malicious gateway signing a fabricated
+  chain in real time is not detectable from the signature alone).
+  `docs/audit-cli.md` documents the v2 schema fields, the two new
+  result values, and the `--require-signed` flag (`b5f8365`).
+
+### Lyrik
+
+- Per-walk dispatch. `walks: [...]` in `.lyrik/config.json` opts
+  a run into per-walk operation. The validator runs at parse
+  time: each named walk must appear in the canonical
+  `KNOWN_WALKS` set and each must exist as
+  `~/.claude/skills/<walk>/SKILL.md`. Empty arrays, unknown
+  names, and missing skill files all hard-fail before any LLM
+  call. Walk skills are operator-installed in the Claude-style
+  tree without a wirken permissions block, so the runner stages
+  them at `<run-dir>/walks-skills/<walk>/SKILL.md` with
+  synthesized wirken-shaped frontmatter wrapping the original
+  body; the agent loads them via the new `Agent::extend_skills`
+  surface so `/<walk-name>` becomes a first-class slash
+  invocation alongside `/lyrik`. `walks: []` and the absence of
+  the field both retain the legacy single-call behaviour
+  (`9b16da0`).
+
+- Concurrent walk dispatch. `dispatch_walks_concurrent` replaces
+  the serial baseline. Each selected walk constructs its own
+  `Agent` (separate LLM conversation, separate tool state)
+  inside a `tokio::spawn` task gated by a `Semaphore` with
+  `max_concurrent_walks` permits (default 4, parse-rejected at
+  zero). Every Agent shares the same `agent_id`, which is the
+  `SessionLog` `session_id`, so all walks land in one signed
+  chain even though they run as N concurrent appenders;
+  rusqlite's interior connection mutex serializes writers, so
+  concurrent appends interleave at the seq level without
+  breaking the chain. The Lyrik runner now opens the session log
+  via `SqliteSessionLog::open_with_signer` against the gateway's
+  audit signing key (`load_or_create` at
+  `<data_dir>/audit/audit-signing.key`); a key load failure logs
+  a warn and runs unsigned. After dispatch and aggregation the
+  runner emits an explicit `SessionEnd` `ChainHead` so the chain
+  caps on a signature rather than the last walk's tool result.
+  Exit-code policy: any walk that hit a permission denial routes
+  the run to non-zero (operator intent, not a transient
+  failure), even when other walks succeeded; all walks failing
+  transient is also non-zero; at least one success and zero
+  denials returns zero. Permission denial does not skip
+  aggregation; the dedup pass writes whatever the run produced
+  (`bbef112`).
+
+- Dedup pass on per-walk findings. `aggregate_findings_multi`
+  takes `(walk_name, source_dir)` pairs and runs a dedup pass
+  when per-walk dispatch is active. Findings sharing
+  `(location.file, location.line_start)` collapse into one
+  merged record per location. On collision: framings union to a
+  sorted unique set, tier rises to the highest of the inputs
+  (`CRITICAL > HIGH > MEDIUM > LOW > INFO`),
+  `dedup_disagreement: true` when input tiers differ, and
+  `dedup_sources` lists each contributing walk in first-seen
+  order so a reviewer can trace which walks surfaced a given
+  finding. A solo finding from a known walk also gets a
+  single-element `dedup_sources` for traceability. Findings
+  without a usable location key (missing file or line_start)
+  pass through unchanged so a malformed input does not collide
+  with everything else under a shared default key. The one-call
+  path keeps verbatim concatenation so legacy operators see the
+  pre-walk behaviour (`c223b42`, `c32bf67`).
+
+- `docs/lyrik.md` covers the `walks` and `max_concurrent_walks`
+  schema, the validator's parse-time hard fails, the dispatch
+  shape, the dedup contract, and the exit-code rules
+  (`2f14ac1`).
+
+### Zirkel
+
+- Perspective-guided query expansion (front-half of Stanford
+  STORM, retrieval-only; the librarian remains
+  retrieval-only and the LLM produces perspective labels, never
+  user-facing prose). Given a topic, the librarian runs a
+  Wikipedia opensearch for related titles, fetches section
+  headings via the MediaWiki Action API, and makes a single
+  structured-output LLM call to a new
+  `zirkel_emit_perspectives` synthetic tool that returns short
+  noun-phrase perspective labels grounded in those headings.
+  The orchestrator then dispatches the existing retriever path
+  once per label via synthetic `SourceConfig`s through the
+  existing `FetcherRegistry` (no manifest extension, no registry
+  surface change). Synthetic source names carry a `::p=<slug>`
+  suffix so the candidates table groups by perspective on read.
+  Labels are ephemeral: they live in `run()` scope and the audit
+  chain only and are not persisted past the turn. Slug-collision
+  dedup runs over the LLM output before any `SourceConfig` is
+  built; first occurrence wins, later collisions drop. Pre-flight
+  cap (`max_perspectives * sources <= per_topic_fanout_cap`)
+  rejects over-budget expansions before any HTTP goes out
+  (`6609d62`, `b4b2af3`).
+
+- Audit-chain plumbing for the expansion turn.
+  `SessionEvent::PerspectiveExpansion` records the run id, the
+  topic, the emitted perspective labels, a fresh `expansion_id`
+  UUID, and any labels dropped for slug collision.
+  `SessionEvent::PerspectiveSkipped` is the sibling variant
+  emitted on the over-budget cap path with a stable snake_case
+  `reason` (today: `"over_budget"`). `HttpFetch` and
+  `CandidateScored` gain an optional
+  `expansion_id: Option<String>` with `serde(default,
+  skip_serializing_if = "Option::is_none")`; rows written under
+  `perspectives_enabled = false` serialize byte-identical to a
+  pre-perspective build. The expansion id threads through every
+  fetch and candidate event the turn caused, so a downstream
+  auditor reconstructs the turn rather than seeing one event
+  hide the fan-out (`6609d62`, `6ba18a4`).
+
+- Default flipped at the CLI surface.
+  `perspectives_enabled` defaults to `true` in
+  `crates/cli/src/commands/zirkel.rs`. With `topic` unset and
+  the cap params at zero, `build_perspective_passes` treats the
+  planned fan-out as a skip and falls through to the default
+  fetch loop; no `PerspectiveExpansion`, no
+  `PerspectiveSkipped`, and no `expansion_id` field on any
+  audit row. The flag flip is the predicate for the follow-up
+  that surfaces topic + cap configuration to the operator
+  (`2c6f703`).
+
+### Agent runtime
+
+- Subagent tier-clamp regression pinned. The
+  `auto_deny_above_tier` ceiling overrides per-agent approval,
+  the clamp is parent-defined per child `agent_id` rather than
+  inherited from caller state, and Tier 3 actions are denied
+  even when the clamp is set to Tier 2 (`d2b07f6`).
+
+### Gateway
+
+- Workspace `.env` cannot steer `GatewayConfig`. Three checks:
+  no dotenv-shaped crate in `Cargo.lock`, no source line calls a
+  dotenv reader, and a behavioural cross-check that planting a
+  `.env` in cwd does not influence `GatewayConfig::default()`.
+  Maps to the qclawer-credited cluster against OpenClaw
+  (CVE-2026-43531 and the GHSA shapes around `.env` overriding
+  hooks root, runtime control vars, connector hosts, and MiniMax
+  host) (`0b9d016`).
+
+- Per-sender scope isolation pinned. No per-sender context
+  exists; permissions are agent-scoped via `canonical_agent_id`.
+  The injection detector's tag-not-block contract is pinned in
+  the same module (`5f6266b`).
+
+### IPC
+
+- No payload field can reroute inbound frames. Schema-level
+  guard against future `host` / `target` / `route` / `sandbox`
+  fields, a field-set pin on `InboundMessage` so a
+  routing-relevant addition has to update the test alongside the
+  schema, and an end-to-end build of a forged-channel frame
+  confirms `AuthenticatedChannel::require_match` rejects it.
+  Maps to CVE-2026-42434 (sandbox escape via `host=node`) and
+  the device-pairing scope-skip GHSA cluster (`6039450`).
+
+### Adapters
+
+- Slack thread mention-gate pinned. Mixed-sender thread
+  regression: only the bot-mentioning message in a thread
+  reaches the gateway; non-mentioning content from other senders
+  is dropped at the adapter and never enters the model context.
+  Maps to CVE-2026-41358 (Slack thread sender allowlist bypass),
+  CVE-2026-43535 (collect-mode context reuse), and the GHSA
+  cluster around subagent fallback synthetic admin and ACP child
+  envelope inheritance (`3a6b7b9`).
+
+### MCP-proxy
+
+- `SAFE_ENV_PASSTHROUGH` contents pinned against silent
+  expansion. The previous test iterated the constant, so a new
+  key would have silently received pass-through coverage. The
+  contents-equality test forces additions to update the test in
+  the same commit and argue for the new key in review
+  (`f51ba29`).
+
+### Skills docs
+
+- `disable-model-invocation` documented in the skill frontmatter
+  table with its default-true posture. New "Auto-invocation vs
+  explicit invocation" section spells out the contract: skills
+  are explicit-only by default, auto-firing requires
+  `disable-model-invocation: false` in frontmatter, the slash
+  interceptor matches `^/<name>(\s|$)` strictly, and an unknown
+  slash invocation rejects loudly rather than falling through to
+  the LLM as plain text (`533c5e7`).
+
+### Tooling
+
+- Pre-commit hook scans for filename and `.gitignore` leaks; the
+  commit-msg attribution-pattern rejection list is extended
+  (`86f7026`).
+
 ## [1.0.2] — 2026-05-04
 
 ### Agent runtime
