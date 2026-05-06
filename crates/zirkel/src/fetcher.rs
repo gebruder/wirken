@@ -158,6 +158,112 @@ impl Fetcher for RssFetcher {
     }
 }
 
+/// Wikipedia section-heading fetcher.
+///
+/// Hits the MediaWiki Action API at the URL passed in
+/// `SourceConfig.endpoint` (which the perspective-expansion module
+/// constructs by templating the article title into
+/// `https://en.wikipedia.org/w/api.php?action=parse&prop=sections&format=json&page={title}`).
+/// Returns one [`FetchedItem`] per section heading where `title` is
+/// the heading line and `abstract_text` is empty, so a downstream
+/// LLM call can treat the headings as a flat heading list without
+/// re-parsing body text.
+///
+/// Body text is intentionally not fetched. The librarian is
+/// retrieval-only; perspective expansion uses headings as scaffolding
+/// for label generation, not as content to summarize.
+pub struct WikipediaTocFetcher;
+
+/// Method name registered for [`WikipediaTocFetcher`] in the fetcher
+/// registry.
+pub const WIKIPEDIA_TOC_METHOD: &str = "wikipedia-toc";
+
+#[async_trait]
+impl Fetcher for WikipediaTocFetcher {
+    fn method(&self) -> &'static str {
+        WIKIPEDIA_TOC_METHOD
+    }
+
+    /// The Wikimedia API courtesy budget for unauthenticated callers
+    /// is generous; the documented soft cap for this kind of
+    /// metadata lookup is several hundred requests per day. The
+    /// per-host override here keeps perspective-expansion turns from
+    /// contending with the polite 2/day floor that the base
+    /// rate-limit config applies to unfamiliar hosts.
+    fn default_rate_limit_per_day(&self) -> Option<u32> {
+        Some(200)
+    }
+
+    async fn fetch(
+        &self,
+        http: &EgressClient,
+        source: &SourceConfig,
+    ) -> Result<Vec<FetchedItem>, FetchError> {
+        let body = fetch_body(http, &source.endpoint).await?;
+        parse_wikipedia_sections(&source.name, &source.endpoint, &body)
+    }
+}
+
+/// Parse the Action API's `?action=parse&prop=sections` response
+/// body into one [`FetchedItem`] per section heading.
+pub fn parse_wikipedia_sections(
+    source_name: &str,
+    request_url: &str,
+    body: &str,
+) -> Result<Vec<FetchedItem>, FetchError> {
+    let v: serde_json::Value = serde_json::from_str(body).map_err(|e| FetchError::Parse {
+        url: request_url.to_string(),
+        message: format!("wikipedia parse response: {e}"),
+    })?;
+    let sections = v
+        .pointer("/parse/sections")
+        .and_then(|s| s.as_array())
+        .ok_or_else(|| FetchError::Parse {
+            url: request_url.to_string(),
+            message: "wikipedia parse response missing /parse/sections array".to_string(),
+        })?;
+    let title = v
+        .pointer("/parse/title")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut out = Vec::with_capacity(sections.len());
+    for s in sections {
+        let line = s
+            .get("line")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let anchor = s
+            .get("anchor")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let url = if anchor.is_empty() || title.is_empty() {
+            request_url.to_string()
+        } else {
+            format!(
+                "https://en.wikipedia.org/wiki/{}#{}",
+                title.replace(' ', "_"),
+                anchor
+            )
+        };
+        out.push(FetchedItem {
+            source_name: source_name.to_string(),
+            url,
+            title: line,
+            abstract_text: String::new(),
+            published_at: String::new(),
+            source_metadata: String::new(),
+        });
+    }
+    Ok(out)
+}
+
 /// HTTP-fetch raw bytes of a feed. Separated from parsing so tests
 /// can exercise the parser directly without a server.
 pub async fn fetch_body(http: &EgressClient, url: &str) -> Result<String, FetchError> {
@@ -356,6 +462,36 @@ mod tests {
     #[test]
     fn malformed_feed_returns_parse_error() {
         let err = parse_feed("x", "https://x", "not a feed at all").unwrap_err();
+        assert!(matches!(err, FetchError::Parse { .. }));
+    }
+
+    #[test]
+    fn wikipedia_sections_parse_into_one_item_per_heading() {
+        let body = r#"{
+            "parse": {
+                "title": "Biometric Information Privacy Act",
+                "sections": [
+                    {"toclevel": 1, "level": "2", "line": "Background", "anchor": "Background", "number": "1"},
+                    {"toclevel": 1, "level": "2", "line": "Enforcement", "anchor": "Enforcement", "number": "2"},
+                    {"toclevel": 2, "level": "3", "line": "  ", "anchor": "blank", "number": "2.1"}
+                ]
+            }
+        }"#;
+        let items =
+            parse_wikipedia_sections("wiki:bipa", "https://en.wikipedia.org/w/api.php?", body)
+                .unwrap();
+        assert_eq!(items.len(), 2, "blank-line section should be skipped");
+        assert_eq!(items[0].title, "Background");
+        assert_eq!(items[0].source_name, "wiki:bipa");
+        assert!(items[0].url.contains("#Background"));
+        assert!(items[0].url.contains("Biometric_Information_Privacy_Act"));
+        assert_eq!(items[1].title, "Enforcement");
+    }
+
+    #[test]
+    fn wikipedia_missing_sections_array_is_parse_error() {
+        let body = r#"{"parse": {"title": "X"}}"#;
+        let err = parse_wikipedia_sections("x", "https://en.wikipedia.org/x", body).unwrap_err();
         assert!(matches!(err, FetchError::Parse { .. }));
     }
 

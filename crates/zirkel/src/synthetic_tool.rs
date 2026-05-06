@@ -112,6 +112,51 @@ pub struct NameThemeArgs {
     pub name: String,
 }
 
+/// Tool def for `zirkel_emit_perspectives` -- the librarian's
+/// perspective-expansion call. Single LLM call: input is the topic
+/// plus concatenated section headings from related Wikipedia
+/// articles (gathered out-of-band by [`crate::perspectives`]),
+/// output is a short list of noun-phrase perspective labels. The
+/// labels are ephemeral and never persisted outside the audit
+/// chain. Output type: [`EmitPerspectivesArgs`].
+pub fn emit_perspectives_tool(max_perspectives: usize) -> ToolDef {
+    let cap = max_perspectives.max(1);
+    ToolDef {
+        name: "zirkel_emit_perspectives".to_string(),
+        description: format!(
+            "Return up to {cap} short noun-phrase perspective labels for the given topic, \
+             each grounded in the supplied section headings. Each label must be a 2-5 word noun \
+             phrase that names a distinct angle on the topic. \
+             You MUST call this tool. Do not respond with text or quotes."
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "perspectives": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "description": "A 2-5 word noun-phrase label naming one angle on the topic."
+                    },
+                    "maxItems": cap,
+                    "description": format!(
+                        "Up to {cap} distinct perspective labels. No duplicates. \
+                         Examples for topic 'biometric privacy': 'employer surveillance', \
+                         'consent frameworks', 'state-level enforcement', 'cross-border transfer'."
+                    )
+                }
+            },
+            "required": ["perspectives"]
+        }),
+    }
+}
+
+/// Output shape for [`emit_perspectives_tool`].
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct EmitPerspectivesArgs {
+    pub perspectives: Vec<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum SyntheticToolError {
     #[error("LLM call failed: {0}")]
@@ -240,6 +285,33 @@ mod tests {
         let json = r#"{"name": "FTC enforcement"}"#;
         let parsed: NameThemeArgs = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.name, "FTC enforcement");
+    }
+
+    #[test]
+    fn emit_perspectives_tool_def_caps_at_max() {
+        let tool = emit_perspectives_tool(4);
+        assert_eq!(tool.name, "zirkel_emit_perspectives");
+        let max_items = tool
+            .parameters
+            .pointer("/properties/perspectives/maxItems")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(max_items, 4);
+        let required = tool
+            .parameters
+            .get("required")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0].as_str().unwrap(), "perspectives");
+    }
+
+    #[test]
+    fn emit_perspectives_args_round_trip() {
+        let json = r#"{"perspectives": ["employer surveillance", "consent frameworks"]}"#;
+        let parsed: EmitPerspectivesArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.perspectives.len(), 2);
+        assert_eq!(parsed.perspectives[0], "employer surveillance");
     }
 
     // Live LlmClient end-to-end is exercised by the orchestrator-

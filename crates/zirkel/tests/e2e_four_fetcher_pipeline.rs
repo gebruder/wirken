@@ -242,6 +242,12 @@ fn build_config(
         ollama_embed_base: String::new(),
         embed_model: String::new(),
         source_api_keys,
+        perspectives_enabled: false,
+        topic: None,
+        max_perspectives: 0,
+        max_related_topics: 0,
+        per_topic_fanout_cap: 0,
+        wikipedia_api_base: None,
     }
 }
 

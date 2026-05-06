@@ -29,6 +29,7 @@ pub mod keep_skip;
 pub mod keep_skip_interceptor;
 pub mod llm_score;
 pub mod orchestrator;
+pub mod perspectives;
 #[cfg(unix)]
 pub mod push_client;
 pub mod schema;

@@ -86,6 +86,16 @@ pub async fn run() -> Result<()> {
         ollama_embed_base: "http://127.0.0.1:11434".to_string(),
         embed_model: DEFAULT_EMBEDDING_MODEL.to_string(),
         source_api_keys,
+        // Perspective expansion is opt-in. The CLI does not yet
+        // surface a flag for it; until a CLI knob lands, the
+        // librarian path runs identically to the pre-perspective
+        // build (no expansion, no expansion_id, no audit variant).
+        perspectives_enabled: false,
+        topic: None,
+        max_perspectives: 0,
+        max_related_topics: 0,
+        per_topic_fanout_cap: 0,
+        wikipedia_api_base: None,
     })
     .await
     .map_err(|e| anyhow!("zirkel orchestrator: {e}"))?;

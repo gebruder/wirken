@@ -294,6 +294,21 @@ pub enum SessionEvent {
         agent_id: String,
         trigger: Option<String>,
     },
+    /// Zirkel: the librarian ran a perspective-expansion turn for
+    /// `topic`. `perspectives` carries the ephemeral noun-phrase
+    /// labels produced by the LLM from concatenated Wikipedia
+    /// section headings; the labels are not persisted in the
+    /// candidates table or anywhere else outside the audit chain.
+    /// `expansion_id` is a fresh UUID minted once per turn and
+    /// threaded through every subsequent `HttpFetch` and
+    /// `CandidateScored` event the turn caused, so a downstream
+    /// auditor can reconstruct what the expansion actually fetched.
+    PerspectiveExpansion {
+        run_id: String,
+        topic: String,
+        perspectives: Vec<String>,
+        expansion_id: String,
+    },
     /// Zirkel orchestrator: an HTTP fetch went out through the policed
     /// transport. `source` is the source's name in `sources.toml`;
     /// `host` is the URL host. `bytes` is the response payload size on
@@ -307,6 +322,13 @@ pub enum SessionEvent {
         outcome: String,
         bytes: u64,
         run_id: Option<String>,
+        /// Correlates this fetch with a perspective-expansion turn.
+        /// `Some` when the fetch was driven by a synthetic
+        /// per-perspective `SourceConfig`; `None` for the default
+        /// manifest-only loop. Defaulted on deserialize so audit rows
+        /// written before the field existed read cleanly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expansion_id: Option<String>,
     },
     /// Zirkel: a fetched item passed exclusion + keyword screening and
     /// landed in the candidates table with its keyword-match score.
@@ -322,6 +344,12 @@ pub enum SessionEvent {
         candidate_id: i64,
         keyword_match_score: u32,
         matched_keywords: String,
+        /// Correlates this candidate with a perspective-expansion
+        /// turn. Same semantics as on `HttpFetch`: `Some` only for
+        /// candidates landed under a synthetic per-perspective
+        /// `SourceConfig`. Defaulted on deserialize.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expansion_id: Option<String>,
     },
     /// Zirkel: the LLM relevance pass scored a candidate.
     /// `llm_relevance_score` is 0–100. `matched_keyword` is the single

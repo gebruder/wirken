@@ -51,7 +51,9 @@ use wirken_agent::llm::LlmClient;
 
 use crate::cluster::{ClusterLabel, cluster as cluster_embeddings, group_by_cluster};
 use crate::embedding::embed_batch;
-use crate::fetcher::{FetchError, FetchedItem, RssFetcher, SourceConfig};
+use crate::fetcher::{
+    FetchError, FetchedItem, RssFetcher, SourceConfig, WIKIPEDIA_TOC_METHOD, WikipediaTocFetcher,
+};
 use crate::fetcher_congress::CongressBillFetcher;
 use crate::fetcher_federal_register::FederalRegisterFetcher;
 use crate::fetcher_govinfo::GovInfoBillsFetcher;
@@ -119,6 +121,40 @@ pub struct OrchestratorConfig {
     /// fetch time and the resulting [`FetchedItem`] flows downstream
     /// without the secret material.
     pub source_api_keys: std::collections::HashMap<String, String>,
+    /// Perspective-guided query expansion (front-half of Stanford
+    /// STORM, retrieval-only). When `false` the run is bit-identical
+    /// to a pre-perspective build: no LLM expansion call, no
+    /// PerspectiveExpansion audit event, no expansion_id field on
+    /// HttpFetch / CandidateScored. When `true` and `topic` is set,
+    /// the orchestrator runs one expansion turn before the fetcher
+    /// loop and dispatches retrievers once per emitted label via
+    /// synthetic `SourceConfig`s.
+    pub perspectives_enabled: bool,
+    /// Topic the expansion turn surveys. `None` (or empty) skips
+    /// expansion even when `perspectives_enabled` is true. Only the
+    /// labels produced from this topic land in the audit chain;
+    /// the topic itself is not persisted in the candidates table.
+    pub topic: Option<String>,
+    /// Upper bound on perspective labels returned by the LLM. The
+    /// expansion's structured-output tool caps at this value;
+    /// callers further trim if the model returns more.
+    pub max_perspectives: usize,
+    /// Upper bound on related Wikipedia articles surveyed for
+    /// section headings. Each surveyed title costs one Action API
+    /// metadata fetch.
+    pub max_related_topics: usize,
+    /// Hard cap on retriever calls a single perspective-expansion
+    /// turn may dispatch (perspectives x manifest sources). The
+    /// orchestrator checks `max_perspectives * sources <= cap`
+    /// before any expansion fetch goes out and skips the expansion
+    /// entirely when over budget. The cap covers retriever calls,
+    /// not the upstream Wikipedia metadata calls.
+    pub per_topic_fanout_cap: usize,
+    /// Override for the Wikipedia Action API endpoint. `None`
+    /// resolves to [`crate::perspectives::DEFAULT_WIKIPEDIA_API_BASE`];
+    /// tests redirect this at a localhost mock so the egress
+    /// allowlist stays scoped to `127.0.0.1`.
+    pub wikipedia_api_base: Option<String>,
 }
 
 /// Outcome of one orchestrator run, by category.
@@ -154,6 +190,21 @@ pub struct RunSummary {
     /// Embedding / clustering / theme-naming failures. Logged here
     /// for the CLI summary; the run completes regardless.
     pub theme_stage_failures: Vec<LlmStageFailure>,
+    /// Ephemeral perspective labels emitted by the expansion turn,
+    /// or empty when expansion was disabled or skipped. Mirrors what
+    /// the `PerspectiveExpansion` audit event records; surfaced on
+    /// `RunSummary` for the CLI summary line. Not persisted past
+    /// this run.
+    pub perspectives_used: Vec<String>,
+    /// `Some` when this run dispatched retrievers under a
+    /// perspective-expansion turn; the embedded UUID matches the
+    /// `expansion_id` field on the corresponding audit events.
+    pub expansion_id: Option<String>,
+    /// True when expansion was enabled and a topic was supplied but
+    /// the planned fan-out (max_perspectives x sources) exceeded the
+    /// configured cap; surfaces the rejection on the summary so the
+    /// CLI can warn the operator without re-deriving the check.
+    pub perspective_skipped_over_budget: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -259,6 +310,12 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
             crate::fetcher_federal_register::METHOD,
             Arc::new(FederalRegisterFetcher),
         );
+        // Wikipedia TOC fetcher is registered unconditionally. It is
+        // not reachable from `sources.toml` (operators would not
+        // declare a wiki-section TOC as a research source); the
+        // perspective-expansion module reaches it directly via the
+        // registry by method name.
+        fetchers.register(WIKIPEDIA_TOC_METHOD, Arc::new(WikipediaTocFetcher));
         if let Some(key) = config.source_api_keys.get("congress-gov") {
             fetchers.register(
                 crate::fetcher_congress::METHOD,
@@ -346,103 +403,120 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
         ..Default::default()
     };
 
-    for source in &manifest.sources {
-        summary.sources_attempted += 1;
+    // Build the perspective passes for this run. The default
+    // (perspectives disabled) is one pass with no label and no
+    // expansion id, which iterates over the manifest sources
+    // unchanged: bit-identical to the pre-perspective build.
+    let perspective_passes: Vec<PerspectivePass> = build_perspective_passes(
+        &config,
+        &http,
+        &manifest,
+        &run_id,
+        config.session_log.as_ref(),
+        audit_handle.as_ref(),
+        &mut summary,
+    )
+    .await;
 
-        // Dispatch by method via the fetcher registry. Methods with
-        // no registered fetcher (today: scrape; tomorrow: anything
-        // not yet wired) record as unsupported and the run continues.
-        let Some(fetcher) = fetchers.get(&source.method) else {
-            summary.sources_unsupported.push(source.name.clone());
-            tracing::info!(
-                "source '{}' uses method '{}' which is not registered (registered: {})",
-                source.name,
-                source.method,
-                fetchers.registered_methods().join(", "),
-            );
-            continue;
-        };
-        let source_cfg = SourceConfig {
-            name: source.name.clone(),
-            endpoint: source.endpoint.clone(),
-        };
-        let items = match fetcher.fetch(&http, &source_cfg).await {
-            Ok(items) => {
-                emit_http_fetch(
-                    config.session_log.as_ref(),
-                    audit_handle.as_ref(),
-                    source,
-                    "ok",
-                    bytes_total(&items),
-                    &run_id,
+    for pass in &perspective_passes {
+        for source in &manifest.sources {
+            summary.sources_attempted += 1;
+
+            // Dispatch by method via the fetcher registry. Methods with
+            // no registered fetcher (today: scrape; tomorrow: anything
+            // not yet wired) record as unsupported and the run continues.
+            let Some(fetcher) = fetchers.get(&source.method) else {
+                summary.sources_unsupported.push(source.name.clone());
+                tracing::info!(
+                    "source '{}' uses method '{}' which is not registered (registered: {})",
+                    source.name,
+                    source.method,
+                    fetchers.registered_methods().join(", "),
                 );
-                items
-            }
-            Err(e) => {
-                let outcome = fetch_outcome_label(&e);
-                emit_http_fetch(
-                    config.session_log.as_ref(),
-                    audit_handle.as_ref(),
-                    source,
-                    &outcome,
-                    0,
-                    &run_id,
-                );
-                summary.sources_failed.push(SourceFailure {
-                    source: source.name.clone(),
-                    reason: e.to_string(),
-                });
                 continue;
-            }
-        };
-
-        summary.sources_succeeded += 1;
-        summary.items_seen += items.len();
-
-        for item in items {
-            // Dedup against the seen table.
-            let url_hash = sha256_hex(&item.url);
-            let already_seen: i64 = store.conn().query_row(
-                "SELECT COUNT(*) FROM seen WHERE url_hash = ?1",
-                rusqlite::params![url_hash],
-                |row| row.get(0),
-            )?;
-            if already_seen > 0 {
-                emit_skip(
-                    config.session_log.as_ref(),
-                    audit_handle.as_ref(),
-                    &run_id,
-                    &item,
-                    &url_hash,
-                    "duplicate_url",
-                );
-                store.conn().execute(
-                    "INSERT INTO skipped_log (run_id, url_hash, url, source_name, reason) \
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    rusqlite::params![
+            };
+            let source_cfg = pass.synthesize_source_config(source);
+            let items = match fetcher.fetch(&http, &source_cfg).await {
+                Ok(items) => {
+                    emit_http_fetch(
+                        config.session_log.as_ref(),
+                        audit_handle.as_ref(),
+                        &source_cfg.name,
+                        &source_cfg.endpoint,
+                        "ok",
+                        bytes_total(&items),
                         &run_id,
-                        &url_hash,
-                        &item.url,
-                        &item.source_name,
-                        "duplicate_url"
-                    ],
-                )?;
-                continue;
-            }
-            // Mark seen before screening so a later orchestrator run
-            // doesn't re-discover the same URL even if screening
-            // changed (e.g., updated interests file would make a
-            // previously-excluded item now match a keyword).
-            store.conn().execute(
-                "INSERT INTO seen (url, url_hash) VALUES (?1, ?2)",
-                rusqlite::params![&item.url, &url_hash],
-            )?;
-            summary.items_new += 1;
+                        pass.expansion_id.as_deref(),
+                    );
+                    items
+                }
+                Err(e) => {
+                    let outcome = fetch_outcome_label(&e);
+                    emit_http_fetch(
+                        config.session_log.as_ref(),
+                        audit_handle.as_ref(),
+                        &source_cfg.name,
+                        &source_cfg.endpoint,
+                        &outcome,
+                        0,
+                        &run_id,
+                        pass.expansion_id.as_deref(),
+                    );
+                    summary.sources_failed.push(SourceFailure {
+                        source: source_cfg.name.clone(),
+                        reason: e.to_string(),
+                    });
+                    continue;
+                }
+            };
 
-            match screen(&item, &interests.keywords, &interests.exclusions) {
-                Screened::Excluded { matched_exclusion } => {
-                    summary.items_excluded += 1;
+            summary.sources_succeeded += 1;
+            summary.items_seen += items.len();
+
+            for item in items {
+                // Dedup against the seen table.
+                let url_hash = sha256_hex(&item.url);
+                let already_seen: i64 = store.conn().query_row(
+                    "SELECT COUNT(*) FROM seen WHERE url_hash = ?1",
+                    rusqlite::params![url_hash],
+                    |row| row.get(0),
+                )?;
+                if already_seen > 0 {
+                    emit_skip(
+                        config.session_log.as_ref(),
+                        audit_handle.as_ref(),
+                        &run_id,
+                        &item,
+                        &url_hash,
+                        "duplicate_url",
+                    );
                     store.conn().execute(
+                        "INSERT INTO skipped_log (run_id, url_hash, url, source_name, reason) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![
+                            &run_id,
+                            &url_hash,
+                            &item.url,
+                            &item.source_name,
+                            "duplicate_url"
+                        ],
+                    )?;
+                    continue;
+                }
+                // Mark seen before screening so a later orchestrator run
+                // doesn't re-discover the same URL even if screening
+                // changed (e.g., updated interests file would make a
+                // previously-excluded item now match a keyword).
+                store.conn().execute(
+                    "INSERT INTO seen (url, url_hash) VALUES (?1, ?2)",
+                    rusqlite::params![&item.url, &url_hash],
+                )?;
+                summary.items_new += 1;
+
+                match screen(&item, &interests.keywords, &interests.exclusions) {
+                    Screened::Excluded { matched_exclusion } => {
+                        summary.items_excluded += 1;
+                        store.conn().execute(
                         "INSERT INTO skipped_log (run_id, url_hash, url, source_name, reason, detail) \
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         rusqlite::params![
@@ -454,88 +528,84 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                             matched_exclusion
                         ],
                     )?;
-                    emit_skip(
-                        config.session_log.as_ref(),
-                        audit_handle.as_ref(),
-                        &run_id,
-                        &item,
-                        &url_hash,
-                        "exclusion_match",
-                    );
-                }
-                Screened::Zero => {
-                    summary.items_score_zero += 1;
-                    store.conn().execute(
-                        "INSERT INTO skipped_log (run_id, url_hash, url, source_name, reason) \
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        rusqlite::params![
+                        emit_skip(
+                            config.session_log.as_ref(),
+                            audit_handle.as_ref(),
                             &run_id,
+                            &item,
                             &url_hash,
-                            &item.url,
-                            &item.source_name,
-                            "score_zero"
-                        ],
-                    )?;
-                    emit_skip(
-                        config.session_log.as_ref(),
-                        audit_handle.as_ref(),
-                        &run_id,
-                        &item,
-                        &url_hash,
-                        "score_zero",
-                    );
-                }
-                Screened::Kept {
-                    matched_keywords,
-                    keyword_match_score,
-                } => {
-                    let matched_json = serde_json::to_string(&matched_keywords)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    let published_at: Option<String> = if item.published_at.is_empty() {
-                        None
-                    } else {
-                        Some(item.published_at.clone())
-                    };
-                    // Default empty source_metadata to '{}' so the
-                    // column's NOT NULL DEFAULT semantics match the
-                    // value the fetcher passed (or didn't).
-                    let source_metadata: &str = if item.source_metadata.is_empty() {
-                        "{}"
-                    } else {
-                        &item.source_metadata
-                    };
-                    store.conn().execute(
-                        "INSERT INTO candidates ( \
+                            "exclusion_match",
+                        );
+                    }
+                    Screened::Zero => {
+                        summary.items_score_zero += 1;
+                        store.conn().execute(
+                            "INSERT INTO skipped_log (run_id, url_hash, url, source_name, reason) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![
+                                &run_id,
+                                &url_hash,
+                                &item.url,
+                                &item.source_name,
+                                "score_zero"
+                            ],
+                        )?;
+                        emit_skip(
+                            config.session_log.as_ref(),
+                            audit_handle.as_ref(),
+                            &run_id,
+                            &item,
+                            &url_hash,
+                            "score_zero",
+                        );
+                    }
+                    Screened::Kept {
+                        matched_keywords,
+                        keyword_match_score,
+                    } => {
+                        let matched_json = serde_json::to_string(&matched_keywords)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let published_at: Option<String> = if item.published_at.is_empty() {
+                            None
+                        } else {
+                            Some(item.published_at.clone())
+                        };
+                        // Default empty source_metadata to '{}' so the
+                        // column's NOT NULL DEFAULT semantics match the
+                        // value the fetcher passed (or didn't).
+                        let source_metadata: &str = if item.source_metadata.is_empty() {
+                            "{}"
+                        } else {
+                            &item.source_metadata
+                        };
+                        store.conn().execute(
+                            "INSERT INTO candidates ( \
                             source_name, url, body, run_id, title, published_at, \
                             matched_keywords, keyword_match_score, source_metadata \
                          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            &item.source_name,
-                            &item.url,
-                            &item.abstract_text,
+                            rusqlite::params![
+                                &item.source_name,
+                                &item.url,
+                                &item.abstract_text,
+                                &run_id,
+                                &item.title,
+                                &published_at,
+                                &matched_json,
+                                keyword_match_score as i64,
+                                source_metadata,
+                            ],
+                        )?;
+                        let candidate_id = store.conn().last_insert_rowid();
+                        summary.items_kept += 1;
+                        summary.kept_candidate_ids.push(candidate_id);
+                        emit_candidate_scored(
+                            config.session_log.as_ref(),
+                            audit_handle.as_ref(),
                             &run_id,
-                            &item.title,
-                            &published_at,
-                            &matched_json,
-                            keyword_match_score as i64,
-                            source_metadata,
-                        ],
-                    )?;
-                    let candidate_id = store.conn().last_insert_rowid();
-                    summary.items_kept += 1;
-                    summary.kept_candidate_ids.push(candidate_id);
-                    if let (Some(log), Some(handle)) =
-                        (config.session_log.as_ref(), audit_handle.as_ref())
-                    {
-                        let _ = log.append(
-                            handle,
-                            TrustLevel::System,
-                            SessionEvent::CandidateScored {
-                                run_id: run_id.clone(),
-                                candidate_id,
-                                keyword_match_score,
-                                matched_keywords: matched_json,
-                            },
+                            candidate_id,
+                            keyword_match_score,
+                            matched_json,
+                            pass.expansion_id.as_deref(),
                         );
                     }
                 }
@@ -880,24 +950,50 @@ fn emit(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_http_fetch(
     session_log: Option<&Arc<dyn SessionLog>>,
     handle: Option<&SessionHandle<OwnSession>>,
-    source: &SourceEntry,
+    source_name: &str,
+    endpoint: &str,
     outcome: &str,
     bytes: u64,
     run_id: &str,
+    expansion_id: Option<&str>,
 ) {
     emit(
         session_log,
         handle,
         SessionEvent::HttpFetch {
-            source: source.name.clone(),
-            host: host_of(&source.endpoint),
-            url: source.endpoint.clone(),
+            source: source_name.to_string(),
+            host: host_of(endpoint),
+            url: endpoint.to_string(),
             outcome: outcome.to_string(),
             bytes,
             run_id: Some(run_id.to_string()),
+            expansion_id: expansion_id.map(str::to_string),
+        },
+    );
+}
+
+fn emit_candidate_scored(
+    session_log: Option<&Arc<dyn SessionLog>>,
+    handle: Option<&SessionHandle<OwnSession>>,
+    run_id: &str,
+    candidate_id: i64,
+    keyword_match_score: u32,
+    matched_keywords: String,
+    expansion_id: Option<&str>,
+) {
+    emit(
+        session_log,
+        handle,
+        SessionEvent::CandidateScored {
+            run_id: run_id.to_string(),
+            candidate_id,
+            keyword_match_score,
+            matched_keywords,
+            expansion_id: expansion_id.map(str::to_string),
         },
     );
 }
@@ -920,6 +1016,135 @@ fn emit_skip(
             reason: reason.to_string(),
         },
     );
+}
+
+/// One iteration of the orchestrator's outer loop. The default
+/// (perspectives disabled, or expansion skipped for any reason) is
+/// a single pass with `label` and `expansion_id` both `None`, which
+/// makes the inner fetcher loop bit-identical to the
+/// pre-perspective build: no synthetic source-name rewriting, no
+/// expansion_id field on emitted audit events.
+struct PerspectivePass {
+    label: Option<String>,
+    expansion_id: Option<String>,
+}
+
+impl PerspectivePass {
+    fn synthesize_source_config(&self, source: &SourceEntry) -> SourceConfig {
+        match self.label.as_deref() {
+            Some(label) => SourceConfig {
+                name: format!("{}::p={}", source.name, crate::perspectives::slug(label)),
+                endpoint: source.endpoint.clone(),
+            },
+            None => SourceConfig {
+                name: source.name.clone(),
+                endpoint: source.endpoint.clone(),
+            },
+        }
+    }
+}
+
+/// Decide which passes the orchestrator runs this turn. Returns
+/// `[PerspectivePass{None, None}]` for a default run; returns one
+/// pass per emitted label (each carrying the same `expansion_id`)
+/// when perspective expansion is enabled and successful.
+///
+/// Pre-check: `max_perspectives * manifest.sources.len() <=
+/// per_topic_fanout_cap`. Over-budget configurations skip expansion
+/// entirely without making any HTTP call (Wikipedia metadata
+/// included), which is what "rejects over-budget expansions before
+/// any fetch" requires.
+async fn build_perspective_passes(
+    config: &OrchestratorConfig,
+    http: &EgressClient,
+    manifest: &SourcesManifest,
+    run_id: &str,
+    session_log: Option<&Arc<dyn SessionLog>>,
+    handle: Option<&SessionHandle<OwnSession>>,
+    summary: &mut RunSummary,
+) -> Vec<PerspectivePass> {
+    let default_pass = || {
+        vec![PerspectivePass {
+            label: None,
+            expansion_id: None,
+        }]
+    };
+
+    if !config.perspectives_enabled {
+        return default_pass();
+    }
+    let topic = match config.topic.as_deref() {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => {
+            tracing::info!("perspectives_enabled but no topic supplied; skipping expansion");
+            return default_pass();
+        }
+    };
+    let Some(llm) = config.llm.as_ref() else {
+        tracing::info!("perspectives_enabled but no LLM client; skipping expansion");
+        return default_pass();
+    };
+    let planned = config
+        .max_perspectives
+        .saturating_mul(manifest.sources.len());
+    if planned == 0 || planned > config.per_topic_fanout_cap {
+        tracing::info!(
+            "perspective fan-out {planned} outside cap {} (max_perspectives={}, sources={}); skipping expansion",
+            config.per_topic_fanout_cap,
+            config.max_perspectives,
+            manifest.sources.len()
+        );
+        summary.perspective_skipped_over_budget = true;
+        return default_pass();
+    }
+
+    let api_base = config
+        .wikipedia_api_base
+        .as_deref()
+        .unwrap_or(crate::perspectives::DEFAULT_WIKIPEDIA_API_BASE);
+    let labels = match crate::perspectives::expand(
+        llm,
+        config.llm_api_key.as_deref(),
+        http,
+        api_base,
+        topic,
+        config.max_related_topics,
+        config.max_perspectives,
+    )
+    .await
+    {
+        Ok(labels) if !labels.is_empty() => labels,
+        Ok(_) => {
+            tracing::info!("perspective expansion produced no labels; skipping fan-out");
+            return default_pass();
+        }
+        Err(e) => {
+            tracing::warn!("perspective expansion failed: {e}; falling back to default fetch");
+            return default_pass();
+        }
+    };
+
+    let expansion_id = uuid::Uuid::new_v4().to_string();
+    emit(
+        session_log,
+        handle,
+        SessionEvent::PerspectiveExpansion {
+            run_id: run_id.to_string(),
+            topic: topic.to_string(),
+            perspectives: labels.clone(),
+            expansion_id: expansion_id.clone(),
+        },
+    );
+    summary.perspectives_used = labels.clone();
+    summary.expansion_id = Some(expansion_id.clone());
+
+    labels
+        .into_iter()
+        .map(|label| PerspectivePass {
+            label: Some(label),
+            expansion_id: Some(expansion_id.clone()),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1071,6 +1296,12 @@ skills = ["aggregator"]
             ollama_embed_base: String::new(),
             embed_model: String::new(),
             source_api_keys: std::collections::HashMap::new(),
+            perspectives_enabled: false,
+            topic: None,
+            max_perspectives: 0,
+            max_related_topics: 0,
+            per_topic_fanout_cap: 0,
+            wikipedia_api_base: None,
         }
     }
 
@@ -1613,6 +1844,12 @@ skills = ["other"]
             ollama_embed_base: embed_base.to_string(),
             embed_model: "nomic-embed-text:v1.5".to_string(),
             source_api_keys: std::collections::HashMap::new(),
+            perspectives_enabled: false,
+            topic: None,
+            max_perspectives: 0,
+            max_related_topics: 0,
+            per_topic_fanout_cap: 0,
+            wikipedia_api_base: None,
         }
     }
 
@@ -1811,5 +2048,451 @@ skills = ["other"]
                 .any(|e| matches!(e.event, SessionEvent::ThemeNamed { .. })),
             "expected ThemeNamed event in chain"
         );
+    }
+
+    // ----- Perspective expansion -----------------------------------------
+
+    /// Multi-shot mock that handles Wikipedia opensearch + parse,
+    /// the perspective-emit synthetic-tool LLM call, the
+    /// candidate-score synthetic-tool LLM call, and an RSS feed body.
+    /// Path-keyed dispatch; same wire shape as
+    /// [`mock_llm_and_feed_server`].
+    async fn mock_perspective_server(feed_body: &'static str, max_requests: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}", addr);
+        tokio::spawn(async move {
+            for _ in 0..max_requests {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 65536];
+                let n = match sock.read(&mut buf).await {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = match req.find("\r\n\r\n") {
+                    Some(idx) => &req[idx + 4..],
+                    None => "",
+                };
+
+                let (response_body, content_type): (String, &str) = if req
+                    .starts_with("GET /w/api.php")
+                {
+                    if req.contains("action=opensearch") {
+                        (
+                            r#"["topic", ["BIPA", "GDPR"], ["d1","d2"], ["u1","u2"]]"#.to_string(),
+                            "application/json",
+                        )
+                    } else if req.contains("action=parse") {
+                        (
+                            r#"{"parse":{"title":"Article","sections":[
+                                    {"line":"Background","anchor":"Background"},
+                                    {"line":"Enforcement","anchor":"Enforcement"}
+                                ]}}"#
+                                .to_string(),
+                            "application/json",
+                        )
+                    } else {
+                        ("{}".to_string(), "application/json")
+                    }
+                } else if req.contains("POST /v1/chat/completions")
+                    || req.contains("POST /chat/completions")
+                {
+                    if body.contains("zirkel_emit_perspectives") {
+                        (canned_perspectives_response(), "application/json")
+                    } else if body.contains("zirkel_score_candidate") {
+                        (canned_score_response(), "application/json")
+                    } else {
+                        panic!(
+                            "perspective mock saw unknown synthetic-tool name in chat body: {body}"
+                        )
+                    }
+                } else if req.contains("POST /api/chat") {
+                    if body.contains("zirkel_emit_perspectives") {
+                        (canned_perspectives_response_ollama(), "application/json")
+                    } else if body.contains("zirkel_score_candidate") {
+                        (canned_score_response_ollama(), "application/json")
+                    } else {
+                        panic!(
+                            "perspective mock saw unknown synthetic-tool name in /api/chat body: {body}"
+                        )
+                    }
+                } else if req.starts_with("GET /feed") {
+                    (feed_body.to_string(), "application/xml")
+                } else {
+                    (
+                        format!("not found: {}", req.lines().next().unwrap_or("")),
+                        "text/plain",
+                    )
+                };
+
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\n\r\n{}",
+                    response_body.len(),
+                    content_type,
+                    response_body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        url
+    }
+
+    fn canned_perspectives_response() -> String {
+        r#"{
+  "id": "test-persp-1",
+  "object": "chat.completion",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_persp_1",
+        "type": "function",
+        "function": {
+          "name": "zirkel_emit_perspectives",
+          "arguments": "{\"perspectives\":[\"Section 5 enforcement\",\"data broker oversight\"]}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}"#
+        .to_string()
+    }
+
+    fn canned_perspectives_response_ollama() -> String {
+        r#"{
+  "model": "llama3.1:8b",
+  "created_at": "2026-01-01T00:00:00Z",
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [{
+      "function": {
+        "name": "zirkel_emit_perspectives",
+        "arguments": {
+          "perspectives": ["Section 5 enforcement", "data broker oversight"]
+        }
+      }
+    }]
+  },
+  "done": true,
+  "prompt_eval_count": 50,
+  "eval_count": 10
+}"#
+        .to_string()
+    }
+
+    /// Build a config configured for perspective expansion against
+    /// the supplied mock URL.
+    #[allow(clippy::too_many_arguments)]
+    fn config_for_perspectives(
+        preset_dir: PathBuf,
+        storage_dir: PathBuf,
+        interests_path: PathBuf,
+        log: Option<Arc<dyn SessionLog>>,
+        llm_base: &str,
+        wikipedia_base: &str,
+        max_perspectives: usize,
+        max_related_topics: usize,
+        per_topic_fanout_cap: usize,
+    ) -> OrchestratorConfig {
+        let llm_cfg = wirken_agent::llm::LlmConfig {
+            provider: "ollama".to_string(),
+            model: "llama3.1:8b".to_string(),
+            base_url: format!("{llm_base}/v1"),
+            max_tokens: 1024,
+            temperature: 0.0,
+            region: None,
+            tools_enabled: true,
+            context_window: 8192,
+        };
+        let llm = Arc::new(LlmClient::new(llm_cfg).unwrap());
+        OrchestratorConfig {
+            preset_dir,
+            storage_dir,
+            interests_path,
+            rate_limit: RateLimitConfig::unrestricted_for_tests(),
+            session_log: log,
+            llm: Some(llm),
+            llm_api_key: None,
+            ollama_embed_base: String::new(),
+            embed_model: String::new(),
+            source_api_keys: std::collections::HashMap::new(),
+            perspectives_enabled: true,
+            topic: Some("biometric privacy".to_string()),
+            max_perspectives,
+            max_related_topics,
+            per_topic_fanout_cap,
+            wikipedia_api_base: Some(format!("{wikipedia_base}/w/api.php")),
+        }
+    }
+
+    /// End-to-end perspective-expansion run. The single mocked LLM
+    /// call returns two perspective labels; the orchestrator runs
+    /// the source loop once per label, the seen-table dedup gives
+    /// the first-perspective ownership of the URL. The audit chain
+    /// records exactly one PerspectiveExpansion event, every fetch
+    /// and candidate event under the expansion shares one
+    /// expansion_id, and the kept candidate's source_name carries
+    /// the synthetic `::p=<slug>` suffix.
+    #[tokio::test]
+    async fn perspective_expansion_groups_citations_and_correlates_audit() {
+        let mock = mock_perspective_server(FTC_FIXTURE, 64).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let preset_dir = tmp.path().join("preset");
+        let storage_dir = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let sources_toml = format!(
+            "[[source]]\nname=\"ftc\"\nendpoint=\"{mock}/feed\"\nmethod=\"rss\"\n",
+            mock = mock
+        );
+        write_fixture_preset(&preset_dir, &storage_dir, &["127.0.0.1"], &sources_toml);
+        let interests_path = storage_dir.join("interests.toml");
+        write_interests(
+            &interests_path,
+            r#"keywords = ["data broker", "Section 5"]
+exclusions = ["cookie banner"]"#,
+        );
+
+        let log: Arc<dyn SessionLog> =
+            Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"));
+        let summary = run(config_for_perspectives(
+            preset_dir,
+            storage_dir.clone(),
+            interests_path,
+            Some(log.clone()),
+            &mock,
+            &mock,
+            2,
+            2,
+            10,
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(summary.perspectives_used.len(), 2);
+        let expansion_id = summary
+            .expansion_id
+            .as_ref()
+            .expect("expansion_id should be set when expansion ran");
+        assert!(!summary.perspective_skipped_over_budget);
+
+        let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+
+        let perspective_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::PerspectiveExpansion { .. }))
+            .collect();
+        assert_eq!(
+            perspective_events.len(),
+            1,
+            "expected exactly one PerspectiveExpansion event"
+        );
+        match &perspective_events[0].event {
+            SessionEvent::PerspectiveExpansion {
+                topic,
+                perspectives,
+                expansion_id: id,
+                ..
+            } => {
+                assert_eq!(topic, "biometric privacy");
+                assert_eq!(perspectives.len(), 2);
+                assert_eq!(id, expansion_id);
+            }
+            _ => unreachable!(),
+        }
+
+        let mut http_with_id = 0;
+        let mut scored_with_id = 0;
+        for ev in &events {
+            match &ev.event {
+                SessionEvent::HttpFetch {
+                    expansion_id: Some(id),
+                    ..
+                } => {
+                    assert_eq!(id, expansion_id, "HttpFetch expansion_id mismatch");
+                    http_with_id += 1;
+                }
+                SessionEvent::CandidateScored {
+                    expansion_id: Some(id),
+                    ..
+                } => {
+                    assert_eq!(id, expansion_id, "CandidateScored expansion_id mismatch");
+                    scored_with_id += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            http_with_id >= 2,
+            "expected at least one HttpFetch per perspective fan-out (got {http_with_id})"
+        );
+        assert!(
+            scored_with_id >= 1,
+            "expected at least one CandidateScored under expansion_id (got {scored_with_id})"
+        );
+
+        // Persisted candidate's source_name carries the synthetic
+        // perspective suffix.
+        let conn = rusqlite::Connection::open(storage_dir.join("aggregator.db")).unwrap();
+        let kept_source: String = conn
+            .query_row(
+                "SELECT source_name FROM candidates WHERE id = ?1",
+                rusqlite::params![summary.kept_candidate_ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            kept_source.starts_with("ftc::p="),
+            "expected synthetic source_name prefix, got '{kept_source}'"
+        );
+    }
+
+    /// Pre-flight cap rejection: when `max_perspectives * sources >
+    /// per_topic_fanout_cap`, the orchestrator skips expansion
+    /// entirely. No PerspectiveExpansion event is emitted, no audit
+    /// row carries an expansion_id, and Wikipedia metadata fetches
+    /// never go out (the mock LLM/Wikipedia URL is never hit).
+    #[tokio::test]
+    async fn fan_out_cap_rejects_over_budget_expansion_before_any_fetch() {
+        // The mock here serves the RSS feed and panics on any
+        // Wikipedia or LLM request. Setting max_requests=2 caps
+        // total accepts at the RSS GET only.
+        let mock = mock_perspective_server(FTC_FIXTURE, 2).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let preset_dir = tmp.path().join("preset");
+        let storage_dir = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let sources_toml = format!(
+            "[[source]]\nname=\"ftc\"\nendpoint=\"{mock}/feed\"\nmethod=\"rss\"\n",
+            mock = mock
+        );
+        write_fixture_preset(&preset_dir, &storage_dir, &["127.0.0.1"], &sources_toml);
+        let interests_path = storage_dir.join("interests.toml");
+        write_interests(
+            &interests_path,
+            r#"keywords = ["data broker"]
+exclusions = []"#,
+        );
+
+        let log: Arc<dyn SessionLog> =
+            Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"));
+
+        // Cap at 2, but planned = max_perspectives(5) * sources(1) = 5 > 2.
+        let summary = run(config_for_perspectives(
+            preset_dir,
+            storage_dir,
+            interests_path,
+            Some(log.clone()),
+            &mock,
+            &mock,
+            5,
+            2,
+            2,
+        ))
+        .await
+        .unwrap();
+
+        assert!(
+            summary.perspective_skipped_over_budget,
+            "expected over-budget rejection"
+        );
+        assert!(summary.expansion_id.is_none());
+        assert!(summary.perspectives_used.is_empty());
+        // Default fetch happened: the RSS source was hit and a
+        // candidate landed.
+        assert_eq!(summary.sources_succeeded, 1);
+        assert_eq!(summary.items_kept, 1);
+
+        // No PerspectiveExpansion event in the chain. No audit row
+        // carries an expansion_id. The default fetch's HttpFetch
+        // event is present but with `expansion_id: None`.
+        let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        for ev in &events {
+            assert!(
+                !matches!(ev.event, SessionEvent::PerspectiveExpansion { .. }),
+                "no PerspectiveExpansion expected when cap rejects"
+            );
+            match &ev.event {
+                SessionEvent::HttpFetch { expansion_id, .. } => {
+                    assert!(
+                        expansion_id.is_none(),
+                        "HttpFetch must not carry expansion_id when expansion was skipped"
+                    );
+                }
+                SessionEvent::CandidateScored { expansion_id, .. } => {
+                    assert!(
+                        expansion_id.is_none(),
+                        "CandidateScored must not carry expansion_id when expansion was skipped"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `perspectives_enabled = false` leaves the audit chain
+    /// bit-identical to a pre-perspective build: no
+    /// PerspectiveExpansion variant, no `expansion_id` field
+    /// surfaces on any event (the `Option<String>` skip-serializing
+    /// rule means default-built events serialize the same bytes as
+    /// before).
+    #[tokio::test]
+    async fn perspectives_disabled_audit_chain_carries_no_expansion_id() {
+        let url = one_shot_server(FTC_FIXTURE).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let preset_dir = tmp.path().join("preset");
+        let storage_dir = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let sources_toml =
+            format!("[[source]]\nname=\"ftc\"\nendpoint=\"{url}\"\nmethod=\"rss\"\n");
+        write_fixture_preset(&preset_dir, &storage_dir, &["127.0.0.1"], &sources_toml);
+        let interests_path = storage_dir.join("interests.toml");
+        write_interests(
+            &interests_path,
+            r#"keywords = ["data broker", "Section 5"]
+exclusions = ["cookie banner"]"#,
+        );
+
+        let log: Arc<dyn SessionLog> =
+            Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"));
+        let summary = run(config_with_log(
+            preset_dir,
+            storage_dir,
+            interests_path,
+            Some(log.clone()),
+        ))
+        .await
+        .unwrap();
+
+        assert!(summary.expansion_id.is_none());
+        assert!(summary.perspectives_used.is_empty());
+        assert!(!summary.perspective_skipped_over_budget);
+
+        let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        for ev in &events {
+            assert!(
+                !matches!(ev.event, SessionEvent::PerspectiveExpansion { .. }),
+                "no PerspectiveExpansion expected when feature disabled"
+            );
+            match &ev.event {
+                SessionEvent::HttpFetch { expansion_id, .. } => {
+                    assert!(expansion_id.is_none());
+                }
+                SessionEvent::CandidateScored { expansion_id, .. } => {
+                    assert!(expansion_id.is_none());
+                }
+                _ => {}
+            }
+        }
     }
 }
