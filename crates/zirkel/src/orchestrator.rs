@@ -1102,7 +1102,7 @@ async fn build_perspective_passes(
         .wikipedia_api_base
         .as_deref()
         .unwrap_or(crate::perspectives::DEFAULT_WIKIPEDIA_API_BASE);
-    let labels = match crate::perspectives::expand(
+    let raw_labels = match crate::perspectives::expand(
         llm,
         config.llm_api_key.as_deref(),
         http,
@@ -1124,6 +1124,19 @@ async fn build_perspective_passes(
         }
     };
 
+    let (labels, dropped_for_collision) = crate::perspectives::dedupe_by_slug(raw_labels);
+    if !dropped_for_collision.is_empty() {
+        tracing::info!(
+            "perspective expansion dropped {} slug-colliding label(s): {:?}",
+            dropped_for_collision.len(),
+            dropped_for_collision
+        );
+    }
+    if labels.is_empty() {
+        tracing::info!("perspective expansion produced no kept labels after dedup; skipping");
+        return default_pass();
+    }
+
     let expansion_id = uuid::Uuid::new_v4().to_string();
     emit(
         session_log,
@@ -1133,6 +1146,7 @@ async fn build_perspective_passes(
             topic: topic.to_string(),
             perspectives: labels.clone(),
             expansion_id: expansion_id.clone(),
+            dropped_for_collision,
         },
     );
     summary.perspectives_used = labels.clone();
@@ -2058,6 +2072,25 @@ skills = ["other"]
     /// Path-keyed dispatch; same wire shape as
     /// [`mock_llm_and_feed_server`].
     async fn mock_perspective_server(feed_body: &'static str, max_requests: usize) -> String {
+        mock_perspective_server_with_labels(
+            feed_body,
+            max_requests,
+            canned_perspectives_response(),
+            canned_perspectives_response_ollama(),
+        )
+        .await
+    }
+
+    /// Variant of [`mock_perspective_server`] that lets the caller
+    /// substitute the perspective-emit canned response. Used to pin
+    /// the slug-collision dedup path against an LLM that emitted
+    /// two surface-distinct labels with identical slugs.
+    async fn mock_perspective_server_with_labels(
+        feed_body: &'static str,
+        max_requests: usize,
+        openai_perspectives_body: String,
+        ollama_perspectives_body: String,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{}", addr);
@@ -2101,7 +2134,7 @@ skills = ["other"]
                     || req.contains("POST /chat/completions")
                 {
                     if body.contains("zirkel_emit_perspectives") {
-                        (canned_perspectives_response(), "application/json")
+                        (openai_perspectives_body.clone(), "application/json")
                     } else if body.contains("zirkel_score_candidate") {
                         (canned_score_response(), "application/json")
                     } else {
@@ -2111,7 +2144,7 @@ skills = ["other"]
                     }
                 } else if req.contains("POST /api/chat") {
                     if body.contains("zirkel_emit_perspectives") {
-                        (canned_perspectives_response_ollama(), "application/json")
+                        (ollama_perspectives_body.clone(), "application/json")
                     } else if body.contains("zirkel_score_candidate") {
                         (canned_score_response_ollama(), "application/json")
                     } else {
@@ -2437,6 +2470,158 @@ exclusions = []"#,
                 _ => {}
             }
         }
+    }
+
+    /// LLM emits two surface-distinct labels whose slugs collide.
+    /// The orchestrator drops the second label before dispatch,
+    /// records both kept and dropped on the `PerspectiveExpansion`
+    /// audit event, and dispatches exactly one perspective pass.
+    #[tokio::test]
+    async fn slug_colliding_labels_drop_to_one_pass_and_record_dropped() {
+        // Two labels that fold to the same slug "climate-policy".
+        // First wins, second is recorded as dropped.
+        let openai_collision = r#"{
+  "id": "test-persp-collide",
+  "object": "chat.completion",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [{
+        "id": "call_persp_collide",
+        "type": "function",
+        "function": {
+          "name": "zirkel_emit_perspectives",
+          "arguments": "{\"perspectives\":[\"Climate policy\",\"climate-policy\"]}"
+        }
+      }]
+    },
+    "finish_reason": "tool_calls"
+  }]
+}"#
+        .to_string();
+        let ollama_collision = r#"{
+  "model": "llama3.1:8b",
+  "created_at": "2026-01-01T00:00:00Z",
+  "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [{
+      "function": {
+        "name": "zirkel_emit_perspectives",
+        "arguments": {
+          "perspectives": ["Climate policy", "climate-policy"]
+        }
+      }
+    }]
+  },
+  "done": true,
+  "prompt_eval_count": 50,
+  "eval_count": 10
+}"#
+        .to_string();
+        let mock = mock_perspective_server_with_labels(
+            FTC_FIXTURE,
+            64,
+            openai_collision,
+            ollama_collision,
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let preset_dir = tmp.path().join("preset");
+        let storage_dir = tmp.path().join("storage");
+        std::fs::create_dir_all(&storage_dir).unwrap();
+        let sources_toml = format!(
+            "[[source]]\nname=\"ftc\"\nendpoint=\"{mock}/feed\"\nmethod=\"rss\"\n",
+            mock = mock
+        );
+        write_fixture_preset(&preset_dir, &storage_dir, &["127.0.0.1"], &sources_toml);
+        let interests_path = storage_dir.join("interests.toml");
+        write_interests(
+            &interests_path,
+            r#"keywords = ["data broker"]
+exclusions = []"#,
+        );
+
+        let log: Arc<dyn SessionLog> =
+            Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"));
+        let summary = run(config_for_perspectives(
+            preset_dir,
+            storage_dir.clone(),
+            interests_path,
+            Some(log.clone()),
+            &mock,
+            &mock,
+            2,
+            2,
+            10,
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            summary.perspectives_used,
+            vec!["Climate policy".to_string()],
+            "only the first slug-winning label dispatches"
+        );
+        let expansion_id = summary.expansion_id.as_ref().unwrap();
+
+        let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        let perspective_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::PerspectiveExpansion { .. }))
+            .collect();
+        assert_eq!(perspective_events.len(), 1);
+        match &perspective_events[0].event {
+            SessionEvent::PerspectiveExpansion {
+                perspectives,
+                dropped_for_collision,
+                expansion_id: id,
+                ..
+            } => {
+                assert_eq!(perspectives, &vec!["Climate policy".to_string()]);
+                assert_eq!(
+                    dropped_for_collision,
+                    &vec!["climate-policy".to_string()],
+                    "dropped label preserved on the audit event"
+                );
+                assert_eq!(id, expansion_id);
+            }
+            _ => unreachable!(),
+        }
+
+        // Synthetic source name on the persisted candidate carries
+        // the surviving slug, not the dropped label's slug.
+        let conn = rusqlite::Connection::open(storage_dir.join("aggregator.db")).unwrap();
+        let kept_source: String = conn
+            .query_row(
+                "SELECT source_name FROM candidates WHERE id = ?1",
+                rusqlite::params![summary.kept_candidate_ids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept_source, "ftc::p=climate-policy");
+
+        // Exactly one HttpFetch carries the expansion_id (the single
+        // surviving perspective pass over the single source).
+        let http_under_id = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.event,
+                    SessionEvent::HttpFetch {
+                        expansion_id: Some(id),
+                        ..
+                    } if id == expansion_id
+                )
+            })
+            .count();
+        assert_eq!(
+            http_under_id, 1,
+            "one perspective survived dedup, so one fan-out fetch"
+        );
     }
 
     /// `perspectives_enabled = false` leaves the audit chain

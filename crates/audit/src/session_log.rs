@@ -308,6 +308,18 @@ pub enum SessionEvent {
         topic: String,
         perspectives: Vec<String>,
         expansion_id: String,
+        /// Labels the LLM emitted that slug-collided with an earlier
+        /// label and were therefore not dispatched. The orchestrator
+        /// folds labels to slugs to derive synthetic
+        /// `SourceConfig.name` values; two slug-identical labels
+        /// would name the same fetch and overstate the turn's
+        /// coverage. Recorded here so a downstream auditor sees the
+        /// LLM emitted them and the orchestrator dropped them.
+        /// Empty when no collisions occurred. Defaulted on
+        /// deserialize for forward-compat with rows written before
+        /// the field existed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        dropped_for_collision: Vec<String>,
     },
     /// Zirkel orchestrator: an HTTP fetch went out through the policed
     /// transport. `source` is the source's name in `sources.toml`;

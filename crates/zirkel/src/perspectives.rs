@@ -183,6 +183,38 @@ const SYSTEM_PROMPT: &str = "You are Zirkel's perspective expander. Given a topi
 Each label must be 2 to 5 words. No verbs, no full sentences, no quotes. Labels must be distinct: do not return synonyms of the same angle. Prefer concrete framings over abstract ones. \
 You MUST call the zirkel_emit_perspectives tool. Do not respond with text.";
 
+/// Drop labels whose slug collides with an earlier label's slug.
+///
+/// Returned tuple is `(kept, dropped)`. Both vectors preserve the
+/// LLM's emission order; first occurrence of any given slug wins.
+/// The slug helper folds case, whitespace, and Unicode into ASCII
+/// alphanumerics, so two surface-distinct labels can collapse to
+/// the same `SourceConfig.name`. Two synthetic configs with
+/// identical names dispatch the same fetch twice (the seen-table
+/// dedup then drops the second batch as duplicate URLs), but the
+/// audit chain loses the "two perspectives meant the same fetch"
+/// fact and the `RunSummary.perspectives_used` list overstates the
+/// turn's coverage. The system prompt asks the LLM for distinct
+/// labels but does not constrain slug-collision specifically, so
+/// this filter runs unconditionally and the orchestrator records
+/// the dropped labels alongside the kept ones in the
+/// `PerspectiveExpansion` event.
+pub fn dedupe_by_slug(labels: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(labels.len());
+    let mut kept: Vec<String> = Vec::with_capacity(labels.len());
+    let mut dropped: Vec<String> = Vec::new();
+    for label in labels {
+        let s = slug(&label);
+        if seen.insert(s) {
+            kept.push(label);
+        } else {
+            dropped.push(label);
+        }
+    }
+    (kept, dropped)
+}
+
 /// Slugify a perspective label for use in a synthetic
 /// `SourceConfig.name` field. Lowercase, ASCII alphanumerics kept,
 /// runs of other characters collapsed to a single `-`, leading and
@@ -236,6 +268,50 @@ mod tests {
         let body = r#"{"unexpected":"object"}"#;
         let err = parse_opensearch_titles(body).unwrap_err();
         assert!(matches!(err, PerspectiveError::Opensearch(_)));
+    }
+
+    #[test]
+    fn dedupe_by_slug_preserves_first_and_records_dropped() {
+        let (kept, dropped) = dedupe_by_slug(vec![
+            "Climate policy".to_string(),
+            "climate-policy".to_string(),
+            "Section 5 enforcement".to_string(),
+            "section, 5, enforcement".to_string(),
+            "Distinct angle".to_string(),
+        ]);
+        assert_eq!(
+            kept,
+            vec![
+                "Climate policy".to_string(),
+                "Section 5 enforcement".to_string(),
+                "Distinct angle".to_string(),
+            ]
+        );
+        assert_eq!(
+            dropped,
+            vec![
+                "climate-policy".to_string(),
+                "section, 5, enforcement".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dedupe_by_slug_with_empty_input_returns_empty() {
+        let (kept, dropped) = dedupe_by_slug(vec![]);
+        assert!(kept.is_empty());
+        assert!(dropped.is_empty());
+    }
+
+    #[test]
+    fn dedupe_by_slug_treats_empty_label_slugs_as_one() {
+        // Both slug to "perspective" because the helper substitutes
+        // a literal for empty inputs. Pinning so a future slug-helper
+        // change does not silently produce two identical
+        // `SourceConfig.name` values.
+        let (kept, dropped) = dedupe_by_slug(vec!["".to_string(), "!!!".to_string()]);
+        assert_eq!(kept, vec!["".to_string()]);
+        assert_eq!(dropped, vec!["!!!".to_string()]);
     }
 
     #[test]
