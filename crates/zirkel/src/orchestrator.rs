@@ -1095,6 +1095,15 @@ async fn build_perspective_passes(
             manifest.sources.len()
         );
         summary.perspective_skipped_over_budget = true;
+        emit(
+            session_log,
+            handle,
+            SessionEvent::PerspectiveSkipped {
+                run_id: run_id.to_string(),
+                topic: topic.to_string(),
+                reason: "over_budget".to_string(),
+            },
+        );
         return default_pass();
     }
 
@@ -2444,17 +2453,26 @@ exclusions = []"#,
         assert_eq!(summary.sources_succeeded, 1);
         assert_eq!(summary.items_kept, 1);
 
-        // No PerspectiveExpansion event in the chain. No audit row
-        // carries an expansion_id. The default fetch's HttpFetch
-        // event is present but with `expansion_id: None`.
+        // Audit chain records PerspectiveSkipped exactly once with
+        // the `over_budget` reason and no PerspectiveExpansion. The
+        // default fetch's HttpFetch event is present but with
+        // `expansion_id: None`.
         let handle = log.handle_for(SessionId::new(summary.run_id.clone()));
         let events = log.get_since(&handle, 0).unwrap();
+        let mut skipped_seen = 0;
         for ev in &events {
             assert!(
                 !matches!(ev.event, SessionEvent::PerspectiveExpansion { .. }),
                 "no PerspectiveExpansion expected when cap rejects"
             );
             match &ev.event {
+                SessionEvent::PerspectiveSkipped {
+                    topic: t, reason, ..
+                } => {
+                    assert_eq!(t, "biometric privacy");
+                    assert_eq!(reason, "over_budget");
+                    skipped_seen += 1;
+                }
                 SessionEvent::HttpFetch { expansion_id, .. } => {
                     assert!(
                         expansion_id.is_none(),
@@ -2470,6 +2488,10 @@ exclusions = []"#,
                 _ => {}
             }
         }
+        assert_eq!(
+            skipped_seen, 1,
+            "expected exactly one PerspectiveSkipped event"
+        );
     }
 
     /// LLM emits two surface-distinct labels whose slugs collide.

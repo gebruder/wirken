@@ -303,6 +303,18 @@ pub enum SessionEvent {
     /// threaded through every subsequent `HttpFetch` and
     /// `CandidateScored` event the turn caused, so a downstream
     /// auditor can reconstruct what the expansion actually fetched.
+    /// Zirkel: a perspective-expansion turn was attempted for
+    /// `topic` but cut by the orchestrator before any retriever
+    /// fetch. Distinct from a successful `PerspectiveExpansion`
+    /// emission so a downstream auditor can count "expansion
+    /// rejected" events directly. `reason` is a stable snake_case
+    /// label (today: `"over_budget"`) so consumers can group by
+    /// rejection cause without re-parsing free text.
+    PerspectiveSkipped {
+        run_id: String,
+        topic: String,
+        reason: String,
+    },
     PerspectiveExpansion {
         run_id: String,
         topic: String,
