@@ -2318,7 +2318,18 @@ exclusions = ["cookie banner"]"#,
         .await
         .unwrap();
 
-        assert_eq!(summary.perspectives_used.len(), 2);
+        // Pin (a): the structured-output channel actually round-trips
+        // the LLM tool-call arguments through perspectives::expand
+        // into both summary.perspectives_used and the audit event.
+        // Tightening from a length check to a content check pins the
+        // shape across the whole call path: the mock returns
+        // ["Section 5 enforcement", "data broker oversight"] and
+        // those exact strings must surface unchanged.
+        let expected_labels = vec![
+            "Section 5 enforcement".to_string(),
+            "data broker oversight".to_string(),
+        ];
+        assert_eq!(summary.perspectives_used, expected_labels);
         let expansion_id = summary
             .expansion_id
             .as_ref()
@@ -2342,10 +2353,15 @@ exclusions = ["cookie banner"]"#,
                 topic,
                 perspectives,
                 expansion_id: id,
+                dropped_for_collision,
                 ..
             } => {
                 assert_eq!(topic, "biometric privacy");
-                assert_eq!(perspectives.len(), 2);
+                assert_eq!(perspectives, &expected_labels);
+                assert!(
+                    dropped_for_collision.is_empty(),
+                    "non-colliding labels should record no drops"
+                );
                 assert_eq!(id, expansion_id);
             }
             _ => unreachable!(),
@@ -2691,6 +2707,10 @@ exclusions = ["cookie banner"]"#,
                 !matches!(ev.event, SessionEvent::PerspectiveExpansion { .. }),
                 "no PerspectiveExpansion expected when feature disabled"
             );
+            assert!(
+                !matches!(ev.event, SessionEvent::PerspectiveSkipped { .. }),
+                "no PerspectiveSkipped expected when feature disabled"
+            );
             match &ev.event {
                 SessionEvent::HttpFetch { expansion_id, .. } => {
                     assert!(expansion_id.is_none());
@@ -2700,6 +2720,31 @@ exclusions = ["cookie banner"]"#,
                 }
                 _ => {}
             }
+        }
+
+        // Pin (e), wire-level: skip_serializing_if drops the
+        // expansion_id field when None and the perspective variants
+        // are absent entirely, so a downstream reader sees JSON
+        // payloads byte-identical to a pre-perspective build.
+        // Stronger than the Rust-level Option::is_none check above:
+        // a future serde-attribute mistake (forgetting
+        // skip_serializing_if) would still pass that check but
+        // would leak a `"expansion_id":null` field on the wire.
+        for ev in &events {
+            let json = serde_json::to_string(&ev.event)
+                .expect("session event serializes to JSON for the wire format");
+            assert!(
+                !json.contains("expansion_id"),
+                "no event must serialize an expansion_id field when perspectives are disabled, got: {json}"
+            );
+            assert!(
+                !json.contains("perspective_expansion"),
+                "no PerspectiveExpansion variant must appear on the wire when disabled, got: {json}"
+            );
+            assert!(
+                !json.contains("perspective_skipped"),
+                "no PerspectiveSkipped variant must appear on the wire when disabled, got: {json}"
+            );
         }
     }
 }
