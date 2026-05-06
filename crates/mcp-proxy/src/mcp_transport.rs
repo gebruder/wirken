@@ -550,4 +550,41 @@ mod env_isolation_tests {
         let out = build_spawn_env(p, &HashMap::new());
         assert!(out.is_empty());
     }
+
+    #[test]
+    fn allowlist_contents_are_pinned_to_documented_minimum() {
+        // Companion to `allowlisted_shell_vars_pass_through`: that
+        // test iterates whatever is in `SAFE_ENV_PASSTHROUGH` and
+        // verifies pass-through, so it would silently accept a
+        // newly-added key. This test pins the exact list so a
+        // "just one more key" addition fails review and the change
+        // author has to argue why the new key is safe to cross
+        // the gateway → MCP child trust boundary.
+        let expected: &[&str] = &[
+            "PATH",
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LC_MESSAGES",
+            "LC_TIME",
+            "LC_NUMERIC",
+            "TERM",
+            "TZ",
+            "TMPDIR",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_DATA_HOME",
+            "XDG_RUNTIME_DIR",
+        ];
+        assert_eq!(
+            SAFE_ENV_PASSTHROUGH, expected,
+            "SAFE_ENV_PASSTHROUGH drifted. Adding a key here expands \
+             the surface that crosses gateway → MCP child; document \
+             the reason in the SAFE_ENV_PASSTHROUGH docstring and \
+             update this test in the same commit."
+        );
+    }
 }
