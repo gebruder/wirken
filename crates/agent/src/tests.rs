@@ -2408,6 +2408,186 @@ mod subagent {
             "spawn_subagent must be a harness-injected def, not a registry built-in"
         );
     }
+
+    // ---- Q2: subagent tier clamp overrides per-agent approval -------
+    //
+    // Companion to `crates/gateway/tests/scope_isolation.rs`. The
+    // clamp at `crates/agent/src/runtime.rs:1455-1478` short-
+    // circuits before the regular permission store check at
+    // line 1479-1486. Even an approved Tier 2 action is denied
+    // when the parent set the child's `auto_deny_above_tier`
+    // below Tier 2 via `set_subagent_runtime`
+    // (`crates/agent/src/runtime.rs:491-500`).
+    //
+    // The ceiling is parent-defined per child agent_id (lookup at
+    // `crates/agent/src/runtime.rs:1850, 1642` via
+    // `allowed_subagents`), set fresh on each spawn. It does not
+    // inherit from the active caller's runtime state — siblings
+    // run with independent clamps.
+    //
+    // Mapped CVE/GHSA shapes:
+    // - CVE-2026-43535 (CWE-266) authorization context reuse
+    // - GHSA-m5jp-p3r5-mfqp subagent fallback synthetic admin
+    // - GHSA-q3jj-46pq-826r ACP child sessions inherit envelope
+
+    fn make_child_agent_for_clamp_test() -> (
+        Agent,
+        Arc<std::sync::Mutex<wirken_gateway::permissions::PermissionStore>>,
+        TempDir,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let agent = Agent::new(
+            "child".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            log,
+        )
+        .unwrap();
+
+        let perm_path = tmp.path().join("perms.db");
+        let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        // Approve `ls` for the agent at the store level. The
+        // clamp test exercises that this approval is overridden
+        // by the subagent ceiling.
+        store
+            .approve(
+                &wirken_gateway::permissions::Action::ShellExec {
+                    pattern: "ls".into(),
+                },
+                "child",
+                "test-operator",
+            )
+            .unwrap();
+        let store = Arc::new(std::sync::Mutex::new(store));
+        (agent, store, tmp)
+    }
+
+    fn restrict_tools_with_exec() -> std::collections::BTreeSet<String> {
+        // The execute_tool path enforces a per-call `restrict_tools`
+        // clamp at `crates/agent/src/runtime.rs:1395-1402` before it
+        // reaches the tier clamp. To exercise the tier clamp in
+        // isolation, restrict_tools must contain `exec`.
+        let mut s = std::collections::BTreeSet::new();
+        s.insert("exec".to_string());
+        s
+    }
+
+    #[tokio::test]
+    async fn subagent_tier_ceiling_overrides_per_agent_approval() {
+        // Tier 2 verb (ls) is APPROVED at the store level. Without
+        // a clamp this would resolve to PermissionCheck::Allowed
+        // and execute. With the clamp set below Tier 2, the auto-
+        // deny envelope at `crates/agent/src/runtime.rs:1468-1477`
+        // wins.
+        let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
+        agent.set_permissions(store);
+
+        // The clamp is set by `set_subagent_runtime`. Equivalent
+        // to what `spawn_subagent_intercept` does on a freshly-
+        // waked child (`crates/agent/src/runtime.rs:1929-1936`).
+        agent.set_subagent_runtime(
+            1,
+            wirken_gateway::permissions::PermissionTier::Tier1,
+            restrict_tools_with_exec(),
+        );
+
+        // exec(ls) is Tier 2 (`crates/gateway/src/permissions.rs:78`).
+        // Tier 2 exceeds the clamp of Tier 1.
+        let result = agent
+            .execute_tool("exec", r#"{"command":"ls"}"#)
+            .await
+            .unwrap();
+
+        assert!(
+            !result.success,
+            "Tier 2 action under Tier 1 clamp must fail: {result:?}"
+        );
+        assert!(
+            result
+                .output
+                .contains("exceeds this subagent's clamped permission tier"),
+            "auto-deny envelope must cite the clamp: {}",
+            result.output
+        );
+    }
+
+    #[tokio::test]
+    async fn subagent_tier_ceiling_at_or_above_action_tier_does_not_clamp() {
+        // Inverse: with the clamp at Tier 2, the same Tier 2 action
+        // passes the clamp gate and falls through to the regular
+        // dispatch path. Pins that the clamp is not over-restrictive.
+        //
+        // restrict_tools must include `exec` so the per-call
+        // clamp at `crates/agent/src/runtime.rs:1395-1402` does not
+        // pre-empt the tier check.
+        //
+        // What happens AFTER the clamp gate is environment-dependent
+        // (the sandbox config, whether Docker is available). The
+        // clamp gate's behavior is what we pin: it must NOT produce
+        // the auto-deny envelope when action.tier() == cap.
+        let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
+        agent.set_permissions(store);
+        agent.set_subagent_runtime(
+            1,
+            wirken_gateway::permissions::PermissionTier::Tier2,
+            restrict_tools_with_exec(),
+        );
+
+        let result = agent.execute_tool("exec", r#"{"command":"ls"}"#).await;
+
+        // The clamp gate produces `Ok(ToolResult { success: false,
+        // output: "...exceeds this subagent's clamped permission
+        // tier..." })`. Anything else means the clamp gate let the
+        // call through. Both `Ok` with non-clamp output and `Err`
+        // (sandbox/dispatch failure) are acceptable: the assertion
+        // is only that the clamp did not fire.
+        match result {
+            Ok(r) => assert!(
+                !r.output
+                    .contains("exceeds this subagent's clamped permission tier"),
+                "Tier 2 action under Tier 2 clamp must not auto-deny: {}",
+                r.output
+            ),
+            Err(e) => {
+                let s = format!("{e}");
+                assert!(
+                    !s.contains("exceeds this subagent's clamped permission tier"),
+                    "Tier 2 action under Tier 2 clamp must not auto-deny: {s}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_clamp_blocks_tier3_even_when_set_to_tier2() {
+        // Tier 3 (curl) is never approvable
+        // (`crates/gateway/src/permissions.rs:329-337`) and the
+        // clamp at Tier 2 must auto-deny it before reaching the
+        // regular store check.
+        let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
+        agent.set_permissions(store);
+        agent.set_subagent_runtime(
+            1,
+            wirken_gateway::permissions::PermissionTier::Tier2,
+            restrict_tools_with_exec(),
+        );
+
+        let result = agent
+            .execute_tool("exec", r#"{"command":"curl https://example.com"}"#)
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(
+            result
+                .output
+                .contains("exceeds this subagent's clamped permission tier"),
+            "Tier 3 under Tier 2 clamp must auto-deny: {}",
+            result.output
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
