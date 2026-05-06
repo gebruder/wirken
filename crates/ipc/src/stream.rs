@@ -48,7 +48,7 @@ impl Stream for tokio::net::UnixStream {
 impl Stream for tokio::net::windows::named_pipe::NamedPipeServer {
     fn peer_principal(&self) -> Result<Principal, IpcError> {
         use std::os::windows::io::AsRawHandle;
-        win::peer_sid_from_named_pipe(self.as_raw_handle() as isize, win::PipeEnd::Server)
+        win::peer_sid_from_named_pipe(self.as_raw_handle().cast(), win::PipeEnd::Server)
     }
 }
 
@@ -90,7 +90,7 @@ mod win {
     struct OwnedHandle(HANDLE);
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
-            if self.0 != 0 {
+            if !self.0.is_null() {
                 // SAFETY: handles in OwnedHandle are returned by
                 // OpenProcess / OpenProcessToken and are documented
                 // to be released with CloseHandle.
@@ -136,13 +136,13 @@ mod win {
             // privilege needed to call OpenProcessToken on the
             // returned handle for token-info query.
             let raw_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if raw_proc == 0 {
+            if raw_proc.is_null() {
                 return Err(last_error_io("OpenProcess"));
             }
             let proc_handle = OwnedHandle(raw_proc);
 
             // 3. Open the process token for query.
-            let mut raw_token: HANDLE = 0;
+            let mut raw_token: HANDLE = std::ptr::null_mut();
             if OpenProcessToken(proc_handle.0, TOKEN_QUERY, &mut raw_token) == 0 {
                 return Err(last_error_io("OpenProcessToken"));
             }
@@ -182,7 +182,7 @@ mod win {
             }
 
             let sid_str = wide_to_string(sid_string_ptr);
-            LocalFree(sid_string_ptr as isize as HLOCAL);
+            LocalFree(sid_string_ptr as HLOCAL);
 
             Ok(Principal::Sid(sid_str))
         }
