@@ -243,15 +243,21 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 println!(
                     "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
                 );
-                println!("  Direct HTTPS mode (no Rust SDK). Attestation is verifiable via");
-                println!("  transparency logs but not checked client-side.");
+                println!("  Wirken dispatches through the tinfoil-rs SDK: each session gates on a");
+                println!(
+                    "  hardware attestation (AMD SEV-SNP) plus Sigstore code-provenance check"
+                );
+                println!(
+                    "  against the published enclave repo, then pins TLS to the attested cert."
+                );
+                println!("  See docs/reference/tinfoil.md for the trust model and model list.");
                 println!("  Get an API key at https://dash.tinfoil.sh");
                 let api_key = super::read_secret("  API key: ")?;
                 let models =
                     super::list_openai_models("https://inference.tinfoil.sh/v1", &api_key).await;
                 let model = store_key_and_pick_model(
                     api_key,
-                    "openai",
+                    "tinfoil",
                     "https://inference.tinfoil.sh/v1",
                     "llama3-3-70b",
                     models,
@@ -259,7 +265,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     &data,
                 )?;
                 (
-                    "openai".to_string(),
+                    "tinfoil".to_string(),
                     model,
                     "https://inference.tinfoil.sh/v1".to_string(),
                     false,

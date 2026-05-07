@@ -10,6 +10,44 @@ tagged.
 
 ## Unreleased
 
+### Agent runtime
+
+- Tinfoil provider arm now dispatches through the
+  [tinfoil-rs SDK](https://github.com/tinfoilsh/tinfoil-rs) instead
+  of treating `inference.tinfoil.sh/v1` as a generic OpenAI-compat
+  endpoint. Each session gates on the SDK's three-step verification
+  (AMD SEV-SNP hardware attestation, Sigstore code-provenance check
+  against the published enclave repo, measurement comparison), and
+  chat traffic flows over a `reqwest::Client` pinned to the attested
+  TLS certificate. The verified client is cached for the gateway's
+  process lifetime; the first inbound message after start pays the
+  attestation cost (one-time per process), subsequent calls reuse
+  the pinned transport. Connect-level errors (TLS-pinning rejection,
+  cert rotation) drop the cache so the next call re-attests against
+  fresh attestation material. Tool calling supported; streaming and
+  the `chat_relaxed` vendor-extension escape hatch are deferred.
+  `LlmConfig::tinfoil` now sets `provider: "tinfoil"`; the
+  `wirken setup` Tinfoil arm stores the API key under
+  `tinfoil-api-key` and writes `provider: "tinfoil"` to
+  `provider.json`. Operators upgrading from 1.1.0 must re-run
+  `wirken setup` for the Tinfoil arm: the prior version stored the
+  key under `openai-api-key` and routed through the OpenAI-compat
+  shim, which never reached the new dispatch. See
+  [docs/reference/tinfoil.md](docs/reference/tinfoil.md) for the
+  trust model and deployment recipe (`597e4a1`).
+
+### Dependencies
+
+- Added `tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs",
+  tag = "v0.0.4" }` to the agent crate. Crate is git-only; no
+  crates.io publication exists yet. AGPL-3.0; carve-out lives in
+  `deny.toml` scoped to the `tinfoil` crate. Workspace
+  `[patch."https://github.com/tinfoilsh/tinfoil-rs"]` redirects to
+  a fork branch that drops the `time = "<0.3.46"` upper bound while
+  upstream PR <https://github.com/tinfoilsh/tinfoil-rs/pull/19> is
+  pending; the patch comes out and the original tag pin is restored
+  when upstream merges.
+
 ## [1.1.0] - 2026-05-07
 
 Minor bump. Audit gains per-gateway chain-head signing. Lyrik gains
