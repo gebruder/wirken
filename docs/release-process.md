@@ -59,6 +59,9 @@ Run top to bottom. Replace `0.7.4` with the target version.
        || { echo "install.sh SHA drift"; exit 1; }
    cargo test --workspace
    ./scripts/test-install.sh
+   gh api repos/gebruder/wirken/dependabot/alerts \
+       --jq '.[] | select(.state == "open") | {num: .number, sev: .security_advisory.severity, pkg: .dependency.package.name, ghsa: .security_advisory.ghsa_id}'
+   gh pr list --label dependencies --state open
    ```
 
    The `shellcheck` and SHA checks exist because a locally modified
@@ -66,6 +69,19 @@ Run top to bottom. Replace `0.7.4` with the target version.
    `installer-pin` CI workflow until push, and a release tagged before
    push will ship with a mismatched pin. `cargo fmt` and `cargo clippy`
    are redundant with CI but serve as a local fast-fail.
+
+   The dependabot alert and PR list checks are non-empty by default;
+   the requirement is that you have read both and made an explicit
+   call on each. Open security alerts must be folded into the
+   release or consciously deferred (the deferral lives in the
+   CHANGELOG, not implicit). Open dependabot PRs that are CI-green
+   and patch-within-range fold cleanly; minor-in-0.x or major bumps
+   take a soak cycle. Tagging while ignoring an open high-severity
+   advisory ships a known-vulnerable release; a v1.0.2 -> v1.1.0 cut
+   missed the openssl 0.10.79 advisory at first tag, was caught by
+   GitHub's push-time alert banner, and required deleting the tag
+   under the [Recovery](#recovery-during-a-release) "tag exists, no
+   draft" path.
 
 2. **Bump the workspace version.** Edit `Cargo.toml`:
    ```toml
