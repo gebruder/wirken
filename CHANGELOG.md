@@ -38,6 +38,12 @@ tagged.
 
 ### Dependencies
 
+- `tokio-tungstenite` 0.28.0 to 0.29.0 (#100). Pulled in via slack-morphism;
+  the upstream tungstenite 0.29 release is two changes (MSRV bump to 1.71
+  and header values can include non-visible ASCII) with no API breaks
+  and no behavioral changes in the WSS handshake path
+  adapter-slack uses (`4b08347`).
+
 - Added `tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs",
   tag = "v0.0.4" }` to the agent crate. Crate is git-only; no
   crates.io publication exists yet. AGPL-3.0; carve-out lives in
