@@ -365,6 +365,227 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}...", &s[..cut])
 }
 
+/// Migrate operator-installed skill frontmatter to the current shape.
+///
+/// Two transformations, both narrowly scoped:
+/// 1. `metadata.openclaw` -> `metadata.wirken`. Pure rename. Triggered
+///    only when `metadata.openclaw` is present and `metadata.wirken`
+///    is not. If both are present the operator already partially
+///    migrated; we leave it alone.
+/// 2. Append a top-level `permissions:` block when missing. Stub is
+///    deny-everything (empty allow lists, allowlist-mode egress with
+///    empty domain set). Migrated skills load but cannot use tools,
+///    egress, or filesystem until the operator edits the stub. The
+///    teaching moment is in the file the operator opens next.
+///
+/// Each rewritten file is copied to
+/// `SKILL.md.pre-migrate-<UTC-iso8601>` first; the rewrite is a
+/// `serde_yaml` round-trip so YAML comments in the original
+/// frontmatter are not preserved (rare in practice).
+///
+/// `dry_run = true` reports what would change and writes nothing.
+pub async fn migrate(path: Option<&str>, dry_run: bool) -> Result<()> {
+    use std::path::PathBuf;
+    let dir: PathBuf = match path {
+        Some(p) => PathBuf::from(p),
+        None => config().data_dir.join("skills"),
+    };
+    if !dir.is_dir() {
+        anyhow::bail!("not a directory: {}", dir.display());
+    }
+    println!("  Scanning {}", dir.display());
+
+    let mut total = 0usize;
+    let mut changed = 0usize;
+    let mut skipped = 0usize;
+    let mut errored = 0usize;
+
+    let entries = std::fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                errored += 1;
+                println!("  ! dir entry: {e}");
+                continue;
+            }
+        };
+        let skill_dir = entry.path();
+        if !skill_dir.is_dir() {
+            continue;
+        }
+        let skill_file = skill_dir.join("SKILL.md");
+        if !skill_file.exists() {
+            continue;
+        }
+        total += 1;
+
+        let name = skill_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+
+        match migrate_one(&skill_file, dry_run) {
+            Ok(MigrationOutcome::NoChange) => {
+                skipped += 1;
+                println!("  - {name}: no change");
+            }
+            Ok(MigrationOutcome::WouldChange(changes)) => {
+                changed += 1;
+                println!("  ~ {name} (dry-run): {}", changes.join(", "));
+            }
+            Ok(MigrationOutcome::Changed { changes, backup }) => {
+                changed += 1;
+                println!(
+                    "  + {name}: {} (backup: {})",
+                    changes.join(", "),
+                    backup.display()
+                );
+            }
+            Err(e) => {
+                errored += 1;
+                println!("  ! {name}: {e}");
+            }
+        }
+    }
+
+    println!();
+    if dry_run {
+        println!(
+            "  Dry-run: {total} skill(s) inspected, {changed} would change, {skipped} already current, {errored} errored."
+        );
+        println!("  Run without --dry-run to apply.");
+    } else {
+        println!(
+            "  {total} skill(s) inspected, {changed} migrated, {skipped} already current, {errored} errored."
+        );
+    }
+    if errored > 0 {
+        anyhow::bail!("{errored} skill(s) errored during migration");
+    }
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MigrationOutcome {
+    /// Nothing to do.
+    NoChange,
+    /// Dry-run reported a list of changes that would apply.
+    WouldChange(Vec<&'static str>),
+    /// Applied; backup at `backup`.
+    Changed {
+        changes: Vec<&'static str>,
+        backup: std::path::PathBuf,
+    },
+}
+
+fn migrate_one(skill_file: &std::path::Path, dry_run: bool) -> Result<MigrationOutcome> {
+    let content = std::fs::read_to_string(skill_file)
+        .with_context(|| format!("read {}", skill_file.display()))?;
+
+    let (yaml_str, body, leading_separator) = split_frontmatter(&content)?;
+    let mut value: serde_yaml::Value = serde_yaml::from_str(yaml_str)
+        .with_context(|| format!("parse YAML in {}", skill_file.display()))?;
+
+    let changes = apply_migrations(&mut value);
+    if changes.is_empty() {
+        return Ok(MigrationOutcome::NoChange);
+    }
+    if dry_run {
+        return Ok(MigrationOutcome::WouldChange(changes));
+    }
+
+    let backup = skill_file.with_file_name(format!(
+        "{}.pre-migrate-{}",
+        skill_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("SKILL.md"),
+        chrono::Utc::now().format("%Y-%m-%dT%H%M%SZ")
+    ));
+    std::fs::copy(skill_file, &backup)
+        .with_context(|| format!("backup to {}", backup.display()))?;
+
+    let new_yaml = serde_yaml::to_string(&value).context("serialize migrated frontmatter")?;
+    let mut new_content = String::new();
+    if leading_separator {
+        new_content.push_str("---\n");
+    }
+    new_content.push_str(&new_yaml);
+    new_content.push_str("---\n\n");
+    new_content.push_str(&body);
+    if !new_content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    std::fs::write(skill_file, new_content)
+        .with_context(|| format!("write {}", skill_file.display()))?;
+
+    Ok(MigrationOutcome::Changed { changes, backup })
+}
+
+/// Split a SKILL.md into (yaml, body, had_leading_separator). Mirrors
+/// the parser in `wirken_agent::skill::parse_frontmatter`: opening
+/// `---` is optional; if present, the next `---` closes the
+/// frontmatter and the rest is body. Files without an opening `---`
+/// are treated as body-only.
+fn split_frontmatter(content: &str) -> Result<(&str, String, bool)> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        anyhow::bail!("no frontmatter to migrate (file has no leading `---`)");
+    }
+    let rest = &trimmed[3..];
+    let end = rest
+        .find("---")
+        .ok_or_else(|| anyhow::anyhow!("unclosed frontmatter (no closing `---`)"))?;
+    let yaml = rest[..end].trim_matches('\n');
+    let body = rest[end + 3..].trim_start_matches('\n').to_string();
+    Ok((yaml, body, true))
+}
+
+/// Apply the two known migrations to a parsed YAML mapping. Returns
+/// the list of change tags applied. Pure: no I/O. Tested directly.
+fn apply_migrations(value: &mut serde_yaml::Value) -> Vec<&'static str> {
+    let mut changes: Vec<&'static str> = Vec::new();
+
+    // (1) metadata.openclaw -> metadata.wirken
+    if let Some(metadata) = value.get_mut("metadata").and_then(|v| v.as_mapping_mut()) {
+        let openclaw_key = serde_yaml::Value::String("openclaw".to_string());
+        let wirken_key = serde_yaml::Value::String("wirken".to_string());
+        if metadata.contains_key(&openclaw_key) && !metadata.contains_key(&wirken_key) {
+            if let Some(v) = metadata.remove(&openclaw_key) {
+                metadata.insert(wirken_key, v);
+                changes.push("openclaw->wirken");
+            }
+        }
+    }
+
+    // (2) Append empty `permissions:` block when absent.
+    let permissions_key = serde_yaml::Value::String("permissions".to_string());
+    let needs_permissions = match value.as_mapping() {
+        Some(m) => !m.contains_key(permissions_key.clone()),
+        None => false,
+    };
+    if needs_permissions {
+        if let Some(map) = value.as_mapping_mut() {
+            map.insert(permissions_key, empty_permissions_stub());
+            changes.push("permissions stub added");
+        }
+    }
+
+    changes
+}
+
+/// The deny-everything permissions stub inserted on migration. Loads
+/// cleanly through `resolve_block` (every list is empty, allowlist
+/// mode is the strictest egress posture). Migrated skills load but
+/// can do nothing until the operator edits.
+fn empty_permissions_stub() -> serde_yaml::Value {
+    serde_yaml::from_str::<serde_yaml::Value>(
+        "tools:\n  allow: []\negress:\n  mode: allowlist\n  domains: []\nfilesystem:\n  write_paths: []\n  read_paths: []\ninference:\n  allow: []\n",
+    )
+    .expect("static permissions stub parses as YAML")
+}
+
 #[cfg(test)]
 mod verify_outcome_tests {
     use super::{VerifyOutcome, VerifyResult, decide_verify_outcome};
@@ -415,5 +636,106 @@ mod verify_outcome_tests {
             decide_verify_outcome(&VerifyResult::Unsigned, true),
             VerifyOutcome::Fail
         );
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::{apply_migrations, split_frontmatter};
+    use serde_yaml::Value;
+
+    fn parse(s: &str) -> Value {
+        serde_yaml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn openclaw_renames_when_wirken_absent() {
+        let mut v = parse(
+            "name: x\nmetadata:\n  openclaw:\n    requires:\n      bins:\n      - docker\npermissions:\n  tools: { allow: [] }\n",
+        );
+        let changes = apply_migrations(&mut v);
+        assert_eq!(changes, vec!["openclaw->wirken"]);
+        let metadata = v.get("metadata").unwrap().as_mapping().unwrap();
+        assert!(metadata.contains_key(Value::String("wirken".into())));
+        assert!(!metadata.contains_key(Value::String("openclaw".into())));
+    }
+
+    #[test]
+    fn openclaw_preserved_when_wirken_already_present() {
+        let mut v = parse(
+            "name: x\nmetadata:\n  wirken:\n    requires:\n      bins:\n      - docker\n  openclaw:\n    requires:\n      bins:\n      - legacy\npermissions:\n  tools: { allow: [] }\n",
+        );
+        let changes = apply_migrations(&mut v);
+        assert!(
+            changes.is_empty(),
+            "should not touch when both keys present"
+        );
+        let metadata = v.get("metadata").unwrap().as_mapping().unwrap();
+        assert!(metadata.contains_key(Value::String("openclaw".into())));
+        assert!(metadata.contains_key(Value::String("wirken".into())));
+    }
+
+    #[test]
+    fn missing_permissions_block_gets_stub() {
+        let mut v = parse("name: x\ndescription: y\n");
+        let changes = apply_migrations(&mut v);
+        assert_eq!(changes, vec!["permissions stub added"]);
+        let permissions = v.get("permissions").unwrap();
+        let map = permissions.as_mapping().unwrap();
+        assert!(map.contains_key(Value::String("tools".into())));
+        assert!(map.contains_key(Value::String("egress".into())));
+        assert!(map.contains_key(Value::String("filesystem".into())));
+        assert!(map.contains_key(Value::String("inference".into())));
+        let egress = permissions.get("egress").unwrap();
+        assert_eq!(
+            egress.get("mode").unwrap(),
+            &Value::String("allowlist".into())
+        );
+    }
+
+    #[test]
+    fn both_migrations_apply_in_one_pass() {
+        let mut v =
+            parse("name: x\nmetadata:\n  openclaw:\n    requires:\n      bins:\n      - docker\n");
+        let changes = apply_migrations(&mut v);
+        assert_eq!(changes, vec!["openclaw->wirken", "permissions stub added"]);
+        let metadata = v.get("metadata").unwrap().as_mapping().unwrap();
+        assert!(metadata.contains_key(Value::String("wirken".into())));
+        assert!(v.get("permissions").is_some());
+    }
+
+    #[test]
+    fn already_current_skill_no_changes() {
+        let mut v = parse(
+            "name: x\nmetadata:\n  wirken:\n    requires:\n      bins: []\npermissions:\n  tools: { allow: [] }\n",
+        );
+        let changes = apply_migrations(&mut v);
+        assert!(
+            changes.is_empty(),
+            "no-change when already current, got {changes:?}"
+        );
+    }
+
+    #[test]
+    fn split_frontmatter_extracts_yaml_and_body() {
+        let content = "---\nname: x\n---\n\nbody line one\n";
+        let (yaml, body, had_sep) = split_frontmatter(content).unwrap();
+        assert_eq!(yaml, "name: x");
+        assert_eq!(body, "body line one\n");
+        assert!(had_sep);
+    }
+
+    #[test]
+    fn split_frontmatter_rejects_no_leading_separator() {
+        let content = "name: x\n---\nbody\n";
+        let err = split_frontmatter(content).unwrap_err();
+        assert!(err.to_string().contains("no frontmatter"));
+    }
+
+    #[test]
+    fn split_frontmatter_rejects_unclosed() {
+        let content = "---\nname: x\nbody body body\n";
+        let err = split_frontmatter(content).unwrap_err();
+        assert!(err.to_string().contains("unclosed"));
     }
 }

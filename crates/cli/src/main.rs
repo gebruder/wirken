@@ -362,6 +362,19 @@ enum SkillCommands {
         #[arg(long)]
         strict: bool,
     },
+    /// Migrate operator skills to the current frontmatter shape.
+    /// Renames the deprecated `openclaw` metadata key to `wirken` and
+    /// inserts an empty `permissions:` stub when missing. Each
+    /// modified file is backed up to `SKILL.md.pre-migrate-<utc>`
+    /// before rewriting.
+    Migrate {
+        /// Path to scan. Defaults to `<data_dir>/skills/` (operator
+        /// skill tree). Pass an explicit path to migrate elsewhere.
+        path: Option<String>,
+        /// Print what would change without writing or backing up.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -654,6 +667,9 @@ async fn main() -> Result<()> {
             SkillCommands::List => commands::skills::list().await,
             SkillCommands::Sign { dir } => commands::skills::sign(&dir).await,
             SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
+            SkillCommands::Migrate { path, dry_run } => {
+                commands::skills::migrate(path.as_deref(), dry_run).await
+            }
         },
         Commands::Preset(cmd) => match cmd {
             PresetCommands::List => commands::preset::list().await,

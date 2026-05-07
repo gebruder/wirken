@@ -42,6 +42,11 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
+# Used by `wirken skills migrate` for round-tripping YAML frontmatter
+# through `serde_yaml::Value` so the migration can splice individual
+# keys without losing unknown fields. Already a transitive dep through
+# wirken-agent, listed directly here so the cli can pull it.
+serde_yaml = "0.9"
 openssl = { workspace = true }
 libc = "0.2"
 rusqlite = { workspace = true }

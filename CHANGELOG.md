@@ -10,6 +10,25 @@ tagged.
 
 ## Unreleased
 
+### Skill loader
+
+- New `wirken skills migrate [path] [--dry-run]` subcommand.
+  Renames `metadata.openclaw` to `metadata.wirken` when the
+  `wirken` key is absent. Appends a deny-everything `permissions:`
+  block when the top-level block is missing. Each rewrite is
+  preceded by a copy to `SKILL.md.pre-migrate-<UTC>`. The rewrite
+  is a `serde_yaml::Value` round-trip so unknown frontmatter keys
+  are preserved (YAML comments are not). Default scan path is
+  `<data_dir>/skills/`. `--dry-run` reports changes without
+  writing.
+
+- `SkillLoader::load_dir` per-skill load failures log at `debug!`;
+  a single aggregate `warn!` fires per directory listing the
+  failed skill names and pointing at
+  `RUST_LOG=wirken_agent::skill=debug` for per-skill detail. The
+  `openclaw` deprecated-metadata-key warning fires once per
+  process via a `OnceLock` gate (`2d35f63`).
+
 ### Agent runtime
 
 - Tinfoil provider arm now dispatches through the
