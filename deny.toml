@@ -43,6 +43,12 @@ allow = [
 confidence-threshold = 0.8
 exceptions = [
     { allow = ["ISC", "MIT", "OpenSSL"], crate = "ring" },
+    # Tinfoil confidential-inference SDK. AGPL-3.0 only reaches wirken
+    # through the agent crate's `tinfoil` provider arm; wirken's source
+    # is public on GitHub, so the AGPL §5 corresponding-source obligation
+    # is satisfied automatically. §13 (network-use source disclosure)
+    # keys on operator modification of the program, not on us.
+    { allow = ["AGPL-3.0"], crate = "tinfoil" },
 ]
 
 [bans]
@@ -53,4 +59,13 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = [
+    # Tinfoil SDK is git-only; no crates.io publication yet. Pinned to
+    # tag v0.0.4 in crates/agent/Cargo.toml.
+    "https://github.com/tinfoilsh/tinfoil-rs",
+    # Temporary patch source while PR #19 (relax `time` upper bound) is
+    # pending upstream. See `[patch.\"https://github.com/tinfoilsh/...\"]`
+    # in Cargo.toml and remove this entry alongside the patch once
+    # upstream merges and re-tags.
+    "https://github.com/d-a-v-i--/tinfoil-rs",
+]

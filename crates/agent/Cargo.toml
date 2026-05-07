@@ -43,6 +43,14 @@ cap-std = "3.4"
 # writes are refused at the connection layer, not by string-pattern
 # checks on the SQL.
 rusqlite = { workspace = true }
+# Tinfoil confidential-inference SDK. Three-step verification (AMD
+# SEV-SNP attestation + Sigstore code provenance + measurement
+# comparison) bundled into client construction; the returned client
+# exposes a TLS-fingerprint-pinned `reqwest::Client` via
+# `http_client()` that wirken's tinfoil dispatch uses for chat traffic.
+# Pinned to v0.0.4; no crates.io publish exists yet. AGPL-3.0 license
+# is carved out for this crate in `deny.toml`.
+tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.0.4" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

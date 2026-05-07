@@ -117,3 +117,14 @@ anyhow = "1"
 
 # OpenSSL (vendored for static musl builds — pulled by serenity/teloxide via reqwest 0.12)
 openssl = { version = "0.10", features = ["vendored"] }
+
+# Tinfoil SDK is git-pinned in crates/agent/Cargo.toml. Upstream
+# Cargo.toml caps `time` at <0.3.46 to enforce MSRV 1.87, which
+# collides with `serde_with 3.18.0`'s `time = "~0.3.47"` (transitive
+# through slack-morphism). PR filed at
+# https://github.com/tinfoilsh/tinfoil-rs/pull/19; until it merges,
+# patch the dep at the workspace level to a fork branch that drops
+# the upper bound. Remove this stanza when the PR lands and the next
+# tag is cut.
+[patch."https://github.com/tinfoilsh/tinfoil-rs"]
+tinfoil = { git = "https://github.com/d-a-v-i--/tinfoil-rs", branch = "relax-time-pin" }

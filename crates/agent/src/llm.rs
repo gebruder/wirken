@@ -120,10 +120,17 @@ impl LlmConfig {
         }
     }
 
-    /// Tinfoil confidential inference (OpenAI-compatible, hardware enclaves)
+    /// Tinfoil confidential inference. Dispatches through the
+    /// tinfoil-rs SDK so each session is gated on a successful
+    /// AMD SEV-SNP attestation + Sigstore code provenance check
+    /// against the published enclave repo, and chat traffic flows
+    /// over a TLS connection pinned to the attested certificate.
+    /// `base_url` is vestigial here: the SDK's discovery endpoint
+    /// picks the host at construction time and the value is unused
+    /// by the tinfoil dispatch path.
     pub fn tinfoil(model: &str) -> Self {
         Self {
-            provider: "openai".into(),
+            provider: "tinfoil".into(),
             model: model.into(),
             base_url: "https://inference.tinfoil.sh/v1".into(),
             max_tokens: 4096,
@@ -171,6 +178,7 @@ impl LlmConfig {
             "gemini" => 1_000_000,
             "bedrock" => 200_000,
             "ollama" => 32_768,
+            "tinfoil" => 128_000,
             _ => 32_000,
         };
         Self {
@@ -222,6 +230,16 @@ pub struct LlmClient {
     /// awaits — the lock is acquired, the inner `Arc` cloned out, and
     /// released before the observer's hooks run.
     observer: Mutex<Option<Arc<dyn RecoveryObserver>>>,
+    /// Lazy-initialized tinfoil SDK client. Construction performs
+    /// AMD SEV-SNP attestation + Sigstore verification + TLS pinning
+    /// against the discovered enclave; the result is cached for the
+    /// process lifetime. Reset to `None` by `complete_tinfoil` when
+    /// an attestation or TLS-pinning error surfaces, so the next
+    /// call re-attests rather than retrying against a stale pinned
+    /// transport. `tokio::sync::Mutex` rather than `std::sync::Mutex`
+    /// because the lock is held across the SDK's `await`s during
+    /// initialization.
+    tinfoil: tokio::sync::Mutex<Option<Arc<tinfoil::Client>>>,
 }
 
 impl LlmClient {
@@ -249,6 +267,7 @@ impl LlmClient {
             config,
             http,
             observer: Mutex::new(None),
+            tinfoil: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -333,8 +352,122 @@ impl LlmClient {
             "gemini" => self.complete_gemini(messages, tools, api_key).await,
             "bedrock" => self.complete_bedrock(messages, tools, api_key).await,
             "ollama" => self.complete_ollama(messages, tools).await,
+            "tinfoil" => self.complete_tinfoil(messages, tools, api_key).await,
             _ => self.complete_openai(messages, tools, api_key).await,
         }
+    }
+
+    /// Tinfoil completion through the attested + TLS-pinned transport.
+    ///
+    /// The SDK's `Client::new_default_with_api_key` runs the full
+    /// three-step verification (AMD SEV-SNP hardware attestation,
+    /// Sigstore code provenance against the published enclave repo,
+    /// measurement comparison) and returns a `reqwest::Client`
+    /// pinned to the attested TLS certificate. We cache the verified
+    /// client for the process lifetime and reuse the pinned reqwest
+    /// for chat traffic, building the same OpenAI-compat request body
+    /// `complete_openai` builds and parsing the response with the
+    /// same `parse_completion_response`. No async-openai type
+    /// translation; the request shape is already what the enclave
+    /// serves on `/v1/chat/completions`.
+    ///
+    /// Failure modes that drop the cached client and force re-
+    /// attestation on the next call: `Error::is_attestation()`,
+    /// `Error::CertificateMismatch`, and `Error::Tls(_)`. Other
+    /// failures (network, configuration, API errors) leave the
+    /// cached client intact and surface to the caller for the
+    /// existing retry layers (lyrik, send-loop) to handle.
+    async fn complete_tinfoil(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        api_key: Option<&str>,
+    ) -> Result<(LlmResponse, Usage), AgentError> {
+        let api_key = api_key.ok_or_else(|| {
+            AgentError::Llm(
+                "tinfoil provider requires an API key; none was passed to complete()".into(),
+            )
+        })?;
+        let client = self.tinfoil_client(api_key).await?;
+
+        let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
+        let body = build_openai_request_body(&self.config, messages_json, tools);
+
+        let pinned = client
+            .http_client()
+            .map_err(|e| AgentError::Llm(format!("tinfoil pinned client unavailable: {e}")))?;
+        let url = format!("{}/v1/chat/completions", client.secure_client().base_url());
+
+        let response = pinned
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {api_key}"))
+            .json(&body)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                // reqwest-level failures from a pinned client carry
+                // the TLS-fingerprint-mismatch case. Drop the cached
+                // client so the next call re-attests against a fresh
+                // certificate rather than retrying the same pinned
+                // transport.
+                if is_pinned_tls_failure(&e) {
+                    self.invalidate_tinfoil_cache().await;
+                }
+                return Err(AgentError::Http(format!("tinfoil request: {e}")));
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AgentError::Llm(format!("HTTP {status}: {body}")));
+        }
+
+        let response_body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AgentError::Http(format!("parse response: {e}")))?;
+
+        parse_completion_response(&response_body)
+    }
+
+    /// Lazy-init the tinfoil SDK client, caching the verified instance
+    /// for the process lifetime. Holds the lock across the SDK's
+    /// async verification call so two concurrent `complete()` calls
+    /// share the same attestation rather than triggering two parallel
+    /// SEV-SNP + Sigstore round trips.
+    async fn tinfoil_client(&self, api_key: &str) -> Result<Arc<tinfoil::Client>, AgentError> {
+        let mut guard = self.tinfoil.lock().await;
+        if let Some(client) = guard.as_ref() {
+            return Ok(client.clone());
+        }
+        let client = tinfoil::Client::new_default_with_api_key(api_key)
+            .await
+            .map_err(|e| {
+                if e.is_attestation() {
+                    AgentError::Llm(format!("tinfoil attestation failed: {e}"))
+                } else if e.is_configuration() {
+                    AgentError::Llm(format!("tinfoil misconfigured: {e}"))
+                } else {
+                    AgentError::Http(format!("tinfoil verification: {e}"))
+                }
+            })?;
+        let arc = Arc::new(client);
+        *guard = Some(arc.clone());
+        Ok(arc)
+    }
+
+    /// Drop the cached tinfoil client. The next `complete_tinfoil`
+    /// call will re-run verification and rebuild the pinned transport.
+    /// Called when a pinned-TLS failure surfaces from the chat path,
+    /// because the cert may have rotated under us.
+    async fn invalidate_tinfoil_cache(&self) {
+        let mut guard = self.tinfoil.lock().await;
+        *guard = None;
     }
 
     /// Ollama native `/api/chat` completion. The OpenAI-compat bridge
@@ -881,6 +1014,18 @@ impl LlmClient {
     pub(crate) fn http_client(&self) -> &reqwest::Client {
         &self.http
     }
+}
+
+/// True when a `reqwest::Error` indicates the connection was rejected
+/// before HTTP semantics applied. Covers TLS-handshake failure (which
+/// is the surface tinfoil's cert-pinning rejection takes) and plain
+/// network unavailability. Used by [`LlmClient::complete_tinfoil`] to
+/// decide whether to drop the cached `tinfoil::Client` and re-attest
+/// on the next call: the false-positive case (network was down, cert
+/// is fine) costs at most one extra attestation round trip on the
+/// subsequent successful call.
+fn is_pinned_tls_failure(e: &reqwest::Error) -> bool {
+    e.is_connect()
 }
 
 /// Build the JSON body for the OpenAI-compatible chat-completion
