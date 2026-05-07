@@ -10,6 +10,8 @@ tagged.
 
 ## Unreleased
 
+## [1.2.0] - 2026-05-07
+
 ### Skill loader
 
 - New `wirken skills migrate [path] [--dry-run]` subcommand.

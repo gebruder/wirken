@@ -80,7 +80,7 @@ cargo install --path crates/cli
 `wirken run` starts the gateway daemon. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken gateway v1.1.0
+  wirken gateway v1.2.0
   ──────────────
 
   Provider: ollama/llama3.2
@@ -226,7 +226,7 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Wirken 1.1.x is the current series. 1.1 gets fixes and features; 1.0 gets security fixes only. 0.9 and earlier are unsupported.
+Wirken 1.2.x is the current series. 1.2 gets fixes and features; 1.1 gets security fixes only. 1.0 and earlier are unsupported.
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
