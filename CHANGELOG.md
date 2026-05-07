@@ -10,7 +10,7 @@ tagged.
 
 ## Unreleased
 
-## [1.1.0] - 2026-05-06
+## [1.1.0] - 2026-05-07
 
 Minor bump. Audit gains per-gateway chain-head signing. Lyrik gains
 concurrent walk dispatch with per-walk dedup against a single signed

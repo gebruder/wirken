@@ -67,7 +67,7 @@ Every JSON document includes a `schema_version` and `wirken_version` at the top 
 ```json
 {
   "schema_version": 2,
-  "wirken_version": "1.0.2",
+  "wirken_version": "1.1.0",
   ...
 }
 ```
@@ -126,7 +126,7 @@ For an intact chain with signed chain heads:
 ```json
 {
   "schema_version": 2,
-  "wirken_version": "1.0.2",
+  "wirken_version": "1.1.0",
   "result": "ok",
   "rows_verified": 1234,
   "sessions_total": 7,
@@ -147,7 +147,7 @@ For an empty log:
 ```json
 {
   "schema_version": 2,
-  "wirken_version": "1.0.2",
+  "wirken_version": "1.1.0",
   "result": "empty",
   "require_signed": false
 }
@@ -158,7 +158,7 @@ For a broken chain (process exit code is `1`):
 ```json
 {
   "schema_version": 2,
-  "wirken_version": "1.0.2",
+  "wirken_version": "1.1.0",
   "result": "broken",
   "session": {
     "full": "assistant/webchat/abc123",
@@ -179,7 +179,7 @@ For an invalid chain-head signature (process exit code is `1`):
 ```json
 {
   "schema_version": 2,
-  "wirken_version": "1.0.2",
+  "wirken_version": "1.1.0",
   "result": "signature_invalid",
   "session": { "full": "assistant/webchat/abc123", "agent": "assistant", "channel": "webchat", "id": "abc123" },
   "seq": 102,
@@ -198,7 +198,7 @@ For a missing chain head under `--require-signed` (process exit code is `1`):
 ```json
 {
   "schema_version": 2,
-  "wirken_version": "1.0.2",
+  "wirken_version": "1.1.0",
   "result": "missing_chain_head",
   "session": { "full": "assistant/webchat/abc123", "agent": "assistant", "channel": "webchat", "id": "abc123" },
   "rows": 240,
