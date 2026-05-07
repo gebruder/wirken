@@ -58,6 +58,7 @@ impl SkillLoader {
         }
 
         let mut skills = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
         let entries = std::fs::read_dir(dir)
             .map_err(|e| AgentError::SkillLoad(format!("read dir {}: {e}", dir.display())))?;
 
@@ -77,9 +78,31 @@ impl SkillLoader {
             match Self::load_file(&skill_file) {
                 Ok(skill) => skills.push(skill),
                 Err(e) => {
-                    tracing::warn!("Failed to load skill at {}: {e}", skill_file.display());
+                    // Per-skill load failures are usually operator-state
+                    // (stale frontmatter from a previous migration window,
+                    // missing `permissions:` block, etc.), not unexpected
+                    // runtime errors. They do not need to surface on every
+                    // user-facing CLI invocation. Detail goes to debug;
+                    // an aggregate summary fires once below if any failed.
+                    tracing::debug!("Failed to load skill at {}: {e}", skill_file.display());
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    failures.push(name);
                 }
             }
+        }
+
+        if !failures.is_empty() {
+            tracing::warn!(
+                "{n} skill(s) failed to load from {dir}: [{names}]. Run with \
+                 RUST_LOG=wirken_agent::skill=debug for per-skill detail.",
+                n = failures.len(),
+                dir = dir.display(),
+                names = failures.join(", ")
+            );
         }
 
         skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -308,9 +331,20 @@ fn extract_required_bins(fm: &SkillFrontmatter) -> Vec<String> {
     let section = metadata.get("wirken").or_else(|| {
         let openclaw = metadata.get("openclaw");
         if openclaw.is_some() {
-            tracing::warn!(
-                "skill frontmatter uses deprecated 'openclaw' metadata key; rename to 'wirken'"
-            );
+            // Once-per-process WARN, not once-per-skill: operator-state
+            // condition for operators carrying skills from before the
+            // 'openclaw' to 'wirken' metadata-key rename. A multi-skill
+            // tree spammed this on every CLI invocation.
+            use std::sync::OnceLock;
+            static OPENCLAW_WARNED: OnceLock<()> = OnceLock::new();
+            if OPENCLAW_WARNED.set(()).is_ok() {
+                tracing::warn!(
+                    "skill frontmatter uses deprecated 'openclaw' metadata key; \
+                     rename to 'wirken'. Suppressing further repeats this process."
+                );
+            } else {
+                tracing::debug!("skill frontmatter uses deprecated 'openclaw' metadata key");
+            }
         }
         openclaw
     });
