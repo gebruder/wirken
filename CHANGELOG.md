@@ -255,6 +255,28 @@ serde envelope.
   commit-msg attribution-pattern rejection list is extended
   (`86f7026`).
 
+### Dependencies
+
+- `openssl` 0.10.78 to 0.10.79 (#104) closes GHSA-xp3w-r5p5-63rr,
+  a high-severity rust-openssl undefined-behaviour bug in
+  `X509Ref::ocsp_responders` for certificates with non-UTF-8 OCSP
+  URLs.
+- `windows-sys` 0.52.0 to 0.61.2 (#102). The 0.61 line changes
+  `HANDLE` and `HLOCAL` from `isize` / `usize` to `*mut c_void`;
+  the named-pipe peer-credential check in `crates/ipc/src/stream.rs`
+  is ported to pointer-shaped semantics (`is_null` checks,
+  `ptr::null_mut` initializers, dropped redundant `isize` casts).
+  Windows-only path; the unix-domain-socket path is unchanged.
+- `clap` 4.6.0 to 4.6.1 (#99), `libc` 0.2.183 to 0.2.186 (#101),
+  `clap_derive` 4.6.0 to 4.6.1, `openssl-sys` 0.9.114 to 0.9.115
+  (transitive on the openssl bump). Patch within range.
+- `github/codeql-action` 4.35.2 to 4.35.3 (#98) in the scorecard
+  workflow.
+- `tokio-tungstenite` 0.28.0 to 0.29.0 (#100) deferred to the next
+  release cycle for one-cycle soak; the upstream changelog is just
+  "update tungstenite to 0.29.0" and the substantive breaking
+  surface in tungstenite 0.29 has not been read yet.
+
 ## [1.0.2] — 2026-05-04
 
 ### Agent runtime
