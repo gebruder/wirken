@@ -1,0 +1,26 @@
+[package]
+name = "wirken-audit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+wirken-audit = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "session_event"
+path = "fuzz_targets/session_event.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone workspace: cargo-fuzz binaries depend on libfuzzer-sys
+# which only builds with the nightly toolchain. Keeping this out of
+# the main workspace lets stable cargo build/test the rest of the
+# tree without touching this directory.
+[workspace]

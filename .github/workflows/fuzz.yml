@@ -1,0 +1,29 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - 'crates/audit/**'
+      - '.github/workflows/fuzz.yml'
+  schedule:
+    # Mondays 06:17 UTC. Off-peak; non-blocking.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-fuzz:
+    name: cargo fuzz session_event (60s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run session_event target
+        working-directory: crates/audit
+        run: cargo fuzz run session_event -- -max_total_time=60
