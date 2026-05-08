@@ -19,7 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode_header};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ring::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -42,6 +44,9 @@ pub const OPENID_CONFIG_URL: &str =
 /// refresh on this cadence to pick up new keys ahead of their first
 /// use and to drop keys that have been retired.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Clock skew leeway applied to `exp` validation, in seconds.
+const EXP_LEEWAY_SECS: i64 = 60;
 
 /// Claims surfaced from a validated JWT. Only the fields that affect
 /// authorization live here. Additional fields are ignored.
@@ -74,8 +79,82 @@ struct JwksKey {
     exponent: Option<String>,
 }
 
+/// Public RSA key components for a single signing key. `n` and `e`
+/// are big-endian byte strings without leading zero octets, matching
+/// the encoding `ring::signature::RsaPublicKeyComponents` expects.
+#[derive(Debug, Clone)]
+pub struct RsaPubKey {
+    pub n: Vec<u8>,
+    pub e: Vec<u8>,
+}
+
+impl RsaPubKey {
+    fn verify(&self, msg: &[u8], sig: &[u8]) -> Result<(), AuthError> {
+        let comps = RsaPublicKeyComponents {
+            n: self.n.as_slice(),
+            e: self.e.as_slice(),
+        };
+        comps
+            .verify(&RSA_PKCS1_2048_8192_SHA256, msg, sig)
+            .map_err(|_| AuthError::JwtValidation("rsa signature invalid".into()))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct JwtHeader {
+    alg: String,
+    kid: Option<String>,
+}
+
+fn b64url_decode(s: &str) -> Result<Vec<u8>, AuthError> {
+    URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|e| AuthError::JwtHeader(format!("base64url: {e}")))
+}
+
+struct ParsedJwt<'a> {
+    header: JwtHeader,
+    payload: Vec<u8>,
+    signature: Vec<u8>,
+    signing_input: &'a str,
+}
+
+fn parse_jwt(token: &str) -> Result<ParsedJwt<'_>, AuthError> {
+    let dot1 = token
+        .find('.')
+        .ok_or_else(|| AuthError::JwtHeader("expected three dot-separated segments".into()))?;
+    let rest = &token[dot1 + 1..];
+    let dot2_rel = rest
+        .find('.')
+        .ok_or_else(|| AuthError::JwtHeader("expected three dot-separated segments".into()))?;
+    let dot2 = dot1 + 1 + dot2_rel;
+
+    let header_b64 = &token[..dot1];
+    let payload_b64 = &token[dot1 + 1..dot2];
+    let sig_b64 = &token[dot2 + 1..];
+    if sig_b64.contains('.') {
+        return Err(AuthError::JwtHeader(
+            "expected three dot-separated segments".into(),
+        ));
+    }
+    let signing_input = &token[..dot2];
+
+    let header_bytes = b64url_decode(header_b64)?;
+    let header: JwtHeader = serde_json::from_slice(&header_bytes)
+        .map_err(|e| AuthError::JwtHeader(format!("header parse: {e}")))?;
+    let payload = b64url_decode(payload_b64)?;
+    let signature = b64url_decode(sig_b64)?;
+
+    Ok(ParsedJwt {
+        header,
+        payload,
+        signature,
+        signing_input,
+    })
+}
+
 struct CacheState {
-    keys: HashMap<String, DecodingKey>,
+    keys: HashMap<String, RsaPubKey>,
     fetched_at: Option<Instant>,
 }
 
@@ -120,32 +199,42 @@ impl JwksCache {
         token: &str,
         expected_aud: &str,
     ) -> Result<Claims, AuthError> {
-        let header = decode_header(token).map_err(|e| AuthError::JwtHeader(e.to_string()))?;
-        let kid = header
+        let parsed = parse_jwt(token)?;
+        if parsed.header.alg != "RS256" {
+            return Err(AuthError::JwtHeader(format!(
+                "alg {} not supported",
+                parsed.header.alg
+            )));
+        }
+        let kid = parsed
+            .header
             .kid
+            .clone()
             .ok_or_else(|| AuthError::JwtHeader("no kid".into()))?;
 
         let key = self.get_key(&kid).await?;
+        key.verify(parsed.signing_input.as_bytes(), &parsed.signature)?;
 
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_audience(&[expected_aud]);
-        validation.set_issuer(&self.accepted_issuers);
-        validation.validate_exp = true;
-        validation.leeway = 60;
+        let claims: Claims = serde_json::from_slice(&parsed.payload)
+            .map_err(|e| AuthError::JwtValidation(format!("claims parse: {e}")))?;
 
-        let data: TokenData<Claims> = decode::<Claims>(token, &key, &validation)
-            .map_err(|e| AuthError::JwtValidation(e.to_string()))?;
-
-        if !self.accepted_issuers.iter().any(|i| i == &data.claims.iss) {
-            return Err(AuthError::IssuerRejected(data.claims.iss.clone()));
+        let now = chrono::Utc::now().timestamp();
+        if claims.exp + EXP_LEEWAY_SECS < now {
+            return Err(AuthError::JwtValidation("token expired".into()));
+        }
+        if claims.aud != expected_aud {
+            return Err(AuthError::JwtValidation("aud mismatch".into()));
+        }
+        if !self.accepted_issuers.iter().any(|i| i == &claims.iss) {
+            return Err(AuthError::IssuerRejected(claims.iss.clone()));
         }
 
-        Ok(data.claims)
+        Ok(claims)
     }
 
     /// Look up a signing key by `kid`. Refreshes the cache on miss
     /// (handles key rotation) and on staleness.
-    async fn get_key(&self, kid: &str) -> Result<DecodingKey, AuthError> {
+    async fn get_key(&self, kid: &str) -> Result<RsaPubKey, AuthError> {
         {
             let state = self.state.read().await;
             if let Some(k) = state.keys.get(kid)
@@ -196,10 +285,19 @@ impl JwksCache {
             let (Some(n), Some(e)) = (key.modulus.as_ref(), key.exponent.as_ref()) else {
                 continue;
             };
-            let Ok(decoding) = DecodingKey::from_rsa_components(n, e) else {
+            let Ok(n_bytes) = b64url_decode(n) else {
                 continue;
             };
-            keys.insert(key.kid, decoding);
+            let Ok(e_bytes) = b64url_decode(e) else {
+                continue;
+            };
+            keys.insert(
+                key.kid,
+                RsaPubKey {
+                    n: n_bytes,
+                    e: e_bytes,
+                },
+            );
         }
 
         let mut state = self.state.write().await;
@@ -211,7 +309,7 @@ impl JwksCache {
     /// Test-only constructor: seed the cache with a fixed set of
     /// keys so validation can run without network access.
     #[cfg(test)]
-    pub(crate) fn for_test(keys: Vec<(String, DecodingKey)>, issuer: &str) -> Self {
+    pub(crate) fn for_test(keys: Vec<(String, RsaPubKey)>, issuer: &str) -> Self {
         let mut map = HashMap::new();
         for (kid, key) in keys {
             map.insert(kid, key);

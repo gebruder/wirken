@@ -91,8 +91,14 @@ async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# JWT
-jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
+# JWT verification primitives. We do not pull `jsonwebtoken` because
+# it transitively depends on `rsa` (RUSTSEC-2023-0071, Marvin Attack
+# timing sidechannel, no patched versions). Both inbound JWT
+# verifiers (Google Chat, Bot Framework / Teams) only verify
+# RSASSA-PKCS1-v1_5 signatures with public key components, which
+# `ring::signature::RsaPublicKeyComponents` covers without `rsa`.
+ring = "0.17"
+base64 = "0.22"
 
 # Channel SDKs
 teloxide = { version = "0.17", features = ["macros"] }

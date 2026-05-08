@@ -460,35 +460,63 @@ fn non_bearer_scheme_rejected() {
 
 mod jwt {
     use super::*;
-    use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, encode};
+    use crate::auth::RsaPubKey;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use ring::rand::SystemRandom;
+    use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
     use serde_json::json;
 
     const TEST_ISSUER: &str = "chat@system.gserviceaccount.com";
     const TEST_AUD: &str = "123456789012";
     const TEST_KID: &str = "test-gchat-kid-01";
 
-    // Static 2048-bit RSA test keypair. See the twin constant in
-    // adapter-teams for the rationale (no runtime keygen, no rand
-    // 0.8 dep). Test-only, not used in production.
-    const TEST_PRIVATE_PEM: &[u8] = include_bytes!("test_rsa_private_TEST_FIXTURE_DO_NOT_USE.pem");
-    const TEST_PUBLIC_PEM: &[u8] = include_bytes!("test_rsa_public.pem");
-    const ATTACKER_PRIVATE_PEM: &[u8] =
-        include_bytes!("test_rsa_attacker_private_TEST_FIXTURE_DO_NOT_USE.pem");
+    // 2048-bit RSA test keypair, PKCS#8-DER encoded so ring's
+    // `RsaKeyPair::from_pkcs8` can load it directly. Public n,e are
+    // committed alongside (raw big-endian, no leading zeros) so the
+    // JwksCache test seed mirrors what the production refresh path
+    // stores after base64url-decoding JWKS values.
+    const LEGIT_PKCS8: &[u8] = include_bytes!("test_rsa_legit.pkcs8.der");
+    const LEGIT_N: &[u8] = include_bytes!("test_rsa_legit.n.bin");
+    const LEGIT_E: &[u8] = include_bytes!("test_rsa_legit.e.bin");
+    const ATTACKER_PKCS8: &[u8] = include_bytes!("test_rsa_attacker.pkcs8.der");
 
-    fn keypair() -> (EncodingKey, DecodingKey) {
-        let enc = EncodingKey::from_rsa_pem(TEST_PRIVATE_PEM).unwrap();
-        let dec = DecodingKey::from_rsa_pem(TEST_PUBLIC_PEM).unwrap();
-        (enc, dec)
+    fn legit_signer() -> RsaKeyPair {
+        RsaKeyPair::from_pkcs8(LEGIT_PKCS8).unwrap()
     }
 
-    fn attacker_enc() -> EncodingKey {
-        EncodingKey::from_rsa_pem(ATTACKER_PRIVATE_PEM).unwrap()
+    fn legit_pubkey() -> RsaPubKey {
+        RsaPubKey {
+            n: LEGIT_N.to_vec(),
+            e: LEGIT_E.to_vec(),
+        }
     }
 
-    fn sign(enc: &EncodingKey, kid: &str, claims: &serde_json::Value) -> String {
-        let mut header = Header::new(Algorithm::RS256);
-        header.kid = Some(kid.into());
-        encode(&header, claims, enc).unwrap()
+    fn attacker_signer() -> RsaKeyPair {
+        RsaKeyPair::from_pkcs8(ATTACKER_PKCS8).unwrap()
+    }
+
+    fn b64url(bytes: &[u8]) -> String {
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn sign(kp: &RsaKeyPair, kid: Option<&str>, claims: &serde_json::Value) -> String {
+        let header = match kid {
+            Some(k) => json!({ "alg": "RS256", "kid": k, "typ": "JWT" }),
+            None => json!({ "alg": "RS256", "typ": "JWT" }),
+        };
+        let header_b64 = b64url(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = b64url(&serde_json::to_vec(claims).unwrap());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let mut sig = vec![0u8; kp.public().modulus_len()];
+        kp.sign(
+            &RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            signing_input.as_bytes(),
+            &mut sig,
+        )
+        .unwrap();
+        format!("{signing_input}.{}", b64url(&sig))
     }
 
     fn exp_future() -> i64 {
@@ -501,11 +529,11 @@ mod jwt {
 
     #[tokio::test]
     async fn valid_token_is_accepted() {
-        let (enc, dec) = keypair();
-        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let kp = legit_signer();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), legit_pubkey())], TEST_ISSUER);
         let token = sign(
-            &enc,
-            TEST_KID,
+            &kp,
+            Some(TEST_KID),
             &json!({ "iss": TEST_ISSUER, "aud": TEST_AUD, "exp": exp_future() }),
         );
         let claims = cache.validate_token(&token, TEST_AUD).await.unwrap();
@@ -515,11 +543,11 @@ mod jwt {
 
     #[tokio::test]
     async fn wrong_aud_rejected() {
-        let (enc, dec) = keypair();
-        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let kp = legit_signer();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), legit_pubkey())], TEST_ISSUER);
         let token = sign(
-            &enc,
-            TEST_KID,
+            &kp,
+            Some(TEST_KID),
             &json!({ "iss": TEST_ISSUER, "aud": "other-project", "exp": exp_future() }),
         );
         assert!(matches!(
@@ -530,11 +558,11 @@ mod jwt {
 
     #[tokio::test]
     async fn expired_rejected() {
-        let (enc, dec) = keypair();
-        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let kp = legit_signer();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), legit_pubkey())], TEST_ISSUER);
         let token = sign(
-            &enc,
-            TEST_KID,
+            &kp,
+            Some(TEST_KID),
             &json!({ "iss": TEST_ISSUER, "aud": TEST_AUD, "exp": exp_past() }),
         );
         assert!(matches!(
@@ -545,12 +573,11 @@ mod jwt {
 
     #[tokio::test]
     async fn foreign_signed_rejected() {
-        let (_trusted_enc, trusted_dec) = keypair();
-        let attacker = attacker_enc();
-        let cache = JwksCache::for_test(vec![(TEST_KID.into(), trusted_dec)], TEST_ISSUER);
+        let attacker = attacker_signer();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), legit_pubkey())], TEST_ISSUER);
         let token = sign(
             &attacker,
-            TEST_KID,
+            Some(TEST_KID),
             &json!({ "iss": TEST_ISSUER, "aud": TEST_AUD, "exp": exp_future() }),
         );
         assert!(matches!(
@@ -561,16 +588,16 @@ mod jwt {
 
     #[tokio::test]
     async fn wrong_issuer_rejected() {
-        let (enc, dec) = keypair();
-        let cache = JwksCache::for_test(vec![(TEST_KID.into(), dec)], TEST_ISSUER);
+        let kp = legit_signer();
+        let cache = JwksCache::for_test(vec![(TEST_KID.into(), legit_pubkey())], TEST_ISSUER);
         let token = sign(
-            &enc,
-            TEST_KID,
+            &kp,
+            Some(TEST_KID),
             &json!({ "iss": "https://evil.example", "aud": TEST_AUD, "exp": exp_future() }),
         );
         assert!(matches!(
             cache.validate_token(&token, TEST_AUD).await,
-            Err(AuthError::JwtValidation(_))
+            Err(AuthError::IssuerRejected(_))
         ));
     }
 }

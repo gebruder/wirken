@@ -2709,29 +2709,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jsonwebtoken"
-version = "10.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0529410abe238729a60b108898784df8984c87f6054c9c4fcacc47e4803c1ce1"
-dependencies = [
- "base64",
- "ed25519-dalek",
- "getrandom 0.2.17",
- "hmac 0.12.1",
- "js-sys",
- "p256",
- "p384",
- "pem",
- "rand 0.8.6",
- "rsa",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "signature",
- "simple_asn1",
-]
-
-[[package]]
 name = "kdtree"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4756,18 +4733,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
 
 [[package]]
-name = "simple_asn1"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
-dependencies = [
- "num-bigint",
- "num-traits",
- "thiserror 2.0.18",
- "time",
-]
-
-[[package]]
 name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6774,10 +6739,11 @@ dependencies = [
 name = "wirken-adapter-google-chat"
 version = "1.2.0"
 dependencies = [
+ "base64",
  "capnp",
  "chrono",
- "jsonwebtoken",
  "reqwest 0.13.3",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",
@@ -6865,10 +6831,11 @@ name = "wirken-adapter-teams"
 version = "1.2.0"
 dependencies = [
  "anyhow",
+ "base64",
  "capnp",
  "chrono",
- "jsonwebtoken",
  "reqwest 0.13.3",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

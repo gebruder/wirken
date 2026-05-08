@@ -16,7 +16,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
-jsonwebtoken = { workspace = true }
+ring = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
