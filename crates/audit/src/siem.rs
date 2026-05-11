@@ -54,6 +54,48 @@ pub struct SiemConfig {
     /// Operator-provided denylist of variant names to suppress.
     /// Honored only when [`Self::typed_include_variants`] is `None`.
     pub typed_exclude_variants: Option<Vec<String>>,
+    /// Explicit opt-in/opt-out for the typed-event SIEM pipe.
+    ///
+    /// - `Some(true)`: spawn the worker with the default
+    ///   forwardable-variant set, even when no include/exclude or
+    ///   `sentinel_typed` override is set. Use this to subscribe
+    ///   to the default set without writing the full variant
+    ///   list in `siem.json`.
+    /// - `Some(false)`: explicit off switch. Overrides the other
+    ///   typed fields; the worker is not spawned even if
+    ///   `typed_include_variants`, `typed_exclude_variants`, or
+    ///   `sentinel_typed` are present. Use this to test the
+    ///   legacy-only path against a config that already has the
+    ///   typed fields populated.
+    /// - `None` (default): opt-in is inferred from the other
+    ///   three typed fields. Any of them set = spawn; all
+    ///   unset = no typed pipe (back-compatible with 1.3.0
+    ///   `siem.json` shapes).
+    pub typed_forwarding_enabled: Option<bool>,
+}
+
+impl SiemConfig {
+    /// Whether the operator has opted into the typed-event SIEM
+    /// pipe. Returns `false` when `typed_forwarding_enabled ==
+    /// Some(false)` (explicit off, overrides every other typed
+    /// field). Otherwise returns `true` when any of
+    /// `typed_forwarding_enabled == Some(true)`,
+    /// `typed_include_variants`, `typed_exclude_variants`, or
+    /// `sentinel_typed` is set. All-null returns `false` (the 1.3.0
+    /// default; back-compat with operators who never wrote any of
+    /// these fields).
+    ///
+    /// Single source of truth for the spawn-guard so the gateway
+    /// and the audit-crate tests cannot drift.
+    pub fn typed_forwarding_opted_in(&self) -> bool {
+        if self.typed_forwarding_enabled == Some(false) {
+            return false;
+        }
+        self.typed_forwarding_enabled == Some(true)
+            || self.typed_include_variants.is_some()
+            || self.typed_exclude_variants.is_some()
+            || self.sentinel_typed.is_some()
+    }
 }
 
 /// Sentinel-only second endpoint for typed-event forwarding.

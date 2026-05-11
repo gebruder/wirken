@@ -618,6 +618,7 @@ fn fixture_config(target: SiemTarget, hmac_secret: Option<&str>) -> SiemConfig {
         sentinel_typed: None,
         typed_include_variants: None,
         typed_exclude_variants: None,
+        typed_forwarding_enabled: None,
     }
 }
 

@@ -42,6 +42,7 @@ fn base_config(target: SiemTarget) -> SiemConfig {
         sentinel_typed: None,
         typed_include_variants: None,
         typed_exclude_variants: None,
+        typed_forwarding_enabled: None,
     }
 }
 
@@ -412,6 +413,66 @@ fn d3_legacy_siem_config_has_no_typed_opt_in() {
     assert!(cfg.typed_include_variants.is_none());
     assert!(cfg.typed_exclude_variants.is_none());
     assert!(cfg.sentinel_typed.is_none());
+    assert!(
+        !cfg.typed_forwarding_opted_in(),
+        "all-null SiemConfig must not opt in to the typed pipe"
+    );
+}
+
+#[test]
+fn d3_typed_forwarding_enabled_true_opts_in_with_default_variants() {
+    // typed_forwarding_enabled: Some(true) is the explicit
+    // subscription form: no include/exclude needed, the default
+    // forwardable-variant set is what the worker forwards. This
+    // closes the smoke-test Finding A where typed_include_variants:
+    // null left the worker un-spawned even though the operator
+    // wanted the default set.
+    let mut cfg = base_config(SiemTarget::Webhook);
+    cfg.typed_forwarding_enabled = Some(true);
+    assert!(cfg.typed_forwarding_opted_in());
+    // And the default set is still in effect: AssistantToolCalls is
+    // included, AssistantMessage is excluded.
+    let tc = fixture_tool_calls();
+    let msg = SessionEvent::AssistantMessage {
+        content: "secret".into(),
+        agent_id: "default".into(),
+    };
+    assert!(
+        siem_typed::should_forward(&tc, &cfg),
+        "default set forwards AssistantToolCalls"
+    );
+    assert!(
+        !siem_typed::should_forward(&msg, &cfg),
+        "default set excludes AssistantMessage"
+    );
+}
+
+#[test]
+fn d3_typed_forwarding_enabled_false_overrides_include() {
+    // typed_forwarding_enabled: Some(false) is the explicit off
+    // switch: even with typed_include_variants populated, the worker
+    // must not spawn. Lets an operator test the legacy-only path
+    // against a siem.json that already has the typed fields filled
+    // in.
+    let mut cfg = base_config(SiemTarget::Webhook);
+    cfg.typed_forwarding_enabled = Some(false);
+    cfg.typed_include_variants = Some(vec!["assistant_tool_calls".into()]);
+    assert!(
+        !cfg.typed_forwarding_opted_in(),
+        "Some(false) must override an otherwise-opted-in config"
+    );
+}
+
+#[test]
+fn d3_typed_include_variants_opts_in_without_explicit_flag() {
+    // Preserves the original audit-recommended path: setting
+    // typed_include_variants is itself an opt-in (no need to also
+    // set typed_forwarding_enabled). Older siem.json shapes that
+    // pre-date the explicit flag must keep working.
+    let mut cfg = base_config(SiemTarget::Webhook);
+    cfg.typed_include_variants = Some(vec!["assistant_tool_calls".into()]);
+    assert_eq!(cfg.typed_forwarding_enabled, None);
+    assert!(cfg.typed_forwarding_opted_in());
 }
 
 // ---------------------------------------------------------------------------

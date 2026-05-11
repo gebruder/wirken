@@ -422,6 +422,7 @@ mod tests {
             sentinel_typed: None,
             typed_include_variants: None,
             typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
         }
     }
 

@@ -2108,10 +2108,24 @@ fn adapter_pubkey_fingerprint(pubkey: &[u8; 32]) -> String {
 }
 
 /// Spawn the typed-event SIEM worker when the operator has opted
-/// in. "Opt-in" means the config has either a non-default
-/// include/exclude list, or (Sentinel) a configured
-/// `sentinel_typed` endpoint. Without one of those, the worker is
-/// not spawned and there is zero polling overhead.
+/// in. Opt-in is satisfied by any of four `siem.json` fields:
+///
+/// - `typed_forwarding_enabled: true`: explicit subscription
+///   with the default forwardable-variant set.
+/// - `typed_include_variants` set: operator-provided allowlist.
+/// - `typed_exclude_variants` set: operator-provided denylist
+///   over the default set.
+/// - `sentinel_typed` set: Sentinel parallel pipe (DCR-stream
+///   constraint).
+///
+/// `typed_forwarding_enabled: Some(false)` is an explicit off
+/// switch that overrides the three include/exclude/sentinel
+/// fields; the worker is not spawned even when those are set.
+/// Use this to test the legacy-only path against a config that
+/// already has the typed fields populated.
+///
+/// All-null (the 1.3.0 default) = no typed pipe. Back-compat with
+/// the original spec; the explicit-true form is the new opt-in.
 ///
 /// The worker reads from `session_events` via
 /// `SqliteSessionLog::get_since`; it never writes, so the audit
@@ -2121,10 +2135,7 @@ async fn maybe_spawn_typed_siem(
     siem_config: Option<&SiemConfig>,
 ) -> Option<wirken_audit::TypedEventForwarder> {
     let cfg_ref = siem_config?;
-    let opted_in = cfg_ref.typed_include_variants.is_some()
-        || cfg_ref.typed_exclude_variants.is_some()
-        || cfg_ref.sentinel_typed.is_some();
-    if !opted_in {
+    if !cfg_ref.typed_forwarding_opted_in() {
         return None;
     }
     let log = match wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()) {
@@ -2210,6 +2221,9 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         });
+    let typed_forwarding_enabled = json
+        .get("typed_forwarding_enabled")
+        .and_then(|v| v.as_bool());
 
     println!("  SIEM: forwarding to {target_str} at {endpoint}");
 
@@ -2223,6 +2237,7 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         sentinel_typed,
         typed_include_variants,
         typed_exclude_variants,
+        typed_forwarding_enabled,
     })
 }
 
