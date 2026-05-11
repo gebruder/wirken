@@ -340,7 +340,17 @@ pub enum SessionEvent {
     LlmResponse {
         request_id: String,
         finish_reason: String,
+        /// Defaulted so a pre-1.2.0 row carrying `tokens_in` (the
+        /// pre-1.2.0 name, intentionally not aliased — see C4) reads
+        /// as `input_tokens: 0` rather than failing. The legacy value
+        /// is silently dropped; the snapshot tests assert this is the
+        /// documented behaviour so a future revert can't pass tests
+        /// accidentally.
+        #[serde(default)]
         input_tokens: u32,
+        /// See [`Self::LlmResponse::input_tokens`] for the legacy
+        /// drop note.
+        #[serde(default)]
         output_tokens: u32,
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         cache_creation_input_tokens: u32,
@@ -1775,6 +1785,15 @@ impl SessionLog for SqliteSessionLog {
                 });
             }
 
+            // Hashes the raw stored `payload` text, not a
+            // deserialize-then-reserialize round-trip. This is what
+            // keeps schema renames safe: an event variant can gain
+            // or rename a field between versions and the leaf hash
+            // on rows already on disk still verifies, because the
+            // bytes that were stored at append time are the bytes
+            // being rehashed here. Any future schema work can rely
+            // on this — there is no migration path needed for chain
+            // integrity.
             let recomputed_leaf = sha256_hex(payload.as_bytes());
             if recomputed_leaf != leaf_hash {
                 return Ok(SessionVerifyResult::Broken {

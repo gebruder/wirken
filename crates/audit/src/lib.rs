@@ -18,7 +18,10 @@ pub use session_log::{
     SessionVerifyResult, SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord,
     TrustLevel,
 };
-pub use siem::{SiemConfig, SiemForwarder, SiemTarget, compute_webhook_signature};
+pub use siem::{
+    SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload, build_sentinel_payload,
+    build_splunk_body, build_webhook_request, compute_webhook_signature,
+};
 pub use signing::{
     AuditSigningKey, CHAIN_HEAD_DOMAIN, CHAIN_HEAD_SCHEMA_VERSION, audit_signing_dir,
 };

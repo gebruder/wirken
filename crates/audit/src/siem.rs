@@ -109,34 +109,7 @@ impl SiemForwarder {
     }
 
     async fn forward_datadog(&self, events: &[AuditEvent]) -> Result<(), String> {
-        let logs: Vec<serde_json::Value> = events
-            .iter()
-            .map(|e| {
-                let channel_tag = e.channel.as_deref().unwrap_or("");
-                serde_json::json!({
-                    "message": format!("{} {} {}", e.action, e.target, e.actor_id),
-                    "ddsource": "wirken",
-                    "ddtags": format!(
-                        "service:{},env:{},action:{},channel:{}",
-                        self.config.service, self.config.environment, e.action, channel_tag
-                    ),
-                    "hostname": hostname(),
-                    "service": self.config.service,
-                    "status": action_to_severity(&e.action),
-                    "timestamp": e.ts.timestamp_millis(),
-                    "wirken": {
-                        "actor_kind": actor_kind_label(e.actor_kind),
-                        "actor_id": e.actor_id,
-                        "action": e.action,
-                        "target": e.target,
-                        "channel": e.channel,
-                        "session": e.session,
-                        "detail": e.detail,
-                    }
-                })
-            })
-            .collect();
-
+        let logs = build_datadog_payload(events, &self.config);
         self.http
             .post(&self.config.endpoint)
             .header("DD-API-KEY", &self.config.api_key)
@@ -145,33 +118,11 @@ impl SiemForwarder {
             .send()
             .await
             .map_err(|e| format!("Datadog: {e}"))?;
-
         Ok(())
     }
 
     async fn forward_splunk(&self, events: &[AuditEvent]) -> Result<(), String> {
-        // Splunk HEC expects one JSON object per event, newline-delimited
-        let mut body = String::new();
-        for event in events {
-            let hec_event = serde_json::json!({
-                "event": {
-                    "actor_kind": actor_kind_label(event.actor_kind),
-                    "actor_id": event.actor_id,
-                    "action": event.action,
-                    "target": event.target,
-                    "channel": event.channel,
-                    "session": event.session,
-                    "detail": event.detail,
-                },
-                "time": event.ts.timestamp(),
-                "sourcetype": "wirken:audit",
-                "source": "wirken",
-                "host": hostname(),
-            });
-            body.push_str(&hec_event.to_string());
-            body.push('\n');
-        }
-
+        let body = build_splunk_body(events);
         self.http
             .post(&self.config.endpoint)
             .header("Authorization", format!("Splunk {}", self.config.api_key))
@@ -180,43 +131,16 @@ impl SiemForwarder {
             .send()
             .await
             .map_err(|e| format!("Splunk: {e}"))?;
-
         Ok(())
     }
 
     async fn forward_sentinel(&self, events: &[AuditEvent]) -> Result<(), String> {
-        // Sentinel's Logs Ingestion API takes a JSON array of records;
-        // the DCR attached to the endpoint URL transforms records into
-        // the operator's custom-table columns. We send the same flat
-        // shape as the webhook path so a single DCR transform covers
-        // both targets — the operator picks `Sentinel` to require the
-        // bearer token and document the auth model, not because the
-        // body schema differs.
         if self.config.api_key.is_empty() {
             return Err(
                 "Sentinel: api_key (Azure AD bearer token) is required, not optional".into(),
             );
         }
-
-        let payload: Vec<serde_json::Value> = events
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "TimeGenerated": e.ts.to_rfc3339(),
-                    "ActorKind": actor_kind_label(e.actor_kind),
-                    "ActorId": e.actor_id,
-                    "Action": e.action,
-                    "Target": e.target,
-                    "Channel": e.channel,
-                    "Session": e.session,
-                    "Detail": e.detail,
-                    "Service": self.config.service,
-                    "Environment": self.config.environment,
-                    "Hostname": hostname(),
-                })
-            })
-            .collect();
-
+        let payload = build_sentinel_payload(events, &self.config);
         self.http
             .post(&self.config.endpoint)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
@@ -225,31 +149,11 @@ impl SiemForwarder {
             .send()
             .await
             .map_err(|e| format!("Sentinel: {e}"))?;
-
         Ok(())
     }
 
     async fn forward_webhook(&self, events: &[AuditEvent]) -> Result<(), String> {
-        let payload: Vec<serde_json::Value> = events
-            .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "timestamp": e.ts.to_rfc3339(),
-                    "actor_kind": actor_kind_label(e.actor_kind),
-                    "actor_id": e.actor_id,
-                    "action": e.action,
-                    "target": e.target,
-                    "channel": e.channel,
-                    "session": e.session,
-                    "detail": e.detail,
-                    "service": self.config.service,
-                    "environment": self.config.environment,
-                    "hostname": hostname(),
-                })
-            })
-            .collect();
-
-        let body = serde_json::to_vec(&payload).map_err(|e| format!("Webhook serialize: {e}"))?;
+        let (body, signature) = build_webhook_request(events, &self.config)?;
 
         let mut request = self
             .http
@@ -259,11 +163,7 @@ impl SiemForwarder {
         if !self.config.api_key.is_empty() {
             request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
-
-        if let Some(secret) = self.config.hmac_secret.as_deref()
-            && !secret.is_empty()
-        {
-            let sig = compute_webhook_signature(secret.as_bytes(), &body);
+        if let Some(sig) = signature {
             request = request.header("X-Wirken-Signature", format!("sha256={sig}"));
         }
 
@@ -275,6 +175,136 @@ impl SiemForwarder {
 
         Ok(())
     }
+}
+
+/// Build the Datadog Log-Intake payload (one entry per event).
+/// Pure — no HTTP. Extracted so the wire snapshot tests can assert
+/// the envelope shape without running an HTTP server.
+pub fn build_datadog_payload(events: &[AuditEvent], config: &SiemConfig) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .map(|e| {
+            let channel_tag = e.channel.as_deref().unwrap_or("");
+            serde_json::json!({
+                "message": format!("{} {} {}", e.action, e.target, e.actor_id),
+                "ddsource": "wirken",
+                "ddtags": format!(
+                    "service:{},env:{},action:{},channel:{}",
+                    config.service, config.environment, e.action, channel_tag
+                ),
+                "hostname": hostname(),
+                "service": config.service,
+                "status": action_to_severity(&e.action),
+                "timestamp": e.ts.timestamp_millis(),
+                "wirken": {
+                    "actor_kind": actor_kind_label(e.actor_kind),
+                    "actor_id": e.actor_id,
+                    "action": e.action,
+                    "target": e.target,
+                    "channel": e.channel,
+                    "session": e.session,
+                    "detail": e.detail,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Build the Splunk HEC body (one newline-delimited JSON object per
+/// event). Pure — no HTTP.
+pub fn build_splunk_body(events: &[AuditEvent]) -> String {
+    let mut body = String::new();
+    for event in events {
+        let hec_event = serde_json::json!({
+            "event": {
+                "actor_kind": actor_kind_label(event.actor_kind),
+                "actor_id": event.actor_id,
+                "action": event.action,
+                "target": event.target,
+                "channel": event.channel,
+                "session": event.session,
+                "detail": event.detail,
+            },
+            "time": event.ts.timestamp(),
+            "sourcetype": "wirken:audit",
+            "source": "wirken",
+            "host": hostname(),
+        });
+        body.push_str(&hec_event.to_string());
+        body.push('\n');
+    }
+    body
+}
+
+/// Build the Microsoft Sentinel Logs-Ingestion payload. Same flat
+/// shape as the webhook path so a single DCR transform covers both.
+/// Pure — no HTTP.
+pub fn build_sentinel_payload(
+    events: &[AuditEvent],
+    config: &SiemConfig,
+) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "TimeGenerated": e.ts.to_rfc3339(),
+                "ActorKind": actor_kind_label(e.actor_kind),
+                "ActorId": e.actor_id,
+                "Action": e.action,
+                "Target": e.target,
+                "Channel": e.channel,
+                "Session": e.session,
+                "Detail": e.detail,
+                "Service": config.service,
+                "Environment": config.environment,
+                "Hostname": hostname(),
+            })
+        })
+        .collect()
+}
+
+/// Build the exact body bytes the webhook target sends and the
+/// `X-Wirken-Signature` value paired with them. Extracted from
+/// [`SiemForwarder::forward_webhook`] so tests can assert the
+/// signature is computed over the *same* bytes that go on the wire,
+/// not over a re-serialized envelope (any field-ordering drift would
+/// produce a different signature than the receiver computes).
+///
+/// Returns `(body, signature)`. `signature` is `Some` only when
+/// `config.hmac_secret` is set to a non-empty string; otherwise
+/// `None` and the caller omits the header.
+pub fn build_webhook_request(
+    events: &[AuditEvent],
+    config: &SiemConfig,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let payload: Vec<serde_json::Value> = events
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "timestamp": e.ts.to_rfc3339(),
+                "actor_kind": actor_kind_label(e.actor_kind),
+                "actor_id": e.actor_id,
+                "action": e.action,
+                "target": e.target,
+                "channel": e.channel,
+                "session": e.session,
+                "detail": e.detail,
+                "service": config.service,
+                "environment": config.environment,
+                "hostname": hostname(),
+            })
+        })
+        .collect();
+
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("Webhook serialize: {e}"))?;
+
+    let signature = config
+        .hmac_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|secret| compute_webhook_signature(secret.as_bytes(), &body));
+
+    Ok((body, signature))
 }
 
 /// HMAC-SHA-256 over `body` keyed by `secret`, hex-encoded.
