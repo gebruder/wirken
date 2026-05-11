@@ -78,13 +78,111 @@ fn pre_1_2_0_assistant_tool_calls_deserializes_with_empty_agent_id() {
         r#"{"kind":"assistant_tool_calls","calls":[{"id":"c1","name":"exec","arguments":"{}"}]}"#;
     let ev: SessionEvent = serde_json::from_str(legacy).unwrap();
     match ev {
-        SessionEvent::AssistantToolCalls { calls, agent_id } => {
+        SessionEvent::AssistantToolCalls {
+            calls,
+            agent_id,
+            adapter_id,
+            sender_id,
+        } => {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "c1");
             assert_eq!(agent_id, "");
+            assert!(adapter_id.is_none(), "pre-A1 rows have no adapter_id");
+            assert!(sender_id.is_none(), "pre-A1 rows have no sender_id");
         }
         other => panic!("expected AssistantToolCalls, got {other:?}"),
     }
+}
+
+#[test]
+fn pre_a1_assistant_tool_calls_with_agent_id_only_deserializes() {
+    // A pre-A1 row from a 1.3.0 emitter carries `agent_id` but no
+    // adapter_id / sender_id. Forward-compat: the 1.3.x reader fills
+    // both new fields from their `#[serde(default)]` (None).
+    let legacy = r#"{"kind":"assistant_tool_calls","calls":[{"id":"c1","name":"exec","arguments":"{\"command\":\"ls\"}"}],"agent_id":"agent-1"}"#;
+    let ev: SessionEvent = serde_json::from_str(legacy).unwrap();
+    match ev {
+        SessionEvent::AssistantToolCalls {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => {
+            assert_eq!(agent_id, "agent-1");
+            assert!(adapter_id.is_none());
+            assert!(sender_id.is_none());
+        }
+        other => panic!("expected AssistantToolCalls, got {other:?}"),
+    }
+}
+
+#[test]
+fn pre_a1_tool_result_with_agent_id_only_deserializes() {
+    let legacy = r#"{"kind":"tool_result","call_id":"c1","tool_name":"exec","output":"ok","success":true,"agent_id":"agent-1"}"#;
+    let ev: SessionEvent = serde_json::from_str(legacy).unwrap();
+    match ev {
+        SessionEvent::ToolResult {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => {
+            assert_eq!(agent_id, "agent-1");
+            assert!(adapter_id.is_none());
+            assert!(sender_id.is_none());
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+}
+
+#[test]
+fn a1_assistant_tool_calls_emitted_with_webchat_identity() {
+    // 1.3.x emit shape: when the inbound came through the webchat
+    // adapter, the AssistantToolCalls row carries
+    // adapter_id="webchat" and sender_id="webchat-user" so a SIEM
+    // rule can pivot on channel without joining back to the
+    // UserMessage row.
+    let ev = SessionEvent::AssistantToolCalls {
+        calls: vec![wirken_audit::ToolCallRecord {
+            id: "c1".into(),
+            name: "exec".into(),
+            arguments: r#"{"command":"curl https://example.com"}"#.into(),
+        }],
+        agent_id: "default".into(),
+        adapter_id: Some("webchat".into()),
+        sender_id: Some("webchat-user".into()),
+    };
+    let v = serde_json::to_value(&ev).unwrap();
+    assert_eq!(
+        v.get("adapter_id").and_then(|x| x.as_str()),
+        Some("webchat")
+    );
+    assert_eq!(
+        v.get("sender_id").and_then(|x| x.as_str()),
+        Some("webchat-user")
+    );
+}
+
+#[test]
+fn a1_tool_result_emitted_with_webchat_identity() {
+    let ev = SessionEvent::ToolResult {
+        call_id: "c1".into(),
+        tool_name: "exec".into(),
+        output: "ok".into(),
+        success: true,
+        agent_id: "default".into(),
+        adapter_id: Some("webchat".into()),
+        sender_id: Some("webchat-user".into()),
+    };
+    let v = serde_json::to_value(&ev).unwrap();
+    assert_eq!(
+        v.get("adapter_id").and_then(|x| x.as_str()),
+        Some("webchat")
+    );
+    assert_eq!(
+        v.get("sender_id").and_then(|x| x.as_str()),
+        Some("webchat-user")
+    );
 }
 
 #[test]

@@ -137,6 +137,15 @@ pub struct Agent {
     /// The current user message that triggered this processing round.
     /// Captured in process_message() for inclusion in denial audit events.
     current_trigger: Option<String>,
+    /// Platform-side identity (adapter + sender) of the inbound that
+    /// triggered the current processing round. Set at the top of
+    /// `process_message_inner` / `process_message_stream_with` so
+    /// downstream tool-call emits (`AssistantToolCalls`,
+    /// `ToolResult`) can carry the same identity as the sibling
+    /// `UserMessage` row. Not cleared at end-of-turn (every new
+    /// turn re-sets it); tests that snapshot agent state between
+    /// turns may observe the previous turn's value.
+    current_inbound: InboundContext,
     /// Session log this agent writes durability events to. Slice 1
     /// of item 2 in `docs/managed-agents-parity.md` makes every
     /// interaction in process_message a typed session event written
@@ -281,6 +290,7 @@ impl Agent {
             permissions: None,
             org_permissions: None,
             current_trigger: None,
+            current_inbound: InboundContext::default(),
             session_log,
             session_handle,
             context_engine,
@@ -362,6 +372,7 @@ impl Agent {
             permissions: None,
             org_permissions: None,
             current_trigger: None,
+            current_inbound: InboundContext::default(),
             session_log,
             session_handle,
             context_engine,
@@ -433,6 +444,11 @@ impl Agent {
                 ),
                 success: false,
                 agent_id: agent_id.to_string(),
+                // heal_partial_tool_rounds runs at session-load time
+                // when no inbound context is in scope; the synthetic
+                // result carries no platform identity.
+                adapter_id: None,
+                sender_id: None,
             };
             log.append(handle, TrustLevel::Tool, event)
                 .map_err(|e| AgentError::SessionLog(e.to_string()))?;
@@ -1205,6 +1221,12 @@ impl Agent {
             return Ok(replay);
         }
 
+        // Stash the inbound context for the duration of the turn so
+        // tool-call emits (`AssistantToolCalls`, `ToolResult`) can
+        // carry the same `adapter_id` / `sender_id` as the sibling
+        // `UserMessage` row.
+        self.current_inbound = inbound.clone();
+
         // agent-runtime-error-recovery: reset the per-turn
         // tool-validation counter so a tool that hit its retry cap on
         // a previous turn gets a fresh budget on this one.
@@ -1414,6 +1436,8 @@ impl Agent {
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
                             agent_id: self.id.clone(),
+                            adapter_id: self.current_inbound.adapter_id.clone(),
+                            sender_id: self.current_inbound.sender_id.clone(),
                         },
                     )?;
 
@@ -1437,6 +1461,8 @@ impl Agent {
                                 output: result.output.clone(),
                                 success: result.success,
                                 agent_id: self.id.clone(),
+                                adapter_id: self.current_inbound.adapter_id.clone(),
+                                sender_id: self.current_inbound.sender_id.clone(),
                             },
                         )?;
                     }
@@ -1457,6 +1483,8 @@ impl Agent {
                                     output: result.output.clone(),
                                     success: result.success,
                                     agent_id: self.id.clone(),
+                                    adapter_id: self.current_inbound.adapter_id.clone(),
+                                    sender_id: self.current_inbound.sender_id.clone(),
                                 },
                             )?;
                         }
@@ -1506,6 +1534,10 @@ impl Agent {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
+        // Stash inbound for tool-call emits during the streaming turn.
+        // Same rationale as the non-streaming path.
+        self.current_inbound = inbound.clone();
+
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             let _ = tx
                 .send(StreamEvent::Done(LlmResponse::Text(
@@ -1712,6 +1744,8 @@ impl Agent {
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
                             agent_id: self.id.clone(),
+                            adapter_id: self.current_inbound.adapter_id.clone(),
+                            sender_id: self.current_inbound.sender_id.clone(),
                         },
                     )?;
 
@@ -1757,6 +1791,8 @@ impl Agent {
                                 output: result.output.clone(),
                                 success: result.success,
                                 agent_id: self.id.clone(),
+                                adapter_id: self.current_inbound.adapter_id.clone(),
+                                sender_id: self.current_inbound.sender_id.clone(),
                             },
                         )?;
                     }

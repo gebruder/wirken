@@ -305,6 +305,17 @@ pub enum SessionEvent {
         calls: Vec<ToolCallRecord>,
         #[serde(default)]
         agent_id: String,
+        /// Adapter that delivered the inbound message that drove
+        /// this tool round. Carried so a SIEM detection on
+        /// `AssistantToolCalls` can pivot to the channel without
+        /// joining back to the sibling `UserMessage` row by
+        /// `session_id`. `None` for CLI / cron / subagent paths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        /// Platform sender that drove this tool round. Same source
+        /// and `None` semantics as `adapter_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// Result of a single tool call.
     ToolResult {
@@ -314,6 +325,14 @@ pub enum SessionEvent {
         success: bool,
         #[serde(default)]
         agent_id: String,
+        /// See [`Self::AssistantToolCalls::adapter_id`]. Mirrored
+        /// onto the result so a SIEM rule observing only the result
+        /// row still gets the inbound channel without a join.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        /// See [`Self::AssistantToolCalls::sender_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// LLM request metadata. Full request body is reconstructible
     /// from prior session events; this carries hashes for the

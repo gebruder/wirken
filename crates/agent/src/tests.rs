@@ -1730,6 +1730,8 @@ mod durability {
                 SessionEvent::AssistantToolCalls {
                     calls: crate::runtime::Agent::calls_to_records(&calls),
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -1742,6 +1744,8 @@ mod durability {
                     output: "a.txt\nb.txt".into(),
                     success: true,
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -1967,6 +1971,8 @@ mod wake {
             SessionEvent::AssistantToolCalls {
                 calls,
                 agent_id: "test-agent".into(),
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1989,6 +1995,8 @@ mod wake {
                 output: output.into(),
                 success: true,
                 agent_id: "test-agent".into(),
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -5267,6 +5275,8 @@ mod verify {
                         arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
                     }],
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -5279,6 +5289,8 @@ mod verify {
                     output: "hello from disk".into(),
                     success: true,
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -5312,6 +5324,8 @@ mod verify {
                         arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
                     }],
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -5324,6 +5338,8 @@ mod verify {
                     output: "OLD".into(),
                     success: true,
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -5354,6 +5370,8 @@ mod verify {
                         arguments: serde_json::json!({"command":"date"}).to_string(),
                     }],
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -5366,6 +5384,8 @@ mod verify {
                     output: "Wed Apr 9 12:34:56 UTC 2026".into(),
                     success: true,
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();

@@ -600,6 +600,8 @@ mod session {
             output: output.into(),
             success: true,
             agent_id: "test-agent".into(),
+            adapter_id: None,
+            sender_id: None,
         }
     }
 
@@ -943,6 +945,8 @@ mod session {
                 SessionEvent::AssistantToolCalls {
                     calls: calls.clone(),
                     agent_id: "test-agent".into(),
+                    adapter_id: None,
+                    sender_id: None,
                 },
             ),
             (
@@ -1057,6 +1061,8 @@ mod session {
             output: "hello".into(),
             success: true,
             agent_id: "test-agent".into(),
+            adapter_id: None,
+            sender_id: None,
         };
         log.append(&h, TrustLevel::Tool, event.clone()).unwrap();
         log.append(&h, TrustLevel::Tool, event).unwrap();
