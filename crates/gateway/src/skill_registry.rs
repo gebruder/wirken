@@ -106,8 +106,44 @@ pub fn hash_skill_file(path: &Path) -> Result<Vec<u8>, GatewayError> {
     Ok(hasher.finalize().to_vec())
 }
 
-/// Sign a skill directory. Signs the SKILL.md content hash with Ed25519.
-/// Writes the signature to SKILL.sig as hex.
+/// Compute the SHA-256 hash that covers the full signable surface of
+/// a skill bundle: the SKILL.md content, and the skill.wasm content
+/// when present.
+///
+/// **Composite layout:** `sha256(SKILL.md_bytes || 0x00 || skill.wasm_bytes)`
+/// when skill.wasm exists; plain `sha256(SKILL.md_bytes)` when it does
+/// not. The null byte is a separator that prevents a content boundary
+/// from being confused with file content (a trailing null inside
+/// SKILL.md would otherwise hash identically to a preceding empty
+/// wasm). Bundles authored before wasm was in scope continue to
+/// hash to the same value as long as no skill.wasm file appears at
+/// verify time; this preserves their existing signatures.
+///
+/// Adding a skill.wasm post-sign or removing one post-sign both
+/// shift the composite and produce `VerifyResult::Invalid` on
+/// verification, which is the intent of the wider scope.
+pub fn hash_skill_bundle(skill_dir: &Path) -> Result<Vec<u8>, GatewayError> {
+    let skill_md = skill_dir.join("SKILL.md");
+    let md_bytes = std::fs::read(&skill_md)
+        .map_err(|e| GatewayError::Config(format!("read {}: {e}", skill_md.display())))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&md_bytes);
+
+    let wasm_path = skill_dir.join("skill.wasm");
+    if wasm_path.exists() {
+        let wasm_bytes = std::fs::read(&wasm_path)
+            .map_err(|e| GatewayError::Config(format!("read {}: {e}", wasm_path.display())))?;
+        hasher.update([0x00]);
+        hasher.update(&wasm_bytes);
+    }
+    Ok(hasher.finalize().to_vec())
+}
+
+/// Sign a skill directory. Signs the composite bundle hash with
+/// Ed25519: SKILL.md alone when the directory has no skill.wasm,
+/// otherwise the composite over both files (see
+/// [`hash_skill_bundle`] for the layout). Writes the signature to
+/// SKILL.sig as hex.
 pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, GatewayError> {
     let skill_md = skill_dir.join("SKILL.md");
     if !skill_md.exists() {
@@ -117,7 +153,7 @@ pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, 
         )));
     }
 
-    let hash = hash_skill_file(&skill_md)?;
+    let hash = hash_skill_bundle(skill_dir)?;
     let signature = signing_key.sign(&hash);
     let sig_hex = hex_encode(&signature.to_bytes());
 
@@ -151,7 +187,6 @@ pub fn sign_skill(skill_dir: &Path, signing_key: &SigningKey) -> Result<String, 
 /// "the bundle's signature checks against the bundle's own key", not
 /// "the bundle came from a trusted publisher".
 pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, GatewayError> {
-    let skill_md = skill_dir.join("SKILL.md");
     let sig_path = skill_dir.join("SKILL.sig");
     let key_path = skill_dir.join("SKILL.pub");
 
@@ -159,7 +194,7 @@ pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, Gatewa
         return Ok(VerifyResult::Unsigned);
     }
 
-    let hash = hash_skill_file(&skill_md)?;
+    let hash = hash_skill_bundle(skill_dir)?;
 
     let sig_hex = std::fs::read_to_string(&sig_path)
         .map_err(|e| GatewayError::Config(format!("read sig: {e}")))?;
@@ -248,8 +283,7 @@ pub fn verify_skill_with_expected_key_and_delegation(
     delegation_sig_hex: Option<&str>,
     bundled_root: Option<&VerifyingKey>,
 ) -> Result<VerifyResult, GatewayError> {
-    let skill_md = skill_dir.join("SKILL.md");
-    let hash = hash_skill_file(&skill_md)?;
+    let hash = hash_skill_bundle(skill_dir)?;
 
     let sig_bytes = hex_decode(expected_sig_hex.trim())
         .map_err(|e| GatewayError::Config(format!("decode sig: {e}")))?;

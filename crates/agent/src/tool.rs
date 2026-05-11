@@ -471,8 +471,24 @@ impl ToolRegistry {
             }
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // B3: strip ANSI / C1 control sequences from the captured
+        // stdout / stderr before either is fed back into the model
+        // turn. The exec sink runs untrusted commands (a Tier 3
+        // prompt approves each non-allowlisted verb); their output
+        // is attacker-influenced text that gets injected verbatim
+        // into the next LLM turn. A response carrying a fake `sudo`
+        // prompt or window-title escape can otherwise confuse the
+        // model about what ran.
+        //
+        // The audit chain sees the same stripped string because the
+        // `SessionEvent::ToolResult` emit in `runtime.rs` clones
+        // `output` from the value returned here. The strip drops
+        // formatting and control bytes; printable character content
+        // is preserved, so an auditor reviewing `audit.db` still
+        // sees what files were listed, what stdout reported, etc.,
+        // just without the color codes and cursor moves.
+        let stdout = crate::ansi::strip_control_sequences(&String::from_utf8_lossy(&output.stdout));
+        let stderr = crate::ansi::strip_control_sequences(&String::from_utf8_lossy(&output.stderr));
 
         let mut result = String::new();
         if !stdout.is_empty() {

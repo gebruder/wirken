@@ -113,7 +113,18 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     println!();
     let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
     match agent.process_message(message, inbound_id).await {
-        Ok(result) => println!("{}", result.response),
+        // B2: strip ANSI / C1 control sequences at the print
+        // boundary. The model's response is shaped by skill bodies
+        // in the system prompt and by tool output the model echoes
+        // back; a hostile skill that asks the model to emit
+        // `\x1b[2K\rsudo password:` would otherwise render in the
+        // operator's terminal as a fake prompt. The raw response
+        // stays in the audit chain unchanged (the audit-write
+        // boundary is upstream of this print).
+        Ok(result) => println!(
+            "{}",
+            wirken_agent::ansi::strip_control_sequences(&result.response)
+        ),
         Err(e) => {
             eprintln!("  Error: {e}");
             std::process::exit(1);
@@ -189,7 +200,18 @@ async fn send_with_agent_config(
     println!();
     let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
     match agent.process_message(message, inbound_id).await {
-        Ok(result) => println!("{}", result.response),
+        // B2: strip ANSI / C1 control sequences at the print
+        // boundary. The model's response is shaped by skill bodies
+        // in the system prompt and by tool output the model echoes
+        // back; a hostile skill that asks the model to emit
+        // `\x1b[2K\rsudo password:` would otherwise render in the
+        // operator's terminal as a fake prompt. The raw response
+        // stays in the audit chain unchanged (the audit-write
+        // boundary is upstream of this print).
+        Ok(result) => println!(
+            "{}",
+            wirken_agent::ansi::strip_control_sequences(&result.response)
+        ),
         Err(e) => {
             eprintln!("  Error: {e}");
             std::process::exit(1);
