@@ -10,12 +10,12 @@ tagged.
 
 ## Unreleased
 
-## [1.2.0] - 2026-05-07
+## [1.3.0] - 2026-05-11
 
 ### Audit schema
 
-Audit schema 1.2.0; identity correlation, field renames, webhook
-HMAC. Pre-1.2.0 audit databases remain readable; chain verification
+Audit schema 1.3.0; identity correlation, field renames, webhook
+HMAC. Pre-1.3.0 audit databases remain readable; chain verification
 hashes the stored payload bytes, not a re-serialized event.
 
 **Schema-breaking**
@@ -23,7 +23,7 @@ hashes the stored payload bytes, not a re-serialized event.
 - `AuditEvent.actor` split into `actor_kind: ActorKind` (`User` /
   `Agent` / `Service`) and `actor_id: String`. `channel` and
   `session` become `Option<String>`. A custom deserializer accepts
-  the pre-1.2.0 single-`actor` shape; known service literals
+  the pre-1.3.0 single-`actor` shape; known service literals
   (`gateway`, `orchestrator`, `audit`, `webchat-user`) classify as
   `Service`, everything else as `User`.
 - `LlmResponse.tokens_in` / `tokens_out` renamed to `input_tokens` /
@@ -40,7 +40,7 @@ hashes the stored payload bytes, not a re-serialized event.
 - `ChainHead.signing_key_id` renamed to `signing_pubkey`.
 - `PermissionDenied` gains `denial_source: DenialSource` (`Tier` /
   `OrgPolicy`); `tier` becomes `Option<String>` populated only for
-  tier-source denials. The pre-1.2.0 `"tier":"org_policy"` sentinel
+  tier-source denials. The pre-1.3.0 `"tier":"org_policy"` sentinel
   is retired.
 - `AuditEvent.target` no longer carries inbound/outbound message
   bodies. The body moves to `detail.content`; `target` becomes a
@@ -84,7 +84,7 @@ hashes the stored payload bytes, not a re-serialized event.
   `compute_webhook_signature` exposed from `wirken_audit::siem` so
   the SIEM wire envelopes are assertable without an HTTP server.
 - Wire-format regression suite at `crates/audit/tests/schema_v1_2.rs`
-  covers every changed variant: pre-1.2.0 row deserialisation,
+  covers every changed variant: pre-1.3.0 row deserialisation,
   presence of new fields, absence of removed fields, and HMAC over
   the exact body bytes.
 
@@ -98,13 +98,15 @@ hashes the stored payload bytes, not a re-serialized event.
   schema work and the credential-plumbing work stay reviewable in
   isolation.
 - `LlmResponse.input_tokens` and `output_tokens` carry
-  `#[serde(default)]`. A pre-1.2.0 row carrying `tokens_in` /
+  `#[serde(default)]`. A pre-1.3.0 row carrying `tokens_in` /
   `tokens_out` deserializes to zero rather than failing; the legacy
   values are silently dropped. There is no serde alias by design.
   The regression fixture
   (`pre_1_2_0_llm_response_drops_renamed_token_fields_to_zero`)
   pins this so a future revert that re-introduces the alias fails
   the suite.
+
+## [1.2.0] - 2026-05-07
 
 ### Skill loader
 
