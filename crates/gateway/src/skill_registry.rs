@@ -699,4 +699,88 @@ mod tests {
             other => panic!("expected Invalid, got {other:?}"),
         }
     }
+
+    // ---- B1: skill.wasm under composite signature scope ---------------
+
+    /// A bundle with no `skill.wasm` hashes to the same value as it
+    /// did pre-1.3.0: `sha256(SKILL.md_bytes)` alone. Pre-1.3.0
+    /// signatures must continue to verify after the composite
+    /// helper landed.
+    #[test]
+    fn c4_md_only_bundle_hashes_to_pre_wasm_value() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("md-only");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), b"---\nname: x\n---\nbody").unwrap();
+
+        let composite = hash_skill_bundle(&skill_dir).unwrap();
+        let md_only = hash_skill_file(&skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(
+            composite, md_only,
+            "no skill.wasm in dir must preserve pre-1.3.0 hash so old signatures still verify"
+        );
+    }
+
+    /// Signing with a `skill.wasm` present and verifying with the
+    /// same wasm yields `Valid`.
+    #[test]
+    fn c4_wasm_bundle_sign_then_verify_is_valid() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("wasm-skill");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), b"---\nname: x\n---\nbody").unwrap();
+        std::fs::write(skill_dir.join("skill.wasm"), b"\x00asm\x01\x00\x00\x00").unwrap();
+
+        let signing = random_signing_key();
+        sign_skill(&skill_dir, &signing).unwrap();
+        match verify_skill_self_signed(&skill_dir).unwrap() {
+            VerifyResult::Valid { .. } => {}
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    /// Swap the `skill.wasm` for different bytes after sign and the
+    /// composite shifts; verify reports `Invalid`. Locks in the
+    /// scope expansion: the wasm is in the signature surface.
+    #[test]
+    fn c4_swapped_wasm_fails_verification() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("wasm-tamper");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), b"---\nname: x\n---\nbody").unwrap();
+        std::fs::write(skill_dir.join("skill.wasm"), b"original-wasm").unwrap();
+
+        let signing = random_signing_key();
+        sign_skill(&skill_dir, &signing).unwrap();
+
+        // Tamper: swap the wasm bytes without re-signing.
+        std::fs::write(skill_dir.join("skill.wasm"), b"tampered-wasm").unwrap();
+
+        match verify_skill_self_signed(&skill_dir).unwrap() {
+            VerifyResult::Invalid => {}
+            other => panic!("expected Invalid after wasm swap, got {other:?}"),
+        }
+    }
+
+    /// Adding a `skill.wasm` after sign changes the composite and
+    /// fails verification. The opposite direction (removing wasm
+    /// after sign) is also caught.
+    #[test]
+    fn c4_adding_wasm_post_sign_fails_verification() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("wasm-injected");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), b"---\nname: x\n---\nbody").unwrap();
+
+        let signing = random_signing_key();
+        sign_skill(&skill_dir, &signing).unwrap();
+
+        // Drop a wasm into the directory without re-signing.
+        std::fs::write(skill_dir.join("skill.wasm"), b"injected").unwrap();
+
+        match verify_skill_self_signed(&skill_dir).unwrap() {
+            VerifyResult::Invalid => {}
+            other => panic!("expected Invalid after wasm injection, got {other:?}"),
+        }
+    }
 }

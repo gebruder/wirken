@@ -362,6 +362,227 @@ fn sign_test_skill(skill_dir: &std::path::Path) {
     sign_skill(skill_dir, &key).expect("sign test skill");
 }
 
+// ---------------------------------------------------------------------------
+// Section C: skill loader spec-conformance regression suite
+// ---------------------------------------------------------------------------
+//
+// Tests in this block exercise the 1.3.0 skill-loader spec gates: the
+// name regex + parent-dir match, description length bounds, the
+// load-time signature gate, and the wasm composite hash. Failures
+// here mean a spec-conformant external skill no longer loads, or a
+// known-bad bundle now loads.
+
+/// Spec-conformant external skill: only name + description + body, no
+/// metadata, no permissions block. Loads with least-privilege defaults
+/// on every axis.
+#[test]
+fn c1_spec_conformant_skill_loads_with_default_deny() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("minimal");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: minimal\ndescription: minimal skill for spec test\n---\nBody.\n",
+    )
+    .unwrap();
+    sign_test_skill(&skill_dir);
+    let skill = SkillLoader::load_file(&skill_dir.join("SKILL.md")).expect("must load");
+    assert_eq!(skill.name, "minimal");
+    assert_eq!(skill.description, "minimal skill for spec test");
+    assert_eq!(
+        skill.permissions,
+        crate::skill_perms::PermissionProfile::default(),
+        "missing block must default to deny-all"
+    );
+}
+
+fn write_unsigned_skill(skill_dir: &std::path::Path, frontmatter: &str) {
+    std::fs::create_dir_all(skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), frontmatter).unwrap();
+}
+
+#[test]
+fn c2_name_with_uppercase_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("BadName");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: BadName\ndescription: x\n---\nbody\n",
+    );
+    sign_test_skill(&skill_dir);
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    assert!(
+        format!("{err}").contains("must start with a lowercase letter"),
+        "got {err}"
+    );
+}
+
+#[test]
+fn c2_name_with_underscore_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("bad_name");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: bad_name\ndescription: x\n---\nbody\n",
+    );
+    sign_test_skill(&skill_dir);
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    assert!(
+        format!("{err}").contains("must match"),
+        "expected regex error, got {err}"
+    );
+}
+
+#[test]
+fn c2_name_over_64_chars_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let long: String = std::iter::repeat_n('a', 65).collect();
+    let skill_dir = tmp.path().join(&long);
+    write_unsigned_skill(
+        &skill_dir,
+        &format!("---\nname: {long}\ndescription: x\n---\nbody\n"),
+    );
+    sign_test_skill(&skill_dir);
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    assert!(
+        format!("{err}").contains("length must be 1..=64"),
+        "got {err}"
+    );
+}
+
+#[test]
+fn c2_name_not_matching_parent_dir_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("alpha");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: beta\ndescription: name does not match dir\n---\nbody\n",
+    );
+    sign_test_skill(&skill_dir);
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    assert!(format!("{err}").contains("parent directory"), "got {err}");
+}
+
+#[test]
+fn c2_description_empty_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("empty-desc");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: empty-desc\ndescription: \"\"\n---\nbody\n",
+    );
+    sign_test_skill(&skill_dir);
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    assert!(format!("{err}").contains("empty description"), "got {err}");
+}
+
+#[test]
+fn c2_description_over_1024_chars_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("verbose");
+    let huge: String = std::iter::repeat_n('x', 1025).collect();
+    write_unsigned_skill(
+        &skill_dir,
+        &format!("---\nname: verbose\ndescription: {huge}\n---\nbody\n"),
+    );
+    sign_test_skill(&skill_dir);
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    assert!(
+        format!("{err}").contains("longer than 1024 chars"),
+        "got {err}"
+    );
+}
+
+#[test]
+fn c3_unsigned_skill_fails_to_load_without_bypass() {
+    // Serialize against c3_unsigned_skill_loads_with_bypass_env_var
+    // so the env-var leakage between parallel tests cannot make this
+    // one observe a `1` value left behind by the other.
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // SAFETY: serialized via ENV_LOCK.
+    unsafe { std::env::remove_var("WIRKEN_ALLOW_UNSIGNED_SKILLS") };
+
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("unsigned");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: unsigned\ndescription: x\n---\nbody\n",
+    );
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("unsigned") && msg.contains("WIRKEN_ALLOW_UNSIGNED_SKILLS"),
+        "expected unsigned-with-bypass-hint error, got {msg}"
+    );
+}
+
+#[test]
+fn c3_forged_signature_fails_to_load() {
+    // Sign with one keypair, then rewrite SKILL.md so the stored
+    // signature no longer matches the bundle's content. The loader
+    // reports `Invalid`.
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("forged");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: forged\ndescription: original content\n---\noriginal body\n",
+    );
+    sign_test_skill(&skill_dir);
+
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: forged\ndescription: tampered content\n---\ntampered body\n",
+    )
+    .unwrap();
+
+    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("SKILL.sig does not match SKILL.md"),
+        "expected Invalid-signature error, got {msg}"
+    );
+}
+
+/// Global mutex serializing env-var-touching tests. Tests run in
+/// parallel by default; this gate makes the `WIRKEN_ALLOW_UNSIGNED_SKILLS`
+/// dance safe against neighbours.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn c3_unsigned_skill_loads_with_bypass_env_var() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // SAFETY: serialized via ENV_LOCK so no other test reads/writes
+    // this var while we are.
+    unsafe { std::env::set_var("WIRKEN_ALLOW_UNSIGNED_SKILLS", "1") };
+
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("bypass-test");
+    write_unsigned_skill(
+        &skill_dir,
+        "---\nname: bypass-test\ndescription: loaded via bypass\n---\nbody\n",
+    );
+    let result = SkillLoader::load_file(&skill_dir.join("SKILL.md"));
+
+    unsafe { std::env::remove_var("WIRKEN_ALLOW_UNSIGNED_SKILLS") };
+
+    let skill = result.expect("WIRKEN_ALLOW_UNSIGNED_SKILLS=1 must allow load");
+    assert_eq!(skill.name, "bypass-test");
+}
+
+#[test]
+fn c5_ansi_strip_at_print_boundary_defangs_fake_sudo() {
+    let attack = "\x1b[2K\rsudo password:";
+    let stripped = crate::ansi::strip_control_sequences(attack);
+    assert!(
+        !stripped.contains('\x1b'),
+        "ESC byte must not survive: {stripped:?}"
+    );
+    assert!(
+        stripped.contains("sudo password:"),
+        "printable content preserved: {stripped:?}"
+    );
+}
+
 /// Migrating to per-skill permissions must not break the merge step
 /// when every bundled skill is loaded together. Detects, in particular,
 /// inference.default conflicts that would block any agent that loads
@@ -2863,6 +3084,42 @@ async fn sandbox_mode_off_permits_host_exec() {
         .unwrap();
     assert!(r.success);
     assert!(r.output.contains("opted-in"));
+}
+
+#[tokio::test]
+async fn c5_exec_strips_ansi_escape_sequences_from_stdout() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+
+    let tmp = TempDir::new().unwrap();
+    let config = ToolConfig {
+        sandbox: SandboxConfig {
+            mode: SandboxMode::Off,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let tools = ToolRegistry::new(tmp.path().to_path_buf(), config).unwrap();
+
+    // printf emits the raw bytes. The CSI sequence `\x1b[2K\r` would
+    // otherwise leak into the model's view of the tool result.
+    let r = tools
+        .execute(
+            "exec",
+            r#"{"command": "printf '\\033[2K\\rfake-prompt: ready\\n'"}"#,
+        )
+        .await
+        .unwrap();
+    assert!(r.success, "exec output: {}", r.output);
+    assert!(
+        !r.output.contains('\x1b'),
+        "ESC byte must not survive the strip: {:?}",
+        r.output
+    );
+    assert!(
+        r.output.contains("fake-prompt: ready"),
+        "printable content must survive: {:?}",
+        r.output
+    );
 }
 
 // ---------------------------------------------------------------------------
