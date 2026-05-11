@@ -4,9 +4,9 @@
 //! - D1: regression fixtures for pre-1.2.0 rows on every changed
 //!   variant. Each fixture is a captured JSON shape that a 1.1.x
 //!   producer would have written; the test deserializes it and
-//!   asserts the documented behaviour (defaults applied, or — for
-//!   the renamed token fields — values silently dropped to zero per
-//!   spec C4).
+//!   asserts the documented behaviour: defaults applied for
+//!   additive fields, or values silently dropped to zero on the
+//!   renamed token fields per spec C4.
 //! - D3: snapshot assertions on the 1.2.0 wire shape. Each test
 //!   constructs a Rust value with 1.2.0 fields populated, serializes
 //!   it, and asserts the JSON contains the new keys *and* does not
@@ -17,7 +17,7 @@
 //! - D4: SIEM forwarder envelope shapes (Datadog, Splunk HEC,
 //!   Sentinel, webhook). The webhook test asserts the
 //!   `X-Wirken-Signature` value is HMAC-SHA-256 over the exact
-//!   serialized body bytes — not over a re-serialized envelope.
+//!   serialized body bytes; not over a re-serialized envelope.
 //!   Any field-ordering drift between the body the signer hashed
 //!   and the body the HTTP client wrote would diverge.
 
@@ -127,7 +127,7 @@ fn pre_1_2_0_llm_request_deserializes_with_empty_agent_id() {
 #[test]
 fn pre_1_2_0_llm_response_drops_renamed_token_fields_to_zero() {
     // Pre-1.2.0 producer wrote `tokens_in` / `tokens_out`. After C4
-    // there is no serde alias by design — the 1.2.0 reader reads the
+    // there is no serde alias by design; the 1.2.0 reader reads the
     // payload, the renamed fields default to 0, and the legacy values
     // are silently dropped. This test locks the documented drop in;
     // a future revert that re-aliased the names would break it.
@@ -229,7 +229,7 @@ fn pre_1_2_0_subagent_result_status_string_maps_to_enum_variant() {
     // `"depth_exceeded"`, `"timeout"`) all match enum variants in
     // their serde-rendered form, so old rows continue to read
     // cleanly. A future fork that emits a string outside this set
-    // would fail to deserialize — that is the documented intent.
+    // would fail to deserialize; that is the documented intent.
     let legacy = r#"{"kind":"subagent_result","child_session_id":"s","output":"out","status":"rounds_exceeded"}"#;
     let ev: SessionEvent = serde_json::from_str(legacy).unwrap();
     match ev {

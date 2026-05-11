@@ -61,9 +61,9 @@ pub struct AuditEvent {
 /// (`actor_kind` + `actor_id`, `channel`/`session` as `Option`) and
 /// the pre-1.2.0 form (single `actor: String`, empty strings on
 /// `channel`/`session`). Old rows get a heuristic `actor_kind`
-/// (`Service` for known service literals, `User` for everything else
-/// — a misclassification on an old row is acceptable because the row
-/// hashes are already sealed).
+/// (`Service` for known service literals, `User` for everything
+/// else). A misclassification on an old row is acceptable because
+/// the row hashes are already sealed.
 #[derive(Deserialize)]
 struct AuditEventWire {
     ts: DateTime<Utc>,

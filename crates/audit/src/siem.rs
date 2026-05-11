@@ -178,7 +178,7 @@ impl SiemForwarder {
 }
 
 /// Build the Datadog Log-Intake payload (one entry per event).
-/// Pure — no HTTP. Extracted so the wire snapshot tests can assert
+/// Pure; no HTTP. Extracted so the wire snapshot tests can assert
 /// the envelope shape without running an HTTP server.
 pub fn build_datadog_payload(events: &[AuditEvent], config: &SiemConfig) -> Vec<serde_json::Value> {
     events
@@ -211,7 +211,7 @@ pub fn build_datadog_payload(events: &[AuditEvent], config: &SiemConfig) -> Vec<
 }
 
 /// Build the Splunk HEC body (one newline-delimited JSON object per
-/// event). Pure — no HTTP.
+/// event). Pure; no HTTP.
 pub fn build_splunk_body(events: &[AuditEvent]) -> String {
     let mut body = String::new();
     for event in events {
@@ -238,7 +238,7 @@ pub fn build_splunk_body(events: &[AuditEvent]) -> String {
 
 /// Build the Microsoft Sentinel Logs-Ingestion payload. Same flat
 /// shape as the webhook path so a single DCR transform covers both.
-/// Pure — no HTTP.
+/// Pure; no HTTP.
 pub fn build_sentinel_payload(
     events: &[AuditEvent],
     config: &SiemConfig,

@@ -14,7 +14,7 @@ tagged.
 
 ### Audit schema
 
-Audit schema 1.2.0 — identity correlation, field renames, webhook
+Audit schema 1.2.0; identity correlation, field renames, webhook
 HMAC. Pre-1.2.0 audit databases remain readable; chain verification
 hashes the stored payload bytes, not a re-serialized event.
 
@@ -100,8 +100,8 @@ hashes the stored payload bytes, not a re-serialized event.
 - `LlmResponse.input_tokens` and `output_tokens` carry
   `#[serde(default)]`. A pre-1.2.0 row carrying `tokens_in` /
   `tokens_out` deserializes to zero rather than failing; the legacy
-  values are silently dropped. There is no serde alias by design —
-  the regression fixture
+  values are silently dropped. There is no serde alias by design.
+  The regression fixture
   (`pre_1_2_0_llm_response_drops_renamed_token_fields_to_zero`)
   pins this so a future revert that re-introduces the alias fails
   the suite.

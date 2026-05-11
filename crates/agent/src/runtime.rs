@@ -91,7 +91,7 @@ const ATTEST_EVERY_K_SECONDS: u64 = 30;
 /// cron, subagent spawn).
 #[derive(Debug, Clone, Default)]
 pub struct InboundContext {
-    /// Adapter that delivered the inbound — `"slack"`, `"signal"`,
+    /// Adapter that delivered the inbound; `"slack"`, `"signal"`,
     /// `"webchat"`, `"cli"`, …
     pub adapter_id: Option<String>,
     /// Platform-side sender identity (Slack uid, Telegram user id,

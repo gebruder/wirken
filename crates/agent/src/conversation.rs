@@ -241,7 +241,7 @@ impl Conversation {
     ///
     /// Other variants (LlmRequest, LlmResponse, PermissionDenied,
     /// Compaction, Attestation, SubagentSpawned, SubagentResult,
-    /// AuditLegacy) are skipped — they're not part of the LLM context,
+    /// AuditLegacy) are skipped; they're not part of the LLM context,
     /// just the audit trail.
     ///
     /// Callers may set an initial system prompt via

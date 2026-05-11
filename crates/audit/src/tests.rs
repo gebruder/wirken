@@ -1229,7 +1229,7 @@ mod session {
         // info) must still deserialize; both cache fields default to
         // zero. Uses the 1.2.0 wire shape (`input_tokens` /
         // `output_tokens`); the pre-1.2.0 wire (`tokens_in` /
-        // `tokens_out`) is not back-compat by design — see
+        // `tokens_out`) is not back-compat by design; see
         // CHANGELOG.md.
         let payload = r#"{"kind":"llm_response","request_id":"req-1","finish_reason":"end_turn","input_tokens":100,"output_tokens":50,"latency_ms":1234,"agent_id":"test"}"#;
         let event: SessionEvent = serde_json::from_str(payload).unwrap();

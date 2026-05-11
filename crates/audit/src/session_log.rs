@@ -341,7 +341,7 @@ pub enum SessionEvent {
         request_id: String,
         finish_reason: String,
         /// Defaulted so a pre-1.2.0 row carrying `tokens_in` (the
-        /// pre-1.2.0 name, intentionally not aliased — see C4) reads
+        /// pre-1.2.0 name, intentionally not aliased; see C4) reads
         /// as `input_tokens: 0` rather than failing. The legacy value
         /// is silently dropped; the snapshot tests assert this is the
         /// documented behaviour so a future revert can't pass tests
@@ -1792,7 +1792,7 @@ impl SessionLog for SqliteSessionLog {
             // on rows already on disk still verifies, because the
             // bytes that were stored at append time are the bytes
             // being rehashed here. Any future schema work can rely
-            // on this — there is no migration path needed for chain
+            // on this; there is no migration path needed for chain
             // integrity.
             let recomputed_leaf = sha256_hex(payload.as_bytes());
             if recomputed_leaf != leaf_hash {
