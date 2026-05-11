@@ -218,7 +218,7 @@ fn print_log_human(
             "  {:>6}  {:20}  {:16}  {:20}  {}",
             event.id,
             event.event.ts.format("%Y-%m-%d %H:%M:%S"),
-            truncate(&event.event.actor, 16),
+            truncate(&event.event.actor_id, 16),
             truncate(&event.event.action, 20),
             truncate(&event.event.target, 40),
         );
@@ -342,11 +342,16 @@ fn print_log_json(
             json!({
                 "id": e.id,
                 "ts": e.event.ts.to_rfc3339(),
-                "actor": e.event.actor,
+                "actor_kind": match e.event.actor_kind {
+                    wirken_audit::ActorKind::User => "user",
+                    wirken_audit::ActorKind::Agent => "agent",
+                    wirken_audit::ActorKind::Service => "service",
+                },
+                "actor_id": e.event.actor_id,
                 "action": e.event.action,
                 "target": e.event.target,
                 "channel": e.event.channel,
-                "session": SessionView::from_session_string(&e.event.session),
+                "session": SessionView::from_session_string(e.event.session.as_deref().unwrap_or("")),
                 "detail": e.event.detail,
                 "hash": e.hash,
             })

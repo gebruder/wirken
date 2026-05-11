@@ -34,11 +34,17 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
 use crate::error::AuditError;
-use crate::event::{AuditEvent, StoredEvent};
+use crate::event::{ActorKind, AuditEvent, StoredEvent};
 use crate::log::{AuditQuery, VerifyResult};
 use crate::session_log::{
     SessionEvent, SessionId, SessionLog, SessionVerifyResult, SqliteSessionLog, TrustLevel,
 };
+
+fn classify_legacy_actor(actor: &str) -> ActorKind {
+    matches!(actor, "gateway" | "orchestrator" | "audit" | "webchat-user")
+        .then_some(ActorKind::Service)
+        .unwrap_or(ActorKind::User)
+}
 
 /// Sentinel session id for legacy audit events that have no session
 /// (empty `session` field on the original [`AuditEvent`] — typically
@@ -95,12 +101,23 @@ pub(crate) fn migrate_legacy_audit_events(log: &SqliteSessionLog) -> Result<usiz
 }
 
 fn create_legacy_view(conn: &Connection) -> Result<(), AuditError> {
+    // `actor_id` (1.2.0+) is the canonical key; `actor` (pre-1.2.0)
+    // is the fallback so SIEM consumers querying old and new rows
+    // through the same view see a non-empty `actor` column for both.
+    // `actor_kind` is exposed alongside so callers that want the
+    // typed dimension can group on it without re-parsing the payload.
     conn.execute_batch(
-        "CREATE VIEW IF NOT EXISTS audit_events AS
+        "DROP VIEW IF EXISTS audit_events;
+         CREATE VIEW audit_events AS
          SELECT
              id,
              ts,
-             COALESCE(json_extract(payload, '$.actor'), '') AS actor,
+             COALESCE(
+                 json_extract(payload, '$.actor_id'),
+                 json_extract(payload, '$.actor'),
+                 ''
+             ) AS actor,
+             COALESCE(json_extract(payload, '$.actor_kind'), '') AS actor_kind,
              COALESCE(
                  json_extract(payload, '$.action'),
                  json_extract(payload, '$.kind'),
@@ -163,9 +180,16 @@ fn copy_legacy_table_into_session_events(conn: &Connection) -> Result<usize, Aud
     for (idx, row) in rows.enumerate() {
         let (ts, actor, action, target, channel, _session, detail_json) = row?;
         let detail: serde_json::Value = serde_json::from_str(&detail_json)?;
+        let actor_kind = classify_legacy_actor(&actor);
+        let channel = if channel.is_empty() {
+            None
+        } else {
+            Some(channel)
+        };
 
         let event = SessionEvent::AuditLegacy {
-            actor,
+            actor_kind,
+            actor_id: actor,
             action,
             target,
             channel,
@@ -208,17 +232,14 @@ fn copy_legacy_table_into_session_events(conn: &Connection) -> Result<usize, Aud
 
 /// Convert an [`AuditEvent`] into a [`SessionEvent::AuditLegacy`]
 /// and append it to the session log under either the event's
-/// `session` field or [`SYSTEM_SESSION`] if empty. The original
+/// `session` field or [`SYSTEM_SESSION`] if absent. The original
 /// timestamp is preserved.
 pub(crate) fn write_legacy(log: &SqliteSessionLog, event: &AuditEvent) -> Result<(), AuditError> {
-    let session_id = if event.session.is_empty() {
-        SYSTEM_SESSION
-    } else {
-        event.session.as_str()
-    };
+    let session_id = event.session.as_deref().unwrap_or(SYSTEM_SESSION);
     let handle = log.handle_for(SessionId::new(session_id));
     let session_event = SessionEvent::AuditLegacy {
-        actor: event.actor.clone(),
+        actor_kind: event.actor_kind,
+        actor_id: event.actor_id.clone(),
         action: event.action.clone(),
         target: event.target.clone(),
         channel: event.channel.clone(),
@@ -244,7 +265,7 @@ pub(crate) fn query_legacy(
 ) -> Result<Vec<StoredEvent>, AuditError> {
     log.with_conn(|conn| {
         let mut sql = String::from(
-            "SELECT id, ts, actor, action, target, channel, session, detail, hash
+            "SELECT id, ts, actor, actor_kind, action, target, channel, session, detail, hash
              FROM audit_events WHERE 1=1",
         );
         let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -284,21 +305,44 @@ pub(crate) fn query_legacy(
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let ts_str: String = row.get(1)?;
-            let detail_str: String = row.get(7)?;
+            let actor_id: String = row.get(2)?;
+            let actor_kind_str: String = row.get(3)?;
+            let channel: String = row.get(6)?;
+            let session: String = row.get(7)?;
+            let detail_str: String = row.get(8)?;
+            let actor_kind = if actor_kind_str.is_empty() {
+                classify_legacy_actor(&actor_id)
+            } else {
+                match actor_kind_str.as_str() {
+                    "user" => crate::event::ActorKind::User,
+                    "agent" => crate::event::ActorKind::Agent,
+                    "service" => crate::event::ActorKind::Service,
+                    _ => classify_legacy_actor(&actor_id),
+                }
+            };
             Ok(StoredEvent {
                 id: row.get(0)?,
                 event: AuditEvent {
                     ts: chrono::DateTime::parse_from_rfc3339(&ts_str)
                         .unwrap_or_default()
                         .with_timezone(&Utc),
-                    actor: row.get(2)?,
-                    action: row.get(3)?,
-                    target: row.get(4)?,
-                    channel: row.get(5)?,
-                    session: row.get(6)?,
+                    actor_kind,
+                    actor_id,
+                    action: row.get(4)?,
+                    target: row.get(5)?,
+                    channel: if channel.is_empty() {
+                        None
+                    } else {
+                        Some(channel)
+                    },
+                    session: if session.is_empty() {
+                        None
+                    } else {
+                        Some(session)
+                    },
                     detail: serde_json::from_str(&detail_str).unwrap_or_default(),
                 },
-                hash: row.get(8)?,
+                hash: row.get(9)?,
             })
         })?;
 

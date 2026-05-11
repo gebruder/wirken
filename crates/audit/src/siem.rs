@@ -7,7 +7,15 @@
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::event::AuditEvent;
+use crate::event::{ActorKind, AuditEvent};
+
+fn actor_kind_label(kind: ActorKind) -> &'static str {
+    match kind {
+        ActorKind::User => "user",
+        ActorKind::Agent => "agent",
+        ActorKind::Service => "service",
+    }
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -104,19 +112,21 @@ impl SiemForwarder {
         let logs: Vec<serde_json::Value> = events
             .iter()
             .map(|e| {
+                let channel_tag = e.channel.as_deref().unwrap_or("");
                 serde_json::json!({
-                    "message": format!("{} {} {}", e.action, e.target, e.actor),
+                    "message": format!("{} {} {}", e.action, e.target, e.actor_id),
                     "ddsource": "wirken",
                     "ddtags": format!(
                         "service:{},env:{},action:{},channel:{}",
-                        self.config.service, self.config.environment, e.action, e.channel
+                        self.config.service, self.config.environment, e.action, channel_tag
                     ),
                     "hostname": hostname(),
                     "service": self.config.service,
                     "status": action_to_severity(&e.action),
                     "timestamp": e.ts.timestamp_millis(),
                     "wirken": {
-                        "actor": e.actor,
+                        "actor_kind": actor_kind_label(e.actor_kind),
+                        "actor_id": e.actor_id,
                         "action": e.action,
                         "target": e.target,
                         "channel": e.channel,
@@ -145,7 +155,8 @@ impl SiemForwarder {
         for event in events {
             let hec_event = serde_json::json!({
                 "event": {
-                    "actor": event.actor,
+                    "actor_kind": actor_kind_label(event.actor_kind),
+                    "actor_id": event.actor_id,
                     "action": event.action,
                     "target": event.target,
                     "channel": event.channel,
@@ -192,7 +203,8 @@ impl SiemForwarder {
             .map(|e| {
                 serde_json::json!({
                     "TimeGenerated": e.ts.to_rfc3339(),
-                    "Actor": e.actor,
+                    "ActorKind": actor_kind_label(e.actor_kind),
+                    "ActorId": e.actor_id,
                     "Action": e.action,
                     "Target": e.target,
                     "Channel": e.channel,
@@ -223,7 +235,8 @@ impl SiemForwarder {
             .map(|e| {
                 serde_json::json!({
                     "timestamp": e.ts.to_rfc3339(),
-                    "actor": e.actor,
+                    "actor_kind": actor_kind_label(e.actor_kind),
+                    "actor_id": e.actor_id,
                     "action": e.action,
                     "target": e.target,
                     "channel": e.channel,

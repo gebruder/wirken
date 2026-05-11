@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use wirken_agent::factory::CacheMode;
 use wirken_agent::llm::LlmConfig;
 use wirken_agent::{AgentFactory, AgentStaticConfig, SkillLoader, session_id_for};
-use wirken_audit::{AuditEvent, AuditWriter, SiemConfig, SiemTarget};
+use wirken_audit::{ActorKind, AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::injection_detect::InjectionDetector;
@@ -101,7 +101,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let audit = Arc::new(audit_writer);
 
     audit
-        .log(AuditEvent::new("gateway", "gateway.start", "daemon"))
+        .log(AuditEvent::new(
+            ActorKind::Service,
+            "gateway",
+            "gateway.start",
+            "daemon",
+        ))
         .await?;
     println!("  Audit log: {}", cfg.audit_db_path().display());
 
@@ -121,6 +126,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         audit
             .log(
                 AuditEvent::new(
+                    ActorKind::Service,
                     "gateway",
                     "org-config.applying",
                     cfg.data_dir.display().to_string(),
@@ -149,6 +155,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     audit
                         .log(
                             AuditEvent::new(
+                                ActorKind::Service,
                                 "gateway",
                                 "org-config.applied",
                                 cfg.data_dir.display().to_string(),
@@ -168,6 +175,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     audit
                         .log(
                             AuditEvent::new(
+                                ActorKind::Service,
                                 "gateway",
                                 "org-config.apply-failed",
                                 cfg.data_dir.display().to_string(),
@@ -186,6 +194,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 audit
                     .log(
                         AuditEvent::new(
+                            ActorKind::Service,
                             "gateway",
                             "org-config.apply-failed",
                             cfg.data_dir.display().to_string(),
@@ -1045,6 +1054,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                             let _ = accept_audit
                                 .log(
                                     AuditEvent::new(
+                                        ActorKind::Service,
                                         "gateway",
                                         "gateway.peer.refused",
                                         "gateway-socket",
@@ -1065,6 +1075,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                             let _ = accept_audit
                                 .log(
                                     AuditEvent::new(
+                                        ActorKind::Service,
                                         "gateway",
                                         "gateway.peer.refused",
                                         "gateway-socket",
@@ -1172,6 +1183,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                             let _ = orchestrator_audit
                                 .log(
                                     AuditEvent::new(
+                                        ActorKind::Service,
                                         "gateway",
                                         "orchestrator.push.refused",
                                         "orchestrator",
@@ -1197,6 +1209,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                         let _ = orchestrator_audit
                             .log(
                                 AuditEvent::new(
+                                    ActorKind::Service,
                                     "gateway",
                                     "orchestrator.push.refused",
                                     "orchestrator",
@@ -1231,7 +1244,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!("  Shutting down...");
 
     audit
-        .log(AuditEvent::new("gateway", "gateway.stop", "daemon"))
+        .log(AuditEvent::new(
+            ActorKind::Service,
+            "gateway",
+            "gateway.stop",
+            "daemon",
+        ))
         .await?;
 
     // Abort adapter processes before emitting SessionEnd ChainHeads
@@ -1303,12 +1321,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             // chain so the verifier surfaces it.
             audit
                 .log(
-                    AuditEvent::new("gateway", "gateway.stop_unsigned_tail", "audit").with_detail(
-                        serde_json::json!({
-                            "emitted": emitted,
-                            "errors": errors,
-                        }),
-                    ),
+                    AuditEvent::new(
+                        ActorKind::Service,
+                        "gateway",
+                        "gateway.stop_unsigned_tail",
+                        "audit",
+                    )
+                    .with_detail(serde_json::json!({
+                        "emitted": emitted,
+                        "errors": errors,
+                    })),
                 )
                 .await
                 .ok();
@@ -1390,11 +1412,16 @@ async fn handle_adapter_connection(
 
     audit
         .log(
-            AuditEvent::new("gateway", "adapter.connect", &adapter_id)
-                .with_channel(authenticated_channel.as_str())
-                .with_detail(serde_json::json!({
-                    "adapter_pubkey_fingerprint": pubkey_fingerprint,
-                })),
+            AuditEvent::new(
+                ActorKind::Service,
+                "gateway",
+                "adapter.connect",
+                &adapter_id,
+            )
+            .with_channel(authenticated_channel.as_str())
+            .with_detail(serde_json::json!({
+                "adapter_pubkey_fingerprint": pubkey_fingerprint,
+            })),
         )
         .await?;
 
@@ -1423,11 +1450,16 @@ async fn handle_adapter_connection(
     registry.lock().await.set_connected(&adapter_id, false);
     audit
         .log(
-            AuditEvent::new("gateway", "adapter.disconnect", &adapter_id)
-                .with_channel(authenticated_channel.as_str())
-                .with_detail(serde_json::json!({
-                    "adapter_pubkey_fingerprint": pubkey_fingerprint,
-                })),
+            AuditEvent::new(
+                ActorKind::Service,
+                "gateway",
+                "adapter.disconnect",
+                &adapter_id,
+            )
+            .with_channel(authenticated_channel.as_str())
+            .with_detail(serde_json::json!({
+                "adapter_pubkey_fingerprint": pubkey_fingerprint,
+            })),
         )
         .await?;
 
@@ -1487,10 +1519,15 @@ async fn handle_orchestrator_push(
                     let outbound_target = format!("{}:out:{}", req.channel, uuid::Uuid::new_v4());
                     let _ = audit
                         .log(
-                            AuditEvent::new("orchestrator", "message.outbound", &outbound_target)
-                                .with_channel(&req.channel)
-                                .with_session(&req.conversation_id)
-                                .with_detail(serde_json::json!({ "content": &req.text })),
+                            AuditEvent::new(
+                                ActorKind::Service,
+                                "orchestrator",
+                                "message.outbound",
+                                &outbound_target,
+                            )
+                            .with_channel(&req.channel)
+                            .with_session(&req.conversation_id)
+                            .with_detail(serde_json::json!({ "content": &req.text })),
                         )
                         .await;
                     OrchestratorPushResponse {
@@ -1666,6 +1703,7 @@ async fn message_loop(
                     let _ = audit
                         .log(
                             AuditEvent::new(
+                                ActorKind::Service,
                                 adapter_id,
                                 "adapter.channel_mismatch",
                                 mismatch.to_string(),
@@ -1710,19 +1748,29 @@ async fn message_loop(
                     }
                 }
 
-                let inbound_event = AuditEvent::new(&sender_id, "message.inbound", &inbound_target)
-                    .with_channel(&channel)
-                    .with_session(&conversation_id)
-                    .with_detail(inbound_detail.clone());
+                let inbound_event = AuditEvent::new(
+                    ActorKind::User,
+                    &sender_id,
+                    "message.inbound",
+                    &inbound_target,
+                )
+                .with_channel(&channel)
+                .with_session(&conversation_id)
+                .with_detail(inbound_detail.clone());
 
                 if threat_detail.is_some() {
                     // Emit a separate threat event for SIEM visibility
                     let _ = audit
                         .log(
-                            AuditEvent::new(&sender_id, "message.threat_flagged", &inbound_target)
-                                .with_channel(&channel)
-                                .with_session(&conversation_id)
-                                .with_detail(inbound_detail),
+                            AuditEvent::new(
+                                ActorKind::User,
+                                &sender_id,
+                                "message.threat_flagged",
+                                &inbound_target,
+                            )
+                            .with_channel(&channel)
+                            .with_session(&conversation_id)
+                            .with_detail(inbound_detail),
                         )
                         .await;
                 }
@@ -1808,6 +1856,7 @@ async fn message_loop(
                     let _ = audit
                         .log(
                             AuditEvent::new(
+                                ActorKind::User,
                                 &denial.agent_id,
                                 "permission.denied",
                                 &denial.tool_name,
@@ -1829,10 +1878,15 @@ async fn message_loop(
                 let outbound_target = format!("{channel}:out:{}", uuid::Uuid::new_v4());
                 audit
                     .log(
-                        AuditEvent::new(&agent_id, "message.outbound", &outbound_target)
-                            .with_channel(&channel)
-                            .with_session(&conversation_id)
-                            .with_detail(serde_json::json!({ "content": &response })),
+                        AuditEvent::new(
+                            ActorKind::Agent,
+                            &agent_id,
+                            "message.outbound",
+                            &outbound_target,
+                        )
+                        .with_channel(&channel)
+                        .with_session(&conversation_id)
+                        .with_detail(serde_json::json!({ "content": &response })),
                     )
                     .await?;
 

@@ -1376,8 +1376,8 @@ impl Agent {
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
-                    tokens_in: usage.input_tokens,
-                    tokens_out: usage.output_tokens,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
@@ -1677,8 +1677,8 @@ impl Agent {
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
-                    tokens_in: usage.input_tokens,
-                    tokens_out: usage.output_tokens,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
@@ -1726,7 +1726,8 @@ impl Agent {
                                     SessionEvent::PermissionDenied {
                                         tool: ctx.tool_name.clone(),
                                         action_key: ctx.action.approval_key(),
-                                        tier: ctx.requested_tier.label().to_string(),
+                                        denial_source: wirken_audit::DenialSource::Tier,
+                                        tier: Some(ctx.requested_tier.label().to_string()),
                                         agent_id: ctx.agent_id.clone(),
                                         trigger: ctx.trigger_message.clone(),
                                     },
@@ -1927,7 +1928,8 @@ impl Agent {
                     SessionEvent::PermissionDenied {
                         tool: name.to_string(),
                         action_key,
-                        tier: "org_policy".to_string(),
+                        denial_source: wirken_audit::DenialSource::OrgPolicy,
+                        tier: None,
                         agent_id: self.id.clone(),
                         trigger: self.current_trigger.clone(),
                     },
@@ -1957,7 +1959,8 @@ impl Agent {
                         SessionEvent::PermissionDenied {
                             tool: name.to_string(),
                             action_key: action.approval_key(),
-                            tier: action.tier().label().to_string(),
+                            denial_source: wirken_audit::DenialSource::Tier,
+                            tier: Some(action.tier().label().to_string()),
                             agent_id: self.id.clone(),
                             trigger: self.current_trigger.clone(),
                         },
@@ -2075,7 +2078,8 @@ impl Agent {
                     SessionEvent::PermissionDenied {
                         tool: ctx.tool_name.clone(),
                         action_key: ctx.action.approval_key(),
-                        tier: ctx.requested_tier.label().to_string(),
+                        denial_source: wirken_audit::DenialSource::Tier,
+                        tier: Some(ctx.requested_tier.label().to_string()),
                         agent_id: ctx.agent_id.clone(),
                         trigger: ctx.trigger_message.clone(),
                     },
@@ -2271,7 +2275,7 @@ impl Agent {
                         SessionEvent::SubagentResult {
                             child_session_id,
                             output: env.output.clone(),
-                            status: "error".into(),
+                            status: wirken_audit::SubagentStatus::Error,
                         },
                     )?;
                     early_results[i] = Some(env);
@@ -2364,13 +2368,13 @@ impl Agent {
                 ),
             };
 
-            let status_str = envelope_status(&envelope.output).unwrap_or_else(|| "ok".to_string());
+            let status = envelope_status(&envelope.output);
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::SubagentResult {
                     child_session_id: p.child_session_id.clone(),
                     output: envelope.output.clone(),
-                    status: status_str,
+                    status,
                 },
             )?;
             final_results[idx] = envelope;
@@ -2499,7 +2503,7 @@ impl Agent {
                     SessionEvent::SubagentResult {
                         child_session_id: child_session_id.clone(),
                         output: envelope.output.clone(),
-                        status: "error".into(),
+                        status: wirken_audit::SubagentStatus::Error,
                     },
                 )?;
                 return Ok(envelope);
@@ -2554,13 +2558,13 @@ impl Agent {
         // guards across an await point.
         drop(child);
 
-        let status_str = envelope_status(&envelope.output).unwrap_or_else(|| "ok".to_string());
+        let status = envelope_status(&envelope.output);
         self.log_event(
             TrustLevel::System,
             SessionEvent::SubagentResult {
                 child_session_id,
                 output: envelope.output.clone(),
-                status: status_str,
+                status,
             },
         )?;
 
@@ -2935,14 +2939,32 @@ fn envelope_result(child_session_id: &str, status: &str, output: &str) -> crate:
     }
 }
 
-/// Re-extract the `status` field out of an envelope JSON string.
-/// Used by the spawn intercept to populate the `SubagentResult`
-/// event so the audit row's status string matches the envelope the
-/// LLM saw.
-fn envelope_status(envelope_json: &str) -> Option<String> {
+/// Re-extract the `status` field out of an envelope JSON string and
+/// map it to the typed [`wirken_audit::SubagentStatus`]. Used by the
+/// spawn intercept to populate the `SubagentResult` audit event so
+/// the audit row's status matches the envelope the LLM saw. Unknown
+/// or missing status defaults to [`wirken_audit::SubagentStatus::Ok`]
+/// (consistent with the pre-1.2.0 string-default behaviour).
+fn envelope_status(envelope_json: &str) -> wirken_audit::SubagentStatus {
     serde_json::from_str::<serde_json::Value>(envelope_json)
         .ok()
-        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(String::from))
+        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str_to_status))
+        .unwrap_or(wirken_audit::SubagentStatus::Ok)
+}
+
+/// Map an envelope status literal to [`wirken_audit::SubagentStatus`].
+/// The envelope strings are stable: see [`envelope_result`] producers
+/// at the spawn-intercept sites. Anything outside the known set falls
+/// back to [`wirken_audit::SubagentStatus::Error`].
+fn str_to_status(s: &str) -> wirken_audit::SubagentStatus {
+    match s {
+        "ok" => wirken_audit::SubagentStatus::Ok,
+        "error" => wirken_audit::SubagentStatus::Error,
+        "rounds_exceeded" => wirken_audit::SubagentStatus::RoundsExceeded,
+        "depth_exceeded" => wirken_audit::SubagentStatus::DepthExceeded,
+        "timeout" => wirken_audit::SubagentStatus::Timeout,
+        _ => wirken_audit::SubagentStatus::Error,
+    }
 }
 
 /// Item 6 slice 1 — strict ordering on [`PermissionTier`].

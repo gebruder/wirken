@@ -195,6 +195,66 @@ pub enum ChainHeadReason {
     Rotation,
 }
 
+/// Why [`SessionEvent::PermissionDenied`] fired: the tier gate
+/// (operator-approval model) or an org-policy block (centrally
+/// configured allow/deny list). The pre-1.2.0 shape conflated these
+/// by overloading the `tier` string with the sentinel `"org_policy"`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DenialSource {
+    /// Tier gate: a Tier 2/3 action was attempted without standing
+    /// approval. `tier` on the same event carries the requested tier
+    /// label (`"tier2"` / `"tier3"`). Default so pre-1.2.0 rows whose
+    /// payload lacks the field deserialize as Tier-source (the only
+    /// kind the pre-1.2.0 emit path produced).
+    #[default]
+    Tier,
+    /// Org-policy block: the tool name was on the org's denylist or
+    /// outside its allowlist. `tier` is `None` for this source.
+    OrgPolicy,
+}
+
+/// Outcome of one HTTP fetch as recorded on
+/// [`SessionEvent::HttpFetch`]. The pre-1.2.0 shape was a free-form
+/// string (`"ok"`, `"http_error_404"`, `"network_error"`, ...); the
+/// 1.2.0 form splits the success/failure category from the HTTP
+/// status code so SIEM consumers can group on a stable label and
+/// filter on the code without parsing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpFetchOutcome {
+    /// Server returned a 2xx response.
+    Success,
+    /// Egress allowlist refused the host before the connection.
+    EgressDenied,
+    /// Per-source rate-limit budget exhausted.
+    RateLimited,
+    /// Server returned a non-2xx response. `http_status_code` carries
+    /// the code on the same event.
+    HttpError,
+    /// Transport-level failure (DNS, TCP, TLS, body parse).
+    NetworkError,
+}
+
+/// Terminal status of a sub-agent run, recorded on
+/// [`SessionEvent::SubagentResult`]. Replaces the pre-1.2.0 free-form
+/// status string with a closed set so SIEM consumers can group on
+/// stable labels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    /// Child returned a normal response.
+    Ok,
+    /// Child raised an error that the parent envelope captured.
+    Error,
+    /// Child exceeded the parent's `max_rounds` ceiling.
+    RoundsExceeded,
+    /// Subagent nesting depth cap reached before the child could spawn.
+    DepthExceeded,
+    /// Child ran past the parent's runtime ceiling and was cut.
+    Timeout,
+}
+
 /// One event in a session transcript.
 ///
 /// New variants may be added without breaking older readers when the
@@ -280,8 +340,8 @@ pub enum SessionEvent {
     LlmResponse {
         request_id: String,
         finish_reason: String,
-        tokens_in: u32,
-        tokens_out: u32,
+        input_tokens: u32,
+        output_tokens: u32,
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         cache_creation_input_tokens: u32,
         #[serde(default, skip_serializing_if = "is_zero_u32")]
@@ -294,7 +354,11 @@ pub enum SessionEvent {
     /// the canonical key under which an operator can grant approval
     /// (e.g., `shell:curl`); kept alongside `tool` so reviewers can
     /// map the denial back to a permissions.db entry without having
-    /// to reparse tool arguments.
+    /// to reparse tool arguments. `denial_source` distinguishes a
+    /// tier gate from an org-policy block; `tier` is populated only
+    /// when `denial_source == Tier` (the prior shape conflated the
+    /// two by overloading the tier string with the sentinel
+    /// `"org_policy"`).
     PermissionDenied {
         tool: String,
         /// Defaulted for rows written before this field existed; old
@@ -302,7 +366,12 @@ pub enum SessionEvent {
         /// session log stays readable.
         #[serde(default)]
         action_key: String,
-        tier: String,
+        /// Default `Tier` so pre-1.2.0 rows (which only carried a
+        /// `tier: String` field) deserialize cleanly.
+        #[serde(default)]
+        denial_source: DenialSource,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
         agent_id: String,
         trigger: Option<String>,
     },
@@ -371,7 +440,20 @@ pub enum SessionEvent {
         source: String,
         host: String,
         url: String,
-        outcome: String,
+        /// Closed-set outcome label. SIEM consumers group on this
+        /// without parsing the prior free-form string.
+        outcome: HttpFetchOutcome,
+        /// Server-side HTTP status when `outcome == HttpError`.
+        /// `None` for transport-layer outcomes (success counted via
+        /// `Success`, but no code is recorded; egress denial, rate
+        /// limit, and network errors have no status code).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_status_code: Option<u16>,
+        /// Response payload size on success. Zero on any non-success
+        /// outcome (egress denial, rate limit, HTTP error, network
+        /// error). The overload is preserved from the pre-1.2.0 shape
+        /// so the existing `bytes_total` aggregations stay accurate
+        /// against new and old rows alike.
         bytes: u64,
         run_id: Option<String>,
         /// Correlates this fetch with a perspective-expansion turn.
@@ -397,13 +479,16 @@ pub enum SessionEvent {
     /// event after this one — the two-event split keeps each pass
     /// independently auditable, so a failed LLM pass leaves the
     /// keyword event in the chain rather than orphaning the candidate.
-    /// `matched_keywords` is the JSON-encoded list, kept verbatim so
-    /// the chain-verifier can replay the screening decision.
+    /// `matched_keywords` is the list of matched keyword strings, kept
+    /// verbatim so the chain-verifier can replay the screening
+    /// decision. Serialized as a JSON array of strings (1.2.0+); the
+    /// pre-1.2.0 shape was a JSON-encoded string (a stringified
+    /// array).
     CandidateScored {
         run_id: String,
         candidate_id: i64,
         keyword_match_score: u32,
-        matched_keywords: String,
+        matched_keywords: Vec<String>,
         /// Correlates this candidate with a perspective-expansion
         /// turn. Same semantics as on `HttpFetch`: `Some` only for
         /// candidates landed under a synthetic per-perspective
@@ -501,7 +586,7 @@ pub enum SessionEvent {
     /// [`crate::signing::build_signed_message`] and binds in
     /// [`crate::signing::CHAIN_HEAD_SCHEMA_VERSION`] so a future
     /// payload-layout bump does not silently invalidate old heads.
-    /// `signing_key_id` is the hex-encoded 32-byte Ed25519 public
+    /// `signing_pubkey` is the hex-encoded 32-byte Ed25519 public
     /// key that produced the signature; the verifier reads it from
     /// the event itself for offline replay.
     ChainHead {
@@ -511,7 +596,7 @@ pub enum SessionEvent {
         prev_chain_hash: HashHex,
         current_chain_hash: HashHex,
         signature: HexBytes,
-        signing_key_id: HashHex,
+        signing_pubkey: HashHex,
         schema_version: u32,
     },
     /// Item 10 follow-up — the harness records its current effective
@@ -561,20 +646,24 @@ pub enum SessionEvent {
     SubagentResult {
         child_session_id: String,
         output: String,
-        status: String,
+        status: SubagentStatus,
     },
     /// Backward-compatibility wrapper for the pre-slice-2 audit
-    /// log. Carries the legacy `(actor, action, target, channel,
-    /// detail)` tuple verbatim. Slice 2 of item 1 makes this the
-    /// only kind that the legacy `AuditWriter` writes; the existing
-    /// `audit_events` table becomes a SQL view that COALESCEs the
-    /// `action` field out of legacy events and the `kind` field out
-    /// of typed events so SIEM consumers see both.
+    /// log. The 1.2.0 schema splits `actor` into
+    /// `actor_kind` + `actor_id` and makes `channel` an
+    /// `Option<String>`; pre-1.2.0 rows persisted as plain `actor` +
+    /// empty-string `channel` continue to deserialize via the
+    /// per-field defaults and the AuditEvent legacy adapter
+    /// (`crates/audit/src/event.rs`). The `audit_events` SQL view
+    /// COALESCEs both wire shapes so existing SIEM consumers see
+    /// every row.
     AuditLegacy {
-        actor: String,
+        actor_kind: crate::event::ActorKind,
+        actor_id: String,
         action: String,
         target: String,
-        channel: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         detail: serde_json::Value,
     },
 }
@@ -782,7 +871,8 @@ pub struct PermissionDenialRecord {
     pub ts: String,
     pub tool: String,
     pub action_key: String,
-    pub tier: String,
+    pub denial_source: DenialSource,
+    pub tier: Option<String>,
     pub trigger: Option<String>,
 }
 
@@ -1015,7 +1105,7 @@ impl SqliteSessionLog {
             prev_chain_hash: HashHex(prev_chain_hash),
             current_chain_hash: HashHex(current_chain_hash),
             signature: HexBytes::from_bytes(&sig.to_bytes()),
-            signing_key_id: HashHex(signer.key_id_hex()),
+            signing_pubkey: HashHex(signer.key_id_hex()),
             schema_version: CHAIN_HEAD_SCHEMA_VERSION,
         };
 
@@ -1167,7 +1257,7 @@ impl SqliteSessionLog {
                 prev_chain_hash,
                 current_chain_hash,
                 signature,
-                signing_key_id,
+                signing_pubkey: signing_key_id,
                 schema_version,
                 ..
             } = &row.event
@@ -1362,6 +1452,7 @@ impl SqliteSessionLog {
                     SessionEvent::PermissionDenied {
                         tool,
                         action_key,
+                        denial_source,
                         tier,
                         agent_id: ev_agent,
                         trigger,
@@ -1371,6 +1462,7 @@ impl SqliteSessionLog {
                         ts,
                         tool,
                         action_key,
+                        denial_source,
                         tier,
                         trigger,
                     }),

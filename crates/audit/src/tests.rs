@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
-use crate::event::AuditEvent;
+use crate::event::{ActorKind, AuditEvent};
 use crate::log::{AuditLog, AuditQuery, VerifyResult};
 use crate::writer::AuditWriter;
 
@@ -12,7 +12,8 @@ use crate::writer::AuditWriter;
 #[test]
 fn write_and_query_single_event() {
     let log = AuditLog::open_in_memory().unwrap();
-    let event = AuditEvent::new("user", "exec", "/bin/ls").with_channel("telegram");
+    let event =
+        AuditEvent::new(ActorKind::User, "user", "exec", "/bin/ls").with_channel("telegram");
 
     log.write_batch(&[event]).unwrap();
 
@@ -20,7 +21,7 @@ fn write_and_query_single_event() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].event.action, "exec");
     assert_eq!(results[0].event.target, "/bin/ls");
-    assert_eq!(results[0].event.channel, "telegram");
+    assert_eq!(results[0].event.channel.as_deref(), Some("telegram"));
 }
 
 #[test]
@@ -28,7 +29,7 @@ fn hash_chain_integrity_on_sequential_writes() {
     let log = AuditLog::open_in_memory().unwrap();
 
     for i in 0..100 {
-        let event = AuditEvent::new("actor", format!("action-{i}"), "target");
+        let event = AuditEvent::new(ActorKind::User, "actor", format!("action-{i}"), "target");
         log.write_batch(&[event]).unwrap();
     }
 
@@ -43,7 +44,14 @@ fn hash_chain_integrity_on_batch_write() {
     let log = AuditLog::open_in_memory().unwrap();
 
     let events: Vec<AuditEvent> = (0..1000)
-        .map(|i| AuditEvent::new("actor", format!("action-{i}"), format!("target-{i}")))
+        .map(|i| {
+            AuditEvent::new(
+                ActorKind::User,
+                "actor",
+                format!("action-{i}"),
+                format!("target-{i}"),
+            )
+        })
         .collect();
 
     log.write_batch(&events).unwrap();
@@ -61,7 +69,7 @@ fn tampered_row_detected() {
     let log = AuditLog::open(&db_path).unwrap();
 
     let events: Vec<AuditEvent> = (0..10)
-        .map(|i| AuditEvent::new("actor", format!("action-{i}"), "target"))
+        .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("action-{i}"), "target"))
         .collect();
     log.write_batch(&events).unwrap();
 
@@ -93,7 +101,7 @@ fn tampered_row_data_detected() {
     let log = AuditLog::open(&db_path).unwrap();
 
     let events: Vec<AuditEvent> = (0..10)
-        .map(|i| AuditEvent::new("actor", format!("action-{i}"), "target"))
+        .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("action-{i}"), "target"))
         .collect();
     log.write_batch(&events).unwrap();
 
@@ -142,10 +150,10 @@ fn query_filter_by_action() {
     let log = AuditLog::open_in_memory().unwrap();
 
     let events = vec![
-        AuditEvent::new("user", "exec", "cmd1"),
-        AuditEvent::new("user", "message.send", "msg1"),
-        AuditEvent::new("user", "exec", "cmd2"),
-        AuditEvent::new("user", "credential.access", "key1"),
+        AuditEvent::new(ActorKind::User, "user", "exec", "cmd1"),
+        AuditEvent::new(ActorKind::User, "user", "message.send", "msg1"),
+        AuditEvent::new(ActorKind::User, "user", "exec", "cmd2"),
+        AuditEvent::new(ActorKind::User, "user", "credential.access", "key1"),
     ];
     log.write_batch(&events).unwrap();
 
@@ -165,9 +173,9 @@ fn query_filter_by_channel() {
     let log = AuditLog::open_in_memory().unwrap();
 
     let events = vec![
-        AuditEvent::new("user", "send", "msg").with_channel("telegram"),
-        AuditEvent::new("user", "send", "msg").with_channel("discord"),
-        AuditEvent::new("user", "send", "msg").with_channel("telegram"),
+        AuditEvent::new(ActorKind::User, "user", "send", "msg").with_channel("telegram"),
+        AuditEvent::new(ActorKind::User, "user", "send", "msg").with_channel("discord"),
+        AuditEvent::new(ActorKind::User, "user", "send", "msg").with_channel("telegram"),
     ];
     log.write_batch(&events).unwrap();
 
@@ -186,7 +194,7 @@ fn query_with_limit() {
     let log = AuditLog::open_in_memory().unwrap();
 
     let events: Vec<AuditEvent> = (0..50)
-        .map(|i| AuditEvent::new("actor", "action", format!("target-{i}")))
+        .map(|i| AuditEvent::new(ActorKind::User, "actor", "action", format!("target-{i}")))
         .collect();
     log.write_batch(&events).unwrap();
 
@@ -304,9 +312,9 @@ fn migration_of_legacy_table_copies_rows_under_sentinel() {
     assert!(
         results
             .iter()
-            .all(|r| r.event.session == "__pre_migration__")
+            .all(|r| r.event.session.as_deref() == Some("__pre_migration__"))
     );
-    assert!(results.iter().all(|r| r.event.actor == "legacy-actor"));
+    assert!(results.iter().all(|r| r.event.actor_id == "legacy-actor"));
 
     // Verify still works on the migrated chain.
     match log.verify().unwrap() {
@@ -368,8 +376,13 @@ fn migration_is_idempotent_across_repeated_opens() {
 
     // Third open through write_batch path: migration still no-op.
     let log3 = AuditLog::open(&db_path).unwrap();
-    log3.write_batch(&[AuditEvent::new("new", "post-migration", "t")])
-        .unwrap();
+    log3.write_batch(&[AuditEvent::new(
+        ActorKind::User,
+        "new",
+        "post-migration",
+        "t",
+    )])
+    .unwrap();
     assert_eq!(log3.query(&AuditQuery::default()).unwrap().len(), 2);
 }
 
@@ -379,8 +392,8 @@ fn audit_event_with_session_routes_to_named_session() {
 
     // Two events: one with a session field, one without.
     log.write_batch(&[
-        AuditEvent::new("u", "send", "msg").with_session("conv-42"),
-        AuditEvent::new("u", "system.start", "daemon"),
+        AuditEvent::new(ActorKind::User, "u", "send", "msg").with_session("conv-42"),
+        AuditEvent::new(ActorKind::User, "u", "system.start", "daemon"),
     ])
     .unwrap();
 
@@ -389,7 +402,12 @@ fn audit_event_with_session_routes_to_named_session() {
 
     let by_action: std::collections::HashMap<&str, &str> = results
         .iter()
-        .map(|r| (r.event.action.as_str(), r.event.session.as_str()))
+        .map(|r| {
+            (
+                r.event.action.as_str(),
+                r.event.session.as_deref().unwrap_or(""),
+            )
+        })
         .collect();
 
     assert_eq!(by_action.get("send"), Some(&"conv-42"));
@@ -413,7 +431,7 @@ fn multiple_batches_maintain_chain() {
     // Write batch 1
     let log = AuditLog::open(&db_path).unwrap();
     let batch1: Vec<AuditEvent> = (0..50)
-        .map(|i| AuditEvent::new("actor", format!("batch1-{i}"), "target"))
+        .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("batch1-{i}"), "target"))
         .collect();
     log.write_batch(&batch1).unwrap();
     drop(log);
@@ -421,7 +439,7 @@ fn multiple_batches_maintain_chain() {
     // Write batch 2 (reopens DB — simulates restart)
     let log = AuditLog::open(&db_path).unwrap();
     let batch2: Vec<AuditEvent> = (0..50)
-        .map(|i| AuditEvent::new("actor", format!("batch2-{i}"), "target"))
+        .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("batch2-{i}"), "target"))
         .collect();
     log.write_batch(&batch2).unwrap();
 
@@ -442,7 +460,8 @@ fn events_with_json_detail() {
         "duration_ms": 42
     });
 
-    let event = AuditEvent::new("agent-1", "exec", "/tmp/test").with_detail(detail.clone());
+    let event = AuditEvent::new(ActorKind::Agent, "agent-1", "exec", "/tmp/test")
+        .with_detail(detail.clone());
     log.write_batch(&[event]).unwrap();
 
     let results = log.query(&AuditQuery::default()).unwrap();
@@ -462,7 +481,12 @@ async fn writer_flushes_events() {
 
     // Write 10 events
     for i in 0..10 {
-        let event = AuditEvent::new("writer-test", format!("action-{i}"), "target");
+        let event = AuditEvent::new(
+            ActorKind::User,
+            "writer-test",
+            format!("action-{i}"),
+            "target",
+        );
         writer.log(event).await.unwrap();
     }
 
@@ -491,7 +515,12 @@ async fn writer_batch_flush_at_capacity() {
 
     // Write more than BATCH_SIZE events quickly
     for i in 0..250 {
-        let event = AuditEvent::new("batch-test", format!("action-{i}"), "target");
+        let event = AuditEvent::new(
+            ActorKind::User,
+            "batch-test",
+            format!("action-{i}"),
+            "target",
+        );
         writer.log(event).await.unwrap();
     }
 
@@ -516,9 +545,14 @@ async fn writer_1000_events_hash_chain_intact() {
     let (writer, handle) = AuditWriter::new(&db_path).unwrap();
 
     for i in 0..1000 {
-        let event = AuditEvent::new("stress", format!("op-{i}"), format!("t-{i}"))
-            .with_channel("telegram")
-            .with_detail(serde_json::json!({"i": i}));
+        let event = AuditEvent::new(
+            ActorKind::User,
+            "stress",
+            format!("op-{i}"),
+            format!("t-{i}"),
+        )
+        .with_channel("telegram")
+        .with_detail(serde_json::json!({"i": i}));
         writer.log(event).await.unwrap();
     }
 
@@ -931,8 +965,8 @@ mod session {
                 SessionEvent::LlmResponse {
                     request_id: "req-1".into(),
                     finish_reason: "end_turn".into(),
-                    tokens_in: 100,
-                    tokens_out: 50,
+                    input_tokens: 100,
+                    output_tokens: 50,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                     latency_ms: 1234,
@@ -944,7 +978,8 @@ mod session {
                 SessionEvent::PermissionDenied {
                     tool: "exec".into(),
                     action_key: "shell:curl".into(),
-                    tier: "tier3".into(),
+                    denial_source: crate::session_log::DenialSource::Tier,
+                    tier: Some("tier3".into()),
                     agent_id: "default".into(),
                     trigger: Some("delete the universe".into()),
                 },
@@ -985,7 +1020,7 @@ mod session {
                 SessionEvent::SubagentResult {
                     child_session_id: "sess-A/sub-0".into(),
                     output: "found the answer".into(),
-                    status: "ok".into(),
+                    status: crate::session_log::SubagentStatus::Ok,
                 },
             ),
         ];
@@ -1136,13 +1171,15 @@ mod session {
             SessionEvent::PermissionDenied {
                 tool,
                 action_key,
+                denial_source,
                 tier,
                 agent_id,
                 trigger,
             } => {
                 assert_eq!(tool, "exec");
                 assert_eq!(action_key, "");
-                assert_eq!(tier, "tier3");
+                assert_eq!(denial_source, crate::session_log::DenialSource::Tier);
+                assert_eq!(tier.as_deref(), Some("tier3"));
                 assert_eq!(agent_id, "default");
                 assert_eq!(trigger.as_deref(), Some("hi"));
             }
@@ -1159,8 +1196,8 @@ mod session {
             SessionEvent::LlmResponse {
                 request_id: "req-cache".into(),
                 finish_reason: "end_turn".into(),
-                tokens_in: 1234,
-                tokens_out: 567,
+                input_tokens: 1234,
+                output_tokens: 567,
                 cache_creation_input_tokens: 800,
                 cache_read_input_tokens: 9000,
                 latency_ms: 42,
@@ -1171,14 +1208,14 @@ mod session {
         let events = log.get_range(&h, 0..1).unwrap();
         match &events[0].event {
             SessionEvent::LlmResponse {
-                tokens_in,
-                tokens_out,
+                input_tokens,
+                output_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
                 ..
             } => {
-                assert_eq!(*tokens_in, 1234);
-                assert_eq!(*tokens_out, 567);
+                assert_eq!(*input_tokens, 1234);
+                assert_eq!(*output_tokens, 567);
                 assert_eq!(*cache_creation_input_tokens, 800);
                 assert_eq!(*cache_read_input_tokens, 9000);
             }
@@ -1188,22 +1225,24 @@ mod session {
 
     #[test]
     fn llm_response_deserializes_without_cache_fields() {
-        // Legacy rows written before the cache fields were added
-        // (and rows from non-anthropic providers, which never carry
-        // cache info) must still deserialize; both fields default
-        // to zero.
-        let legacy = r#"{"kind":"llm_response","request_id":"req-1","finish_reason":"end_turn","tokens_in":100,"tokens_out":50,"latency_ms":1234}"#;
-        let event: SessionEvent = serde_json::from_str(legacy).unwrap();
+        // Rows from non-anthropic providers (which never carry cache
+        // info) must still deserialize; both cache fields default to
+        // zero. Uses the 1.2.0 wire shape (`input_tokens` /
+        // `output_tokens`); the pre-1.2.0 wire (`tokens_in` /
+        // `tokens_out`) is not back-compat by design — see
+        // CHANGELOG.md.
+        let payload = r#"{"kind":"llm_response","request_id":"req-1","finish_reason":"end_turn","input_tokens":100,"output_tokens":50,"latency_ms":1234,"agent_id":"test"}"#;
+        let event: SessionEvent = serde_json::from_str(payload).unwrap();
         match event {
             SessionEvent::LlmResponse {
-                tokens_in,
-                tokens_out,
+                input_tokens,
+                output_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
                 ..
             } => {
-                assert_eq!(tokens_in, 100);
-                assert_eq!(tokens_out, 50);
+                assert_eq!(input_tokens, 100);
+                assert_eq!(output_tokens, 50);
                 assert_eq!(cache_creation_input_tokens, 0);
                 assert_eq!(cache_read_input_tokens, 0);
             }
@@ -1219,8 +1258,8 @@ mod session {
         let event = SessionEvent::LlmResponse {
             request_id: "r".into(),
             finish_reason: "end_turn".into(),
-            tokens_in: 10,
-            tokens_out: 5,
+            input_tokens: 10,
+            output_tokens: 5,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
             latency_ms: 1,
@@ -1288,7 +1327,7 @@ mod chain_head_signing {
         match &rows[1].event {
             SessionEvent::ChainHead {
                 reason,
-                signing_key_id,
+                signing_pubkey: signing_key_id,
                 schema_version,
                 ..
             } => {
@@ -1579,7 +1618,7 @@ mod chain_head_signing {
         match &last.event {
             SessionEvent::ChainHead {
                 reason,
-                signing_key_id,
+                signing_pubkey: signing_key_id,
                 ..
             } => {
                 assert_eq!(*reason, ChainHeadReason::SessionEnd);

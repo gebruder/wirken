@@ -121,9 +121,10 @@ pub async fn list_pending(agent: &str) -> Result<()> {
     );
     for rec in &pending {
         let ts_short = rec.ts.get(..19).unwrap_or(rec.ts.as_str());
+        let tier_label = rec.tier.as_deref().unwrap_or("-");
         println!(
             "  {:30}  {:6}  {:20}  {}",
-            rec.action_key, rec.tier, ts_short, rec.tool,
+            rec.action_key, tier_label, ts_short, rec.tool,
         );
     }
     println!();

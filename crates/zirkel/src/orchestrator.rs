@@ -43,7 +43,8 @@ use wirken_agent::preset::PresetLoader;
 use wirken_agent::rate_limit::RateLimitConfig;
 use wirken_agent::skill_perms::PermissionProfile;
 use wirken_audit::{
-    HashHex, OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog, TrustLevel,
+    HashHex, HttpFetchOutcome, OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog,
+    TrustLevel,
 };
 use wirken_skill_store::{SkillStore, SkillStoreError};
 
@@ -452,7 +453,8 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                         audit_handle.as_ref(),
                         &source_cfg.name,
                         &source_cfg.endpoint,
-                        "ok",
+                        HttpFetchOutcome::Success,
+                        None,
                         bytes_total(&items),
                         &run_id,
                         pass.expansion_id.as_deref(),
@@ -462,13 +464,14 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                     items
                 }
                 Err(e) => {
-                    let outcome = fetch_outcome_label(&e);
+                    let (outcome, status) = fetch_outcome_label(&e);
                     emit_http_fetch(
                         config.session_log.as_ref(),
                         audit_handle.as_ref(),
                         &source_cfg.name,
                         &source_cfg.endpoint,
-                        &outcome,
+                        outcome,
+                        status,
                         0,
                         &run_id,
                         pass.expansion_id.as_deref(),
@@ -617,7 +620,7 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                             &run_id,
                             candidate_id,
                             keyword_match_score,
-                            matched_json,
+                            matched_keywords.clone(),
                             pass.expansion_id.as_deref(),
                         );
                     }
@@ -927,20 +930,20 @@ fn bytes_total(items: &[FetchedItem]) -> u64 {
         .sum()
 }
 
-fn fetch_outcome_label(e: &FetchError) -> String {
+fn fetch_outcome_label(e: &FetchError) -> (HttpFetchOutcome, Option<u16>) {
     match e {
         FetchError::Denied {
             source: HttpAccessDenied::Egress(_),
             ..
-        } => "egress_denied".to_string(),
+        } => (HttpFetchOutcome::EgressDenied, None),
         FetchError::Denied {
             source: HttpAccessDenied::RateLimit(_),
             ..
-        } => "rate_limited".to_string(),
-        FetchError::HttpStatus { status, .. } => format!("http_error_{}", status),
-        FetchError::Network { .. } => "network_error".to_string(),
-        FetchError::Parse { .. } => "parse_error".to_string(),
-        FetchError::TooLarge { .. } => "body_too_large".to_string(),
+        } => (HttpFetchOutcome::RateLimited, None),
+        FetchError::HttpStatus { status, .. } => (HttpFetchOutcome::HttpError, Some(*status)),
+        FetchError::Network { .. } => (HttpFetchOutcome::NetworkError, None),
+        FetchError::Parse { .. } => (HttpFetchOutcome::NetworkError, None),
+        FetchError::TooLarge { .. } => (HttpFetchOutcome::NetworkError, None),
     }
 }
 
@@ -969,7 +972,8 @@ fn emit_http_fetch(
     handle: Option<&SessionHandle<OwnSession>>,
     source_name: &str,
     endpoint: &str,
-    outcome: &str,
+    outcome: HttpFetchOutcome,
+    http_status_code: Option<u16>,
     bytes: u64,
     run_id: &str,
     expansion_id: Option<&str>,
@@ -983,7 +987,8 @@ fn emit_http_fetch(
             source: source_name.to_string(),
             host: host_of(endpoint),
             url: endpoint.to_string(),
-            outcome: outcome.to_string(),
+            outcome,
+            http_status_code,
             bytes,
             run_id: Some(run_id.to_string()),
             expansion_id: expansion_id.map(str::to_string),
@@ -999,7 +1004,7 @@ fn emit_candidate_scored(
     run_id: &str,
     candidate_id: i64,
     keyword_match_score: u32,
-    matched_keywords: String,
+    matched_keywords: Vec<String>,
     expansion_id: Option<&str>,
 ) {
     emit(

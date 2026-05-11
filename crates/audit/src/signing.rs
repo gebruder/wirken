@@ -144,7 +144,7 @@ impl AuditSigningKey {
     }
 
     /// Hex-encoded public key. Stable identifier for this key and
-    /// the canonical form embedded in `ChainHead.signing_key_id`.
+    /// the canonical form embedded in `ChainHead.signing_pubkey`.
     pub fn key_id_hex(&self) -> String {
         hex_encode(&self.public_key_bytes())
     }

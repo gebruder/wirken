@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use wirken_agent::{AgentFactory, session_id_for};
-use wirken_audit::{AuditEvent, AuditWriter};
+use wirken_audit::{ActorKind, AuditEvent, AuditWriter};
 use wirken_gateway::rate_limit::ControlPlaneRateLimiter;
 use wirken_gateway::session::SessionStore;
 
@@ -269,9 +269,14 @@ pub async fn serve(
                 let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
                 let _ = audit
                     .log(
-                        AuditEvent::new("webchat-user", "message.inbound", &inbound_target)
-                            .with_channel("webchat")
-                            .with_detail(serde_json::json!({ "content": &message })),
+                        AuditEvent::new(
+                            ActorKind::Service,
+                            "webchat-user",
+                            "message.inbound",
+                            &inbound_target,
+                        )
+                        .with_channel("webchat")
+                        .with_detail(serde_json::json!({ "content": &message })),
                     )
                     .await;
 
@@ -344,6 +349,7 @@ pub async fn serve(
                                 let _ = audit
                                     .log(
                                         AuditEvent::new(
+                                            ActorKind::User,
                                             "default",
                                             "message.outbound",
                                             &outbound_target,

@@ -5,7 +5,7 @@ use tokio::time::{Duration, interval};
 
 use crate::alarm_log::{AlarmLog, AlarmRecord, hostname_best_effort, now_rfc3339};
 use crate::error::AuditError;
-use crate::event::AuditEvent;
+use crate::event::{ActorKind, AuditEvent};
 use crate::log::{AuditLog, VerifyResult};
 use crate::siem::{SiemConfig, SiemForwarder};
 use crate::signing::AuditSigningKey;
@@ -294,15 +294,19 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome
             // honest chain-walk reader sees the failure inline. The
             // alarm log is the load-bearing record above; this is
             // best-effort.
-            let event = AuditEvent::new("audit", "audit.chain_broken", "audit.db").with_detail(
-                serde_json::json!({
-                    "session": session_id.as_str(),
-                    "seq": seq,
-                    "expected_hash": expected_hash,
-                    "actual_hash": actual_hash,
-                    "verified_count": verified_count,
-                }),
-            );
+            let event = AuditEvent::new(
+                ActorKind::Service,
+                "audit",
+                "audit.chain_broken",
+                "audit.db",
+            )
+            .with_detail(serde_json::json!({
+                "session": session_id.as_str(),
+                "seq": seq,
+                "expected_hash": expected_hash,
+                "actual_hash": actual_hash,
+                "verified_count": verified_count,
+            }));
             if let Err(e) = log.write_batch(&[event]) {
                 tracing::error!("audit chain_broken event write failed: {e}");
             }
@@ -584,7 +588,7 @@ mod tests {
         let db_path = tmp.path().join("audit.db");
         let log = AuditLog::open(&db_path).unwrap();
 
-        let mut buffer = vec![AuditEvent::new("actor", "a1", "t1")];
+        let mut buffer = vec![AuditEvent::new(ActorKind::User, "actor", "a1", "t1")];
         let res = flush(&log, &mut buffer, &None).await;
         assert!(res.is_ok(), "flush should succeed against a valid db");
         assert!(
@@ -603,7 +607,7 @@ mod tests {
         {
             let log = AuditLog::open(&db_path).unwrap();
             let events: Vec<AuditEvent> = (0..6)
-                .map(|i| AuditEvent::new("actor", format!("step-{i}"), "t"))
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
                 .collect();
             log.write_batch(&events).unwrap();
         }
@@ -803,7 +807,7 @@ mod tests {
         {
             let log = AuditLog::open(&db_path).unwrap();
             let events: Vec<AuditEvent> = (0..6)
-                .map(|i| AuditEvent::new("actor", format!("step-{i}"), "t"))
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
                 .collect();
             log.write_batch(&events).unwrap();
         }
@@ -855,7 +859,7 @@ mod tests {
         {
             let log = AuditLog::open(&db_path).unwrap();
             let events: Vec<AuditEvent> = (0..6)
-                .map(|i| AuditEvent::new("actor", format!("step-{i}"), "t"))
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
                 .collect();
             log.write_batch(&events).unwrap();
         }
@@ -932,8 +936,8 @@ mod tests {
         fs::set_permissions(tmp.path(), perms).unwrap();
 
         let mut buffer = vec![
-            AuditEvent::new("actor", "a1", "t1"),
-            AuditEvent::new("actor", "a2", "t2"),
+            AuditEvent::new(ActorKind::User, "actor", "a1", "t1"),
+            AuditEvent::new(ActorKind::User, "actor", "a2", "t2"),
         ];
         let before = buffer.len();
         let res = flush(&log, &mut buffer, &None).await;
@@ -977,8 +981,8 @@ mod tests {
         let log = AuditLog::open(&db_path).unwrap();
 
         let mut buffer = vec![
-            AuditEvent::new("actor", "attempt", "first"),
-            AuditEvent::new("actor", "attempt", "second"),
+            AuditEvent::new(ActorKind::User, "actor", "attempt", "first"),
+            AuditEvent::new(ActorKind::User, "actor", "attempt", "second"),
         ];
 
         let res = flush(&log, &mut buffer, &None).await;

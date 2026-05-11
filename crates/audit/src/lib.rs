@@ -10,14 +10,15 @@ mod writer;
 
 pub use alarm_log::{AlarmLog, AlarmRecord, AlarmVerifyStatus, VerifiedAlarmRecord};
 pub use error::AuditError;
-pub use event::{AuditEvent, StoredEvent};
+pub use event::{ActorKind, AuditEvent, StoredEvent};
 pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use session_log::{
-    ChainHeadReason, HashHex, HexBytes, OwnSession, PermissionDenialRecord, SessionEvent,
-    SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SqliteSessionLog,
-    StoredSessionEvent, ToolCallRecord, TrustLevel,
+    ChainHeadReason, DenialSource, HashHex, HexBytes, HttpFetchOutcome, OwnSession,
+    PermissionDenialRecord, SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope,
+    SessionVerifyResult, SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord,
+    TrustLevel,
 };
-pub use siem::{SiemConfig, SiemForwarder, SiemTarget};
+pub use siem::{SiemConfig, SiemForwarder, SiemTarget, compute_webhook_signature};
 pub use signing::{
     AuditSigningKey, CHAIN_HEAD_DOMAIN, CHAIN_HEAD_SCHEMA_VERSION, audit_signing_dir,
 };
