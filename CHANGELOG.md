@@ -12,6 +12,100 @@ tagged.
 
 ## [1.2.0] - 2026-05-07
 
+### Audit schema
+
+Audit schema 1.2.0 — identity correlation, field renames, webhook
+HMAC. Pre-1.2.0 audit databases remain readable; chain verification
+hashes the stored payload bytes, not a re-serialized event.
+
+**Schema-breaking**
+
+- `AuditEvent.actor` split into `actor_kind: ActorKind` (`User` /
+  `Agent` / `Service`) and `actor_id: String`. `channel` and
+  `session` become `Option<String>`. A custom deserializer accepts
+  the pre-1.2.0 single-`actor` shape; known service literals
+  (`gateway`, `orchestrator`, `audit`, `webchat-user`) classify as
+  `Service`, everything else as `User`.
+- `LlmResponse.tokens_in` / `tokens_out` renamed to `input_tokens` /
+  `output_tokens`. No alias; see notes.
+- `HttpFetch.outcome: String` replaced with the `HttpFetchOutcome`
+  enum (`Success` / `EgressDenied` / `RateLimited` / `HttpError` /
+  `NetworkError`); the HTTP status code moves to a sibling
+  `http_status_code: Option<u16>` field.
+- `CandidateScored.matched_keywords` is now `Vec<String>` (was a
+  JSON-encoded string).
+- `SubagentResult.status: String` replaced with the `SubagentStatus`
+  enum (`Ok` / `Error` / `RoundsExceeded` / `DepthExceeded` /
+  `Timeout`).
+- `ChainHead.signing_key_id` renamed to `signing_pubkey`.
+- `PermissionDenied` gains `denial_source: DenialSource` (`Tier` /
+  `OrgPolicy`); `tier` becomes `Option<String>` populated only for
+  tier-source denials. The pre-1.2.0 `"tier":"org_policy"` sentinel
+  is retired.
+- `AuditEvent.target` no longer carries inbound/outbound message
+  bodies. The body moves to `detail.content`; `target` becomes a
+  stable resource id (`<channel>:<platform-msg-id>` for inbound,
+  `<channel>:out:<uuid>` for outbound).
+- `SessionEvent::DigestPushed` and `SessionEvent::SandboxProvisioned`
+  removed; neither had a producer.
+
+**Schema-additive**
+
+- `UserMessage` gains `adapter_id: Option<String>` and
+  `sender_id: Option<String>`; populated by adapter-driven and
+  webchat-driven callers, `None` for CLI / cron / subagent paths.
+  New `wirken_agent::InboundContext` carries the pair; new
+  `Agent::process_inbound` and `Agent::process_message_stream_with`
+  accept it.
+- `AssistantMessage`, `AssistantToolCalls`, `ToolResult`,
+  `LlmRequest`, `LlmResponse`, `SystemPromptSet` gain
+  `agent_id: String`.
+- `HttpFetch` gains `agent_id: Option<String>` and
+  `skill_name: Option<String>`; the zirkel orchestrator threads both
+  through `OrchestratorConfig`.
+- `Compaction` gains `agent_id: String`, `provider: Option<String>`,
+  `model: Option<String>`. `ContextEngine::fit()` now takes the
+  agent id.
+- `adapter.connect` and `adapter.disconnect` legacy-audit events
+  carry `detail.adapter_pubkey_fingerprint` (first 16 hex chars of
+  the handshake key).
+
+**Infrastructure**
+
+- Webhook SIEM target adds `X-Wirken-Signature: sha256=<hex>` when
+  `siem.json.hmac_secret` is set. HMAC-SHA-256 over the exact
+  serialized request body bytes.
+- `wirken_gateway::permissions::Action` gains a `Display` impl
+  emitting stable snake_case labels; the audit event for a denied
+  tool now records the label plus the canonical `approval_key`
+  instead of the debug shape.
+- New pure builders `build_datadog_payload`, `build_splunk_body`,
+  `build_sentinel_payload`, `build_webhook_request`, and
+  `compute_webhook_signature` exposed from `wirken_audit::siem` so
+  the SIEM wire envelopes are assertable without an HTTP server.
+- Wire-format regression suite at `crates/audit/tests/schema_v1_2.rs`
+  covers every changed variant: pre-1.2.0 row deserialisation,
+  presence of new fields, absence of removed fields, and HMAC over
+  the exact body bytes.
+
+**Notes**
+
+- `LlmRequest.credential_id` / `LlmResponse.credential_id` (the
+  vault-entry-name correlation originally specified for this PR) is
+  deferred. Threading the entry name requires changes to
+  `AgentStaticConfig`, `ChannelOverride`, `Agent`, and the
+  `wirken ask` / factory constructors; tracked separately so the
+  schema work and the credential-plumbing work stay reviewable in
+  isolation.
+- `LlmResponse.input_tokens` and `output_tokens` carry
+  `#[serde(default)]`. A pre-1.2.0 row carrying `tokens_in` /
+  `tokens_out` deserializes to zero rather than failing; the legacy
+  values are silently dropped. There is no serde alias by design —
+  the regression fixture
+  (`pre_1_2_0_llm_response_drops_renamed_token_fields_to_zero`)
+  pins this so a future revert that re-introduces the alias fails
+  the suite.
+
 ### Skill loader
 
 - New `wirken skills migrate [path] [--dry-run]` subcommand.
