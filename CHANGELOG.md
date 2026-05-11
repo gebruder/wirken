@@ -10,6 +10,69 @@ tagged.
 
 ## Unreleased
 
+### Audit schema
+
+**Schema-additive**
+
+- `AssistantToolCalls` and `ToolResult` gain
+  `adapter_id: Option<String>` and `sender_id: Option<String>`.
+  Populated from the active `InboundContext` so a SIEM detection on
+  a tool-call row can pivot on channel without joining to the
+  sibling `UserMessage`. `None` for CLI / cron / subagent emits.
+  Forward-compatible: pre-1.3.x rows continue to deserialize cleanly
+  via `#[serde(default)]`.
+
+### SIEM forwarder
+
+**Feature**
+
+- Typed `SessionEvent` rows now reach the SIEM pipe via a hybrid
+  path. Targets that tolerate mixed payload shapes (Datadog, Splunk
+  HEC, generic webhook) carry typed events on the same endpoint as
+  the legacy `AuditEvent` batch; the Sentinel target requires a
+  second DCR stream because its first stream is column-pinned.
+- New `siem.json` fields, all optional and opt-in:
+  `sentinel_typed.{endpoint, api_key}` for the Sentinel parallel
+  pipe, `typed_include_variants` and `typed_exclude_variants` to
+  override the default forwardable-variant set.
+- Default forwardable variants: `AssistantToolCalls`, `ToolResult`,
+  `HttpFetch`, `PermissionDenied`, `SkillPermissionDenied`,
+  `SubagentSpawned`, `SubagentResult`, `ChainHead`. PII-carrying
+  variants (`UserMessage`, `AssistantMessage`) and token-accounting
+  variants (`LlmRequest`, `LlmResponse`) are excluded unless the
+  operator opts in via `typed_include_variants`.
+- Polling seam: the typed-event worker reads `session_events` via
+  `SessionLog::get_since` at a 50 ms cadence. Cursor advances per
+  session only after a successful POST. The audit hash chain is
+  unaffected; the worker never writes.
+- Webhook typed pipe carries `X-Wirken-Signature` over the exact
+  body bytes via the same `(body, signature)` factoring as the
+  legacy pipe. Shared HMAC secret produces distinct signatures per
+  pipe because the body shapes differ.
+- New public API on `wirken_audit`:
+  `TypedEventForwarder::spawn`, `TypedSink`, `HttpTypedSink`,
+  `TypedTransport`, plus four typed builders alongside the legacy
+  ones (`build_datadog_typed_payload`, `build_splunk_typed_body`,
+  `build_sentinel_typed_payload`, `build_webhook_typed_request`).
+
+**Tests**
+
+- New `crates/audit/tests/typed_forwarder.rs` integration suite:
+  per-target snapshot shape, polling worker seq-ordered delivery,
+  retry-on-sink-error without cursor advance, exclude-list
+  suppression, chain integrity assertion (the `session_events`
+  hashes are byte-identical before and after a polling pass).
+- Five new fixtures in `crates/audit/tests/schema_v1_2.rs`:
+  pre-A1 rows that carry only `agent_id`, and 1.3.x emits that
+  carry the new identity fields.
+
+**Notes**
+
+- The typed forwarder is opt-in: a `siem.json` without
+  `sentinel_typed` / `typed_include_variants` /
+  `typed_exclude_variants` matches 1.3.0 behaviour exactly. No
+  version bump; the changes are patch-compatible.
+
 ## [1.3.0] - 2026-05-11
 
 ### Audit schema
