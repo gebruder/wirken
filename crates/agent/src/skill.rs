@@ -4,6 +4,19 @@ use std::path::{Path, PathBuf};
 use crate::error::AgentError;
 use crate::skill_perms::{PermissionProfile, PermissionsBlock, resolve_block};
 
+/// Maximum allowed length of a skill name in the frontmatter.
+const NAME_MAX_LEN: usize = 64;
+
+/// Maximum allowed length of a skill description.
+const NAME_DESC_MAX_LEN: usize = 1024;
+
+/// Env-var operator opt-out that lets unsigned skills load. Matches
+/// the install-time behaviour at `wirken skills install`. When set to
+/// a truthy value, [`SkillLoader::load_file`] emits a `tracing::warn!`
+/// and proceeds instead of erroring on a skill that ships no
+/// `SKILL.sig` / `SKILL.pub`.
+const ALLOW_UNSIGNED_ENV: &str = "WIRKEN_ALLOW_UNSIGNED_SKILLS";
+
 /// A loaded markdown skill.
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -14,10 +27,14 @@ pub struct Skill {
     pub path: PathBuf,
     pub available: bool,
     /// Per-skill permissions declared in the frontmatter `permissions:`
-    /// block. Required since the migration window closed (#76); the
-    /// loader hard-fails on a missing block. The agent merges declared
-    /// profiles from all loaded skills into one effective per-agent
-    /// profile at `attach_skills` time.
+    /// block. When the block is absent the loader fills in
+    /// [`PermissionProfile::default`], which is least-privilege on every
+    /// axis (empty tool allowlist, deny-all egress, empty filesystem
+    /// allowlists, empty inference allowlist). A skill without an
+    /// explicit block can be loaded but can do nothing beyond text
+    /// output; the operator must opt in to capabilities by writing the
+    /// block. The agent merges declared profiles from all loaded skills
+    /// into one effective per-agent profile at `attach_skills` time.
     pub permissions: PermissionProfile,
     /// Whether the skill is excluded from the LLM's auto-pickable set
     /// (matches OpenClaw's `disable-model-invocation` field, #79).
@@ -109,13 +126,6 @@ impl SkillLoader {
         Ok(skills)
     }
 
-    /// Substrings that would collide with the prompt-time envelope
-    /// markers and let a hostile skill forge the trust boundary.
-    /// Refused at load time. Case-sensitive: the runtime emits the
-    /// markers in this exact case, so a lowercase variant is harmless.
-    const ENVELOPE_COLLISION_TOKENS: &'static [&'static str] =
-        &["BEGIN UNTRUSTED SKILL", "END UNTRUSTED SKILL"];
-
     /// Load a single SKILL.md file.
     pub fn load_file(path: &Path) -> Result<Skill, AgentError> {
         let content = std::fs::read_to_string(path)
@@ -133,78 +143,79 @@ impl SkillLoader {
             .unwrap_or("unknown")
             .to_string();
 
-        let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
-        let home = std::env::var("HOME").ok().map(PathBuf::from);
-        let permissions = match frontmatter.permissions {
-            Some(block) => resolve_block(block, skill_root, home.as_deref()).map_err(|e| {
-                AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
-            })?,
-            None => {
-                return Err(AgentError::SkillLoad(format!(
-                    "skill at {} has no `permissions:` block; required since #76 \
-                     migration-window flip. See an existing bundled SKILL.md for \
-                     the schema.",
-                    path.display()
-                )));
-            }
-        };
-
-        // Default-true (Wirken's posture: auto-invocation requires
-        // explicit opt-in). #79.
-        let disable_model_invocation = frontmatter.disable_model_invocation.unwrap_or(true);
-
-        let name = frontmatter.name.unwrap_or(dir_name);
-        let description = frontmatter.description.unwrap_or_default();
+        // Bind the candidate name + description first so the envelope
+        // check below can inspect them. Validation of the regex /
+        // parent-dir match / length runs after the envelope gate so
+        // an envelope-forging name surfaces as `EnvelopeCollision`
+        // rather than a bare format error.
+        let candidate_name = frontmatter.name.clone().unwrap_or_else(|| dir_name.clone());
+        let description = frontmatter.description.clone().ok_or_else(|| {
+            AgentError::SkillLoad(format!(
+                "skill at {} is missing the `description:` field (required, 1..=1024 chars)",
+                path.display()
+            ))
+        })?;
 
         // Refuse skills whose body, description, or name would forge
         // the prompt-time UNTRUSTED-SKILL envelope. Per-build-prompt
         // nonces make literal-marker collisions ineffective at the
         // boundary itself, but carrying the tokens through to the
-        // LLM still gives the model a confusable surface — and
-        // there's no legitimate reason for a SKILL.md field to write
-        // the exact tokens anyway. Refusal at load time is the
-        // simpler story than scrubbing inside `build_prompt`.
+        // LLM still gives the model a confusable surface, and there
+        // is no legitimate reason for a SKILL.md field to write the
+        // exact tokens anyway. Refusal at load time is the simpler
+        // story than scrubbing inside `build_prompt`.
         //
         // The name field matters because `build_prompt` renders it
         // inside the envelope as a heading; a hostile name could
         // otherwise emit a `END UNTRUSTED SKILL <fake-nonce>` token
         // at the heading position even though the per-build nonce
         // makes the literal forgery ineffective.
-        for token in Self::ENVELOPE_COLLISION_TOKENS {
-            if name.contains(token) {
-                tracing::warn!(
-                    "refusing skill at {}: name contains envelope-collision token \
-                     {token:?}",
-                    path.display()
-                );
-                return Err(AgentError::EnvelopeCollision {
-                    name: name.clone(),
-                    field: "name",
-                });
+        envelope_collision_check(&candidate_name, &description, &body, path)?;
+
+        // Frontmatter name takes precedence when present, but must
+        // agree with the directory basename so the on-disk layout
+        // matches the skill's wire identity. When the frontmatter
+        // omits a name, the directory name becomes the skill name;
+        // the directory name itself still has to pass the format
+        // gate.
+        let name = match frontmatter.name {
+            Some(declared) => {
+                if declared != dir_name {
+                    return Err(AgentError::SkillLoad(format!(
+                        "skill at {} has frontmatter name '{declared}' but parent directory \
+                         is '{dir_name}'; name and directory basename must agree",
+                        path.display()
+                    )));
+                }
+                declared
             }
-            if body.contains(token) {
-                tracing::warn!(
-                    "refusing skill at {}: body contains envelope-collision token \
-                     {token:?}",
-                    path.display()
-                );
-                return Err(AgentError::EnvelopeCollision {
-                    name: name.clone(),
-                    field: "body",
-                });
-            }
-            if description.contains(token) {
-                tracing::warn!(
-                    "refusing skill at {}: description contains envelope-collision \
-                     token {token:?}",
-                    path.display()
-                );
-                return Err(AgentError::EnvelopeCollision {
-                    name: name.clone(),
-                    field: "description",
-                });
-            }
-        }
+            None => dir_name,
+        };
+        validate_name(&name, path)?;
+        validate_description(&description, path)?;
+
+        let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
+        let home = std::env::var("HOME").ok().map(PathBuf::from);
+        // A1: missing `permissions:` block is no longer a load error.
+        // It falls back to `PermissionProfile::default()`, which is
+        // least-privilege on every axis (empty tool allowlist,
+        // deny-all egress, empty filesystem allowlists, empty
+        // inference allowlist). A skill that omits the block can be
+        // loaded but cannot do anything beyond emitting text through
+        // the prompt; the operator opts into capability by writing
+        // the block.
+        let permissions = match frontmatter.permissions {
+            Some(block) => resolve_block(block, skill_root, home.as_deref()).map_err(|e| {
+                AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
+            })?,
+            None => PermissionProfile::default(),
+        };
+
+        // Default-true (Wirken's posture: auto-invocation requires
+        // explicit opt-in). #79.
+        let disable_model_invocation = frontmatter.disable_model_invocation.unwrap_or(true);
+
+        verify_skill_signature(skill_root, path)?;
 
         Ok(Skill {
             name,
@@ -318,38 +329,16 @@ fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentE
     Ok((frontmatter, body))
 }
 
-/// Extract required binary names from the metadata field.
-/// Primary key is `metadata.wirken.requires.bins`. `metadata.openclaw.*`
-/// is accepted as a deprecated alias for back-compat; a migration hint
-/// is logged when only the alias is present.
+/// Extract required binary names from the metadata field. The only
+/// recognised location is `metadata.wirken.requires.bins`; any
+/// `metadata.openclaw.*` entry in the frontmatter is ignored (the
+/// deprecated alias was retired by the skill-loader spec). Skills
+/// authored against the previous alias should rename the key; the
+/// `wirken skills migrate` subcommand performs the rewrite.
 fn extract_required_bins(fm: &SkillFrontmatter) -> Vec<String> {
-    let metadata = match fm.metadata.as_ref() {
-        Some(m) => m,
-        None => return Vec::new(),
-    };
-
-    let section = metadata.get("wirken").or_else(|| {
-        let openclaw = metadata.get("openclaw");
-        if openclaw.is_some() {
-            // Once-per-process WARN, not once-per-skill: operator-state
-            // condition for operators carrying skills from before the
-            // 'openclaw' to 'wirken' metadata-key rename. A multi-skill
-            // tree spammed this on every CLI invocation.
-            use std::sync::OnceLock;
-            static OPENCLAW_WARNED: OnceLock<()> = OnceLock::new();
-            if OPENCLAW_WARNED.set(()).is_ok() {
-                tracing::warn!(
-                    "skill frontmatter uses deprecated 'openclaw' metadata key; \
-                     rename to 'wirken'. Suppressing further repeats this process."
-                );
-            } else {
-                tracing::debug!("skill frontmatter uses deprecated 'openclaw' metadata key");
-            }
-        }
-        openclaw
-    });
-
-    section
+    fm.metadata
+        .as_ref()
+        .and_then(|m| m.get("wirken"))
         .and_then(|s| s.get("requires"))
         .and_then(|req| req.get("bins"))
         .and_then(|bins| bins.as_array())
@@ -374,4 +363,153 @@ fn which_exists(bin: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Spec form of a skill name: lowercase letter prefix, then any
+/// combination of `a-z 0-9 -` up to 64 characters total. Reject
+/// names whose first character is a digit or hyphen so a skill name
+/// can never be confused with a numeric flag or option in a CLI
+/// rendering. Reject uppercase, underscores, dots, slashes,
+/// non-ASCII so the same name is one token on every filesystem and
+/// in every shell.
+fn validate_name(name: &str, path: &Path) -> Result<(), AgentError> {
+    if name.is_empty() || name.len() > NAME_MAX_LEN {
+        return Err(AgentError::SkillLoad(format!(
+            "skill at {} has invalid name {name:?}: length must be 1..={NAME_MAX_LEN}",
+            path.display()
+        )));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().expect("checked non-empty above");
+    if !first.is_ascii_lowercase() {
+        return Err(AgentError::SkillLoad(format!(
+            "skill at {} has invalid name {name:?}: must start with a lowercase letter",
+            path.display()
+        )));
+    }
+    for c in chars {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            return Err(AgentError::SkillLoad(format!(
+                "skill at {} has invalid name {name:?}: must match \
+                 ^[a-z][a-z0-9-]{{0,63}}$ (offending char: {c:?})",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Spec form of a skill description: present, non-empty, at most
+/// 1024 characters.
+fn validate_description(desc: &str, path: &Path) -> Result<(), AgentError> {
+    if desc.is_empty() {
+        return Err(AgentError::SkillLoad(format!(
+            "skill at {} has an empty description (must be 1..={NAME_DESC_MAX_LEN} chars)",
+            path.display()
+        )));
+    }
+    if desc.chars().count() > NAME_DESC_MAX_LEN {
+        return Err(AgentError::SkillLoad(format!(
+            "skill at {} has a description longer than {NAME_DESC_MAX_LEN} chars",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse any skill whose name, description, or body contains a
+/// literal envelope marker token. The 1.2.0 schema renames are not
+/// at issue here; this gate protects the trust boundary between the
+/// system prompt and the third-party skill envelope. Runs early, ahead
+/// of the name and description format gates, so an envelope-forging
+/// name surfaces as [`AgentError::EnvelopeCollision`] rather than a
+/// less-specific format error.
+fn envelope_collision_check(
+    name: &str,
+    description: &str,
+    body: &str,
+    path: &Path,
+) -> Result<(), AgentError> {
+    const TOKENS: &[&str] = &["BEGIN UNTRUSTED SKILL", "END UNTRUSTED SKILL"];
+    for token in TOKENS {
+        if name.contains(token) {
+            tracing::warn!(
+                "refusing skill at {}: name contains envelope-collision token {token:?}",
+                path.display()
+            );
+            return Err(AgentError::EnvelopeCollision {
+                name: name.to_string(),
+                field: "name",
+            });
+        }
+        if body.contains(token) {
+            tracing::warn!(
+                "refusing skill at {}: body contains envelope-collision token {token:?}",
+                path.display()
+            );
+            return Err(AgentError::EnvelopeCollision {
+                name: name.to_string(),
+                field: "body",
+            });
+        }
+        if description.contains(token) {
+            tracing::warn!(
+                "refusing skill at {}: description contains envelope-collision token {token:?}",
+                path.display()
+            );
+            return Err(AgentError::EnvelopeCollision {
+                name: name.to_string(),
+                field: "description",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Verify the skill bundle's signature at load. Uses
+/// [`wirken_gateway::skill_registry::verify_skill_self_signed`]; the
+/// self-signed check proves the bundle is internally consistent
+/// (`SKILL.md` hashes to what `SKILL.sig` covers under `SKILL.pub`),
+/// which is what catches post-install tampering by a process other
+/// than the operator.
+///
+/// `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` lets a bundle without sig + pub
+/// files load anyway with a `tracing::warn!` audit line; this
+/// matches the install-time bypass semantics so an operator running
+/// a dev workflow does not need a different env var per surface.
+/// A bundle whose signature is present but does not verify is always
+/// a hard fail; the bypass is for missing files, not for bad ones.
+fn verify_skill_signature(skill_dir: &Path, skill_md_path: &Path) -> Result<(), AgentError> {
+    use wirken_gateway::skill_registry::{VerifyResult, verify_skill_self_signed};
+
+    let result = verify_skill_self_signed(skill_dir).map_err(|e| {
+        AgentError::SkillLoad(format!(
+            "signature verification at {} failed: {e}",
+            skill_md_path.display()
+        ))
+    })?;
+    match result {
+        VerifyResult::Valid { .. } => Ok(()),
+        VerifyResult::Invalid => Err(AgentError::SkillLoad(format!(
+            "signature verification at {} failed: SKILL.sig does not match SKILL.md \
+             under SKILL.pub. If the bundle was modified after install, restore from \
+             the source or re-sign before loading.",
+            skill_md_path.display()
+        ))),
+        VerifyResult::Unsigned => {
+            if wirken_gateway::org::parse_boolean_escape(ALLOW_UNSIGNED_ENV) {
+                tracing::warn!(
+                    path = %skill_md_path.display(),
+                    "{ALLOW_UNSIGNED_ENV}=1: loading unsigned skill; bundle provenance is unverified"
+                );
+                Ok(())
+            } else {
+                Err(AgentError::SkillLoad(format!(
+                    "skill at {} is unsigned (no SKILL.sig / SKILL.pub). Sign with \
+                     `wirken skills sign <dir>` or set {ALLOW_UNSIGNED_ENV}=1 to opt in.",
+                    skill_md_path.display()
+                )))
+            }
+        }
+    }
 }

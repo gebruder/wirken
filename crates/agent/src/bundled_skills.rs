@@ -77,6 +77,16 @@ const SKILLS: &[BundledSkill] = &[
 
 /// Install bundled skills to a directory. Skips skills that already exist.
 /// Returns the number of skills installed.
+///
+/// Each freshly installed skill is self-signed with a one-shot keypair
+/// so the loader's signature gate (see
+/// `crates/agent/src/skill.rs::verify_skill_signature`) accepts the
+/// bundle without operator setup. The signing key is discarded after
+/// the signature is written. The pair gives tamper-detection for the
+/// bundled set after install: if any file in the bundle changes
+/// without re-signing, the loader rejects it. Skills that already
+/// exist on disk are left untouched (re-signing them would mask any
+/// operator edits to the SKILL.md content).
 pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<usize> {
     let mut installed = 0;
 
@@ -90,6 +100,16 @@ pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<usize> {
 
         std::fs::create_dir_all(&dir)?;
         std::fs::write(&path, skill.content)?;
+
+        let (secret_hex, _public_hex) = wirken_gateway::skill_registry::generate_signing_keypair();
+        let secret_bytes = wirken_gateway::skill_registry::hex_decode_public(&secret_hex)
+            .map_err(std::io::Error::other)?;
+        let mut secret_arr = [0u8; 32];
+        secret_arr.copy_from_slice(&secret_bytes);
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+        wirken_gateway::skill_registry::sign_skill(&dir, &signing_key)
+            .map_err(std::io::Error::other)?;
+
         installed += 1;
     }
 

@@ -140,6 +140,7 @@ Use `curl wttr.in/{city}` to get current weather.
 "#,
     )
     .unwrap();
+    sign_test_skill(&skill_dir);
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
@@ -186,6 +187,7 @@ Summarize the given text concisely.
 "#,
     )
     .unwrap();
+    sign_test_skill(&skill_dir);
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
@@ -203,19 +205,55 @@ fn load_skill_missing_bin() {
         r#"---
 name: impossible
 description: "Needs a nonexistent binary"
-metadata: { "openclaw": { "requires": { "bins": ["nonexistent_binary_xyz_999"] } } }
+metadata: { "wirken": { "requires": { "bins": ["nonexistent_binary_xyz_999"] } } }
 permissions: {}
 ---
 
-This skill requires a binary that doesn't exist, declared under the
-deprecated `openclaw` alias to exercise the back-compat path.
+This skill requires a binary that doesn't exist.
 "#,
     )
     .unwrap();
+    sign_test_skill(&skill_dir);
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
     assert_eq!(skills.len(), 1);
     assert!(!skills[0].available);
+}
+
+#[test]
+fn metadata_openclaw_alias_is_ignored() {
+    // A4: the deprecated `metadata.openclaw.*` alias was retired. A
+    // SKILL.md that declares its required-bins under the old key now
+    // loads with an empty `required_bins`; the skill is treated as
+    // always-available because the loader sees no bins to probe for.
+    // Regression test against any code that reintroduces the alias
+    // path.
+    let tmp = TempDir::new().unwrap();
+    let skill_dir = tmp.path().join("openclaw-relic");
+    std::fs::create_dir(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        r#"---
+name: openclaw-relic
+description: "Pre-1.3 frontmatter using the retired openclaw alias"
+metadata: { "openclaw": { "requires": { "bins": ["nonexistent_binary_xyz_999"] } } }
+permissions: {}
+---
+
+Body.
+"#,
+    )
+    .unwrap();
+    sign_test_skill(&skill_dir);
+
+    let skills = SkillLoader::load_dir(tmp.path()).unwrap();
+    assert_eq!(skills.len(), 1);
+    assert!(
+        skills[0].required_bins.is_empty(),
+        "openclaw-alias bins must be ignored, got {:?}",
+        skills[0].required_bins
+    );
+    assert!(skills[0].available, "no bins declared = always available");
 }
 
 #[test]
@@ -232,6 +270,7 @@ fn load_multiple_skills() {
             ),
         )
         .unwrap();
+        sign_test_skill(&dir);
     }
 
     let skills = SkillLoader::load_dir(tmp.path()).unwrap();
@@ -281,26 +320,46 @@ fn every_bundled_skill_loads_with_a_permissions_block() {
     }
 }
 
-/// Hard-fail flip (#76 follow-up): a SKILL.md without a `permissions:`
-/// block is a load error, not a deprecation warning. Regression test
-/// against future code that softens this back to a warning.
+/// Spec change: a SKILL.md without a `permissions:` block now loads
+/// successfully, filling the permission profile from
+/// `PermissionProfile::default()` (least-privilege on every axis). The
+/// skill can be present in the system prompt but cannot exercise any
+/// tool, host, path, or provider until the operator writes an explicit
+/// block. Regression test against any future code that re-introduces a
+/// hard fail on missing permissions.
 #[test]
-fn skill_without_permissions_block_fails_to_load() {
+fn skill_without_permissions_block_loads_with_default_deny() {
     let tmp = TempDir::new().unwrap();
-    let skill_dir = tmp.path().join("legacy_skill");
+    let skill_dir = tmp.path().join("legacy-skill");
     std::fs::create_dir_all(&skill_dir).unwrap();
     let skill_file = skill_dir.join("SKILL.md");
     std::fs::write(
         &skill_file,
-        "---\nname: legacy_skill\ndescription: no permissions block\n---\n\nBody.\n",
+        "---\nname: legacy-skill\ndescription: no permissions block\n---\n\nBody.\n",
     )
     .unwrap();
-    let err = SkillLoader::load_file(&skill_file).unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("no `permissions:` block"),
-        "expected hard-fail message, got: {msg}"
+    sign_test_skill(&skill_dir);
+    let skill = SkillLoader::load_file(&skill_file).expect("missing block must not hard-fail");
+    assert_eq!(
+        skill.permissions,
+        crate::skill_perms::PermissionProfile::default(),
+        "missing block must produce least-privilege defaults"
     );
+}
+
+/// Self-sign a test skill directory with a fresh one-shot Ed25519
+/// keypair so the loader's signature gate accepts the bundle without
+/// resorting to env-var bypasses. Mirrors what
+/// [`crate::bundled_skills::install_bundled_skills`] does on the
+/// install path.
+fn sign_test_skill(skill_dir: &std::path::Path) {
+    use wirken_gateway::skill_registry::{generate_signing_keypair, hex_decode_public, sign_skill};
+    let (secret_hex, _) = generate_signing_keypair();
+    let bytes = hex_decode_public(&secret_hex).expect("hex");
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    let key = ed25519_dalek::SigningKey::from_bytes(&arr);
+    sign_skill(skill_dir, &key).expect("sign test skill");
 }
 
 /// Migrating to per-skill permissions must not break the merge step
@@ -1321,6 +1380,7 @@ fn agent_loads_skills() {
         "---\nname: weather\ndescription: get weather\npermissions: {}\n---\nUse curl wttr.in",
     )
     .unwrap();
+    sign_test_skill(&weather);
 
     let mut agent = crate::runtime::Agent::new(
         "test-agent".into(),
@@ -6195,6 +6255,7 @@ You are the Zirkel librarian. Use sqlite_query with one of: kept_recent, kept_by
         let lib_dir = skills_dir.join("librarian");
         std::fs::create_dir_all(&lib_dir).unwrap();
         std::fs::write(lib_dir.join("SKILL.md"), LIBRARIAN_SKILL_MD).unwrap();
+        super::sign_test_skill(&lib_dir);
     }
 
     fn seed_zirkel_db(db_path: &Path) {

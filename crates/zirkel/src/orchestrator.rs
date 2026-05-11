@@ -1286,8 +1286,24 @@ skills = ["aggregator"]
              \x20\x20\x20\x20allow: [\"*\"]\n\
              ---\n\nbody\n",
         );
-        std::fs::write(dest.join("skills/aggregator/SKILL.md"), aggregator_md).unwrap();
+        let aggregator_dir = dest.join("skills/aggregator");
+        std::fs::write(aggregator_dir.join("SKILL.md"), aggregator_md).unwrap();
+        sign_test_skill(&aggregator_dir);
         std::fs::write(dest.join("sources.toml"), sources_toml).unwrap();
+    }
+
+    /// Self-sign a test skill directory with a fresh one-shot
+    /// keypair. Mirrors what bundled-skill / bundled-preset install
+    /// does on the production paths so the loader's signature gate
+    /// accepts the fixture without test-only env-var games.
+    fn sign_test_skill(skill_dir: &Path) {
+        let (secret_hex, _) = wirken_gateway::skill_registry::generate_signing_keypair();
+        let bytes =
+            wirken_gateway::skill_registry::hex_decode_public(&secret_hex).expect("hex decode");
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        let key = ed25519_dalek::SigningKey::from_bytes(&arr);
+        wirken_gateway::skill_registry::sign_skill(skill_dir, &key).expect("sign test skill");
     }
 
     fn write_interests(path: &Path, raw: &str) {
@@ -1604,6 +1620,7 @@ skills = ["other"]
             "---\nname: other\ndescription: x\ndisable-model-invocation: false\npermissions: {}\n---\nbody\n",
         )
         .unwrap();
+        sign_test_skill(&preset_dir.join("skills/other"));
         std::fs::write(
             preset_dir.join("sources.toml"),
             "[[source]]\nname=\"x\"\nendpoint=\"http://x\"\nmethod=\"rss\"\n",

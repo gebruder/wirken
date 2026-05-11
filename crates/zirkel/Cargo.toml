@@ -31,3 +31,5 @@ hdbscan = "0.12"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wirken-gateway = { path = "../gateway" }
+ed25519-dalek = { workspace = true }

@@ -43,6 +43,14 @@ const PRESETS: &[BundledPreset] = &[BundledPreset {
 /// created if missing; existing files are overwritten so an update of
 /// the wirken binary refreshes the on-disk preset on next install.
 /// Returns the count of files written.
+///
+/// Each skill directory the preset ships (any `SKILL.md` path under
+/// `skills/<name>/`) is self-signed with a one-shot keypair after
+/// the SKILL.md is written. The signing key is discarded after the
+/// signature file is on disk. Matches the bundled-skill install
+/// behaviour: the loader's signature gate accepts the bundle on
+/// first load without operator setup, and any post-install edit to
+/// a SKILL.md without re-signing is rejected.
 pub fn install_bundled_preset(name: &str, dest_dir: &Path) -> io::Result<usize> {
     let preset = PRESETS.iter().find(|p| p.name == name).ok_or_else(|| {
         io::Error::new(
@@ -51,13 +59,28 @@ pub fn install_bundled_preset(name: &str, dest_dir: &Path) -> io::Result<usize> 
         )
     })?;
     let mut count = 0;
+    let mut skill_dirs: Vec<std::path::PathBuf> = Vec::new();
     for (rel_path, content) in preset.files {
         let path = dest_dir.join(rel_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, content)?;
+        if path.file_name().and_then(|n| n.to_str()) == Some("SKILL.md")
+            && let Some(parent) = path.parent()
+        {
+            skill_dirs.push(parent.to_path_buf());
+        }
         count += 1;
+    }
+    for dir in skill_dirs {
+        let (secret_hex, _) = wirken_gateway::skill_registry::generate_signing_keypair();
+        let bytes = wirken_gateway::skill_registry::hex_decode_public(&secret_hex)
+            .map_err(io::Error::other)?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        let key = ed25519_dalek::SigningKey::from_bytes(&arr);
+        wirken_gateway::skill_registry::sign_skill(&dir, &key).map_err(io::Error::other)?;
     }
     Ok(count)
 }
