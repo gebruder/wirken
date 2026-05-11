@@ -48,6 +48,28 @@ pub enum Action {
     SkillInstall,
 }
 
+impl std::fmt::Display for Action {
+    /// Stable snake_case label. SIEM consumers group by this string;
+    /// the `Debug` form would carry struct payloads (`ShellExec { pattern: "curl" }`)
+    /// which is not stable wire shape.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Action::WorkspaceFileAccess => "workspace_file_access",
+            Action::ChannelConverse => "channel_converse",
+            Action::WebSearch => "web_search",
+            Action::ShellExec { .. } => "shell_exec",
+            Action::ExternalFileAccess { .. } => "external_file_access",
+            Action::CrossConversationMessage => "cross_conversation_message",
+            Action::DestructiveFileOp => "destructive_file_op",
+            Action::NetworkRequest { .. } => "network_request",
+            Action::CredentialAccess => "credential_access",
+            Action::CronCreate => "cron_create",
+            Action::SkillInstall => "skill_install",
+        };
+        f.write_str(label)
+    }
+}
+
 /// Commands whose shell-exec pattern keeps the default Tier 2
 /// ("first-use approval, remembered for 30 days") behaviour. Every
 /// other exec prefix escalates to Tier 3 ("always prompt"). This is

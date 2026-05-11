@@ -412,13 +412,6 @@ pub enum SessionEvent {
         name: String,
         member_count: u32,
     },
-    /// Zirkel: the daily digest was rendered and pushed to the
-    /// configured channel (C-Signal scope).
-    DigestPushed {
-        run_id: String,
-        channel_adapter: String,
-        item_count: u32,
-    },
     /// Zirkel: the interests file changed between runs. `before_hash`
     /// is the hash recorded on the previous run's snapshot;
     /// `after_hash` is the current hash. Emitted at the start of every
@@ -427,9 +420,6 @@ pub enum SessionEvent {
         before_hash: HashHex,
         after_hash: HashHex,
     },
-    /// Sandbox lazily provisioned (item 3 emits this once at first
-    /// use).
-    SandboxProvisioned { name: String, mode: String },
     /// Compaction event from the context engine (item 4). The
     /// `extracts` are structured key-value claims, not free-text.
     /// `via_model: true` flags the rare free-text fallback path

@@ -263,11 +263,15 @@ pub async fn serve(
                     return;
                 }
 
-                // Audit
+                // Audit. Webchat has no platform-assigned message id;
+                // synthesize one so `target` stays a stable resource
+                // handle and the body lives under `detail.content`.
+                let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
                 let _ = audit
                     .log(
-                        AuditEvent::new("webchat-user", "message.inbound", &message)
-                            .with_channel("webchat"),
+                        AuditEvent::new("webchat-user", "message.inbound", &inbound_target)
+                            .with_channel("webchat")
+                            .with_detail(serde_json::json!({ "content": &message })),
                     )
                     .await;
 
@@ -330,14 +334,19 @@ pub async fn serve(
 
                         match result {
                             Ok(result) => {
+                                let outbound_target =
+                                    format!("webchat:out:{}", uuid::Uuid::new_v4());
                                 let _ = audit
                                     .log(
                                         AuditEvent::new(
                                             "default",
                                             "message.outbound",
-                                            &result.response,
+                                            &outbound_target,
                                         )
-                                        .with_channel("webchat"),
+                                        .with_channel("webchat")
+                                        .with_detail(
+                                            serde_json::json!({ "content": &result.response }),
+                                        ),
                                     )
                                     .await;
                             }

@@ -1476,11 +1476,13 @@ async fn handle_orchestrator_push(
             let mut w = w.lock().await;
             match w.write_message(&reply).await {
                 Ok(()) => {
+                    let outbound_target = format!("{}:out:{}", req.channel, uuid::Uuid::new_v4());
                     let _ = audit
                         .log(
-                            AuditEvent::new("orchestrator", "message.outbound", &req.text)
+                            AuditEvent::new("orchestrator", "message.outbound", &outbound_target)
                                 .with_channel(&req.channel)
-                                .with_session(&req.conversation_id),
+                                .with_session(&req.conversation_id)
+                                .with_detail(serde_json::json!({ "content": &req.text })),
                         )
                         .await;
                     OrchestratorPushResponse {
@@ -1681,23 +1683,38 @@ async fn message_loop(
                     truncate(&text, 80),
                 );
 
-                // Audit inbound
-                let mut inbound_event = AuditEvent::new(&sender_id, "message.inbound", &text)
-                    .with_channel(&channel)
-                    .with_session(&conversation_id);
+                // Audit inbound. `target` carries the stable resource
+                // id `<channel>:<platform-msg-id>`; the message body
+                // lives under `detail.content` so downstream consumers
+                // can correlate without parsing a free-text field.
+                let inbound_target = format!("{channel}:{id}");
+                let mut inbound_detail = serde_json::json!({ "content": &text });
 
                 // Scan for prompt injection patterns
-                if let Some(threat) = detector.scan(&text) {
-                    let detail = threat.to_detail_json();
-                    inbound_event = inbound_event.with_detail(detail.clone());
+                let threat_detail = detector.scan(&text).map(|threat| threat.to_detail_json());
+                if let Some(ref threat) = threat_detail {
+                    if let (Some(obj), Some(threat_obj)) =
+                        (inbound_detail.as_object_mut(), threat.as_object())
+                    {
+                        for (k, v) in threat_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
 
+                let inbound_event = AuditEvent::new(&sender_id, "message.inbound", &inbound_target)
+                    .with_channel(&channel)
+                    .with_session(&conversation_id)
+                    .with_detail(inbound_detail.clone());
+
+                if threat_detail.is_some() {
                     // Emit a separate threat event for SIEM visibility
                     let _ = audit
                         .log(
-                            AuditEvent::new(&sender_id, "message.threat_flagged", &text)
+                            AuditEvent::new(&sender_id, "message.threat_flagged", &inbound_target)
                                 .with_channel(&channel)
                                 .with_session(&conversation_id)
-                                .with_detail(detail),
+                                .with_detail(inbound_detail),
                         )
                         .await;
                 }
@@ -1770,7 +1787,8 @@ async fn message_loop(
                 for denial in &denials {
                     let detail = serde_json::json!({
                         "tool": denial.tool_name,
-                        "action": format!("{:?}", denial.action),
+                        "action": denial.action.to_string(),
+                        "action_key": denial.action.approval_key(),
                         "requested_tier": denial.requested_tier.label(),
                         "agent_id": denial.agent_id,
                         "trigger_message": denial.trigger_message,
@@ -1791,12 +1809,18 @@ async fn message_loop(
 
                 tracing::info!("[{}] -> {}", channel, truncate(&response, 80));
 
-                // Audit outbound
+                // Audit outbound. No platform-assigned id at emit time
+                // (the adapter assigns one on send and returns it via
+                // `OutboundResult`); synthesize a per-event id so the
+                // `target` field stays a stable resource handle and the
+                // body lives under `detail.content`.
+                let outbound_target = format!("{channel}:out:{}", uuid::Uuid::new_v4());
                 audit
                     .log(
-                        AuditEvent::new(&agent_id, "message.outbound", &response)
+                        AuditEvent::new(&agent_id, "message.outbound", &outbound_target)
                             .with_channel(&channel)
-                            .with_session(&conversation_id),
+                            .with_session(&conversation_id)
+                            .with_detail(serde_json::json!({ "content": &response })),
                     )
                     .await?;
 
@@ -2022,6 +2046,11 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         .and_then(|v| v.as_str())
         .unwrap_or("production")
         .to_string();
+    let hmac_secret = json
+        .get("hmac_secret")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
 
     println!("  SIEM: forwarding to {target_str} at {endpoint}");
 
@@ -2031,6 +2060,7 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         api_key,
         service,
         environment,
+        hmac_secret,
     })
 }
 

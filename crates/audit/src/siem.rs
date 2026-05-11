@@ -4,7 +4,12 @@
 //! over a Data Collection Rule), and generic webhook endpoints. Events
 //! are serialized as structured JSON and POSTed in batches.
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
 use crate::event::AuditEvent;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// SIEM forwarder configuration.
 #[derive(Debug, Clone)]
@@ -19,6 +24,11 @@ pub struct SiemConfig {
     pub service: String,
     /// Environment tag (e.g., "production", "staging").
     pub environment: String,
+    /// Shared secret for webhook payload authentication. When set, the
+    /// webhook target adds `X-Wirken-Signature: sha256=<hex>` whose hex
+    /// is HMAC-SHA-256 over the exact serialized request body. Unset
+    /// means no header. Other targets ignore this field.
+    pub hmac_secret: Option<String>,
 }
 
 /// Supported SIEM targets.
@@ -226,6 +236,8 @@ impl SiemForwarder {
             })
             .collect();
 
+        let body = serde_json::to_vec(&payload).map_err(|e| format!("Webhook serialize: {e}"))?;
+
         let mut request = self
             .http
             .post(&self.config.endpoint)
@@ -235,14 +247,37 @@ impl SiemForwarder {
             request = request.header("Authorization", format!("Bearer {}", self.config.api_key));
         }
 
+        if let Some(secret) = self.config.hmac_secret.as_deref()
+            && !secret.is_empty()
+        {
+            let sig = compute_webhook_signature(secret.as_bytes(), &body);
+            request = request.header("X-Wirken-Signature", format!("sha256={sig}"));
+        }
+
         request
-            .json(&payload)
+            .body(body)
             .send()
             .await
             .map_err(|e| format!("Webhook: {e}"))?;
 
         Ok(())
     }
+}
+
+/// HMAC-SHA-256 over `body` keyed by `secret`, hex-encoded.
+/// Used by [`SiemForwarder::forward_webhook`] when
+/// [`SiemConfig::hmac_secret`] is set; receivers verify by recomputing
+/// over the raw request body bytes.
+pub fn compute_webhook_signature(secret: &[u8], body: &[u8]) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(body);
+    let bytes = mac.finalize().into_bytes();
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        write!(&mut s, "{b:02x}").expect("write to String");
+    }
+    s
 }
 
 /// Map audit action to syslog-compatible severity for Datadog.

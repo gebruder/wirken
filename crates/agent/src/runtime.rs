@@ -2729,10 +2729,10 @@ impl Agent {
                     events_unverifiable += 1;
                 }
                 // Structural events (Compaction, PermissionDenied,
-                // SandboxProvisioned, Attestation, Subagent*,
-                // AuditLegacy) are not part of the LLM-visible
-                // projection but they pass the chain check and
-                // require no further verification work.
+                // Attestation, Subagent*, AuditLegacy) are not part
+                // of the LLM-visible projection but they pass the
+                // chain check and require no further verification
+                // work.
                 _ => {
                     events_verified += 1;
                 }

@@ -941,13 +941,6 @@ mod session {
                 },
             ),
             (
-                TrustLevel::System,
-                SessionEvent::SandboxProvisioned {
-                    name: "default".into(),
-                    mode: "gvisor".into(),
-                },
-            ),
-            (
                 TrustLevel::Compaction,
                 SessionEvent::Compaction {
                     spans: vec![0, 1, 2, 3],
