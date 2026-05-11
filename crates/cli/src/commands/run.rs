@@ -93,12 +93,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     let (audit_writer, audit_handle) = AuditWriter::with_siem_alarm_and_audit_signer(
         &cfg.audit_db_path(),
-        siem_config,
+        siem_config.clone(),
         alarm_log_key,
         audit_signer.clone(),
     )
     .context("Failed to start audit writer")?;
     let audit = Arc::new(audit_writer);
+
+    // Typed-event SIEM forwarder (hybrid path). Reads
+    // session_events via `get_since`; never writes, so the audit
+    // chain stays intact. Spawned only when typed forwarding is
+    // wired (config has either a custom include/exclude list or, for
+    // Sentinel, a `sentinel_typed` endpoint). Otherwise no overhead.
+    let typed_siem_handle = maybe_spawn_typed_siem(&cfg, siem_config.as_ref()).await;
 
     audit
         .log(AuditEvent::new(
@@ -1341,6 +1348,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     drop(audit);
     let _ = audit_handle.await;
 
+    // Signal the typed-event SIEM worker (if spawned) to exit and
+    // wait for it to drain. Shutdown is best-effort: a forwarder
+    // mid-POST sees the shutdown signal at the next tick boundary.
+    if let Some(mut typed) = typed_siem_handle {
+        typed.shutdown();
+        typed.join().await;
+    }
+
     // Cleanup sockets
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&mcp_proxy_socket);
@@ -2092,6 +2107,44 @@ fn adapter_pubkey_fingerprint(pubkey: &[u8; 32]) -> String {
     s
 }
 
+/// Spawn the typed-event SIEM worker when the operator has opted
+/// in. "Opt-in" means the config has either a non-default
+/// include/exclude list, or (Sentinel) a configured
+/// `sentinel_typed` endpoint. Without one of those, the worker is
+/// not spawned and there is zero polling overhead.
+///
+/// The worker reads from `session_events` via
+/// `SqliteSessionLog::get_since`; it never writes, so the audit
+/// hash chain stays intact regardless of forwarder activity.
+async fn maybe_spawn_typed_siem(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    siem_config: Option<&SiemConfig>,
+) -> Option<wirken_audit::TypedEventForwarder> {
+    let cfg_ref = siem_config?;
+    let opted_in = cfg_ref.typed_include_variants.is_some()
+        || cfg_ref.typed_exclude_variants.is_some()
+        || cfg_ref.sentinel_typed.is_some();
+    if !opted_in {
+        return None;
+    }
+    let log = match wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()) {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            tracing::warn!("typed-SIEM: open session log failed; not spawning: {e}");
+            return None;
+        }
+    };
+    let sink: Arc<dyn wirken_audit::TypedSink> = Arc::new(
+        wirken_audit::siem_typed::HttpTypedSink::new(cfg_ref.clone()),
+    );
+    println!("  SIEM: typed-event forwarder spawned");
+    Some(wirken_audit::TypedEventForwarder::spawn(
+        log,
+        sink,
+        cfg_ref.clone(),
+    ))
+}
+
 fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemConfig> {
     let path = cfg.siem_config_path();
     if !path.exists() {
@@ -2131,6 +2184,33 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         .filter(|s| !s.is_empty())
         .map(String::from);
 
+    let sentinel_typed = json.get("sentinel_typed").and_then(|s| {
+        let endpoint = s.get("endpoint").and_then(|v| v.as_str())?.to_string();
+        let api_key = s
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        Some(wirken_audit::SentinelTypedEndpoint { endpoint, api_key })
+    });
+
+    let typed_include_variants = json
+        .get("typed_include_variants")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+    let typed_exclude_variants = json
+        .get("typed_exclude_variants")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
+
     println!("  SIEM: forwarding to {target_str} at {endpoint}");
 
     Some(SiemConfig {
@@ -2140,6 +2220,9 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         service,
         environment,
         hmac_secret,
+        sentinel_typed,
+        typed_include_variants,
+        typed_exclude_variants,
     })
 }
 
