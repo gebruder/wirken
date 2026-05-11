@@ -158,6 +158,7 @@ impl ContextEngine {
         tools: &[ToolDef],
         session_log: &dyn SessionLog,
         handle: &SessionHandle<OwnSession>,
+        agent_id: &str,
     ) -> Result<FitResult, AgentError> {
         let empty_result = FitResult {
             trimmed_messages: Vec::new(),
@@ -284,6 +285,9 @@ impl ContextEngine {
                 "via_model": false,
             }),
             via_model: false,
+            agent_id: agent_id.to_string(),
+            provider: None,
+            model: None,
         };
         session_log
             .append(handle, TrustLevel::Compaction, event)

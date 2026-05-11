@@ -31,7 +31,8 @@ pub use recovery::{
     MAX_RATE_LIMIT_RETRIES, MAX_TOOL_VALIDATION_RETRIES, RecoveryObserver, RetryDecision,
 };
 pub use runtime::{
-    Agent, DivergenceRecord, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult, VerifyReport,
+    Agent, DivergenceRecord, InboundContext, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult,
+    VerifyReport,
 };
 pub use skill::SkillLoader;
 

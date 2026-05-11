@@ -1353,7 +1353,7 @@ async fn handle_adapter_connection(
             .collect()
     };
 
-    let (adapter_id, _pub_key) =
+    let (adapter_id, pub_key) =
         perform_gateway_handshake(&mut reader, &mut writer, move |id, pk| {
             match known.get(id) {
                 None => Err(wirken_ipc::HandshakeError::UnknownAdapter(id.to_string())),
@@ -1386,10 +1386,15 @@ async fn handle_adapter_connection(
     tracing::info!("Adapter '{adapter_id}' authenticated on channel '{authenticated_channel}'");
     registry.lock().await.set_connected(&adapter_id, true);
 
+    let pubkey_fingerprint = adapter_pubkey_fingerprint(&pub_key);
+
     audit
         .log(
             AuditEvent::new("gateway", "adapter.connect", &adapter_id)
-                .with_channel(authenticated_channel.as_str()),
+                .with_channel(authenticated_channel.as_str())
+                .with_detail(serde_json::json!({
+                    "adapter_pubkey_fingerprint": pubkey_fingerprint,
+                })),
         )
         .await?;
 
@@ -1419,7 +1424,10 @@ async fn handle_adapter_connection(
     audit
         .log(
             AuditEvent::new("gateway", "adapter.disconnect", &adapter_id)
-                .with_channel(authenticated_channel.as_str()),
+                .with_channel(authenticated_channel.as_str())
+                .with_detail(serde_json::json!({
+                    "adapter_pubkey_fingerprint": pubkey_fingerprint,
+                })),
         )
         .await?;
 
@@ -1749,10 +1757,14 @@ async fn message_loop(
                 };
                 let session_id = session_id_for(&resolved_agent, &channel, &conversation_id);
 
+                let inbound_ctx = wirken_agent::InboundContext {
+                    adapter_id: Some(adapter_id.to_string()),
+                    sender_id: Some(sender_id.clone()),
+                };
                 let (response, denials) = match factory.wake(&resolved_agent, &session_id) {
                     Ok(agent_mutex) => {
                         let mut ag = agent_mutex.lock().await;
-                        match ag.process_message(&text, id.clone()).await {
+                        match ag.process_inbound(&text, id.clone(), inbound_ctx).await {
                             Ok(result) => (result.response, result.denials),
                             Err(e) => {
                                 // The full error stays in operator logs
@@ -2011,6 +2023,19 @@ fn org_pubkey_fingerprint(data_dir: &std::path::Path) -> Option<String> {
     let trimmed = body.trim();
     let fp: String = trimmed.chars().take(16).collect();
     if fp.is_empty() { None } else { Some(fp) }
+}
+
+/// Short hex fingerprint over a 32-byte adapter pubkey for audit
+/// correlation. Same first-16-hex-chars convention as
+/// `org_pubkey_fingerprint`; long enough to dedupe in practice,
+/// short enough to stay legible on the audit line.
+fn adapter_pubkey_fingerprint(pubkey: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(16);
+    for b in pubkey.iter().take(8) {
+        write!(&mut s, "{b:02x}").expect("write to String");
+    }
+    s
 }
 
 fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemConfig> {

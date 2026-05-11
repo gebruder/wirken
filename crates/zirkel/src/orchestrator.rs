@@ -155,6 +155,15 @@ pub struct OrchestratorConfig {
     /// tests redirect this at a localhost mock so the egress
     /// allowlist stays scoped to `127.0.0.1`.
     pub wikipedia_api_base: Option<String>,
+    /// Agent that drove this orchestrator run. Threaded into
+    /// [`SessionEvent::HttpFetch::agent_id`] so a SIEM consumer can
+    /// correlate fetches back to the agent (and from there to the
+    /// inbound that triggered the run). `None` when the run is
+    /// agent-anonymous (cron + the rare ad-hoc CLI invocation).
+    pub agent_id: Option<String>,
+    /// Skill that owns the fetcher (`"zirkel"` for the standard
+    /// orchestrator). `None` when the caller is not skill-attributable.
+    pub skill_name: Option<String>,
 }
 
 /// Outcome of one orchestrator run, by category.
@@ -447,6 +456,8 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                         bytes_total(&items),
                         &run_id,
                         pass.expansion_id.as_deref(),
+                        config.agent_id.as_deref(),
+                        config.skill_name.as_deref(),
                     );
                     items
                 }
@@ -461,6 +472,8 @@ pub async fn run(config: OrchestratorConfig) -> Result<RunSummary, OrchestratorE
                         0,
                         &run_id,
                         pass.expansion_id.as_deref(),
+                        config.agent_id.as_deref(),
+                        config.skill_name.as_deref(),
                     );
                     summary.sources_failed.push(SourceFailure {
                         source: source_cfg.name.clone(),
@@ -960,6 +973,8 @@ fn emit_http_fetch(
     bytes: u64,
     run_id: &str,
     expansion_id: Option<&str>,
+    agent_id: Option<&str>,
+    skill_name: Option<&str>,
 ) {
     emit(
         session_log,
@@ -972,6 +987,8 @@ fn emit_http_fetch(
             bytes,
             run_id: Some(run_id.to_string()),
             expansion_id: expansion_id.map(str::to_string),
+            agent_id: agent_id.map(str::to_string),
+            skill_name: skill_name.map(str::to_string),
         },
     );
 }
@@ -1325,6 +1342,8 @@ skills = ["aggregator"]
             max_related_topics: 0,
             per_topic_fanout_cap: 0,
             wikipedia_api_base: None,
+            agent_id: None,
+            skill_name: None,
         }
     }
 
@@ -1873,6 +1892,8 @@ skills = ["other"]
             max_related_topics: 0,
             per_topic_fanout_cap: 0,
             wikipedia_api_base: None,
+            agent_id: None,
+            skill_name: None,
         }
     }
 
@@ -2272,6 +2293,8 @@ skills = ["other"]
             max_related_topics,
             per_topic_fanout_cap,
             wikipedia_api_base: Some(format!("{wikipedia_base}/w/api.php")),
+            agent_id: None,
+            skill_name: None,
         }
     }
 

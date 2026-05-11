@@ -102,6 +102,8 @@ pub async fn run() -> Result<()> {
         max_related_topics: 0,
         per_topic_fanout_cap: 0,
         wikipedia_api_base: None,
+        agent_id: None,
+        skill_name: Some("zirkel".to_string()),
     })
     .await
     .map_err(|e| anyhow!("zirkel orchestrator: {e}"))?;

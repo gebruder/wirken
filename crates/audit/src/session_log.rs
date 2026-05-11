@@ -219,17 +219,41 @@ pub enum SessionEvent {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         inbound_id: Option<String>,
+        /// Adapter that delivered this message (e.g. `slack`, `signal`,
+        /// `webchat`, `cli`). Source-of-record for which channel was
+        /// the trigger of the agent turn. `None` for callers that do
+        /// not have a platform adapter (subagent recursion).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        /// Platform-side sender identity (Telegram user id, Slack uid,
+        /// the literal `webchat-user`, ...). `None` for subagent
+        /// recursion.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// Final assistant text response for a turn.
-    AssistantMessage { content: String },
+    AssistantMessage {
+        content: String,
+        /// Agent id whose runtime emitted the response. Required so a
+        /// multi-agent session log can be split by agent without
+        /// re-traversing the chain.
+        #[serde(default)]
+        agent_id: String,
+    },
     /// Assistant requested one or more tool calls.
-    AssistantToolCalls { calls: Vec<ToolCallRecord> },
+    AssistantToolCalls {
+        calls: Vec<ToolCallRecord>,
+        #[serde(default)]
+        agent_id: String,
+    },
     /// Result of a single tool call.
     ToolResult {
         call_id: String,
         tool_name: String,
         output: String,
         success: bool,
+        #[serde(default)]
+        agent_id: String,
     },
     /// LLM request metadata. Full request body is reconstructible
     /// from prior session events; this carries hashes for the
@@ -240,6 +264,8 @@ pub enum SessionEvent {
         request_id: String,
         tools_hash: HashHex,
         messages_hash: HashHex,
+        #[serde(default)]
+        agent_id: String,
     },
     /// LLM response metadata.
     ///
@@ -261,6 +287,8 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "is_zero_u32")]
         cache_read_input_tokens: u32,
         latency_ms: u64,
+        #[serde(default)]
+        agent_id: String,
     },
     /// Permission denial recorded by the harness. `action_key` is
     /// the canonical key under which an operator can grant approval
@@ -353,6 +381,14 @@ pub enum SessionEvent {
         /// written before the field existed read cleanly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expansion_id: Option<String>,
+        /// Agent that drove the fetch. `None` when the fetcher ran
+        /// outside an agent turn (cron orchestrator, ad-hoc run).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        /// Skill that owns the fetcher (e.g. `zirkel`). `None` when
+        /// the fetcher is not skill-attributable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skill_name: Option<String>,
     },
     /// Zirkel: a fetched item passed exclusion + keyword screening and
     /// landed in the candidates table with its keyword-match score.
@@ -428,6 +464,19 @@ pub enum SessionEvent {
         spans: Vec<u64>,
         extracts: serde_json::Value,
         via_model: bool,
+        /// Agent whose context engine produced this compaction.
+        #[serde(default)]
+        agent_id: String,
+        /// LLM provider used to summarise when `via_model: true`.
+        /// `None` for the deterministic structured-extract path
+        /// (`via_model: false`), which is the only path Compaction
+        /// emits today.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// LLM model used to summarise when `via_model: true`. Same
+        /// `None` semantics as `provider`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Periodic chain-head signature (item 8). Self-contained proof
     /// that the chain up to `chain_head_seq` is intact.
@@ -477,7 +526,11 @@ pub enum SessionEvent {
     /// `LlmRequest` events have no preceding `SystemPromptSet`
     /// (legacy sessions written before this variant existed) are
     /// reported as `events_unverifiable` rather than divergent.
-    SystemPromptSet { content: String },
+    SystemPromptSet {
+        content: String,
+        #[serde(default)]
+        agent_id: String,
+    },
     /// Record of a [`SessionLog::rewind`] call. Appended immediately
     /// after the DELETE so the chain picks up cleanly from whatever
     /// row survived the cut. The event is the new chain head, which
@@ -1948,6 +2001,8 @@ mod precreate_perms_tests {
             SessionEvent::UserMessage {
                 content: "hi".into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();

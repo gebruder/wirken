@@ -301,7 +301,12 @@ pub async fn serve(
 
                         // Run agent streaming and SSE forwarding concurrently
                         let mut ag = agent_mutex.lock().await;
-                        let stream_future = ag.process_message_stream(&message, inbound_id, tx);
+                        let inbound_ctx = wirken_agent::InboundContext {
+                            adapter_id: Some("webchat".to_string()),
+                            sender_id: Some("webchat-user".to_string()),
+                        };
+                        let stream_future =
+                            ag.process_message_stream_with(&message, inbound_id, tx, inbound_ctx);
 
                         // Forward stream events to the HTTP response as SSE
                         let write_stream = &mut stream;

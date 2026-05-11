@@ -82,6 +82,23 @@ pub const PARTIAL_RESULT_LOST_SENTINEL: &str = "PARTIAL_RESULT_LOST:";
 const ATTEST_EVERY_N_EVENTS: u64 = 20;
 const ATTEST_EVERY_K_SECONDS: u64 = 30;
 
+/// Platform-side identity of an inbound message. Threaded into
+/// [`SessionEvent::UserMessage`] so a session log row is sufficient to
+/// correlate "which channel and which sender drove this turn" without
+/// re-reading the gateway-side legacy `message.inbound` event.
+///
+/// Use [`Default`] when no platform adapter is the trigger (CLI ask,
+/// cron, subagent spawn).
+#[derive(Debug, Clone, Default)]
+pub struct InboundContext {
+    /// Adapter that delivered the inbound — `"slack"`, `"signal"`,
+    /// `"webchat"`, `"cli"`, …
+    pub adapter_id: Option<String>,
+    /// Platform-side sender identity (Slack uid, Telegram user id,
+    /// `webchat-user`, …).
+    pub sender_id: Option<String>,
+}
+
 /// Result of processing a message, containing the response and any
 /// permission denials that occurred during tool execution.
 pub struct ProcessResult {
@@ -311,7 +328,7 @@ impl Agent {
         // each call_id has a matching ToolResult somewhere later in
         // the session. For any call_id that doesn't, write a
         // synthetic ToolResult with the PARTIAL_RESULT_LOST sentinel.
-        Self::heal_partial_tool_rounds(&*session_log, &session_handle)?;
+        Self::heal_partial_tool_rounds(&*session_log, &session_handle, &id)?;
 
         // Build the conversation by replaying the (now-complete)
         // session log.
@@ -370,6 +387,7 @@ impl Agent {
     fn heal_partial_tool_rounds(
         log: &dyn SessionLog,
         handle: &SessionHandle<OwnSession>,
+        agent_id: &str,
     ) -> Result<(), AgentError> {
         use std::collections::HashSet;
 
@@ -382,7 +400,7 @@ impl Agent {
         let mut expected: Vec<(String, String)> = Vec::new(); // (call_id, tool_name)
         for row in &rows {
             match &row.event {
-                SessionEvent::AssistantToolCalls { calls } => {
+                SessionEvent::AssistantToolCalls { calls, .. } => {
                     for c in calls {
                         expected.push((c.id.clone(), c.name.clone()));
                     }
@@ -414,6 +432,7 @@ impl Agent {
                      the tool was not retried"
                 ),
                 success: false,
+                agent_id: agent_id.to_string(),
             };
             log.append(handle, TrustLevel::Tool, event)
                 .map_err(|e| AgentError::SessionLog(e.to_string()))?;
@@ -996,7 +1015,7 @@ impl Agent {
             .get_since(&self.session_handle, 0)
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
         let last_recorded = rows.iter().rev().find_map(|r| match &r.event {
-            SessionEvent::SystemPromptSet { content } => Some(content.clone()),
+            SessionEvent::SystemPromptSet { content, .. } => Some(content.clone()),
             _ => None,
         });
         if last_recorded.as_deref() == Some(current.as_str()) {
@@ -1004,7 +1023,10 @@ impl Agent {
         }
         self.log_event(
             TrustLevel::System,
-            SessionEvent::SystemPromptSet { content: current },
+            SessionEvent::SystemPromptSet {
+                content: current,
+                agent_id: self.id.clone(),
+            },
         )
     }
 
@@ -1081,7 +1103,7 @@ impl Agent {
         // UserMessage. If we find one, this is a clean re-delivery
         // and we replay the prior response.
         for row in rows.iter().skip(pos + 1) {
-            if let SessionEvent::AssistantMessage { content } = &row.event {
+            if let SessionEvent::AssistantMessage { content, .. } = &row.event {
                 tracing::info!(
                     "agent {} dedup: replaying response for inbound_id {} (idx {})",
                     self.id,
@@ -1143,7 +1165,23 @@ impl Agent {
         user_message: &str,
         inbound_id: String,
     ) -> Result<ProcessResult, AgentError> {
-        self.process_message_inner(user_message, inbound_id, None)
+        self.process_message_inner(user_message, inbound_id, None, InboundContext::default())
+            .await
+    }
+
+    /// Like [`Self::process_message`] but carries adapter / sender
+    /// identity into the [`SessionEvent::UserMessage`] event for SIEM
+    /// correlation. Callers that drive the agent from a platform
+    /// adapter (Slack, Signal, webchat, etc.) supply [`InboundContext`]
+    /// here; CLI / cron / subagent paths can keep using
+    /// [`Self::process_message`].
+    pub async fn process_inbound(
+        &mut self,
+        user_message: &str,
+        inbound_id: String,
+        ctx: InboundContext,
+    ) -> Result<ProcessResult, AgentError> {
+        self.process_message_inner(user_message, inbound_id, None, ctx)
             .await
     }
 
@@ -1161,6 +1199,7 @@ impl Agent {
         user_message: &str,
         inbound_id: String,
         max_rounds_budget: Option<usize>,
+        inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             return Ok(replay);
@@ -1195,6 +1234,8 @@ impl Agent {
                     SessionEvent::UserMessage {
                         content: user_message.to_string(),
                         inbound_id: Some(inbound_id),
+                        adapter_id: inbound.adapter_id.clone(),
+                        sender_id: inbound.sender_id.clone(),
                     },
                 )?;
                 for event in audit_events {
@@ -1204,6 +1245,7 @@ impl Agent {
                     TrustLevel::System,
                     SessionEvent::AssistantMessage {
                         content: reply.clone(),
+                        agent_id: self.id.clone(),
                     },
                 )?;
                 return Ok(ProcessResult {
@@ -1219,6 +1261,8 @@ impl Agent {
             SessionEvent::UserMessage {
                 content: user_message,
                 inbound_id: Some(inbound_id),
+                adapter_id: inbound.adapter_id.clone(),
+                sender_id: inbound.sender_id.clone(),
             },
         )?;
 
@@ -1263,6 +1307,7 @@ impl Agent {
             &tool_defs,
             &*self.session_log,
             &self.session_handle,
+            &self.id,
         )?;
         self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
             .await?;
@@ -1291,6 +1336,7 @@ impl Agent {
                 &tool_defs,
                 &*self.session_log,
                 &self.session_handle,
+                &self.id,
             )?;
             self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
                 .await?;
@@ -1310,6 +1356,7 @@ impl Agent {
                     request_id: request_id.clone(),
                     tools_hash,
                     messages_hash,
+                    agent_id: self.id.clone(),
                 },
             )?;
 
@@ -1334,6 +1381,7 @@ impl Agent {
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
+                    agent_id: self.id.clone(),
                 },
             )?;
 
@@ -1344,6 +1392,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: text.clone(),
+                            agent_id: self.id.clone(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -1364,6 +1413,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
+                            agent_id: self.id.clone(),
                         },
                     )?;
 
@@ -1386,6 +1436,7 @@ impl Agent {
                                 tool_name: call.name.clone(),
                                 output: result.output.clone(),
                                 success: result.success,
+                                agent_id: self.id.clone(),
                             },
                         )?;
                     }
@@ -1405,6 +1456,7 @@ impl Agent {
                                     tool_name: call.name.clone(),
                                     output: result.output.clone(),
                                     success: result.success,
+                                    agent_id: self.id.clone(),
                                 },
                             )?;
                         }
@@ -1419,6 +1471,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: fallback.clone(),
+                            agent_id: self.id.clone(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -1439,6 +1492,19 @@ impl Agent {
         user_message: &str,
         inbound_id: String,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
+    ) -> Result<ProcessResult, AgentError> {
+        self.process_message_stream_with(user_message, inbound_id, tx, InboundContext::default())
+            .await
+    }
+
+    /// Streaming counterpart to [`Self::process_inbound`]: carries
+    /// adapter/sender identity into the `UserMessage` event.
+    pub async fn process_message_stream_with(
+        &mut self,
+        user_message: &str,
+        inbound_id: String,
+        tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             let _ = tx
@@ -1468,6 +1534,8 @@ impl Agent {
                     SessionEvent::UserMessage {
                         content: user_message.to_string(),
                         inbound_id: Some(inbound_id),
+                        adapter_id: inbound.adapter_id.clone(),
+                        sender_id: inbound.sender_id.clone(),
                     },
                 )?;
                 for event in audit_events {
@@ -1477,6 +1545,7 @@ impl Agent {
                     TrustLevel::System,
                     SessionEvent::AssistantMessage {
                         content: reply.clone(),
+                        agent_id: self.id.clone(),
                     },
                 )?;
                 let _ = tx
@@ -1495,6 +1564,8 @@ impl Agent {
             SessionEvent::UserMessage {
                 content: user_message,
                 inbound_id: Some(inbound_id),
+                adapter_id: inbound.adapter_id.clone(),
+                sender_id: inbound.sender_id.clone(),
             },
         )?;
 
@@ -1521,6 +1592,7 @@ impl Agent {
             &tool_defs,
             &*self.session_log,
             &self.session_handle,
+            &self.id,
         )?;
         self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
             .await?;
@@ -1542,6 +1614,7 @@ impl Agent {
                 &tool_defs,
                 &*self.session_log,
                 &self.session_handle,
+                &self.id,
             )?;
             self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
                 .await?;
@@ -1560,6 +1633,7 @@ impl Agent {
                     request_id: request_id.clone(),
                     tools_hash,
                     messages_hash,
+                    agent_id: self.id.clone(),
                 },
             )?;
 
@@ -1608,6 +1682,7 @@ impl Agent {
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
+                    agent_id: self.id.clone(),
                 },
             )?;
 
@@ -1618,6 +1693,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: text.clone(),
+                            agent_id: self.id.clone(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -1635,6 +1711,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
+                            agent_id: self.id.clone(),
                         },
                     )?;
 
@@ -1678,6 +1755,7 @@ impl Agent {
                                 tool_name: call.name.clone(),
                                 output: result.output.clone(),
                                 success: result.success,
+                                agent_id: self.id.clone(),
                             },
                         )?;
                     }
@@ -1689,6 +1767,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: fallback.clone(),
+                            agent_id: self.id.clone(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -2233,6 +2312,7 @@ impl Agent {
                         &prompt,
                         inbound_id,
                         Some(max_rounds),
+                        InboundContext::default(),
                     ));
                     let result = tokio::time::timeout(max_runtime, run).await;
                     drop(child_guard);
@@ -2445,8 +2525,12 @@ impl Agent {
         // the recursive `async fn` size cycle:
         // process_message_inner → execute_tool → spawn_subagent_intercept
         // → child.process_message_inner.
-        let run =
-            Box::pin(child.process_message_inner(&parsed.prompt, inbound_id, Some(max_rounds)));
+        let run = Box::pin(child.process_message_inner(
+            &parsed.prompt,
+            inbound_id,
+            Some(max_rounds),
+            InboundContext::default(),
+        ));
         let envelope = match tokio::time::timeout(max_runtime, run).await {
             Ok(Ok(result)) => envelope_result(&child_session_id, "ok", &result.response),
             Ok(Err(AgentError::RoundsExceeded { rounds })) => envelope_result(
@@ -2595,7 +2679,7 @@ impl Agent {
 
         for row in &rows {
             match &row.event {
-                wirken_audit::SessionEvent::SystemPromptSet { content } => {
+                wirken_audit::SessionEvent::SystemPromptSet { content, .. } => {
                     // Item 10 follow-up: apply the recorded prompt
                     // to the verify-side conversation. set_system_prompt
                     // replaces any existing system message in place.
@@ -2607,11 +2691,11 @@ impl Agent {
                     conv.add_user_message(content);
                     events_verified += 1;
                 }
-                wirken_audit::SessionEvent::AssistantMessage { content } => {
+                wirken_audit::SessionEvent::AssistantMessage { content, .. } => {
                     conv.add_assistant_message(content);
                     events_verified += 1;
                 }
-                wirken_audit::SessionEvent::AssistantToolCalls { calls } => {
+                wirken_audit::SessionEvent::AssistantToolCalls { calls, .. } => {
                     let in_proc: Vec<crate::conversation::ToolCallRequest> = calls
                         .iter()
                         .map(|c| crate::conversation::ToolCallRequest {
@@ -2684,6 +2768,7 @@ impl Agent {
                         &current_tool_defs,
                         &*dryrun_log,
                         &dryrun_handle,
+                        &self.id,
                     ) {
                         // ContextOverflow during verify is itself a
                         // divergence — the conversation no longer
@@ -2878,7 +2963,7 @@ fn tier_exceeds(actual: PermissionTier, cap: PermissionTier) -> bool {
 /// any prior `AssistantToolCalls` event in the session.
 fn find_call_arguments(rows: &[wirken_audit::StoredSessionEvent], call_id: &str) -> Option<String> {
     for row in rows {
-        if let wirken_audit::SessionEvent::AssistantToolCalls { calls } = &row.event
+        if let wirken_audit::SessionEvent::AssistantToolCalls { calls, .. } = &row.event
             && let Some(c) = calls.iter().find(|c| c.id == call_id)
         {
             return Some(c.arguments.clone());

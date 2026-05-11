@@ -547,11 +547,16 @@ mod session {
         SessionEvent::UserMessage {
             content: s.into(),
             inbound_id: None,
+            adapter_id: None,
+            sender_id: None,
         }
     }
 
     fn assistant_msg(s: &str) -> SessionEvent {
-        SessionEvent::AssistantMessage { content: s.into() }
+        SessionEvent::AssistantMessage {
+            content: s.into(),
+            agent_id: "test-agent".into(),
+        }
     }
 
     fn tool_result(call_id: &str, name: &str, output: &str) -> SessionEvent {
@@ -560,6 +565,7 @@ mod session {
             tool_name: name.into(),
             output: output.into(),
             success: true,
+            agent_id: "test-agent".into(),
         }
     }
 
@@ -902,6 +908,7 @@ mod session {
                 TrustLevel::System,
                 SessionEvent::AssistantToolCalls {
                     calls: calls.clone(),
+                    agent_id: "test-agent".into(),
                 },
             ),
             (
@@ -916,6 +923,7 @@ mod session {
                     request_id: "req-1".into(),
                     tools_hash: crate::session_log::HashHex("deadbeef".repeat(8)),
                     messages_hash: crate::session_log::HashHex("cafebabe".repeat(8)),
+                    agent_id: "test-agent".into(),
                 },
             ),
             (
@@ -928,6 +936,7 @@ mod session {
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
                     latency_ms: 1234,
+                    agent_id: "test-agent".into(),
                 },
             ),
             (
@@ -949,6 +958,9 @@ mod session {
                         "user_stated_goal": "rename"
                     }),
                     via_model: false,
+                    agent_id: "test-agent".into(),
+                    provider: None,
+                    model: None,
                 },
             ),
             (
@@ -1009,6 +1021,7 @@ mod session {
             tool_name: "exec".into(),
             output: "hello".into(),
             success: true,
+            agent_id: "test-agent".into(),
         };
         log.append(&h, TrustLevel::Tool, event.clone()).unwrap();
         log.append(&h, TrustLevel::Tool, event).unwrap();
@@ -1080,6 +1093,7 @@ mod session {
                         TrustLevel::User,
                         SessionEvent::AssistantMessage {
                             content: format!("a-{i}"),
+                            agent_id: "test-agent".into(),
                         },
                     )
                     .expect("append via log_a must succeed under contention");
@@ -1093,6 +1107,7 @@ mod session {
                         TrustLevel::User,
                         SessionEvent::AssistantMessage {
                             content: format!("b-{i}"),
+                            agent_id: "test-agent".into(),
                         },
                     )
                     .expect("append via log_b must succeed under contention");
@@ -1149,6 +1164,7 @@ mod session {
                 cache_creation_input_tokens: 800,
                 cache_read_input_tokens: 9000,
                 latency_ms: 42,
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -1208,6 +1224,7 @@ mod session {
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
             latency_ms: 1,
+            agent_id: "test-agent".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -1242,6 +1259,8 @@ mod chain_head_signing {
         SessionEvent::UserMessage {
             content: s.into(),
             inbound_id: None,
+            adapter_id: None,
+            sender_id: None,
         }
     }
 

@@ -1403,6 +1403,8 @@ mod durability {
                 SessionEvent::UserMessage {
                     content: "hello".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -1436,6 +1438,8 @@ mod durability {
                 SessionEvent::UserMessage {
                     content: "list files".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -1444,6 +1448,7 @@ mod durability {
                 TrustLevel::System,
                 SessionEvent::AssistantToolCalls {
                     calls: crate::runtime::Agent::calls_to_records(&calls),
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -1455,6 +1460,7 @@ mod durability {
                     tool_name: "exec".into(),
                     output: "a.txt\nb.txt".into(),
                     success: true,
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -1463,6 +1469,7 @@ mod durability {
                 TrustLevel::System,
                 SessionEvent::AssistantMessage {
                     content: "two files".into(),
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -1551,6 +1558,8 @@ mod durability {
             SessionEvent::UserMessage {
                 content: "from alpha".into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1559,6 +1568,8 @@ mod durability {
             SessionEvent::UserMessage {
                 content: "from beta".into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1647,6 +1658,8 @@ mod wake {
             SessionEvent::UserMessage {
                 content: content.into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1659,6 +1672,7 @@ mod wake {
             TrustLevel::System,
             SessionEvent::AssistantMessage {
                 content: content.into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -1669,7 +1683,10 @@ mod wake {
         log.append(
             &h,
             TrustLevel::System,
-            SessionEvent::AssistantToolCalls { calls },
+            SessionEvent::AssistantToolCalls {
+                calls,
+                agent_id: "test-agent".into(),
+            },
         )
         .unwrap();
     }
@@ -1690,6 +1707,7 @@ mod wake {
                 tool_name: tool_name.into(),
                 output: output.into(),
                 success: true,
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -1898,6 +1916,8 @@ mod wake {
             SessionEvent::UserMessage {
                 content: "first".into(),
                 inbound_id: Some("msg-1".into()),
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1906,6 +1926,7 @@ mod wake {
             TrustLevel::System,
             SessionEvent::AssistantMessage {
                 content: "prior reply".into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -1934,6 +1955,8 @@ mod wake {
             SessionEvent::UserMessage {
                 content: "first".into(),
                 inbound_id: Some("msg-2".into()),
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -2363,7 +2386,12 @@ mod subagent {
         .unwrap();
 
         let result = agent
-            .process_message_inner("hello", "test-1".into(), Some(0))
+            .process_message_inner(
+                "hello",
+                "test-1".into(),
+                Some(0),
+                crate::InboundContext::default(),
+            )
             .await;
         match result {
             Err(AgentError::RoundsExceeded { rounds }) => {
@@ -3648,6 +3676,8 @@ mod attestation_tests {
         SessionEvent::UserMessage {
             content: s.into(),
             inbound_id: None,
+            adapter_id: None,
+            sender_id: None,
         }
     }
 
@@ -3867,6 +3897,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "hi".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -3895,6 +3927,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "first".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -3914,6 +3948,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "first".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -3929,6 +3965,8 @@ mod auto_attest {
                     SessionEvent::UserMessage {
                         content: format!("msg {i}"),
                         inbound_id: None,
+                        adapter_id: None,
+                        sender_id: None,
                     },
                 )
                 .unwrap();
@@ -3953,6 +3991,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "first".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -3967,6 +4007,8 @@ mod auto_attest {
                     SessionEvent::UserMessage {
                         content: format!("event {i}"),
                         inbound_id: None,
+                        adapter_id: None,
+                        sender_id: None,
                     },
                 )
                 .unwrap();
@@ -3989,6 +4031,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "first".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -4008,6 +4052,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "second".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -4030,6 +4076,8 @@ mod auto_attest {
                 SessionEvent::UserMessage {
                     content: "hi".into(),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -4090,7 +4138,7 @@ mod context_engine {
         let mut conv = Conversation::new(0);
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
         // Nothing trimmed → no Compaction event written.
         let rows = log.get_since(&h, 0).unwrap();
@@ -4106,7 +4154,7 @@ mod context_engine {
         conv.add_assistant_message("hi there");
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
         // Conversation unchanged.
         assert_eq!(conv.len(), 3);
@@ -4138,7 +4186,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .expect("fit should succeed");
 
         // The tool result message itself is still present (preserves
@@ -4186,7 +4234,7 @@ mod context_engine {
 
         // The system prompt + tail won't fit even after trimming,
         // so this should error with ContextOverflow.
-        let result = engine.fit(&mut conv, &empty_tool_defs(), &*log, &h);
+        let result = engine.fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent");
         assert!(matches!(result, Err(AgentError::ContextOverflow { .. })));
 
         // System prompt content untouched.
@@ -4210,7 +4258,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         // Under budget anyway → no trims.
@@ -4233,7 +4281,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         // The first assistant message got trimmed; the second is
@@ -4263,7 +4311,7 @@ mod context_engine {
         conv.add_assistant_message("and an assistant reply that pushes us over");
 
         let (log, h) = fresh_log_and_handle();
-        let result = engine.fit(&mut conv, &empty_tool_defs(), &*log, &h);
+        let result = engine.fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent");
         assert!(matches!(result, Err(AgentError::ContextOverflow { .. })));
     }
 
@@ -4284,7 +4332,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         let rows = log.get_since(&h, 0).unwrap();
@@ -4295,6 +4343,7 @@ mod context_engine {
                     spans,
                     extracts,
                     via_model,
+                    ..
                 } => Some((spans, extracts, via_model)),
                 _ => None,
             })
@@ -4342,7 +4391,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         // Both tool result messages are still present (just with
@@ -4409,7 +4458,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         let summary = engine
@@ -4444,7 +4493,7 @@ mod context_engine {
 
         let (log, h) = fresh_log_and_handle();
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         let messages = conv.messages();
@@ -4474,7 +4523,7 @@ mod context_engine {
         let (log, h) = fresh_log_and_handle();
         // First fit triggers a trim and injects a Compaction.
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
         let after_first = conv
             .messages()
@@ -4487,7 +4536,7 @@ mod context_engine {
         // must still leave exactly one Compaction message in place,
         // not stack a second one on top.
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
         let after_second = conv
             .messages()
@@ -4519,6 +4568,9 @@ mod context_engine {
                     "via_model": false,
                 }),
                 via_model: false,
+                agent_id: "test-agent".into(),
+                provider: None,
+                model: None,
             },
         )
         .unwrap();
@@ -4528,7 +4580,7 @@ mod context_engine {
         conv.add_user_message("hello");
 
         engine
-            .fit(&mut conv, &empty_tool_defs(), &*log, &h)
+            .fit(&mut conv, &empty_tool_defs(), &*log, &h, "test-agent")
             .unwrap();
 
         let compaction_msgs: Vec<_> = conv
@@ -4644,7 +4696,7 @@ mod verify {
         let dryrun_log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
         let dryrun_handle = dryrun_log.handle_for(SessionId::new("dryrun"));
         engine
-            .fit(&mut copy, tools, &*dryrun_log, &dryrun_handle)
+            .fit(&mut copy, tools, &*dryrun_log, &dryrun_handle, "test-agent")
             .unwrap();
         compute_messages_hash(copy.messages())
     }
@@ -4657,6 +4709,8 @@ mod verify {
             SessionEvent::UserMessage {
                 content: content.into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -4669,6 +4723,7 @@ mod verify {
             TrustLevel::System,
             SessionEvent::AssistantMessage {
                 content: content.into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -4681,6 +4736,7 @@ mod verify {
             TrustLevel::System,
             SessionEvent::SystemPromptSet {
                 content: content.into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -4703,6 +4759,7 @@ mod verify {
                 request_id: request_id.into(),
                 tools_hash,
                 messages_hash,
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -4721,6 +4778,7 @@ mod verify {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
                 latency_ms: 1,
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -4891,6 +4949,7 @@ mod verify {
                         name: "read_file".into(),
                         arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
                     }],
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -4902,6 +4961,7 @@ mod verify {
                     tool_name: "read_file".into(),
                     output: "hello from disk".into(),
                     success: true,
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -4934,6 +4994,7 @@ mod verify {
                         name: "read_file".into(),
                         arguments: serde_json::json!({ "path": "note.txt" }).to_string(),
                     }],
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -4945,6 +5006,7 @@ mod verify {
                     tool_name: "read_file".into(),
                     output: "OLD".into(),
                     success: true,
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -4974,6 +5036,7 @@ mod verify {
                         name: "exec".into(),
                         arguments: serde_json::json!({"command":"date"}).to_string(),
                     }],
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -4985,6 +5048,7 @@ mod verify {
                     tool_name: "exec".into(),
                     output: "Wed Apr 9 12:34:56 UTC 2026".into(),
                     success: true,
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -5107,6 +5171,7 @@ mod system_prompt_event {
             wirken_audit::TrustLevel::System,
             SessionEvent::SystemPromptSet {
                 content: "harness-recorded prompt".into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -5116,6 +5181,8 @@ mod system_prompt_event {
             SessionEvent::UserMessage {
                 content: "hi".into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -5143,6 +5210,7 @@ mod system_prompt_event {
             wirken_audit::TrustLevel::System,
             SessionEvent::SystemPromptSet {
                 content: "first".into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -5152,6 +5220,8 @@ mod system_prompt_event {
             SessionEvent::UserMessage {
                 content: "early".into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -5160,6 +5230,7 @@ mod system_prompt_event {
             wirken_audit::TrustLevel::System,
             SessionEvent::SystemPromptSet {
                 content: "second".into(),
+                agent_id: "test-agent".into(),
             },
         )
         .unwrap();
@@ -5169,6 +5240,8 @@ mod system_prompt_event {
             SessionEvent::UserMessage {
                 content: "later".into(),
                 inbound_id: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -5416,6 +5489,7 @@ mod per_channel_llm_override {
                     request_id: format!("req-{channel}"),
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();
@@ -5469,6 +5543,7 @@ mod per_channel_llm_override {
                     request_id: req_id.into(),
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
+                    agent_id: "test-agent".into(),
                 },
             )
             .unwrap();

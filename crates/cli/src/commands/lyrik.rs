@@ -1743,6 +1743,8 @@ mod tests {
                 SessionEvent::UserMessage {
                     content: format!("walk-{i}"),
                     inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();

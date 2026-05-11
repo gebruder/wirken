@@ -256,16 +256,16 @@ impl Conversation {
         let rows = log.get_since(handle, 0)?;
         for row in rows {
             match row.event {
-                SessionEvent::SystemPromptSet { content } => {
+                SessionEvent::SystemPromptSet { content, .. } => {
                     self.set_system_prompt(&content);
                 }
                 SessionEvent::UserMessage { content, .. } => {
                     self.add_user_message(&content);
                 }
-                SessionEvent::AssistantMessage { content } => {
+                SessionEvent::AssistantMessage { content, .. } => {
                     self.add_assistant_message(&content);
                 }
-                SessionEvent::AssistantToolCalls { calls } => {
+                SessionEvent::AssistantToolCalls { calls, .. } => {
                     self.add_assistant_tool_calls(records_to_calls(calls));
                 }
                 SessionEvent::ToolResult {

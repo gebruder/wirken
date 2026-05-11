@@ -248,6 +248,8 @@ fn build_config(
         max_related_topics: 0,
         per_topic_fanout_cap: 0,
         wikipedia_api_base: None,
+        agent_id: None,
+        skill_name: None,
     }
 }
 
