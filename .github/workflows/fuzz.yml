@@ -23,7 +23,7 @@ jobs:
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz
       - name: Run session_event target
         working-directory: crates/audit
         run: cargo fuzz run session_event -- -max_total_time=60
