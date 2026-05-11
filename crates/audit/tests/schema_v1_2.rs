@@ -615,6 +615,9 @@ fn fixture_config(target: SiemTarget, hmac_secret: Option<&str>) -> SiemConfig {
         service: "wirken".into(),
         environment: "test".into(),
         hmac_secret: hmac_secret.map(String::from),
+        sentinel_typed: None,
+        typed_include_variants: None,
+        typed_exclude_variants: None,
     }
 }
 

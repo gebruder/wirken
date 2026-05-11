@@ -5,6 +5,7 @@ mod legacy_compat;
 mod log;
 mod session_log;
 pub mod siem;
+pub mod siem_typed;
 pub mod signing;
 mod writer;
 
@@ -19,9 +20,12 @@ pub use session_log::{
     TrustLevel,
 };
 pub use siem::{
-    SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload, build_sentinel_payload,
-    build_splunk_body, build_webhook_request, compute_webhook_signature,
+    SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,
+    build_datadog_typed_entry, build_datadog_typed_payload, build_sentinel_payload,
+    build_sentinel_typed_payload, build_splunk_body, build_splunk_typed_body,
+    build_webhook_request, build_webhook_typed_request, compute_webhook_signature,
 };
+pub use siem_typed::{TYPED_POLL_INTERVAL, TypedEventForwarder, TypedSink, TypedTransport};
 pub use signing::{
     AuditSigningKey, CHAIN_HEAD_DOMAIN, CHAIN_HEAD_SCHEMA_VERSION, audit_signing_dir,
 };

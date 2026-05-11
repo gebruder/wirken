@@ -19,6 +19,7 @@ tokio = { workspace = true, features = ["sync", "time", "rt"] }
 reqwest = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

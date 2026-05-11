@@ -37,6 +37,41 @@ pub struct SiemConfig {
     /// is HMAC-SHA-256 over the exact serialized request body. Unset
     /// means no header. Other targets ignore this field.
     pub hmac_secret: Option<String>,
+    /// Sentinel-only: typed-event stream endpoint and bearer token.
+    /// Required when the operator opts into typed forwarding on the
+    /// Sentinel target because the DCR for the legacy stream
+    /// (`Custom-WirkenAudit`) is column-pinned and cannot carry
+    /// typed-event payloads. Other targets carry typed events on
+    /// the same endpoint as the legacy events and leave this field
+    /// `None`.
+    pub sentinel_typed: Option<SentinelTypedEndpoint>,
+    /// Operator-provided allowlist of variant names to forward
+    /// typed events for. `None` means "use the default
+    /// forwardable-variant set" (see
+    /// [`crate::siem_typed::default_forward_variant`]). Matched
+    /// against each event's `kind` tag. Include wins over exclude.
+    pub typed_include_variants: Option<Vec<String>>,
+    /// Operator-provided denylist of variant names to suppress.
+    /// Honored only when [`Self::typed_include_variants`] is `None`.
+    pub typed_exclude_variants: Option<Vec<String>>,
+}
+
+/// Sentinel-only second endpoint for typed-event forwarding.
+/// Required because the Sentinel target's legacy DCR is column-
+/// pinned to the `Custom-WirkenAudit` schema and rejects rows that
+/// do not match it. The typed-event stream points at a separate
+/// DCR (typically `Custom-WirkenSession`) with its own column set.
+#[derive(Debug, Clone)]
+pub struct SentinelTypedEndpoint {
+    /// Full DCR stream URL for typed events. Same shape as the
+    /// legacy `endpoint`, but pointing at a different stream
+    /// segment.
+    pub endpoint: String,
+    /// Azure AD bearer token for the typed-event DCR. When `None`,
+    /// the legacy `api_key` is reused (the operator's app
+    /// registration usually has Monitoring Metrics Publisher on
+    /// both DCRs).
+    pub api_key: Option<String>,
 }
 
 /// Supported SIEM targets.
@@ -305,6 +340,237 @@ pub fn build_webhook_request(
         .map(|secret| compute_webhook_signature(secret.as_bytes(), &body));
 
     Ok((body, signature))
+}
+
+// ---------------------------------------------------------------------------
+// Typed-event builders (per Section B3 of the typed-forwarder spec)
+// ---------------------------------------------------------------------------
+
+/// Datadog Log-Intake entry for one typed [`StoredSessionEvent`].
+/// Surfaces the variant kind tag, the row metadata (`session_id`,
+/// `seq`, `ts`, `trust`), and the variant payload under a `wirken`
+/// sub-object whose shape is the SessionEvent serde JSON form
+/// (kind-tagged, snake_case fields).
+///
+/// `message` is a short human-readable summary so the Datadog log
+/// stream is greppable without expanding the structured payload.
+pub fn build_datadog_typed_entry(
+    event: &crate::session_log::StoredSessionEvent,
+    config: &SiemConfig,
+) -> serde_json::Value {
+    let kind = crate::siem_typed::variant_kind_for(&event.event);
+    let summary = typed_summary(&event.event);
+    serde_json::json!({
+        "message": format!("{} session={} seq={}", summary, event.session_id.as_str(), event.seq),
+        "ddsource": "wirken",
+        "ddtags": format!(
+            "service:{},env:{},kind:{}",
+            config.service, config.environment, kind
+        ),
+        "hostname": hostname(),
+        "service": config.service,
+        "status": "info",
+        "timestamp": event.ts.timestamp_millis(),
+        "wirken": {
+            "kind": kind,
+            "session_id": event.session_id.as_str(),
+            "seq": event.seq,
+            "trust": trust_label(event.trust),
+            "event": event.event,
+        }
+    })
+}
+
+/// Datadog payload for a batch of typed events.
+pub fn build_datadog_typed_payload(
+    events: &[&crate::session_log::StoredSessionEvent],
+    config: &SiemConfig,
+) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .map(|e| build_datadog_typed_entry(e, config))
+        .collect()
+}
+
+/// Splunk HEC body (newline-delimited JSON) for typed events.
+/// `sourcetype: "wirken:session"` distinguishes from the legacy
+/// `"wirken:audit"` stream so Splunk operators route the two
+/// independently in `props.conf`.
+pub fn build_splunk_typed_body(events: &[&crate::session_log::StoredSessionEvent]) -> String {
+    let mut body = String::new();
+    for stored in events {
+        let kind = crate::siem_typed::variant_kind_for(&stored.event);
+        let hec = serde_json::json!({
+            "event": {
+                "kind": kind,
+                "session_id": stored.session_id.as_str(),
+                "seq": stored.seq,
+                "trust": trust_label(stored.trust),
+                "event": stored.event,
+            },
+            "time": stored.ts.timestamp(),
+            "sourcetype": "wirken:session",
+            "source": "wirken",
+            "host": hostname(),
+        });
+        body.push_str(&hec.to_string());
+        body.push('\n');
+    }
+    body
+}
+
+/// Sentinel DCR payload for typed events. PascalCase column names
+/// matching a `Custom-WirkenSession` schema (sibling to the legacy
+/// `Custom-WirkenAudit` stream).
+pub fn build_sentinel_typed_payload(
+    events: &[&crate::session_log::StoredSessionEvent],
+) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .map(|stored| {
+            let kind = crate::siem_typed::variant_kind_for(&stored.event);
+            let (adapter_id, sender_id, agent_id) = extract_identity_for_sentinel(&stored.event);
+            serde_json::json!({
+                "TimeGenerated": stored.ts.to_rfc3339(),
+                "SessionId": stored.session_id.as_str(),
+                "Seq": stored.seq,
+                "Kind": kind,
+                "Trust": trust_label(stored.trust),
+                "AgentId": agent_id,
+                "AdapterId": adapter_id,
+                "SenderId": sender_id,
+                "Event": stored.event,
+                "Hostname": hostname(),
+            })
+        })
+        .collect()
+}
+
+/// Build the webhook request body for typed events, paired with an
+/// optional HMAC over the exact serialized bytes. Same factoring as
+/// [`build_webhook_request`]: one [`serde_json::to_vec`] call drives
+/// both the wire body and the signature so the receiver's recompute
+/// over the request body always matches.
+pub fn build_webhook_typed_request(
+    events: &[&crate::session_log::StoredSessionEvent],
+    config: &SiemConfig,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let payload: Vec<serde_json::Value> = events
+        .iter()
+        .map(|stored| {
+            let kind = crate::siem_typed::variant_kind_for(&stored.event);
+            serde_json::json!({
+                "timestamp": stored.ts.to_rfc3339(),
+                "session_id": stored.session_id.as_str(),
+                "seq": stored.seq,
+                "kind": kind,
+                "trust": trust_label(stored.trust),
+                "event": stored.event,
+                "service": config.service,
+                "environment": config.environment,
+                "hostname": hostname(),
+            })
+        })
+        .collect();
+
+    let body = serde_json::to_vec(&payload).map_err(|e| format!("Webhook typed serialize: {e}"))?;
+
+    let signature = config
+        .hmac_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|secret| compute_webhook_signature(secret.as_bytes(), &body));
+
+    Ok((body, signature))
+}
+
+/// Pull adapter_id / sender_id / agent_id out of any variant that
+/// carries them. Returns `(adapter_id, sender_id, agent_id)`. None
+/// for variants that have no such field; the Sentinel and webhook
+/// envelopes already include the typed payload separately so a
+/// missing column does not lose information.
+fn extract_identity_for_sentinel(
+    event: &crate::session_log::SessionEvent,
+) -> (Option<String>, Option<String>, Option<String>) {
+    use crate::session_log::SessionEvent;
+    match event {
+        SessionEvent::UserMessage {
+            adapter_id,
+            sender_id,
+            ..
+        } => (adapter_id.clone(), sender_id.clone(), None),
+        SessionEvent::AssistantToolCalls {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::ToolResult {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::HttpFetch { agent_id, .. } => (None, None, agent_id.clone()),
+        SessionEvent::PermissionDenied { agent_id, .. }
+        | SessionEvent::SkillPermissionDenied { agent_id, .. }
+        | SessionEvent::AssistantMessage { agent_id, .. }
+        | SessionEvent::LlmRequest { agent_id, .. }
+        | SessionEvent::LlmResponse { agent_id, .. }
+        | SessionEvent::SystemPromptSet { agent_id, .. }
+        | SessionEvent::Compaction { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        _ => (None, None, None),
+    }
+}
+
+fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
+    use crate::session_log::SessionEvent;
+    match event {
+        SessionEvent::AssistantToolCalls {
+            calls, agent_id, ..
+        } => {
+            let names: Vec<&str> = calls.iter().map(|c| c.name.as_str()).collect();
+            format!("tool_calls={} agent={agent_id}", names.join(","))
+        }
+        SessionEvent::ToolResult {
+            tool_name,
+            success,
+            agent_id,
+            ..
+        } => format!("tool_result name={tool_name} success={success} agent={agent_id}"),
+        SessionEvent::HttpFetch { host, outcome, .. } => {
+            format!("http_fetch host={host} outcome={outcome:?}")
+        }
+        SessionEvent::PermissionDenied {
+            tool,
+            denial_source,
+            ..
+        } => format!("permission_denied tool={tool} source={denial_source:?}"),
+        SessionEvent::SubagentSpawned { child_agent_id, .. } => {
+            format!("subagent_spawned child={child_agent_id}")
+        }
+        SessionEvent::SubagentResult { status, .. } => format!("subagent_result status={status:?}"),
+        SessionEvent::ChainHead { reason, .. } => format!("chain_head reason={reason:?}"),
+        other => format!("{:?}", other).chars().take(80).collect(),
+    }
+}
+
+fn trust_label(t: crate::session_log::TrustLevel) -> &'static str {
+    use crate::session_log::TrustLevel;
+    match t {
+        TrustLevel::System => "system",
+        TrustLevel::User => "user",
+        TrustLevel::Tool => "tool",
+        TrustLevel::Compaction => "compaction",
+    }
 }
 
 /// HMAC-SHA-256 over `body` keyed by `secret`, hex-encoded.
