@@ -53,6 +53,14 @@ pub async fn search(query: &str) -> Result<()> {
     Ok(())
 }
 
+/// Install gate: signature verification against the registry's
+/// expected key (see `verify_skill_with_expected_key_and_delegation`
+/// below) plus the `WIRKEN_ALLOW_UNSIGNED_SKILLS` env-var bypass.
+/// `wirken skills install` is an operator-typed CLI command; it does
+/// NOT route through the runtime permission-tier system. Tier 1/2/3
+/// exists to gate model-driven actions against operator policy, and
+/// adding a tier prompt for something the operator just typed would
+/// be a UX papercut rather than a security control.
 pub async fn install(name: &str) -> Result<()> {
     let cfg = config();
     let index = fetch_index().await?;

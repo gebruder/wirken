@@ -40,6 +40,17 @@ tagged.
   unchanged where they name pre-1.2.0 transitions; the convention
   is documented at the top of the renamed file.
 
+### Permissions
+
+- Remove unreachable `Action::SkillInstall` variant. The CLI
+  `wirken skills install` command is operator-typed and gates on
+  registry-anchored signature verification (plus the
+  `WIRKEN_ALLOW_UNSIGNED_SKILLS` env-var bypass), not on the
+  runtime permission tier system. The variant was defined as
+  Tier 3 in `permissions.rs` but never wired into the install
+  path. A compile-time tripwire test pins the remaining variant
+  set so the same dead-classification can't return silently.
+
 ### SIEM forwarder
 
 **Feature**

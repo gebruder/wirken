@@ -45,7 +45,6 @@ pub enum Action {
     NetworkRequest { domain: String },
     CredentialAccess,
     CronCreate,
-    SkillInstall,
 }
 
 impl std::fmt::Display for Action {
@@ -64,7 +63,6 @@ impl std::fmt::Display for Action {
             Action::NetworkRequest { .. } => "network_request",
             Action::CredentialAccess => "credential_access",
             Action::CronCreate => "cron_create",
-            Action::SkillInstall => "skill_install",
         };
         f.write_str(label)
     }
@@ -154,8 +152,7 @@ impl Action {
             Action::DestructiveFileOp
             | Action::NetworkRequest { .. }
             | Action::CredentialAccess
-            | Action::CronCreate
-            | Action::SkillInstall => PermissionTier::Tier3,
+            | Action::CronCreate => PermissionTier::Tier3,
         }
     }
 
@@ -553,7 +550,39 @@ mod tier_tests {
         );
         assert_eq!(Action::CredentialAccess.tier(), PermissionTier::Tier3);
         assert_eq!(Action::CronCreate.tier(), PermissionTier::Tier3);
-        assert_eq!(Action::SkillInstall.tier(), PermissionTier::Tier3);
+    }
+
+    /// Compile-time tripwire: this match must remain exhaustive
+    /// without a wildcard. Any new `Action` variant added without
+    /// updating this list fails to compile. The check exists
+    /// because `Action::SkillInstall` was previously defined here
+    /// as a Tier 3 action but was never reachable from the CLI
+    /// install path (install gates on signature verification, not
+    /// tier classification); a future contributor reintroducing
+    /// that variant or any other "added but never wired" variant
+    /// will be forced to either wire it through or update this
+    /// guard. See `crates/cli/src/commands/skills.rs::install`
+    /// for the actual install gate.
+    #[test]
+    fn action_variant_set_is_pinned() {
+        fn variant_label(a: &Action) -> &'static str {
+            match a {
+                Action::WorkspaceFileAccess => "workspace_file_access",
+                Action::ChannelConverse => "channel_converse",
+                Action::WebSearch => "web_search",
+                Action::ShellExec { .. } => "shell_exec",
+                Action::ExternalFileAccess { .. } => "external_file_access",
+                Action::CrossConversationMessage => "cross_conversation_message",
+                Action::DestructiveFileOp => "destructive_file_op",
+                Action::NetworkRequest { .. } => "network_request",
+                Action::CredentialAccess => "credential_access",
+                Action::CronCreate => "cron_create",
+            }
+        }
+        // Smoke a representative variant so the function isn't
+        // dead-code-eliminated and the compile-time match still
+        // gets exercised.
+        assert_eq!(variant_label(&Action::WebSearch), "web_search");
     }
 
     #[test]
