@@ -10,97 +10,69 @@ tagged.
 
 ## Unreleased
 
-### Audit schema
+## [1.4.0] - 2026-05-12
 
-**Schema-additive**
+### Skill loading
 
-- `AssistantToolCalls` and `ToolResult` gain
-  `adapter_id: Option<String>` and `sender_id: Option<String>`.
-  Populated from the active `InboundContext` so a SIEM detection on
-  a tool-call row can pivot on channel without joining to the
-  sibling `UserMessage`. `None` for CLI / cron / subagent emits.
-  Forward-compatible: pre-1.3.x rows continue to deserialize cleanly
-  via `#[serde(default)]`.
-- `LlmRequest` and `LlmResponse` gain
-  `credential_id: Option<String>` (the vault entry name the api_key
-  was resolved from). Populated by the gateway, `wirken ask`, and
-  Lyrik when the api_key came from a named vault slot; `None` for
-  paths that pass an api_key directly (raw value in `provider.json`,
-  env override, tests, ollama). Threaded through `ChannelOverride`,
-  `AgentStaticConfig`, and the Agent constructors so per-channel
-  credential selection lands the right slot name on every
-  `LlmRequest` / `LlmResponse`. `skip_serializing_if = "Option::is_none"`
-  so the wire shape stays back-compatible when no slot name is in
-  scope; pre-1.3.x rows deserialize with `credential_id: None`.
+- Signature verification wired into `SkillLoader::load_file`.
+  `WIRKEN_ALLOW_UNSIGNED_SKILLS` bypass preserved with the same
+  install-time semantics, now applied at load.
+- `permissions:` optional with a least-privilege default
+  (deny-all). Spec-conformant skills load without an explicit
+  `permissions` block.
+- Name validation: lowercase `a-z` + digits + hyphens, starts
+  with a letter, max 64 chars, must match parent directory name.
+- Description validation: required, 1 to 1024 characters.
+- `metadata.openclaw.*` deprecated alias dropped.
+- `skill.wasm` covered by the composite signature scope
+  alongside `SKILL.md`.
 
-**Tests**
+### Audit forwarder
 
-- Rename `crates/audit/tests/schema_v1_2.rs` to `schema_v1_3.rs` so
-  the file name tracks the current schema boundary. Test prefixes
-  unchanged where they name pre-1.2.0 transitions; the convention
-  is documented at the top of the renamed file.
+- Typed-event SIEM forwarder (hybrid path: webhook, Splunk HEC,
+  Datadog accept mixed batches at one endpoint; Sentinel takes a
+  separate stream by DCR column-pinning constraint).
+- Polling seam via `SessionLog::get_since` against
+  `session_events`; zero-touch on the typed-event append path.
+- `SiemConfig.typed_forwarding_enabled` opt-in; default-off,
+  back-compatible with 1.3.0 `siem.json`.
+- `audit.chain_broken` routed through the `AuditWriter` mpsc
+  channel so the SIEM forwarder receives chain-tamper events.
+- `AssistantToolCalls` and `ToolResult` carry `adapter_id` and
+  `sender_id` from the active inbound context (additive,
+  defaultable).
+- `LlmRequest` and `LlmResponse` carry `credential_id` (the
+  vault entry name, never the raw secret).
 
 ### Permissions
 
-- Remove unreachable `Action::SkillInstall` variant. The CLI
-  `wirken skills install` command is operator-typed and gates on
-  registry-anchored signature verification (plus the
-  `WIRKEN_ALLOW_UNSIGNED_SKILLS` env-var bypass), not on the
-  runtime permission tier system. The variant was defined as
-  Tier 3 in `permissions.rs` but never wired into the install
-  path. A compile-time tripwire test pins the remaining variant
-  set so the same dead-classification can't return silently.
+- `Action::SkillInstall` variant removed; install gating remains
+  signature verification + `WIRKEN_ALLOW_UNSIGNED_SKILLS`.
 
-### SIEM forwarder
+### Terminal output
 
-**Feature**
+- ANSI/CSI escape sequences stripped from model output before
+  `println` at the CLI boundary.
+- ANSI/CSI sequences stripped from `exec` captured stdout/stderr
+  before the bytes re-enter the model context.
 
-- Typed `SessionEvent` rows now reach the SIEM pipe via a hybrid
-  path. Targets that tolerate mixed payload shapes (Datadog, Splunk
-  HEC, generic webhook) carry typed events on the same endpoint as
-  the legacy `AuditEvent` batch; the Sentinel target requires a
-  second DCR stream because its first stream is column-pinned.
-- New `siem.json` fields, all optional and opt-in:
-  `sentinel_typed.{endpoint, api_key}` for the Sentinel parallel
-  pipe, `typed_include_variants` and `typed_exclude_variants` to
-  override the default forwardable-variant set.
-- Default forwardable variants: `AssistantToolCalls`, `ToolResult`,
-  `HttpFetch`, `PermissionDenied`, `SkillPermissionDenied`,
-  `SubagentSpawned`, `SubagentResult`, `ChainHead`. PII-carrying
-  variants (`UserMessage`, `AssistantMessage`) and token-accounting
-  variants (`LlmRequest`, `LlmResponse`) are excluded unless the
-  operator opts in via `typed_include_variants`.
-- Polling seam: the typed-event worker reads `session_events` via
-  `SessionLog::get_since` at a 50 ms cadence. Cursor advances per
-  session only after a successful POST. The audit hash chain is
-  unaffected; the worker never writes.
-- Webhook typed pipe carries `X-Wirken-Signature` over the exact
-  body bytes via the same `(body, signature)` factoring as the
-  legacy pipe. Shared HMAC secret produces distinct signatures per
-  pipe because the body shapes differ.
-- New public API on `wirken_audit`:
-  `TypedEventForwarder::spawn`, `TypedSink`, `HttpTypedSink`,
-  `TypedTransport`, plus four typed builders alongside the legacy
-  ones (`build_datadog_typed_payload`, `build_splunk_typed_body`,
-  `build_sentinel_typed_payload`, `build_webhook_typed_request`).
+### Tests and infrastructure
 
-**Tests**
+- `schema_v1_2.rs` renamed to `schema_v1_3.rs`; test prefix
+  convention documented inline.
+- `precreate_owner_only` race on concurrent `AuditWriter` +
+  `TypedEventForwarder` open resolved.
 
-- New `crates/audit/tests/typed_forwarder.rs` integration suite:
-  per-target snapshot shape, polling worker seq-ordered delivery,
-  retry-on-sink-error without cursor advance, exclude-list
-  suppression, chain integrity assertion (the `session_events`
-  hashes are byte-identical before and after a polling pass).
-- Five new fixtures in `crates/audit/tests/schema_v1_3.rs`:
-  pre-A1 rows that carry only `agent_id`, and 1.3.x emits that
-  carry the new identity fields.
+### Notes
 
-**Notes**
-
-- The typed forwarder is opt-in: a `siem.json` without
-  `sentinel_typed` / `typed_include_variants` /
-  `typed_exclude_variants` matches 1.3.0 behaviour exactly. No
-  version bump; the changes are patch-compatible.
+- No wire-breaking changes against 1.3.x readers. Every new
+  field is additive with serde defaults; readers that do not
+  expect the new fields ignore them.
+- `credential_id` on `LlmRequest` and `LlmResponse` was added in
+  the same release as its plumbing; pre-1.4.0 audit databases
+  remain readable.
+- OCSF projection at the forwarder boundary deferred to a
+  future release.
 
 ## [1.3.0] - 2026-05-11
 
