@@ -1,5 +1,21 @@
-//! Wire-format tests for the 1.2.0 audit schema. Covers Section D of
-//! the 1.2.0 cleanup spec:
+//! Wire-format tests for the audit schema. The file name tracks the
+//! current schema boundary (currently 1.3.0); the individual test
+//! prefixes track the *transition* each test documents:
+//!
+//! - `pre_<version>_<name>`: a row produced by a pre-`<version>`
+//!   binary, read by the current binary. The prefix names the
+//!   boundary the test crosses, NOT the binary that runs the test.
+//!   `pre_1_2_0_user_message_*` continues to be the right name for
+//!   a fixture that captures a 1.1.x-shaped row, even after the
+//!   file was renamed for the 1.3.0 schema bump.
+//! - `<version>_<name>`: behaviour of a row produced at exactly
+//!   `<version>` round-tripping cleanly through the current
+//!   deserializer.
+//! - `snapshot_<name>`: positive-and-negative presence assertions
+//!   on the current wire shape. These keep us honest against a
+//!   future revert that silently re-introduces a dropped field.
+//!
+//! Covers Section D of the 1.2.0 cleanup spec:
 //!
 //! - D1: regression fixtures for pre-1.2.0 rows on every changed
 //!   variant. Each fixture is a captured JSON shape that a 1.1.x

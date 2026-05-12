@@ -22,6 +22,13 @@ tagged.
   Forward-compatible: pre-1.3.x rows continue to deserialize cleanly
   via `#[serde(default)]`.
 
+**Tests**
+
+- Rename `crates/audit/tests/schema_v1_2.rs` to `schema_v1_3.rs` so
+  the file name tracks the current schema boundary. Test prefixes
+  unchanged where they name pre-1.2.0 transitions; the convention
+  is documented at the top of the renamed file.
+
 ### SIEM forwarder
 
 **Feature**
@@ -62,7 +69,7 @@ tagged.
   retry-on-sink-error without cursor advance, exclude-list
   suppression, chain integrity assertion (the `session_events`
   hashes are byte-identical before and after a polling pass).
-- Five new fixtures in `crates/audit/tests/schema_v1_2.rs`:
+- Five new fixtures in `crates/audit/tests/schema_v1_3.rs`:
   pre-A1 rows that carry only `agent_id`, and 1.3.x emits that
   carry the new identity fields.
 
@@ -146,7 +153,7 @@ hashes the stored payload bytes, not a re-serialized event.
   `build_sentinel_payload`, `build_webhook_request`, and
   `compute_webhook_signature` exposed from `wirken_audit::siem` so
   the SIEM wire envelopes are assertable without an HTTP server.
-- Wire-format regression suite at `crates/audit/tests/schema_v1_2.rs`
+- Wire-format regression suite at `crates/audit/tests/schema_v1_3.rs`
   covers every changed variant: pre-1.3.0 row deserialisation,
   presence of new fields, absence of removed fields, and HMAC over
   the exact body bytes.
