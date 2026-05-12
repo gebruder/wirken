@@ -1608,6 +1608,7 @@ fn agent_loads_skills() {
         workspace,
         LlmConfig::ollama("test"),
         None,
+        None,
         test_session_log(),
     )
     .unwrap();
@@ -1626,6 +1627,7 @@ fn agent_conversation_tracking() {
         "test".into(),
         tmp.path().to_path_buf(),
         LlmConfig::ollama("test"),
+        None,
         None,
         test_session_log(),
     )
@@ -1658,6 +1660,7 @@ mod durability {
             "durability-test".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
+            None,
             None,
             log.clone(),
         )
@@ -1826,6 +1829,7 @@ mod durability {
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
             None,
+            None,
             log.clone(),
         )
         .unwrap();
@@ -1833,6 +1837,7 @@ mod durability {
             "beta".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
+            None,
             None,
             log.clone(),
         )
@@ -1922,6 +1927,7 @@ mod wake {
                 llm_config: LlmConfig::ollama("test"),
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -2275,6 +2281,7 @@ mod wake {
                 llm_config: LlmConfig::ollama("test"),
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -2340,6 +2347,7 @@ mod subagent {
                 llm_config: LlmConfig::ollama("test"),
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -2358,6 +2366,7 @@ mod subagent {
                 llm_config: LlmConfig::ollama("test"),
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -2431,6 +2440,7 @@ mod subagent {
             "solo".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
+            None,
             None,
             log,
         )
@@ -2670,6 +2680,7 @@ mod subagent {
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
             None,
+            None,
             log,
         )
         .unwrap();
@@ -2758,6 +2769,7 @@ mod subagent {
             "child".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
+            None,
             None,
             log,
         )
@@ -4186,6 +4198,7 @@ mod auto_attest {
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
             None,
+            None,
             log.clone(),
         )
         .unwrap();
@@ -4210,6 +4223,7 @@ mod auto_attest {
             "no-id".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
+            None,
             None,
             log.clone(),
         )
@@ -5004,6 +5018,7 @@ mod verify {
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
             None,
+            None,
             log.clone(),
         )
         .unwrap();
@@ -5085,6 +5100,7 @@ mod verify {
                 tools_hash,
                 messages_hash,
                 agent_id: "test-agent".into(),
+                credential_id: None,
             },
         )
         .unwrap();
@@ -5104,6 +5120,7 @@ mod verify {
                 cache_read_input_tokens: 0,
                 latency_ms: 1,
                 agent_id: "test-agent".into(),
+                credential_id: None,
             },
         )
         .unwrap();
@@ -5643,6 +5660,7 @@ mod per_channel_llm_override {
                 llm_config: LlmConfig::ollama(default_model),
                 channel_overrides: overrides,
                 api_key: default_api_key,
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -5661,6 +5679,7 @@ mod per_channel_llm_override {
         ChannelOverride {
             llm_config: LlmConfig::ollama(model),
             api_key: key.map(str::to_string),
+            api_key_credential: None,
         }
     }
 
@@ -5772,6 +5791,7 @@ mod per_channel_llm_override {
             ChannelOverride {
                 llm_config: llm_b.clone(),
                 api_key: Some("override-key".into()),
+                api_key_credential: None,
             },
         );
         configs.insert(
@@ -5782,6 +5802,7 @@ mod per_channel_llm_override {
                 llm_config: llm_a.clone(),
                 channel_overrides: overrides,
                 api_key: Some("default-key".into()),
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -5827,6 +5848,7 @@ mod per_channel_llm_override {
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "test-agent".into(),
+                    credential_id: None,
                 },
             )
             .unwrap();
@@ -5881,6 +5903,7 @@ mod per_channel_llm_override {
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "test-agent".into(),
+                    credential_id: None,
                 },
             )
             .unwrap();
@@ -5889,6 +5912,112 @@ mod per_channel_llm_override {
         match log.verify(&handle).unwrap() {
             SessionVerifyResult::Ok { .. } => {}
             other => panic!("verify should pass across provider switch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wake_threads_credential_identity_per_channel() {
+        // The Agent::api_key_credential field is set at wake time
+        // from the (override-or-default) ChannelOverride /
+        // AgentStaticConfig pair. The factory test above proves
+        // api_key pairs with provider; this test proves the
+        // credential name pairs alongside, so every LlmRequest /
+        // LlmResponse the woken Agent emits will carry the slot
+        // name that resolved the api_key.
+        use wirken_audit::{SessionEvent, SessionId, TrustLevel};
+
+        let mut llm_default = LlmConfig::ollama("default-model");
+        llm_default.provider = "provider-default".into();
+        let mut llm_override = LlmConfig::ollama("override-model");
+        llm_override.provider = "provider-override".into();
+
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut configs = HashMap::new();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "signal".into(),
+            ChannelOverride {
+                llm_config: llm_override.clone(),
+                api_key: Some("override-key".into()),
+                api_key_credential: Some("signal-anthropic-slot".into()),
+            },
+        );
+        configs.insert(
+            "a1".to_string(),
+            AgentStaticConfig {
+                agent_id: "a1".to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: llm_default.clone(),
+                channel_overrides: overrides,
+                api_key: Some("default-key".into()),
+                api_key_credential: Some("anthropic-api-key".into()),
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: Default::default(),
+                sandbox: Default::default(),
+                extra_interceptors: vec![],
+                zirkel_db_path: None,
+            },
+        );
+        let factory =
+            AgentFactory::with_options(configs, log.clone(), None, None, CacheMode::Drop, 4);
+
+        for (channel, expected_credential) in [
+            ("signal", "signal-anthropic-slot"),
+            ("slack", "anthropic-api-key"),
+        ] {
+            let session = session_id_for("a1", channel, "conv-1");
+            let agent = factory.wake("a1", &session).unwrap();
+            let a = agent.lock().await;
+            assert_eq!(
+                a.api_key_credential_for_test(),
+                Some(expected_credential),
+                "channel {channel} must carry its own slot name"
+            );
+
+            // Mirror the emit shape `process_message_inner` uses, so
+            // we exercise the same SessionEvent::LlmRequest path the
+            // gateway would write at runtime. Using the agent's own
+            // credential getter for `credential_id` here is the same
+            // thing the runtime does via `self.api_key_credential`.
+            let handle = log.handle_for(SessionId::new(&session));
+            log.append(
+                &handle,
+                TrustLevel::System,
+                SessionEvent::LlmRequest {
+                    provider: a.llm_config_for_test().provider.clone(),
+                    model: a.llm_config_for_test().model.clone(),
+                    request_id: format!("req-{channel}"),
+                    tools_hash: wirken_audit::HashHex("00".repeat(32)),
+                    messages_hash: wirken_audit::HashHex("00".repeat(32)),
+                    agent_id: "a1".into(),
+                    credential_id: a.api_key_credential_for_test().map(String::from),
+                },
+            )
+            .unwrap();
+        }
+
+        // Round-trip: read each session and assert the emitted
+        // LlmRequest carries the right slot name.
+        for (channel, expected_credential) in [
+            ("signal", "signal-anthropic-slot"),
+            ("slack", "anthropic-api-key"),
+        ] {
+            let session = session_id_for("a1", channel, "conv-1");
+            let handle = log.handle_for(SessionId::new(&session));
+            let events = log.get_since(&handle, 0).unwrap();
+            let credential = events
+                .iter()
+                .find_map(|e| match &e.event {
+                    SessionEvent::LlmRequest { credential_id, .. } => Some(credential_id.clone()),
+                    _ => None,
+                })
+                .expect("LlmRequest event present")
+                .expect("credential_id populated");
+            assert_eq!(credential, expected_credential, "channel {channel}");
         }
     }
 
@@ -5938,6 +6067,7 @@ mod org_tool_policy {
                 llm_config: LlmConfig::ollama("test"),
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
+                api_key_credential: None,
                 skills: Vec::new(),
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -6746,6 +6876,7 @@ mod recovery_tool_validation {
             "rec-test".into(),
             tmp.path().to_path_buf(),
             LlmConfig::ollama("test"),
+            None,
             None,
             test_session_log(),
         )

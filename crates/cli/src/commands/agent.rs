@@ -56,6 +56,11 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
             });
     }
 
+    // Vault slot the api_key was resolved from. Stamped on every
+    // `LlmRequest` / `LlmResponse` for SIEM correlation. `None` for
+    // ollama (no vault lookup) and for the warn-and-continue failure
+    // path below.
+    let mut api_key_credential: Option<String> = None;
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
             dialoguer::Password::new()
@@ -67,7 +72,10 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
             .context("Failed to open credential store")?;
         let cred_name = format!("{provider}-api-key");
         match store.retrieve(&cred_name) {
-            Ok((secret, _)) => Some(secret.expose().to_string()),
+            Ok((secret, _)) => {
+                api_key_credential = Some(cred_name.clone());
+                Some(secret.expose().to_string())
+            }
             Err(e) => {
                 tracing::warn!("Failed to retrieve API key '{cred_name}': {e}");
                 None
@@ -94,6 +102,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         workspace.clone(),
         llm_config,
         api_key,
+        api_key_credential,
         session_log,
         super::load_sandbox_config(&cfg.data_dir),
     )?;
@@ -149,6 +158,14 @@ async fn send_with_agent_config(
             .map(String::from);
     }
 
+    // Stamp the slot name on `LlmRequest` / `LlmResponse` emits for
+    // SIEM correlation. Empty `api_key_credential` on the agent
+    // config means no vault lookup, so no slot name to carry.
+    let api_key_credential = if agent_cfg.api_key_credential.is_empty() {
+        None
+    } else {
+        Some(agent_cfg.api_key_credential.clone())
+    };
     let api_key = if !agent_cfg.api_key_credential.is_empty() {
         let keychain = probe_keychain(&cfg.data_dir, || {
             dialoguer::Password::new()
@@ -179,6 +196,7 @@ async fn send_with_agent_config(
         workspace.clone(),
         llm_config,
         api_key,
+        api_key_credential,
         session_log,
         super::load_sandbox_config(&cfg.data_dir),
     )?;

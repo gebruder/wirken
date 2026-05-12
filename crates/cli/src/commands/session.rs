@@ -256,6 +256,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             llm_config,
             channel_overrides: HashMap::new(),
             api_key: None, // verify never calls the LLM
+            api_key_credential: None,
             skills: Vec::new(),
             wasm_skills: Vec::new(),
             mcp_client: None,

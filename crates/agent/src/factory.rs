@@ -101,6 +101,12 @@ pub(crate) fn channel_from_session_id(session_id: &str) -> Option<&str> {
 pub struct ChannelOverride {
     pub llm_config: LlmConfig,
     pub api_key: Option<String>,
+    /// Vault entry name that resolved to `api_key`. Carried alongside
+    /// the secret so the waked Agent can stamp it on every
+    /// `LlmRequest` / `LlmResponse` for SIEM correlation. `None` for
+    /// overrides whose `api_key` came from a path that doesn't surface
+    /// a slot name (raw value, env override).
+    pub api_key_credential: Option<String>,
 }
 
 /// Per-agent static configuration held by the factory and injected
@@ -119,6 +125,10 @@ pub struct AgentStaticConfig {
     #[doc(alias = "per-channel-provider")]
     pub channel_overrides: HashMap<String, ChannelOverride>,
     pub api_key: Option<String>,
+    /// Vault entry name that resolved to `api_key`. See
+    /// [`ChannelOverride::api_key_credential`]; same role at the
+    /// agent-wide-default level.
+    pub api_key_credential: Option<String>,
     pub skills: Vec<Skill>,
     pub wasm_skills: Vec<WasmSkill>,
     /// Long-lived MCP proxy connection shared across every waked
@@ -313,9 +323,17 @@ impl AgentFactory {
         // unit-test short ids) falls back to the defaults.
         let override_for_channel =
             channel_from_session_id(session_id).and_then(|ch| cfg.channel_overrides.get(ch));
-        let (llm_config, api_key) = match override_for_channel {
-            Some(ov) => (ov.llm_config.clone(), ov.api_key.clone()),
-            None => (cfg.llm_config.clone(), cfg.api_key.clone()),
+        let (llm_config, api_key, api_key_credential) = match override_for_channel {
+            Some(ov) => (
+                ov.llm_config.clone(),
+                ov.api_key.clone(),
+                ov.api_key_credential.clone(),
+            ),
+            None => (
+                cfg.llm_config.clone(),
+                cfg.api_key.clone(),
+                cfg.api_key_credential.clone(),
+            ),
         };
 
         let mut agent = Agent::from_session_log(
@@ -323,6 +341,7 @@ impl AgentFactory {
             cfg.workspace.clone(),
             llm_config,
             api_key,
+            api_key_credential,
             self.session_log.clone(),
             cfg.sandbox.clone(),
         )?;

@@ -337,6 +337,17 @@ pub enum SessionEvent {
     /// LLM request metadata. Full request body is reconstructible
     /// from prior session events; this carries hashes for the
     /// reproducible-replay verifier (item 10).
+    ///
+    /// `credential_id` is the vault entry NAME (the slot the operator
+    /// configured in `provider.json` or `channel_overrides`) under
+    /// which the api key was stored. Never the raw secret. Populated
+    /// when the gateway resolved the api key from a named vault slot;
+    /// `None` for paths that pass an api key directly (raw value in
+    /// `provider.json`, env-var override, tests with a hardcoded
+    /// key). Defaulted on deserialize so pre-credential_id rows read
+    /// cleanly. The field is omitted from the serialized form when
+    /// `None` so the wire shape stays back-compatible with consumers
+    /// that pin column names.
     LlmRequest {
         provider: String,
         model: String,
@@ -345,6 +356,8 @@ pub enum SessionEvent {
         messages_hash: HashHex,
         #[serde(default)]
         agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_id: Option<String>,
     },
     /// LLM response metadata.
     ///
@@ -378,6 +391,12 @@ pub enum SessionEvent {
         latency_ms: u64,
         #[serde(default)]
         agent_id: String,
+        /// See the corresponding field on
+        /// [`Self::LlmRequest::credential_id`]. Populated on emit
+        /// from the same Agent state so a `LlmRequest` and its
+        /// paired `LlmResponse` always agree.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_id: Option<String>,
     },
     /// Permission denial recorded by the harness. `action_key` is
     /// the canonical key under which an operator can grant approval

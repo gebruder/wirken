@@ -229,12 +229,100 @@ fn pre_1_2_0_llm_request_deserializes_with_empty_agent_id() {
     let ev: SessionEvent = serde_json::from_str(legacy).unwrap();
     match ev {
         SessionEvent::LlmRequest {
-            provider, agent_id, ..
+            provider,
+            agent_id,
+            credential_id,
+            ..
         } => {
             assert_eq!(provider, "anthropic");
             assert_eq!(agent_id, "");
+            assert!(
+                credential_id.is_none(),
+                "pre-credential_id row must default to None"
+            );
         }
         other => panic!("expected LlmRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn llm_request_with_credential_id_round_trips() {
+    // The 1.3.x wire shape carries credential_id when the gateway
+    // resolved the api_key from a named vault slot. Round-trip a
+    // populated value to lock the field in.
+    let original = SessionEvent::LlmRequest {
+        provider: "anthropic".into(),
+        model: "claude-sonnet-4-6".into(),
+        request_id: "req-1".into(),
+        tools_hash: HashHex("aa".repeat(32)),
+        messages_hash: HashHex("bb".repeat(32)),
+        agent_id: "default".into(),
+        credential_id: Some("anthropic-api-key".into()),
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    assert!(
+        json.contains("\"credential_id\":\"anthropic-api-key\""),
+        "credential_id must serialize on the wire when Some, got: {json}"
+    );
+    let parsed: SessionEvent = serde_json::from_str(&json).unwrap();
+    match parsed {
+        SessionEvent::LlmRequest { credential_id, .. } => {
+            assert_eq!(credential_id.as_deref(), Some("anthropic-api-key"));
+        }
+        other => panic!("expected LlmRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn llm_request_with_credential_id_none_omits_field_on_wire() {
+    // None must omit the field entirely so consumers that pin column
+    // sets (e.g. Sentinel DCRs) don't see a null where they didn't
+    // before. `skip_serializing_if = "Option::is_none"`.
+    let ev = SessionEvent::LlmRequest {
+        provider: "ollama".into(),
+        model: "qwen2.5:7b".into(),
+        request_id: "req-2".into(),
+        tools_hash: HashHex("00".repeat(32)),
+        messages_hash: HashHex("11".repeat(32)),
+        agent_id: "default".into(),
+        credential_id: None,
+    };
+    let json = serde_json::to_string(&ev).unwrap();
+    assert!(
+        !json.contains("credential_id"),
+        "credential_id must be absent on the wire when None, got: {json}"
+    );
+    // Round-trip preserves None.
+    let parsed: SessionEvent = serde_json::from_str(&json).unwrap();
+    match parsed {
+        SessionEvent::LlmRequest { credential_id, .. } => {
+            assert!(credential_id.is_none());
+        }
+        other => panic!("expected LlmRequest, got {other:?}"),
+    }
+}
+
+#[test]
+fn llm_response_with_credential_id_round_trips() {
+    let original = SessionEvent::LlmResponse {
+        request_id: "req-1".into(),
+        finish_reason: "end_turn".into(),
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        latency_ms: 1234,
+        agent_id: "default".into(),
+        credential_id: Some("anthropic-api-key".into()),
+    };
+    let json = serde_json::to_string(&original).unwrap();
+    assert!(json.contains("\"credential_id\":\"anthropic-api-key\""));
+    let parsed: SessionEvent = serde_json::from_str(&json).unwrap();
+    match parsed {
+        SessionEvent::LlmResponse { credential_id, .. } => {
+            assert_eq!(credential_id.as_deref(), Some("anthropic-api-key"));
+        }
+        other => panic!("expected LlmResponse, got {other:?}"),
     }
 }
 
@@ -491,12 +579,16 @@ fn snapshot_llm_response_renames_tokens_and_carries_agent_id() {
         cache_read_input_tokens: 0,
         latency_ms: 1234,
         agent_id: "agent-1".into(),
+        credential_id: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["input_tokens", "output_tokens", "agent_id"]);
     // Pre-1.2.0 field names must not reappear. A revert of C4 would
     // re-introduce these and fail the snapshot.
     assert_keys_absent(&v, &["tokens_in", "tokens_out"]);
+    // credential_id is skip_serializing_if = "Option::is_none"; the
+    // None case omits the field from the wire shape entirely.
+    assert_keys_absent(&v, &["credential_id"]);
 }
 
 #[test]

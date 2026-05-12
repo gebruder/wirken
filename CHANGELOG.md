@@ -21,6 +21,17 @@ tagged.
   sibling `UserMessage`. `None` for CLI / cron / subagent emits.
   Forward-compatible: pre-1.3.x rows continue to deserialize cleanly
   via `#[serde(default)]`.
+- `LlmRequest` and `LlmResponse` gain
+  `credential_id: Option<String>` (the vault entry name the api_key
+  was resolved from). Populated by the gateway, `wirken ask`, and
+  Lyrik when the api_key came from a named vault slot; `None` for
+  paths that pass an api_key directly (raw value in `provider.json`,
+  env override, tests, ollama). Threaded through `ChannelOverride`,
+  `AgentStaticConfig`, and the Agent constructors so per-channel
+  credential selection lands the right slot name on every
+  `LlmRequest` / `LlmResponse`. `skip_serializing_if = "Option::is_none"`
+  so the wire shape stays back-compatible when no slot name is in
+  scope; pre-1.3.x rows deserialize with `credential_id: None`.
 
 **Tests**
 

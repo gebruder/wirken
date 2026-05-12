@@ -962,6 +962,7 @@ mod session {
                     tools_hash: crate::session_log::HashHex("deadbeef".repeat(8)),
                     messages_hash: crate::session_log::HashHex("cafebabe".repeat(8)),
                     agent_id: "test-agent".into(),
+                    credential_id: None,
                 },
             ),
             (
@@ -975,6 +976,7 @@ mod session {
                     cache_read_input_tokens: 0,
                     latency_ms: 1234,
                     agent_id: "test-agent".into(),
+                    credential_id: None,
                 },
             ),
             (
@@ -1208,6 +1210,7 @@ mod session {
                 cache_read_input_tokens: 9000,
                 latency_ms: 42,
                 agent_id: "test-agent".into(),
+                credential_id: None,
             },
         )
         .unwrap();
@@ -1270,6 +1273,7 @@ mod session {
             cache_read_input_tokens: 0,
             latency_ms: 1,
             agent_id: "test-agent".into(),
+            credential_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(

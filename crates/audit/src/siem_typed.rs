@@ -490,6 +490,7 @@ mod tests {
             tools_hash: HashHex("aa".repeat(32)),
             messages_hash: HashHex("bb".repeat(32)),
             agent_id: "default".into(),
+            credential_id: None,
         };
         assert!(!should_forward(&req, &cfg));
     }

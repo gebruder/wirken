@@ -125,6 +125,14 @@ pub struct Agent {
     /// API key passed per-request — agent never stores it long-term.
     /// In production, the gateway's LLM proxy handles this.
     api_key: Option<String>,
+    /// Vault entry name that resolved to [`Self::api_key`], when the
+    /// gateway looked the key up by slot name. Stored alongside the
+    /// secret so every `LlmRequest` and `LlmResponse` emit carries
+    /// the credential identity for SIEM correlation. `None` for
+    /// paths that pass an api key directly (raw value in
+    /// `provider.json`, env-var override, tests). Never the secret
+    /// itself.
+    api_key_credential: Option<String>,
     /// Optional permission store for checking tool execution permissions.
     /// When None, all tools execute without permission checks (standalone mode).
     permissions: Option<Arc<std::sync::Mutex<PermissionStore>>>,
@@ -233,11 +241,18 @@ pub struct Agent {
 
 impl Agent {
     /// Create a new agent.
+    ///
+    /// `api_key_credential` is the vault entry name the gateway
+    /// resolved `api_key` from, when applicable. Threaded through to
+    /// every `LlmRequest` / `LlmResponse` emit for SIEM correlation.
+    /// Pass `None` for callers that pass `api_key` directly (raw
+    /// value, env override, tests with a hardcoded key).
     pub fn new(
         id: String,
         workspace: PathBuf,
         llm_config: LlmConfig,
         api_key: Option<String>,
+        api_key_credential: Option<String>,
         session_log: Arc<dyn SessionLog>,
     ) -> Result<Self, AgentError> {
         Self::new_with_sandbox(
@@ -245,6 +260,7 @@ impl Agent {
             workspace,
             llm_config,
             api_key,
+            api_key_credential,
             session_log,
             crate::sandbox::SandboxConfig::default(),
         )
@@ -259,6 +275,7 @@ impl Agent {
         workspace: PathBuf,
         llm_config: LlmConfig,
         api_key: Option<String>,
+        api_key_credential: Option<String>,
         session_log: Arc<dyn SessionLog>,
         sandbox: crate::sandbox::SandboxConfig,
     ) -> Result<Self, AgentError> {
@@ -287,6 +304,7 @@ impl Agent {
             wasm_skills: Vec::new(),
             system_prompt,
             api_key,
+            api_key_credential,
             permissions: None,
             org_permissions: None,
             current_trigger: None,
@@ -327,6 +345,7 @@ impl Agent {
         workspace: PathBuf,
         llm_config: LlmConfig,
         api_key: Option<String>,
+        api_key_credential: Option<String>,
         session_log: Arc<dyn SessionLog>,
         sandbox: crate::sandbox::SandboxConfig,
     ) -> Result<Self, AgentError> {
@@ -369,6 +388,7 @@ impl Agent {
             wasm_skills: Vec::new(),
             system_prompt,
             api_key,
+            api_key_credential,
             permissions: None,
             org_permissions: None,
             current_trigger: None,
@@ -798,6 +818,15 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn api_key_for_test(&self) -> Option<&str> {
         self.api_key.as_deref()
+    }
+
+    /// Test-only accessor returning the vault entry name the
+    /// api_key was resolved from. Used to prove the credential
+    /// identity threads through the factory and lands on emitted
+    /// `LlmRequest` / `LlmResponse` rows.
+    #[cfg(test)]
+    pub(crate) fn api_key_credential_for_test(&self) -> Option<&str> {
+        self.api_key_credential.as_deref()
     }
 
     /// Test-only setter for the depth counter, used to drive the
@@ -1379,6 +1408,7 @@ impl Agent {
                     tools_hash,
                     messages_hash,
                     agent_id: self.id.clone(),
+                    credential_id: self.api_key_credential.clone(),
                 },
             )?;
 
@@ -1404,6 +1434,7 @@ impl Agent {
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
                     agent_id: self.id.clone(),
+                    credential_id: self.api_key_credential.clone(),
                 },
             )?;
 
@@ -1666,6 +1697,7 @@ impl Agent {
                     tools_hash,
                     messages_hash,
                     agent_id: self.id.clone(),
+                    credential_id: self.api_key_credential.clone(),
                 },
             )?;
 
@@ -1715,6 +1747,7 @@ impl Agent {
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     latency_ms,
                     agent_id: self.id.clone(),
+                    credential_id: self.api_key_credential.clone(),
                 },
             )?;
 

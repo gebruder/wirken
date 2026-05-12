@@ -259,6 +259,10 @@ async fn dispatch_via_agent_runtime(
 
     let cfg = super::config();
 
+    // Slot name the api_key was resolved from. Stamped on every
+    // `LlmRequest` / `LlmResponse` for SIEM correlation. `None` for
+    // ollama (no vault lookup).
+    let mut api_key_credential: Option<String> = None;
     let api_key = if pin.provider != "ollama" {
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
@@ -266,7 +270,10 @@ async fn dispatch_via_agent_runtime(
             .context("open credential store")?;
         let cred_name = format!("{}-api-key", pin.provider);
         match store.retrieve(&cred_name) {
-            Ok((secret, _)) => Some(secret.expose().to_string()),
+            Ok((secret, _)) => {
+                api_key_credential = Some(cred_name.clone());
+                Some(secret.expose().to_string())
+            }
             Err(e) => anyhow::bail!(
                 "API key '{cred_name}' missing from vault: {e}; \
                  add it with `wirken credentials add {cred_name}` \
@@ -313,6 +320,7 @@ async fn dispatch_via_agent_runtime(
         target.to_path_buf(),
         llm_config.clone(),
         api_key.clone(),
+        api_key_credential.clone(),
         session_log.clone(),
         super::load_sandbox_config(&cfg.data_dir),
     )?;
@@ -422,6 +430,7 @@ async fn dispatch_via_agent_runtime(
                 run_id.to_string(),
                 llm_config.clone(),
                 api_key.clone(),
+                api_key_credential.clone(),
                 session_log.clone(),
                 super::load_sandbox_config(&cfg.data_dir),
                 perms_arc.clone(),
@@ -697,6 +706,7 @@ async fn dispatch_walks_concurrent(
     run_id: String,
     llm_config: LlmConfig,
     api_key: Option<String>,
+    api_key_credential: Option<String>,
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
@@ -723,6 +733,7 @@ async fn dispatch_walks_concurrent(
         let run_id_t = run_id.clone();
         let llm_config_t = llm_config.clone();
         let api_key_t = api_key.clone();
+        let api_key_credential_t = api_key_credential.clone();
         let session_log_t = session_log.clone();
         let sandbox_t = sandbox.clone();
         let permissions_t = permissions.clone();
@@ -740,6 +751,7 @@ async fn dispatch_walks_concurrent(
                 target_t.clone(),
                 llm_config_t,
                 api_key_t,
+                api_key_credential_t,
                 session_log_t,
                 sandbox_t,
             ) {

@@ -244,6 +244,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Load API key from vault ---
     let mut vault_passphrase = String::new();
+    // Slot name the api_key was resolved from. Stamped on every
+    // `LlmRequest`/`LlmResponse` for SIEM correlation. `None` for
+    // ollama (no vault lookup) and for the failure paths below where
+    // the key didn't resolve.
+    let mut api_key_credential: Option<String> = None;
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
             let pp = dialoguer::Password::new()
@@ -257,7 +262,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open credential store")?;
         let cred_name = format!("{provider}-api-key");
         match store.retrieve(&cred_name) {
-            Ok((secret, _)) => Some(secret.expose().to_string()),
+            Ok((secret, _)) => {
+                api_key_credential = Some(cred_name.clone());
+                Some(secret.expose().to_string())
+            }
             Err(wirken_vault::VaultError::Decryption(_)) => {
                 // AEAD-tag mismatch on a credential that was stored
                 // before the AAD-binding change in 26b1f8e. Older
@@ -421,7 +429,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
 
         for agent_cfg in agent_store.list()? {
-            // Resolve API key from vault
+            // Resolve API key from vault. Track the vault slot name so
+            // it can land on every `LlmRequest` / `LlmResponse` for
+            // SIEM correlation. `None` when the agent config doesn't
+            // name a slot (the api_key was supplied some other way or
+            // is absent).
+            let agent_api_key_credential = if agent_cfg.api_key_credential.is_empty() {
+                None
+            } else {
+                Some(agent_cfg.api_key_credential.clone())
+            };
             let agent_api_key = if !agent_cfg.api_key_credential.is_empty() {
                 vault
                     .as_ref()
@@ -507,6 +524,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     llm_config: llm,
                     channel_overrides: std::collections::HashMap::new(),
                     api_key: agent_api_key,
+                    api_key_credential: agent_api_key_credential,
                     skills,
                     wasm_skills: Vec::new(),
                     mcp_client: None, // populated below after the proxy starts
@@ -594,6 +612,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 llm_config,
                 channel_overrides,
                 api_key,
+                api_key_credential,
                 skills,
                 wasm_skills: Vec::new(),
                 mcp_client: None,
@@ -2304,7 +2323,7 @@ fn resolve_channel_overrides(
         })?;
         let base_url = cfg.get("base_url").and_then(|v| v.as_str()).unwrap_or("");
 
-        let api_key = match cfg.get("api_key_name").and_then(|v| v.as_str()) {
+        let (api_key, api_key_credential) = match cfg.get("api_key_name").and_then(|v| v.as_str()) {
             Some(slot) => {
                 let (secret, _) = store.retrieve(slot).with_context(|| {
                     format!(
@@ -2313,9 +2332,9 @@ fn resolve_channel_overrides(
                          Run `wirken credentials add {slot}` to add it."
                     )
                 })?;
-                Some(secret.expose().to_string())
+                (Some(secret.expose().to_string()), Some(slot.to_string()))
             }
-            None => None,
+            None => (None, None),
         };
 
         let llm_config = LlmConfig::from_provider(provider, base_url, model);
@@ -2324,6 +2343,7 @@ fn resolve_channel_overrides(
             wirken_agent::ChannelOverride {
                 llm_config,
                 api_key,
+                api_key_credential,
             },
         );
     }
