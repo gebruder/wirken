@@ -2086,12 +2086,29 @@ fn precreate_owner_only(path: &Path) -> Result<(), AuditError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let _ = std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
             .open(path)
-            .map_err(|e| AuditError::SiemConfig(format!("create {}: {e}", path.display())))?;
+        {
+            Ok(_) => Ok(()),
+            // Another opener won the race against the `path.exists()`
+            // check. SQLite creates `-wal` and `-shm` sidecars on
+            // every WAL-mode connection, so concurrent gateway
+            // components (the AuditWriter's flush loop and the
+            // typed-event forwarder both open the audit db at
+            // startup) routinely race here. Treat the loss as
+            // success after re-stat'ing the mode and chmod'ing
+            // down if the winner didn't land 0o600.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                ensure_owner_only_perms(path)
+            }
+            Err(e) => Err(AuditError::SiemConfig(format!(
+                "create {}: {e}",
+                path.display()
+            ))),
+        }
     }
     #[cfg(not(unix))]
     {
@@ -2100,11 +2117,35 @@ fn precreate_owner_only(path: &Path) -> Result<(), AuditError> {
              relying on user profile isolation for confidentiality",
             path.display()
         );
-        std::fs::OpenOptions::new()
+        match std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(path)
-            .map_err(|e| AuditError::SiemConfig(format!("create {}: {e}", path.display())))?;
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) => Err(AuditError::SiemConfig(format!(
+                "create {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+}
+
+/// Stat `path` and chmod to 0o600 if it isn't already. Used by
+/// [`precreate_owner_only`] when another caller won the create race;
+/// our 0o600-or-else guarantee still has to hold against whatever
+/// mode the winner created the file with (in practice SQLite creates
+/// WAL/SHM sidecars at the process umask, which is typically 0o644).
+#[cfg(unix)]
+fn ensure_owner_only_perms(path: &Path) -> Result<(), AuditError> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| AuditError::SiemConfig(format!("stat {}: {e}", path.display())))?;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| AuditError::SiemConfig(format!("chmod 0o600 {}: {e}", path.display())))?;
     }
     Ok(())
 }
@@ -2114,6 +2155,58 @@ mod precreate_perms_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
+
+    #[test]
+    fn precreate_handles_existing_file_with_wrong_mode() {
+        // Direct test of `ensure_owner_only_perms`: drop a 0o644
+        // file at the target path, then call precreate. The
+        // path.exists() early-return covers the file-already-there
+        // case; this test verifies the chmod path that
+        // `precreate_owner_only`'s race-loss branch relies on.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("audit.db-wal");
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        ensure_owner_only_perms(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "race-loss branch must chmod down to 0o600");
+    }
+
+    #[test]
+    fn precreate_owner_only_concurrent_calls_all_succeed() {
+        // Race-condition coverage: spawn N threads that all call
+        // `precreate_owner_only` against the same fresh path. Without
+        // the AlreadyExists handling on `create_new`, the losing
+        // threads return Err and the gateway's flush_loop or typed
+        // forwarder exits at startup. With the fix, every thread
+        // returns Ok and the file ends up at 0o600 regardless of
+        // who won the create.
+        use std::sync::Arc;
+        use std::sync::Barrier;
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let path = Arc::new(tmp.path().join("audit.db-wal"));
+        let barrier = Arc::new(Barrier::new(16));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let p = Arc::clone(&path);
+            let b = Arc::clone(&barrier);
+            handles.push(thread::spawn(move || {
+                b.wait();
+                precreate_owner_only(&p)
+            }));
+        }
+        for h in handles {
+            h.join()
+                .unwrap()
+                .expect("every concurrent precreate must return Ok");
+        }
+        let mode = std::fs::metadata(&*path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     #[test]
     fn open_lands_0o600_on_db_and_wal_and_shm_after_first_transaction() {
