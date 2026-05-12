@@ -7,10 +7,14 @@
 //! - `inference` — which LLM providers this skill needs the agent to call.
 //!
 //! Enforcement is per-agent: the agent computes its effective profile at init
-//! as the union of all loaded skills' declared profiles. Every skill must
-//! declare a `permissions:` block — the migration-window soft-warn closed
-//! with the hard-fail flip. The only path that produces
-//! `EffectiveProfile::Legacy` is the empty-attach case (no skills loaded).
+//! as the union of all loaded skills' declared profiles. The `permissions:`
+//! block is optional: when omitted, the loader falls back to
+//! `PermissionProfile::default()`, least-privilege on every axis (empty tool
+//! allowlist, deny-all egress, empty filesystem allowlists, empty inference
+//! allowlist). A skill without the block loads, but cannot do anything beyond
+//! emitting text through the prompt; the operator opts into capability by
+//! writing the block. The only path that produces `EffectiveProfile::Legacy`
+//! is the empty-attach case (no skills loaded at all).
 //!
 //! Wildcard `"*"` is supported on `tools`, `egress.domains`, and
 //! `inference.allow`. Filesystem wildcards are rejected: cap-std workspace

@@ -38,8 +38,8 @@ lyrik-bench/
 /audit/
 drafts/
 *.draft.md
-audit-*.md
-findings-*.md
+/audit-*.md
+/findings-*.md
 
 # Lyrik run artifacts (per-target-repo state, never tracked here)
 .lyrik/

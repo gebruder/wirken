@@ -37,8 +37,8 @@
 //! Operators wanting hard egress control should run wirken inside a
 //! network namespace, container with restricted egress, or with
 //! iptables/firewall rules at the OS level. The skill-side
-//! `egress.allow` list is a defense-in-depth control on the built-in
-//! tools, not a network boundary.
+//! `egress.domains` list is a defense-in-depth control on the
+//! built-in tools, not a network boundary.
 //!
 //! ## Two construction shapes
 //!
