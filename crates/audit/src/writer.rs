@@ -197,7 +197,20 @@ fn verify_every_flushes() -> u64 {
 /// in-chain row is defense-in-depth: if it's still there, an honest
 /// chain-walk reader sees both signals; if it isn't, the alarm log
 /// is the surviving record.
-async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome {
+///
+/// `audit_tx` is the flush-loop's own sender. When set, the in-chain
+/// chain_broken event is dispatched through the channel so the
+/// standard flush path (SQLite write + SIEM forward) carries it. On a
+/// closed or full channel the function falls back to a direct
+/// `log.write_batch`, preserving SQLite landing even when the route
+/// to SIEM is unavailable. `None` skips the in-chain emission
+/// entirely; tests that don't care about the channel pass `None` and
+/// rely on the alarm log to prove the verify pass fired.
+async fn run_verify_pass(
+    log: &AuditLog,
+    alarms: &AlarmLog,
+    audit_tx: Option<&mpsc::Sender<AuditEvent>>,
+) -> VerifyPassOutcome {
     match log.verify() {
         Ok(VerifyResult::Ok { rows_verified, .. }) => {
             tracing::debug!(
@@ -294,6 +307,17 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome
             // honest chain-walk reader sees the failure inline. The
             // alarm log is the load-bearing record above; this is
             // best-effort.
+            //
+            // Route the in-chain row through the flush-loop channel
+            // when one is provided so SIEM forwarding picks it up on
+            // the next flush. `try_send` is non-blocking: the verify
+            // pass runs *inside* the flush loop that owns the
+            // receiver, so a blocking `send` would deadlock against
+            // its own drain. If the channel is full or closed, fall
+            // back to a direct `write_batch` so the SQLite landing
+            // still happens (matching the prior behaviour); SIEM
+            // forwarding is lost on that fallback path, which the
+            // alarm log compensates for.
             let event = AuditEvent::new(
                 ActorKind::Service,
                 "audit",
@@ -307,8 +331,31 @@ async fn run_verify_pass(log: &AuditLog, alarms: &AlarmLog) -> VerifyPassOutcome
                 "actual_hash": actual_hash,
                 "verified_count": verified_count,
             }));
-            if let Err(e) = log.write_batch(&[event]) {
-                tracing::error!("audit chain_broken event write failed: {e}");
+            let routed_through_channel = match audit_tx {
+                Some(tx) => match tx.try_send(event.clone()) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            "audit channel full; landing chain_broken via direct \
+                             write_batch (SIEM forwarding on this event is lost; \
+                             alarm log retains the load-bearing record)"
+                        );
+                        false
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        tracing::warn!(
+                            "audit channel closed; landing chain_broken via direct \
+                             write_batch (SIEM forwarding unavailable)"
+                        );
+                        false
+                    }
+                },
+                None => false,
+            };
+            if !routed_through_channel {
+                if let Err(e) = log.write_batch(&[event]) {
+                    tracing::error!("audit chain_broken event write failed: {e}");
+                }
             }
             VerifyPassOutcome {
                 intact: false,
@@ -401,7 +448,20 @@ impl AuditWriter {
             Some(cfg) => Some(SiemForwarder::new(cfg).map_err(AuditError::SiemConfig)?),
             None => None,
         };
-        let handle = tokio::spawn(flush_loop(rx, path, forwarder, alarms, audit_signer));
+        // The flush loop holds a *weak* sender so the channel still
+        // closes when the AuditWriter's strong `tx` drops. A cloned
+        // strong Sender here would deadlock the loop on shutdown
+        // because `rx.recv()` only returns None when the last strong
+        // sender drops.
+        let verify_tx = tx.downgrade();
+        let handle = tokio::spawn(flush_loop(
+            rx,
+            verify_tx,
+            path,
+            forwarder,
+            alarms,
+            audit_signer,
+        ));
 
         Ok((Self { tx }, handle))
     }
@@ -425,6 +485,7 @@ impl AuditWriter {
 
 async fn flush_loop(
     mut rx: mpsc::Receiver<AuditEvent>,
+    audit_tx: mpsc::WeakSender<AuditEvent>,
     db_path: PathBuf,
     forwarder: Option<SiemForwarder>,
     alarms: AlarmLog,
@@ -479,7 +540,13 @@ async fn flush_loop(
                 }
                 flushes_since_verify = flushes_since_verify.saturating_add(1);
                 if flushes_since_verify >= verify_cadence {
-                    let outcome = run_verify_pass(&log, &alarms).await;
+                    // Upgrade the weak sender only for this call so
+                    // the channel can still close cleanly between
+                    // verify passes. If the strong sender is already
+                    // gone, `tx_strong` is None and run_verify_pass
+                    // falls back to its direct-write path.
+                    let tx_strong = audit_tx.upgrade();
+                    let outcome = run_verify_pass(&log, &alarms, tx_strong.as_ref()).await;
                     if record_verify_outcome(
                         &mut integrity_failures,
                         &mut alarm_write_failures,
@@ -632,7 +699,11 @@ mod tests {
         }
         let log = AuditLog::open(&db_path).unwrap();
         let alarms = AlarmLog::new(tmp.path());
-        let outcome = run_verify_pass(&log, &alarms).await;
+        // No channel: exercise the fallback direct-write path so the
+        // in-chain assertion below proves SQLite landing regardless
+        // of whether the channel was opted into. The channel-routed
+        // path is covered by `run_verify_pass_routes_chain_broken_through_channel`.
+        let outcome = run_verify_pass(&log, &alarms, None).await;
         assert!(!outcome.intact, "expected break to be detected");
         assert!(
             outcome.alarm_write_ok,
@@ -659,6 +730,130 @@ mod tests {
         assert!(
             !events.is_empty(),
             "expected audit.chain_broken event to be appended"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_verify_pass_routes_chain_broken_through_channel() {
+        // When a Sender is provided, the in-chain `audit.chain_broken`
+        // event must be dispatched through the channel so the flush
+        // loop's standard write+forward path carries it. This is the
+        // Finding C fix: prior to threading the Sender, the verify
+        // pass wrote directly via `log.write_batch`, bypassing the
+        // SIEM forwarder entirely.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let new_payload = serde_json::to_string(&serde_json::json!({
+                "kind": "audit_legacy",
+                "actor": "actor",
+                "action": "HACKED",
+                "target": "t",
+                "channel": "",
+                "detail": null,
+            }))
+            .unwrap();
+            conn.execute(
+                "UPDATE session_events SET payload = ?1 WHERE id = 3",
+                rusqlite::params![new_payload],
+            )
+            .unwrap();
+        }
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+
+        let outcome = run_verify_pass(&log, &alarms, Some(&tx)).await;
+        assert!(!outcome.intact);
+
+        let routed = rx
+            .try_recv()
+            .expect("chain_broken event must be on the channel");
+        assert_eq!(routed.action, "audit.chain_broken");
+        assert_eq!(routed.target, "audit.db");
+        assert!(matches!(routed.actor_kind, ActorKind::Service));
+        assert!(
+            routed.detail.get("expected_hash").is_some(),
+            "detail must include expected_hash, got {:?}",
+            routed.detail
+        );
+
+        // The fallback direct-write must NOT have fired: SQLite holds
+        // no chain_broken row from this pass (the row will land via
+        // the flush loop receiving from rx, which is not part of this
+        // unit test). The channel is the single dispatch path when
+        // it accepts the event.
+        let in_chain = log
+            .query(&AuditQuery {
+                action: Some("audit.chain_broken".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            in_chain.is_empty(),
+            "channel-routed event must not also be direct-written; got {in_chain:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_verify_pass_falls_back_to_direct_write_when_channel_closed() {
+        // Closing the receiver drops the channel. The verify pass
+        // must fall back to a direct write_batch so the in-chain row
+        // still lands even though SIEM forwarding is lost on this
+        // event. The alarm log remains the load-bearing record.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let new_payload = serde_json::to_string(&serde_json::json!({
+                "kind": "audit_legacy",
+                "actor": "actor",
+                "action": "HACKED",
+                "target": "t",
+                "channel": "",
+                "detail": null,
+            }))
+            .unwrap();
+            conn.execute(
+                "UPDATE session_events SET payload = ?1 WHERE id = 3",
+                rusqlite::params![new_payload],
+            )
+            .unwrap();
+        }
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let (tx, rx) = mpsc::channel::<AuditEvent>(16);
+        drop(rx);
+
+        let outcome = run_verify_pass(&log, &alarms, Some(&tx)).await;
+        assert!(!outcome.intact);
+
+        let in_chain = log
+            .query(&AuditQuery {
+                action: Some("audit.chain_broken".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            !in_chain.is_empty(),
+            "closed-channel fallback must land the row via direct write_batch"
         );
     }
 
@@ -834,7 +1029,7 @@ mod tests {
         let mut alarm = 0u32;
         let mut halted = false;
         for _ in 0..MAX_INTEGRITY_FAILURES {
-            let outcome = run_verify_pass(&log, &alarms).await;
+            let outcome = run_verify_pass(&log, &alarms, None).await;
             if record_verify_outcome(&mut integrity, &mut alarm, &outcome) {
                 halted = true;
                 break;
@@ -895,7 +1090,7 @@ mod tests {
         let mut alarm = 0u32;
         let mut halted = false;
         for _ in 0..MAX_ALARM_WRITE_FAILURES {
-            let outcome = run_verify_pass(&log, &alarms).await;
+            let outcome = run_verify_pass(&log, &alarms, None).await;
             assert!(!outcome.intact);
             assert!(
                 !outcome.alarm_write_ok,
