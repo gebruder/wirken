@@ -813,6 +813,18 @@ impl Agent {
         self.effective_permissions.overlay()
     }
 
+    /// Slice-4 replay-side counterpart to [`Self::enter_phase`].
+    /// Installs `overlay` unconditionally, replacing whatever is
+    /// currently active. Skips the `AlreadyActive` check the live
+    /// path enforces, and emits no `PhaseEntered` audit row (the
+    /// row is already in the session log, which is what the replay
+    /// is iterating). Symmetric with
+    /// `PermissionStore::restore_session_scoped_approval` from the
+    /// session-scoped approval replay path.
+    pub(crate) fn restore_phase_overlay(&mut self, overlay: crate::skill_perms::PhaseDenyOverlay) {
+        self.effective_permissions.set_overlay(overlay);
+    }
+
     /// Turn-end auto-exit for any active phase deny overlay. Mirrors
     /// `factory.evict`'s posture: emission failures are logged and
     /// swallowed because the in-memory clear has already happened, so

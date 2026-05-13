@@ -369,6 +369,21 @@ impl AgentFactory {
                 );
             }
         }
+        // Slice 4 of the per-pass deny overlay: replay PhaseEntered /
+        // PhaseExited events to re-establish any active phase
+        // overlay across the wake. Runs AFTER `attach_skills` so the
+        // base `PhasedEffective` is in place: `attach_skills` resets
+        // the overlay slot, so the replay's `set_overlay` is the
+        // last write. Best-effort: a read failure logs and continues
+        // with no overlay, matching the deny-by-default posture of
+        // the session-scoped approval replay above.
+        if let Err(err) = replay_phase_overlay(&mut agent, &self.session_log, session_id) {
+            tracing::warn!(
+                session_id,
+                error = %err,
+                "factory: failed to replay phase overlay; agent starts with no active phase"
+            );
+        }
         if let Some(org) = &self.org_permissions {
             agent.set_org_permissions(org.clone());
         }
@@ -508,6 +523,67 @@ fn replay_session_scoped_approvals(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// Walk the session log for `session_id` and re-apply the
+/// PhaseEntered / PhaseExited lifecycle events to the agent's
+/// effective permissions, last-event-wins. Mirrors
+/// `replay_session_scoped_approvals` in shape but targets the
+/// per-pass deny overlay added in slices 1-3.
+///
+/// Semantics:
+/// - `PhaseEntered` reconstructs a [`PhaseDenyOverlay`] from the
+///   wire-shape [`wirken_audit::PhaseDenyContent`] on the event and
+///   makes it the current overlay. Multiple `PhaseEntered` events
+///   without an intervening `PhaseExited` (a corrupted-log shape
+///   the live path's `AlreadyActive` guard normally prevents) are
+///   tolerated defensively: the latest one wins.
+/// - `PhaseExited` clears the current overlay. An orphan
+///   `PhaseExited` (no preceding `PhaseEntered`) is a no-op.
+/// - The reason on `PhaseExited` is intentionally ignored at
+///   replay: `TurnEnd`, `PhaseChange`, and `SkillUnloaded` all
+///   produce the same "no active phase" terminal state.
+///
+/// Variants other than the two phase-lifecycle ones are ignored;
+/// this pass is concerned with the overlay only. Runs AFTER
+/// [`Agent::attach_skills`] because attach_skills resets the overlay
+/// slot to None; the replay's final write wins.
+fn replay_phase_overlay(
+    agent: &mut Agent,
+    log: &Arc<dyn SessionLog>,
+    session_id: &str,
+) -> Result<(), wirken_audit::AuditError> {
+    let handle = log.handle_for(SessionId::new(session_id.to_string()));
+    let events = log.get_since(&handle, 0)?;
+    let mut current: Option<crate::skill_perms::PhaseDenyOverlay> = None;
+    for stored in events {
+        match stored.event {
+            SessionEvent::PhaseEntered {
+                skill_id,
+                phase_name,
+                denied,
+            } => {
+                current = Some(crate::skill_perms::PhaseDenyOverlay {
+                    skill_id,
+                    phase_name,
+                    entered_at: stored.ts,
+                    tools: denied.tools.into_iter().collect(),
+                    egress_hosts: denied.egress_hosts.into_iter().collect(),
+                    paths_read: denied.paths_read.into_iter().map(PathBuf::from).collect(),
+                    paths_write: denied.paths_write.into_iter().map(PathBuf::from).collect(),
+                    inference_providers: denied.inference_providers.into_iter().collect(),
+                });
+            }
+            SessionEvent::PhaseExited { .. } => {
+                current = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(overlay) = current {
+        agent.restore_phase_overlay(overlay);
     }
     Ok(())
 }
@@ -746,5 +822,208 @@ mod replay_tests {
                 action,
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // replay_phase_overlay (slice 4 of per-pass deny overlay)
+    // -----------------------------------------------------------------
+
+    use crate::llm::LlmConfig;
+    use crate::runtime::Agent;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+    use wirken_audit::PhaseDenyContent;
+
+    /// Build an Agent with a fresh-per-test SqliteSessionLog so the
+    /// replay function can read its own log. Returns
+    /// `(agent, log_arc, session_id, _tmp)` where `_tmp` keeps the
+    /// audit DB alive for the test's lifetime. The agent's
+    /// permission profile is the default `Legacy` shape; the phase
+    /// overlay sits on top of it and is what slice 4 reconstructs.
+    fn agent_for_phase_replay() -> (Agent, Arc<SqliteSessionLog>, String, TempDir) {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("audit.db");
+        let concrete = Arc::new(SqliteSessionLog::open(&log_path).unwrap());
+        let log_dyn: Arc<dyn SessionLog> = concrete.clone();
+        let session_id = "default/webchat/replay-phase".to_string();
+        let agent = Agent::new(
+            session_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log_dyn,
+        )
+        .unwrap();
+        (agent, concrete, session_id, tmp)
+    }
+
+    /// Append a PhaseEntered event for `session_id`. Mirrors the
+    /// emission shape of `Agent::enter_phase_intercept`.
+    fn append_phase_entered(
+        log: &Arc<SqliteSessionLog>,
+        session_id: &str,
+        skill_id: &str,
+        phase_name: &str,
+        denied_tools: &[&str],
+    ) {
+        let handle = log.handle_for(SessionId::new(session_id.to_string()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PhaseEntered {
+                skill_id: skill_id.to_string(),
+                phase_name: phase_name.to_string(),
+                denied: PhaseDenyContent {
+                    tools: denied_tools.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    }
+
+    fn append_phase_exited(
+        log: &Arc<SqliteSessionLog>,
+        session_id: &str,
+        skill_id: &str,
+        phase_name: &str,
+    ) {
+        let handle = log.handle_for(SessionId::new(session_id.to_string()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PhaseExited {
+                skill_id: skill_id.to_string(),
+                phase_name: phase_name.to_string(),
+                reason: wirken_audit::PhaseExitReason::PhaseChange,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn replay_reconstructs_overlay_from_phase_entered() {
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        // Drive a full-payload PhaseEntered: tools axis plus another
+        // axis to confirm reconstruction covers more than tools.
+        let handle = log.handle_for(SessionId::new(session_id.clone()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PhaseEntered {
+                skill_id: "test-skill".to_string(),
+                phase_name: "scoring".to_string(),
+                denied: PhaseDenyContent {
+                    tools: vec!["read_file".to_string(), "exec".to_string()],
+                    paths_read: vec!["/etc/secrets".to_string()],
+                    inference_providers: vec!["openai".to_string()],
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_phase_overlay(&mut agent, &log_dyn, &session_id).unwrap();
+
+        let overlay = agent.current_phase().expect("overlay re-established");
+        assert_eq!(overlay.skill_id, "test-skill");
+        assert_eq!(overlay.phase_name, "scoring");
+        assert!(overlay.tools.contains("read_file"));
+        assert!(overlay.tools.contains("exec"));
+        assert!(overlay.paths_read.contains(&PathBuf::from("/etc/secrets")));
+        assert!(overlay.inference_providers.contains("openai"));
+    }
+
+    #[test]
+    fn replay_clears_overlay_on_phase_exited_tombstone() {
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_phase_entered(&log, &session_id, "test-skill", "scoring", &["exec"]);
+        append_phase_exited(&log, &session_id, "test-skill", "scoring");
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_phase_overlay(&mut agent, &log_dyn, &session_id).unwrap();
+
+        assert!(agent.current_phase().is_none());
+    }
+
+    #[test]
+    fn replay_takes_latest_unmatched_enter() {
+        // Enter-Exit-Enter: the third event is the live phase at the
+        // end of the log; replay should re-establish it.
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_phase_entered(&log, &session_id, "test-skill", "recon", &["read_file"]);
+        append_phase_exited(&log, &session_id, "test-skill", "recon");
+        append_phase_entered(&log, &session_id, "test-skill", "scoring", &["exec"]);
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_phase_overlay(&mut agent, &log_dyn, &session_id).unwrap();
+
+        let overlay = agent.current_phase().expect("scoring overlay active");
+        assert_eq!(overlay.phase_name, "scoring");
+        assert!(overlay.tools.contains("exec"));
+        assert!(!overlay.tools.contains("read_file"));
+    }
+
+    #[test]
+    fn replay_ignores_orphan_phase_exited() {
+        // PhaseExited with no preceding PhaseEntered: defensive
+        // tolerance for log-corruption or out-of-order replay.
+        // Replay leaves the overlay empty, no panic, no error.
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_phase_exited(&log, &session_id, "test-skill", "scoring");
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_phase_overlay(&mut agent, &log_dyn, &session_id).unwrap();
+
+        assert!(agent.current_phase().is_none());
+    }
+
+    #[test]
+    fn replay_crash_mid_phase() {
+        // Crash-recovery framing: the log has PhaseEntered with no
+        // PhaseExited (the host crashed before exit_phase or
+        // clear_phase_at_turn_end ran). Replay re-establishes the
+        // overlay so the next wake's tool calls are still subject
+        // to the deny.
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_phase_entered(&log, &session_id, "lyrik", "scoring", &["exec"]);
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_phase_overlay(&mut agent, &log_dyn, &session_id).unwrap();
+
+        let overlay = agent
+            .current_phase()
+            .expect("crash recovery resurrects overlay");
+        assert_eq!(overlay.skill_id, "lyrik");
+        assert_eq!(overlay.phase_name, "scoring");
+    }
+
+    #[test]
+    fn replay_clean_phase_exit_leaves_no_overlay() {
+        // Symmetric counterpart to the crash test: the log has a
+        // matching Enter/Exit pair, so the wake produces no
+        // overlay. The reason on the Exit does not matter at
+        // replay (PhaseChange, SkillUnloaded, and TurnEnd are all
+        // treated as terminal).
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_phase_entered(&log, &session_id, "lyrik", "scoring", &["exec"]);
+        let handle = log.handle_for(SessionId::new(session_id.clone()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PhaseExited {
+                skill_id: "lyrik".to_string(),
+                phase_name: "scoring".to_string(),
+                reason: wirken_audit::PhaseExitReason::TurnEnd,
+            },
+        )
+        .unwrap();
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_phase_overlay(&mut agent, &log_dyn, &session_id).unwrap();
+
+        assert!(agent.current_phase().is_none());
     }
 }

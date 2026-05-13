@@ -795,6 +795,18 @@ impl PhasedEffective {
         self.overlay.take()
     }
 
+    /// Slice-4 replay-side setter. Unconditionally installs
+    /// `overlay`, replacing whatever is currently active. Skips the
+    /// `AlreadyActive` check the live [`Self::enter_phase`] enforces
+    /// because replay needs to set the final state observed in the
+    /// session log without diagnosing intermediate corrupted-log
+    /// patterns (a `PhaseEntered` without a preceding `PhaseExited`
+    /// becomes last-event-wins). The replay caller is responsible
+    /// for not emitting a duplicate `PhaseEntered` audit row.
+    pub fn set_overlay(&mut self, overlay: PhaseDenyOverlay) {
+        self.overlay = Some(overlay);
+    }
+
     /// True iff at least one attached skill's declared
     /// `permissions.tools.allow` admits `name`. Distinct from
     /// [`Self::gate_tool`] in that the [`EffectiveProfile::Legacy`]
