@@ -23,6 +23,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -496,6 +497,78 @@ pub fn effective_for_skills(
         return Ok(EffectiveProfile::Legacy);
     }
     Ok(EffectiveProfile::Resolved(merge(profiles)?))
+}
+
+// ---------------------------------------------------------------------------
+// Phase deny overlay (per-pass denylist)
+// ---------------------------------------------------------------------------
+
+/// In-memory deny overlay layered on top of an Agent's
+/// [`EffectiveProfile`]. Entries listed here are denied even when the
+/// base profile would have allowed them. The overlay is single-slot:
+/// only one phase can be active per Agent at a time. Set by a skill
+/// via the `wirken_enter_phase` host function (slice 3); cleared via
+/// `wirken_exit_phase`, turn-end, or skill-unload.
+///
+/// The four deny axes mirror the four `allows_*` methods on
+/// [`EffectiveProfile`]: tools, egress hosts, filesystem read/write
+/// paths, and inference providers. An axis with an empty set denies
+/// nothing on that axis. The overlay is a denylist over an allowlist
+/// base; it cannot widen what the base profile allows.
+///
+/// `skill_id` and `phase_name` are recorded for audit attribution
+/// and replay; `entered_at` is the wall-clock at the
+/// `wirken_enter_phase` call site, preserved across replay from the
+/// audit row's `ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PhaseDenyOverlay {
+    pub skill_id: String,
+    pub phase_name: String,
+    pub entered_at: DateTime<Utc>,
+    pub tools: BTreeSet<String>,
+    pub egress_hosts: BTreeSet<String>,
+    pub paths_read: BTreeSet<PathBuf>,
+    pub paths_write: BTreeSet<PathBuf>,
+    pub inference_providers: BTreeSet<String>,
+}
+
+impl PhaseDenyOverlay {
+    /// True when the overlay would deny `name` on the tools axis.
+    /// Slice 2 wires this into the agent's permission gate; slice 1
+    /// only defines the predicate so the type's shape is testable.
+    pub fn denies_tool(&self, name: &str) -> bool {
+        self.tools.contains(name)
+    }
+
+    /// True when the overlay would deny `host` on the egress axis.
+    /// Plain string equality; the existing
+    /// [`EffectiveProfile::allows_host`] pattern-matches with `*.`
+    /// wildcards on the allow side, but the overlay is a closed deny
+    /// list: a skill enters a phase with concrete hosts to refuse,
+    /// not wildcard patterns.
+    pub fn denies_host(&self, host: &str) -> bool {
+        self.egress_hosts.contains(host)
+    }
+
+    /// True when the overlay would deny `path` on the filesystem read
+    /// axis. Matches by directory prefix (a denied root denies every
+    /// descendant), mirroring the base profile's
+    /// [`EffectiveProfile::allows_read_path`] containment check.
+    pub fn denies_read_path(&self, path: &Path) -> bool {
+        self.paths_read.iter().any(|root| path.starts_with(root))
+    }
+
+    /// True when the overlay would deny `path` on the filesystem write
+    /// axis. Same prefix-match semantics as
+    /// [`Self::denies_read_path`].
+    pub fn denies_write_path(&self, path: &Path) -> bool {
+        self.paths_write.iter().any(|root| path.starts_with(root))
+    }
+
+    /// True when the overlay would deny `name` on the inference axis.
+    pub fn denies_provider(&self, name: &str) -> bool {
+        self.inference_providers.contains(name)
+    }
 }
 
 /// Union-merge a slice of declared per-skill profiles into one effective

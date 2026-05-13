@@ -237,6 +237,53 @@ pub enum ApprovalScopeKind {
     Session,
 }
 
+/// Wire-stable content of a phase deny overlay as recorded on
+/// [`SessionEvent::PhaseEntered`]. Lives in audit rather than
+/// `wirken-agent::skill_perms` because audit cannot depend on agent
+/// (gateway → audit is the only direction); the agent-side
+/// `PhaseDenyOverlay` maps onto this on emit. Paths are recorded as
+/// `String` rather than `PathBuf` so the wire shape is portable
+/// across platforms; the agent-side reconstructor parses them back
+/// into `PathBuf` at replay time.
+///
+/// Every axis is defaulted to empty on deserialize and skipped on
+/// serialize when empty, so a future axis addition (e.g. credential
+/// names) stays forward-compatible.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PhaseDenyContent {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths_read: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths_write: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inference_providers: Vec<String>,
+}
+
+/// Why a phase overlay was exited. Carried on
+/// [`SessionEvent::PhaseExited`] so a SIEM consumer or replay path
+/// can distinguish a clean skill-driven exit from a host-driven one
+/// (turn end, skill unload) without inferring from surrounding
+/// context. `Default` is `PhaseChange` (the skill-initiated case)
+/// for forward-compat with rows written before this field existed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseExitReason {
+    /// Skill explicitly called `wirken_exit_phase`, typically to
+    /// enter the next phase.
+    #[default]
+    PhaseChange,
+    /// Agent turn ended; the host auto-exited any still-active phase
+    /// before clearing the turn-scoped overlay slot.
+    TurnEnd,
+    /// Skill was unloaded mid-phase; the host auto-exited so the
+    /// dangling overlay does not survive the skill's lifetime.
+    SkillUnloaded,
+}
+
 /// Outcome of one HTTP fetch as recorded on
 /// [`SessionEvent::HttpFetch`]. The pre-1.2.0 shape was a free-form
 /// string (`"ok"`, `"http_error_404"`, `"network_error"`, ...); the
@@ -479,6 +526,34 @@ pub enum SessionEvent {
         session_id: String,
         count: u32,
         reason: String,
+    },
+    /// A skill entered a phase with a deny overlay active. The
+    /// overlay denies the listed tools / egress hosts / filesystem
+    /// paths / inference providers for the remainder of the turn or
+    /// until the skill calls `wirken_exit_phase`. `skill_id`
+    /// attributes the overlay; `phase_name` is the skill-supplied
+    /// label (e.g. `"recon"`, `"scoring"`) for operator-readable
+    /// audit. `denied` is defaulted on deserialize so a row written
+    /// before this variant existed (none today, but future-compat)
+    /// reads cleanly.
+    PhaseEntered {
+        skill_id: String,
+        phase_name: String,
+        #[serde(default)]
+        denied: PhaseDenyContent,
+    },
+    /// The active phase deny overlay was cleared. Emitted by the
+    /// host on every overlay clear: skill-initiated
+    /// (`PhaseChange`), turn-end auto-exit (`TurnEnd`), or
+    /// skill-unload (`SkillUnloaded`). `phase_name` matches the
+    /// phase named by the most recent `PhaseEntered` event for the
+    /// same `skill_id`; replay walks `PhaseEntered`/`PhaseExited`
+    /// pairs last-event-wins to reconstruct the active overlay.
+    PhaseExited {
+        skill_id: String,
+        phase_name: String,
+        #[serde(default)]
+        reason: PhaseExitReason,
     },
     /// Skill-permission-block denial recorded by the harness. Distinct
     /// from `PermissionDenied` (which is tier-based, operator-approval

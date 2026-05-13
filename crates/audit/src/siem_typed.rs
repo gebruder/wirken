@@ -115,6 +115,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionDenied { .. } => "permission_denied",
         SessionEvent::PermissionApproved { .. } => "permission_approved",
         SessionEvent::SessionScopedApprovalsCleared { .. } => "session_scoped_approvals_cleared",
+        SessionEvent::PhaseEntered { .. } => "phase_entered",
+        SessionEvent::PhaseExited { .. } => "phase_exited",
         SessionEvent::SkillPermissionDenied { .. } => "skill_permission_denied",
         SessionEvent::PerspectiveSkipped { .. } => "perspective_skipped",
         SessionEvent::PerspectiveExpansion { .. } => "perspective_expansion",
