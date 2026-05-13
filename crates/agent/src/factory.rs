@@ -42,10 +42,12 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use lru::LruCache;
 use tokio::sync::Mutex as AsyncMutex;
-use wirken_audit::{ApprovalScopeKind, SessionEvent, SessionId, SessionLog, TrustLevel};
+use wirken_audit::{ApprovalScopeKind, SessionEvent, SessionId, SessionLog};
 use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::org::OrgPermissions;
-use wirken_gateway::permissions::{PermissionStore, SESSION_CLEAR_REASON_ENDED};
+use wirken_gateway::permissions::{
+    PermissionStore, SESSION_CLEAR_REASON_ENDED, emit_session_scoped_approvals_cleared,
+};
 
 use crate::error::AgentError;
 use crate::llm::LlmConfig;
@@ -440,23 +442,20 @@ impl AgentFactory {
                 store.clear_session_scope(session_id)
             };
 
-            if cleared > 0 {
-                let handle = self
-                    .session_log
-                    .handle_for(SessionId::new(session_id.to_string()));
-                let event = SessionEvent::SessionScopedApprovalsCleared {
-                    session_id: session_id.to_string(),
-                    count: cleared,
-                    reason: SESSION_CLEAR_REASON_ENDED.to_string(),
-                };
-                if let Err(err) = self.session_log.append(&handle, TrustLevel::System, event) {
-                    tracing::warn!(
-                        session_id,
-                        cleared,
-                        error = %err,
-                        "factory.evict: failed to append SessionScopedApprovalsCleared; in-memory clear already applied"
-                    );
-                }
+            if cleared > 0
+                && let Err(err) = emit_session_scoped_approvals_cleared(
+                    self.session_log.as_ref(),
+                    session_id,
+                    cleared,
+                    SESSION_CLEAR_REASON_ENDED,
+                )
+            {
+                tracing::warn!(
+                    session_id,
+                    cleared,
+                    error = %err,
+                    "factory.evict: failed to append SessionScopedApprovalsCleared; in-memory clear already applied"
+                );
             }
         }
     }
@@ -517,7 +516,7 @@ fn replay_session_scoped_approvals(
 mod replay_tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
-    use wirken_audit::SqliteSessionLog;
+    use wirken_audit::{SqliteSessionLog, TrustLevel};
     use wirken_gateway::permissions::{Action, PermissionCheck, PermissionStore, PermissionTier};
 
     fn make_store() -> Arc<StdMutex<PermissionStore>> {

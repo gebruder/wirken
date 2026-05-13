@@ -725,6 +725,85 @@ pub enum PermissionCheck {
 /// downstream pattern-match share one string.
 pub const SESSION_CLEAR_REASON_ENDED: &str = "session_ended";
 
+/// Append a `SessionEvent::SessionScopedApprovalsCleared` tombstone
+/// to `log` under `session_id`. The shared emission point for any
+/// caller that ends a session: today the in-daemon
+/// [`AgentFactory::evict`] hook and the CLI `wirken sessions close`
+/// shim. Centralising the call shape here keeps the trust level
+/// (`System`), the field layout, and the wire-stable `reason`
+/// constant in one place, so a future caller cannot accidentally
+/// emit a tombstone the replay path does not recognise.
+///
+/// `count` is the number of session-scoped grants the caller
+/// observed; replay treats the tombstone as authoritative
+/// regardless of count, but SIEM consumers use it to size the
+/// blast radius of the clear.
+///
+/// [`AgentFactory::evict`]: crate::permissions
+// Note: the link target lives in crates/agent; rustdoc cannot resolve
+// it from here without pulling agent in as a doc dep. Plain prose
+// references it instead.
+pub fn emit_session_scoped_approvals_cleared(
+    log: &dyn wirken_audit::SessionLog,
+    session_id: &str,
+    count: u32,
+    reason: &str,
+) -> Result<(), wirken_audit::AuditError> {
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    log.append(
+        &handle,
+        wirken_audit::TrustLevel::System,
+        wirken_audit::SessionEvent::SessionScopedApprovalsCleared {
+            session_id: session_id.to_string(),
+            count,
+            reason: reason.to_string(),
+        },
+    )?;
+    Ok(())
+}
+
+/// Replay the session log to count active session-scoped grants for
+/// `session_id`: number of distinct `action_key`s under
+/// `PermissionApproved(Session)` events minus those tombstoned by a
+/// subsequent `SessionScopedApprovalsCleared`. Used by out-of-process
+/// callers (the CLI `wirken sessions close` shim) that do not share
+/// the daemon's in-memory cache but need to know whether emitting a
+/// tombstone is meaningful: returning zero lets the caller skip the
+/// emit and preserve the "no audit noise for no-op" convention.
+///
+/// Returns the same number that `factory.evict`'s
+/// `clear_session_scope` would have returned if it had run inside the
+/// daemon, modulo grants made and not yet replayed (which an
+/// out-of-process caller has no way to see anyway). Replay walks
+/// events in seq order, so `grant + clear + grant` reports `1`.
+pub fn count_active_session_scoped_approvals(
+    log: &dyn wirken_audit::SessionLog,
+    session_id: &str,
+) -> Result<u32, wirken_audit::AuditError> {
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    let events = log.get_since(&handle, 0)?;
+    let mut active: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for stored in events {
+        match stored.event {
+            wirken_audit::SessionEvent::PermissionApproved {
+                action_key,
+                scope: wirken_audit::ApprovalScopeKind::Session,
+                session_id: Some(sid),
+                ..
+            } if sid == session_id => {
+                active.insert(action_key);
+            }
+            wirken_audit::SessionEvent::SessionScopedApprovalsCleared {
+                session_id: sid, ..
+            } if sid == session_id => {
+                active.clear();
+            }
+            _ => {}
+        }
+    }
+    Ok(active.len() as u32)
+}
+
 /// Approve an action and append a `SessionEvent::PermissionApproved`
 /// audit entry to `log` under `handle`. The orchestration helper for
 /// any caller that has both the perm store and a session-log handle
@@ -1436,6 +1515,176 @@ mod tier_tests {
         assert_eq!(
             store.check(&shell("ls"), session).unwrap(),
             PermissionCheck::Allowed,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Session-end emit + count helpers (followup 1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn emit_session_scoped_approvals_cleared_writes_tombstone() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let session = "default/webchat/conv-emit";
+
+        super::emit_session_scoped_approvals_cleared(
+            &log,
+            session,
+            3,
+            super::SESSION_CLEAR_REASON_ENDED,
+        )
+        .unwrap();
+
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+        let events = log.get_since(&handle, 0).unwrap();
+        let cleared: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::SessionScopedApprovalsCleared { .. } => Some(&e.event),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cleared.len(), 1);
+        match cleared[0] {
+            SessionEvent::SessionScopedApprovalsCleared {
+                session_id,
+                count,
+                reason,
+            } => {
+                assert_eq!(session_id, session);
+                assert_eq!(*count, 3);
+                assert_eq!(reason, super::SESSION_CLEAR_REASON_ENDED);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn count_active_session_scoped_approvals_walks_events() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let session = "default/webchat/conv-count";
+
+        // Empty log: zero.
+        assert_eq!(
+            super::count_active_session_scoped_approvals(&log, session).unwrap(),
+            0,
+        );
+
+        // Two grants under this session: active set = {shell:ls, shell:cat} → 2.
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+        for key in ["shell:ls", "shell:cat"] {
+            log.append(
+                &handle,
+                wirken_audit::TrustLevel::System,
+                SessionEvent::PermissionApproved {
+                    action_key: key.to_string(),
+                    agent_id: "default".to_string(),
+                    approved_by: "operator".to_string(),
+                    scope: wirken_audit::ApprovalScopeKind::Session,
+                    session_id: Some(session.to_string()),
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            super::count_active_session_scoped_approvals(&log, session).unwrap(),
+            2,
+        );
+
+        // Tombstone clears the active set → 0.
+        super::emit_session_scoped_approvals_cleared(
+            &log,
+            session,
+            2,
+            super::SESSION_CLEAR_REASON_ENDED,
+        )
+        .unwrap();
+        assert_eq!(
+            super::count_active_session_scoped_approvals(&log, session).unwrap(),
+            0,
+        );
+
+        // Re-grant after the tombstone: active set = {shell:ls} → 1.
+        // Matches the user's "clear wins iff no further grants"
+        // semantics from slice 3.
+        log.append(
+            &handle,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:ls".to_string(),
+                agent_id: "default".to_string(),
+                approved_by: "operator".to_string(),
+                scope: wirken_audit::ApprovalScopeKind::Session,
+                session_id: Some(session.to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            super::count_active_session_scoped_approvals(&log, session).unwrap(),
+            1,
+        );
+    }
+
+    #[test]
+    fn count_active_skips_persisted_and_other_sessions() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let target = "default/webchat/conv-target";
+        let other = "default/webchat/conv-other";
+
+        // A persisted PermissionApproved row inside the target session
+        // log: must not count. Same target session log gets a Session-
+        // scoped row that does count.
+        let handle = log.handle_for(SessionId::new(target.to_string()));
+        log.append(
+            &handle,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:ls".to_string(),
+                agent_id: "default".to_string(),
+                approved_by: "operator".to_string(),
+                scope: wirken_audit::ApprovalScopeKind::Persisted,
+                session_id: None,
+            },
+        )
+        .unwrap();
+        log.append(
+            &handle,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:cat".to_string(),
+                agent_id: "default".to_string(),
+                approved_by: "operator".to_string(),
+                scope: wirken_audit::ApprovalScopeKind::Session,
+                session_id: Some(target.to_string()),
+            },
+        )
+        .unwrap();
+        // A Session-scoped row whose inner session_id names a
+        // different session (`other`): pathological, but the count
+        // helper must reject the mismatch and not count it.
+        log.append(
+            &handle,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:head".to_string(),
+                agent_id: "default".to_string(),
+                approved_by: "operator".to_string(),
+                scope: wirken_audit::ApprovalScopeKind::Session,
+                session_id: Some(other.to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            super::count_active_session_scoped_approvals(&log, target).unwrap(),
+            1,
+            "only the session-scoped grant whose inner session_id matches target counts",
         );
     }
 }

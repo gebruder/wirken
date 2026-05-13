@@ -1,9 +1,52 @@
 use anyhow::{Context, Result};
 
 use wirken_audit::SessionLog;
+use wirken_gateway::permissions::{
+    SESSION_CLEAR_REASON_ENDED, count_active_session_scoped_approvals,
+    emit_session_scoped_approvals_cleared,
+};
 use wirken_gateway::session::SessionStore;
 
 use super::config;
+
+/// Resolve a CLI session-id argument to the composite log id
+/// (`{agent_id}/{channel}/{conversation_id}`) the session log and
+/// `factory.evict` key on. Accepts either form so the CLI's "Use
+/// STORE ID for `wirken sessions close`, LOG ID for `wirken sessions
+/// verify`" message stays operator-friendly:
+///
+/// - composite (contains `/`): returned unchanged.
+/// - hex store id: looked up in `SessionStore`, joined with the
+///   agent id resolved from `AgentConfigStore`, defaulting to
+///   `"default"` if no agent owns the session's channel.
+///
+/// Returns `None` when a hex id has no matching `SessionStore` row;
+/// the caller surfaces that as a "session not found" error.
+fn resolve_to_composite_log_id(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    raw_id: &str,
+) -> Option<String> {
+    if raw_id.contains('/') {
+        return Some(raw_id.to_string());
+    }
+    let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs).ok()?;
+    let sess = store.get(raw_id).ok()?;
+    let agent_id =
+        wirken_gateway::agent_config::AgentConfigStore::open(&cfg.agent_config_db_path())
+            .ok()
+            .and_then(|s| s.list().ok())
+            .and_then(|agents| {
+                agents
+                    .into_iter()
+                    .find(|a| a.channels.iter().any(|c| c == &sess.channel))
+                    .map(|a| a.id)
+            })
+            .unwrap_or_else(|| "default".into());
+    Some(format!(
+        "{}/{}/{}",
+        agent_id, sess.channel, sess.conversation_id
+    ))
+}
 
 pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()> {
     let cfg = config();
@@ -108,6 +151,21 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
     Ok(())
 }
 
+/// Close (mark expired) a session and tombstone any active
+/// session-scoped approval grants in its audit chain. The store-side
+/// flip is what `wirken sessions list` reflects; the audit tombstone
+/// is what the replay-on-wake path in `AgentFactory::wake` consumes
+/// to leave the in-memory cache empty on the next wake.
+///
+/// Coherence note: the daemon (if running) keeps any session-scoped
+/// grants in its own in-process cache until process restart, because
+/// the CLI runs out-of-band of the daemon and cannot directly call
+/// `factory.evict`. A daemon-side background sweep that routes
+/// expired sessions through `factory.evict` is the architecturally
+/// clean follow-up; until that lands, in-flight grants on a CLI-
+/// closed session remain effective for the lifetime of the daemon
+/// process. Replay correctness on the next wake is preserved by the
+/// tombstone emitted here.
 pub async fn close(id: &str) -> Result<()> {
     let cfg = config();
     let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
@@ -116,6 +174,29 @@ pub async fn close(id: &str) -> Result<()> {
     store
         .close(id)
         .context(format!("Failed to close session '{id}'"))?;
+
+    // Tombstone any session-scoped approvals. The CLI may have
+    // received a hex store id or a composite log id; the audit
+    // chain keys on the composite, so translate before emitting.
+    // Translation failure is non-fatal: a session that has no
+    // composite mapping (or no SessionStore row) cannot have had
+    // session-scoped grants emitted under it, so the tombstone
+    // would be a no-op anyway.
+    if let Some(composite) = resolve_to_composite_log_id(&cfg, id) {
+        let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("Failed to open session log")?;
+        let active = count_active_session_scoped_approvals(&log, &composite)
+            .context("Failed to count active session-scoped approvals")?;
+        if active > 0 {
+            emit_session_scoped_approvals_cleared(
+                &log,
+                &composite,
+                active,
+                SESSION_CLEAR_REASON_ENDED,
+            )
+            .context("Failed to emit SessionScopedApprovalsCleared")?;
+        }
+    }
 
     println!("  Session '{id}' closed.");
     Ok(())
