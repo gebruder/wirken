@@ -30,6 +30,27 @@ tagged.
   persisted grants are out of band of any single session log; a
   non-session operator-action audit channel is the future home
   for those).
+- Per-pass tool-call denylist. Skills can declare phase
+  boundaries via synthetic `wirken_enter_phase` /
+  `wirken_exit_phase` tool calls, LLM-visible only when the skill
+  declares them in its `SKILL.md` `permissions.tools.allow`. Each
+  phase carries a deny set across five axes: tools, egress hosts,
+  filesystem read paths, filesystem write paths, inference
+  providers. Enforced at the tool-call gate overlay-first /
+  base-fallthrough, returning typed
+  `GateDecision::DeniedByPhase { phase_name, axis }`. The audit
+  chain records `PhaseEntered` / `PhaseExited` rows with typed
+  reasons (`PhaseChange`, `TurnEnd`, `SkillUnloaded`);
+  `SkillPermissionDenied` rows whose `denied_reason` is
+  `Phase { phase_name }` correlate with the triggering
+  `PhaseEntered` for SIEM consumers. Replayed from the session
+  log on wake: an active phase survives a crash, a clean exit
+  tombstones the overlay. Single-slot invariant: nested phases
+  are refused so every `PhaseEntered` pairs cleanly with one
+  `PhaseExited`. Egress-axis enforcement is type-prepared but
+  not yet wired through `EgressEnforcement`; documented coverage
+  gap tracked for a future slice. See `docs/skills.md` for
+  skill-author docs.
 
 ## [1.4.0] - 2026-05-12
 

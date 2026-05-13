@@ -90,6 +90,89 @@ parameters:
 
 The tool appears to the LLM as `wasm_hash`.
 
+## Phase boundaries
+
+Skills can declare phase boundaries during a single agent turn. Each phase carries a deny set across five axes (tools, egress hosts, filesystem read paths, filesystem write paths, inference providers) that narrows what the agent can do for the remainder of the phase. The phase ends when the skill emits `wirken_exit_phase`, when the skill enters a new phase, or when the turn ends and the host auto-clears.
+
+The canonical use case is the recon → framings → scoring shape: a skill that knows its own pass structure can declare "scoring should not write to disk or call `exec`" at the boundary, and the runtime enforces that constraint until the skill exits the phase. Defense against mid-turn drift: even if a later LLM step would otherwise call a denied tool, the gate refuses with a typed `Phase` reason in the audit chain.
+
+### Declaring the phase tools in SKILL.md
+
+The phase tools are LLM-visible only when the skill opts in by listing them in its `permissions.tools.allow`. A skill that does not declare them never sees the tools as available and cannot enter or exit a phase. Legacy mode (no skills attached) does not advertise the phase tools either.
+
+```yaml
+---
+name: my-skill
+description: Skill that runs scoped passes
+permissions:
+  tools:
+    allow:
+      - read_file
+      - write_file
+      - wirken_enter_phase
+      - wirken_exit_phase
+---
+```
+
+### Entering a phase
+
+The LLM calls `wirken_enter_phase` with this argument shape:
+
+```json
+{
+  "phase_name": "scoring",
+  "denied": {
+    "tools": ["exec", "write_file"],
+    "egress_hosts": [],
+    "paths_read": [],
+    "paths_write": [],
+    "inference_providers": []
+  }
+}
+```
+
+Result: `{"status":"ok"}` on success, or `{"status":"error","reason":"phase_already_active","active_phase":"<name>"}` when a phase is already active. The single-slot invariant is hard: the skill must exit before re-entering. Nested phases are refused so every `PhaseEntered` row in the audit chain pairs cleanly with one `PhaseExited`.
+
+An optional `skill_id` field overrides the audit attribution (defaults to the agent id).
+
+### Exiting a phase
+
+The LLM calls `wirken_exit_phase` with this argument shape:
+
+```json
+{"reason": "phase_change"}
+```
+
+Accepted reasons: `"phase_change"` (default) when the skill is about to enter a new phase, `"skill_unloaded"` when the skill is finishing. The host-only `"turn_end"` is rejected at the intercept (the host emits it on every turn end; the skill is not allowed to forge it).
+
+Result: `{"status":"ok"}` on success, or `{"status":"error","reason":"no_active_phase"}` when no phase is active.
+
+### Lifecycle and turn-end auto-clear
+
+- Phase enter → the overlay applies to every subsequent tool call
+- Skill emits phase exit → overlay clears, next phase can enter
+- Turn ends before skill exits → host auto-clears with reason `TurnEnd`
+
+The host clears the overlay on every turn end regardless of whether the skill exited cleanly. A skill that crashes mid-phase does not leave a stale deny set active for the next turn.
+
+### Phase audit chain
+
+Every phase event lands in the per-session hash chain:
+
+- `PhaseEntered { skill_id, phase_name, denied }` on every successful enter
+- `PhaseExited { skill_id, phase_name, reason }` on every clear (`PhaseChange`, `TurnEnd`, `SkillUnloaded`)
+- `SkillPermissionDenied { ..., denied_reason: Phase { phase_name } }` when the overlay refuses a tool call
+
+The audit chain is replayed on agent wake: an active phase at the time of a crash is re-established on the next wake; a clean exit before the crash leaves the overlay clear. SIEM consumers correlate phase activity via `phase_name`.
+
+### Caveats
+
+The skill cannot read overlay state. There is no host function or tool that returns the current phase. Skills set policy; they do not query it. The audit chain is the operator's view of phase activity; the skill operates on its own pass discipline.
+
+The egress-axis enforcement is type-prepared but not yet wired through the runtime's outbound HTTP path. A phase that lists `egress_hosts` in its deny set records the entries in the audit chain but does not block the calls. Tools, filesystem read/write, and inference axes are fully enforced today; egress follows.
+
+Lyrik's recon → framings → inline-rubric → scoring pass shape is the canonical example use case. The mechanism landed in this release; Lyrik's `SKILL.md` adoption is on a separate track.
+
 ## Installing skills from the registry
 
 ```bash
