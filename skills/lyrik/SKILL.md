@@ -42,6 +42,17 @@ Recon steps:
 
 Recon's only artifacts are the file paths, line ranges, and framing assignments cited inside the staged finding objects. No separate context document, no per-component history. Those return in later slices.
 
+## Override feedback (fire-once)
+
+If your invocation prompt carries feedback from a prior run or an external reviewer (for example, "the prior recon missed X, focus on Y this round"), treat it as authoritative scoping for THIS run only:
+
+1. Read the feedback before recon.
+2. Let it override recon defaults. If the feedback names a file or framing to focus on, prioritize that over the heuristics in Recon step 2.
+3. Do not re-inject the feedback into your reasoning across multiple turns within the run. The feedback applies once, at the top of the working set.
+4. The feedback is not carried into future runs. Each invocation starts fresh; the runner does not persist override feedback between runs.
+
+Absent such feedback in the invocation prompt, proceed directly to recon.
+
 ## Framings
 
 ### `auth`
@@ -162,3 +173,17 @@ Final write paths, in the order they are produced:
 - And so on, zero-padded three digits.
 
 The directory is created on first write — `write_file` will create parents as needed.
+
+## Run journal
+
+After all findings are staged and recon is complete, write one summary file to `.lyrik/state/runs/<run-id>/journal.md`. The journal is metadata for human reviewers and audit; the runner does not aggregate it.
+
+This is a `write_file` call, not assistant-message prose. The "no prose in your assistant message" rule from the emission discipline section still holds: `journal.md` is a markdown *file* you write, not a heading inside the chat reply.
+
+Contents, in this order:
+
+1. **Status header**: phase reached, framings activated, finding count by tier (`CRITICAL`/`HIGH`/`MEDIUM`/`LOW`/`INFO`), count of files surveyed.
+2. **Per-finding line**: one line per emitted finding, form `F001 <framing> <attacker_reach> <blast_radius> <file>:<line>: <title>`.
+3. **Notes**: free-text observations not captured in findings. Example: "framing `injection` had no candidate sites; only `auth` findings emitted."
+
+The journal is one `write_file` call. Path: `.lyrik/state/runs/<run-id>/journal.md`. It is the only write this skill produces outside `staging/`.
