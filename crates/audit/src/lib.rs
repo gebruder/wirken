@@ -14,10 +14,10 @@ pub use error::AuditError;
 pub use event::{ActorKind, AuditEvent, StoredEvent};
 pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use session_log::{
-    ChainHeadReason, DenialSource, HashHex, HexBytes, HttpFetchOutcome, OwnSession,
-    PermissionDenialRecord, SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope,
-    SessionVerifyResult, SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord,
-    TrustLevel,
+    ApprovalScopeKind, ChainHeadReason, DenialSource, HashHex, HexBytes, HttpFetchOutcome,
+    OwnSession, PermissionDenialRecord, SessionEvent, SessionHandle, SessionId, SessionLog,
+    SessionScope, SessionVerifyResult, SqliteSessionLog, StoredSessionEvent, SubagentStatus,
+    ToolCallRecord, TrustLevel,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

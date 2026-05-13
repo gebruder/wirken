@@ -173,6 +173,56 @@ impl Action {
     }
 }
 
+/// Scope under which an approval applies. Discriminated so the
+/// check path can branch on storage lifetime without re-deriving it
+/// from `expires_at` heuristics.
+///
+/// - `Persisted` writes to `permissions.db` with the
+///   default-30-day expiry; this is the historical default and the
+///   only form pre-existing callers produce.
+/// - `Session { session_id }` is in-memory only, scoped to the named
+///   agent session, never written to SQLite. Survives crashes only
+///   if the session-log replay re-emits the `PermissionApproved`
+///   audit event; otherwise it is gone with the process. See
+///   `~/code/wirken-ironcurtain/04-surpass.md` for the rationale
+///   (the "actually-useful version" of policy hot-swap framed for
+///   wirken's single-process model).
+///
+/// Wire shape: `serde(tag = "kind", ...)` so a future scope (e.g.
+/// per-channel) can be added without breaking the persisted rows
+/// that did not carry a `kind` field; back-compat handled by the
+/// `Default` impl which returns `Persisted`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApprovalScope {
+    /// SQLite-backed, default expiry, survives process restart.
+    #[default]
+    Persisted,
+    /// In-memory only, cleared on session end.
+    Session {
+        /// Logical agent session id (the `{agent}/{channel}/{conversation}`
+        /// shape produced by `wirken_agent::factory::session_id_for`).
+        /// Stored verbatim, never normalized; the in-memory cache keys
+        /// on it exactly.
+        session_id: String,
+    },
+}
+
+impl ApprovalScope {
+    /// True when this scope is session-bounded (in-memory only).
+    pub fn is_session_scoped(&self) -> bool {
+        matches!(self, Self::Session { .. })
+    }
+
+    /// The session id this scope is bound to, if any.
+    pub fn session_id(&self) -> Option<&str> {
+        match self {
+            Self::Persisted => None,
+            Self::Session { session_id } => Some(session_id.as_str()),
+        }
+    }
+}
+
 /// A stored permission approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Approval {
@@ -181,6 +231,11 @@ pub struct Approval {
     pub approved_at: DateTime<Utc>,
     pub approved_by: String,
     pub expires_at: DateTime<Utc>,
+    /// Storage lifetime. Defaulted on deserialize so rows persisted
+    /// before this field existed read back as `ApprovalScope::Persisted`,
+    /// which is the only form the pre-slice-1 emit path produced.
+    #[serde(default)]
+    pub scope: ApprovalScope,
 }
 
 /// Normalize a runtime `agent_id` to the logical agent id used in
@@ -371,6 +426,7 @@ impl PermissionStore {
             approved_at: now,
             approved_by: approved_by.to_string(),
             expires_at: expires,
+            scope: ApprovalScope::Persisted,
         })
     }
 
@@ -419,6 +475,7 @@ impl PermissionStore {
                 approved_at: parse_dt(&row.get::<_, String>(2)?),
                 approved_by: row.get(3)?,
                 expires_at: parse_dt(&row.get::<_, String>(4)?),
+                scope: ApprovalScope::Persisted,
             })
         })?;
 
@@ -445,6 +502,7 @@ impl PermissionStore {
                     approved_at: parse_dt(&row.get::<_, String>(2)?),
                     approved_by: row.get(3)?,
                     expires_at: parse_dt(&row.get::<_, String>(4)?),
+                    scope: ApprovalScope::Persisted,
                 })
             },
         );

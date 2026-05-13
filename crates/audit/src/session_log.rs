@@ -214,6 +214,29 @@ pub enum DenialSource {
     OrgPolicy,
 }
 
+/// Storage lifetime of a recorded permission approval. Defined here
+/// rather than in `wirken-gateway::permissions` because audit cannot
+/// depend on gateway (the dependency direction is `gateway →
+/// audit`); the gateway-side `ApprovalScope` enum maps onto this on
+/// emit. `serde` snake_case wire shape mirrors gateway's so a SIEM
+/// consumer querying audit events sees the same labels as
+/// `wirken permissions list`.
+///
+/// `Default` returns `Persisted`, matching gateway's
+/// `ApprovalScope::Persisted` so a row written by the pre-slice-1
+/// emit path (none exist yet, but the variant lands defaulted for
+/// future forward-compat) reads cleanly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalScopeKind {
+    /// SQLite-backed, default expiry. The pre-slice-1 default.
+    #[default]
+    Persisted,
+    /// In-memory only, cleared on session end. `session_id` on the
+    /// same event names the session.
+    Session,
+}
+
 /// Outcome of one HTTP fetch as recorded on
 /// [`SessionEvent::HttpFetch`]. The pre-1.2.0 shape was a free-form
 /// string (`"ok"`, `"http_error_404"`, `"network_error"`, ...); the
@@ -422,6 +445,40 @@ pub enum SessionEvent {
         tier: Option<String>,
         agent_id: String,
         trigger: Option<String>,
+    },
+    /// Operator approved a Tier 2 action. `scope` distinguishes
+    /// SQLite-persisted approvals (the default) from session-scoped
+    /// approvals which live only in-memory; session-scoped grants
+    /// survive a crash only when this event is replayed from the
+    /// session log on agent re-wake, which is the only audit-side
+    /// trace of their existence.
+    ///
+    /// `session_id` is populated iff `scope == Session`; the field
+    /// is omitted from the wire shape otherwise so SIEM consumers
+    /// pivoting on it do not match persisted approvals by accident.
+    /// `approved_by` carries the operator label exactly as the
+    /// gateway recorded it (`approved_by` on
+    /// `crate::permissions::Approval`).
+    PermissionApproved {
+        action_key: String,
+        agent_id: String,
+        approved_by: String,
+        #[serde(default)]
+        scope: ApprovalScopeKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
+    /// Session-scoped approvals were cleared for `session_id`.
+    /// Emitted once per session end (clean shutdown or crash
+    /// recovery) so a replay path sees the boundary and does not
+    /// re-establish entries that were intentionally let go.
+    /// `count` is the number of in-memory rows that were dropped;
+    /// `reason` is a stable snake_case label (`"session_end"`,
+    /// `"session_replaced"`, `"operator_revoke"`).
+    SessionScopedApprovalsCleared {
+        session_id: String,
+        count: u32,
+        reason: String,
     },
     /// Skill-permission-block denial recorded by the harness. Distinct
     /// from `PermissionDenied` (which is tier-based, operator-approval
