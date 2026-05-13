@@ -42,10 +42,10 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use lru::LruCache;
 use tokio::sync::Mutex as AsyncMutex;
-use wirken_audit::SessionLog;
+use wirken_audit::{ApprovalScopeKind, SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_gateway::agent_config::SubagentCeiling;
 use wirken_gateway::org::OrgPermissions;
-use wirken_gateway::permissions::PermissionStore;
+use wirken_gateway::permissions::{PermissionStore, SESSION_CLEAR_REASON_ENDED};
 
 use crate::error::AgentError;
 use crate::llm::LlmConfig;
@@ -349,6 +349,23 @@ impl AgentFactory {
         agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone())?;
         if let Some(perms) = &self.permissions {
             agent.set_permissions(perms.clone());
+            // Replay session-scoped approval events for this
+            // session id so a wake-after-crash re-establishes any
+            // grants the operator made before the crash. Persisted
+            // approvals are not touched: SQLite is their source of
+            // truth and PermissionStore::open already loads them.
+            // Best-effort: a read failure logs and continues with an
+            // empty cache (deny-by-default is the conservative
+            // failure mode and matches `heal_partial_tool_rounds`'s
+            // recovery posture).
+            if let Err(err) = replay_session_scoped_approvals(perms, &self.session_log, session_id)
+            {
+                tracing::warn!(
+                    session_id,
+                    error = %err,
+                    "factory: failed to replay session-scoped approvals; cache starts empty"
+                );
+            }
         }
         if let Some(org) = &self.org_permissions {
             agent.set_org_permissions(org.clone());
@@ -392,9 +409,343 @@ impl AgentFactory {
     /// Drop a session from the cache. Used by callers that know the
     /// session is finished (e.g., after a `wirken sessions close`).
     /// No-op in drop mode.
+    ///
+    /// Also clears any session-scoped approvals held under
+    /// `session_id` and appends a `SessionScopedApprovalsCleared`
+    /// audit event when at least one approval was cleared. Audit
+    /// emission failures are logged and swallowed: the in-memory
+    /// clear has already happened, so a missed audit row is a
+    /// reconciliation issue, not a correctness one (the cache is
+    /// gone with the process anyway). No emit when count is zero,
+    /// matching the rest of the audit surface's "no noise for
+    /// no-op" pattern.
     pub fn evict(&self, session_id: &str) {
         if self.cache_mode == CacheMode::Cached {
             self.cache.lock().unwrap().pop(session_id);
+        }
+
+        if let Some(perms) = &self.permissions {
+            let cleared = {
+                let store = match perms.lock() {
+                    Ok(s) => s,
+                    Err(err) => {
+                        tracing::warn!(
+                            session_id,
+                            error = %err,
+                            "factory.evict: permission store poisoned; skipping session-scope clear"
+                        );
+                        return;
+                    }
+                };
+                store.clear_session_scope(session_id)
+            };
+
+            if cleared > 0 {
+                let handle = self
+                    .session_log
+                    .handle_for(SessionId::new(session_id.to_string()));
+                let event = SessionEvent::SessionScopedApprovalsCleared {
+                    session_id: session_id.to_string(),
+                    count: cleared,
+                    reason: SESSION_CLEAR_REASON_ENDED.to_string(),
+                };
+                if let Err(err) = self.session_log.append(&handle, TrustLevel::System, event) {
+                    tracing::warn!(
+                        session_id,
+                        cleared,
+                        error = %err,
+                        "factory.evict: failed to append SessionScopedApprovalsCleared; in-memory clear already applied"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Walk the session log for `session_id` and re-apply any
+/// session-scoped approval lifecycle events to the perm-store
+/// cache. Insertion order matches the log's `seq` order, so a
+/// `SessionScopedApprovalsCleared` followed by a fresh
+/// `PermissionApproved` correctly re-establishes the later grant
+/// (the user's "clear wins iff no further grants" semantics fall
+/// out of last-event-wins replay).
+///
+/// `PermissionApproved` with `scope == Persisted` is intentionally a
+/// no-op here: SQLite is the source of truth for persisted
+/// approvals, and `PermissionStore::open` has already loaded them.
+/// Variants other than the two permission-lifecycle ones are
+/// ignored; this pass is concerned with the cache only.
+fn replay_session_scoped_approvals(
+    perms: &Arc<StdMutex<PermissionStore>>,
+    log: &Arc<dyn SessionLog>,
+    session_id: &str,
+) -> Result<(), wirken_audit::AuditError> {
+    let handle = log.handle_for(SessionId::new(session_id.to_string()));
+    let events = log.get_since(&handle, 0)?;
+    let store = perms
+        .lock()
+        .expect("factory: permission store poisoned during replay");
+    for stored in events {
+        match stored.event {
+            SessionEvent::PermissionApproved {
+                action_key,
+                agent_id,
+                approved_by,
+                scope: ApprovalScopeKind::Session,
+                session_id: Some(sid),
+            } => {
+                store.restore_session_scoped_approval(
+                    action_key,
+                    agent_id,
+                    approved_by,
+                    sid,
+                    stored.ts,
+                );
+            }
+            SessionEvent::SessionScopedApprovalsCleared {
+                session_id: sid, ..
+            } => {
+                store.clear_session_scope(&sid);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+    use wirken_audit::SqliteSessionLog;
+    use wirken_gateway::permissions::{Action, PermissionCheck, PermissionStore, PermissionTier};
+
+    fn make_store() -> Arc<StdMutex<PermissionStore>> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // Leak the tempfile path: each test owns a fresh one in
+        // process-wide /tmp, dropped on test process exit. The
+        // NamedTempFile guard would otherwise drop the DB the
+        // moment this helper returns. The leak is bounded to the
+        // test process; no shipping code path is affected.
+        let path = tmp.into_temp_path();
+        let perm_path = path.keep().unwrap();
+        Arc::new(StdMutex::new(PermissionStore::open(&perm_path).unwrap()))
+    }
+
+    fn make_log() -> Arc<dyn SessionLog> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.into_temp_path();
+        let audit_path = path.keep().unwrap();
+        Arc::new(SqliteSessionLog::open(&audit_path).unwrap()) as Arc<dyn SessionLog>
+    }
+
+    fn shell_ls() -> Action {
+        Action::ShellExec {
+            pattern: "ls".to_string(),
+        }
+    }
+
+    fn shell_cat() -> Action {
+        Action::ShellExec {
+            pattern: "cat".to_string(),
+        }
+    }
+
+    /// Append a synthetic PermissionApproved(Session) event for
+    /// `action_key` under `session_id`. Mirrors what slice 4's CLI
+    /// surface will emit through `approve_and_log`; the test path
+    /// fakes the emission to keep the replay assertion focused.
+    fn append_session_grant(
+        log: &Arc<dyn SessionLog>,
+        session_id: &str,
+        action_key: &str,
+        agent_id: &str,
+    ) {
+        let handle = log.handle_for(SessionId::new(session_id.to_string()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: action_key.to_string(),
+                agent_id: agent_id.to_string(),
+                approved_by: "operator".to_string(),
+                scope: ApprovalScopeKind::Session,
+                session_id: Some(session_id.to_string()),
+            },
+        )
+        .unwrap();
+    }
+
+    fn append_session_clear(log: &Arc<dyn SessionLog>, session_id: &str, count: u32) {
+        let handle = log.handle_for(SessionId::new(session_id.to_string()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::SessionScopedApprovalsCleared {
+                session_id: session_id.to_string(),
+                count,
+                reason: SESSION_CLEAR_REASON_ENDED.to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn replay_reconstructs_cache_from_permission_approved_session() {
+        let perms = make_store();
+        let log = make_log();
+        let session = "default/webchat/conv-1";
+
+        append_session_grant(&log, session, "shell:ls", "default");
+        append_session_grant(&log, session, "shell:cat", "default");
+
+        replay_session_scoped_approvals(&perms, &log, session).unwrap();
+
+        let store = perms.lock().unwrap();
+        assert_eq!(
+            store.check(&shell_ls(), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+        assert_eq!(
+            store.check(&shell_cat(), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+    }
+
+    #[test]
+    fn replay_respects_session_scoped_approvals_cleared_tombstone() {
+        // grant + clear → cache empty on wake. Mirrors the clean
+        // session-end path: evict cleared the cache and emitted the
+        // tombstone; a later wake on the same session id must not
+        // re-establish the grants from the earlier PermissionApproved
+        // rows that survived in the log.
+        let perms = make_store();
+        let log = make_log();
+        let session = "default/webchat/conv-2";
+
+        append_session_grant(&log, session, "shell:ls", "default");
+        append_session_clear(&log, session, 1);
+
+        replay_session_scoped_approvals(&perms, &log, session).unwrap();
+
+        let store = perms.lock().unwrap();
+        assert_eq!(
+            store.check(&shell_ls(), session).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+    }
+
+    #[test]
+    fn replay_re_grants_after_clear_when_log_has_later_approval() {
+        // grant + clear + grant → cache has the last grant. The
+        // user's "if both, the clear wins" applies when the clear
+        // is the terminal event; a later grant on the same session
+        // is a fresh authorization that supersedes the clear.
+        let perms = make_store();
+        let log = make_log();
+        let session = "default/webchat/conv-3";
+
+        append_session_grant(&log, session, "shell:ls", "default");
+        append_session_clear(&log, session, 1);
+        append_session_grant(&log, session, "shell:ls", "default");
+
+        replay_session_scoped_approvals(&perms, &log, session).unwrap();
+
+        let store = perms.lock().unwrap();
+        assert_eq!(
+            store.check(&shell_ls(), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+    }
+
+    #[test]
+    fn replay_skips_permission_approved_with_persisted_scope() {
+        // Persisted grants in the log are no-ops on the cache path:
+        // SQLite is the source of truth for them. The replay must
+        // not double-apply by inserting them into the in-memory
+        // cache (it would still work, but it would be wrong by
+        // design and would leak persisted grants into a structure
+        // sized for ephemeral state).
+        let perms = make_store();
+        let log = make_log();
+        let session = "default/webchat/conv-4";
+
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:ls".to_string(),
+                agent_id: "default".to_string(),
+                approved_by: "operator".to_string(),
+                scope: ApprovalScopeKind::Persisted,
+                session_id: None,
+            },
+        )
+        .unwrap();
+
+        replay_session_scoped_approvals(&perms, &log, session).unwrap();
+
+        // Cache must be empty (no session entry). Check returns
+        // NeedsApproval because SQLite is also empty in this test.
+        let store = perms.lock().unwrap();
+        assert_eq!(
+            store.check(&shell_ls(), session).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+    }
+
+    #[test]
+    fn replay_crash_mid_session_re_establishes_active_grants() {
+        // The canonical "crash recovery" path: the session log has
+        // a PermissionApproved(Session) row but no terminal
+        // SessionScopedApprovalsCleared. A later wake replays the
+        // log and resurrects the grant.
+        let perms = make_store();
+        let log = make_log();
+        let session = "default/signal/sender-1";
+
+        append_session_grant(&log, session, "shell:ls", "default");
+        // No clear event: crash happened before evict ran.
+
+        replay_session_scoped_approvals(&perms, &log, session).unwrap();
+
+        let store = perms.lock().unwrap();
+        assert_eq!(
+            store.check(&shell_ls(), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+    }
+
+    #[test]
+    fn replay_clean_session_end_leaves_cache_empty() {
+        // Symmetric counterpart to the crash test: the log has
+        // matching grant + clear pairs (evict ran cleanly), so a
+        // wake on this session must produce an empty cache.
+        let perms = make_store();
+        let log = make_log();
+        let session = "default/signal/sender-2";
+
+        append_session_grant(&log, session, "shell:ls", "default");
+        append_session_grant(&log, session, "shell:cat", "default");
+        append_session_clear(&log, session, 2);
+
+        replay_session_scoped_approvals(&perms, &log, session).unwrap();
+
+        let store = perms.lock().unwrap();
+        for action in [shell_ls(), shell_cat()] {
+            assert_eq!(
+                store.check(&action, session).unwrap(),
+                PermissionCheck::NeedsApproval {
+                    tier: PermissionTier::Tier2,
+                },
+                "{} must require approval after clean clear",
+                action,
+            );
         }
     }
 }

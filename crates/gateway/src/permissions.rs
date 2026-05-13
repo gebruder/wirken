@@ -223,6 +223,21 @@ impl ApprovalScope {
             Self::Session { session_id } => Some(session_id.as_str()),
         }
     }
+
+    /// Split into the audit-side `(ApprovalScopeKind, Option<session_id>)`
+    /// pair used when emitting `SessionEvent::PermissionApproved`. The
+    /// audit crate cannot depend on gateway, so the wire shape there
+    /// uses a flat enum + an optional `session_id` field; this method
+    /// is the only place the mapping happens.
+    pub fn to_audit_repr(&self) -> (wirken_audit::ApprovalScopeKind, Option<String>) {
+        match self {
+            Self::Persisted => (wirken_audit::ApprovalScopeKind::Persisted, None),
+            Self::Session { session_id } => (
+                wirken_audit::ApprovalScopeKind::Session,
+                Some(session_id.clone()),
+            ),
+        }
+    }
 }
 
 /// A stored permission approval.
@@ -501,6 +516,45 @@ impl PermissionStore {
         }
     }
 
+    /// Replay-side cache insert. Builds an [`Approval`] from the raw
+    /// fields recovered from a `SessionEvent::PermissionApproved` event
+    /// (where scope is `Session`) and inserts it into the in-memory
+    /// cache. Does NOT emit any audit event; the replayed event is
+    /// already in the log. `approved_at` is the original event
+    /// timestamp so the restored `Approval` carries the same wall-clock
+    /// the operator saw at grant time.
+    ///
+    /// This bypasses `approve_with_scope`'s `Action` parameter because
+    /// `action_key` is the only thing the audit event records and
+    /// reverse-engineering an `Action` from a key is lossy (a
+    /// `shell:ls` key matches `Action::ShellExec { pattern: "ls" }`
+    /// but the original pattern was operator-supplied input that may
+    /// have included a leading path).
+    pub fn restore_session_scoped_approval(
+        &self,
+        action_key: String,
+        agent_id: String,
+        approved_by: String,
+        session_id: String,
+        approved_at: DateTime<Utc>,
+    ) {
+        let approval = Approval {
+            action_key: action_key.clone(),
+            agent_id,
+            approved_at,
+            approved_by,
+            expires_at: DateTime::<Utc>::MAX_UTC,
+            scope: ApprovalScope::Session {
+                session_id: session_id.clone(),
+            },
+        };
+        self.session_cache
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .insert(action_key, approval);
+    }
+
     /// Record an approval using a pre-computed action key. Callers
     /// that already have the key (e.g., the CLI `permissions approve`
     /// command, reading it off a past `PermissionDenied` audit entry)
@@ -640,6 +694,62 @@ pub enum PermissionCheck {
     Allowed,
     /// Action needs user approval before proceeding.
     NeedsApproval { tier: PermissionTier },
+}
+
+/// Stable label for the `reason` field on
+/// `SessionEvent::SessionScopedApprovalsCleared`. The audit variant
+/// docstring lists `"session_ended"`, `"session_replaced"`, and
+/// `"operator_revoke"` as the recognised values; this constant
+/// centralises the "clean shutdown" case so the emitter and any
+/// downstream pattern-match share one string.
+pub const SESSION_CLEAR_REASON_ENDED: &str = "session_ended";
+
+/// Approve an action and append a `SessionEvent::PermissionApproved`
+/// audit entry to `log` under `handle`. The orchestration helper for
+/// any caller that has both the perm store and a session-log handle
+/// in scope; the CLI session-scoped approval surface (slice 4) is
+/// the first production caller. PermissionStore stays a pure data
+/// layer; this function lives alongside it because it composes the
+/// gateway-owned store with the audit-owned log.
+///
+/// Emission semantics:
+/// - The event fires for every successful approval, regardless of
+///   scope. `scope = Persisted` emits with `session_id: None`;
+///   `scope = Session { .. }` emits with `session_id: Some(_)`.
+/// - The persisted-from-CLI path (`commands::permission::approve`)
+///   does NOT route through here today: it has no session-log
+///   handle and no obvious session id to attribute the event to.
+///   That call site stays silent for slice 3; a future slice can
+///   wire a synthetic operator-action audit channel for it
+///   without changing this function's shape.
+/// - On audit failure the store-side write has already happened;
+///   the helper returns `Err(GatewayError::Audit)` so the caller can
+///   surface the inconsistency. This matches the existing pattern
+///   where `?` on an `AuditError` short-circuits gateway flows that
+///   require audit integrity.
+pub fn approve_and_log(
+    store: &PermissionStore,
+    action: &Action,
+    agent_id: &str,
+    approved_by: &str,
+    scope: ApprovalScope,
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+) -> Result<Approval, GatewayError> {
+    let approval = store.approve_with_scope(action, agent_id, approved_by, scope)?;
+    let (scope_kind, session_id) = approval.scope.to_audit_repr();
+    log.append(
+        handle,
+        wirken_audit::TrustLevel::System,
+        wirken_audit::SessionEvent::PermissionApproved {
+            action_key: approval.action_key.clone(),
+            agent_id: approval.agent_id.clone(),
+            approved_by: approval.approved_by.clone(),
+            scope: scope_kind,
+            session_id,
+        },
+    )?;
+    Ok(approval)
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
@@ -1123,5 +1233,105 @@ mod tier_tests {
         );
         // And the SQLite store is still empty under this agent id.
         assert!(store.list("default").unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // approve_and_log emission (slice 3)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn approve_and_log_emits_permission_approved_with_session_scope() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let perms_tmp = tempfile::NamedTempFile::new().unwrap();
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(perms_tmp.path()).unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+
+        let session = "default/webchat/conv-1";
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+        let approval = super::approve_and_log(
+            &store,
+            &shell("ls"),
+            "default",
+            "operator",
+            session_scope(session),
+            &log,
+            &handle,
+        )
+        .unwrap();
+
+        // Store side: cache populated, SQLite empty.
+        assert!(approval.scope.is_session_scoped());
+        assert!(store.list("default").unwrap().is_empty());
+
+        // Audit side: exactly one PermissionApproved row, fields exact.
+        let events = log.get_since(&handle, 0).unwrap();
+        let approved: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::PermissionApproved { .. } => Some(&e.event),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(approved.len(), 1, "exactly one PermissionApproved emitted");
+        match approved[0] {
+            SessionEvent::PermissionApproved {
+                action_key,
+                agent_id,
+                approved_by,
+                scope,
+                session_id,
+            } => {
+                assert_eq!(action_key, "shell:ls");
+                assert_eq!(agent_id, "default");
+                assert_eq!(approved_by, "operator");
+                assert_eq!(*scope, wirken_audit::ApprovalScopeKind::Session);
+                assert_eq!(session_id.as_deref(), Some(session));
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approve_and_log_emits_permission_approved_with_persisted_scope() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let perms_tmp = tempfile::NamedTempFile::new().unwrap();
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(perms_tmp.path()).unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+
+        // Persisted path still emits, but session_id is None on the
+        // wire so a SIEM consumer pivoting on session-id does not
+        // match. The store-side row lands in SQLite.
+        let handle = log.handle_for(SessionId::new("__operator__".to_string()));
+        super::approve_and_log(
+            &store,
+            &shell("ls"),
+            "default",
+            "operator",
+            ApprovalScope::Persisted,
+            &log,
+            &handle,
+        )
+        .unwrap();
+
+        let listed = store.list("default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action_key, "shell:ls");
+
+        let events = log.get_since(&handle, 0).unwrap();
+        let approved = events
+            .iter()
+            .find(|e| matches!(e.event, SessionEvent::PermissionApproved { .. }))
+            .expect("one PermissionApproved emitted");
+        match &approved.event {
+            SessionEvent::PermissionApproved {
+                scope, session_id, ..
+            } => {
+                assert_eq!(*scope, wirken_audit::ApprovalScopeKind::Persisted);
+                assert!(session_id.is_none());
+            }
+            _ => unreachable!(),
+        }
     }
 }
