@@ -780,18 +780,48 @@ pub fn count_active_session_scoped_approvals(
     log: &dyn wirken_audit::SessionLog,
     session_id: &str,
 ) -> Result<u32, wirken_audit::AuditError> {
+    Ok(list_active_session_scoped_grants_in_session(log, session_id)?.len() as u32)
+}
+
+/// One row in an active session-scoped approval listing. Returned by
+/// [`list_active_session_scoped_grants_in_session`] and
+/// [`list_active_session_scoped_grants_for_agent`]. `approved_at` is
+/// the timestamp from the original `PermissionApproved` audit row,
+/// not the moment the listing was built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSessionScopedGrant {
+    pub session_id: String,
+    pub action_key: String,
+    pub approved_by: String,
+    pub approved_at: DateTime<Utc>,
+}
+
+/// Replay the session log for `session_id` and return one row per
+/// `action_key` whose most-recent
+/// `PermissionApproved(Session)` was not tombstoned by a later
+/// `SessionScopedApprovalsCleared`. Same last-event-wins semantics
+/// as `replay_session_scoped_approvals` in `wirken_agent::factory`,
+/// but returns the rows instead of mutating a cache. Used by the
+/// CLI list path (followup 2) to surface session-scoped grants
+/// without crossing the daemon process boundary.
+pub fn list_active_session_scoped_grants_in_session(
+    log: &dyn wirken_audit::SessionLog,
+    session_id: &str,
+) -> Result<Vec<ActiveSessionScopedGrant>, wirken_audit::AuditError> {
     let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
     let events = log.get_since(&handle, 0)?;
-    let mut active: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut active: std::collections::BTreeMap<String, (String, DateTime<Utc>)> =
+        std::collections::BTreeMap::new();
     for stored in events {
         match stored.event {
             wirken_audit::SessionEvent::PermissionApproved {
                 action_key,
+                approved_by,
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(sid),
                 ..
             } if sid == session_id => {
-                active.insert(action_key);
+                active.insert(action_key, (approved_by, stored.ts));
             }
             wirken_audit::SessionEvent::SessionScopedApprovalsCleared {
                 session_id: sid, ..
@@ -801,7 +831,52 @@ pub fn count_active_session_scoped_approvals(
             _ => {}
         }
     }
-    Ok(active.len() as u32)
+    Ok(active
+        .into_iter()
+        .map(
+            |(action_key, (approved_by, approved_at))| ActiveSessionScopedGrant {
+                session_id: session_id.to_string(),
+                action_key,
+                approved_by,
+                approved_at,
+            },
+        )
+        .collect())
+}
+
+/// List every active session-scoped approval whose session id starts
+/// with `{agent_id}/` (the canonical composite-id prefix produced by
+/// `session_id_for`). Walks
+/// `SqliteSessionLog::list_session_ids` and replays each candidate;
+/// returns rows sorted by `(session_id, action_key)` for stable CLI
+/// output. Out-of-process safe: the daemon's in-memory cache is not
+/// consulted, only the on-disk session log.
+///
+/// Takes the concrete [`wirken_audit::SqliteSessionLog`] rather than
+/// `&dyn SessionLog` because the cross-session enumeration is not on
+/// the trait (the trait is per-session-handle by design). Callers
+/// that hold a `&dyn SessionLog` cannot use this helper today;
+/// none exist in production.
+pub fn list_active_session_scoped_grants_for_agent(
+    log: &wirken_audit::SqliteSessionLog,
+    agent_id: &str,
+) -> Result<Vec<ActiveSessionScopedGrant>, wirken_audit::AuditError> {
+    let prefix = format!("{agent_id}/");
+    let session_ids = log.list_session_ids()?;
+    let mut out: Vec<ActiveSessionScopedGrant> = Vec::new();
+    for sid in session_ids {
+        if !sid.starts_with(&prefix) {
+            continue;
+        }
+        let mut rows = list_active_session_scoped_grants_in_session(log, &sid)?;
+        out.append(&mut rows);
+    }
+    out.sort_by(|a, b| {
+        a.session_id
+            .cmp(&b.session_id)
+            .then_with(|| a.action_key.cmp(&b.action_key))
+    });
+    Ok(out)
 }
 
 /// Approve an action and append a `SessionEvent::PermissionApproved`
@@ -1685,6 +1760,141 @@ mod tier_tests {
             super::count_active_session_scoped_approvals(&log, target).unwrap(),
             1,
             "only the session-scoped grant whose inner session_id matches target counts",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // list_active_session_scoped_grants_for_agent (followup 2)
+    // -----------------------------------------------------------------
+
+    fn append_session_grant(
+        log: &wirken_audit::SqliteSessionLog,
+        session_id: &str,
+        action_key: &str,
+        agent_id: &str,
+        approved_by: &str,
+    ) {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog};
+        let handle = log.handle_for(SessionId::new(session_id.to_string()));
+        log.append(
+            &handle,
+            wirken_audit::TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: action_key.to_string(),
+                agent_id: agent_id.to_string(),
+                approved_by: approved_by.to_string(),
+                scope: wirken_audit::ApprovalScopeKind::Session,
+                session_id: Some(session_id.to_string()),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_active_grants_for_agent_returns_rows_across_sessions() {
+        use wirken_audit::SqliteSessionLog;
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+
+        // Same agent, two sessions, three distinct action keys.
+        append_session_grant(&log, "default/webchat/conv-a", "shell:ls", "default", "op");
+        append_session_grant(&log, "default/webchat/conv-a", "shell:cat", "default", "op");
+        append_session_grant(
+            &log,
+            "default/signal/sender-1",
+            "shell:head",
+            "default",
+            "op",
+        );
+        // Different agent: must not appear.
+        append_session_grant(
+            &log,
+            "researcher/webchat/conv-x",
+            "shell:wc",
+            "researcher",
+            "op",
+        );
+
+        let rows = super::list_active_session_scoped_grants_for_agent(&log, "default").unwrap();
+        assert_eq!(
+            rows.len(),
+            3,
+            "three grants for `default` across two sessions"
+        );
+        // Sort is (session_id, action_key) ascending.
+        assert_eq!(rows[0].session_id, "default/signal/sender-1");
+        assert_eq!(rows[0].action_key, "shell:head");
+        assert_eq!(rows[1].session_id, "default/webchat/conv-a");
+        assert_eq!(rows[1].action_key, "shell:cat");
+        assert_eq!(rows[2].session_id, "default/webchat/conv-a");
+        assert_eq!(rows[2].action_key, "shell:ls");
+
+        // Cross-agent isolation: list for the other agent.
+        let other = super::list_active_session_scoped_grants_for_agent(&log, "researcher").unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].action_key, "shell:wc");
+    }
+
+    #[test]
+    fn list_active_grants_for_agent_skips_tombstoned_sessions() {
+        use wirken_audit::SqliteSessionLog;
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+
+        // Session A: grant then clear → no rows from A.
+        append_session_grant(&log, "default/webchat/conv-a", "shell:ls", "default", "op");
+        super::emit_session_scoped_approvals_cleared(
+            &log,
+            "default/webchat/conv-a",
+            1,
+            super::SESSION_CLEAR_REASON_ENDED,
+        )
+        .unwrap();
+
+        // Session B: grant survives.
+        append_session_grant(&log, "default/webchat/conv-b", "shell:cat", "default", "op");
+
+        let rows = super::list_active_session_scoped_grants_for_agent(&log, "default").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, "default/webchat/conv-b");
+        assert_eq!(rows[0].action_key, "shell:cat");
+    }
+
+    #[test]
+    fn list_active_grants_for_agent_empty_when_no_session_log_rows() {
+        use wirken_audit::SqliteSessionLog;
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let rows = super::list_active_session_scoped_grants_for_agent(&log, "default").unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn list_active_grants_re_grant_after_clear_includes_only_active() {
+        // grant + clear + grant under same session = one row for the
+        // most-recent grant, sourced from the post-clear event's
+        // approved_by + approved_at fields.
+        use wirken_audit::SqliteSessionLog;
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let session = "default/webchat/conv-c";
+
+        append_session_grant(&log, session, "shell:ls", "default", "operator-a");
+        super::emit_session_scoped_approvals_cleared(
+            &log,
+            session,
+            1,
+            super::SESSION_CLEAR_REASON_ENDED,
+        )
+        .unwrap();
+        append_session_grant(&log, session, "shell:ls", "default", "operator-b");
+
+        let rows = super::list_active_session_scoped_grants_for_agent(&log, "default").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action_key, "shell:ls");
+        assert_eq!(
+            rows[0].approved_by, "operator-b",
+            "post-clear grant wins; pre-clear approved_by is gone",
         );
     }
 }

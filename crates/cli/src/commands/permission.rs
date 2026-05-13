@@ -2,18 +2,38 @@ use anyhow::{Context, Result};
 use std::collections::HashSet;
 
 use wirken_audit::{SessionId, SessionLog, SqliteSessionLog};
-use wirken_gateway::permissions::{ApprovalScope, PermissionStore, approve_and_log_by_key};
+use wirken_gateway::permissions::{
+    ApprovalScope, PermissionStore, approve_and_log_by_key,
+    list_active_session_scoped_grants_for_agent,
+};
 
 use super::config;
 
+/// List both persisted approvals (from SQLite) and active
+/// session-scoped grants (from the on-disk session log, replayed
+/// last-event-wins per session id). Out-of-process safe: the
+/// daemon's in-memory cache is not consulted, so session-scoped
+/// grants made and not yet replayed to the audit log will not
+/// appear. The append-on-every-grant pattern in
+/// `approve_and_log_by_key` keeps that gap to a single un-flushed
+/// row at worst.
+///
+/// The two scopes share one table; the SCOPE column distinguishes
+/// them. For session-scoped rows the expiry column shows the
+/// session id instead of a date (session-scoped has no time-based
+/// expiry; it ends with the session).
 pub async fn list(agent: &str) -> Result<()> {
     let cfg = config();
     let store = PermissionStore::open(&cfg.permissions_db_path())
         .context("Failed to open permission store")?;
 
-    let approvals = store.list(agent).context("Failed to list permissions")?;
+    let persisted = store.list(agent).context("Failed to list permissions")?;
 
-    if approvals.is_empty() {
+    let log = SqliteSessionLog::open(&cfg.audit_db_path()).context("Failed to open session log")?;
+    let session_scoped = list_active_session_scoped_grants_for_agent(&log, agent)
+        .context("Failed to scan session-scoped grants")?;
+
+    if persisted.is_empty() && session_scoped.is_empty() {
         println!("  No permissions granted for agent '{agent}'.");
         return Ok(());
     }
@@ -21,27 +41,45 @@ pub async fn list(agent: &str) -> Result<()> {
     println!("  Permissions for agent '{agent}':");
     println!();
     println!(
-        "  {:30}  {:12}  {:20}  {:20}",
-        "ACTION", "APPROVED BY", "APPROVED AT", "EXPIRES AT"
+        "  {:30}  {:10}  {:12}  {:20}  EXPIRES AT / SESSION",
+        "ACTION", "SCOPE", "APPROVED BY", "APPROVED AT"
     );
     println!(
-        "  {}  {}  {}  {}",
+        "  {}  {}  {}  {}  {}",
         "─".repeat(30),
+        "─".repeat(10),
         "─".repeat(12),
         "─".repeat(20),
-        "─".repeat(20)
+        "─".repeat(40)
     );
 
-    for approval in &approvals {
+    for approval in &persisted {
         println!(
-            "  {:30}  {:12}  {:20}  {:20}",
+            "  {:30}  {:10}  {:12}  {:20}  {}",
             approval.action_key,
+            "persisted",
             approval.approved_by,
             approval.approved_at.format("%Y-%m-%d %H:%M:%S"),
             approval.expires_at.format("%Y-%m-%d %H:%M:%S"),
         );
     }
+    for grant in &session_scoped {
+        println!(
+            "  {:30}  {:10}  {:12}  {:20}  {}",
+            grant.action_key,
+            "session",
+            grant.approved_by,
+            grant.approved_at.format("%Y-%m-%d %H:%M:%S"),
+            grant.session_id,
+        );
+    }
     println!();
+    println!(
+        "  {} grant(s): {} persisted, {} session-scoped.",
+        persisted.len() + session_scoped.len(),
+        persisted.len(),
+        session_scoped.len(),
+    );
     Ok(())
 }
 
