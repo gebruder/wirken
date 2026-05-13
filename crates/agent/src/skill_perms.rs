@@ -794,6 +794,22 @@ impl PhasedEffective {
     pub fn exit_phase(&mut self) -> Option<PhaseDenyOverlay> {
         self.overlay.take()
     }
+
+    /// True iff at least one attached skill's declared
+    /// `permissions.tools.allow` admits `name`. Distinct from
+    /// [`Self::gate_tool`] in that the [`EffectiveProfile::Legacy`]
+    /// base (no skills attached) returns `false` here, not `true`:
+    /// the synthetic phase tools `wirken_enter_phase` /
+    /// `wirken_exit_phase` should only become discoverable to the
+    /// LLM when at least one skill has opted in by listing them in
+    /// its SKILL.md `tools.allow`. Legacy mode skips them entirely.
+    /// Wildcard `tools.allow: ["*"]` counts as opting in.
+    pub fn skills_admit_tool(&self, name: &str) -> bool {
+        match &self.base {
+            EffectiveProfile::Legacy => false,
+            EffectiveProfile::Resolved(p) => p.tools.allow.allows(name),
+        }
+    }
 }
 
 /// Union-merge a slice of declared per-skill profiles into one effective

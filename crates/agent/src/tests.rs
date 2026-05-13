@@ -7129,6 +7129,243 @@ mod phase_overlay {
         );
     }
 
+    // -------------------------------------------------------------
+    // Slice 3: synthetic tool intercepts
+    // -------------------------------------------------------------
+
+    fn enter_phase_args(phase: &str, denied_tools: &[&str]) -> String {
+        let denied = denied_tools
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "phase_name": phase,
+            "denied": {"tools": denied},
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn enter_phase_intercept_installs_overlay_and_emits_phase_entered() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        let args = enter_phase_args("scoring", &["read_file", "exec"]);
+
+        let result = agent
+            .execute_tool("wirken_enter_phase", &args)
+            .await
+            .unwrap();
+        assert!(result.success);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["status"], "ok");
+        assert_eq!(
+            agent.current_phase().map(|o| o.phase_name.as_str()),
+            Some("scoring")
+        );
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let entered = rows
+            .iter()
+            .find(|r| matches!(r.event, SessionEvent::PhaseEntered { .. }))
+            .expect("PhaseEntered emitted");
+        match &entered.event {
+            SessionEvent::PhaseEntered {
+                skill_id,
+                phase_name,
+                denied,
+            } => {
+                // skill_id defaults to agent_id when args.skill_id is absent
+                assert_eq!(skill_id, "test-phase-agent");
+                assert_eq!(phase_name, "scoring");
+                assert_eq!(denied.tools.len(), 2);
+                assert!(denied.tools.contains(&"read_file".to_string()));
+                assert!(denied.tools.contains(&"exec".to_string()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_phase_intercept_rejects_nested_phase() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        agent
+            .execute_tool("wirken_enter_phase", &enter_phase_args("recon", &[]))
+            .await
+            .unwrap();
+
+        // Second enter while still in `recon`: error result, no second emit.
+        let result = agent
+            .execute_tool("wirken_enter_phase", &enter_phase_args("scoring", &[]))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["status"], "error");
+        assert_eq!(parsed["reason"], "phase_already_active");
+        assert_eq!(parsed["active_phase"], "recon");
+        // First phase is still the active one.
+        assert_eq!(
+            agent.current_phase().map(|o| o.phase_name.as_str()),
+            Some("recon")
+        );
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let entered_count = rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::PhaseEntered { .. }))
+            .count();
+        assert_eq!(entered_count, 1, "only the first enter should have emitted");
+    }
+
+    #[tokio::test]
+    async fn exit_phase_intercept_clears_overlay_and_emits_phase_change() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        agent
+            .execute_tool(
+                "wirken_enter_phase",
+                &enter_phase_args("scoring", &["exec"]),
+            )
+            .await
+            .unwrap();
+
+        let result = agent
+            .execute_tool(
+                "wirken_exit_phase",
+                &serde_json::json!({"reason": "phase_change"}).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert!(agent.current_phase().is_none());
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let exited = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                SessionEvent::PhaseExited {
+                    reason, phase_name, ..
+                } => Some((reason, phase_name)),
+                _ => None,
+            })
+            .expect("PhaseExited emitted");
+        assert_eq!(*exited.0, PhaseExitReason::PhaseChange);
+        assert_eq!(exited.1, "scoring");
+    }
+
+    #[tokio::test]
+    async fn exit_phase_intercept_accepts_skill_unloaded_reason() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        agent
+            .execute_tool("wirken_enter_phase", &enter_phase_args("scoring", &[]))
+            .await
+            .unwrap();
+        agent
+            .execute_tool(
+                "wirken_exit_phase",
+                &serde_json::json!({"reason": "skill_unloaded"}).to_string(),
+            )
+            .await
+            .unwrap();
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let reason = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                SessionEvent::PhaseExited { reason, .. } => Some(*reason),
+                _ => None,
+            })
+            .expect("PhaseExited emitted");
+        assert_eq!(reason, PhaseExitReason::SkillUnloaded);
+    }
+
+    #[tokio::test]
+    async fn exit_phase_intercept_rejects_turn_end_reason_from_skill() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        agent
+            .execute_tool("wirken_enter_phase", &enter_phase_args("scoring", &[]))
+            .await
+            .unwrap();
+
+        let result = agent
+            .execute_tool(
+                "wirken_exit_phase",
+                &serde_json::json!({"reason": "turn_end"}).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["reason"], "turn_end_is_host_only");
+        // Overlay must stay active: turn_end is a host-only reason
+        // and a skill calling it should not be able to clear the
+        // overlay as a side effect.
+        assert!(agent.current_phase().is_some());
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let exited_count = rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::PhaseExited { .. }))
+            .count();
+        assert_eq!(exited_count, 0, "rejected exit must not emit PhaseExited");
+    }
+
+    #[tokio::test]
+    async fn exit_phase_intercept_rejects_when_no_phase_active() {
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        let result = agent
+            .execute_tool(
+                "wirken_exit_phase",
+                &serde_json::json!({"reason": "phase_change"}).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(!result.success);
+        let parsed: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(parsed["reason"], "no_active_phase");
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let exited_count = rows
+            .iter()
+            .filter(|r| matches!(r.event, SessionEvent::PhaseExited { .. }))
+            .count();
+        assert_eq!(exited_count, 0);
+    }
+
+    #[tokio::test]
+    async fn phase_intercept_bypasses_overlay_self_deny() {
+        // The intercept runs before the permission gate, so a phase
+        // that names its own exit tool in `denied.tools` cannot lock
+        // the skill out of exiting. Without this property a malformed
+        // SKILL.md could brick the LLM mid-turn.
+        let (mut agent, _log, _agent_id) = agent_with_session_log();
+        agent
+            .execute_tool(
+                "wirken_enter_phase",
+                &enter_phase_args("scoring", &["wirken_exit_phase"]),
+            )
+            .await
+            .unwrap();
+        assert!(agent.current_phase().is_some());
+
+        let result = agent
+            .execute_tool(
+                "wirken_exit_phase",
+                &serde_json::json!({"reason": "phase_change"}).to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.success,
+            "intercept must bypass the gate; output was: {}",
+            result.output,
+        );
+        assert!(agent.current_phase().is_none());
+    }
+
     #[tokio::test]
     async fn phase_denied_tool_call_does_not_fall_through_to_profile() {
         // Regression on the order: the overlay check runs before the

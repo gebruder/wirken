@@ -54,6 +54,19 @@ const MAX_SUBAGENT_DEPTH: usize = 4;
 /// The built-in tool name for spawning a child agent. Item 6 slice 1.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
+/// Per-pass deny overlay slice 3: synthetic tool name a skill emits to
+/// install a phase deny overlay. Intercepted at the top of
+/// [`Agent::execute_tool`] before any gate check or MCP dispatch, so
+/// an MCP server that happens to register a tool with this name is
+/// shadowed by the intercept; same defensive posture as
+/// [`SPAWN_SUBAGENT_TOOL`].
+pub(crate) const WIRKEN_ENTER_PHASE_TOOL: &str = "wirken_enter_phase";
+
+/// Per-pass deny overlay slice 3: synthetic tool name a skill emits to
+/// clear the active phase deny overlay. Same intercept posture as
+/// [`WIRKEN_ENTER_PHASE_TOOL`].
+pub(crate) const WIRKEN_EXIT_PHASE_TOOL: &str = "wirken_exit_phase";
+
 /// Prefix on the synthetic `ToolResult` output that
 /// [`Agent::from_session_log`] writes for tool calls whose results
 /// were lost to a crash. The LLM sees a failed tool call with this
@@ -1433,9 +1446,26 @@ impl Agent {
             defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
             // Item 6 slice 1: expose `spawn_subagent` to the LLM
             // only when the agent has at least one allowed child.
-            // Empty allowed_subagents → never offer the tool.
+            // Empty allowed_subagents = never offer the tool.
             if !self.allowed_subagents.is_empty() && self.subagent_depth < MAX_SUBAGENT_DEPTH {
                 defs.push(spawn_subagent_tool_def());
+            }
+            // Per-pass deny overlay slice 3: phase tools are
+            // discoverable only when a loaded skill has them in its
+            // declared `tools.allow`. Legacy mode (no skills attached)
+            // does not advertise them; agents with no opted-in skill
+            // see them not at all.
+            if self
+                .effective_permissions
+                .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
+            {
+                defs.push(wirken_enter_phase_tool_def());
+            }
+            if self
+                .effective_permissions
+                .skills_admit_tool(WIRKEN_EXIT_PHASE_TOOL)
+            {
+                defs.push(wirken_exit_phase_tool_def());
             }
             defs
         } else {
@@ -2008,6 +2038,20 @@ impl Agent {
         // through the sandbox/permission/MCP routing below.
         if name == SPAWN_SUBAGENT_TOOL {
             return self.spawn_subagent_intercept(arguments).await;
+        }
+
+        // Per-pass deny overlay slice 3: phase signals are synthetic
+        // tools intercepted in-process. The intercept runs BEFORE the
+        // permission gate so an active overlay that happens to deny
+        // these names cannot lock a skill out of exiting its own
+        // phase. An MCP server that registered a tool by these names
+        // would be shadowed for the same reason; same posture as
+        // SPAWN_SUBAGENT_TOOL above.
+        if name == WIRKEN_ENTER_PHASE_TOOL {
+            return self.enter_phase_intercept(arguments);
+        }
+        if name == WIRKEN_EXIT_PHASE_TOOL {
+            return self.exit_phase_intercept(arguments);
         }
 
         // Item 6 slice 1: when this Agent runs as a child, the
@@ -2649,6 +2693,206 @@ impl Agent {
     /// and `SubagentResult` events to this agent's session log, and
     /// returns a JSON envelope as the tool result so the parent's
     /// LLM sees a stable summary of what happened. The child's own
+    /// Handle the synthetic [`WIRKEN_ENTER_PHASE_TOOL`] tool call.
+    /// Parses the JSON arguments into a
+    /// [`crate::skill_perms::PhaseDenyOverlay`], installs it via
+    /// [`crate::skill_perms::PhasedEffective::enter_phase`], emits a
+    /// `PhaseEntered` audit row, and returns a JSON status envelope
+    /// to the LLM. Atomicity per the slice-2 `factory.evict` pattern:
+    /// the in-memory swap happens first; audit-emit failure is
+    /// logged and swallowed because the policy is already live.
+    ///
+    /// Bypasses the [`crate::skill_perms::PhasedEffective::gate_tool`]
+    /// check (the intercept fires at the top of
+    /// [`Self::execute_tool`] before the gate runs), so an active
+    /// phase that denied [`WIRKEN_ENTER_PHASE_TOOL`] still admits
+    /// the call here. The [`crate::skill_perms::PhaseError::AlreadyActive`]
+    /// error path is the only place a `wirken_enter_phase` call can
+    /// fail policy-wise: nested phases are refused.
+    pub(crate) fn enter_phase_intercept(
+        &mut self,
+        arguments: &str,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        let args: EnterPhaseArgs = match serde_json::from_str(arguments) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(crate::tool::ToolResult {
+                    output: serde_json::json!({
+                        "status": "error",
+                        "reason": "invalid_arguments",
+                        "detail": e.to_string(),
+                    })
+                    .to_string(),
+                    success: false,
+                });
+            }
+        };
+        // `skill_id` defaults to the agent id: the runtime does not
+        // currently track per-tool-call skill attribution, so an
+        // honest fallback is "the agent that emitted the call".
+        // Prompt-side discipline can override by passing `skill_id`
+        // in the args; a future per-skill-call context tracker
+        // could populate this automatically.
+        let skill_id = args.skill_id.unwrap_or_else(|| self.id.clone());
+        let phase_name = args.phase_name;
+        let tools: std::collections::BTreeSet<String> = args.denied.tools.into_iter().collect();
+        let egress_hosts: std::collections::BTreeSet<String> =
+            args.denied.egress_hosts.into_iter().collect();
+        let paths_read: std::collections::BTreeSet<PathBuf> =
+            args.denied.paths_read.iter().map(PathBuf::from).collect();
+        let paths_write: std::collections::BTreeSet<PathBuf> =
+            args.denied.paths_write.iter().map(PathBuf::from).collect();
+        let inference_providers: std::collections::BTreeSet<String> =
+            args.denied.inference_providers.into_iter().collect();
+
+        let denied_audit = wirken_audit::PhaseDenyContent {
+            tools: tools.iter().cloned().collect(),
+            egress_hosts: egress_hosts.iter().cloned().collect(),
+            paths_read: paths_read.iter().map(|p| p.display().to_string()).collect(),
+            paths_write: paths_write
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            inference_providers: inference_providers.iter().cloned().collect(),
+        };
+
+        let overlay = crate::skill_perms::PhaseDenyOverlay {
+            skill_id: skill_id.clone(),
+            phase_name: phase_name.clone(),
+            entered_at: chrono::Utc::now(),
+            tools,
+            egress_hosts,
+            paths_read,
+            paths_write,
+            inference_providers,
+        };
+
+        match self.effective_permissions.enter_phase(overlay) {
+            Ok(()) => {
+                if let Err(err) = self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::PhaseEntered {
+                        skill_id,
+                        phase_name: phase_name.clone(),
+                        denied: denied_audit,
+                    },
+                ) {
+                    tracing::warn!(
+                        agent_id = %self.id,
+                        %phase_name,
+                        error = %err,
+                        "agent: failed to emit PhaseEntered; overlay already active in memory"
+                    );
+                }
+                Ok(crate::tool::ToolResult {
+                    output: serde_json::json!({"status": "ok"}).to_string(),
+                    success: true,
+                })
+            }
+            Err(crate::skill_perms::PhaseError::AlreadyActive) => {
+                let active = self
+                    .effective_permissions
+                    .overlay()
+                    .map(|o| o.phase_name.clone())
+                    .unwrap_or_default();
+                Ok(crate::tool::ToolResult {
+                    output: serde_json::json!({
+                        "status": "error",
+                        "reason": "phase_already_active",
+                        "active_phase": active,
+                    })
+                    .to_string(),
+                    success: false,
+                })
+            }
+        }
+    }
+
+    /// Handle the synthetic [`WIRKEN_EXIT_PHASE_TOOL`] tool call.
+    /// Parses the JSON arguments, validates the `reason` against the
+    /// skill-callable subset (`phase_change` or `skill_unloaded`;
+    /// `turn_end` is host-only and rejected), clears the overlay,
+    /// emits a `PhaseExited` audit row, and returns a JSON status
+    /// envelope. Same atomicity posture as
+    /// [`Self::enter_phase_intercept`].
+    pub(crate) fn exit_phase_intercept(
+        &mut self,
+        arguments: &str,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        let args: ExitPhaseArgs = if arguments.trim().is_empty() {
+            ExitPhaseArgs::default()
+        } else {
+            match serde_json::from_str(arguments) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Ok(crate::tool::ToolResult {
+                        output: serde_json::json!({
+                            "status": "error",
+                            "reason": "invalid_arguments",
+                            "detail": e.to_string(),
+                        })
+                        .to_string(),
+                        success: false,
+                    });
+                }
+            }
+        };
+        let reason = match args.reason.as_str() {
+            "phase_change" => PhaseExitReason::PhaseChange,
+            "skill_unloaded" => PhaseExitReason::SkillUnloaded,
+            "turn_end" => {
+                return Ok(crate::tool::ToolResult {
+                    output: serde_json::json!({
+                        "status": "error",
+                        "reason": "turn_end_is_host_only",
+                    })
+                    .to_string(),
+                    success: false,
+                });
+            }
+            other => {
+                return Ok(crate::tool::ToolResult {
+                    output: serde_json::json!({
+                        "status": "error",
+                        "reason": "unknown_reason",
+                        "received": other,
+                    })
+                    .to_string(),
+                    success: false,
+                });
+            }
+        };
+        let Some(cleared) = self.effective_permissions.exit_phase() else {
+            return Ok(crate::tool::ToolResult {
+                output: serde_json::json!({
+                    "status": "error",
+                    "reason": "no_active_phase",
+                })
+                .to_string(),
+                success: false,
+            });
+        };
+        if let Err(err) = self.log_event(
+            TrustLevel::System,
+            SessionEvent::PhaseExited {
+                skill_id: cleared.skill_id.clone(),
+                phase_name: cleared.phase_name.clone(),
+                reason,
+            },
+        ) {
+            tracing::warn!(
+                agent_id = %self.id,
+                phase_name = %cleared.phase_name,
+                error = %err,
+                "agent: failed to emit PhaseExited; overlay already cleared in memory"
+            );
+        }
+        Ok(crate::tool::ToolResult {
+            output: serde_json::json!({"status": "ok"}).to_string(),
+            success: true,
+        })
+    }
+
     /// session log holds the full transcript for offline inspection.
     ///
     /// Crate-private so the test suite can drive it without needing
@@ -3108,6 +3352,23 @@ impl Agent {
             let mut d = self.tools.definitions();
             d.extend(mcp_defs);
             d.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
+            // Per-pass deny overlay slice 3: same opt-in surface as
+            // `process_message_turn` so `snapshot_tool_defs` returns
+            // the same set verify-time as the LLM was offered at
+            // emit-time. Without this mirror the `tools_hash`
+            // recomputation in `Self::verify` would not match.
+            if self
+                .effective_permissions
+                .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
+            {
+                d.push(wirken_enter_phase_tool_def());
+            }
+            if self
+                .effective_permissions
+                .skills_admit_tool(WIRKEN_EXIT_PHASE_TOOL)
+            {
+                d.push(wirken_exit_phase_tool_def());
+            }
             d
         } else {
             Vec::new()
@@ -3172,6 +3433,118 @@ struct SpawnSubagentArgs {
     prompt: String,
     #[serde(default)]
     tools: Option<Vec<String>>,
+}
+
+/// Per-pass deny overlay slice 3: JSON arguments for
+/// `wirken_enter_phase`. `phase_name` is operator-readable
+/// (recorded on the `PhaseEntered` audit row); `skill_id` defaults
+/// to the agent id because the runtime does not currently track
+/// per-tool-call skill attribution; `denied` lists the five axes
+/// the overlay will refuse for the lifetime of the phase.
+#[derive(serde::Deserialize)]
+struct EnterPhaseArgs {
+    phase_name: String,
+    denied: PhaseDeniedArgs,
+    #[serde(default)]
+    skill_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PhaseDeniedArgs {
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    egress_hosts: Vec<String>,
+    #[serde(default)]
+    paths_read: Vec<String>,
+    #[serde(default)]
+    paths_write: Vec<String>,
+    #[serde(default)]
+    inference_providers: Vec<String>,
+}
+
+/// Per-pass deny overlay slice 3: JSON arguments for
+/// `wirken_exit_phase`. `reason` defaults to `"phase_change"` when
+/// the LLM omits it; `"skill_unloaded"` is also accepted. The
+/// host-only `"turn_end"` is rejected at the intercept.
+#[derive(serde::Deserialize, Default)]
+struct ExitPhaseArgs {
+    #[serde(default = "default_exit_phase_reason")]
+    reason: String,
+}
+
+fn default_exit_phase_reason() -> String {
+    "phase_change".to_string()
+}
+
+/// Per-pass deny overlay slice 3: tool definition for the synthetic
+/// `wirken_enter_phase`. Exposed to the LLM only when a loaded skill
+/// has opted in by listing the tool name in its
+/// `permissions.tools.allow`; see
+/// [`crate::skill_perms::PhasedEffective::skills_admit_tool`].
+fn wirken_enter_phase_tool_def() -> crate::tool::ToolDef {
+    crate::tool::ToolDef {
+        name: WIRKEN_ENTER_PHASE_TOOL.to_string(),
+        description: "Enter a deny-overlay phase. Tool calls, egress hosts, filesystem \
+             paths, and inference providers listed in `denied` are refused for the \
+             remainder of the current turn or until `wirken_exit_phase` is called. \
+             The deny is layered over the base permission profile and narrows only; \
+             it cannot widen what the base allows. Returns {\"status\":\"ok\"} on \
+             success, or {\"status\":\"error\", \"reason\":\"phase_already_active\", \
+             \"active_phase\":...} when a phase is already active."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "phase_name": {
+                    "type": "string",
+                    "description": "Short label for this phase (e.g. \"scoring\", \"recon\"). Recorded on the PhaseEntered audit row."
+                },
+                "denied": {
+                    "type": "object",
+                    "properties": {
+                        "tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names to deny."},
+                        "egress_hosts": {"type": "array", "items": {"type": "string"}, "description": "Egress hostnames to deny (exact match)."},
+                        "paths_read": {"type": "array", "items": {"type": "string"}, "description": "Filesystem read paths to deny (prefix match)."},
+                        "paths_write": {"type": "array", "items": {"type": "string"}, "description": "Filesystem write paths to deny (prefix match)."},
+                        "inference_providers": {"type": "array", "items": {"type": "string"}, "description": "Inference provider names to deny."}
+                    }
+                },
+                "skill_id": {
+                    "type": "string",
+                    "description": "Optional skill identifier recorded on the audit row. Defaults to the agent id."
+                }
+            },
+            "required": ["phase_name", "denied"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// Per-pass deny overlay slice 3: tool definition for the synthetic
+/// `wirken_exit_phase`. Same opt-in discoverability as
+/// [`wirken_enter_phase_tool_def`].
+fn wirken_exit_phase_tool_def() -> crate::tool::ToolDef {
+    crate::tool::ToolDef {
+        name: WIRKEN_EXIT_PHASE_TOOL.to_string(),
+        description: "Exit the active deny-overlay phase. `reason` defaults to \
+             \"phase_change\" (the skill is about to enter a new phase) or may be \
+             \"skill_unloaded\" (the skill is finishing). The host-only reason \
+             \"turn_end\" is rejected. Returns {\"status\":\"ok\"} or \
+             {\"status\":\"error\", \"reason\":...}."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "enum": ["phase_change", "skill_unloaded"],
+                    "description": "Why the phase is exiting. Defaults to \"phase_change\"."
+                }
+            },
+            "additionalProperties": false
+        }),
+    }
 }
 
 /// Item 6 slice 1 — wire-format envelope returned to the parent's
