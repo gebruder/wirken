@@ -52,6 +52,7 @@
 //!   real and per-source.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::sync::{Arc, RwLock};
 
 use reqwest::RequestBuilder;
@@ -116,13 +117,55 @@ fn host_matches(host: &str, pattern: &str) -> bool {
     false
 }
 
+/// A phase-deny overlay pushed onto the [`EgressClient`] by the
+/// per-pass deny mechanism. The check path consults this BEFORE the
+/// base [`EgressEnforcement`], so a phase that denies a host
+/// short-circuits even when the base profile would have allowed it.
+/// Closes the egress-axis coverage gap that the original slice-2
+/// commit message flagged: `PhaseAxis::EgressHost` was type-prepared
+/// but the runtime gate didn't consult the overlay.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseEgressDeny {
+    /// Operator-readable label from the active phase; surfaced on
+    /// the [`EgressDenyReason::Phase`] reason that bubbles up to the
+    /// audit chain.
+    pub phase_name: String,
+    /// Hosts the overlay refuses. Matched with the same exact /
+    /// wildcard-label semantics as [`EgressEnforcement::Allowlist`].
+    pub hosts: BTreeSet<String>,
+}
+
+/// Which layer of the egress gate refused a request. Carried on
+/// [`EgressDenied`] so the runtime can emit the matching typed
+/// `SkillDeniedReason` (`Profile` vs `Phase { phase_name }`) on the
+/// `SkillPermissionDenied` audit row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EgressDenyReason {
+    /// Base permission profile refused the host (the pre-slice-6
+    /// shape). Pre-slice-6 audit rows that did not carry a reason
+    /// field deserialize as this via the audit-side default.
+    Profile,
+    /// Active phase deny overlay refused the host. `phase_name`
+    /// flows into the audit event for SIEM correlation with the
+    /// triggering `PhaseEntered` row.
+    Phase { phase_name: String },
+}
+
 /// Pre-flight host check around the inner [`RateLimitedClient`]. The
 /// wrapper holds the enforcement policy in shared state so the agent
 /// can update it after attaching skills without rebuilding the client.
+///
+/// Slice 6 of the per-pass deny overlay adds a second `Arc<RwLock<_>>`
+/// holding the optional phase overlay deny. The check path consults
+/// the overlay first, then the base enforcement; transitions
+/// (`enter_phase`, `exit_phase`, turn-end auto-clear, wake-replay)
+/// push the overlay state via [`Self::set_phase_overlay_deny`] /
+/// [`Self::clear_phase_overlay_deny`].
 #[derive(Clone)]
 pub struct EgressClient {
     inner: RateLimitedClient,
     enforcement: Arc<RwLock<EgressEnforcement>>,
+    overlay_deny: Arc<RwLock<Option<PhaseEgressDeny>>>,
 }
 
 impl EgressClient {
@@ -140,6 +183,7 @@ impl EgressClient {
         Self {
             inner: RateLimitedClient::new(reqwest::Client::new(), config),
             enforcement: Arc::new(RwLock::new(EgressEnforcement::Unrestricted)),
+            overlay_deny: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -148,6 +192,29 @@ impl EgressClient {
     pub fn set_enforcement(&self, e: EgressEnforcement) {
         if let Ok(mut guard) = self.enforcement.write() {
             *guard = e;
+        }
+    }
+
+    /// Slice-6 phase-overlay setter. Called by the runtime's phase
+    /// intercepts (`wirken_enter_phase`) and the wake-replay path
+    /// after `Agent::enter_phase` or `Agent::restore_phase_overlay`
+    /// successfully installs an overlay. The overlay is consulted
+    /// BEFORE the base enforcement in [`Self::check_egress`], so a
+    /// phase that denies a host short-circuits even when the base
+    /// profile would have allowed it.
+    pub fn set_phase_overlay_deny(&self, deny: PhaseEgressDeny) {
+        if let Ok(mut guard) = self.overlay_deny.write() {
+            *guard = Some(deny);
+        }
+    }
+
+    /// Slice-6 phase-overlay clear. Called by the runtime's
+    /// `wirken_exit_phase` intercept, the turn-end auto-clear, and
+    /// any wake-replay that ends with no active phase. A no-op when
+    /// no overlay is currently installed.
+    pub fn clear_phase_overlay_deny(&self) {
+        if let Ok(mut guard) = self.overlay_deny.write() {
+            *guard = None;
         }
     }
 
@@ -182,15 +249,35 @@ impl EgressClient {
             .and_then(|u| u.host_str().map(|s| s.to_string()))
             .ok_or_else(|| EgressDenied {
                 host: format!("<unparseable url: {url}>"),
+                reason: EgressDenyReason::Profile,
             })?;
-        let guard = self
-            .enforcement
-            .read()
-            .map_err(|_| EgressDenied { host: host.clone() })?;
+        // Slice 6: overlay deny first. A phase-installed deny entry
+        // short-circuits even when the base enforcement would have
+        // allowed the host, and surfaces a `Phase` reason so the
+        // runtime emits `SkillDeniedReason::Phase { phase_name }` on
+        // the audit row instead of `Profile`.
+        if let Ok(overlay) = self.overlay_deny.read()
+            && let Some(deny) = overlay.as_ref()
+            && deny.hosts.iter().any(|pat| host_matches(&host, pat))
+        {
+            return Err(EgressDenied {
+                host,
+                reason: EgressDenyReason::Phase {
+                    phase_name: deny.phase_name.clone(),
+                },
+            });
+        }
+        let guard = self.enforcement.read().map_err(|_| EgressDenied {
+            host: host.clone(),
+            reason: EgressDenyReason::Profile,
+        })?;
         if guard.allows(&host) {
             Ok(())
         } else {
-            Err(EgressDenied { host })
+            Err(EgressDenied {
+                host,
+                reason: EgressDenyReason::Profile,
+            })
         }
     }
 }
@@ -201,12 +288,35 @@ impl Default for EgressClient {
     }
 }
 
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-#[error(
-    "egress denied: host '{host}' is not in the agent's effective skill permissions egress allow-set"
-)]
+/// Egress refused by [`EgressClient::check_egress`]. `reason`
+/// distinguishes the base profile path from the phase-overlay path
+/// so the runtime audit emit can stamp the correct
+/// `SkillDeniedReason` on the `SkillPermissionDenied` row. Manual
+/// `Display` impl because the message text differs by reason and
+/// the `#[error(...)]` shorthand does not branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressDenied {
     pub host: String,
+    pub reason: EgressDenyReason,
+}
+
+impl std::error::Error for EgressDenied {}
+
+impl fmt::Display for EgressDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.reason {
+            EgressDenyReason::Profile => write!(
+                f,
+                "egress denied: host '{}' is not in the agent's effective skill permissions egress allow-set",
+                self.host,
+            ),
+            EgressDenyReason::Phase { phase_name } => write!(
+                f,
+                "egress denied: host '{}' is denied by active phase '{}'",
+                self.host, phase_name,
+            ),
+        }
+    }
 }
 
 /// Unified result for [`EgressClient`] gating. The two variants
@@ -287,7 +397,7 @@ mod tests {
         let err = c.get("https://denied.example.com/foo").await.unwrap_err();
         assert!(matches!(
             err,
-            HttpAccessDenied::Egress(EgressDenied { ref host }) if host == "denied.example.com"
+            HttpAccessDenied::Egress(EgressDenied { ref host, .. }) if host == "denied.example.com"
         ));
     }
 
@@ -315,7 +425,7 @@ mod tests {
         let err = c.get("not a url").await.unwrap_err();
         assert!(matches!(
             err,
-            HttpAccessDenied::Egress(EgressDenied { ref host }) if host.starts_with("<unparseable")
+            HttpAccessDenied::Egress(EgressDenied { ref host, .. }) if host.starts_with("<unparseable")
         ));
     }
 
@@ -350,5 +460,127 @@ mod tests {
         assert!(c.get("https://allowed.example.com/b").await.is_ok());
         let err = c.get("https://allowed.example.com/c").await.unwrap_err();
         assert!(matches!(err, HttpAccessDenied::RateLimit(_)));
+    }
+
+    // ---------------------------------------------------------------
+    // Phase overlay deny (slice 6 of per-pass deny overlay)
+    // ---------------------------------------------------------------
+
+    fn overlay_denying(phase: &str, host: &str) -> PhaseEgressDeny {
+        let mut hosts = BTreeSet::new();
+        hosts.insert(host.to_string());
+        PhaseEgressDeny {
+            phase_name: phase.to_string(),
+            hosts,
+        }
+    }
+
+    #[tokio::test]
+    async fn overlay_denies_host_with_phase_reason() {
+        // Base is Unrestricted; overlay denies one host. The host
+        // should refuse with reason=Phase even though the base
+        // would have allowed.
+        let c = EgressClient::new();
+        c.set_phase_overlay_deny(overlay_denying("scoring", "api.openai.com"));
+
+        let err = c.get("https://api.openai.com/v1/x").await.unwrap_err();
+        match err {
+            HttpAccessDenied::Egress(d) => {
+                assert_eq!(d.host, "api.openai.com");
+                assert_eq!(
+                    d.reason,
+                    EgressDenyReason::Phase {
+                        phase_name: "scoring".to_string(),
+                    },
+                );
+            }
+            other => panic!("expected Egress denial, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn overlay_does_not_match_falls_through_to_base_with_profile_reason() {
+        // Overlay denies `denied.example.com`; base also denies
+        // anything not on its allowlist. A call to a different
+        // refused host (`other.example.com`) should surface a
+        // `Profile` reason because the overlay did not match.
+        let c = EgressClient::new();
+        c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
+            "allowed.example.com".to_string(),
+        ])));
+        c.set_phase_overlay_deny(overlay_denying("scoring", "denied.example.com"));
+
+        let err = c.get("https://other.example.com/x").await.unwrap_err();
+        match err {
+            HttpAccessDenied::Egress(d) => {
+                assert_eq!(d.host, "other.example.com");
+                assert_eq!(d.reason, EgressDenyReason::Profile);
+            }
+            other => panic!("expected Egress denial, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn overlay_does_not_widen_base_allowlist() {
+        // Overlay-denied entries narrow only. A host not on the
+        // base allowlist still gets denied (Profile reason); the
+        // presence of an overlay does not implicitly admit hosts.
+        let c = EgressClient::new();
+        c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
+            "allowed.example.com".to_string(),
+        ])));
+        c.set_phase_overlay_deny(overlay_denying("scoring", "nothing-to-do-with-this.com"));
+
+        let err = c.get("https://forbidden.example.com/x").await.unwrap_err();
+        match err {
+            HttpAccessDenied::Egress(d) => {
+                assert_eq!(d.reason, EgressDenyReason::Profile);
+            }
+            other => panic!("expected Egress denial, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn overlay_allows_when_neither_layer_denies() {
+        // Base allows the host AND overlay does not list it: ok.
+        let c = EgressClient::new();
+        c.set_enforcement(EgressEnforcement::Allowlist(BTreeSet::from([
+            "allowed.example.com".to_string(),
+        ])));
+        c.set_phase_overlay_deny(overlay_denying("scoring", "other.example.com"));
+
+        assert!(c.get("https://allowed.example.com/x").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn clear_phase_overlay_deny_falls_back_to_base() {
+        // Overlay denies a host; clearing the overlay restores the
+        // base-alone behaviour. Mirrors the phase-end auto-clear
+        // and the wirken_exit_phase intercept's side effect.
+        let c = EgressClient::new();
+        c.set_phase_overlay_deny(overlay_denying("scoring", "api.openai.com"));
+        assert!(c.get("https://api.openai.com/v1/x").await.is_err());
+
+        c.clear_phase_overlay_deny();
+        assert!(c.get("https://api.openai.com/v1/x").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn overlay_message_distinguishes_phase_from_profile() {
+        // EgressDenied's Display impl branches on `reason` so a
+        // human reading a log line can tell which layer fired.
+        let phase = EgressDenied {
+            host: "api.openai.com".to_string(),
+            reason: EgressDenyReason::Phase {
+                phase_name: "scoring".to_string(),
+            },
+        };
+        assert!(format!("{phase}").contains("denied by active phase 'scoring'"));
+
+        let profile = EgressDenied {
+            host: "api.openai.com".to_string(),
+            reason: EgressDenyReason::Profile,
+        };
+        assert!(format!("{profile}").contains("not in the agent's effective skill permissions"));
     }
 }

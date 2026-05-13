@@ -823,6 +823,30 @@ impl Agent {
     /// session-scoped approval replay path.
     pub(crate) fn restore_phase_overlay(&mut self, overlay: crate::skill_perms::PhaseDenyOverlay) {
         self.effective_permissions.set_overlay(overlay);
+        self.sync_phase_overlay_to_egress();
+    }
+
+    /// Slice-6 phase-overlay → `EgressClient` sync. After any
+    /// transition that changes
+    /// [`crate::skill_perms::PhasedEffective::overlay`] (enter,
+    /// exit, turn-end auto-clear, wake-replay), push the egress
+    /// axis of the current overlay into the agent's HTTP client so
+    /// the egress check consults it. When no overlay is active, or
+    /// the active overlay has no egress denies, the client's
+    /// overlay slot is cleared. Idempotent.
+    fn sync_phase_overlay_to_egress(&self) {
+        match self.effective_permissions.overlay() {
+            Some(o) if !o.egress_hosts.is_empty() => {
+                self.tools
+                    .set_phase_overlay_egress(crate::egress::PhaseEgressDeny {
+                        phase_name: o.phase_name.clone(),
+                        hosts: o.egress_hosts.clone(),
+                    });
+            }
+            _ => {
+                self.tools.clear_phase_overlay_egress();
+            }
+        }
     }
 
     /// Turn-end auto-exit for any active phase deny overlay. Mirrors
@@ -840,6 +864,9 @@ impl Agent {
         let Some(overlay) = self.effective_permissions.exit_phase() else {
             return;
         };
+        // Slice 6: mirror the in-memory clear onto the HTTP client
+        // so any phase egress denies do not survive past turn end.
+        self.sync_phase_overlay_to_egress();
         if let Err(err) = self.log_event(
             TrustLevel::System,
             SessionEvent::PhaseExited {
@@ -2332,31 +2359,48 @@ impl Agent {
             // wrapped HTTP client. Emit the audit event here, then
             // surface a non-success ToolResult to the LLM rather
             // than propagating the error out of the agent.
-            Err(AgentError::EgressDenied { host }) => {
-                // Egress denials come from the wrapped HTTP client's
-                // `EgressEnforcement` layer, which is built from the
-                // base `EffectiveProfile` at `attach_skills` time and
-                // does not consult the phase overlay. Phase-deny on
-                // the egress axis is type-prepared (`PhaseAxis::EgressHost`,
-                // `PhasedEffective::gate_host`) but production
-                // coverage waits on a future slice that threads
-                // `PhasedEffective` through `EgressEnforcement`;
-                // until then every egress denial here is profile-shaped.
+            Err(AgentError::EgressDenied(denied)) => {
+                // Slice 6 of the per-pass deny overlay closes the
+                // egress-axis enforcement gap that earlier slices
+                // documented: `EgressClient::check_egress` now
+                // consults the phase overlay before the base
+                // enforcement and returns a typed reason. The audit
+                // emit matches on it so the
+                // `SkillPermissionDenied` row carries
+                // `SkillDeniedReason::Phase { phase_name }` when the
+                // overlay refused, matching the typed-reason shape
+                // the tools / filesystem / inference axes already use.
+                let (denied_reason, output) = match &denied.reason {
+                    crate::egress::EgressDenyReason::Profile => (
+                        SkillDeniedReason::Profile,
+                        format!(
+                            "egress denied: host '{}' is not in the agent's \
+                             effective skill permissions egress allow-set",
+                            denied.host,
+                        ),
+                    ),
+                    crate::egress::EgressDenyReason::Phase { phase_name } => (
+                        SkillDeniedReason::Phase {
+                            phase_name: phase_name.clone(),
+                        },
+                        format!(
+                            "egress denied: host '{}' is denied by active phase '{}'",
+                            denied.host, phase_name,
+                        ),
+                    ),
+                };
                 self.log_event(
                     TrustLevel::System,
                     SessionEvent::SkillPermissionDenied {
                         axis: "egress".to_string(),
-                        requested: host.clone(),
+                        requested: denied.host.clone(),
                         agent_id: self.id.clone(),
                         trigger: self.current_trigger.clone(),
-                        denied_reason: SkillDeniedReason::Profile,
+                        denied_reason,
                     },
                 )?;
                 Ok(crate::tool::ToolResult {
-                    output: format!(
-                        "egress denied: host '{host}' is not in the agent's \
-                         effective skill permissions egress allow-set"
-                    ),
+                    output,
                     success: false,
                 })
             }
@@ -2781,6 +2825,13 @@ impl Agent {
 
         match self.effective_permissions.enter_phase(overlay) {
             Ok(()) => {
+                // Slice 6: keep the HTTP client's overlay slot in
+                // sync with the in-memory effective_permissions so
+                // egress checks consult the active phase's deny
+                // hosts. Runs even when the overlay has no egress
+                // entries; the sync clears any stale push from a
+                // prior phase in that case.
+                self.sync_phase_overlay_to_egress();
                 if let Err(err) = self.log_event(
                     TrustLevel::System,
                     SessionEvent::PhaseEntered {
@@ -2884,6 +2935,10 @@ impl Agent {
                 success: false,
             });
         };
+        // Slice 6: the in-memory overlay is gone; mirror that on the
+        // HTTP client so subsequent egress checks fall through to the
+        // base enforcement alone.
+        self.sync_phase_overlay_to_egress();
         if let Err(err) = self.log_event(
             TrustLevel::System,
             SessionEvent::PhaseExited {

@@ -398,6 +398,21 @@ impl ToolRegistry {
         self.http.set_enforcement(enforcement);
     }
 
+    /// Slice-6 phase-overlay sync. Push a phase deny set onto the
+    /// HTTP client so subsequent egress checks consult the overlay
+    /// before the base enforcement. Called from
+    /// `Agent::sync_phase_overlay_to_egress` after every phase
+    /// transition (enter, exit, turn-end auto-clear, wake-replay).
+    pub fn set_phase_overlay_egress(&self, deny: crate::egress::PhaseEgressDeny) {
+        self.http.set_phase_overlay_deny(deny);
+    }
+
+    /// Slice-6 phase-overlay clear. Drop any installed phase deny
+    /// from the HTTP client. Pair with [`Self::set_phase_overlay_egress`].
+    pub fn clear_phase_overlay_egress(&self) {
+        self.http.clear_phase_overlay_deny();
+    }
+
     /// Execute a tool by name with the given JSON arguments.
     pub async fn execute(&self, name: &str, arguments: &str) -> Result<ToolResult, AgentError> {
         let arg_str = if arguments.is_empty() {
@@ -1131,7 +1146,7 @@ fn extract_required_string(params: &serde_json::Value, name: &str) -> Result<Str
 /// installed a stricter config.
 fn map_http_access_denied(e: crate::egress::HttpAccessDenied) -> AgentError {
     match e {
-        crate::egress::HttpAccessDenied::Egress(d) => AgentError::EgressDenied { host: d.host },
+        crate::egress::HttpAccessDenied::Egress(d) => AgentError::EgressDenied(d),
         crate::egress::HttpAccessDenied::RateLimit(d) => AgentError::Tool(format!("{d}")),
     }
 }

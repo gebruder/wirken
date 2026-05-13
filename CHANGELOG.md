@@ -38,7 +38,13 @@ tagged.
   filesystem read paths, filesystem write paths, inference
   providers. Enforced at the tool-call gate overlay-first /
   base-fallthrough, returning typed
-  `GateDecision::DeniedByPhase { phase_name, axis }`. The audit
+  `GateDecision::DeniedByPhase { phase_name, axis }`. Egress-axis
+  enforcement runs through `EgressClient`'s parallel
+  overlay-deny slot, consulted before the base
+  `EgressEnforcement`; an `EgressDenied` carries an
+  `EgressDenyReason` (`Profile` vs `Phase { phase_name }`) that
+  translates into the same `SkillDeniedReason` shape the other
+  axes use on the `SkillPermissionDenied` audit row. The audit
   chain records `PhaseEntered` / `PhaseExited` rows with typed
   reasons (`PhaseChange`, `TurnEnd`, `SkillUnloaded`);
   `SkillPermissionDenied` rows whose `denied_reason` is
@@ -47,10 +53,7 @@ tagged.
   log on wake: an active phase survives a crash, a clean exit
   tombstones the overlay. Single-slot invariant: nested phases
   are refused so every `PhaseEntered` pairs cleanly with one
-  `PhaseExited`. Egress-axis enforcement is type-prepared but
-  not yet wired through `EgressEnforcement`; documented coverage
-  gap tracked for a future slice. See `docs/skills.md` for
-  skill-author docs.
+  `PhaseExited`. See `docs/skills.md` for skill-author docs.
 
 ## [1.4.0] - 2026-05-12
 

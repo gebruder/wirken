@@ -169,8 +169,6 @@ The audit chain is replayed on agent wake: an active phase at the time of a cras
 
 The skill cannot read overlay state. There is no host function or tool that returns the current phase. Skills set policy; they do not query it. The audit chain is the operator's view of phase activity; the skill operates on its own pass discipline.
 
-The egress-axis enforcement is type-prepared but not yet wired through the runtime's outbound HTTP path. A phase that lists `egress_hosts` in its deny set records the entries in the audit chain but does not block the calls. Tools, filesystem read/write, and inference axes are fully enforced today; egress follows.
-
 Lyrik's recon → framings → inline-rubric → scoring pass shape is the canonical example use case. The mechanism landed in this release; Lyrik's `SKILL.md` adoption is on a separate track.
 
 ## Installing skills from the registry

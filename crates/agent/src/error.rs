@@ -99,10 +99,14 @@ pub enum AgentError {
     /// The agent's dispatcher catches this variant, emits a
     /// `SkillPermissionDenied` audit event, and returns a non-success
     /// `ToolResult` to the LLM rather than propagating the error up.
-    #[error(
-        "egress denied: host '{host}' is not in the agent's effective skill permissions egress allow-set"
-    )]
-    EgressDenied { host: String },
+    ///
+    /// Slice 6 of the per-pass deny overlay restructured this as a
+    /// tuple variant wrapping [`crate::egress::EgressDenied`] so the
+    /// `reason` field (Profile vs Phase) carries through to the
+    /// audit emit site without a parallel `host` slot drifting from
+    /// the underlying egress error.
+    #[error("{0}")]
+    EgressDenied(crate::egress::EgressDenied),
 
     /// #79: user typed `/<name>` as a slash invocation but no loaded
     /// skill has that name. Surfaced to the channel so the user can
