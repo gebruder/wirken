@@ -6964,3 +6964,198 @@ mod recovery_tool_validation {
         );
     }
 }
+
+// -------------------------------------------------------------------------
+// Per-pass phase deny overlay (slice 2): typed reason propagation +
+// turn-end auto-exit. End-to-end at the Agent boundary; the in-process
+// gate logic itself is unit-tested in skill_perms.rs.
+// -------------------------------------------------------------------------
+
+mod phase_overlay {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use tempfile::TempDir;
+    use wirken_audit::{
+        PhaseExitReason, SessionEvent, SessionId, SessionLog, SkillDeniedReason, SqliteSessionLog,
+    };
+
+    use crate::llm::LlmConfig;
+    use crate::skill_perms::PhaseDenyOverlay;
+
+    /// Build an Agent with a fresh per-test SqliteSessionLog so the
+    /// audit chain produced by the agent is readable by test code.
+    /// Returns `(agent, log, agent_id)` so the caller can mint a
+    /// SessionHandle off the same `SessionLog`.
+    fn agent_with_session_log() -> (crate::runtime::Agent, Arc<SqliteSessionLog>, String) {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("audit.db");
+        let concrete = Arc::new(SqliteSessionLog::open(&log_path).unwrap());
+        let log_dyn: Arc<dyn SessionLog> = concrete.clone();
+        let agent_id = "test-phase-agent".to_string();
+        let agent = crate::runtime::Agent::new(
+            agent_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log_dyn,
+        )
+        .unwrap();
+        // Keep `tmp` alive for the agent's lifetime via the workspace
+        // copy; the audit DB stays valid as long as `concrete` does.
+        // `tmp` drops at end of test; the OS keeps the file until
+        // the SQLite handle in `concrete` drops too.
+        std::mem::forget(tmp);
+        (agent, concrete, agent_id)
+    }
+
+    fn overlay_denying_tool(phase_name: &str, tool: &str) -> PhaseDenyOverlay {
+        let mut tools = BTreeSet::new();
+        tools.insert(tool.to_string());
+        PhaseDenyOverlay {
+            skill_id: "test-skill".to_string(),
+            phase_name: phase_name.to_string(),
+            entered_at: Utc::now(),
+            tools,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn phase_denied_tool_call_emits_audit_with_typed_phase_reason() {
+        // Path: enter phase that denies `read_file`, call
+        // execute_tool, expect the SkillPermissionDenied audit row
+        // to carry denied_reason = Phase { phase_name } and the
+        // `tools` axis label.
+        let (mut agent, log, agent_id) = agent_with_session_log();
+
+        agent
+            .enter_phase(overlay_denying_tool("scoring", "read_file"))
+            .unwrap();
+
+        let result = agent
+            .execute_tool("read_file", r#"{"path":"/tmp/nope"}"#)
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(
+            result.output.contains("denied by active phase 'scoring'"),
+            "tool output must name the active phase, got: {}",
+            result.output,
+        );
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let denied = rows
+            .iter()
+            .find(|r| matches!(r.event, SessionEvent::SkillPermissionDenied { .. }))
+            .expect("one SkillPermissionDenied audit row landed");
+        match &denied.event {
+            SessionEvent::SkillPermissionDenied {
+                axis,
+                requested,
+                denied_reason,
+                ..
+            } => {
+                assert_eq!(axis, "tools");
+                assert_eq!(requested, "read_file");
+                assert_eq!(
+                    *denied_reason,
+                    SkillDeniedReason::Phase {
+                        phase_name: "scoring".to_string(),
+                    },
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_phase_at_turn_end_emits_phase_exited_with_turn_end_reason() {
+        // The unit-under-test is `clear_phase_at_turn_end` (the
+        // helper `process_message_inner` and `process_message_stream_with`
+        // both invoke at turn end). Direct call avoids needing an
+        // LLM round-trip while still exercising the audit emit.
+        let (mut agent, log, agent_id) = agent_with_session_log();
+
+        agent
+            .enter_phase(overlay_denying_tool("scoring", "read_file"))
+            .unwrap();
+        assert!(agent.current_phase().is_some());
+
+        agent.clear_phase_at_turn_end();
+        assert!(
+            agent.current_phase().is_none(),
+            "overlay must be cleared after turn-end auto-exit",
+        );
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let exited = rows
+            .iter()
+            .find(|r| matches!(r.event, SessionEvent::PhaseExited { .. }))
+            .expect("PhaseExited audit row landed");
+        match &exited.event {
+            SessionEvent::PhaseExited {
+                skill_id,
+                phase_name,
+                reason,
+            } => {
+                assert_eq!(skill_id, "test-skill");
+                assert_eq!(phase_name, "scoring");
+                assert_eq!(*reason, PhaseExitReason::TurnEnd);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_phase_at_turn_end_is_noop_when_no_overlay_active() {
+        // No-emit-on-no-op: same pattern as factory.evict and the
+        // session-scoped allowlist clear. Empty session log after
+        // calling the helper means the rule holds.
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        agent.clear_phase_at_turn_end();
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        assert!(
+            !rows
+                .iter()
+                .any(|r| matches!(r.event, SessionEvent::PhaseExited { .. })),
+            "no PhaseExited row should be emitted when no overlay was active",
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_denied_tool_call_does_not_fall_through_to_profile() {
+        // Regression on the order: the overlay check runs before the
+        // base profile check, so even a Legacy base (which allows
+        // everything) still surfaces a phase denial. denied_reason
+        // must be Phase, not Profile.
+        let (mut agent, log, agent_id) = agent_with_session_log();
+        agent
+            .enter_phase(overlay_denying_tool("recon", "list_files"))
+            .unwrap();
+        let _ = agent
+            .execute_tool("list_files", r#"{"path":"."}"#)
+            .await
+            .unwrap();
+
+        let handle = log.handle_for(SessionId::new(agent_id));
+        let rows = log.get_since(&handle, 0).unwrap();
+        let denied = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                SessionEvent::SkillPermissionDenied { denied_reason, .. } => Some(denied_reason),
+                _ => None,
+            })
+            .expect("SkillPermissionDenied row landed");
+        match denied {
+            SkillDeniedReason::Phase { phase_name } => assert_eq!(phase_name, "recon"),
+            other => panic!("expected Phase reason, got: {other:?}"),
+        }
+    }
+}

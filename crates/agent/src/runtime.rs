@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use wirken_audit::{
-    OwnSession, SessionEvent, SessionHandle, SessionId, SessionLog, ToolCallRecord, TrustLevel,
+    OwnSession, PhaseExitReason, SessionEvent, SessionHandle, SessionId, SessionLog,
+    SkillDeniedReason, ToolCallRecord, TrustLevel,
 };
 
 use crate::context::ContextEngine;
@@ -218,7 +219,7 @@ pub struct Agent {
     /// no skills are attached or any attached skill is `Legacy`
     /// (transitional during the migration window). Enforcement is
     /// per-agent, not per-skill — see gebruder/wirken#76.
-    effective_permissions: crate::skill_perms::EffectiveProfile,
+    effective_permissions: crate::skill_perms::PhasedEffective,
     /// Pre-LLM inbound interceptors. The slash-command interceptor
     /// (#79) is registered by default; additional interceptors plug
     /// in via [`Self::attach_interceptor`]. The chain runs at the
@@ -319,7 +320,7 @@ impl Agent {
             subagent_depth: 0,
             auto_deny_above_tier: None,
             restrict_tools: None,
-            effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
+            effective_permissions: crate::skill_perms::PhasedEffective::default(),
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
@@ -403,7 +404,7 @@ impl Agent {
             subagent_depth: 0,
             auto_deny_above_tier: None,
             restrict_tools: None,
-            effective_permissions: crate::skill_perms::EffectiveProfile::Legacy,
+            effective_permissions: crate::skill_perms::PhasedEffective::default(),
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
@@ -639,7 +640,11 @@ impl Agent {
         // effective egress allow-set (#76 Phase 2.2).
         self.tools
             .set_egress_enforcement(crate::egress::EgressEnforcement::from_profile(&effective));
-        self.effective_permissions = effective;
+        // Re-attach clears any active phase overlay: attach_skills can
+        // unload the skill that set it, and a dangling overlay outside
+        // its skill's lifetime would be a security regression. Skills
+        // re-enter the phase explicitly on the next turn if needed.
+        self.effective_permissions = crate::skill_perms::PhasedEffective::from_base(effective);
         self.skills = skills;
         self.wasm_skills = wasm_skills;
         self.rebuild_system_prompt();
@@ -735,22 +740,96 @@ impl Agent {
     /// event is emitted and the call short-circuits.
     fn check_inference_or_deny(&self) -> Result<(), AgentError> {
         let provider = &self.llm.config().provider;
-        if self.effective_permissions.allows_provider(provider) {
-            return Ok(());
+        match self.effective_permissions.gate_provider(provider) {
+            crate::skill_perms::GateDecision::Allow => Ok(()),
+            crate::skill_perms::GateDecision::DeniedByPhase { phase_name, axis } => {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SkillPermissionDenied {
+                        axis: axis.axis_label().to_string(),
+                        requested: provider.clone(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                        denied_reason: SkillDeniedReason::Phase {
+                            phase_name: phase_name.clone(),
+                        },
+                    },
+                )?;
+                Err(AgentError::PermissionDenied(format!(
+                    "inference provider '{provider}' is denied by active phase '{phase_name}'"
+                )))
+            }
+            crate::skill_perms::GateDecision::DeniedByProfile => {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SkillPermissionDenied {
+                        axis: "inference".to_string(),
+                        requested: provider.clone(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                        denied_reason: SkillDeniedReason::Profile,
+                    },
+                )?;
+                Err(AgentError::PermissionDenied(format!(
+                    "inference provider '{provider}' is not in the agent's effective \
+                     skill permissions inference.allow set"
+                )))
+            }
         }
-        self.log_event(
+    }
+
+    /// Install a phase deny overlay for the remainder of the current
+    /// turn. Returns [`crate::skill_perms::PhaseError::AlreadyActive`]
+    /// when an overlay is already active; the caller (slice 3's
+    /// `wirken_enter_phase` host fn) must exit the prior phase before
+    /// entering a new one.
+    ///
+    /// Audit emission for the matching `PhaseEntered` row lands in
+    /// slice 3 alongside the host-fn wiring. Slice 2 exposes the
+    /// in-process mutator so unit tests can exercise the gate path.
+    pub fn enter_phase(
+        &mut self,
+        overlay: crate::skill_perms::PhaseDenyOverlay,
+    ) -> Result<(), crate::skill_perms::PhaseError> {
+        self.effective_permissions.enter_phase(overlay)
+    }
+
+    /// The currently-active phase overlay, if any. Read-only inspection
+    /// surface for tests and operator tooling.
+    pub fn current_phase(&self) -> Option<&crate::skill_perms::PhaseDenyOverlay> {
+        self.effective_permissions.overlay()
+    }
+
+    /// Turn-end auto-exit for any active phase deny overlay. Mirrors
+    /// `factory.evict`'s posture: emission failures are logged and
+    /// swallowed because the in-memory clear has already happened, so
+    /// a missed audit row is a reconciliation issue, not a correctness
+    /// one. The reason is fixed to `TurnEnd`; skill-initiated exits
+    /// (`PhaseChange`) and skill-unload exits (`SkillUnloaded`) come
+    /// from slice 3's host-fn surface.
+    ///
+    /// `pub(crate)` so tests in `tests.rs` can drive the auto-exit
+    /// path without spinning up a real LLM round trip via
+    /// `process_message_inner`.
+    pub(crate) fn clear_phase_at_turn_end(&mut self) {
+        let Some(overlay) = self.effective_permissions.exit_phase() else {
+            return;
+        };
+        if let Err(err) = self.log_event(
             TrustLevel::System,
-            SessionEvent::SkillPermissionDenied {
-                axis: "inference".to_string(),
-                requested: provider.clone(),
-                agent_id: self.id.clone(),
-                trigger: self.current_trigger.clone(),
+            SessionEvent::PhaseExited {
+                skill_id: overlay.skill_id.clone(),
+                phase_name: overlay.phase_name.clone(),
+                reason: PhaseExitReason::TurnEnd,
             },
-        )?;
-        Err(AgentError::PermissionDenied(format!(
-            "inference provider '{provider}' is not in the agent's effective \
-             skill permissions inference.allow set"
-        )))
+        ) {
+            tracing::warn!(
+                agent_id = %self.id,
+                phase_name = %overlay.phase_name,
+                error = %err,
+                "agent: failed to emit PhaseExited(TurnEnd); in-memory clear already applied"
+            );
+        }
     }
 
     /// Attach a signing identity for session attestation. Item 8
@@ -1246,6 +1325,29 @@ impl Agent {
         max_rounds_budget: Option<usize>,
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
+        let result = self
+            .process_message_turn(user_message, inbound_id, max_rounds_budget, inbound)
+            .await;
+        // Turn-end auto-exit for any active phase deny overlay. Runs
+        // regardless of how the turn ended (Ok, Err, or dedup short-
+        // circuit) so a skill that crashes mid-phase does not leave
+        // a dangling overlay across turns. Best-effort: audit-emit
+        // failures are logged and swallowed because the in-memory
+        // clear has already happened.
+        self.clear_phase_at_turn_end();
+        result
+    }
+
+    /// The body of [`Self::process_message_inner`] before the
+    /// turn-end auto-exit was wrapped around it. Pure refactor;
+    /// shape unchanged from the slice-1 baseline.
+    async fn process_message_turn(
+        &mut self,
+        user_message: &str,
+        inbound_id: String,
+        max_rounds_budget: Option<usize>,
+        inbound: InboundContext,
+    ) -> Result<ProcessResult, AgentError> {
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             return Ok(replay);
         }
@@ -1559,6 +1661,25 @@ impl Agent {
     /// Streaming counterpart to [`Self::process_inbound`]: carries
     /// adapter/sender identity into the `UserMessage` event.
     pub async fn process_message_stream_with(
+        &mut self,
+        user_message: &str,
+        inbound_id: String,
+        tx: tokio::sync::mpsc::Sender<StreamEvent>,
+        inbound: InboundContext,
+    ) -> Result<ProcessResult, AgentError> {
+        let result = self
+            .process_message_stream_turn(user_message, inbound_id, tx, inbound)
+            .await;
+        // Same turn-end auto-exit as the non-streaming path. See
+        // `process_message_inner` for the rationale.
+        self.clear_phase_at_turn_end();
+        result
+    }
+
+    /// Body of [`Self::process_message_stream_with`] before the
+    /// turn-end auto-exit wrap. Pure refactor; shape unchanged from
+    /// the slice-1 baseline.
+    async fn process_message_stream_turn(
         &mut self,
         user_message: &str,
         inbound_id: String,
@@ -1911,60 +2032,117 @@ impl Agent {
         // we re-check at dispatch in case the LLM ignores the surface.
         // `EffectiveProfile::Legacy` short-circuits — agents with no
         // skills attached, or with any Legacy skill, retain full surface.
-        if !self.effective_permissions.allows_tool(name) {
-            self.log_event(
-                TrustLevel::System,
-                SessionEvent::SkillPermissionDenied {
-                    axis: "tools".to_string(),
-                    requested: name.to_string(),
-                    agent_id: self.id.clone(),
-                    trigger: self.current_trigger.clone(),
-                },
-            )?;
-            return Ok(crate::tool::ToolResult {
-                output: format!("tool '{name}' is not in the agent's effective skill permissions"),
-                success: false,
-            });
+        match self.effective_permissions.gate_tool(name) {
+            crate::skill_perms::GateDecision::Allow => {}
+            crate::skill_perms::GateDecision::DeniedByPhase { phase_name, axis } => {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SkillPermissionDenied {
+                        axis: axis.axis_label().to_string(),
+                        requested: name.to_string(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                        denied_reason: SkillDeniedReason::Phase {
+                            phase_name: phase_name.clone(),
+                        },
+                    },
+                )?;
+                return Ok(crate::tool::ToolResult {
+                    output: format!("tool '{name}' is denied by active phase '{phase_name}'"),
+                    success: false,
+                });
+            }
+            crate::skill_perms::GateDecision::DeniedByProfile => {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::SkillPermissionDenied {
+                        axis: "tools".to_string(),
+                        requested: name.to_string(),
+                        agent_id: self.id.clone(),
+                        trigger: self.current_trigger.clone(),
+                        denied_reason: SkillDeniedReason::Profile,
+                    },
+                )?;
+                return Ok(crate::tool::ToolResult {
+                    output: format!(
+                        "tool '{name}' is not in the agent's effective skill permissions"
+                    ),
+                    success: false,
+                });
+            }
         }
 
         // Filesystem gate (#76 Phase 2.3): inner tighter check on top of
         // the cap-std workspace scope. cap-std refuses absolute paths and
         // parent traversal at the syscall layer; this gate enforces the
         // skill-declared `filesystem.{read,write}_paths` allowlist on top
-        // of that. Two-layer defense — cap-std is the outer guarantee,
+        // of that. Two-layer defense: cap-std is the outer guarantee,
         // the permission profile is the inner allowlist. `Legacy`
         // short-circuits.
         if let Some((axis, requested)) = self.fs_axis_for_call(name, arguments) {
-            let allowed = match axis {
-                FsAxis::Read => self.effective_permissions.allows_read_path(&requested),
-                FsAxis::Write => self.effective_permissions.allows_write_path(&requested),
+            let decision = match axis {
+                FsAxis::Read => self.effective_permissions.gate_read_path(&requested),
+                FsAxis::Write => self.effective_permissions.gate_write_path(&requested),
             };
-            if !allowed {
-                let axis_str = match axis {
-                    FsAxis::Read => "filesystem.read",
-                    FsAxis::Write => "filesystem.write",
-                };
-                self.log_event(
-                    TrustLevel::System,
-                    SessionEvent::SkillPermissionDenied {
-                        axis: axis_str.to_string(),
-                        requested: requested.display().to_string(),
-                        agent_id: self.id.clone(),
-                        trigger: self.current_trigger.clone(),
-                    },
-                )?;
-                return Ok(crate::tool::ToolResult {
-                    output: format!(
-                        "{} on path '{}' is not in the agent's effective skill permissions {} allow-set",
-                        match axis {
-                            FsAxis::Read => "read",
-                            FsAxis::Write => "write",
+            match decision {
+                crate::skill_perms::GateDecision::Allow => {}
+                crate::skill_perms::GateDecision::DeniedByPhase {
+                    phase_name,
+                    axis: phase_axis,
+                } => {
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::SkillPermissionDenied {
+                            axis: phase_axis.axis_label().to_string(),
+                            requested: requested.display().to_string(),
+                            agent_id: self.id.clone(),
+                            trigger: self.current_trigger.clone(),
+                            denied_reason: SkillDeniedReason::Phase {
+                                phase_name: phase_name.clone(),
+                            },
                         },
-                        requested.display(),
-                        axis_str,
-                    ),
-                    success: false,
-                });
+                    )?;
+                    return Ok(crate::tool::ToolResult {
+                        output: format!(
+                            "{} on path '{}' is denied by active phase '{}'",
+                            match axis {
+                                FsAxis::Read => "read",
+                                FsAxis::Write => "write",
+                            },
+                            requested.display(),
+                            phase_name,
+                        ),
+                        success: false,
+                    });
+                }
+                crate::skill_perms::GateDecision::DeniedByProfile => {
+                    let axis_str = match axis {
+                        FsAxis::Read => "filesystem.read",
+                        FsAxis::Write => "filesystem.write",
+                    };
+                    self.log_event(
+                        TrustLevel::System,
+                        SessionEvent::SkillPermissionDenied {
+                            axis: axis_str.to_string(),
+                            requested: requested.display().to_string(),
+                            agent_id: self.id.clone(),
+                            trigger: self.current_trigger.clone(),
+                            denied_reason: SkillDeniedReason::Profile,
+                        },
+                    )?;
+                    return Ok(crate::tool::ToolResult {
+                        output: format!(
+                            "{} on path '{}' is not in the agent's effective skill permissions {} allow-set",
+                            match axis {
+                                FsAxis::Read => "read",
+                                FsAxis::Write => "write",
+                            },
+                            requested.display(),
+                            axis_str,
+                        ),
+                        success: false,
+                    });
+                }
             }
         }
 
@@ -2099,6 +2277,15 @@ impl Agent {
             // surface a non-success ToolResult to the LLM rather
             // than propagating the error out of the agent.
             Err(AgentError::EgressDenied { host }) => {
+                // Egress denials come from the wrapped HTTP client's
+                // `EgressEnforcement` layer, which is built from the
+                // base `EffectiveProfile` at `attach_skills` time and
+                // does not consult the phase overlay. Phase-deny on
+                // the egress axis is type-prepared (`PhaseAxis::EgressHost`,
+                // `PhasedEffective::gate_host`) but production
+                // coverage waits on a future slice that threads
+                // `PhasedEffective` through `EgressEnforcement`;
+                // until then every egress denial here is profile-shaped.
                 self.log_event(
                     TrustLevel::System,
                     SessionEvent::SkillPermissionDenied {
@@ -2106,6 +2293,7 @@ impl Agent {
                         requested: host.clone(),
                         agent_id: self.id.clone(),
                         trigger: self.current_trigger.clone(),
+                        denied_reason: SkillDeniedReason::Profile,
                     },
                 )?;
                 Ok(crate::tool::ToolResult {
@@ -2926,7 +3114,12 @@ impl Agent {
         };
         // Per-skill permission profile (#76): only surface tools the
         // effective profile allows. `Legacy` admits everything.
-        defs.retain(|d| self.effective_permissions.allows_tool(&d.name));
+        defs.retain(|d| {
+            matches!(
+                self.effective_permissions.gate_tool(&d.name),
+                crate::skill_perms::GateDecision::Allow
+            )
+        });
         defs.sort_by(|a, b| a.name.cmp(&b.name));
         defs
     }

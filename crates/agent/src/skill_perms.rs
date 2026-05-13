@@ -571,6 +571,231 @@ impl PhaseDenyOverlay {
     }
 }
 
+/// The five axes that an Agent's tool-call gate consults. Each gate
+/// call site already knows which axis it represents (a call to
+/// `gate_tool` returning [`GateDecision::DeniedByPhase`] implies
+/// [`PhaseAxis::Tool`]), but carrying the axis on the deny variant
+/// lets the gate site emit a uniform [`SessionEvent::SkillPermissionDenied`]
+/// regardless of which method produced the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseAxis {
+    Tool,
+    EgressHost,
+    PathRead,
+    PathWrite,
+    InferenceProvider,
+}
+
+impl PhaseAxis {
+    /// Stable snake_case label for the `axis` field on
+    /// [`wirken_audit::SessionEvent::SkillPermissionDenied`].
+    /// Matches the strings the runtime already used for the
+    /// profile-denial path (`"tools"`, `"egress"`,
+    /// `"filesystem.read"`, `"filesystem.write"`, `"inference"`) so
+    /// SIEM consumers see one vocabulary across both deny reasons.
+    pub fn axis_label(&self) -> &'static str {
+        match self {
+            Self::Tool => "tools",
+            Self::EgressHost => "egress",
+            Self::PathRead => "filesystem.read",
+            Self::PathWrite => "filesystem.write",
+            Self::InferenceProvider => "inference",
+        }
+    }
+}
+
+/// Result of one gate consultation on [`PhasedEffective`]. Carries
+/// enough discriminator for the gate-site caller to emit the right
+/// audit shape (profile-denial vs phase-denial) without re-querying
+/// the overlay.
+///
+/// Pre-slice-2 the gate methods returned `bool`; the explicit enum
+/// is the typed-reason channel the audit layer needs to distinguish
+/// "phase overlay" from "permission profile mismatch" in the SIEM
+/// chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    /// Tool call is allowed: neither the active overlay (if any) nor
+    /// the base profile refused.
+    Allow,
+    /// An active phase deny overlay refused the call. `phase_name`
+    /// names the phase for SIEM correlation with the triggering
+    /// `PhaseEntered` row; `axis` is the gate axis the overlay
+    /// matched on.
+    DeniedByPhase { phase_name: String, axis: PhaseAxis },
+    /// The base [`EffectiveProfile`] refused the call. The pre-slice-2
+    /// shape: gate site knows its own axis statically, so no extra
+    /// data carried on the variant.
+    DeniedByProfile,
+}
+
+/// Error returned when a skill calls `enter_phase` while a phase
+/// overlay is already active. Single-slot semantics: the host
+/// declines to nest overlays so the audit chain stays unambiguous
+/// (every `PhaseEntered` pairs cleanly with one `PhaseExited`).
+/// Skills MUST call `exit_phase` before `enter_phase`.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PhaseError {
+    #[error("a phase overlay is already active; skill must call exit_phase before enter_phase")]
+    AlreadyActive,
+}
+
+/// Agent-side wrapper layering a phase deny overlay over the base
+/// [`EffectiveProfile`]. Single-slot: at most one overlay is active
+/// at a time. The `gate_*` methods consult the overlay first
+/// (deny short-circuits) and fall through to the base profile,
+/// returning a typed [`GateDecision`] so the audit layer can record
+/// which side denied.
+///
+/// The overlay's lifetime is bounded by the agent turn that owns
+/// it: `enter_phase` is called from inside a turn (slice 3 wires
+/// the WASM host fn), `exit_phase` is called either by the same
+/// skill before the next phase (`PhaseExitReason::PhaseChange`) or
+/// by the host at turn end (`PhaseExitReason::TurnEnd`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PhasedEffective {
+    base: EffectiveProfile,
+    overlay: Option<PhaseDenyOverlay>,
+}
+
+impl PhasedEffective {
+    /// Wrap an [`EffectiveProfile`] with an empty overlay slot.
+    /// Pre-slice-2 callers that held an `EffectiveProfile` directly
+    /// land here via `PhasedEffective::from_base(...)`.
+    pub fn from_base(base: EffectiveProfile) -> Self {
+        Self {
+            base,
+            overlay: None,
+        }
+    }
+
+    /// The base profile underneath the overlay. Existing call sites
+    /// that need an `EffectiveProfile` for non-gate purposes (egress
+    /// enforcement wiring, system-prompt rendering) read it here.
+    pub fn base(&self) -> &EffectiveProfile {
+        &self.base
+    }
+
+    /// The currently-active overlay, if any. Returns `None` outside
+    /// a phase. Read-only access; mutation goes through
+    /// [`Self::enter_phase`] / [`Self::exit_phase`].
+    pub fn overlay(&self) -> Option<&PhaseDenyOverlay> {
+        self.overlay.as_ref()
+    }
+
+    /// Pass-through to [`EffectiveProfile::inference_default`].
+    /// Overlay does not modify inference defaults; only the
+    /// allow/deny decision via [`Self::gate_provider`].
+    pub fn inference_default(&self) -> Option<&str> {
+        self.base.inference_default()
+    }
+
+    /// Gate a tool-call dispatch by tool name.
+    pub fn gate_tool(&self, name: &str) -> GateDecision {
+        if let Some(overlay) = &self.overlay
+            && overlay.denies_tool(name)
+        {
+            return GateDecision::DeniedByPhase {
+                phase_name: overlay.phase_name.clone(),
+                axis: PhaseAxis::Tool,
+            };
+        }
+        if self.base.allows_tool(name) {
+            GateDecision::Allow
+        } else {
+            GateDecision::DeniedByProfile
+        }
+    }
+
+    /// Gate an egress destination host.
+    pub fn gate_host(&self, host: &str) -> GateDecision {
+        if let Some(overlay) = &self.overlay
+            && overlay.denies_host(host)
+        {
+            return GateDecision::DeniedByPhase {
+                phase_name: overlay.phase_name.clone(),
+                axis: PhaseAxis::EgressHost,
+            };
+        }
+        if self.base.allows_host(host) {
+            GateDecision::Allow
+        } else {
+            GateDecision::DeniedByProfile
+        }
+    }
+
+    /// Gate a filesystem read path.
+    pub fn gate_read_path(&self, path: &Path) -> GateDecision {
+        if let Some(overlay) = &self.overlay
+            && overlay.denies_read_path(path)
+        {
+            return GateDecision::DeniedByPhase {
+                phase_name: overlay.phase_name.clone(),
+                axis: PhaseAxis::PathRead,
+            };
+        }
+        if self.base.allows_read_path(path) {
+            GateDecision::Allow
+        } else {
+            GateDecision::DeniedByProfile
+        }
+    }
+
+    /// Gate a filesystem write path.
+    pub fn gate_write_path(&self, path: &Path) -> GateDecision {
+        if let Some(overlay) = &self.overlay
+            && overlay.denies_write_path(path)
+        {
+            return GateDecision::DeniedByPhase {
+                phase_name: overlay.phase_name.clone(),
+                axis: PhaseAxis::PathWrite,
+            };
+        }
+        if self.base.allows_write_path(path) {
+            GateDecision::Allow
+        } else {
+            GateDecision::DeniedByProfile
+        }
+    }
+
+    /// Gate an inference provider selection.
+    pub fn gate_provider(&self, name: &str) -> GateDecision {
+        if let Some(overlay) = &self.overlay
+            && overlay.denies_provider(name)
+        {
+            return GateDecision::DeniedByPhase {
+                phase_name: overlay.phase_name.clone(),
+                axis: PhaseAxis::InferenceProvider,
+            };
+        }
+        if self.base.allows_provider(name) {
+            GateDecision::Allow
+        } else {
+            GateDecision::DeniedByProfile
+        }
+    }
+
+    /// Install `overlay` as the active phase. Errors with
+    /// [`PhaseError::AlreadyActive`] when one is already active;
+    /// the skill must `exit_phase` first. Slice 3 wires this through
+    /// the `wirken_enter_phase` host function.
+    pub fn enter_phase(&mut self, overlay: PhaseDenyOverlay) -> Result<(), PhaseError> {
+        if self.overlay.is_some() {
+            return Err(PhaseError::AlreadyActive);
+        }
+        self.overlay = Some(overlay);
+        Ok(())
+    }
+
+    /// Clear the active overlay, returning it if one was present.
+    /// The caller emits a `PhaseExited` audit row carrying the
+    /// returned overlay's `skill_id` / `phase_name` plus the
+    /// caller-supplied [`wirken_audit::PhaseExitReason`].
+    pub fn exit_phase(&mut self) -> Option<PhaseDenyOverlay> {
+        self.overlay.take()
+    }
+}
+
 /// Union-merge a slice of declared per-skill profiles into one effective
 /// agent profile. Set-typed fields are unioned; wildcards win. The single
 /// scalar field (`inference.default`) must be unanimous among the skills
@@ -1023,5 +1248,191 @@ inference:
         );
         let err = effective_for_skills(&[a, b]).unwrap_err();
         assert!(matches!(err, MergeError::DefaultConflict { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // PhasedEffective + GateDecision (slice 2 per-pass deny overlay)
+    // -----------------------------------------------------------------
+
+    fn overlay_with_tool(phase_name: &str, tool: &str) -> PhaseDenyOverlay {
+        let mut tools = BTreeSet::new();
+        tools.insert(tool.to_string());
+        PhaseDenyOverlay {
+            skill_id: "test-skill".to_string(),
+            phase_name: phase_name.to_string(),
+            entered_at: Utc::now(),
+            tools,
+            ..Default::default()
+        }
+    }
+
+    fn allowed_profile_with_tools(names: &[&str]) -> EffectiveProfile {
+        let mut profile = PermissionProfile::default();
+        let mut set = BTreeSet::new();
+        for n in names {
+            set.insert(n.to_string());
+        }
+        profile.tools.allow = AllowSet::Set(set);
+        EffectiveProfile::Resolved(profile)
+    }
+
+    #[test]
+    fn phased_gate_tool_allow_when_overlay_absent_and_base_allows() {
+        let phased = PhasedEffective::from_base(allowed_profile_with_tools(&["read_file"]));
+        assert_eq!(phased.gate_tool("read_file"), GateDecision::Allow);
+    }
+
+    #[test]
+    fn phased_gate_tool_denied_by_profile_when_overlay_absent_and_base_refuses() {
+        let phased = PhasedEffective::from_base(allowed_profile_with_tools(&["read_file"]));
+        assert_eq!(phased.gate_tool("exec"), GateDecision::DeniedByProfile);
+    }
+
+    #[test]
+    fn phased_gate_tool_denied_by_phase_when_overlay_denies() {
+        let mut phased = PhasedEffective::from_base(allowed_profile_with_tools(&["read_file"]));
+        phased
+            .enter_phase(overlay_with_tool("scoring", "read_file"))
+            .unwrap();
+        assert_eq!(
+            phased.gate_tool("read_file"),
+            GateDecision::DeniedByPhase {
+                phase_name: "scoring".to_string(),
+                axis: PhaseAxis::Tool,
+            },
+        );
+    }
+
+    #[test]
+    fn phased_gate_tool_falls_through_to_base_when_overlay_does_not_match() {
+        // Overlay denies `read_file`; base allows `write_file`. A call
+        // to `write_file` is not in the overlay's denied set, so the
+        // overlay short-circuit is skipped and the base verdict wins.
+        let mut phased = PhasedEffective::from_base(allowed_profile_with_tools(&["write_file"]));
+        phased
+            .enter_phase(overlay_with_tool("scoring", "read_file"))
+            .unwrap();
+        assert_eq!(phased.gate_tool("write_file"), GateDecision::Allow);
+        // And a tool the base also refuses still surfaces as
+        // `DeniedByProfile` (the overlay does not invent allows or
+        // synthesize an axis when it would not have fired).
+        assert_eq!(phased.gate_tool("exec"), GateDecision::DeniedByProfile);
+    }
+
+    #[test]
+    fn phased_exit_phase_clears_overlay_and_base_decision_returns() {
+        let mut phased = PhasedEffective::from_base(allowed_profile_with_tools(&["read_file"]));
+        phased
+            .enter_phase(overlay_with_tool("scoring", "read_file"))
+            .unwrap();
+        let cleared = phased.exit_phase().expect("overlay was active");
+        assert_eq!(cleared.phase_name, "scoring");
+        // The overlay is gone; `read_file` is allowed again by the
+        // base profile alone.
+        assert_eq!(phased.gate_tool("read_file"), GateDecision::Allow);
+        // Calling exit_phase again with no overlay returns None.
+        assert!(phased.exit_phase().is_none());
+    }
+
+    #[test]
+    fn phased_enter_phase_while_active_errors() {
+        let mut phased = PhasedEffective::from_base(allowed_profile_with_tools(&["read_file"]));
+        phased
+            .enter_phase(overlay_with_tool("scoring", "read_file"))
+            .unwrap();
+        let err = phased
+            .enter_phase(overlay_with_tool("framings", "write_file"))
+            .unwrap_err();
+        assert_eq!(err, PhaseError::AlreadyActive);
+        // The original overlay is still active; the second
+        // `enter_phase` did not partially apply.
+        assert_eq!(
+            phased.overlay().map(|o| o.phase_name.as_str()),
+            Some("scoring")
+        );
+    }
+
+    #[test]
+    fn phased_gate_host_overlay_takes_precedence() {
+        let mut profile = PermissionProfile::default();
+        let mut domains = BTreeSet::new();
+        domains.insert("api.example.com".to_string());
+        profile.egress = EgressPolicy {
+            mode: EgressMode::Allowlist,
+            domains: AllowSet::Set(domains),
+        };
+        let mut phased = PhasedEffective::from_base(EffectiveProfile::Resolved(profile));
+
+        // Without overlay: base allows.
+        assert_eq!(phased.gate_host("api.example.com"), GateDecision::Allow);
+
+        // Enter a phase that denies the host.
+        let mut overlay = overlay_with_tool("scoring", "ignored_tool");
+        overlay.egress_hosts.insert("api.example.com".to_string());
+        phased.enter_phase(overlay).unwrap();
+
+        assert_eq!(
+            phased.gate_host("api.example.com"),
+            GateDecision::DeniedByPhase {
+                phase_name: "scoring".to_string(),
+                axis: PhaseAxis::EgressHost,
+            },
+        );
+    }
+
+    #[test]
+    fn phased_gate_paths_overlay_uses_prefix_match() {
+        let mut profile = PermissionProfile::default();
+        profile
+            .filesystem
+            .read_paths
+            .insert(PathBuf::from("/home/x/code"));
+        let mut phased = PhasedEffective::from_base(EffectiveProfile::Resolved(profile));
+
+        // Base allows /home/x/code/anything.
+        assert_eq!(
+            phased.gate_read_path(Path::new("/home/x/code/foo.rs")),
+            GateDecision::Allow,
+        );
+
+        // Overlay denies /home/x/code/secrets; every descendant is
+        // refused even though the base profile allows the parent.
+        let mut overlay = overlay_with_tool("scoring", "ignored");
+        overlay
+            .paths_read
+            .insert(PathBuf::from("/home/x/code/secrets"));
+        phased.enter_phase(overlay).unwrap();
+
+        assert_eq!(
+            phased.gate_read_path(Path::new("/home/x/code/secrets/creds.json")),
+            GateDecision::DeniedByPhase {
+                phase_name: "scoring".to_string(),
+                axis: PhaseAxis::PathRead,
+            },
+        );
+        // Sibling path not under the denied root: still allowed.
+        assert_eq!(
+            phased.gate_read_path(Path::new("/home/x/code/foo.rs")),
+            GateDecision::Allow,
+        );
+    }
+
+    #[test]
+    fn phased_default_is_legacy_with_no_overlay() {
+        // Regression: with the default-constructed PhasedEffective
+        // (matching the `Legacy` pre-slice-2 initializer in
+        // runtime.rs), every gate_* call returns Allow.
+        let phased = PhasedEffective::default();
+        assert_eq!(phased.gate_tool("anything"), GateDecision::Allow);
+        assert_eq!(phased.gate_host("api.example.com"), GateDecision::Allow);
+        assert_eq!(phased.gate_provider("any"), GateDecision::Allow);
+        assert_eq!(
+            phased.gate_read_path(Path::new("/tmp/x")),
+            GateDecision::Allow,
+        );
+        assert_eq!(
+            phased.gate_write_path(Path::new("/tmp/x")),
+            GateDecision::Allow,
+        );
     }
 }

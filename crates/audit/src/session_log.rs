@@ -284,6 +284,32 @@ pub enum PhaseExitReason {
     SkillUnloaded,
 }
 
+/// Why a [`SessionEvent::SkillPermissionDenied`] event fired:
+/// the agent's base permission profile refused the call
+/// (`Profile`), or an active phase deny overlay refused it
+/// (`Phase { phase_name }`). SIEM consumers correlate the
+/// `Phase` variant with the triggering `PhaseEntered` row by
+/// `phase_name`; the `Profile` variant is the pre-slice-2 default
+/// and the only shape any row written before this field existed
+/// carries.
+///
+/// Serde tag = "kind" so the wire shape stays extensible (a future
+/// org-policy variant could land without renaming the existing
+/// two). Defaulted to `Profile` on deserialize so pre-upgrade audit
+/// rows read cleanly without a migration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SkillDeniedReason {
+    /// The agent's effective per-skill permission profile refused
+    /// the call. Pre-slice-2 default; carries no extra data.
+    #[default]
+    Profile,
+    /// An active phase deny overlay refused the call. `phase_name`
+    /// names which phase fired so SIEM consumers can correlate with
+    /// the triggering `PhaseEntered` row for the same agent.
+    Phase { phase_name: String },
+}
+
 /// Outcome of one HTTP fetch as recorded on
 /// [`SessionEvent::HttpFetch`]. The pre-1.2.0 shape was a free-form
 /// string (`"ok"`, `"http_error_404"`, `"network_error"`, ...); the
@@ -570,6 +596,14 @@ pub enum SessionEvent {
         requested: String,
         agent_id: String,
         trigger: Option<String>,
+        /// Why the call was denied: by the base permission profile
+        /// (`Profile`, the pre-slice-2 default) or by an active
+        /// phase deny overlay (`Phase { phase_name }`). Defaulted on
+        /// deserialize so a row written before this field existed
+        /// reads back as `Profile`, matching the only deny path the
+        /// pre-upgrade emit produced.
+        #[serde(default)]
+        denied_reason: SkillDeniedReason,
     },
     /// Zirkel: the librarian ran a perspective-expansion turn for
     /// `topic`. `perspectives` carries the ephemeral noun-phrase
