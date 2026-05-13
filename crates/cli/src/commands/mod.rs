@@ -12,6 +12,7 @@ pub mod lyrik_walks;
 pub mod mcp;
 pub mod mcp_proxy;
 pub mod permission;
+pub mod persona;
 pub mod preset;
 pub mod run;
 pub mod service;

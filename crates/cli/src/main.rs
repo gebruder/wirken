@@ -79,6 +79,19 @@ enum Commands {
     #[command(subcommand)]
     Preset(PresetCommands),
 
+    /// Manage personas (agent + preset bundles)
+    ///
+    /// A persona is an AgentConfig row optionally pointing at a Preset.
+    /// For lower-level access:
+    ///
+    ///   wirken agents: raw AgentConfig CRUD
+    ///   wirken preset: skill-bundle management
+    ///
+    /// Use `wirken persona` for the operator-facing workflow; the
+    /// lower-level commands cover advanced cases.
+    #[command(subcommand)]
+    Persona(PersonaCommands),
+
     /// Run the Zirkel orchestrator (cron or manual)
     #[command(subcommand)]
     Zirkel(ZirkelCommands),
@@ -389,6 +402,87 @@ enum SkillCommands {
 }
 
 #[derive(Subcommand)]
+enum PersonaCommands {
+    /// Create a new persona row in the agent config store.
+    Create {
+        /// Persona name (used as both the AgentConfig id and the display name).
+        name: String,
+        /// Optional preset bundle to attach. May reference a preset that
+        /// is not yet installed; the persona keeps the reference and the
+        /// persona view surfaces a dangling-reference error at lookup.
+        #[arg(long)]
+        preset: Option<String>,
+        /// LLM provider (openai, anthropic, ollama, custom).
+        #[arg(long, default_value = "openai")]
+        provider: String,
+        /// Model id.
+        #[arg(long, default_value = "gpt-4o")]
+        model: String,
+        /// API base URL.
+        #[arg(long, default_value = "https://api.openai.com/v1")]
+        base_url: String,
+        /// Vault credential name for the API key. Empty if the provider
+        /// does not require one (e.g. local ollama).
+        #[arg(long, default_value = "")]
+        credential: String,
+        /// Channels to bind to this persona. Repeat for multiple.
+        #[arg(long)]
+        channel: Vec<String>,
+        /// Child personas this persona may spawn as subagents. Each entry
+        /// is added with the default ceiling (no tools, tier1, 5 rounds,
+        /// 30s); refine via `wirken agents allow-subagent`.
+        #[arg(long)]
+        allow_subagent: Vec<String>,
+    },
+    /// List configured personas.
+    List,
+    /// Show the resolved view (config + preset + skills) for one persona.
+    Show {
+        /// Persona name.
+        name: String,
+    },
+    /// Edit fields on an existing persona. At least one field flag is
+    /// required.
+    Edit {
+        /// Persona name.
+        name: String,
+        /// Replace the preset reference. Conflicts with --clear-preset.
+        #[arg(long, conflicts_with = "clear_preset")]
+        preset: Option<String>,
+        /// Remove the preset reference entirely.
+        #[arg(long, conflicts_with = "preset")]
+        clear_preset: bool,
+        /// New provider.
+        #[arg(long)]
+        provider: Option<String>,
+        /// New model id.
+        #[arg(long)]
+        model: Option<String>,
+        /// New API base URL.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// New vault credential name.
+        #[arg(long)]
+        credential: Option<String>,
+        /// Replace the channel set. Repeat for multiple channels; pass
+        /// the flag at least once to mark a replacement (empty channel
+        /// sets are not editable via this flag; use `wirken agents` for
+        /// that case).
+        #[arg(long)]
+        channel: Vec<String>,
+        /// New display name.
+        #[arg(long)]
+        display_name: Option<String>,
+    },
+    /// Delete a persona row. Workspace and per-agent skill directories
+    /// are left on disk; remove them manually if no longer needed.
+    Delete {
+        /// Persona name.
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum PresetCommands {
     /// List bundled presets that can be installed
     List,
@@ -690,6 +784,57 @@ async fn main() -> Result<()> {
             PresetCommands::Schedule { name } => commands::preset::schedule(&name).await,
             PresetCommands::Unschedule { name } => commands::preset::unschedule(&name).await,
         },
+        Commands::Persona(cmd) => match cmd {
+            PersonaCommands::Create {
+                name,
+                preset,
+                provider,
+                model,
+                base_url,
+                credential,
+                channel,
+                allow_subagent,
+            } => {
+                commands::persona::create(
+                    &name,
+                    preset.as_deref(),
+                    &provider,
+                    &model,
+                    &base_url,
+                    &credential,
+                    channel,
+                    allow_subagent,
+                )
+                .await
+            }
+            PersonaCommands::List => commands::persona::list().await,
+            PersonaCommands::Show { name } => commands::persona::show(&name).await,
+            PersonaCommands::Edit {
+                name,
+                preset,
+                clear_preset,
+                provider,
+                model,
+                base_url,
+                credential,
+                channel,
+                display_name,
+            } => {
+                commands::persona::edit(
+                    &name,
+                    preset.as_deref(),
+                    clear_preset,
+                    provider.as_deref(),
+                    model.as_deref(),
+                    base_url.as_deref(),
+                    credential.as_deref(),
+                    channel,
+                    display_name.as_deref(),
+                )
+                .await
+            }
+            PersonaCommands::Delete { name } => commands::persona::delete(&name).await,
+        },
         Commands::Zirkel(cmd) => match cmd {
             ZirkelCommands::Run => commands::zirkel::run().await,
             ZirkelCommands::Bind {
@@ -764,5 +909,168 @@ async fn main() -> Result<()> {
                 commands::lyrik::report(&format, findings.as_deref(), run.as_deref(), &output).await
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("clap parse failed")
+    }
+
+    #[test]
+    fn persona_create_parses_with_defaults() {
+        let cli = parse(&["wirken", "persona", "create", "alice"]);
+        match cli.command {
+            Commands::Persona(PersonaCommands::Create {
+                name,
+                preset,
+                provider,
+                model,
+                base_url,
+                credential,
+                channel,
+                allow_subagent,
+            }) => {
+                assert_eq!(name, "alice");
+                assert!(preset.is_none());
+                assert_eq!(provider, "openai");
+                assert_eq!(model, "gpt-4o");
+                assert_eq!(base_url, "https://api.openai.com/v1");
+                assert_eq!(credential, "");
+                assert!(channel.is_empty());
+                assert!(allow_subagent.is_empty());
+            }
+            _ => panic!("expected Persona::Create"),
+        }
+    }
+
+    #[test]
+    fn persona_create_parses_with_every_flag() {
+        let cli = parse(&[
+            "wirken",
+            "persona",
+            "create",
+            "alice",
+            "--preset",
+            "researcher",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-sonnet-4-20250514",
+            "--base-url",
+            "https://api.anthropic.com/v1",
+            "--credential",
+            "alice-anthropic-key",
+            "--channel",
+            "slack",
+            "--channel",
+            "teams",
+            "--allow-subagent",
+            "writer",
+        ]);
+        match cli.command {
+            Commands::Persona(PersonaCommands::Create {
+                name,
+                preset,
+                channel,
+                allow_subagent,
+                ..
+            }) => {
+                assert_eq!(name, "alice");
+                assert_eq!(preset.as_deref(), Some("researcher"));
+                assert_eq!(channel, vec!["slack", "teams"]);
+                assert_eq!(allow_subagent, vec!["writer"]);
+            }
+            _ => panic!("expected Persona::Create"),
+        }
+    }
+
+    #[test]
+    fn persona_list_parses() {
+        let cli = parse(&["wirken", "persona", "list"]);
+        assert!(matches!(
+            cli.command,
+            Commands::Persona(PersonaCommands::List)
+        ));
+    }
+
+    #[test]
+    fn persona_show_parses() {
+        let cli = parse(&["wirken", "persona", "show", "alice"]);
+        match cli.command {
+            Commands::Persona(PersonaCommands::Show { name }) => assert_eq!(name, "alice"),
+            _ => panic!("expected Persona::Show"),
+        }
+    }
+
+    #[test]
+    fn persona_edit_with_preset_flag_parses() {
+        let cli = parse(&[
+            "wirken",
+            "persona",
+            "edit",
+            "alice",
+            "--preset",
+            "researcher",
+        ]);
+        match cli.command {
+            Commands::Persona(PersonaCommands::Edit {
+                name,
+                preset,
+                clear_preset,
+                ..
+            }) => {
+                assert_eq!(name, "alice");
+                assert_eq!(preset.as_deref(), Some("researcher"));
+                assert!(!clear_preset);
+            }
+            _ => panic!("expected Persona::Edit"),
+        }
+    }
+
+    #[test]
+    fn persona_edit_with_clear_preset_parses() {
+        let cli = parse(&["wirken", "persona", "edit", "alice", "--clear-preset"]);
+        match cli.command {
+            Commands::Persona(PersonaCommands::Edit {
+                preset,
+                clear_preset,
+                ..
+            }) => {
+                assert!(preset.is_none());
+                assert!(clear_preset);
+            }
+            _ => panic!("expected Persona::Edit"),
+        }
+    }
+
+    #[test]
+    fn persona_edit_rejects_both_preset_and_clear_preset() {
+        let result = Cli::try_parse_from([
+            "wirken",
+            "persona",
+            "edit",
+            "alice",
+            "--preset",
+            "researcher",
+            "--clear-preset",
+        ]);
+        assert!(
+            result.is_err(),
+            "clap must reject --preset and --clear-preset together"
+        );
+    }
+
+    #[test]
+    fn persona_delete_parses() {
+        let cli = parse(&["wirken", "persona", "delete", "alice"]);
+        match cli.command {
+            Commands::Persona(PersonaCommands::Delete { name }) => assert_eq!(name, "alice"),
+            _ => panic!("expected Persona::Delete"),
+        }
     }
 }

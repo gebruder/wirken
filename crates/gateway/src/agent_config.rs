@@ -347,6 +347,63 @@ impl AgentConfigStore {
         Ok(())
     }
 
+    /// Replace every non-key column on an existing row with the
+    /// values in `config`. The row identified by `config.id` is
+    /// overwritten; channel bindings are reset to the new
+    /// `config.channels` set. Errors if no row with that id exists.
+    /// Used by the persona-edit flow for read-modify-write updates;
+    /// per-field setters above remain available for targeted writes
+    /// that do not want to round-trip the whole row.
+    pub fn update(&self, config: &AgentConfig) -> Result<(), GatewayError> {
+        let allowed_subagents_json = serde_json::to_string(&config.allowed_subagents)
+            .map_err(|e| GatewayError::Config(format!("serialize allowed_subagents: {e}")))?;
+        let tools_enabled_str = config
+            .tools_enabled
+            .map(|b| if b { "true" } else { "false" });
+
+        let changes = self.conn.execute(
+            "UPDATE agents
+             SET name = ?2, provider = ?3, model = ?4, base_url = ?5,
+                 api_key_credential = ?6, allowed_subagents = ?7,
+                 tools_enabled = ?8, preset = ?9
+             WHERE id = ?1",
+            params![
+                config.id,
+                config.name,
+                config.provider,
+                config.model,
+                config.base_url,
+                config.api_key_credential,
+                allowed_subagents_json,
+                tools_enabled_str,
+                config.preset,
+            ],
+        )?;
+        if changes == 0 {
+            return Err(GatewayError::Config(format!(
+                "agent '{}' not found",
+                config.id
+            )));
+        }
+
+        // Replace this agent's channel set. Channel collisions with
+        // other agents are left alone; the `bind_channel` path remains
+        // the operator-facing route that enforces single-agent-per-
+        // channel routing.
+        self.conn.execute(
+            "DELETE FROM agent_channels WHERE agent_id = ?1",
+            params![config.id],
+        )?;
+        for channel in &config.channels {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO agent_channels (agent_id, channel) VALUES (?1, ?2)",
+                params![config.id, channel],
+            )?;
+        }
+
+        Ok(())
+    }
+
     fn get_channels(&self, agent_id: &str) -> Result<Vec<String>, GatewayError> {
         let mut stmt = self
             .conn
@@ -611,6 +668,96 @@ mod tests {
             .unwrap();
         let got = store.get("legacy").unwrap();
         assert!(got.allowed_subagents.is_empty());
+    }
+
+    #[test]
+    fn update_round_trips_full_row_including_preset() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+
+        store
+            .register(&AgentConfig {
+                id: "alice".into(),
+                name: "Alice".into(),
+                provider: "openai".into(),
+                model: "gpt-4o".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_credential: "alice-key".into(),
+                channels: vec!["slack".into()],
+                allowed_subagents: Default::default(),
+                tools_enabled: None,
+                preset: None,
+            })
+            .unwrap();
+
+        let updated = AgentConfig {
+            id: "alice".into(),
+            name: "Alice Updated".into(),
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-20250514".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            api_key_credential: "alice-anthropic-key".into(),
+            channels: vec!["discord".into(), "telegram".into()],
+            allowed_subagents: Default::default(),
+            tools_enabled: Some(true),
+            preset: Some("researcher".into()),
+        };
+        store.update(&updated).unwrap();
+
+        let got = store.get("alice").unwrap();
+        assert_eq!(got.name, "Alice Updated");
+        assert_eq!(got.provider, "anthropic");
+        assert_eq!(got.preset.as_deref(), Some("researcher"));
+        assert_eq!(got.tools_enabled, Some(true));
+        assert_eq!(got.channels, vec!["discord", "telegram"]);
+    }
+
+    #[test]
+    fn update_errors_when_row_missing() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        let cfg = AgentConfig {
+            id: "ghost".into(),
+            name: "Ghost".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_credential: String::new(),
+            channels: vec![],
+            allowed_subagents: Default::default(),
+            tools_enabled: None,
+            preset: None,
+        };
+        let err = store.update(&cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("not found"),
+            "expected not-found error, got: {err}",
+        );
+    }
+
+    #[test]
+    fn update_clears_preset_when_set_to_none() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+
+        let mut cfg = AgentConfig {
+            id: "bob".into(),
+            name: "Bob".into(),
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_credential: String::new(),
+            channels: vec![],
+            allowed_subagents: Default::default(),
+            tools_enabled: None,
+            preset: Some("starter".into()),
+        };
+        store.register(&cfg).unwrap();
+        assert_eq!(store.get("bob").unwrap().preset.as_deref(), Some("starter"));
+
+        cfg.preset = None;
+        store.update(&cfg).unwrap();
+        assert!(store.get("bob").unwrap().preset.is_none());
     }
 
     #[test]
