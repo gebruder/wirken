@@ -22,7 +22,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-toml = "0.8"
+toml = "0.9"
 feed-rs = "2"
 chrono = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
