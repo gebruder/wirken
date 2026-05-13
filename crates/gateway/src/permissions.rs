@@ -464,29 +464,50 @@ impl PermissionStore {
         approved_by: &str,
         scope: ApprovalScope,
     ) -> Result<Approval, GatewayError> {
+        self.approve_with_scope_by_key(&action.approval_key(), agent_id, approved_by, scope)
+    }
+
+    /// Key-driven counterpart to [`Self::approve_with_scope`]. CLI
+    /// callers (`wirken permission approve <action-key>`) already
+    /// have the action key as a string and re-parsing it into a
+    /// typed [`Action`] is lossy (a `shell:ls` key matches
+    /// `Action::ShellExec { pattern: "ls" }` but the original
+    /// pattern was operator input that may have included a path
+    /// prefix). Both forms dispatch through this method so the
+    /// scope-match logic lives in one place.
+    pub fn approve_with_scope_by_key(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+        approved_by: &str,
+        scope: ApprovalScope,
+    ) -> Result<Approval, GatewayError> {
         match scope {
-            ApprovalScope::Persisted => {
-                self.approve_by_key(&action.approval_key(), agent_id, approved_by)
-            }
+            ApprovalScope::Persisted => self.approve_by_key(action_key, agent_id, approved_by),
             ApprovalScope::Session { session_id } => {
-                self.approve_session_scoped(action, agent_id, approved_by, session_id)
+                self.approve_session_scoped_by_key(action_key, agent_id, approved_by, session_id)
             }
         }
     }
 
     /// In-memory session-scoped insert. Internal helper for
-    /// [`Self::approve_with_scope`]. Never writes to SQLite.
-    fn approve_session_scoped(
+    /// [`Self::approve_with_scope_by_key`]. Never writes to SQLite.
+    /// Unlike [`Self::approve_by_key`] this does NOT refuse Tier-3
+    /// shell verbs: session-scoped grants are bounded by session
+    /// lifetime, not the 30-day window that motivated the persisted
+    /// refusal (a "dead row in `wirken permission list`" is the
+    /// failure mode the persisted refusal exists to prevent, and
+    /// the in-memory cache has no such surface).
+    fn approve_session_scoped_by_key(
         &self,
-        action: &Action,
+        action_key: &str,
         agent_id: &str,
         approved_by: &str,
         session_id: String,
     ) -> Result<Approval, GatewayError> {
-        let action_key = action.approval_key();
         let now = Utc::now();
         let approval = Approval {
-            action_key: action_key.clone(),
+            action_key: action_key.to_string(),
             agent_id: agent_id.to_string(),
             approved_at: now,
             approved_by: approved_by.to_string(),
@@ -499,7 +520,7 @@ impl PermissionStore {
             .borrow_mut()
             .entry(session_id)
             .or_default()
-            .insert(action_key, approval.clone());
+            .insert(action_key.to_string(), approval.clone());
         Ok(approval)
     }
 
@@ -736,7 +757,33 @@ pub fn approve_and_log(
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
 ) -> Result<Approval, GatewayError> {
-    let approval = store.approve_with_scope(action, agent_id, approved_by, scope)?;
+    approve_and_log_by_key(
+        store,
+        &action.approval_key(),
+        agent_id,
+        approved_by,
+        scope,
+        log,
+        handle,
+    )
+}
+
+/// Key-driven counterpart to [`approve_and_log`]. CLI callers that
+/// already hold a stringly-typed `action_key` (e.g. read off a
+/// prior `PermissionDenied` audit row) skip the typed [`Action`]
+/// reconstruction. Same emission semantics as [`approve_and_log`]:
+/// every successful approval emits a `PermissionApproved` event,
+/// `session_id` populated iff `scope == Session`.
+pub fn approve_and_log_by_key(
+    store: &PermissionStore,
+    action_key: &str,
+    agent_id: &str,
+    approved_by: &str,
+    scope: ApprovalScope,
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+) -> Result<Approval, GatewayError> {
+    let approval = store.approve_with_scope_by_key(action_key, agent_id, approved_by, scope)?;
     let (scope_kind, session_id) = approval.scope.to_audit_repr();
     log.append(
         handle,
@@ -1333,5 +1380,62 @@ mod tier_tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn approve_and_log_by_key_session_path_skips_sqlite() {
+        // The CLI session-scoped surface
+        // (`wirken permission approve <key> --session <id>`) drives
+        // this overload directly with a stringly-typed action key.
+        // Assert: no SQLite row, exactly one PermissionApproved
+        // emitted with session_id populated, and a subsequent
+        // check() inside the same session id is Allowed.
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let perms_tmp = tempfile::NamedTempFile::new().unwrap();
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(perms_tmp.path()).unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+
+        let session = "default/webchat/conv-42";
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+        let approval = super::approve_and_log_by_key(
+            &store,
+            "shell:ls",
+            "default",
+            "operator",
+            session_scope(session),
+            &log,
+            &handle,
+        )
+        .unwrap();
+
+        assert!(approval.scope.is_session_scoped());
+        assert!(store.list("default").unwrap().is_empty());
+
+        let events = log.get_since(&handle, 0).unwrap();
+        let approved_rows: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::PermissionApproved { .. }))
+            .collect();
+        assert_eq!(approved_rows.len(), 1);
+        match &approved_rows[0].event {
+            SessionEvent::PermissionApproved {
+                action_key,
+                scope,
+                session_id,
+                ..
+            } => {
+                assert_eq!(action_key, "shell:ls");
+                assert_eq!(*scope, wirken_audit::ApprovalScopeKind::Session);
+                assert_eq!(session_id.as_deref(), Some(session));
+            }
+            _ => unreachable!(),
+        }
+
+        // check() inside the same session id is Allowed.
+        assert_eq!(
+            store.check(&shell("ls"), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
     }
 }

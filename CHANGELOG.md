@@ -10,6 +10,27 @@ tagged.
 
 ## Unreleased
 
+### Permissions
+
+- Session-scoped approval allowlist. `wirken permission approve
+  <action-key> --session <session-id>` grants an approval that
+  lives in-memory for the named agent session only and is cleared
+  on session end (the `factory.evict` path; a production caller
+  will follow when "wirken sessions close" wiring lands). Without
+  `--session` the command keeps its existing 30-day persisted
+  behaviour. Session-scoped grants are recorded in the per-session
+  hash chain as `SessionEvent::PermissionApproved` with
+  `scope: Session` and replayed from the log on next agent wake,
+  so an active grant survives a crash and a clean
+  `SessionScopedApprovalsCleared` tombstone is respected on
+  replay. `PermissionCheck` consults the in-memory cache before
+  the SQLite lookup; a session-scoped grant overrides any tier
+  for the duration of its session. The CLI persisted path stays
+  silent on the audit chain by design (operator-initiated
+  persisted grants are out of band of any single session log; a
+  non-session operator-action audit channel is the future home
+  for those).
+
 ## [1.4.0] - 2026-05-12
 
 ### Skill loading

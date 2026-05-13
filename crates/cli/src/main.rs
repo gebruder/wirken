@@ -254,13 +254,24 @@ enum PermissionCommands {
         #[arg(long, default_value = "default")]
         agent: String,
     },
-    /// Grant a 30-day approval for an action key
+    /// Grant an approval for an action key. Without `--session`,
+    /// writes a 30-day persisted approval to `permissions.db`.
+    /// With `--session <id>`, writes a session-scoped approval that
+    /// lives in-memory for the named agent session only and is
+    /// cleared on session end; the grant is recorded in the
+    /// session's audit chain as `PermissionApproved` and replayed
+    /// from the log on next wake.
     Approve {
-        /// Action key to approve (e.g., shell:sh, file:/path)
+        /// Action key to approve (e.g., shell:ls, file:/path)
         key: String,
         /// Agent ID
         #[arg(long, default_value = "default")]
         agent: String,
+        /// Scope the grant to a single agent session. Pass the
+        /// full session id (`{agent}/{channel}/{conversation}`).
+        /// Without this flag the approval is persisted for 30 days.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Revoke a permission
     Revoke {
@@ -628,9 +639,11 @@ async fn main() -> Result<()> {
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,
-            PermissionCommands::Approve { key, agent } => {
-                commands::permission::approve(&key, &agent).await
-            }
+            PermissionCommands::Approve {
+                key,
+                agent,
+                session,
+            } => commands::permission::approve(&key, &agent, session.as_deref()).await,
             PermissionCommands::Revoke { key, agent } => {
                 commands::permission::revoke(&key, &agent).await
             }
