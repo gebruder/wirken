@@ -61,6 +61,18 @@ pub struct AgentConfig {
     /// the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_enabled: Option<bool>,
+    /// Slice 1 of the named-persona-bundling feature: optional
+    /// reference to a `Preset` (see `wirken_agent::preset`) by name.
+    /// When set, the persona view materialised by
+    /// `wirken_agent::persona::Persona::materialize` resolves the
+    /// preset at lookup time and surfaces the bundled skills.
+    /// Defaulted on deserialize so pre-slice-1 rows / serialized
+    /// configs continue to read as `None` (no preset reference); a
+    /// row whose preset name later disappears surfaces as a
+    /// `PersonaError::DanglingPresetReference` at materialize time
+    /// rather than at row read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 }
 
 /// Persistent registry of agent configurations.
@@ -111,6 +123,15 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
+        // Persona-bundling slice 1: additive migration for the
+        // optional `preset` reference. NULL default so existing
+        // rows continue to round-trip with `preset = None`.
+        if let Err(e) = conn.execute("ALTER TABLE agents ADD COLUMN preset TEXT DEFAULT NULL", [])
+            && !e.to_string().contains("duplicate column")
+        {
+            return Err(e.into());
+        }
+
         Ok(Self { conn })
     }
 
@@ -122,8 +143,8 @@ impl AgentConfigStore {
             .tools_enabled
             .map(|b| if b { "true" } else { "false" });
         self.conn.execute(
-            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 config.id,
                 config.name,
@@ -133,6 +154,7 @@ impl AgentConfigStore {
                 config.api_key_credential,
                 allowed_subagents_json,
                 tools_enabled_str,
+                config.preset,
             ],
         )?;
 
@@ -191,7 +213,7 @@ impl AgentConfigStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled
+                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset
                  FROM agents WHERE id = ?1",
                 params![agent_id],
                 |row| {
@@ -204,6 +226,7 @@ impl AgentConfigStore {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
@@ -223,13 +246,14 @@ impl AgentConfigStore {
             channels,
             allowed_subagents,
             tools_enabled,
+            preset: row.8,
         })
     }
 
     /// List all agent configs.
     pub fn list(&self) -> Result<Vec<AgentConfig>, GatewayError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled
+            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset
              FROM agents ORDER BY id",
         )?;
 
@@ -243,6 +267,7 @@ impl AgentConfigStore {
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
 
@@ -257,6 +282,7 @@ impl AgentConfigStore {
                 api_key_credential,
                 allowed_subagents_json,
                 tools_enabled_raw,
+                preset,
             ) = row?;
             let channels = self.get_channels(&id)?;
             let allowed_subagents = parse_allowed_subagents(&allowed_subagents_json)?;
@@ -271,6 +297,7 @@ impl AgentConfigStore {
                 channels,
                 allowed_subagents,
                 tools_enabled,
+                preset,
             });
         }
 
@@ -372,6 +399,7 @@ mod tests {
             channels: vec!["slack".into(), "teams".into()],
             allowed_subagents: Default::default(),
             tools_enabled: None,
+            preset: None,
         };
 
         store.register(&config).unwrap();
@@ -399,6 +427,7 @@ mod tests {
                 channels: vec!["telegram".into(), "discord".into()],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
 
@@ -413,6 +442,7 @@ mod tests {
                 channels: vec!["slack".into()],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
 
@@ -438,6 +468,7 @@ mod tests {
                 channels: vec!["telegram".into()],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
 
@@ -462,6 +493,7 @@ mod tests {
                 channels: vec!["telegram".into()],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
         store
@@ -475,6 +507,7 @@ mod tests {
                 channels: vec![],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
 
@@ -505,6 +538,7 @@ mod tests {
                     channels: vec!["discord".into()],
                     allowed_subagents: Default::default(),
                     tools_enabled: None,
+                    preset: None,
                 })
                 .unwrap();
         }
@@ -541,6 +575,7 @@ mod tests {
             channels: vec!["slack".into()],
             allowed_subagents: ceilings,
             tools_enabled: None,
+            preset: None,
         };
         store.register(&cfg).unwrap();
 
@@ -571,6 +606,7 @@ mod tests {
                 channels: vec![],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
         let got = store.get("legacy").unwrap();
@@ -592,6 +628,7 @@ mod tests {
                 channels: vec![],
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
+                preset: None,
             })
             .unwrap();
         let mut ceilings = BTreeMap::new();

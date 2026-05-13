@@ -12,6 +12,7 @@ pub mod inbound_interceptor;
 pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
+pub mod persona;
 pub mod preset;
 pub mod rate_limit;
 pub mod recovery;

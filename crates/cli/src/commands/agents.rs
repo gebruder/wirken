@@ -141,6 +141,7 @@ pub async fn add() -> Result<()> {
         channels: channels.clone(),
         allowed_subagents: Default::default(),
         tools_enabled: None,
+        preset: None,
     };
 
     agent_store
