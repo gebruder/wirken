@@ -1,6 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::GatewayError;
@@ -250,9 +252,21 @@ fn canonical_agent_id(agent_id: &str) -> &str {
 }
 
 /// Permission store backed by SQLite.
+///
+/// `session_cache` holds session-scoped approvals: nested map of
+/// `session_id` (the full `{agent}/{channel}/{conversation}` form
+/// the runtime passes into `check`) to `action_key` to `Approval`.
+/// Pure in-memory; never persisted, never consulted by `list()`.
+/// `RefCell` matches the existing interior-mutability posture (the
+/// `rusqlite::Connection` field also mutates through `&self`); the
+/// outer `Arc<Mutex<PermissionStore>>` that callers hold (see
+/// `crates/agent/src/runtime.rs:2049-2051`) provides the
+/// thread-safety bound, so a finer-grained inner lock would be
+/// redundant.
 pub struct PermissionStore {
     conn: Connection,
     default_expiry_days: u32,
+    session_cache: RefCell<HashMap<String, HashMap<String, Approval>>>,
 }
 
 impl PermissionStore {
@@ -287,6 +301,7 @@ impl PermissionStore {
         let mut store = Self {
             conn,
             default_expiry_days: 30,
+            session_cache: RefCell::new(HashMap::new()),
         };
         store.prune_non_tier2_shell_approvals()?;
         Ok(store)
@@ -344,7 +359,33 @@ impl PermissionStore {
     /// - Ok(true) for Tier 1 (always allowed) or approved Tier 2
     /// - Ok(false) for unapproved Tier 2 or any Tier 3
     /// - Err for database errors
+    ///
+    /// Session-scoped approvals win over persisted ones: the cache is
+    /// consulted against the raw `agent_id` (which the runtime passes
+    /// as the full `{agent}/{channel}/{conversation}` form, matching
+    /// the `session_id` recorded under `ApprovalScope::Session`)
+    /// before the canonical-prefix SQLite lookup.
     pub fn check(&self, action: &Action, agent_id: &str) -> Result<PermissionCheck, GatewayError> {
+        // Session-cache short-circuit. Applies to every tier so a
+        // Tier 3 action could in principle be session-granted in a
+        // future slice; for now the only emitters target Tier 2, but
+        // gating the lookup on tier here would make session-scoped
+        // semantics tier-coupled in a way the data model is not.
+        let session_hit = {
+            let cache = self.session_cache.borrow();
+            cache
+                .get(agent_id)
+                .and_then(|per_session| {
+                    per_session
+                        .contains_key(&action.approval_key())
+                        .then_some(())
+                })
+                .is_some()
+        };
+        if session_hit {
+            return Ok(PermissionCheck::Allowed);
+        }
+
         let agent_id = canonical_agent_id(agent_id);
         match action.tier() {
             PermissionTier::Tier1 => Ok(PermissionCheck::Allowed),
@@ -374,13 +415,90 @@ impl PermissionStore {
     }
 
     /// Record an approval for a Tier 2 action.
+    ///
+    /// Defaults to [`ApprovalScope::Persisted`]; for session-scoped
+    /// grants call [`Self::approve_with_scope`] directly.
     pub fn approve(
         &self,
         action: &Action,
         agent_id: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
-        self.approve_by_key(&action.approval_key(), agent_id, approved_by)
+        self.approve_with_scope(action, agent_id, approved_by, ApprovalScope::Persisted)
+    }
+
+    /// Record an approval with an explicit scope. Persisted grants go
+    /// to SQLite via [`Self::approve_by_key`]; session-scoped grants
+    /// land in the in-memory cache keyed on `scope.session_id`. The
+    /// caller-supplied `agent_id` is used by both paths (canonicalized
+    /// for SQLite, recorded verbatim on the in-memory `Approval`), so
+    /// the audit emitter (slice 3) can record both fields without
+    /// re-deriving either.
+    ///
+    /// Session-scoped approvals do not have a meaningful time-based
+    /// expiry; the cache lookup in [`Self::check`] does not consult
+    /// `expires_at`. The field is populated with
+    /// `DateTime::<Utc>::MAX_UTC` as a sentinel so a future caller
+    /// reading the `Approval` directly does not interpret a stale
+    /// 30-day window as "still valid" or "already expired"; both are
+    /// wrong, and a far-future value makes the intent explicit.
+    pub fn approve_with_scope(
+        &self,
+        action: &Action,
+        agent_id: &str,
+        approved_by: &str,
+        scope: ApprovalScope,
+    ) -> Result<Approval, GatewayError> {
+        match scope {
+            ApprovalScope::Persisted => {
+                self.approve_by_key(&action.approval_key(), agent_id, approved_by)
+            }
+            ApprovalScope::Session { session_id } => {
+                self.approve_session_scoped(action, agent_id, approved_by, session_id)
+            }
+        }
+    }
+
+    /// In-memory session-scoped insert. Internal helper for
+    /// [`Self::approve_with_scope`]. Never writes to SQLite.
+    fn approve_session_scoped(
+        &self,
+        action: &Action,
+        agent_id: &str,
+        approved_by: &str,
+        session_id: String,
+    ) -> Result<Approval, GatewayError> {
+        let action_key = action.approval_key();
+        let now = Utc::now();
+        let approval = Approval {
+            action_key: action_key.clone(),
+            agent_id: agent_id.to_string(),
+            approved_at: now,
+            approved_by: approved_by.to_string(),
+            expires_at: DateTime::<Utc>::MAX_UTC,
+            scope: ApprovalScope::Session {
+                session_id: session_id.clone(),
+            },
+        };
+        self.session_cache
+            .borrow_mut()
+            .entry(session_id)
+            .or_default()
+            .insert(action_key, approval.clone());
+        Ok(approval)
+    }
+
+    /// Drop every session-scoped approval recorded under `session_id`.
+    /// Returns the number of action-keys removed; zero when the
+    /// session had no entries (clean-shutdown path on a fresh session
+    /// is the common no-op caller). The session-id row is removed
+    /// from the cache so a subsequent re-use of the same id starts
+    /// from an empty set.
+    pub fn clear_session_scope(&self, session_id: &str) -> u32 {
+        match self.session_cache.borrow_mut().remove(session_id) {
+            Some(per_session) => per_session.len() as u32,
+            None => 0,
+        }
     }
 
     /// Record an approval using a pre-computed action key. Callers
@@ -810,5 +928,200 @@ mod tier_tests {
             store.check(&shell("cat"), "default").unwrap(),
             PermissionCheck::Allowed,
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Session-scoped approval cache (slice 2)
+    // -----------------------------------------------------------------
+
+    fn session_scope(id: &str) -> ApprovalScope {
+        ApprovalScope::Session {
+            session_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn session_scoped_approval_does_not_write_to_sqlite() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let session = "default/webchat/conv-1";
+
+        let approval = store
+            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .unwrap();
+        // The returned Approval carries the session scope verbatim.
+        assert!(approval.scope.is_session_scoped());
+        assert_eq!(approval.scope.session_id(), Some(session));
+
+        // SQLite-side enumeration must show no rows: list() only
+        // reads SQLite, so an empty list proves the cache write did
+        // not leak into the durable store.
+        let persisted = store.list("default").unwrap();
+        assert!(
+            persisted.is_empty(),
+            "session-scoped approve must not write to SQLite, found: {:?}",
+            persisted.iter().map(|a| &a.action_key).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn check_returns_allow_for_session_scoped_grant_within_same_session() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let session = "default/webchat/conv-1";
+
+        // Baseline: no grant, Tier 2 needs approval.
+        assert_eq!(
+            store.check(&shell("ls"), session).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+
+        store
+            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .unwrap();
+
+        // Same session id passed to check resolves to Allowed.
+        // Two calls in a row prove the cache survives the first read.
+        assert_eq!(
+            store.check(&shell("ls"), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+        assert_eq!(
+            store.check(&shell("ls"), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+    }
+
+    #[test]
+    fn session_scoped_grant_does_not_leak_to_other_sessions() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let granted = "default/webchat/conv-1";
+        let other = "default/webchat/conv-2";
+
+        store
+            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(granted))
+            .unwrap();
+
+        // Different session id under the same logical agent: still
+        // needs approval. Session-scoping is finer than the
+        // canonical-agent-id lookup the SQLite path uses.
+        assert_eq!(
+            store.check(&shell("ls"), other).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+
+        // Bare agent id (no `/`) is also not the session id and must
+        // fall through to the SQLite path, which is empty.
+        assert_eq!(
+            store.check(&shell("ls"), "default").unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+    }
+
+    #[test]
+    fn clear_session_scope_removes_entries_and_returns_count() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let session = "default/telegram/chat-7";
+
+        store
+            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .unwrap();
+        store
+            .approve_with_scope(&shell("cat"), "default", "operator", session_scope(session))
+            .unwrap();
+        // Separate session must not be cleared by the targeted call.
+        store
+            .approve_with_scope(
+                &shell("head"),
+                "default",
+                "operator",
+                session_scope("default/webchat/other"),
+            )
+            .unwrap();
+
+        let cleared = store.clear_session_scope(session);
+        assert_eq!(cleared, 2, "two action keys lived under this session");
+
+        // Cleared session: back to needing approval.
+        assert_eq!(
+            store.check(&shell("ls"), session).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+        assert_eq!(
+            store.check(&shell("cat"), session).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+        // Untouched session still allowed.
+        assert_eq!(
+            store
+                .check(&shell("head"), "default/webchat/other")
+                .unwrap(),
+            PermissionCheck::Allowed,
+        );
+
+        // Clearing an empty session id is a 0-count no-op.
+        assert_eq!(store.clear_session_scope("nonexistent/session"), 0);
+        // Clearing the same session twice is a 0-count no-op (the
+        // row was already removed).
+        assert_eq!(store.clear_session_scope(session), 0);
+    }
+
+    #[test]
+    fn persisted_approve_path_unchanged_when_session_cache_empty() {
+        // Regression: the cache-first check must not interfere with
+        // the existing SQLite-backed flow when no session-scoped
+        // grant exists. Mirrors `ls_is_first_use_then_silent_until_expiry`
+        // with the cache stable at empty.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        assert_eq!(
+            store.check(&shell("ls"), "default").unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+            },
+        );
+        store.approve(&shell("ls"), "default", "operator").unwrap();
+        assert_eq!(
+            store.check(&shell("ls"), "default").unwrap(),
+            PermissionCheck::Allowed,
+        );
+        // Persisted approvals are still listed by `list()`.
+        let listed = store.list("default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].action_key, "shell:ls");
+        assert!(!listed[0].scope.is_session_scoped());
+    }
+
+    #[test]
+    fn session_scoped_check_wins_over_persisted_lookup() {
+        // Order matters: the cache short-circuit runs before the
+        // SQLite check, so a session-scoped grant covers an action
+        // even when no persisted approval exists. This is the
+        // canonical path slice 3 will exercise via the CLI.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let session = "default/webchat/conv-x";
+        store
+            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(session))
+            .unwrap();
+
+        assert_eq!(
+            store.check(&shell("ls"), session).unwrap(),
+            PermissionCheck::Allowed,
+        );
+        // And the SQLite store is still empty under this agent id.
+        assert!(store.list("default").unwrap().is_empty());
     }
 }
