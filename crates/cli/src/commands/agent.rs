@@ -25,7 +25,10 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // Fall back to legacy provider.json for "default" agent
     if agent_id != "default" {
         anyhow::bail!(
-            "Agent '{agent_id}' not found. Run `wirken agents add` or use --agent default."
+            "Persona / agent '{agent_id}' not found.\n\
+             Run `wirken persona list` to see configured personas,\n\
+             `wirken persona create {agent_id}` to register one,\n\
+             or use --agent default."
         );
     }
 
@@ -213,6 +216,20 @@ async fn send_with_agent_config(
     let shared_skills = cfg.data_dir.join("skills");
     if shared_skills.is_dir() {
         let _ = agent.load_skills(&shared_skills);
+    }
+
+    // Persona-bundling slice 3: resolve the persona's preset
+    // reference (if any) and merge its declared skills into the
+    // agent. The resolver hard-fails on a dangling reference or
+    // load failure so a misconfigured persona surfaces as an
+    // operator-actionable error rather than as silent skill
+    // absence.
+    let presets_dir = cfg.data_dir.join("presets");
+    let preset_skills = super::persona::resolve_for_construction(agent_cfg, &presets_dir)?;
+    if !preset_skills.is_empty() {
+        agent
+            .extend_with_skills(preset_skills)
+            .context("attach preset skills")?;
     }
 
     println!();

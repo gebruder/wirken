@@ -8,10 +8,11 @@
 //! `wirken preset`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use wirken_agent::persona::{Persona, PersonaError};
+use wirken_agent::skill::Skill;
 use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, SubagentCeiling};
 use wirken_gateway::permissions::PermissionTier;
 
@@ -291,6 +292,68 @@ pub async fn delete(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Slice 3 of named persona bundling: resolve the persona's preset
+/// reference into the skill list to attach at agent construction
+/// time. The construction sites (`wirken ask`, `wirken run`'s
+/// per-agent `AgentStaticConfig` build) call this once per agent;
+/// the returned skills are then merged into whatever per-agent and
+/// shared skills the existing loaders pulled in.
+///
+/// Returns:
+/// - `Ok(Vec<Skill>)` with the preset's declared skills, or an empty
+///   vec when `AgentConfig.preset` is `None`.
+/// - `Err(_)` with a formatted operator-facing message (see
+///   [`format_construction_error`]) when the preset reference is
+///   dangling or fails to load. The agent is not constructed in
+///   either error case: a persona that promises skills it can't
+///   deliver is a configuration error, not a warning condition.
+///   `wirken persona show` warns and continues because its job is
+///   inspection; this path errors because its job is execution.
+pub(crate) fn resolve_for_construction(
+    agent_cfg: &AgentConfig,
+    presets_dir: &Path,
+) -> Result<Vec<Skill>> {
+    match Persona::materialize(agent_cfg.clone(), presets_dir) {
+        Ok(persona) => Ok(persona.preset.map(|p| p.skills).unwrap_or_default()),
+        Err(e) => Err(anyhow!("{}", format_construction_error(&agent_cfg.id, &e))),
+    }
+}
+
+/// Pure formatter for the operator-facing construction-time error
+/// message. Both `wirken ask` and `wirken run` route their dangling-
+/// reference / load-failure errors through this so the message stays
+/// identical across surfaces. The two recovery hints (install the
+/// missing preset; clear the reference on the persona) cover both
+/// operator intents; the caller chooses based on what they meant to
+/// configure.
+pub(crate) fn format_construction_error(persona_name: &str, err: &PersonaError) -> String {
+    match err {
+        PersonaError::DanglingPresetReference {
+            preset_name,
+            preset_path,
+            ..
+        } => format!(
+            "persona '{persona_name}' references preset '{preset_name}' which is not installed at {}.\n\
+             Either install the preset:\n    \
+             wirken preset install {preset_name}\n\
+             Or clear the reference:\n    \
+             wirken persona edit {persona_name} --clear-preset",
+            preset_path.display()
+        ),
+        PersonaError::PresetLoadFailed {
+            preset_name,
+            source,
+            ..
+        } => format!(
+            "persona '{persona_name}' preset '{preset_name}' failed to load: {source}.\n\
+             Either reinstall the preset:\n    \
+             wirken preset install {preset_name}\n\
+             Or clear the reference:\n    \
+             wirken persona edit {persona_name} --clear-preset"
+        ),
+    }
+}
+
 /// Resolved-or-not state for the preset half of the persona view.
 /// Constructed once in `show()` and consumed by the formatter so the
 /// formatter stays pure and snapshot-friendly.
@@ -512,5 +575,117 @@ mod tests {
         cfg.api_key_credential = String::new();
         let (out, _) = render_persona_show("alice", &cfg, &PresetState::None);
         assert!(out.contains("credential:   (none)"));
+    }
+
+    // Slice 3 construction-helper tests.
+
+    fn dangling_err() -> PersonaError {
+        PersonaError::DanglingPresetReference {
+            persona_name: "alice".into(),
+            preset_name: "analyst".into(),
+            preset_path: PathBuf::from("/data/presets/analyst"),
+        }
+    }
+
+    #[test]
+    fn format_construction_error_dangling_includes_both_recovery_hints() {
+        let msg = format_construction_error("alice", &dangling_err());
+        assert!(msg.contains("persona 'alice'"));
+        assert!(msg.contains("preset 'analyst'"));
+        assert!(msg.contains("not installed at /data/presets/analyst"));
+        assert!(msg.contains("wirken preset install analyst"));
+        assert!(msg.contains("wirken persona edit alice --clear-preset"));
+    }
+
+    #[test]
+    fn format_construction_error_load_failed_carries_underlying_error_and_hints() {
+        let err = PersonaError::PresetLoadFailed {
+            persona_name: "alice".into(),
+            preset_name: "broken".into(),
+            source: wirken_agent::preset::PresetError::EmptyName,
+        };
+        let msg = format_construction_error("alice", &err);
+        assert!(msg.contains("persona 'alice'"));
+        assert!(msg.contains("preset 'broken'"));
+        assert!(msg.contains("failed to load"));
+        // The two recovery hints are the same shape as the dangling case.
+        assert!(msg.contains("wirken preset install broken"));
+        assert!(msg.contains("wirken persona edit alice --clear-preset"));
+    }
+
+    /// Self-sign a skill bundle so `SkillLoader::load_file` accepts
+    /// it. Mirrors the `sign_for_test` pattern used in
+    /// `crates/agent/src/preset.rs` and slice-1's persona tests.
+    fn sign_skill_for_test(skill_dir: &std::path::Path) {
+        let (secret_hex, _) = wirken_gateway::skill_registry::generate_signing_keypair();
+        let bytes =
+            wirken_gateway::skill_registry::hex_decode_public(&secret_hex).expect("hex decode");
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        let key = ed25519_dalek::SigningKey::from_bytes(&arr);
+        wirken_gateway::skill_registry::sign_skill(skill_dir, &key).expect("sign test skill");
+    }
+
+    fn write_minimal_preset(
+        presets_dir: &std::path::Path,
+        preset_name: &str,
+        skill_dir_name: &str,
+    ) {
+        let preset_dir = presets_dir.join(preset_name);
+        let skill_dir = preset_dir.join("skills").join(skill_dir_name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            preset_dir.join("preset.toml"),
+            format!(
+                r#"[preset]
+name = "{preset_name}"
+description = "test preset"
+version = "0.1.0"
+skills = ["{skill_dir_name}"]
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {skill_dir_name}\ndescription: test skill\ndisable-model-invocation: true\npermissions: {{}}\n---\n"
+            ),
+        )
+        .unwrap();
+        sign_skill_for_test(&skill_dir);
+    }
+
+    #[test]
+    fn resolve_for_construction_returns_empty_when_persona_has_no_preset() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = sample_config();
+        let skills = resolve_for_construction(&cfg, tmp.path()).unwrap();
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn resolve_for_construction_loads_preset_skills_on_success() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_minimal_preset(tmp.path(), "researcher", "test-skill");
+        let mut cfg = sample_config();
+        cfg.preset = Some("researcher".into());
+
+        let skills = resolve_for_construction(&cfg, tmp.path()).unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "test-skill");
+    }
+
+    #[test]
+    fn resolve_for_construction_errors_on_dangling_reference_with_recovery_hints() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut cfg = sample_config();
+        cfg.preset = Some("ghost".into());
+
+        let err = resolve_for_construction(&cfg, tmp.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not installed"));
+        assert!(msg.contains("wirken preset install ghost"));
+        assert!(msg.contains("wirken persona edit alice --clear-preset"));
     }
 }

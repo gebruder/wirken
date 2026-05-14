@@ -104,14 +104,17 @@ enum Commands {
     #[command(subcommand)]
     Lyrik(LyrikCommands),
 
-    /// Send a message to an agent
+    /// Send a message to an agent (also called a persona)
     #[command(name = "ask")]
     Ask {
         /// The message to send
         #[arg(short, long)]
         message: String,
-        /// Agent ID (default: "default")
-        #[arg(long, default_value = "default")]
+        /// Agent / persona name. The two flags are interchangeable;
+        /// every persona is an AgentConfig row keyed by its name, so
+        /// `--agent alice` and `--persona alice` both resolve the
+        /// same row. (default: "default")
+        #[arg(long, visible_alias = "persona", default_value = "default")]
         agent: String,
     },
 

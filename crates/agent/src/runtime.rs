@@ -1061,7 +1061,22 @@ impl Agent {
     /// end. Returns the total skill count after the merge.
     pub fn extend_skills(&mut self, dir: &std::path::Path) -> Result<usize, AgentError> {
         let added = SkillLoader::load_dir(dir)?;
-        for s in added {
+        self.extend_with_skills(added)
+    }
+
+    /// Merge pre-loaded skills into the existing set. Same semantics
+    /// as [`Self::extend_skills`] (last-write-wins on duplicates,
+    /// sort by name, rebuild system prompt) but takes a `Vec<Skill>`
+    /// the caller already loaded. Used by the persona-bundling path
+    /// where `PresetLoader::load_dir` has already validated the
+    /// manifest and signature-checked each declared skill; reloading
+    /// from disk via `extend_skills` would duplicate that work and
+    /// bypass the manifest's declared-skills filter (only declared
+    /// skills are returned by the preset loader; the skills directory
+    /// may contain other `SKILL.md` files the preset author did not
+    /// intend to activate).
+    pub fn extend_with_skills(&mut self, additional: Vec<Skill>) -> Result<usize, AgentError> {
+        for s in additional {
             if let Some(existing) = self.skills.iter_mut().find(|x| x.name == s.name) {
                 *existing = s;
             } else {

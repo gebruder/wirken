@@ -482,6 +482,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 skills.extend(s);
             }
 
+            // Persona-bundling slice 3: merge preset skills into the
+            // static config. A dangling reference or load failure
+            // hard-fails daemon startup so a misconfigured persona
+            // cannot silently route channel traffic to an agent with
+            // no skills. The operator sees the same message
+            // `wirken ask` would print and applies one of the two
+            // recovery hints before the daemon will start.
+            let presets_dir = cfg.data_dir.join("presets");
+            let preset_skills = super::persona::resolve_for_construction(&agent_cfg, &presets_dir)?;
+            skills.extend(preset_skills);
+
             // Bind channels to this agent
             for channel in &agent_cfg.channels {
                 router.bind(RouteBinding {
