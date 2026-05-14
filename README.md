@@ -226,12 +226,12 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Wirken 1.2.x is the current series. 1.2 gets fixes and features; 1.1 gets security fixes only. 1.0 and earlier are unsupported.
+Wirken 1.5.x is the current series. 1.5 gets fixes and features; 1.4 gets security fixes only. 1.3 and earlier are unsupported.
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
 - **16 bundled skills** under `skills/`.
-- **766 tests** in the workspace, all green on main (`cargo test --workspace`).
+- **1452 tests** in the workspace, all green on main (`cargo test --workspace`).
 - **Signed releases.** `checksums.sha256` is signed offline with an Ed25519 SSH key. `install.sh` embeds the public key inline, fetches `checksums.sha256.sig` from the release, and fails closed on any verification failure. See [docs/release-signing.md](docs/release-signing.md) and [KEYS](KEYS).
 
 ## The name
