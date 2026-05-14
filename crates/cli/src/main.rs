@@ -651,6 +651,25 @@ enum McpCommands {
         /// Per-agent mcp.json (default: shared ~/.wirken/mcp.json)
         #[arg(long)]
         agent: Option<String>,
+        /// Explicit scope selection (repeatable). The required floor
+        /// is always included regardless. Skips the interactive
+        /// picker. Mutually exclusive with --no-scopes and
+        /// --all-scopes.
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with_all = ["no_scopes", "all_scopes"]
+        )]
+        scope: Vec<String>,
+        /// Request only the required scope floor; skip the picker.
+        /// Useful for scripted bootstraps that want the minimum.
+        /// Mutually exclusive with --scope and --all-scopes.
+        #[arg(long, conflicts_with_all = ["scope", "all_scopes"])]
+        no_scopes: bool,
+        /// Request every scope in the provider's catalog; skip the
+        /// picker. Mutually exclusive with --scope and --no-scopes.
+        #[arg(long, conflicts_with_all = ["scope", "no_scopes"])]
+        all_scopes: bool,
     },
 }
 
@@ -767,8 +786,15 @@ async fn main() -> Result<()> {
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
         },
         Commands::Mcp(cmd) => match cmd {
-            McpCommands::Authorize { server, agent } => {
-                commands::mcp::authorize(&server, agent.as_deref()).await
+            McpCommands::Authorize {
+                server,
+                agent,
+                scope,
+                no_scopes,
+                all_scopes,
+            } => {
+                commands::mcp::authorize(&server, agent.as_deref(), scope, no_scopes, all_scopes)
+                    .await
             }
         },
         Commands::Skills(cmd) => match cmd {

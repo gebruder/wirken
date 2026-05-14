@@ -23,7 +23,10 @@ mod runner;
 
 pub use error::ProxyError;
 pub use mcp_config::McpConfig;
-pub use oauth::{OAuthCredential, lookup_provider, run_authorization_code_flow, store_oauth};
+pub use oauth::{
+    OAuthCredential, OAuthProvider, ScopeCategory, ScopeChoice, default_selected_scopes,
+    lookup_provider, run_authorization_code_flow, store_oauth,
+};
 pub use runner::run;
 
 #[cfg(test)]

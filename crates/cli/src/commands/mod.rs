@@ -11,6 +11,7 @@ pub mod lyrik_sarif;
 pub mod lyrik_walks;
 pub mod mcp;
 pub mod mcp_proxy;
+pub mod oauth_scope;
 pub mod permission;
 pub mod persona;
 pub mod preset;

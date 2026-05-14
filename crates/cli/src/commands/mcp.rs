@@ -15,6 +15,7 @@ use wirken_mcp_proxy::{
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
+use super::oauth_scope::{ScopeFlags, resolve_scopes, stdin_is_tty};
 
 /// Bootstrap an OAuth credential for one MCP server.
 ///
@@ -23,7 +24,13 @@ use super::config;
 /// runs the authorization code flow against the configured
 /// provider, and stores the resulting tokens in the vault under
 /// the credential name from the server's auth config.
-pub async fn authorize(server: &str, agent: Option<&str>) -> Result<()> {
+pub async fn authorize(
+    server: &str,
+    agent: Option<&str>,
+    scope: Vec<String>,
+    no_scopes: bool,
+    all_scopes: bool,
+) -> Result<()> {
     let cfg = config();
     let mcp_path = match agent {
         Some(a) => cfg.mcp_config_path(a),
@@ -65,11 +72,11 @@ pub async fn authorize(server: &str, agent: Option<&str>) -> Result<()> {
         }
     };
 
-    if lookup_provider(&provider).is_none() {
-        anyhow::bail!(
+    let provider_def = lookup_provider(&provider).ok_or_else(|| {
+        anyhow::anyhow!(
             "unknown OAuth provider '{provider}'. Slice 2 supports: linear, notion, github, google."
-        );
-    }
+        )
+    })?;
 
     let credential_name = credential_ref
         .strip_prefix("vault:")
@@ -84,9 +91,41 @@ pub async fn authorize(server: &str, agent: Option<&str>) -> Result<()> {
     println!("  credential: {credential_name}");
     println!();
 
+    // Bundle A item 3 slice 2: operator-facing scope selection. The
+    // resolver returns the operator's chosen scope set with the
+    // required floor unconditionally included. Required scopes
+    // (per the slice-1 catalog) are non-negotiable; explicit flags
+    // augment the floor, the interactive picker is the default at a
+    // TTY. The result is passed as `extra_scopes` and unioned with
+    // the provider's hardcoded `default_scopes` inside
+    // `run_authorization_code_flow`; slice 3 unifies those layers.
+    let scope_flags = ScopeFlags {
+        scope,
+        no_scopes,
+        all_scopes,
+    };
+    let extra_scopes = resolve_scopes(provider_def, &scope_flags, stdin_is_tty())?;
+
+    println!();
+    println!("  Requesting scopes:");
+    for s in provider_def.default_scopes {
+        println!("    {s}  (provider default)");
+    }
+    for s in &extra_scopes {
+        // Mark required entries so the operator can tell which came
+        // from the floor and which were their explicit pick.
+        let is_required = provider_def.scopes.iter().any(|c| c.id == s && c.required);
+        if is_required {
+            println!("    {s}  (required)");
+        } else {
+            println!("    {s}");
+        }
+    }
+    println!();
+
     // Run the OAuth flow. This opens the user's browser and waits
     // for the redirect.
-    let cred: OAuthCredential = run_authorization_code_flow(&provider, &[])
+    let cred: OAuthCredential = run_authorization_code_flow(&provider, &extra_scopes)
         .await
         .map_err(|e| anyhow::anyhow!("OAuth authorization failed: {e}"))?;
 
