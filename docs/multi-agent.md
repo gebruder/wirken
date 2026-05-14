@@ -2,6 +2,8 @@
 
 Route different channels to different agents, each with its own model, API key, workspace, and skills.
 
+For an operator-facing workflow that bundles agent configuration with a skill preset under a single named handle, see [`personas.md`](personas.md). The `wirken persona` subcommand composes the lower-level `wirken agents` and `wirken preset` surfaces covered on this page.
+
 ## Why
 
 You might want separate agents for separate contexts:

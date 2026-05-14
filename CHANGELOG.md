@@ -10,6 +10,29 @@ tagged.
 
 ## Unreleased
 
+### Personas
+
+- Named persona bundling. `wirken persona create / list / show /
+  edit / delete` subcommands provide an operator-facing handle for
+  an `AgentConfig` row plus an optional reference to a `Preset`
+  (skill bundle). The schema gains a nullable `AgentConfig.preset`
+  column via additive migration, so existing rows continue to
+  round-trip as `preset = None`. `wirken ask --agent <name>` (alias
+  `--persona <name>`) materializes the persona at construction
+  time: identity, provider, channels, and subagent permissions
+  come from the `AgentConfig` row, and the preset's declared
+  skills are merged into the agent alongside the per-agent and
+  shared skill directories. The daemon-side `AgentStaticConfig`
+  build path picks up the same materialization so adapter-routed
+  sessions (Telegram, Signal, etc.) resolve personas identically.
+  A dangling preset reference surfaces differently per surface:
+  `wirken persona show` prints a stderr warning and exits zero
+  (inspection tolerates incomplete state); `wirken ask` and
+  `wirken run` exit non-zero with a structured error message
+  naming both recovery paths (execution refuses to run an agent
+  that cannot deliver its promised skills). See
+  `docs/personas.md`.
+
 ### Permissions
 
 - Session-scoped approval allowlist. `wirken permission approve
