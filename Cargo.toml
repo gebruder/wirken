@@ -66,7 +66,7 @@ capnp = "0.25"
 
 # Sandbox
 wasmtime = "43.0.2"
-bollard = "0.20"
+bollard = "0.21"
 
 # CLI
 clap = { version = "4.6", features = ["derive"] }
