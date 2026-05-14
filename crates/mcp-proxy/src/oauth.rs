@@ -64,7 +64,223 @@ pub struct OAuthProvider {
     /// is fully public-client; users can leave the env var unset
     /// if they registered a public OAuth app.
     pub client_secret_env: Option<&'static str>,
+    /// Bundle A item 3 slice 1: catalog of OAuth scopes the
+    /// interactive picker offers for this provider. The picker
+    /// (slice 2) renders a `dialoguer::MultiSelect` from this
+    /// catalog with `required: true` entries pre-checked and not
+    /// de-selectable. Slice 3 routes the picker's output into the
+    /// authorization URL via the existing `extra_scopes` parameter
+    /// on [`run_authorization_code_flow`]; `default_scopes` above
+    /// stays in place until slice 3 unifies the two.
+    pub scopes: &'static [ScopeChoice],
 }
+
+/// Coarse grouping for picker display order. The picker renders
+/// categories in this order so the most-likely-needed scopes
+/// surface first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeCategory {
+    /// Identity / user info. Typically the required minimum so the
+    /// operator can answer "whose credential is this".
+    Profile,
+    /// Read-only access to provider resources.
+    Read,
+    /// Mutations: create, update, send, delete.
+    Write,
+    /// Administrative or dangerous scopes (org admin, full Drive,
+    /// workflow modification).
+    Admin,
+}
+
+/// One entry in a provider's scope catalog. The picker consumes
+/// `&'static [ScopeChoice]` and renders a `MultiSelect` UI;
+/// `required` scopes are pre-checked and not de-selectable so the
+/// operator cannot submit a scope set the provider would reject or
+/// that leaves wirken unable to identify the credential owner.
+///
+/// Named `ScopeChoice` to distinguish from `oauth2::Scope` (the
+/// protocol-level scope string the `oauth2` crate hands to the
+/// authorization URL builder); the picker offers choices, each
+/// choice maps to one `oauth2::Scope` at flow time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeChoice {
+    /// The OAuth scope string the provider accepts on the
+    /// authorization URL (e.g. `"read"`, `"repo"`,
+    /// `"https://www.googleapis.com/auth/drive.readonly"`).
+    pub id: &'static str,
+    /// One-line operator-facing description of what the scope
+    /// authorizes. Rendered in the picker UI alongside the id.
+    pub description: &'static str,
+    /// Coarse grouping for picker display order.
+    pub category: ScopeCategory,
+    /// `true` when the picker must pre-check and lock this entry.
+    /// Two reasons to mark required: the provider rejects auth
+    /// without this scope (Google rejects empty scope lists, Linear
+    /// requires at least one), or wirken cannot identify the
+    /// credential owner without it (Linear `read`, GitHub
+    /// `read:user`). All other scopes default to `false`; the
+    /// operator picks.
+    pub required: bool,
+}
+
+/// Linear scope catalog. Linear rejects auth requests with no
+/// scope; `read` is the minimum that also identifies the
+/// credential owner.
+const LINEAR_SCOPES: &[ScopeChoice] = &[
+    ScopeChoice {
+        id: "read",
+        description: "Read issues, comments, projects, and basic user identity",
+        category: ScopeCategory::Profile,
+        required: true,
+    },
+    ScopeChoice {
+        id: "write",
+        description: "Create and update issues, comments, projects (broad write)",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "issues:create",
+        description: "Create issues only (narrower than `write`)",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "comments:create",
+        description: "Create comments only (narrower than `write`)",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "admin",
+        description: "Workspace administration (members, settings)",
+        category: ScopeCategory::Admin,
+        required: false,
+    },
+];
+
+/// Notion does not use OAuth scopes for permission scoping. Each
+/// Notion integration receives access to a per-workspace set of
+/// pages selected during the Notion connection UI, not via OAuth
+/// scopes. The picker (slice 2) short-circuits for this provider
+/// with a "no scope choices needed at OAuth time" message; this
+/// empty catalog is the data representation of that fact.
+const NOTION_SCOPES: &[ScopeChoice] = &[];
+
+/// GitHub scope catalog. GitHub accepts auth requests with no
+/// scopes (the resulting token has public-only read), but
+/// `read:user` is the minimum for wirken to identify the
+/// credential owner.
+const GITHUB_SCOPES: &[ScopeChoice] = &[
+    ScopeChoice {
+        id: "read:user",
+        description: "Read the authenticated user's profile information",
+        category: ScopeCategory::Profile,
+        required: true,
+    },
+    ScopeChoice {
+        id: "user:email",
+        description: "Read the authenticated user's email addresses",
+        category: ScopeCategory::Profile,
+        required: false,
+    },
+    ScopeChoice {
+        id: "repo",
+        description: "Full control of private and public repositories",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "public_repo",
+        description: "Public-repository read and write (narrower than `repo`)",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "read:org",
+        description: "Read organization membership and team listings",
+        category: ScopeCategory::Read,
+        required: false,
+    },
+    ScopeChoice {
+        id: "gist",
+        description: "Create and modify gists",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "workflow",
+        description: "Update GitHub Actions workflow files",
+        category: ScopeCategory::Admin,
+        required: false,
+    },
+];
+
+/// Google scope catalog. Google rejects auth requests with empty
+/// scope lists; `openid` plus `userinfo.email` is the OIDC
+/// identity minimum.
+const GOOGLE_SCOPES: &[ScopeChoice] = &[
+    ScopeChoice {
+        id: "openid",
+        description: "OIDC identity (subject identifier)",
+        category: ScopeCategory::Profile,
+        required: true,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/userinfo.email",
+        description: "Email address",
+        category: ScopeCategory::Profile,
+        required: true,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/userinfo.profile",
+        description: "Display name and profile picture",
+        category: ScopeCategory::Profile,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/drive.readonly",
+        description: "Read-only access to Drive files",
+        category: ScopeCategory::Read,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/drive.file",
+        description: "Per-file Drive access for files created by this app",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/drive",
+        description: "Full Drive access (broad)",
+        category: ScopeCategory::Admin,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/gmail.readonly",
+        description: "Read-only Gmail access",
+        category: ScopeCategory::Read,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/gmail.send",
+        description: "Send mail via Gmail",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/calendar.readonly",
+        description: "Read-only Calendar access",
+        category: ScopeCategory::Read,
+        required: false,
+    },
+    ScopeChoice {
+        id: "https://www.googleapis.com/auth/calendar.events",
+        description: "Create and modify Calendar events",
+        category: ScopeCategory::Write,
+        required: false,
+    },
+];
 
 const LINEAR: OAuthProvider = OAuthProvider {
     name: "linear",
@@ -73,6 +289,7 @@ const LINEAR: OAuthProvider = OAuthProvider {
     default_scopes: &["read", "write"],
     client_id_env: "WIRKEN_LINEAR_CLIENT_ID",
     client_secret_env: Some("WIRKEN_LINEAR_CLIENT_SECRET"),
+    scopes: LINEAR_SCOPES,
 };
 
 const NOTION: OAuthProvider = OAuthProvider {
@@ -82,6 +299,7 @@ const NOTION: OAuthProvider = OAuthProvider {
     default_scopes: &[],
     client_id_env: "WIRKEN_NOTION_CLIENT_ID",
     client_secret_env: Some("WIRKEN_NOTION_CLIENT_SECRET"),
+    scopes: NOTION_SCOPES,
 };
 
 const GITHUB: OAuthProvider = OAuthProvider {
@@ -91,6 +309,7 @@ const GITHUB: OAuthProvider = OAuthProvider {
     default_scopes: &["repo", "read:user"],
     client_id_env: "WIRKEN_GITHUB_CLIENT_ID",
     client_secret_env: Some("WIRKEN_GITHUB_CLIENT_SECRET"),
+    scopes: GITHUB_SCOPES,
 };
 
 const GOOGLE: OAuthProvider = OAuthProvider {
@@ -100,7 +319,22 @@ const GOOGLE: OAuthProvider = OAuthProvider {
     default_scopes: &["https://www.googleapis.com/auth/drive.readonly"],
     client_id_env: "WIRKEN_GOOGLE_CLIENT_ID",
     client_secret_env: Some("WIRKEN_GOOGLE_CLIENT_SECRET"),
+    scopes: GOOGLE_SCOPES,
 };
+
+/// Compute the set of scope ids the picker pre-checks. Returns
+/// every `required: true` scope in catalog order. Used by slice 2
+/// as the initial selection state for `dialoguer::MultiSelect`.
+/// The picker also consults `required` per-entry to lock the
+/// pre-checked items so the operator cannot deselect them.
+pub fn default_selected_scopes(provider: &OAuthProvider) -> Vec<&'static str> {
+    provider
+        .scopes
+        .iter()
+        .filter(|s| s.required)
+        .map(|s| s.id)
+        .collect()
+}
 
 /// Look up a provider by name. Returns `None` if the name isn't in
 /// the slice 2 registry.
@@ -540,4 +774,137 @@ fn reqwest_http_client() -> Result<oauth2::reqwest::Client, ProxyError> {
         .redirect(oauth2::reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ProxyError::Vault(format!("oauth http client: {e}")))
+}
+
+#[cfg(test)]
+mod scope_catalog_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn three_providers_have_a_scope_catalog_and_notion_is_intentionally_empty() {
+        // Notion handles per-workspace permissions outside OAuth
+        // scopes; its empty catalog is the data representation of
+        // the slice-2 short-circuit.
+        assert!(!LINEAR.scopes.is_empty());
+        assert!(!GITHUB.scopes.is_empty());
+        assert!(!GOOGLE.scopes.is_empty());
+        assert_eq!(NOTION.scopes.len(), 0);
+    }
+
+    #[test]
+    fn linear_requires_read_for_identity() {
+        let required: Vec<&str> = LINEAR
+            .scopes
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(required, vec!["read"]);
+    }
+
+    #[test]
+    fn github_requires_read_user_for_credential_owner_identification() {
+        let required: Vec<&str> = GITHUB
+            .scopes
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.id)
+            .collect();
+        assert!(
+            required.contains(&"read:user"),
+            "GitHub picker must require read:user; got {required:?}",
+        );
+    }
+
+    #[test]
+    fn google_requires_oidc_identity_minimum() {
+        // Google rejects empty scope lists; OIDC identity needs
+        // openid plus an email or profile scope. Both are required
+        // here so the picker pre-checks both and locks them.
+        let required: Vec<&str> = GOOGLE
+            .scopes
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.id)
+            .collect();
+        assert!(required.contains(&"openid"));
+        assert!(
+            required.iter().any(|s| s.ends_with("/userinfo.email")),
+            "Google required set must include userinfo.email; got {required:?}",
+        );
+    }
+
+    #[test]
+    fn notion_has_no_required_scopes() {
+        // Empty catalog implies empty required set; the picker
+        // short-circuits this provider rather than rendering an
+        // empty MultiSelect.
+        let required = NOTION.scopes.iter().filter(|s| s.required).count();
+        assert_eq!(required, 0);
+    }
+
+    #[test]
+    fn default_selected_scopes_returns_required_in_catalog_order() {
+        let google_defaults = default_selected_scopes(&GOOGLE);
+        let required_in_catalog: Vec<&str> = GOOGLE
+            .scopes
+            .iter()
+            .filter(|s| s.required)
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(google_defaults, required_in_catalog);
+    }
+
+    #[test]
+    fn default_selected_scopes_empty_for_notion() {
+        assert!(default_selected_scopes(&NOTION).is_empty());
+    }
+
+    #[test]
+    fn scope_ids_are_unique_within_each_provider() {
+        for provider in [&LINEAR, &NOTION, &GITHUB, &GOOGLE] {
+            let mut seen = BTreeSet::new();
+            for scope in provider.scopes {
+                assert!(
+                    seen.insert(scope.id),
+                    "duplicate scope id '{}' in provider '{}'",
+                    scope.id,
+                    provider.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_required_scope_is_in_profile_category() {
+        // Required scopes exist for identity; the picker renders
+        // them under Profile. If a future required entry lands in
+        // Read / Write / Admin that's a real design decision worth
+        // re-examining, not an oversight: this test catches the
+        // drift.
+        for provider in [&LINEAR, &NOTION, &GITHUB, &GOOGLE] {
+            for scope in provider.scopes {
+                if scope.required {
+                    assert_eq!(
+                        scope.category,
+                        ScopeCategory::Profile,
+                        "required scope '{}' on provider '{}' is not in Profile category",
+                        scope.id,
+                        provider.name,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_provider_finds_every_known_name() {
+        for name in provider_names() {
+            assert!(
+                lookup_provider(name).is_some(),
+                "lookup_provider failed for '{name}'",
+            );
+        }
+    }
 }
