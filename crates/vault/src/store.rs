@@ -203,6 +203,65 @@ impl CredentialStore {
         Ok((secret, meta))
     }
 
+    /// Inspect a credential without updating `last_used_at`. Same
+    /// return shape as [`Self::retrieve`] but does not write back to
+    /// the row. Used by `wirken credentials show` and `wirken
+    /// credentials list`'s scope-summary augmentation, where the
+    /// caller is inspecting rather than authenticating: bumping
+    /// `last_used_at` on every `list` invocation would corrupt the
+    /// "when was this credential last actually used" signal that
+    /// operators rely on for rotation decisions.
+    pub fn peek(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at
+             FROM credentials WHERE name = ?1",
+        )?;
+
+        let row = stmt
+            .query_row(params![name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|_| VaultError::NotFound(name.to_string()))?;
+
+        let (
+            channel,
+            encrypted,
+            created_at_str,
+            expires_at_str,
+            last_used_at_str,
+            rotation_due_at_str,
+        ) = row;
+
+        let meta = CredentialMetadata {
+            name: name.to_string(),
+            channel,
+            created_at: parse_datetime(&created_at_str)?,
+            expires_at: expires_at_str.as_deref().map(parse_datetime).transpose()?,
+            last_used_at: last_used_at_str
+                .as_deref()
+                .map(parse_datetime)
+                .transpose()?,
+            rotation_due_at: rotation_due_at_str
+                .as_deref()
+                .map(parse_datetime)
+                .transpose()?,
+        };
+
+        if meta.is_expired() {
+            return Err(VaultError::Expired(name.to_string()));
+        }
+
+        let secret = decrypt(name, &encrypted, &self.device_key)?;
+        Ok((secret, meta))
+    }
+
     /// Delete a credential by name.
     pub fn delete(&self, name: &str) -> Result<(), VaultError> {
         let changes = self

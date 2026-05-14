@@ -360,9 +360,13 @@ pub fn provider_names() -> &'static [&'static str] {
 
 /// Stored OAuth credential. Lives in the vault as a UTF-8 JSON
 /// string under a `vault:NAME` reference. The full JSON is the
-/// secret — do NOT log or expose any field other than `provider`
-/// and `expires_at` for diagnostics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// secret. `Debug` is hand-rolled to redact `access_token` and
+/// `refresh_token` so accidental tracing or `dbg!` calls do not
+/// surface bearer tokens in logs; the public-view variant
+/// [`PublicOAuthCredential`] is the right type for any code path
+/// that only needs the non-secret fields (provider, scopes,
+/// expiry).
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthCredential {
     pub access_token: String,
     pub refresh_token: String,
@@ -370,6 +374,71 @@ pub struct OAuthCredential {
     pub expires_at: u64,
     pub scope: String,
     pub provider: String,
+}
+
+impl std::fmt::Debug for OAuthCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredential")
+            .field("access_token", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .field("provider", &self.provider)
+            .finish()
+    }
+}
+
+/// Non-secret view of an [`OAuthCredential`]. Carries provider,
+/// granted scopes, and expiry; does not carry the access or refresh
+/// tokens. Consumed by `wirken credentials show` and `wirken
+/// credentials list`'s scope summary so the CLI surface for those
+/// commands cannot accidentally leak a bearer token, regardless of
+/// what a future contributor decides to print.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicOAuthCredential {
+    pub provider: String,
+    pub scopes: Vec<String>,
+    /// Unix timestamp seconds. Same value as [`OAuthCredential::expires_at`].
+    pub expires_at: u64,
+}
+
+impl PublicOAuthCredential {
+    /// Convert the wrapping [`OAuthCredential`] into the public view,
+    /// dropping the bearer tokens. The scope string is split on
+    /// whitespace per OAuth convention.
+    fn from_full(cred: OAuthCredential) -> Self {
+        Self {
+            scopes: cred.scope.split_whitespace().map(String::from).collect(),
+            expires_at: cred.expires_at,
+            provider: cred.provider,
+        }
+    }
+}
+
+/// Parse a vault-stored OAuth credential payload directly into the
+/// public view. Pure (no IO) so callers that already hold the
+/// decrypted bytes (e.g. tests) can build a `PublicOAuthCredential`
+/// without touching the vault. Errors when the payload is not the
+/// expected JSON shape.
+pub fn parse_public_view(json: &str) -> Result<PublicOAuthCredential, ProxyError> {
+    let cred: OAuthCredential = serde_json::from_str(json)
+        .map_err(|e| ProxyError::Vault(format!("parse oauth credential: {e}")))?;
+    Ok(PublicOAuthCredential::from_full(cred))
+}
+
+/// Load the public view of an OAuth credential from the vault.
+/// Uses [`wirken_vault::CredentialStore::peek`] so inspection does
+/// not bump `last_used_at`. The full [`OAuthCredential`] (with
+/// bearer tokens) is constructed inside this function and dropped
+/// before returning so the caller never sees the secret fields.
+pub fn load_oauth_public(
+    store: &CredentialStore,
+    name: &str,
+) -> Result<PublicOAuthCredential, ProxyError> {
+    let (secret, _meta) = store
+        .peek(name)
+        .map_err(|e| ProxyError::Vault(format!("load oauth credential '{name}': {e}")))?;
+    parse_public_view(secret.expose())
 }
 
 /// Serialize an [`OAuthCredential`] as JSON and store it in the
@@ -906,5 +975,63 @@ mod scope_catalog_tests {
                 "lookup_provider failed for '{name}'",
             );
         }
+    }
+
+    // Slice 3 public-view tests.
+
+    #[test]
+    fn parse_public_view_splits_scope_string_on_whitespace() {
+        let json = r#"{
+            "access_token": "secret-token",
+            "refresh_token": "secret-refresh",
+            "expires_at": 1234567890,
+            "scope": "openid read write",
+            "provider": "linear"
+        }"#;
+        let public = parse_public_view(json).unwrap();
+        assert_eq!(public.provider, "linear");
+        assert_eq!(public.expires_at, 1234567890);
+        assert_eq!(public.scopes, vec!["openid", "read", "write"]);
+    }
+
+    #[test]
+    fn parse_public_view_returns_empty_scope_vec_for_empty_string() {
+        let json = r#"{
+            "access_token": "secret-token",
+            "refresh_token": "secret-refresh",
+            "expires_at": 0,
+            "scope": "",
+            "provider": "notion"
+        }"#;
+        let public = parse_public_view(json).unwrap();
+        assert!(public.scopes.is_empty());
+    }
+
+    #[test]
+    fn parse_public_view_errors_on_malformed_json() {
+        let err = parse_public_view("not-json-at-all").unwrap_err();
+        assert!(format!("{err}").contains("parse oauth credential"));
+    }
+
+    #[test]
+    fn debug_impl_redacts_access_and_refresh_tokens() {
+        // Defense-in-depth: a future contributor who Debug-prints an
+        // OAuthCredential (via tracing! or dbg!) does not leak the
+        // bearer tokens. The token fields are replaced with
+        // "<redacted>"; the non-secret fields render normally.
+        let cred = OAuthCredential {
+            access_token: "ya29.live-token-value".into(),
+            refresh_token: "1//refresh-token-secret".into(),
+            expires_at: 1234567890,
+            scope: "openid email".into(),
+            provider: "google".into(),
+        };
+        let debug = format!("{cred:?}");
+        assert!(!debug.contains("ya29.live-token-value"));
+        assert!(!debug.contains("1//refresh-token-secret"));
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("1234567890"));
+        assert!(debug.contains("openid email"));
+        assert!(debug.contains("google"));
     }
 }

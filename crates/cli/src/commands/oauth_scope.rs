@@ -64,6 +64,23 @@ pub(crate) fn resolve_scopes(
     flags: &ScopeFlags,
     stdin_is_tty: bool,
 ) -> Result<Vec<String>> {
+    resolve_scopes_with_defaults(provider, flags, stdin_is_tty, &[])
+}
+
+/// Resolver variant that accepts a pre-selection for the interactive
+/// picker. Used by `wirken credentials rescope` to seed the picker
+/// with the credential's currently-granted optional scopes so the
+/// operator sees what they have today and can add or drop without
+/// retyping the whole set. Non-picker paths (`--scope`,
+/// `--no-scopes`, `--all-scopes`) ignore `picker_defaults`: the
+/// scripted-mode flags are the operator's explicit instruction and
+/// override any prior state.
+pub(crate) fn resolve_scopes_with_defaults(
+    provider: &OAuthProvider,
+    flags: &ScopeFlags,
+    stdin_is_tty: bool,
+    picker_defaults: &[String],
+) -> Result<Vec<String>> {
     if provider.scopes.is_empty() {
         if !flags.scope.is_empty() || flags.no_scopes || flags.all_scopes {
             eprintln!(
@@ -142,18 +159,25 @@ pub(crate) fn resolve_scopes(
         );
     }
 
-    run_picker(provider)
+    run_picker_with_defaults(provider, picker_defaults)
 }
 
-/// Render the interactive picker. The required floor is shown above
-/// the `MultiSelect` widget so the operator sees what is auto-
-/// included; the widget itself only contains optional scopes.
-pub(crate) fn run_picker(provider: &OAuthProvider) -> Result<Vec<String>> {
+/// Render the interactive picker with `default_optional_ids`
+/// pre-checked. Required scopes are still auto-included separately;
+/// the defaults only affect optional-scope checkbox state. Unknown
+/// or required ids in the defaults slice are silently ignored (an
+/// unknown default isn't an operator instruction, it's a stale
+/// reference from a prior catalog or a typo). The required floor is
+/// shown above the `MultiSelect` widget; the widget itself only
+/// contains optional scopes.
+pub(crate) fn run_picker_with_defaults(
+    provider: &OAuthProvider,
+    default_optional_ids: &[String],
+) -> Result<Vec<String>> {
     if provider.scopes.is_empty() {
         // Defensive; `resolve_scopes` short-circuits the empty
         // catalog before reaching the picker. Keeping this branch
-        // makes `run_picker` safe to call standalone from slice 3's
-        // `wirken credentials rescope`.
+        // makes `run_picker` safe to call standalone.
         eprintln!(
             "  {} grants permissions per workspace; no scope choices at OAuth time.",
             provider.name
@@ -197,9 +221,18 @@ pub(crate) fn run_picker(provider: &OAuthProvider) -> Result<Vec<String>> {
         })
         .collect();
 
+    // Mirror the `optional` order so `defaults[i]` lines up with
+    // `items[i]`. Unknown ids in the input slice don't appear in
+    // optional and are silently dropped at this stage.
+    let defaults: Vec<bool> = optional
+        .iter()
+        .map(|s| default_optional_ids.iter().any(|d| d == s.id))
+        .collect();
+
     let selected_idx = MultiSelect::new()
         .with_prompt("  Choose additional scopes")
         .items(&items)
+        .defaults(&defaults)
         .interact_opt()
         .map_err(|e| anyhow!("picker error: {e}"))?
         .ok_or_else(|| anyhow!("OAuth authorization canceled"))?;
@@ -458,5 +491,82 @@ mod tests {
         let out = resolve_scopes(github(), &flags, true).unwrap();
         assert!(out.contains(&"read:user".to_string()));
         assert!(out.contains(&"repo".to_string()));
+    }
+
+    // Slice 3 picker-defaults tests. The non-picker paths
+    // (`--no-scopes`, `--all-scopes`, explicit `--scope`) must ignore
+    // `picker_defaults` because those flags are the operator's
+    // scripted-mode instruction; the picker pre-selection is only
+    // relevant when the picker actually runs.
+
+    #[test]
+    fn resolve_with_defaults_ignores_defaults_on_no_scopes() {
+        let flags = ScopeFlags {
+            no_scopes: true,
+            ..Default::default()
+        };
+        let defaults = vec![
+            "https://www.googleapis.com/auth/drive.readonly".to_string(),
+            "https://www.googleapis.com/auth/gmail.send".to_string(),
+        ];
+        let out = resolve_scopes_with_defaults(google(), &flags, true, &defaults).unwrap();
+        // --no-scopes returns required floor only, even if defaults
+        // are non-empty.
+        assert!(!out.iter().any(|s| s.ends_with("/drive.readonly")));
+        assert!(!out.iter().any(|s| s.ends_with("/gmail.send")));
+        assert!(out.contains(&"openid".to_string()));
+    }
+
+    #[test]
+    fn resolve_with_defaults_ignores_defaults_on_all_scopes() {
+        let flags = ScopeFlags {
+            all_scopes: true,
+            ..Default::default()
+        };
+        let defaults = vec!["read".to_string()];
+        let out = resolve_scopes_with_defaults(linear(), &flags, true, &defaults).unwrap();
+        assert_eq!(out.len(), linear().scopes.len());
+    }
+
+    #[test]
+    fn resolve_with_defaults_ignores_defaults_on_explicit_scope_flag() {
+        let flags = ScopeFlags {
+            scope: vec!["write".to_string()],
+            ..Default::default()
+        };
+        let defaults = vec!["admin".to_string()];
+        let out = resolve_scopes_with_defaults(linear(), &flags, true, &defaults).unwrap();
+        // --scope only includes the named ids plus the required
+        // floor; the defaults set is irrelevant here.
+        assert!(out.contains(&"read".to_string()));
+        assert!(out.contains(&"write".to_string()));
+        assert!(!out.contains(&"admin".to_string()));
+    }
+
+    #[test]
+    fn resolve_with_defaults_non_tty_path_still_errors() {
+        // No flags + non-TTY errors regardless of defaults: defaults
+        // only seed the picker, and the picker cannot run without
+        // a TTY.
+        let flags = ScopeFlags::default();
+        let defaults = vec!["read".to_string()];
+        let err = resolve_scopes_with_defaults(linear(), &flags, false, &defaults).unwrap_err();
+        assert!(format!("{err}").contains("not a TTY"));
+    }
+
+    #[test]
+    fn resolve_thin_wrapper_passes_empty_defaults() {
+        // The slice 2 entry `resolve_scopes` is a thin wrapper that
+        // calls `resolve_scopes_with_defaults` with an empty slice.
+        // This regression test asserts the wrapper still produces
+        // identical output to the explicit-empty form so future
+        // refactors do not silently introduce non-empty defaults.
+        let flags = ScopeFlags {
+            no_scopes: true,
+            ..Default::default()
+        };
+        let via_wrapper = resolve_scopes(github(), &flags, true).unwrap();
+        let via_full = resolve_scopes_with_defaults(github(), &flags, true, &[]).unwrap();
+        assert_eq!(via_wrapper, via_full);
     }
 }

@@ -1,9 +1,19 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use dialoguer::Password;
 
+use wirken_mcp_proxy::{
+    OAuthCredential, load_oauth_public, lookup_provider, run_authorization_code_flow, store_oauth,
+};
 use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
 use super::config;
+use super::oauth_scope::{ScopeFlags, resolve_scopes_with_defaults, stdin_is_tty};
+
+/// Vault channel marker for OAuth-managed credentials. Set by
+/// `store_oauth` in the mcp-proxy crate; matched here to discriminate
+/// OAuth-backed credentials from raw secrets in `show` / `rescope` /
+/// `list`.
+const OAUTH_CHANNEL: &str = "oauth";
 
 pub async fn list() -> Result<()> {
     let cfg = config();
@@ -26,15 +36,16 @@ pub async fn list() -> Result<()> {
     }
 
     println!(
-        "  {:24}  {:12}  {:20}  {:12}",
+        "  {:24}  {:12}  {:20}  {:12}  SCOPES",
         "NAME", "CHANNEL", "CREATED", "STATUS"
     );
     println!(
-        "  {}  {}  {}  {}",
+        "  {}  {}  {}  {}  {}",
         "─".repeat(24),
         "─".repeat(12),
         "─".repeat(20),
-        "─".repeat(12)
+        "─".repeat(12),
+        "─".repeat(10),
     );
 
     for cred in &creds {
@@ -46,12 +57,30 @@ pub async fn list() -> Result<()> {
             "ok"
         };
 
+        // Scope summary: OAuth rows decrypt via the public-view
+        // helper (which uses `peek` and never carries the bearer
+        // tokens out of mcp-proxy) and display a count. Non-OAuth
+        // rows show "n/a"; a decryption failure on an OAuth row
+        // shows "?" rather than blocking the whole list.
+        let scope_summary = if cred.channel == OAUTH_CHANNEL {
+            match load_oauth_public(&store, &cred.name) {
+                Ok(public) => {
+                    let n = public.scopes.len();
+                    format!("{n} scope{}", if n == 1 { "" } else { "s" })
+                }
+                Err(_) => "?".to_string(),
+            }
+        } else {
+            "n/a".to_string()
+        };
+
         println!(
-            "  {:24}  {:12}  {:20}  {:12}",
+            "  {:24}  {:12}  {:20}  {:12}  {}",
             cred.name,
             cred.channel,
             cred.created_at.format("%Y-%m-%d %H:%M:%S"),
             status,
+            scope_summary,
         );
     }
 
@@ -60,6 +89,175 @@ pub async fn list() -> Result<()> {
         "  {} credentials. Values are encrypted — never shown.",
         creds.len()
     );
+    println!("  Run `wirken credentials show <name>` for scope detail.");
+    Ok(())
+}
+
+/// `wirken credentials show <name>`: pretty-print one credential's
+/// non-secret metadata. The vault secret itself never enters this
+/// function's scope: OAuth credentials route through the public-view
+/// helper that drops the bearer tokens inside mcp-proxy; non-OAuth
+/// credentials display only their metadata. `peek` is used rather
+/// than `retrieve` so inspection does not bump `last_used_at`.
+pub async fn show(name: &str) -> Result<()> {
+    let cfg = config();
+
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    // `peek` returns metadata even for non-OAuth credentials; we use
+    // its `VaultSecret` only when the channel is `oauth` and even
+    // then route through the public-view helper for type-enforced
+    // redaction.
+    let (_secret, meta) = store
+        .peek(name)
+        .with_context(|| format!("credential '{name}' not found"))?;
+
+    println!();
+    println!("  Credential: {name}");
+    println!("    channel:        {}", meta.channel);
+    println!(
+        "    created:        {}",
+        meta.created_at.format("%Y-%m-%d %H:%M:%S")
+    );
+    if let Some(last) = meta.last_used_at {
+        println!("    last used:      {}", last.format("%Y-%m-%d %H:%M:%S"));
+    }
+    if let Some(exp) = meta.expires_at {
+        println!("    expires:        {}", exp.format("%Y-%m-%d %H:%M:%S"));
+    }
+    if let Some(rot) = meta.rotation_due_at {
+        println!("    rotation due:   {}", rot.format("%Y-%m-%d %H:%M:%S"));
+    }
+
+    if meta.channel == OAUTH_CHANNEL {
+        let public = load_oauth_public(&store, name)
+            .map_err(|e| anyhow!("read OAuth credential '{name}': {e}"))?;
+        println!("    provider:       {}", public.provider);
+        if public.scopes.is_empty() {
+            println!("    granted scopes: (none)");
+        } else {
+            println!("    granted scopes:");
+            for s in &public.scopes {
+                println!("      {s}");
+            }
+        }
+    } else {
+        println!("    scope:          n/a (non-OAuth credential)");
+    }
+
+    Ok(())
+}
+
+/// `wirken credentials rescope <name>`: re-run the OAuth authorization
+/// flow for an existing credential with a newly chosen scope set.
+/// The current scopes seed the interactive picker so the operator
+/// sees what they have today and can add or drop.
+///
+/// On success the vault row is replaced atomically via
+/// `INSERT OR REPLACE` (the same path `store_oauth` already uses for
+/// bootstrap and refresh writeback). On cancel or auth failure the
+/// existing credential is left unchanged: the failure path returns
+/// before any vault mutation.
+///
+/// Non-OAuth credentials cannot be rescoped; the function errors
+/// with a typed message before any picker UI is rendered. The
+/// vault's `channel` column (set to `"oauth"` by `store_oauth`) is
+/// the discriminator.
+pub async fn rescope(
+    name: &str,
+    scope: Vec<String>,
+    no_scopes: bool,
+    all_scopes: bool,
+) -> Result<()> {
+    let cfg = config();
+
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+
+    let (_secret, meta) = store
+        .peek(name)
+        .with_context(|| format!("credential '{name}' not found"))?;
+
+    if meta.channel != OAUTH_CHANNEL {
+        anyhow::bail!(
+            "credential '{name}' is not OAuth-backed (channel: '{}'); only OAuth credentials carry scopes.\n\
+             Use `wirken credentials rotate {name}` to replace a raw secret.",
+            meta.channel
+        );
+    }
+
+    let public = load_oauth_public(&store, name)
+        .map_err(|e| anyhow!("read OAuth credential '{name}': {e}"))?;
+
+    let provider_def = lookup_provider(&public.provider).ok_or_else(|| {
+        anyhow!(
+            "credential '{name}' references unknown OAuth provider '{}'; cannot rescope.",
+            public.provider
+        )
+    })?;
+
+    println!();
+    println!("  wirken credentials rescope");
+    println!("  ──────────────────────────");
+    println!("  credential:     {name}");
+    println!("  provider:       {}", public.provider);
+    if public.scopes.is_empty() {
+        println!("  current scopes: (none)");
+    } else {
+        println!("  current scopes:");
+        for s in &public.scopes {
+            println!("    {s}");
+        }
+    }
+    println!();
+
+    let scope_flags = ScopeFlags {
+        scope,
+        no_scopes,
+        all_scopes,
+    };
+    let new_extra_scopes =
+        resolve_scopes_with_defaults(provider_def, &scope_flags, stdin_is_tty(), &public.scopes)?;
+
+    println!();
+    println!("  New scopes:");
+    for s in provider_def.default_scopes {
+        println!("    {s}  (provider default)");
+    }
+    for s in &new_extra_scopes {
+        let is_required = provider_def.scopes.iter().any(|c| c.id == s && c.required);
+        if is_required {
+            println!("    {s}  (required)");
+        } else {
+            println!("    {s}");
+        }
+    }
+    println!();
+
+    // Re-run the OAuth flow. The user's browser opens, the provider
+    // re-confirms consent for the new scope set, and the new tokens
+    // are returned. If this fails (timeout, user cancels at the
+    // provider's consent screen, network error) the existing vault
+    // row is untouched: the function returns before any vault write.
+    let new_cred: OAuthCredential =
+        run_authorization_code_flow(&public.provider, &new_extra_scopes)
+            .await
+            .map_err(|e| anyhow!("OAuth re-authorization failed: {e}"))?;
+
+    // Atomic vault rewrite via `INSERT OR REPLACE` semantics in
+    // `store.store`. The same path bootstraps a fresh credential, so
+    // there is no separate update primitive that could partially
+    // succeed.
+    store_oauth(&store, name, &new_cred)
+        .map_err(|e| anyhow!("vault writeback failed after successful OAuth grant: {e}"))?;
+
+    println!();
+    println!("  Credential '{name}' rescoped. New scopes stored in vault.");
     Ok(())
 }
 

@@ -341,6 +341,43 @@ fn retrieve_updates_last_used_at() {
 }
 
 #[test]
+fn peek_does_not_update_last_used_at() {
+    // Slice 3 inspection path: `wirken credentials show` and the
+    // list-output scope summary call `peek` rather than `retrieve`
+    // so reading the credential for display does not corrupt the
+    // "when was this credential last actually used" signal.
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+
+    let secret = VaultSecret::new("value".into());
+    store.store("test", "chan", &secret, None, None).unwrap();
+
+    let (val1, meta1) = store.peek("test").unwrap();
+    assert_eq!(val1.expose(), "value");
+    assert!(meta1.last_used_at.is_none());
+
+    // A subsequent peek must still see `last_used_at = None`.
+    let (val2, meta2) = store.peek("test").unwrap();
+    assert_eq!(val2.expose(), "value");
+    assert!(meta2.last_used_at.is_none());
+
+    // But a real retrieve DOES bump last_used_at, and a peek after
+    // that reflects the retrieve.
+    let _ = store.retrieve("test").unwrap();
+    let (_, meta3) = store.peek("test").unwrap();
+    assert!(meta3.last_used_at.is_some());
+}
+
+#[test]
+fn peek_nonexistent_credential_fails() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+
+    let result = store.peek("does-not-exist");
+    assert!(matches!(result, Err(crate::VaultError::NotFound(_))));
+}
+
+#[test]
 fn retrieve_nonexistent_credential_fails() {
     let tmp = TempDir::new().unwrap();
     let store = test_store(&tmp);

@@ -630,6 +630,37 @@ enum CredentialCommands {
         /// Credential name
         name: String,
     },
+    /// Show one credential's non-secret metadata (provider, granted
+    /// scopes for OAuth, timestamps). The secret value is never
+    /// displayed; only metadata routes through this command.
+    Show {
+        /// Credential name
+        name: String,
+    },
+    /// Re-run the OAuth authorization flow for an existing credential
+    /// with a new scope selection. The current scopes seed the
+    /// interactive picker so the operator can add or drop without
+    /// retyping the whole set. Non-OAuth credentials cannot be
+    /// rescoped.
+    Rescope {
+        /// Credential name
+        name: String,
+        /// Explicit scope selection (repeatable). The required floor
+        /// is always included. Skips the interactive picker.
+        #[arg(
+            long,
+            value_name = "ID",
+            conflicts_with_all = ["no_scopes", "all_scopes"]
+        )]
+        scope: Vec<String>,
+        /// Request only the required scope floor; skip the picker.
+        #[arg(long, conflicts_with_all = ["scope", "all_scopes"])]
+        no_scopes: bool,
+        /// Request every scope in the provider's catalog; skip the
+        /// picker.
+        #[arg(long, conflicts_with_all = ["scope", "no_scopes"])]
+        all_scopes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -784,6 +815,13 @@ async fn main() -> Result<()> {
             }
             CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
+            CredentialCommands::Show { name } => commands::credential::show(&name).await,
+            CredentialCommands::Rescope {
+                name,
+                scope,
+                no_scopes,
+                all_scopes,
+            } => commands::credential::rescope(&name, scope, no_scopes, all_scopes).await,
         },
         Commands::Mcp(cmd) => match cmd {
             McpCommands::Authorize {
