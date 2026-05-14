@@ -10,6 +10,32 @@ tagged.
 
 ## Unreleased
 
+## [1.5.0] - 2026-05-14
+
+### Known security findings (deferred)
+
+- Scorecard / `cargo audit` reports 7 outstanding advisories on
+  transitive dependencies, all carried from before the 1.5 cycle
+  and not introduced by 1.5 changes:
+  - `rsa 0.9.10` (RUSTSEC-2023-0071, Marvin timing sidechannel) via
+    `tinfoil → sev`. No upstream fix is available; the affected
+    operation is not in a remote-attacker-reachable timing-sensitive
+    path. Tracked for fold-in when `rsa` upstream ships a
+    constant-time implementation.
+  - `rustls-webpki 0.102.8` (RUSTSEC-2026-0049, -0098, -0099, -0104)
+    via `serenity 0.12.5 → tokio-tungstenite 0.21.0 → rustls 0.22.4`.
+    Fixes are on the `rustls-webpki 0.103.x` line, which requires
+    `rustls 0.23.x`; `serenity 0.12.5` (current stable) pins
+    `rustls 0.22.4`. Tracked for fold-in when serenity bumps or the
+    Discord adapter is swapped. The affected code paths (CRL
+    handling, URI name constraints, wildcard name constraints) are
+    not exercised by the Discord adapter's traffic against
+    `discord.com`.
+  - `backoff 0.4.0` (RUSTSEC-2025-0012, unmaintained) and
+    `instant 0.1.13` (RUSTSEC-2024-0384, unmaintained) via
+    `tinfoil → async-openai 0.36.1`. Tracked for fold-in when the
+    `tinfoil` pin bumps to a build that uses `async-openai 0.38+`.
+
 ### OAuth
 
 - Interactive OAuth scope picker. `wirken mcp authorize <server>`
