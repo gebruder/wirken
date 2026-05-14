@@ -120,6 +120,6 @@ This is not a sandbox. There is no `cap_drop`, seccomp filter, namespace, gVisor
 - **HTTP** — connect to a remote MCP server over HTTP/HTTPS. Supports three auth modes:
   - `NoAuth` — no authentication header.
   - `BearerAuth` — static bearer token from the vault.
-  - `OAuth2Auth` — client credentials flow via the `oauth2` crate. Token refresh is automatic.
+  - `OAuth2Auth` — client credentials flow via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.
 
 The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth2 client secrets) are held in the proxy process and never exposed to the agent.

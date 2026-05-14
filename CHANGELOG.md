@@ -10,6 +10,36 @@ tagged.
 
 ## Unreleased
 
+### OAuth
+
+- Interactive OAuth scope picker. `wirken mcp authorize <server>`
+  invokes a `dialoguer::MultiSelect` listing the scopes the
+  provider's catalog supports (Linear, GitHub, Google; Notion
+  short-circuits because it grants permissions per workspace
+  outside the OAuth scope mechanism). Required scopes are
+  auto-included and never de-selectable; the picker shows only
+  optional scopes for operator toggle. Non-interactive flags
+  `--scope <id>` (repeatable), `--no-scopes`, and `--all-scopes`
+  skip the picker for scripted use; required scopes are still
+  unconditionally included regardless of which path the operator
+  takes. `wirken credentials show <name>` displays non-secret
+  metadata and the granted scope list; `wirken credentials list`
+  gains a SCOPES column showing the scope count per row;
+  `wirken credentials rescope <name>` re-runs the OAuth flow with
+  a picker pre-seeded from the credential's current scopes and
+  atomically replaces the vault row on success. Type-enforced
+  redaction: a new `PublicOAuthCredential` view carries only the
+  non-secret fields and is the type all CLI display paths consume;
+  `OAuthCredential` itself gains a hand-written `Debug` impl that
+  redacts bearer tokens so accidental tracing or `dbg!` calls
+  cannot leak them. The typed `ScopeNotGranted` tool-error variant
+  and transport-layer detection of missing-scope failures are
+  deferred to a follow-up slice pending verification against real
+  MCP-server auth-error formats; until that lands, operators see
+  the provider's raw auth-error response and must run
+  `wirken credentials rescope <name>` themselves. See
+  `docs/credentials.md`.
+
 ### Personas
 
 - Named persona bundling. `wirken persona create / list / show /
