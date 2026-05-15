@@ -75,12 +75,12 @@ Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Appl
 `wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken v1.5.1
+  wirken v1.5.2
   ──────
 
   Provider: ollama/llama3.2
   Ollama version: 0.19.0
-  Route: telegram -> agent:default
+  Route: Telegram -> agent:default
   WebChat: http://localhost:18790
 
   Wirken running. Press Ctrl+C to stop.

@@ -10,6 +10,31 @@ tagged.
 
 ## Unreleased
 
+## [1.5.2] - 2026-05-15
+
+Audit chain halt on first run against any pre-1.2.0 audit.db.
+`SessionEvent::AuditLegacy` required `actor_kind` without a default;
+pre-1.2.0 rows in `session_events` lacked the field, deserialization
+failed, three consecutive chain-verify passes crossed
+`MAX_INTEGRITY_FAILURES`, the writer halted silently. The audit chain
+went dark on first run of 1.5.1 against any database written by an
+earlier version. The variant now defaults `actor_kind` to `Service`
+and aliases `actor_id` to accept the legacy `actor` field.
+
+Default `wirken run` boot output cleaned up. The tracing filter
+flipped from `wirken=info` to `wirken=warn`, so INFO from any wirken
+crate is now opt-in via `RUST_LOG=wirken=info`. Three escaped
+`println!` lines handled: `Audit log:` dropped entirely (Step 6 of
+`wirken setup` owns the audit-path surface with full crypto framing);
+`Host exec shell:` split (none-found stays as a warn, happy-path
+goes to info); `Orchestrator socket:` demoted to info.
+
+Issue #115 tracks the deferred halt-policy work distinguishing
+tamper-class verification failures (halt and surface) from
+schema-class failures (warn and continue). 1.5.2 restores
+deserialization for the immediate gap; the policy redesign is its
+own slice.
+
 ## [1.5.1] - 2026-05-15
 
 Install experience overhaul. Setup wizard and run banner restructured;
