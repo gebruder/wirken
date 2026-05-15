@@ -546,8 +546,31 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     let should_install = if install_service {
         true
     } else {
+        // Name what gets installed and where before the prompt.
+        // Same pattern as Step 1's Tinfoil branch: explain the
+        // implementation, then ask. Service install is supported on
+        // systemd-managed Linux and macOS via launchd; the Unsupported
+        // branch falls back to platform-neutral phrasing because the
+        // install path will fail anyway and the user sees that error.
+        use super::service::Platform;
+        let where_installed = match super::service::detect_platform() {
+            Platform::LinuxSystemd => {
+                Some("a systemd user unit at ~/.config/systemd/user/wirken.service")
+            }
+            Platform::MacOsLaunchd => {
+                Some("a launchd agent at ~/Library/LaunchAgents/app.ottenheimer.wirken.plist")
+            }
+            Platform::Unsupported(_) => None,
+        };
+        match where_installed {
+            Some(path) => println!("  Wirken will install {path}."),
+            None => println!("  Wirken will install a system service."),
+        }
+        println!("  Starts on login, restarts on failure.");
+        println!("  Disable with: wirken setup --uninstall-service");
+        println!();
         Confirm::new()
-            .with_prompt("  Install as a system service (starts on login)?")
+            .with_prompt("  Install as a system service?")
             .default(true)
             .interact()?
     };
@@ -588,7 +611,16 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             serde_json::to_string_pretty(&body)?.as_bytes(),
         )
         .context("Failed to write sandbox.json")?;
-        println!("  Sandbox: {mode}");
+        // Qualify the value so a security-relevant default does not
+        // go silent. `gvisor` is the stronger option; `exec-only`
+        // (the default when runsc is absent) needs the user to know
+        // they are not on the syscall-filtered path.
+        let qualifier = match mode {
+            "gvisor" => " (syscall-filtered)",
+            "exec-only" => " (install gVisor for syscall filtering)",
+            _ => "",
+        };
+        println!("  Sandbox: {mode}{qualifier}");
     }
 
     // --- Step 6: Audit log recap ---
