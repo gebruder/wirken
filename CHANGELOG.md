@@ -10,6 +10,8 @@ tagged.
 
 ## Unreleased
 
+## [1.5.3] - 2026-05-15
+
 ### OAuth
 
 - Typed `McpToolError::ScopeNotGranted` variant in
