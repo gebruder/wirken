@@ -710,10 +710,21 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
+    // The default filter applies to every crate whose name starts
+    // with `wirken` (the EnvFilter target-match is a prefix, so
+    // `wirken` covers `wirken`, `wirken_vault`, `wirken_mcp_proxy`,
+    // `wirken_agent`, every workspace crate). `warn` is the floor
+    // for default-visible output: the boot banner is built from
+    // explicit `println!` lines, and INFO from any wirken crate is
+    // observability that an operator opts into with
+    // `RUST_LOG=wirken=info`. Lowering this to `info` (the prior
+    // default) produced ~15 timestamped lines per boot mixed in
+    // with the banner; see 1.5.1's first-run regression and step 4
+    // of the install-experience overhaul for the failure mode.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("wirken=info".parse().unwrap()),
+                .add_directive("wirken=warn".parse().unwrap()),
         )
         .init();
 
