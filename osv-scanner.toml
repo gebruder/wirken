@@ -1,0 +1,74 @@
+# Wirken dependency-vulnerability ignore list.
+#
+# Each entry below documents a finding wirken's transitive dependency
+# tree carries, the verified-narrow-exposure analysis behind the
+# ignore decision, and the condition under which the entry should be
+# revisited. Consumed by `osv-scanner` (https://osv.dev) and any
+# scanner that honors this schema. Reviewed when a new finding lands
+# or when the revisit condition changes.
+#
+# ## Category: rustls-webpki 0.102.8 (RUSTSEC-2026-0049 / -0098 /
+# ## -0099 / -0104)
+#
+# Shared root cause and verification analysis. The four entries
+# below all stem from the same transitive pin:
+#
+#     wirken-adapter-discord
+#       -> serenity 0.12.5
+#         -> tokio-tungstenite 0.21.0
+#           -> rustls 0.22.4
+#             -> rustls-webpki 0.102.8
+#
+# Serenity 0.12.5 is the current stable release. The rustls-webpki
+# fixes are on the 0.103.x line, which requires rustls 0.23.x.
+# Serenity has not yet shipped a release on rustls 0.23.x; there is
+# no clean upgrade path from wirken's side until upstream bumps.
+#
+# Verified narrow exposure (applies to all four entries):
+#
+# 1. `wirken-adapter-discord` does not customize serenity's TLS
+#    configuration. The crate's source (773 LOC total) contains
+#    zero TLS, certificate, or CRL touchpoints; no occurrence of
+#    `RustlsConfig`, `ClientCertVerifier`, `CertificateRevocationList`,
+#    `NameConstraints`, `enable_revocation_checking`, or
+#    `with_revocation` exists anywhere under `crates/`. The adapter
+#    consumes serenity's defaults verbatim.
+#
+# 2. Default `rustls` configuration does not enable revocation
+#    checking. CRL parsing and CRL distribution-point matching paths
+#    are unreachable without explicit operator opt-in. Wirken's
+#    operator surface offers no flag for enabling revocation
+#    checking on adapter TLS.
+#
+# 3. Discord's server certificate chain (issued through standard
+#    public CAs) does not assert URI-typed Subject Alternative
+#    Names or wildcard SANs that exercise the name-constraint
+#    validation path the advisories cover. Routine adapter traffic
+#    against `discord.com` and `gateway.discord.gg` does not load a
+#    certificate that triggers the affected branches.
+#
+# 4. The adapter does not accept client certificates from peers;
+#    there is no Discord-side concept of a client-supplied
+#    certificate for a Discord bot session.
+#
+# Revisit condition (shared): when `serenity` ships a release on
+# `rustls 0.23.x` (which transitively pulls `rustls-webpki 0.103.x`
+# with the fixes), or when the Discord adapter is swapped for a
+# crate that already tracks newer rustls. At that point all four
+# entries below can be removed in a single commit.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0049"
+reason = "narrow-exposure: CRLs not considered authoritative by Distribution Point due to faulty matching logic. The affected code path runs only when revocation checking is enabled on a rustls ClientConfig. Wirken's adapter-discord consumes serenity's default TLS config (no opt-in to revocation checking) and the workspace contains zero revocation-checking call sites. See the shared verification comment at the top of this file for the dependency chain and revisit condition."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0098"
+reason = "narrow-exposure: name constraints incorrectly accepted for URI-typed Subject Alternative Names. The Discord adapter's TLS traffic targets `discord.com` / `gateway.discord.gg`, whose certificate chains do not contain URI-typed SANs that exercise the affected name-constraint validation path. See the shared verification comment at the top of this file for the dependency chain and revisit condition."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0099"
+reason = "narrow-exposure: name constraints accepted for certificates asserting a wildcard name. Same root cause and chain as RUSTSEC-2026-0098. Discord's certificate chain does not assert wildcard SANs under name constraints that reach this validation branch. See the shared verification comment at the top of this file for the dependency chain and revisit condition."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0104"
+reason = "narrow-exposure: reachable panic in certificate revocation list parsing. The affected code path is the CRL parser, which runs only when an operator-supplied or downloaded CRL is fed into rustls-webpki. Wirken does not load CRLs in any code path; revocation checking is off by default in rustls and the adapter does not opt in. See the shared verification comment at the top of this file for the dependency chain and revisit condition."
