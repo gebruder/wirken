@@ -39,21 +39,6 @@ The installer then fetches `checksums.sha256` and `checksums.sha256.sig` from th
 
 Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Apple Silicon), and Windows 11 (x86_64). The Linux binaries are statically linked against musl with no glibc dependency. Windows users: the bash installer above does not apply; see [docs/windows.md](docs/windows.md) for the Windows install path and the feature-set differences (Signal adapter, orchestrator-push, service installer, and cron presets are Linux/macOS only).
 
-Or build from source (requires Rust 1.85+ and the `capnp` compiler):
-
-```bash
-# Ubuntu/Debian
-sudo apt-get install -y capnproto
-
-# macOS
-brew install capnp
-
-# Windows
-choco install capnproto -y
-
-cargo install --path crates/cli
-```
-
 `wirken setup` walks you through six steps:
 
 ```
@@ -90,7 +75,7 @@ cargo install --path crates/cli
 `wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken v1.5.0
+  wirken v1.5.1
   ──────
 
   Provider: ollama/llama3.2
@@ -227,7 +212,7 @@ cargo test -p wirken-vault        # test one crate
 cargo build -p wirken-cli         # build the binary
 ```
 
-Building from source requires the Cap'n Proto compiler (`capnproto` package on Ubuntu, `capnp` via Homebrew on macOS).
+Building from source needs Rust 1.87+ and the Cap'n Proto compiler. Install `capnp` via your package manager (`apt-get install -y capnproto` on Ubuntu, `brew install capnp` on macOS, `choco install capnproto -y` on Windows), then `cargo install --path crates/cli`.
 
 The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
