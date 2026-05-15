@@ -1,6 +1,6 @@
 # Wirken
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![CI](https://github.com/gebruder/wirken/actions/workflows/ci.yml/badge.svg)](https://github.com/gebruder/wirken/actions/workflows/ci.yml) ![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg) [![Release](https://img.shields.io/github/v/release/gebruder/wirken)](https://github.com/gebruder/wirken/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![CI](https://github.com/gebruder/wirken/actions/workflows/ci.yml/badge.svg)](https://github.com/gebruder/wirken/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/gebruder/wirken)](https://github.com/gebruder/wirken/releases)
 
 <p align="center">
   <img src="docs/img/wirken-switchboard.webp" alt="Wirken: the switchboard for the agent era" width="420">
@@ -212,7 +212,7 @@ cargo test -p wirken-vault        # test one crate
 cargo build -p wirken-cli         # build the binary
 ```
 
-Building from source needs Rust 1.87+ and the Cap'n Proto compiler. Install `capnp` via your package manager (`apt-get install -y capnproto` on Ubuntu, `brew install capnp` on macOS, `choco install capnproto -y` on Windows), then `cargo install --path crates/cli`.
+Building from source needs a recent stable Rust toolchain and the Cap'n Proto compiler. Install `capnp` via your package manager (`apt-get install -y capnproto` on Ubuntu, `brew install capnp` on macOS, `choco install capnproto -y` on Windows), then `cargo install --path crates/cli`.
 
 The architecture is documented in [docs/architecture.md](docs/architecture.md).
 

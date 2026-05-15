@@ -2,7 +2,6 @@
 name = "wirken-skill-store"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 description = "Per-skill SQLite store with permission-policy-gated paths and idempotent migrations."
 

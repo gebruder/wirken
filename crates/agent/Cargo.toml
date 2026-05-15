@@ -2,7 +2,6 @@
 name = "wirken-agent"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 description = "Wirken agent runtime: LLM dispatch, tool execution, context engine, reproducible session replay."
 
@@ -48,9 +47,9 @@ rusqlite = { workspace = true }
 # comparison) bundled into client construction; the returned client
 # exposes a TLS-fingerprint-pinned `reqwest::Client` via
 # `http_client()` that wirken's tinfoil dispatch uses for chat traffic.
-# Pinned to v0.0.4; no crates.io publish exists yet. AGPL-3.0 license
+# Pinned to v0.1.0; no crates.io publish exists yet. AGPL-3.0 license
 # is carved out for this crate in `deny.toml`.
-tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.0.4" }
+tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.1.0" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

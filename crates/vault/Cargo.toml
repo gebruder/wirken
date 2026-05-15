@@ -2,7 +2,6 @@
 name = "wirken-vault"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 description = "Encrypted credential vault for Wirken: XChaCha20-Poly1305 at rest, OS-keychain-keyed, with per-credential rotation metadata."
 

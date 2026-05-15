@@ -2,7 +2,6 @@
 name = "wirken-audit"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 description = "Per-session SHA-256 hash-chained audit log for Wirken, with SIEM forwarding to Datadog, Splunk, or webhook."
 

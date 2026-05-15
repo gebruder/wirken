@@ -2,7 +2,6 @@
 name = "wirken-zirkel"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 description = "Zirkel preset orchestrator: daily-fetch pipeline that runs through the policed HTTP transport and writes to the per-skill SQLite store."
 

@@ -22,8 +22,6 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the wildcard-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
     { id = "RUSTSEC-2026-0104", reason = "Reachable panic in CRL parsing (BorrowedCertRevocationList::from_der). The 0.103.x instance is patched via cargo update to 0.103.13. The residual 0.102.8 instance reaches wirken only via rustls 0.22 -> serenity 0.12 (Discord); serenity does not configure CRL validation and Discord endpoints are not distributed via CRL-bearing PKI, so from_der is not invoked on this path. No upstream 0.102.x backport; revisit when serenity 0.13 releases with rustls 0.23." },
     { id = "RUSTSEC-2023-0071", reason = "Marvin Attack in the rsa crate affects RSA private-key operations (signing, decryption) observable via network timing. wirken reaches rsa only through jsonwebtoken's RS256 verify path, which performs public-key operations (signature verification) that are not affected by Marvin. RSA private keys are used only in dev-deps (adapter-teams and adapter-google-chat tests) for synthetic JWT generation; those paths never run in production and are not network-observable. Revisit when rsa crate ships a constant-time implementation or jsonwebtoken switches to a non-rsa backend." },
-    { id = "RUSTSEC-2024-0384", reason = "`instant 0.1.13` is unmaintained (author recommends `web-time`). Not a vulnerability; classification is unmaintained-crate. Reaches wirken via `instant -> backoff 0.4 -> async-openai 0.36.1 -> tinfoil 0.1`. The wasm-target-aware code path is dead in wirken's native-only builds. No local fix; either async-openai migrates `backoff` off `instant`, or `backoff` itself does. Revisit when the chain refactors." },
-    { id = "RUSTSEC-2025-0012", reason = "`backoff 0.4` is unmaintained (recommended replacement is `backon`). Not a vulnerability; classification is unmaintained-crate. Reaches wirken via `backoff -> async-openai 0.36.1 -> tinfoil 0.1`. wirken's tinfoil dispatch arm goes through `tinfoil::Client::http_client()` (the pinned reqwest), not through async-openai's retry path, so backoff's exponential-backoff code is dead on wirken's call path. No local fix; either async-openai migrates to backon or wirken's tinfoil arm switches transports. Revisit alongside RUSTSEC-2024-0384." },
 ]
 
 [licenses]
@@ -63,11 +61,6 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     # Tinfoil SDK is git-only; no crates.io publication yet. Pinned to
-    # tag v0.0.4 in crates/agent/Cargo.toml.
+    # tag v0.1.0 in crates/agent/Cargo.toml.
     "https://github.com/tinfoilsh/tinfoil-rs",
-    # Temporary patch source while PR #19 (relax `time` upper bound) is
-    # pending upstream. See `[patch.\"https://github.com/tinfoilsh/...\"]`
-    # in Cargo.toml and remove this entry alongside the patch once
-    # upstream merges and re-tags.
-    "https://github.com/d-a-v-i--/tinfoil-rs",
 ]
