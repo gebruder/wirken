@@ -553,10 +553,10 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     println!("  Audit log at {}", cfg.audit_db_path().display());
     println!();
     if should_install {
-        println!("  The gateway is running as a service.");
+        println!("  Wirken is running as a service.");
         println!("  Manage with: wirken setup --uninstall-service");
     } else {
-        println!("  Start the gateway: wirken run");
+        println!("  Start wirken: wirken run");
     }
     println!();
 

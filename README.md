@@ -77,11 +77,11 @@ cargo install --path crates/cli
   Channels: telegram
 ```
 
-`wirken run` starts the gateway daemon. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
+`wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken gateway v1.2.0
-  ──────────────
+  wirken v1.5.0
+  ──────
 
   Provider: ollama/llama3.2
   Ollama version: 0.19.0
@@ -89,12 +89,12 @@ cargo install --path crates/cli
   Socket: ~/.wirken/sockets/gateway.sock
   WebChat: http://localhost:18790
 
-  Gateway running. Press Ctrl+C to stop.
+  Wirken running. Press Ctrl+C to stop.
 ```
 
 All local services bind to 127.0.0.1. Wirken never instructs you to bind inference servers, WebChat, or any local endpoint to 0.0.0.0.
 
-Install as a system service so the gateway starts on login:
+Install as a system service so wirken starts on login:
 
 ```bash
 wirken setup --install-service
@@ -107,7 +107,7 @@ graph TD
     Channels["Telegram · Discord · Slack · Teams · Matrix · WhatsApp · Signal · Google Chat · iMessage"]
     Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry
 
-    subgraph Gateway["Wirken"]
+    subgraph Wirken
         Registry[Adapter Registry] --> Router
         Router --> Detect[Injection Detection]
         Detect --> Factory[AgentFactory]

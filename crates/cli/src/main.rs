@@ -25,21 +25,21 @@ enum Commands {
         org: Option<String>,
     },
 
-    /// Start the gateway daemon
+    /// Start wirken
     Run {
         /// WebChat port
         #[arg(short, long)]
         port: Option<u16>,
     },
 
-    /// Run an adapter process (called by the gateway daemon)
+    /// Run an adapter process (called by wirken)
     #[command(hide = true)]
     Adapter {
         /// Channel to run
         channel: String,
     },
 
-    /// Run the MCP proxy (called by the gateway daemon)
+    /// Run the MCP proxy (called by wirken)
     #[command(name = "mcp-proxy", hide = true)]
     McpProxy,
 

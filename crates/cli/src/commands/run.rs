@@ -36,8 +36,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     cfg.ensure_dirs()?;
 
     println!();
-    println!("  wirken gateway v{}", env!("CARGO_PKG_VERSION"));
-    println!("  ──────────────");
+    println!("  wirken v{}", env!("CARGO_PKG_VERSION"));
+    println!("  ──────");
     println!();
 
     // --- Start audit writer (with optional SIEM forwarding) ---
@@ -1042,7 +1042,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     println!("  WebChat: http://localhost:{webchat_port}");
     println!();
-    println!("  Gateway running. Press Ctrl+C to stop.");
+    println!("  Wirken running. Press Ctrl+C to stop.");
     println!();
 
     // --- Injection detector (shared, stateless) ---
@@ -1392,7 +1392,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     #[cfg(unix)]
     let _ = std::fs::remove_file(&orchestrator_socket_path);
 
-    println!("  Gateway stopped.");
+    println!("  Wirken stopped.");
     Ok(())
 }
 
