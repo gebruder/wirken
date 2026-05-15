@@ -14,6 +14,34 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     let cfg = config();
     let data = data_dir()?;
 
+    // First run is signalled by the absence of provider.json. The
+    // welcome panel surfaces wirken's positioning and the two
+    // trust-model claims (no credentials to the LLM; signed
+    // hash-chained audit log) at the moment the user is deciding
+    // whether to trust the tool. Re-runs skip straight to org
+    // config or Step 1; they're typically channel-add or key
+    // rotation and the elevator pitch is noise.
+    let is_first_run = !data.join("provider.json").exists();
+    if is_first_run {
+        println!("  Wirken is the switchboard between your messaging channels and an");
+        println!("  AI agent you control. Credentials never reach the LLM. Every");
+        println!("  action is logged in a signed, hash-chained audit log.");
+        println!();
+        println!("  Setup walks through six steps: provider, channels, credentials,");
+        println!("  service, sandbox, audit. About two minutes.");
+        println!();
+        let proceed = Confirm::new()
+            .with_prompt("  Continue")
+            .default(true)
+            .interact()?;
+        if !proceed {
+            println!();
+            println!("  Setup cancelled.");
+            return Ok(());
+        }
+        println!();
+    }
+
     // --- Org config (if provided) ---
 
     let org_applied = if let Some(ref url) = org_url {
@@ -64,8 +92,12 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         false
     };
 
-    println!("  Credentials are encrypted immediately. Never stored in plaintext.");
-    println!();
+    if !is_first_run {
+        // Welcome already names the encryption guarantee. Print
+        // the one-liner only on re-runs.
+        println!("  Credentials are encrypted immediately. Never stored in plaintext.");
+        println!();
+    }
 
     // --- Step 1: AI Provider (skip if org config provided it) ---
 
@@ -474,8 +506,43 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     println!();
 
-    // --- Step 3: Service installation ---
+    // --- Step 3: Credentials recap ---
+    //
+    // Pure surfacing: no input. Lists what got encrypted during
+    // steps 1 and 2 with the crypto framing, or prints the
+    // empty-state with the add command. Querying the vault only
+    // makes sense when a passphrase was actually entered earlier;
+    // otherwise the file may not exist and we report empty.
 
+    println!("  Step 3: Credentials");
+    println!();
+    let stored_creds: Vec<String> = if cfg.vault_db_path().exists() {
+        std::env::var("WIRKEN_VAULT_PASSPHRASE")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| {
+                let keychain = probe_keychain(&data, move || p);
+                CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()
+            })
+            .and_then(|store| store.list().ok())
+            .map(|metas| metas.into_iter().map(|m| m.name).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if stored_creds.is_empty() {
+        println!("  No credentials stored yet.");
+        println!("  Add with: wirken credentials add <name>");
+    } else {
+        println!("  Encrypted: {}", stored_creds.join(", "));
+        println!("  XChaCha20-Poly1305, keyed from the OS keychain.");
+    }
+    println!();
+
+    // --- Step 4: Service installation ---
+
+    println!("  Step 4: Service installation");
+    println!();
     let should_install = if install_service {
         true
     } else {
@@ -494,12 +561,14 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         }
     }
 
-    // --- Step 4: Sandbox mode ---
+    // --- Step 5: Sandbox mode ---
     //
     // Default is exec-only (0.7.5). If `runsc` is registered as a
     // Docker runtime, offer the stricter gvisor mode. If the operator
     // is setting up via --org and the org config already wrote
     // sandbox.json, don't prompt; org policy wins.
+    println!();
+    println!("  Step 5: Sandbox mode");
     println!();
     if data.join("sandbox.json").exists() {
         println!("  Sandbox: configured by organization.");
@@ -521,6 +590,20 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         .context("Failed to write sandbox.json")?;
         println!("  Sandbox: {mode}");
     }
+
+    // --- Step 6: Audit log recap ---
+    //
+    // Surfacing the trust claim: the audit log is the load-bearing
+    // story for wirken. Doing it silently means the user installs
+    // the tool without ever seeing what the audit guarantee
+    // actually is. Path + properties + when-it-gets-created.
+
+    println!();
+    println!("  Step 6: Audit log");
+    println!();
+    println!("  {}", cfg.audit_db_path().display());
+    println!("  Append-only, SHA-256 hash chain, Ed25519 chain-head signed.");
+    println!("  Created on first `wirken run`.");
 
     // --- Done ---
 
