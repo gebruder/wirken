@@ -502,7 +502,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 });
                 println!(
                     "  Route: {} -> agent:{} ({}/{})",
-                    channel, agent_cfg.id, agent_cfg.provider, agent_cfg.model
+                    super::channel::display_name(channel.as_str()),
+                    agent_cfg.id,
+                    agent_cfg.provider,
+                    agent_cfg.model
                 );
             }
 
@@ -596,7 +599,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     conversation_pattern: "*".into(),
                     agent_id: "default".into(),
                 });
-                println!("  Route: {} -> agent:default", adapter.channel);
+                println!(
+                    "  Route: {} -> agent:default",
+                    super::channel::display_name(&adapter.channel)
+                );
             }
         }
 

@@ -618,7 +618,17 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         let qualifier = match mode {
             "gvisor" => " (syscall-filtered)",
             "exec-only" => " (install gVisor for syscall filtering)",
-            _ => "",
+            other => {
+                // Silent fallthrough would hide a degraded UX when a
+                // future mode is wired into the picker before the
+                // qualifier table catches up. Log so the gap surfaces
+                // under `RUST_LOG=warn`.
+                tracing::warn!(
+                    "Sandbox mode '{other}' has no display qualifier; \
+                     extend pick_setup_sandbox_mode's match"
+                );
+                ""
+            }
         };
         println!("  Sandbox: {mode}{qualifier}");
     }
@@ -658,7 +668,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     if selected_channels.is_empty() {
         println!("  Channels: none (add later with `wirken channel add`)");
     } else {
-        println!("  Channels: {}", selected_channels.join(", "));
+        let display: Vec<&str> = selected_channels
+            .iter()
+            .map(|id| super::channel::display_name(id))
+            .collect();
+        println!("  Channels: {}", display.join(", "));
     }
     println!();
     println!("  Next steps:");

@@ -159,7 +159,11 @@ pub async fn add() -> Result<()> {
     if channels.is_empty() {
         println!("  Channels: none (bind with `wirken agent bind {id} <channel>`)");
     } else {
-        println!("  Channels: {}", channels.join(", "));
+        let display: Vec<&str> = channels
+            .iter()
+            .map(|id| super::channel::display_name(id))
+            .collect();
+        println!("  Channels: {}", display.join(", "));
     }
     println!();
 

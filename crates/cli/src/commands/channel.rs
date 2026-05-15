@@ -8,6 +8,27 @@ use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
 use super::{config, data_dir};
 
+/// Brand-canonical display name for a channel id. Internal ids are
+/// stable lowercase identifiers (used in config files, audit events,
+/// `wirken channel add <id>`); display names follow each platform's
+/// trademark casing (iMessage, WhatsApp, Microsoft Teams). Unknown
+/// ids pass through unchanged so a new adapter does not silently
+/// render as "unknown" before this table catches up.
+pub fn display_name(id: &str) -> &str {
+    match id {
+        "telegram" => "Telegram",
+        "discord" => "Discord",
+        "slack" => "Slack",
+        "teams" => "Microsoft Teams",
+        "matrix" => "Matrix",
+        "signal" => "Signal",
+        "google-chat" => "Google Chat",
+        "imessage" => "iMessage",
+        "whatsapp" => "WhatsApp",
+        other => other,
+    }
+}
+
 /// Non-interactive flags for `wirken channel add`. Flags that are
 /// `None` fall through to the matching `WIRKEN_<CHANNEL>_*` env var
 /// (where applicable) and then to an interactive prompt. Validation
