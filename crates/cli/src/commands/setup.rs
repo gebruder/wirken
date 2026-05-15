@@ -899,19 +899,19 @@ async fn configure_channel_overrides(
         // the main provider's key).
         let default_slot = format!("{provider_name}-api-key");
         let api_key_name: String = Input::new()
-            .with_prompt("  Vault slot for API key")
+            .with_prompt("  Name this key (used to reference it later, e.g. anthropic-prod)")
             .default(default_slot.clone())
             .interact_text()?;
 
-        // Validate early: refuse to persist a pointer at a slot
-        // that does not exist. Avoids a runtime failure on the
-        // first message routed to this channel.
+        // Validate early: refuse to persist a pointer at a name
+        // that has no credential yet. Avoids a runtime failure on
+        // the first message routed to this channel.
         if api_key_name.trim().is_empty() {
-            println!("  (no api_key_name provided — override will run without a key)");
+            println!("  (no name provided - override will run without a key)");
         } else if store.retrieve(&api_key_name).is_err() {
             println!(
-                "  Warning: vault slot '{api_key_name}' does not exist yet. \
-                 Run `wirken credentials add {api_key_name}` before starting the gateway."
+                "  Warning: no key named '{api_key_name}'. \
+                 Add it with: wirken credentials add {api_key_name}"
             );
         }
 
@@ -922,9 +922,7 @@ async fn configure_channel_overrides(
             "api_key_name": api_key_name,
         });
         overrides.insert(channel.clone(), entry);
-        println!(
-            "  Override recorded: {channel} -> {provider_name}/{model} (key slot: {api_key_name})"
-        );
+        println!("  Override recorded: {channel} -> {provider_name}/{model} (key: {api_key_name})");
 
         if !Confirm::new()
             .with_prompt("  Add another override?")

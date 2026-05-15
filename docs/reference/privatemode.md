@@ -110,7 +110,7 @@ The more interesting configuration — and the Privatemode partnership's headlin
    - Provider: `privatemode`
    - Model: `kimi-k2.5`
    - Base URL: `http://localhost:8080/v1`
-   - Vault slot for API key: `privatemode-access-key`
+   - Name this key: `privatemode-access-key`
 3. **Inspect `~/.wirken/provider.json`**. It should now contain a `channel_overrides` block:
    ```json
    {
@@ -128,7 +128,7 @@ The more interesting configuration — and the Privatemode partnership's headlin
    ```
 4. **`wirken run`.** A Signal message now routes to Privatemode; a Slack message stays on the agent's default. The audit log's `LlmRequest` events carry the per-turn provider and model.
 
-**Fail-closed behavior:** if `api_key_name` points at a vault slot that doesn't exist, `wirken run` refuses to start with a message naming the missing slot. Nothing silently degrades to the default.
+**Fail-closed behavior:** if `api_key_name` points at a key that doesn't exist, `wirken run` refuses to start with a message naming the missing key. Nothing silently degrades to the default.
 
 ## Credentials
 
@@ -164,7 +164,7 @@ Run with manifest auto-fetch enabled (the default). Pinning via `--manifestPath`
 
 - **`curl http://127.0.0.1:8080/v1/models` times out or is refused.** The proxy container isn't up. `docker ps | grep privatemode-proxy` — if absent, re-run step 2 of the Quickstart. If present but unhealthy, `docker logs privatemode-proxy`; the common first-run cause is attestation against `cdn.confidential.cloud:443` being blocked by an outbound firewall.
 - **Proxy logs say "401" or "invalid api key".** The key you passed to `--apiKey` is wrong. Generate a fresh one at <https://www.privatemode.ai> and restart the container. This is a proxy-to-backend error, not a Wirken error — `wirken run` will print success, then every message will fail at inference.
-- **`wirken run` aborts with "vault slot X is not present".** You configured a channel override but never ran `wirken credentials add X --stdin` to populate the slot. The message names the exact slot and the fix.
+- **`wirken run` aborts with "no key named X".** You configured a channel override but never ran `wirken credentials add X --stdin` to create the key. The message names the exact key and the fix.
 - **`wirken run` starts but messages get no reply.** Check two things in order: (a) `docker logs privatemode-proxy` for proxy-side errors, (b) `tail -f ~/.wirken/audit.db`-backed session events or `wirken sessions list` to see if an `LlmRequest` event was even emitted. If no event, the adapter never reached the agent — usually an adapter config problem. If the event is there but no response, the call to the proxy failed; proxy logs will say why.
 - **First message after a cold start takes 10+ seconds.** The proxy fetches a signed manifest from `cdn.confidential.cloud:443` and runs the remote attestation handshake on first request. Second and subsequent requests are fast. Not a bug.
 - **I see two `privatemode-proxy` containers listening on the same port.** `docker ps`, kill the extra one. Wirken does not manage the proxy lifecycle — it assumes the operator owns `:8080`.
@@ -191,7 +191,7 @@ Grounded in the Privatemode 2.0 launch email (2026-04-22) and the public release
 
 - Wirken does not verify Privatemode attestation independently; it trusts the proxy handshake.
 - No integration test in CI exercises the Privatemode code path. The adapter + LLM client paths have unit coverage, but the end-to-end request/response with the real proxy (or a stub) is verified by hand.
-- The `privatemode-access-key` vault slot is per-agent, not per-caller. Multi-user deployments that want to bill inference to distinct humans need per-caller key scoping that does not exist today.
+- The `privatemode-access-key` credential is per-agent, not per-caller. Multi-user deployments that want to bill inference to distinct humans need per-caller key scoping that does not exist today.
 
 ## References
 

@@ -2338,9 +2338,9 @@ fn resolve_channel_overrides(
             Some(slot) => {
                 let (secret, _) = store.retrieve(slot).with_context(|| {
                     format!(
-                        "channel_overrides['{channel}'] names vault slot '{slot}', \
-                         but that slot is not present in the vault. \
-                         Run `wirken credentials add {slot}` to add it."
+                        "channel '{channel}' needs a key named '{slot}', \
+                         but no key with that name exists. \
+                         Add it with: wirken credentials add {slot}"
                     )
                 })?;
                 (Some(secret.expose().to_string()), Some(slot.to_string()))
