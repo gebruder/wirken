@@ -629,11 +629,13 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         println!("  Channels: {}", selected_channels.join(", "));
     }
     println!();
-    println!(
-        "  Your credentials are encrypted in {}",
-        cfg.vault_db_path().display()
-    );
-    println!("  Audit log at {}", cfg.audit_db_path().display());
+    println!("  Next steps:");
+    println!("    wirken channel add <channel>      Add another messaging channel");
+    println!("    wirken credentials add <name>     Add or rotate a key");
+    println!("    wirken doctor                     Verify the install");
+    println!("    wirken session list               See active conversations");
+    println!();
+    println!("  WebChat: http://localhost:18790");
     println!();
     if should_install {
         println!("  Wirken is running as a service.");
