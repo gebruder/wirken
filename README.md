@@ -54,27 +54,37 @@ choco install capnproto -y
 cargo install --path crates/cli
 ```
 
-`wirken setup` walks you through three steps:
+`wirken setup` walks you through six steps:
 
 ```
   wirken setup
   ────────────
 
-  Step 1: Pick your AI
-  Provider: Ollama (local) / Anthropic / OpenAI / Google Gemini / AWS Bedrock / Tinfoil / Privatemode / Custom endpoint
-  API key: ********
-  Encrypting API key...
-  API key encrypted and stored.
-  Model: gpt-4.1-mini               ← auto-detected from provider API
+  Wirken is the switchboard between your messaging channels and an
+  AI agent you control. Credentials never reach the LLM. Every
+  action is logged in a signed, hash-chained audit log.
 
-  Step 2: Pick your channels
-  Add a channel: Telegram
-  Telegram bot token: ********
-  telegram: token encrypted, adapter keypair generated, registered.
+  Setup walks through six steps: provider, channels, credentials,
+  service, sandbox, audit. About a minute.
+
+  Continue [Y/n]: y
+
+  ... (six interactive steps) ...
 
   Setup complete!
-  Provider: openai (gpt-4o)
-  Channels: telegram
+
+  Provider: anthropic (claude-sonnet-4-6)
+  Channels: Telegram
+
+  Next steps:
+    wirken channel add <channel>      Add another messaging channel
+    wirken credentials add <name>     Add or rotate a key
+    wirken doctor                     Verify the install
+    wirken session list               See active conversations
+
+  WebChat: http://localhost:18790
+
+  Start wirken: wirken run
 ```
 
 `wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
