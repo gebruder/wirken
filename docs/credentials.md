@@ -109,27 +109,49 @@ Non-OAuth credentials cannot be rescoped; the command errors with
 a typed message before any picker UI is rendered. Use `wirken
 credentials rotate <name>` to replace a raw secret.
 
-## Scope-not-granted failures (current limitation)
+## Scope-not-granted failures
 
-If a tool call fails because the credential is missing a scope
-the tool needs, wirken currently surfaces the MCP server's raw
-auth-error response. The typed error variant that converts these
-into a clear "run wirken credentials rescope <name>" message is
-planned for a future slice once the per-provider auth-error
-formats can be verified against real MCP server integrations.
+If a tool call fails because the OAuth credential is missing a
+scope the tool needs, wirken detects the failure at the MCP
+transport layer and surfaces a typed error to the agent. The
+tool result reads:
 
-In the meantime, if a tool call fails with what looks like an
-auth or permission error, check the credential's scopes:
+```
+Tool call refused: credential '<name>' missing scope <hint>.
+Run: wirken credentials rescope <name>
+```
+
+When the provider's response named the specific scope, `<hint>`
+carries the scope id. When the response indicated insufficient
+scope generically, the message reads:
+
+```
+Tool call refused: credential '<name>' may be missing required
+scope. Run: wirken credentials rescope <name> to review.
+```
+
+Detection is per-provider: GitHub REST 403 responses (e.g.
+"Resource not accessible by integration"), Linear GraphQL
+`FORBIDDEN` / `AUTHENTICATION_ERROR` extensions combined with
+insufficient-permissions wording, and Google REST envelopes
+carrying `insufficientPermissions` or "Request had insufficient
+authentication scopes." Notion does not use OAuth scopes and is
+not detected; its auth failures surface as generic tool errors.
+
+Detectors are conservative. An auth error wirken cannot
+classify with confidence falls through to the generic
+tool-error path, where the operator sees the provider's raw
+response. In that case the manual workflow still applies:
 
 ```bash
 wirken credentials show <name>
-```
-
-And rescope if needed:
-
-```bash
 wirken credentials rescope <name>
 ```
+
+The detection logic is source-derived: each parser is built
+against the provider's documented error format. The first
+real-world failure that hits a detector either confirms the
+shape or surfaces a refinement.
 
 ## Type-enforced secret redaction
 

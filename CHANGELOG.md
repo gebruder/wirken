@@ -10,6 +10,32 @@ tagged.
 
 ## Unreleased
 
+### OAuth
+
+- Typed `McpToolError::ScopeNotGranted` variant in
+  `wirken-mcp-proxy`, closing the gap left in v1.5.0's OAuth
+  scope picker. Detection wired for Linear, GitHub, and Google
+  via per-provider detectors that match documented REST / GraphQL
+  error shapes (GitHub REST "Resource not accessible by ..." and
+  related 403 phrases, Linear GraphQL `FORBIDDEN` /
+  `AUTHENTICATION_ERROR` extensions combined with insufficient-
+  permissions wording, Google REST `insufficientPermissions`
+  reason / "Request had insufficient authentication scopes"
+  envelope). Notion does not use OAuth scopes and has no
+  detector. Detectors are conservative: ambiguous shapes return
+  `None` and fall through to the generic error path. `McpToolResult`
+  gains an `error_kind` discriminator and substitutes the typed
+  `Display` text (`"Tool call refused: credential '<name>'
+  missing scope <hint>. Run: wirken credentials rescope <name>"`)
+  into `output` when a detector matched, so the operator sees the
+  rescope command in the agent's response without dispatching on
+  the typed variant. `AuthProvider` gains an `oauth_context()`
+  method and the `Transport` enum exposes it on the call path so
+  detection runs only when the credential is OAuth-managed.
+  Source-derived detection: the first real-world failure either
+  confirms each parser's shape or refines it. See
+  `docs/credentials.md` for the updated operator narrative.
+
 ## [1.5.2] - 2026-05-15
 
 Audit chain halt on first run against any pre-1.2.0 audit.db.
