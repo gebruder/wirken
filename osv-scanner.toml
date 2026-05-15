@@ -72,3 +72,52 @@ reason = "narrow-exposure: name constraints accepted for certificates asserting 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0104"
 reason = "narrow-exposure: reachable panic in certificate revocation list parsing. The affected code path is the CRL parser, which runs only when an operator-supplied or downloaded CRL is fed into rustls-webpki. Wirken does not load CRLs in any code path; revocation checking is off by default in rustls and the adapter does not opt in. See the shared verification comment at the top of this file for the dependency chain and revisit condition."
+
+# ## Category: rsa 0.9.10 Marvin attack (RUSTSEC-2023-0071)
+#
+# The `rsa` crate has a known timing sidechannel on RSA
+# decryption operations (the "Marvin attack" class). No fixed
+# upstream release is available. Wirken carries `rsa 0.9.10` via:
+#
+#     wirken-agent
+#       -> tinfoil (git pin)
+#         -> sev 7.1.0
+#           -> rsa 0.9.10
+#
+# `sev` is the SEV-SNP attestation verification SDK; `tinfoil` uses
+# it to verify the AMD SEV-SNP report that Tinfoil's enclave
+# endpoint presents at session setup. The RSA operations sit inside
+# that attestation-chain verification.
+#
+# Verified narrow exposure:
+#
+# 1. The RSA decryption / signature-verification operation runs at
+#    most once per wirken process startup. `tinfoil::Client::new_default_with_api_key`
+#    is gated by a `tokio::sync::Mutex<Option<Arc<tinfoil::Client>>>`
+#    in `crates/agent/src/llm.rs`; the cached client is reused for
+#    the process lifetime and re-attestation only triggers when a
+#    pinned-TLS cert rotation surfaces (`invalidate_tinfoil_cache`).
+#    A Marvin-style attack needs thousands to millions of timing
+#    samples on attacker-controlled inputs; wirken's call rate is
+#    O(1) per process, sometimes a small constant on cert rotation.
+#
+# 2. The input to the RSA operation is a server-supplied attestation
+#    document fetched from Tinfoil's known endpoint, not an
+#    attacker-submitted ciphertext. Marvin attacks require an
+#    adaptive chosen-ciphertext oracle; wirken's RSA path consumes
+#    a server-sent payload and produces a verify-only result.
+#
+# 3. The attacker would need to measure wirken's RSA-verify timing
+#    over the network. Remote timing measurement on a single
+#    occasional operation, buried under network jitter and TLS
+#    handshake variability, does not yield the precision needed to
+#    extract key material. The realistic attack vector for Marvin
+#    requires a local oracle.
+#
+# Revisit condition: when the `rsa` crate releases a constant-time
+# fix and `sev` adopts it, or when `tinfoil` removes the `sev`
+# dependency entirely. At that point this entry can be removed.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+reason = "no-fix-available + narrow-exposure: Marvin attack timing sidechannel on RSA decryption in rsa 0.9.10. Wirken's RSA path runs through tinfoil's SEV-SNP attestation verification at client init, gated by a mutex and cached for the process lifetime. The operation runs at most once per process (rare re-attestation on cert rotation), consumes server-supplied attestation data rather than attacker-submitted ciphertexts, and would have to be measured remotely under network jitter. The Marvin attack vector requires adaptive chosen-ciphertext queries and high-precision local timing, neither of which the wirken deployment exposes. See the verification comment block above for the call-graph reasoning and revisit condition."
