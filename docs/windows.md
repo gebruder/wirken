@@ -10,7 +10,7 @@ Wirken targets a researcher / single-user-workstation profile on Windows. The Li
 - **Vault uses an age-encrypted file.** Keys are stored in `%APPDATA%\wirken\keychain\` and unlocked with a passphrase. Native Credential Manager / DPAPI integration is on the roadmap; the age-file backend is portable across machines if you keep the passphrase.
 - **`wirken zirkel push` (the orchestrator-push API) is Linux/macOS only.** The push socket is a same-user JSON-line trust boundary that has no analog on Windows; the rest of zirkel works.
 - **The Signal adapter is Linux/macOS only.** It connects to `signal-cli`'s unix-domain socket, which doesn't exist on Windows. The other channel adapters (Telegram, Discord, Slack, Teams, Matrix, WhatsApp, Google Chat) work.
-- **`wirken service` (systemd/launchd installer) is not available.** Run the gateway manually, or schedule it via Task Scheduler.
+- **`wirken service` (systemd/launchd installer) is not available.** Run wirken manually, or schedule it via Task Scheduler.
 - **`wirken cron` (preset cron) is not available.** Use Task Scheduler.
 
 These are not bugs to file; they are deliberate scope cuts. The Linux/macOS docs describe the full surface.
@@ -29,7 +29,7 @@ Download the latest release binary from [github.com/gebruder/wirken/releases](ht
 
 1. Unzip. The zip contains `wirken.exe` directly.
 2. Open a terminal in the folder containing `wirken.exe`.
-3. Run `.\wirken.exe setup` to configure, then `.\wirken.exe run` to start the gateway.
+3. Run `.\wirken.exe setup` to configure, then `.\wirken.exe run` to start wirken.
 
 The binary is unsigned. On first run, Windows SmartScreen will warn that the publisher is unverified; click "More info" then "Run anyway". This is expected. Code signing is on the roadmap.
 
@@ -67,7 +67,7 @@ To pin a specific shell, set `shell` in `%APPDATA%\wirken\sandbox.json`:
 }
 ```
 
-The gateway prints the resolved shell at startup:
+Wirken prints the resolved shell at startup:
 
 ```
   Host exec shell: sh (C:\Program Files\Git\usr\bin\sh.exe)
@@ -75,7 +75,7 @@ The gateway prints the resolved shell at startup:
 
 ## File-permission posture
 
-Wirken sets `0o600` on its key files (vault device key, agent identity, signing keys) on Linux/macOS. Windows does not have a direct equivalent; the keys are written without ACL tightening and rely on the user-profile isolation of `%APPDATA%`. The gateway emits a `tracing::warn!` on each such write so the posture is visible.
+Wirken sets `0o600` on its key files (vault device key, agent identity, signing keys) on Linux/macOS. Windows does not have a direct equivalent; the keys are written without ACL tightening and rely on the user-profile isolation of `%APPDATA%`. Wirken emits a `tracing::warn!` on each such write so the posture is visible.
 
 If your threat model requires owner-only ACLs on these files, set them manually with `icacls` or PowerShell after first run. Native ACL-on-write is on the roadmap.
 

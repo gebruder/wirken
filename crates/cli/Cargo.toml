@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Wirken command-line interface and long-running gateway daemon."
+description = "The switchboard for the agent era. Reach an AI agent on Telegram, Slack, Teams, Matrix, WhatsApp, Signal, Google Chat, or iMessage."
 
 [[bin]]
 name = "wirken"

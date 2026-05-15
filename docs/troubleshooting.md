@@ -20,7 +20,7 @@ Run `wirken setup` first. This creates `~/.wirken/provider.json`.
 
 **"Failed to bind UDS"**
 
-The socket file already exists from a previous run. Either the gateway is already running, or it crashed without cleanup. Delete the socket:
+The socket file already exists from a previous run. Either wirken is already running, or it crashed without cleanup. Delete the socket:
 
 ```bash
 rm ~/.wirken/sockets/gateway.sock
@@ -49,7 +49,7 @@ An adapter process crashed. Check the logs with `RUST_LOG=wirken=debug wirken ru
 **With Ollama:**
 - Small local models (e.g., llama3.2) may hallucinate tool calls, causing the agent to loop without producing a response. Tools are disabled by default for Ollama to avoid this.
 - Non-streaming requests (used by channel adapters) wait for the full response before replying. This can take 10-30 seconds depending on your hardware. WebChat uses streaming and feels faster.
-- Verify Ollama is running: the gateway prints the detected version at startup (e.g., `Ollama version: 0.19.0`).
+- Verify Ollama is running: wirken prints the detected version at startup (e.g., `Ollama version: 0.19.0`).
 
 ## Vault passphrase mismatch
 

@@ -19,7 +19,7 @@ BlueBubbles Server posts outbound webhook events with no authentication of any k
 The adapter therefore enforces its trust boundary at the socket layer:
 
 - The webhook listener binds to `127.0.0.1` only. `wirken run` refuses to start the adapter if the bound local address is not a loopback IP.
-- The realistic deployment is single-user, single-machine, with BlueBubbles Server and the wirken gateway on the same Mac.
+- The realistic deployment is single-user, single-machine, with BlueBubbles Server and wirken on the same Mac.
 
 If you need the adapter to receive webhooks from a different machine, put a trusted reverse proxy in front that adds its own authentication layer (mTLS, HMAC signing at the proxy, bearer header) and terminate that before the request reaches the loopback listener. Do not expose the adapter's port directly.
 

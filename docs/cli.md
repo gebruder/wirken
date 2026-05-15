@@ -16,7 +16,7 @@ wirken setup [OPTIONS]
 
 ## wirken run
 
-Start the gateway daemon. Spawns adapter processes, starts WebChat, and accepts connections.
+Start wirken. Spawns adapter processes, starts WebChat, and accepts connections.
 
 ```
 wirken run [OPTIONS]

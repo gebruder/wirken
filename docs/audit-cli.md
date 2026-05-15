@@ -1,6 +1,6 @@
 # Audit CLI
 
-`wirken audit` reads and verifies the hash-chained audit log produced by every running gateway. The log is per-session: each session has its own chain of events, and the integrity of any one session is provable independently. This page documents the user-facing surface so you can cite results in research output, script integrity checks, or hand the schema to a downstream tool.
+`wirken audit` reads and verifies the hash-chained audit log produced by every running wirken instance. The log is per-session: each session has its own chain of events, and the integrity of any one session is provable independently. This page documents the user-facing surface so you can cite results in research output, script integrity checks, or hand the schema to a downstream tool.
 
 The schema is versioned. As of this release, JSON output is `schema_version: 2`. Schema 2 is the first version with chain-head signature reporting; schema 1 archives stay readable through the same fields, signatures simply read as zero counters.
 

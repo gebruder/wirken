@@ -24,7 +24,7 @@ One sequential procedure to get a working Wirken + Privatemode instance. Assumes
 3. **Configure Wirken.** `wirken setup` and choose:
    - Step 1 (provider): pick **Privatemode**. Accept the default proxy URL (`http://localhost:8080`). Paste your access key. Accept the default model (`kimi-k2.5`).
    - Step 2 (channel): pick at least one — Telegram or Signal is easiest for a first run.
-4. **Start the gateway.** `wirken run`. You should see `Provider: openai/kimi-k2.5` and your channel listed as a route.
+4. **Start wirken.** `wirken run`. You should see `Provider: openai/kimi-k2.5` and your channel listed as a route.
 5. **Send a test message** through the channel you configured. The response should come back in the same channel.
 6. **Verify the round-trip landed in the audit log.**
    ```

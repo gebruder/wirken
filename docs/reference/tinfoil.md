@@ -24,7 +24,7 @@ Assumes a built `wirken` binary and outbound network access.
      (this listing call is pre-attestation; the wizard does not gate model selection on the
      enclave verification). Pick a model from the list, or accept the default.
    - Step 2 (channel): pick at least one. WebChat is the simplest first run.
-3. **Start the gateway.** `wirken run`. The first inbound message pays the attestation cost
+3. **Start wirken.** `wirken run`. The first inbound message pays the attestation cost
    (a few seconds while the SDK runs router discovery, AMD SEV-SNP hardware attestation,
    Sigstore code-provenance verification, and TLS-key pinning). Subsequent messages reuse
    the pinned transport.
