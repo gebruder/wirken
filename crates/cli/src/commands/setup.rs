@@ -28,7 +28,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         println!("  action is logged in a signed, hash-chained audit log.");
         println!();
         println!("  Setup walks through six steps: provider, channels, credentials,");
-        println!("  service, sandbox, audit. About two minutes.");
+        println!("  service, sandbox, audit. About a minute.");
         println!();
         let proceed = Confirm::new()
             .with_prompt("  Continue")
