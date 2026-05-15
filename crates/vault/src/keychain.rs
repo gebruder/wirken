@@ -78,11 +78,11 @@ pub trait Keychain: Send + Sync {
 /// back to unsigned alarm-log mode and emit a prominent warn.
 pub fn load_or_create_alarm_log_key(keychain: &dyn Keychain) -> Result<Vec<u8>, VaultError> {
     const ALARM_LOG_KEY_NAME: &str = "alarm-log-hmac";
-    if let Ok(bytes) = keychain.retrieve_aux_key(ALARM_LOG_KEY_NAME) {
-        if bytes.len() == 32 {
-            return Ok(bytes);
-        }
-        // Length mismatch is treated as missing; regenerate.
+    if let Ok(bytes) = keychain.retrieve_aux_key(ALARM_LOG_KEY_NAME)
+        && bytes.len() == 32
+    {
+        return Ok(bytes);
+        // Length mismatch falls through to the regenerate path below.
     }
     // On the age-file backend the wrapping key derives from the
     // operator's passphrase. If the keychain has not been unlocked

@@ -88,10 +88,10 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
     if !in_default {
         return false;
     }
-    if let Some(exclude) = &config.typed_exclude_variants {
-        if exclude.iter().any(|k| k == kind) {
-            return false;
-        }
+    if let Some(exclude) = &config.typed_exclude_variants
+        && exclude.iter().any(|k| k == kind)
+    {
+        return false;
     }
     true
 }

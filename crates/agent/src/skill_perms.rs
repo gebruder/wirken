@@ -256,10 +256,10 @@ pub fn resolve_block(
     let inference = match block.inference {
         Some(i) => {
             let allow = resolve_allow(&i.allow, "inference")?;
-            if let Some(ref d) = i.default {
-                if !allow.allows(d) {
-                    return Err(PermissionsError::DefaultNotInAllow(d.clone()));
-                }
+            if let Some(ref d) = i.default
+                && !allow.allows(d)
+            {
+                return Err(PermissionsError::DefaultNotInAllow(d.clone()));
             }
             InferencePolicy {
                 allow,
@@ -474,10 +474,10 @@ fn host_matches(host: &str, pattern: &str) -> bool {
     if pattern == host {
         return true;
     }
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        if let Some(dotidx) = host.find('.') {
-            return &host[dotidx + 1..] == suffix;
-        }
+    if let Some(suffix) = pattern.strip_prefix("*.")
+        && let Some(dotidx) = host.find('.')
+    {
+        return &host[dotidx + 1..] == suffix;
     }
     false
 }

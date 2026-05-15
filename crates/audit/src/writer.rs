@@ -352,10 +352,8 @@ async fn run_verify_pass(
                 },
                 None => false,
             };
-            if !routed_through_channel {
-                if let Err(e) = log.write_batch(&[event]) {
-                    tracing::error!("audit chain_broken event write failed: {e}");
-                }
+            if !routed_through_channel && let Err(e) = log.write_batch(&[event]) {
+                tracing::error!("audit chain_broken event write failed: {e}");
             }
             VerifyPassOutcome {
                 intact: false,

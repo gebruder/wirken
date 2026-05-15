@@ -1807,13 +1807,12 @@ async fn message_loop(
 
                 // Scan for prompt injection patterns
                 let threat_detail = detector.scan(&text).map(|threat| threat.to_detail_json());
-                if let Some(ref threat) = threat_detail {
-                    if let (Some(obj), Some(threat_obj)) =
+                if let Some(ref threat) = threat_detail
+                    && let (Some(obj), Some(threat_obj)) =
                         (inbound_detail.as_object_mut(), threat.as_object())
-                    {
-                        for (k, v) in threat_obj {
-                            obj.insert(k.clone(), v.clone());
-                        }
+                {
+                    for (k, v) in threat_obj {
+                        obj.insert(k.clone(), v.clone());
                     }
                 }
 

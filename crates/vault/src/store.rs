@@ -419,11 +419,11 @@ fn precreate_owner_only(path: &Path) -> Result<(), VaultError> {
     if path.exists() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| VaultError::Keychain(format!("create parent: {e}")))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| VaultError::Keychain(format!("create parent: {e}")))?;
     }
     #[cfg(unix)]
     {

@@ -959,10 +959,10 @@ fn emit(
     handle: Option<&SessionHandle<OwnSession>>,
     event: SessionEvent,
 ) {
-    if let (Some(log), Some(handle)) = (session_log, handle) {
-        if let Err(e) = log.append(handle, TrustLevel::System, event) {
-            tracing::warn!("zirkel audit append failed: {e}");
-        }
+    if let (Some(log), Some(handle)) = (session_log, handle)
+        && let Err(e) = log.append(handle, TrustLevel::System, event)
+    {
+        tracing::warn!("zirkel audit append failed: {e}");
     }
 }
 

@@ -208,11 +208,11 @@ pub fn render(
         for r in rs {
             text.push_str(&format!("{idx}. {}\n", r.title));
             text.push_str(&format!("   {}", r.source_name));
-            if let Some(why) = &r.llm_why_surfaced {
-                if !why.is_empty() {
-                    text.push_str(" — ");
-                    text.push_str(why);
-                }
+            if let Some(why) = &r.llm_why_surfaced
+                && !why.is_empty()
+            {
+                text.push_str(" — ");
+                text.push_str(why);
             }
             text.push('\n');
             text.push_str(&format!("   {}\n", r.url));

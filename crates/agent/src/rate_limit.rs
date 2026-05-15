@@ -161,12 +161,12 @@ impl RateLimitedClient {
                 });
 
             // Window roll-over.
-            if let Ok(elapsed) = now_wall.duration_since(entry.window_start) {
-                if elapsed >= Duration::from_secs(24 * 60 * 60) {
-                    entry.count = 0;
-                    entry.window_start = now_wall;
-                    entry.last_request = None;
-                }
+            if let Ok(elapsed) = now_wall.duration_since(entry.window_start)
+                && elapsed >= Duration::from_secs(24 * 60 * 60)
+            {
+                entry.count = 0;
+                entry.window_start = now_wall;
+                entry.last_request = None;
             }
 
             if entry.count >= cap {

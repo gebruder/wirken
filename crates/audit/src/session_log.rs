@@ -1814,10 +1814,10 @@ impl SqliteSessionLog {
                     ChainHeadReason::SessionStart,
                     &signer,
                 )?;
-            } else if !is_chain_head {
-                if let Some(reason) = self.checkpoint_due(&session_id, Utc::now()) {
-                    self.append_chain_head_locked(&conn, handle, reason, &signer)?;
-                }
+            } else if !is_chain_head
+                && let Some(reason) = self.checkpoint_due(&session_id, Utc::now())
+            {
+                self.append_chain_head_locked(&conn, handle, reason, &signer)?;
             }
         }
 
@@ -2290,12 +2290,12 @@ fn precreate_owner_only(path: &Path) -> Result<(), AuditError> {
     if path.exists() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AuditError::SiemConfig(format!("create parent {}: {e}", parent.display()))
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AuditError::SiemConfig(format!("create parent {}: {e}", parent.display()))
+        })?;
     }
     #[cfg(unix)]
     {

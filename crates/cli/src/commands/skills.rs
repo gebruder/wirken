@@ -559,11 +559,12 @@ fn apply_migrations(value: &mut serde_yaml::Value) -> Vec<&'static str> {
     if let Some(metadata) = value.get_mut("metadata").and_then(|v| v.as_mapping_mut()) {
         let openclaw_key = serde_yaml::Value::String("openclaw".to_string());
         let wirken_key = serde_yaml::Value::String("wirken".to_string());
-        if metadata.contains_key(&openclaw_key) && !metadata.contains_key(&wirken_key) {
-            if let Some(v) = metadata.remove(&openclaw_key) {
-                metadata.insert(wirken_key, v);
-                changes.push("openclaw->wirken");
-            }
+        if metadata.contains_key(&openclaw_key)
+            && !metadata.contains_key(&wirken_key)
+            && let Some(v) = metadata.remove(&openclaw_key)
+        {
+            metadata.insert(wirken_key, v);
+            changes.push("openclaw->wirken");
         }
     }
 
@@ -573,11 +574,9 @@ fn apply_migrations(value: &mut serde_yaml::Value) -> Vec<&'static str> {
         Some(m) => !m.contains_key(permissions_key.clone()),
         None => false,
     };
-    if needs_permissions {
-        if let Some(map) = value.as_mapping_mut() {
-            map.insert(permissions_key, empty_permissions_stub());
-            changes.push("permissions stub added");
-        }
+    if needs_permissions && let Some(map) = value.as_mapping_mut() {
+        map.insert(permissions_key, empty_permissions_stub());
+        changes.push("permissions stub added");
     }
 
     changes
