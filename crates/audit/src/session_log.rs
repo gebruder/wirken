@@ -351,6 +351,14 @@ pub enum SubagentStatus {
     Timeout,
 }
 
+/// Default `actor_kind` for `SessionEvent::AuditLegacy` rows that
+/// were written by a pre-1.2.0 path and therefore have no
+/// `actor_kind` field on the wire. See the variant's doc for the
+/// trade-off.
+fn default_legacy_actor_kind() -> crate::event::ActorKind {
+    crate::event::ActorKind::Service
+}
+
 /// One event in a session transcript.
 ///
 /// New variants may be added without breaking older readers when the
@@ -866,13 +874,34 @@ pub enum SessionEvent {
     /// log. The 1.2.0 schema splits `actor` into
     /// `actor_kind` + `actor_id` and makes `channel` an
     /// `Option<String>`; pre-1.2.0 rows persisted as plain `actor` +
-    /// empty-string `channel` continue to deserialize via the
-    /// per-field defaults and the AuditEvent legacy adapter
-    /// (`crates/audit/src/event.rs`). The `audit_events` SQL view
-    /// COALESCEs both wire shapes so existing SIEM consumers see
-    /// every row.
+    /// empty-string `channel`. The `audit_events` SQL view COALESCEs
+    /// both wire shapes so existing SIEM consumers see every row.
+    ///
+    /// Pre-1.2.0 payloads that landed in `session_events` (e.g., from
+    /// a 1.1.x writer) are missing `actor_kind` entirely. Reading
+    /// them must not break chain verification, which is what 1.5.1
+    /// regressed: the variant declared `actor_kind: ActorKind`
+    /// without a default, so `serde_json::from_str::<SessionEvent>`
+    /// failed with `missing field actor_kind` and halted the audit
+    /// writer after three consecutive verify-pass errors.
+    ///
+    /// The fields below tolerate the pre-1.2.0 shape:
+    ///   - `actor_kind` defaults to `Service`. Conservative because
+    ///     the rows that lack the field tend to be internal events
+    ///     (gateway lifecycle, alarm-log writes). User messages
+    ///     written by the pre-1.2.0 path get classified Service
+    ///     instead of User; the variant comment treats that
+    ///     misclassification as acceptable because the row hashes
+    ///     are already sealed and the precise classify-from-actor
+    ///     heuristic requires a custom Deserialize (deferred until
+    ///     a future schema migration justifies it).
+    ///   - `actor_id` aliases `actor` so a pre-split row with
+    ///     `{"actor":"alice",...}` populates `actor_id` with the
+    ///     original identifier.
     AuditLegacy {
+        #[serde(default = "default_legacy_actor_kind")]
         actor_kind: crate::event::ActorKind,
+        #[serde(default, alias = "actor")]
         actor_id: String,
         action: String,
         target: String,
@@ -2427,6 +2456,109 @@ mod precreate_perms_tests {
                 "{}: expected 0o600, got 0o{mode:o}",
                 p.display()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_legacy_deserialize_tests {
+    //! Regression tests for the `actor_kind` deserialization gap
+    //! that halted the audit writer on 1.5.1 first-run against an
+    //! existing audit.db. Pre-1.2.0 rows lacked `actor_kind`; the
+    //! variant declared it without a default, so chain verification
+    //! failed with `serialization error: missing field actor_kind`
+    //! after three flushes.
+    //!
+    //! The fix makes `actor_kind` default to `Service` and aliases
+    //! `actor_id` to accept the pre-split `actor` field. These tests
+    //! pin both shapes against the same `SessionEvent` deserializer
+    //! the live writer uses.
+
+    use super::SessionEvent;
+    use crate::event::ActorKind;
+
+    #[test]
+    fn deserializes_legacy_row_missing_actor_kind() {
+        let payload = r#"{
+            "kind": "audit_legacy",
+            "actor_id": "alice",
+            "action": "exec",
+            "target": "ls",
+            "detail": {}
+        }"#;
+        let event: SessionEvent =
+            serde_json::from_str(payload).expect("legacy row must deserialize");
+        match event {
+            SessionEvent::AuditLegacy {
+                actor_kind,
+                actor_id,
+                action,
+                ..
+            } => {
+                assert_eq!(actor_kind, ActorKind::Service);
+                assert_eq!(actor_id, "alice");
+                assert_eq!(action, "exec");
+            }
+            other => panic!("expected AuditLegacy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_pre_split_row_with_actor_field() {
+        // Pre-1.2.0 wire shape: single `actor` string, no
+        // `actor_kind`. The alias on actor_id picks up the value;
+        // actor_kind defaults to Service.
+        let payload = r#"{
+            "kind": "audit_legacy",
+            "actor": "gateway",
+            "action": "channel.open",
+            "target": "slack",
+            "detail": {}
+        }"#;
+        let event: SessionEvent =
+            serde_json::from_str(payload).expect("pre-split row must deserialize");
+        match event {
+            SessionEvent::AuditLegacy {
+                actor_kind,
+                actor_id,
+                ..
+            } => {
+                assert_eq!(actor_kind, ActorKind::Service);
+                assert_eq!(actor_id, "gateway");
+            }
+            other => panic!("expected AuditLegacy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_post_1_2_0_row_unchanged() {
+        // Pin: rows written by 1.2.0+ (with explicit actor_kind +
+        // actor_id) must continue to deserialize exactly as they did
+        // before the fix. The default and alias only fire when the
+        // primary fields are absent.
+        let payload = r#"{
+            "kind": "audit_legacy",
+            "actor_kind": "user",
+            "actor_id": "bob",
+            "action": "message.send",
+            "target": "slack",
+            "channel": "slack",
+            "detail": {}
+        }"#;
+        let event: SessionEvent =
+            serde_json::from_str(payload).expect("post-1.2.0 row must deserialize");
+        match event {
+            SessionEvent::AuditLegacy {
+                actor_kind,
+                actor_id,
+                channel,
+                ..
+            } => {
+                assert_eq!(actor_kind, ActorKind::User);
+                assert_eq!(actor_id, "bob");
+                assert_eq!(channel.as_deref(), Some("slack"));
+            }
+            other => panic!("expected AuditLegacy, got {other:?}"),
         }
     }
 }
