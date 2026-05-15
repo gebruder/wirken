@@ -43,6 +43,23 @@ use crate::oauth::{OAuthCredential, refresh_oauth_token};
 #[async_trait]
 pub trait AuthProvider: Send + Sync {
     async fn authorization_header(&mut self) -> Result<Option<HeaderValue>, ProxyError>;
+
+    /// OAuth-credential context for typed error reporting. Returns
+    /// `Some((credential_name, provider_name))` when this auth
+    /// provider is backed by an OAuth credential the `wirken
+    /// credentials rescope` flow can re-grant. `NoAuth` and
+    /// `BearerAuth` return `None`: they are not OAuth-managed and
+    /// rescope does not apply to them.
+    ///
+    /// Used by the MCP-tool-call path to populate
+    /// [`crate::tool_error::McpToolError::ScopeNotGranted`] when a
+    /// per-provider detector classifies a tool-call failure as a
+    /// scope-missing condition. The credential name appears in the
+    /// operator-facing rescope hint; the provider name routes
+    /// through to the right detector.
+    fn oauth_context(&self) -> Option<(String, String)> {
+        None
+    }
 }
 
 /// No-auth provider — produces no `Authorization` header.
@@ -216,5 +233,9 @@ impl AuthProvider for OAuth2Auth {
 
         let header = bearer_header(&cred.access_token)?;
         Ok(Some(header))
+    }
+
+    fn oauth_context(&self) -> Option<(String, String)> {
+        Some((self.credential_name.clone(), self.provider.clone()))
     }
 }

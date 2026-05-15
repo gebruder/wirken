@@ -17,6 +17,7 @@ pub mod mcp_registry;
 pub mod mcp_transport;
 pub mod oauth;
 pub mod server;
+pub mod tool_error;
 pub mod wire;
 
 mod runner;
@@ -29,6 +30,7 @@ pub use oauth::{
     run_authorization_code_flow, store_oauth,
 };
 pub use runner::run;
+pub use tool_error::{McpToolError, detect_scope_not_granted};
 
 #[cfg(test)]
 mod tests;

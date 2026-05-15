@@ -7,14 +7,25 @@
 
 use crate::error::ProxyError;
 use crate::mcp_transport::Transport;
+use crate::tool_error::{McpToolError, detect_scope_not_granted};
 use crate::wire::ToolDefWire;
 
 /// Result of executing an MCP tool. Mirrors `wirken_agent::tool::ToolResult`
 /// but is defined locally so the proxy does not depend on `wirken-agent`.
+///
+/// `error_kind` is populated when a per-provider detector
+/// (see [`crate::tool_error`]) classifies the failure as a known
+/// shape (e.g. scope-not-granted). Existing callers that read only
+/// `output` continue to work; the field carries the typed message
+/// for the operator already so display-side dispatch is optional.
 #[derive(Debug, Clone)]
 pub struct McpToolResult {
     pub output: String,
     pub success: bool,
+    /// Typed classification of the failure when the detector
+    /// matched. `None` on success and on unknown / unclassifiable
+    /// errors (the generic error path).
+    pub error_kind: Option<McpToolError>,
 }
 
 /// A connected MCP server client. Holds a [`Transport`] enum so the
@@ -130,10 +141,24 @@ impl McpClient {
 
         let resp = self.transport.request("tools/call", Some(params)).await?;
 
+        // Snapshot the auth context once (cheap clone of two
+        // strings) so both error-handling branches below can run
+        // the per-provider scope detector without re-reading the
+        // transport. `None` for non-OAuth transports / auth providers
+        // (Stdio, NoAuth, BearerAuth) and bypasses detection entirely
+        // since rescope only applies to OAuth-managed credentials.
+        let oauth_ctx = self.transport.oauth_context();
+
         if let Some(ref err) = resp.error {
+            let raw_output = format!("MCP tool error: {} ({})", err.message, err.code);
+            let error_kind = classify_error(&oauth_ctx, &err.message);
             return Ok(McpToolResult {
-                output: format!("MCP tool error: {} ({})", err.message, err.code),
+                output: error_kind
+                    .as_ref()
+                    .map(|e| e.to_string())
+                    .unwrap_or(raw_output),
                 success: false,
+                error_kind,
             });
         }
 
@@ -160,13 +185,24 @@ impl McpClient {
             .and_then(|e| e.as_bool())
             .unwrap_or(false);
 
+        let raw_output = if output.is_empty() {
+            "(no output)".into()
+        } else {
+            output
+        };
+        let error_kind = if is_error {
+            classify_error(&oauth_ctx, &raw_output)
+        } else {
+            None
+        };
+
         Ok(McpToolResult {
-            output: if output.is_empty() {
-                "(no output)".into()
-            } else {
-                output
-            },
+            output: error_kind
+                .as_ref()
+                .map(|e| e.to_string())
+                .unwrap_or(raw_output),
             success: !is_error,
+            error_kind,
         })
     }
 
@@ -181,4 +217,14 @@ impl McpClient {
         let _ = self.transport.notify("exit", None).await;
         self.transport.shutdown().await;
     }
+}
+
+/// Run the per-provider scope detector when an OAuth context is
+/// available. Returns `None` for non-OAuth transports, unknown
+/// providers, or response shapes the detector cannot match with
+/// confidence. The caller substitutes the typed message into
+/// `output` when this is `Some`.
+fn classify_error(oauth_ctx: &Option<(String, String)>, error_text: &str) -> Option<McpToolError> {
+    let (credential, provider) = oauth_ctx.as_ref()?;
+    detect_scope_not_granted(provider, credential, error_text)
 }

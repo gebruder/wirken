@@ -433,6 +433,19 @@ impl Transport {
             Transport::Http(t) => t.shutdown().await,
         }
     }
+
+    /// OAuth context for typed error reporting on the tool-call path.
+    /// Stdio transports always return `None` (no auth provider).
+    /// HTTP transports delegate to the underlying
+    /// [`crate::auth::AuthProvider::oauth_context`]; `OAuth2Auth`
+    /// returns `Some((credential, provider))`, other auth providers
+    /// return `None`.
+    pub fn oauth_context(&self) -> Option<(String, String)> {
+        match self {
+            Transport::Stdio(_) => None,
+            Transport::Http(t) => t.auth.oauth_context(),
+        }
+    }
 }
 
 #[cfg(test)]
