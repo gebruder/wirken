@@ -23,13 +23,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     // rotation and the elevator pitch is noise.
     let is_first_run = !data.join("provider.json").exists();
     if is_first_run {
-        println!("  Wirken is the switchboard between your messaging channels and an");
-        println!("  AI agent you control. Credentials never reach the LLM. Every");
-        println!("  action is logged in a signed, hash-chained audit log.");
-        println!();
-        println!("  Setup walks through six steps: provider, channels, credentials,");
-        println!("  service, sandbox, audit. About a minute.");
-        println!();
+        super::ui::welcome();
         let proceed = Confirm::new()
             .with_prompt("  Continue")
             .default(true)
@@ -104,8 +98,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     if org_applied && data.join("provider.json").exists() {
         println!("  Step 1: AI provider configured by organization.");
     } else {
-        println!("  Step 1: Pick your AI");
-        println!();
+        super::ui::step(1, "Pick your AI");
 
         let providers = &[
             "Ollama (local)",
@@ -420,8 +413,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     // --- Step 2: Channels ---
 
-    println!("  Step 2: Pick your channels");
-    println!();
+    super::ui::step(2, "Pick your channels");
 
     let channels = &[
         "Telegram",
@@ -514,8 +506,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     // makes sense when a passphrase was actually entered earlier;
     // otherwise the file may not exist and we report empty.
 
-    println!("  Step 3: Credentials");
-    println!();
+    super::ui::step(3, "Credentials");
     let stored_creds: Vec<String> = if cfg.vault_db_path().exists() {
         std::env::var("WIRKEN_VAULT_PASSPHRASE")
             .ok()
@@ -531,18 +522,22 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
         Vec::new()
     };
     if stored_creds.is_empty() {
-        println!("  No credentials stored yet.");
-        println!("  Add with: wirken credentials add <name>");
+        super::ui::body(&[
+            "No credentials stored yet.",
+            "Add with: wirken credentials add <name>",
+        ]);
     } else {
-        println!("  Encrypted: {}", stored_creds.join(", "));
-        println!("  XChaCha20-Poly1305, keyed from the OS keychain.");
+        let encrypted = format!("Encrypted: {}", stored_creds.join(", "));
+        super::ui::body(&[
+            encrypted.as_str(),
+            "XChaCha20-Poly1305, keyed from the OS keychain.",
+        ]);
     }
     println!();
 
     // --- Step 4: Service installation ---
 
-    println!("  Step 4: Service installation");
-    println!();
+    super::ui::step(4, "Service installation");
     let should_install = if install_service {
         true
     } else {
@@ -562,12 +557,15 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             }
             Platform::Unsupported(_) => None,
         };
-        match where_installed {
-            Some(path) => println!("  Wirken will install {path}."),
-            None => println!("  Wirken will install a system service."),
-        }
-        println!("  Starts on login, restarts on failure.");
-        println!("  Disable with: wirken setup --uninstall-service");
+        let first_line = match where_installed {
+            Some(path) => format!("Wirken will install {path}."),
+            None => "Wirken will install a system service.".to_string(),
+        };
+        super::ui::body(&[
+            first_line.as_str(),
+            "Starts on login, restarts on failure.",
+            "Disable with: wirken setup --uninstall-service",
+        ]);
         println!();
         Confirm::new()
             .with_prompt("  Install as a system service?")
@@ -591,8 +589,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     // is setting up via --org and the org config already wrote
     // sandbox.json, don't prompt; org policy wins.
     println!();
-    println!("  Step 5: Sandbox mode");
-    println!();
+    super::ui::step(5, "Sandbox mode");
     if data.join("sandbox.json").exists() {
         println!("  Sandbox: configured by organization.");
     } else {
@@ -641,16 +638,16 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
     // actually is. Path + properties + when-it-gets-created.
 
     println!();
-    println!("  Step 6: Audit log");
-    println!();
-    println!("  {}", cfg.audit_db_path().display());
-    println!("  Append-only, SHA-256 hash chain, Ed25519 chain-head signed.");
-    println!("  Created on first `wirken run`.");
+    super::ui::step(6, "Audit log");
+    let audit_path = cfg.audit_db_path().display().to_string();
+    super::ui::body(&[
+        audit_path.as_str(),
+        "Append-only, SHA-256 hash chain, Ed25519 chain-head signed.",
+        "Created on first `wirken run`.",
+    ]);
 
     // --- Done ---
 
-    println!();
-    println!("  Setup complete!");
     println!();
     // Read provider info from the saved config (works for both org and manual setup)
     let provider_summary = std::fs::read_to_string(data.join("provider.json"))
@@ -664,32 +661,25 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             )
         })
         .unwrap_or_else(|| "not configured".into());
-    println!("  Provider: {provider_summary}");
-    if selected_channels.is_empty() {
-        println!("  Channels: none (add later with `wirken channel add`)");
+    let display_channels: Vec<&str> = selected_channels
+        .iter()
+        .map(|id| super::channel::display_name(id))
+        .collect();
+    let service = if should_install {
+        super::ui::ServiceState::Running {
+            manage_command: "wirken setup --uninstall-service",
+        }
     } else {
-        let display: Vec<&str> = selected_channels
-            .iter()
-            .map(|id| super::channel::display_name(id))
-            .collect();
-        println!("  Channels: {}", display.join(", "));
-    }
-    println!();
-    println!("  Next steps:");
-    println!("    wirken channel add <channel>      Add another messaging channel");
-    println!("    wirken credentials add <name>     Add or rotate a key");
-    println!("    wirken doctor                     Verify the install");
-    println!("    wirken session list               See active conversations");
-    println!();
-    println!("  WebChat: http://localhost:18790");
-    println!();
-    if should_install {
-        println!("  Wirken is running as a service.");
-        println!("  Manage with: wirken setup --uninstall-service");
-    } else {
-        println!("  Start wirken: wirken run");
-    }
-    println!();
+        super::ui::ServiceState::NotRunning {
+            start_command: "wirken run",
+        }
+    };
+    super::ui::outro(
+        &provider_summary,
+        &display_channels,
+        "http://localhost:18790",
+        service,
+    );
 
     Ok(())
 }

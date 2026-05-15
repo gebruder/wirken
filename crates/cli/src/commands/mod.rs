@@ -20,6 +20,7 @@ pub mod service;
 pub mod session;
 pub mod setup;
 pub mod skills;
+pub mod ui;
 pub mod webchat;
 pub mod zirkel;
 
