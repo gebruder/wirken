@@ -86,7 +86,6 @@ cargo install --path crates/cli
   Provider: ollama/llama3.2
   Ollama version: 0.19.0
   Route: telegram -> agent:default
-  Socket: ~/.wirken/sockets/gateway.sock
   WebChat: http://localhost:18790
 
   Wirken running. Press Ctrl+C to stop.

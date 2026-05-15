@@ -636,14 +636,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         );
     }
 
-    println!(
-        "  Agents: {}",
-        static_configs
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    // Single-agent boot is the modal case ("Agents: default" tells the
+    // user nothing). Surface the list on stdout only when more than one
+    // agent is configured; log it under tracing::info either way so
+    // `RUST_LOG=info wirken run` still shows the inventory.
+    let agent_list = static_configs
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::info!("Agents: {agent_list}");
+    if static_configs.len() > 1 {
+        println!("  Agents: {agent_list}");
+    }
 
     // --- Setup IPC listener ---
     let socket_path = cfg.socket_dir().join("gateway.sock");
@@ -663,7 +668,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
             .context("Failed to chmod gateway socket to 0600")?;
     }
-    println!("  Socket: {}", socket_path.display());
+    // Implementation detail: the IPC socket path. Useful for debugging
+    // adapter handshake or a stuck socket file, not for an operator
+    // confirming wirken started. `RUST_LOG=info wirken run` surfaces it.
+    tracing::info!("IPC socket: {}", socket_path.display());
 
     // --- Pre-flight: validate per-adapter vault entries ---
     //
@@ -2178,7 +2186,7 @@ async fn maybe_spawn_typed_siem(
     let sink: Arc<dyn wirken_audit::TypedSink> = Arc::new(
         wirken_audit::siem_typed::HttpTypedSink::new(cfg_ref.clone()),
     );
-    println!("  SIEM: typed-event forwarder spawned");
+    tracing::info!("SIEM: typed-event forwarder spawned");
     Some(wirken_audit::TypedEventForwarder::spawn(
         log,
         sink,

@@ -170,7 +170,6 @@ Startup prints:
   Provider: ollama/qwen2.5:72b
   Route: slack -> agent:work
   Route: matrix -> agent:work
-  Socket: ~/.wirken/sockets/gateway.sock
 ```
 
 Two adapter processes spawn, one per channel. Each connects back over the local IPC transport (Unix domain socket on Linux/macOS, named pipe on Windows), performs the ed25519 handshake, and begins polling its platform.
