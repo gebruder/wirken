@@ -10,6 +10,17 @@ tagged.
 
 ## Unreleased
 
+## [1.5.1] - 2026-05-15
+
+Install experience overhaul. Setup wizard and run banner restructured;
+"gateway" is gone from user-facing surfaces (internal IPC role unchanged).
+
+Default `wirken run` output drops three lines (IPC socket path, SIEM
+forwarder spawn, single-agent list); set `RUST_LOG=info` to surface them.
+Channel display names in the run banner's Route: line and the setup outro
+use brand-canonical casing (Telegram, iMessage, WhatsApp); internal ids in
+config files and audit events stay lowercase.
+
 ## [1.5.0] - 2026-05-14
 
 ### Known security findings (deferred)
