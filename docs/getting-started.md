@@ -46,7 +46,7 @@ This walks you through:
 wirken run
 ```
 
-This starts the gateway. It spawns adapter processes for each channel, starts the WebChat UI at `http://localhost:18790`, and waits for messages.
+This starts wirken. It spawns adapter processes for each channel, starts the WebChat UI at `http://localhost:18790`, and waits for messages.
 
 Send a test message from your configured channel, or open the WebChat in a browser.
 

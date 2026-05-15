@@ -1,8 +1,8 @@
-# Architecture: Secure Personal AI Gateway
+# Architecture: Secure Personal AI Switchboard
 
 **Wirken**: German, *to work*, *to weave*, *to have effect*. Named for [Gebruder Ottenheimer](https://gebruder.ottenheimer.app/briefs/wirken.html), a weaving mill in Wurttemberg, 1862-1937.
 
-A secure, model-agnostic AI agent gateway. Multi-channel personal AI assistant with skills, tool execution, and local-first operation.
+A secure, model-agnostic AI agent switchboard. Multi-channel personal AI assistant with skills, tool execution, and local-first operation.
 
 Written in Rust. Not because Rust is fashionable, but because the security properties this architecture requires — memory safety, no prototype pollution, no deserialization exploits, no dynamic property access, compile-time enforcement of isolation boundaries — are properties that Rust provides at compile time and garbage-collected runtimes cannot.
 
