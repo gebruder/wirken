@@ -115,7 +115,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             "daemon",
         ))
         .await?;
-    println!("  Audit log: {}", cfg.audit_db_path().display());
+    // Step 6 of `wirken setup` now surfaces the audit DB path with
+    // its full trust-claim framing (append-only, SHA-256 hash chain,
+    // Ed25519 chain-head signed). Re-printing the bare path on every
+    // `wirken run` was noise. Operators who need the path consult
+    // `wirken doctor` or know where it lives.
 
     // --- Refresh org config if configured ---
     //
@@ -325,15 +329,21 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let host_exec_sandbox = super::load_sandbox_config(&cfg.data_dir);
     match host_exec_sandbox.shell.resolve() {
         Some(resolved) => {
-            println!(
-                "  Host exec shell: {} ({})",
+            // Happy path: shell is detected and exec will work.
+            // Useful when debugging skill compatibility, noise on
+            // every boot. Hidden by default under wirken=warn;
+            // `RUST_LOG=wirken=info` opts back in.
+            tracing::info!(
+                "Host exec shell: {} ({})",
                 resolved.kind,
                 resolved.program.display()
             );
         }
         None => {
-            println!(
-                "  Host exec shell: none found ({:?}); the exec tool will refuse to run on this host",
+            // Operator-actionable: shell-exec skills will refuse
+            // until a shell is configured. Stays visible.
+            tracing::warn!(
+                "Host exec shell: none found ({:?}); the exec tool will refuse to run on this host",
                 host_exec_sandbox.shell
             );
         }
@@ -1207,8 +1217,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .context("Failed to chmod orchestrator socket to 0600")?;
     }
     #[cfg(unix)]
-    println!(
-        "  Orchestrator socket: {}",
+    tracing::info!(
+        "Orchestrator socket: {}",
         orchestrator_socket_path.display()
     );
 
