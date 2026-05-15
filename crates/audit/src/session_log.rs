@@ -2532,10 +2532,9 @@ mod audit_legacy_deserialize_tests {
 
     #[test]
     fn deserializes_post_1_2_0_row_unchanged() {
-        // Pin: rows written by 1.2.0+ (with explicit actor_kind +
-        // actor_id) must continue to deserialize exactly as they did
-        // before the fix. The default and alias only fire when the
-        // primary fields are absent.
+        // Pin the wire shape: rows written by 1.2.0+ with explicit
+        // actor_kind + actor_id must deserialize without the default
+        // or alias firing.
         let payload = r#"{
             "kind": "audit_legacy",
             "actor_kind": "user",
@@ -2560,5 +2559,27 @@ mod audit_legacy_deserialize_tests {
             }
             other => panic!("expected AuditLegacy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fully_populated_audit_legacy_roundtrips() {
+        // Symmetric regression coverage: pin that a fully-populated
+        // typed event survives serialize -> deserialize equal. The
+        // hand-written payload tests above only confirm the
+        // deserializer accepts an expected wire shape; this catches
+        // the inverse failure (renamed field, dropped field on the
+        // Serialize side, asymmetric alias handling) that a wire-shape
+        // test cannot.
+        let original = SessionEvent::AuditLegacy {
+            actor_kind: ActorKind::User,
+            actor_id: "bob".to_string(),
+            action: "message.send".to_string(),
+            target: "slack".to_string(),
+            channel: Some("slack".to_string()),
+            detail: serde_json::json!({"trust": "low", "reply_to": 42}),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: SessionEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, original);
     }
 }
