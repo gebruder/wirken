@@ -178,6 +178,13 @@ impl PendingApprovalQueue {
     /// does not retain a tombstone for resolved ids; SIEM consumers
     /// see the actual decision on the audit chain in either case.
     pub fn resolve(&self, request_id: &str, decision: PendingDecision) -> ResolveResult {
+        // Race: if the gate's tokio::time::timeout fires while
+        // resolve() is mid-call, the entry is removed and tx.send
+        // may succeed into an already-dropping receiver. The gate
+        // returns Timeout, the audit chain records timeout-denial,
+        // but the HTTP response to the operator returned Accepted.
+        // Sub-millisecond window. Audit chain is authoritative; the
+        // operator-UI mismatch is the cost.
         let entry = self.inner.lock().unwrap().remove(request_id);
         match entry {
             Some(e) => match e.tx.send(decision) {
