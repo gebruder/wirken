@@ -171,11 +171,20 @@ impl SignalAdapter {
     pub(crate) const PREFIX_LEN: usize = 8;
 
     /// Run the adapter to completion (or indefinitely). Handles the
-    /// gateway handshake once, spawns the long-lived gateway-side tasks
-    /// (heartbeat, outbound handler, inbound pump), and enters the
-    /// signal-cli reconnect loop. The reconnect loop never returns; the
-    /// adapter process exits only when the gateway drops it or a fatal
-    /// protocol error escapes the reconnect boundary.
+    /// gateway handshake once, makes the first signal-cli connect,
+    /// then spawns the long-lived gateway-side tasks (heartbeat,
+    /// outbound handler, inbound pump), and enters the signal-cli
+    /// reconnect loop. First-attempt signal-cli failure is fatal
+    /// (run() returns Err so the adapter process exits with a
+    /// clear error); mid-session disconnects retry with backoff.
+    ///
+    /// Connect ordering: outbound_handler is spawned only after the
+    /// first signal-cli connect+subscribe completes. The
+    /// alternative ordering (handler first, connect second) admits
+    /// a race where a gateway frame arriving in the connect window
+    /// would fail with ConnectionClosed and surface to operators
+    /// as ApprovalRequestFailed for what should have been a
+    /// well-formed pending approval.
     pub async fn run(self: Arc<Self>, gateway_socket: &Path) -> Result<(), SignalError> {
         if self.allowlist.is_empty() {
             tracing::warn!(
@@ -213,21 +222,34 @@ impl SignalAdapter {
         let pump_writer = gw_writer.clone();
         tokio::spawn(inbound_pump(inbound_rx, pump_writer));
 
-        let outbound_self = self.clone();
-        let outbound_writer = gw_writer.clone();
-        tokio::spawn(async move {
-            outbound_handler(gw_reader, outbound_self, outbound_writer).await;
-        });
-
         tracing::info!(
             "Connecting to signal-cli socket at {} for account {}",
             self.socket_path.display(),
             self.phone_number
         );
 
+        // First signal-cli connect happens BEFORE spawning the
+        // outbound handler. If signal-cli is unreachable at
+        // startup (daemon not running, socket path wrong) the
+        // adapter exits here with a clear error rather than
+        // entering a degraded state where every outbound frame
+        // surfaces as ApprovalRequestFailed.
+        let mut reader_handle = self.connect_and_subscribe().await?;
+
+        let outbound_self = self.clone();
+        let outbound_writer = gw_writer.clone();
+        tokio::spawn(async move {
+            outbound_handler(gw_reader, outbound_self, outbound_writer).await;
+        });
+
         let mut backoff = BACKOFF_MIN;
         loop {
-            let outcome = self.connect_once().await;
+            let outcome = match reader_handle.await {
+                Ok(r) => r,
+                Err(join_err) => Err(SignalError::Signal(format!(
+                    "reader task joined: {join_err}"
+                ))),
+            };
             *self.inner.lock().await = None;
 
             match outcome {
@@ -244,14 +266,41 @@ impl SignalAdapter {
                 }
             }
 
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(BACKOFF_MAX);
+            // Reconnect attempts. Mid-session race window between
+            // disconnect and reconnect is its own concern; frames
+            // that arrive during the window will fail with
+            // ConnectionClosed (same as pre-fix first-connect
+            // window did). Out of scope for this slice.
+            loop {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                match self.connect_and_subscribe().await {
+                    Ok(handle) => {
+                        reader_handle = handle;
+                        backoff = BACKOFF_MIN;
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "signal-cli reconnect failed; will retry"
+                        );
+                    }
+                }
+            }
         }
     }
 
-    /// One connect-subscribe-read cycle. Returns `Ok(())` on clean EOF,
-    /// `Err(...)` on any other failure. Caller retries with backoff.
-    async fn connect_once(self: &Arc<Self>) -> Result<(), SignalError> {
+    /// Connect to signal-cli, spawn the read loop, and complete
+    /// the `subscribeReceive` handshake. Returns the `JoinHandle`
+    /// of the spawned read loop so the caller can await connection
+    /// lifetime separately from establishment. On any failure the
+    /// reader is aborted and `self.inner` is cleared so a retry
+    /// starts from a clean state.
+    async fn connect_and_subscribe(
+        self: &Arc<Self>,
+    ) -> Result<tokio::task::JoinHandle<Result<(), SignalError>>, SignalError> {
         let stream = UnixStream::connect(&self.socket_path).await?;
         let (read, write) = stream.into_split();
         let conn = Arc::new(Connection {
@@ -272,17 +321,12 @@ impl SignalAdapter {
         let reader_handle =
             tokio::spawn(async move { read_loop(read, reader_adapter, reader_conn).await });
 
-        self.subscribe(&conn).await?;
-
-        // Block on the reader. It returns when signal-cli closes the
-        // socket (normal EOF) or hits a read error.
-        match reader_handle.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(join_err) => Err(SignalError::Signal(format!(
-                "reader task joined: {join_err}"
-            ))),
+        if let Err(e) = self.subscribe(&conn).await {
+            reader_handle.abort();
+            *self.inner.lock().await = None;
+            return Err(e);
         }
+        Ok(reader_handle)
     }
 
     async fn subscribe(&self, conn: &Arc<Connection>) -> Result<(), SignalError> {

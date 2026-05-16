@@ -1623,6 +1623,64 @@ fn test_adapter(allowlist: SignalAllowlist) -> std::sync::Arc<crate::SignalAdapt
     )
 }
 
+/// First-attempt signal-cli connect failure must propagate out of
+/// `run()` as `Err`, not silently retry. Operators who start
+/// wirken before the signal-cli daemon see a meaningful startup
+/// error rather than a degraded adapter that surfaces every
+/// gateway frame as ApprovalRequestFailed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connect_failure_at_startup_returns_err_from_run() {
+    use std::sync::Arc;
+    use tokio::net::UnixListener;
+
+    use crate::SignalAdapter;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Intentionally do NOT bind a listener at this path; the
+    // adapter's first connect attempt will hit ENOENT or
+    // ECONNREFUSED and bubble that up as SignalError::Io.
+    let signal_socket = tmp.path().join("signal-cli-not-running.sock");
+    let gw_socket = tmp.path().join("gw.sock");
+    let gw_listener = UnixListener::bind(&gw_socket).unwrap();
+
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gw_listener.accept().await.unwrap();
+        let (mut gr, mut gw) = split_stream(stream);
+        // Adapter must reach handshake before its first
+        // signal-cli connect attempt.
+        perform_gateway_handshake(&mut gr, &mut gw, |_, _| Ok(()))
+            .await
+            .unwrap();
+    });
+
+    let identity = AdapterIdentity::generate("signal");
+    let allowlist = SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap();
+    let adapter = SignalAdapter::new(
+        identity,
+        signal_socket.to_string_lossy().into_owned(),
+        fixtures::FIXTURE_ACCOUNT.into(),
+        allowlist,
+    )
+    .expect("adapter construction");
+
+    let run_result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        Arc::new(adapter).run(&gw_socket),
+    )
+    .await
+    .expect("run() must return (not hang) on signal-cli connect failure");
+
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), gateway_task).await;
+
+    // The exact error variant depends on the OS error code
+    // (ENOENT for missing path, ECONNREFUSED for path-exists-
+    // no-listener). Either lands as SignalError::Io.
+    match run_result {
+        Err(crate::SignalError::Io(_)) => {}
+        other => panic!("expected SignalError::Io from connect failure, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn approval_prefix_miss_does_not_remove_other_entries() {
     let adapter = test_adapter(SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap());
@@ -1738,13 +1796,6 @@ async fn approval_round_trip_via_text_command() {
     let request_id = "0f9d3c52-1234-5678-9abc-deadbeef0001";
     let expected_prefix = "0f9d3c52";
 
-    // Subscribe-ack signal: fake_signal triggers this after
-    // responding to the adapter's subscribe RPC. Gateway_task
-    // waits on it before sending the ApprovalRequest so the
-    // adapter's `self.inner` is populated and `send_message`
-    // won't trip the cold-start ConnectionClosed path.
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
-
     let fake_signal = tokio::spawn(async move {
         let (stream, _) = signal_listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
@@ -1759,8 +1810,6 @@ async fn approval_round_trip_via_text_command() {
             .write_all(fixtures::subscribe_response(req_id, sub_id).as_bytes())
             .await
             .unwrap();
-        // Signal readiness to the gateway side.
-        let _ = ready_tx.send(());
 
         // The adapter renders the approval prompt; capture the
         // outgoing `send` RPC and reply with a fake timestamp.
@@ -1799,11 +1848,14 @@ async fn approval_round_trip_via_text_command() {
         perform_gateway_handshake(&mut gr, &mut gw, |_, _| Ok(()))
             .await
             .unwrap();
-        // Block until the fake signal-cli has acknowledged the
-        // subscribe RPC; the adapter's `self.inner` is populated
-        // by `connect_once` before the subscribe is sent, so once
-        // this fires `send_message` will find a live connection.
-        ready_rx.await.expect("fake_signal must complete subscribe");
+
+        // No cross-task readiness sync needed: the adapter's
+        // `run()` now waits for the first signal-cli connect to
+        // complete before spawning the outbound handler. The
+        // gateway frame written here arrives at a handler that
+        // already has a live signal-cli connection to dispatch
+        // through. If this test starts racing again, the
+        // connect-ordering fix has regressed.
 
         // Push an ApprovalRequest frame.
         let mut req_msg = capnp::message::Builder::new_default();
