@@ -34,6 +34,15 @@ pub enum SignalError {
     #[error("subscribeReceive did not return a subscription id")]
     BadSubscribeResponse,
 
+    /// `send_message` was called while the signal-cli connection was
+    /// down and reconnect did not complete within
+    /// `WIRKEN_SIGNAL_RECONNECT_WAIT_S` (default 30s). Distinct from
+    /// `ConnectionClosed` so the gateway's `ApprovalRequestFailed`
+    /// path can carry a `reconnect_timeout` reason label rather than
+    /// the generic `channel_not_accessible`.
+    #[error("signal-cli reconnect did not complete within cap")]
+    ReconnectTimeout,
+
     /// Configured endpoint is an HTTP URL. The adapter moved to
     /// `--socket` JSON-RPC; surface a clear migration message at startup
     /// rather than looping in reconnect with a cryptic UnixStream error.

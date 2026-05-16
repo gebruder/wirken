@@ -44,6 +44,25 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// Wall-clock cap on how long `send_message` will wait for
+/// signal-cli reconnect when the connection is down. After this
+/// elapses the call returns `SignalError::ReconnectTimeout` so
+/// the gateway-side path can emit `ApprovalRequestFailed` with a
+/// `reconnect_timeout` reason rather than waiting indefinitely on
+/// a daemon that may be permanently gone. Overridable via
+/// `WIRKEN_SIGNAL_RECONNECT_WAIT_S`.
+pub const DEFAULT_RECONNECT_WAIT_SECS: u64 = 30;
+
+pub fn resolve_reconnect_wait() -> Duration {
+    match std::env::var("WIRKEN_SIGNAL_RECONNECT_WAIT_S") {
+        Ok(s) => match s.trim().parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => Duration::from_secs(DEFAULT_RECONNECT_WAIT_SECS),
+        },
+        Err(_) => Duration::from_secs(DEFAULT_RECONNECT_WAIT_SECS),
+    }
+}
+
 /// Sentinel for "no subscribe in flight" / "no subscription yet".
 /// signal-cli assigns monotonically increasing positive ids, so
 /// `u64::MAX` never collides with a real subscription or request id.
@@ -112,6 +131,15 @@ pub struct SignalAdapter {
     /// before `run()` populates it; production callers must call
     /// `run()` before driving inbound notifications.
     gateway_writer: Mutex<Option<Arc<Mutex<IpcFrameWriter>>>>,
+    /// Notification fired by `run()` after every successful
+    /// signal-cli connect (initial + reconnect). `send_message`
+    /// uses this to block during a reconnect window rather than
+    /// failing the caller's frame immediately with
+    /// `ConnectionClosed`. Edge-triggered, with the
+    /// register-then-recheck pattern in `wait_for_connection` so
+    /// a notify that fires between check and registration is not
+    /// lost.
+    connect_notify: Arc<tokio::sync::Notify>,
 }
 
 /// Per-connection state. Recreated on every reconnect cycle. Shared
@@ -161,6 +189,7 @@ impl SignalAdapter {
             formatter: SignalFormatter,
             approval_prefix_map: Mutex::new(HashMap::new()),
             gateway_writer: Mutex::new(None),
+            connect_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -266,11 +295,15 @@ impl SignalAdapter {
                 }
             }
 
-            // Reconnect attempts. Mid-session race window between
-            // disconnect and reconnect is its own concern; frames
-            // that arrive during the window will fail with
-            // ConnectionClosed (same as pre-fix first-connect
-            // window did). Out of scope for this slice.
+            // Reconnect attempts. Gateway frames arriving while
+            // we are between attempts park in
+            // `send_message` -> `wait_for_connection` rather than
+            // failing immediately; the notify_waiters() inside
+            // `connect_and_subscribe` wakes them after the next
+            // successful attempt. If the cap elapses with no
+            // attempt succeeding, the parked send returns
+            // `ReconnectTimeout` and the gateway sees an
+            // `ApprovalRequestFailed` with that reason.
             loop {
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -326,7 +359,56 @@ impl SignalAdapter {
             *self.inner.lock().await = None;
             return Err(e);
         }
+        // Wake any send_message calls that are parked in
+        // wait_for_connection because they hit `self.inner = None`
+        // during a reconnect window.
+        self.connect_notify.notify_waiters();
         Ok(reader_handle)
+    }
+
+    /// Block until `self.inner` is `Some`, returning the
+    /// `Arc<Connection>` for use by the caller. Returns
+    /// `SignalError::ReconnectTimeout` when `cap` elapses without
+    /// a successful reconnect. Designed for the
+    /// reconnect-window race in `send_message`: a gateway frame
+    /// that arrives while the reconnect inner loop is between
+    /// attempts can park here rather than failing the caller's
+    /// approval delivery with the misleading
+    /// `channel_not_accessible` label.
+    ///
+    /// The register-then-recheck pattern (enable the Notified
+    /// future *before* the state check) ensures a notify that
+    /// fires between our state check and our await is not lost.
+    async fn wait_for_connection(&self, cap: Duration) -> Result<Arc<Connection>, SignalError> {
+        let deadline = tokio::time::Instant::now() + cap;
+        loop {
+            // Register the waiter BEFORE checking state. A
+            // notify_waiters fired between our state check and
+            // our await would otherwise be lost; enable() makes
+            // this future visible to the next notify regardless
+            // of polling order.
+            let notified = self.connect_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            // Scoped to drop the MutexGuard before any await.
+            let inner_clone = {
+                let guard = self.inner.lock().await;
+                guard.as_ref().cloned()
+            };
+            if let Some(conn) = inner_clone {
+                return Ok(conn);
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(SignalError::ReconnectTimeout);
+            }
+
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return Err(SignalError::ReconnectTimeout);
+            }
+        }
     }
 
     async fn subscribe(&self, conn: &Arc<Connection>) -> Result<(), SignalError> {
@@ -610,12 +692,25 @@ impl SignalAdapter {
     /// signal-cli rejects the RPC if both are present, so this
     /// branching is required for group sends to work at all.
     async fn send_message(&self, conversation_id: &str, text: &str) -> Result<i64, SignalError> {
-        let conn = {
+        // Fast path: signal-cli is currently connected. Slow
+        // path: park on `wait_for_connection` until reconnect
+        // completes or the cap (default 30s) elapses. The slow
+        // path catches the mid-session reconnect window so
+        // gateway frames arriving during the window deliver
+        // after reconnect rather than failing immediately with
+        // `channel_not_accessible`.
+        // Scope the lock so its MutexGuard drops BEFORE the
+        // wait_for_connection await. Without the explicit scope
+        // the guard would live across the await (match scrutinee
+        // temporary), and wait_for_connection takes the same
+        // mutex - deadlock.
+        let inner_clone = {
             let guard = self.inner.lock().await;
-            guard
-                .as_ref()
-                .cloned()
-                .ok_or(SignalError::ConnectionClosed)?
+            guard.as_ref().cloned()
+        };
+        let conn = match inner_clone {
+            Some(c) => c,
+            None => self.wait_for_connection(resolve_reconnect_wait()).await?,
         };
 
         // Agents emit markdown; Signal renders almost none of it.
@@ -919,6 +1014,7 @@ async fn send_approval_request(
 fn classify_send_error(e: &SignalError) -> &'static str {
     match e {
         SignalError::ConnectionClosed => "channel_not_accessible",
+        SignalError::ReconnectTimeout => "reconnect_timeout",
         SignalError::Timeout { .. } => "signal_rpc_timeout",
         SignalError::Signal(_) => "signal_rpc_error",
         SignalError::Io(_) => "network_error",

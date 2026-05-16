@@ -2068,3 +2068,356 @@ async fn approval_round_trip_via_text_command() {
         "body missing full request id: {body:?}"
     );
 }
+
+/// Serializes tests that touch `WIRKEN_SIGNAL_RECONNECT_WAIT_S`.
+/// cargo test parallelizes within a binary; without this lock,
+/// the two reconnect-cap tests below would race on env-var
+/// reads/writes and intermittently observe each other's value.
+static RECONNECT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// ---------------------------------------------------------------------------
+// Mid-session reconnect window. signal-cli disconnects, gateway pushes a
+// frame, adapter parks in `wait_for_connection`, fake-signal-cli accepts the
+// reconnect, frame delivers. The pre-fix behavior would have surfaced
+// ApprovalRequestFailed with `channel_not_accessible` during the window;
+// this test pins the post-fix happy-path delivery.
+// ---------------------------------------------------------------------------
+
+// Static-Mutex env-var serialization holds a std::sync::Mutex
+// guard across awaits to keep WIRKEN_SIGNAL_RECONNECT_WAIT_S
+// stable for the test's duration. Standard test-fixture idiom;
+// allowed here.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_session_reconnect_delivers_queued_frame() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::sync::Mutex;
+
+    use crate::SignalAdapter;
+
+    // SAFETY: the static RECONNECT_ENV_LOCK serializes this
+    // test against the reconnect-cap test below so they don't
+    // interleave on WIRKEN_SIGNAL_RECONNECT_WAIT_S. Generous
+    // cap value so the reconnect window is the test's only
+    // timing variable. Held across the entire test scope
+    // because env reads happen anywhere inside adapter.run().
+    let _env_guard = RECONNECT_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S", "10");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let signal_socket = tmp.path().join("signal-cli.sock");
+    let gw_socket = tmp.path().join("gw.sock");
+    let signal_listener = UnixListener::bind(&signal_socket).unwrap();
+    let gw_listener = UnixListener::bind(&gw_socket).unwrap();
+
+    let captured_send: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_send_for_fake = captured_send.clone();
+
+    let request_id = "abcd1234-1234-5678-9abc-deadbeef0042";
+    let expected_prefix = "abcd1234";
+    let signal_group_id = "group-reconnect-happy==";
+
+    // Cross-task sync: fake_signal fires `conn1_closed_tx` after
+    // dropping conn1, so the gateway side knows when to push the
+    // ApprovalRequest. Without this, the gateway might write the
+    // frame before the adapter has observed the EOF and cleared
+    // `self.inner`, and send_message would proceed through the
+    // dead conn1 rather than parking in wait_for_connection.
+    let (conn1_closed_tx, conn1_closed_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let fake_signal = tokio::spawn(async move {
+        // Connection 1: subscribe, then close.
+        let (stream1, _) = signal_listener.accept().await.unwrap();
+        let (read1, mut write1) = stream1.into_split();
+        let mut lines1 = BufReader::new(read1).lines();
+        let line = lines1.next_line().await.unwrap().expect("subscribe1");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let req_id = req["id"].as_u64().unwrap();
+        write1
+            .write_all(fixtures::subscribe_response(req_id, 1).as_bytes())
+            .await
+            .unwrap();
+        drop(write1);
+        drop(lines1);
+        let _ = conn1_closed_tx.send(());
+
+        // Connection 2: subscribe, then capture the send RPC the
+        // adapter dispatches once `wait_for_connection` unblocks.
+        let (stream2, _) = signal_listener.accept().await.unwrap();
+        let (read2, mut write2) = stream2.into_split();
+        let mut lines2 = BufReader::new(read2).lines();
+        let line = lines2.next_line().await.unwrap().expect("subscribe2");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let req_id = req["id"].as_u64().unwrap();
+        write2
+            .write_all(fixtures::subscribe_response(req_id, 2).as_bytes())
+            .await
+            .unwrap();
+
+        let line = lines2
+            .next_line()
+            .await
+            .unwrap()
+            .expect("send after reconnect");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(req["method"], "send");
+        let send_id = req["id"].as_u64().unwrap();
+        *captured_send_for_fake.lock().await = Some(req.clone());
+        write2
+            .write_all(fixtures::send_response(send_id, 1234567890999).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    });
+
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gw_listener.accept().await.unwrap();
+        let (mut gr, mut gw) = split_stream(stream);
+        perform_gateway_handshake(&mut gr, &mut gw, |_, _| Ok(()))
+            .await
+            .unwrap();
+
+        // Wait for fake_signal to close conn1, then give the
+        // adapter a beat to observe the EOF and clear
+        // `self.inner`. EOF propagation is microseconds-to-
+        // milliseconds; 200ms is a generous safety margin.
+        conn1_closed_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Push the ApprovalRequest INSIDE the reconnect window.
+        // Adapter's send_message must park in
+        // wait_for_connection rather than failing the frame
+        // through the dead conn1.
+        let mut req_msg = capnp::message::Builder::new_default();
+        {
+            let fb = req_msg.init_root::<frame::Builder<'_>>();
+            let mut req = fb.init_approval_request();
+            req.set_request_id(request_id);
+            req.set_tool_name("shell");
+            req.set_action_key("shell:rm");
+            req.set_requested_tier("tier3");
+            req.set_triggering_agent("default");
+            req.set_trigger_message("clean logs");
+            req.set_target_conversation_id(signal_group_id);
+        }
+        gw.write_message(&req_msg).await.unwrap();
+
+        // Confirm no ApprovalRequestFailed surfaces during the
+        // reconnect window. The post-fix delivery is silent on
+        // the gateway side until the gate's queue resolves (which
+        // doesn't happen in this test because no operator
+        // command arrives), so absence of failure is the
+        // observable signal here. Captured signal-cli send_call
+        // below is the positive-side assertion.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, gr.read_message()).await {
+                Ok(Ok(msg)) => {
+                    let fr = msg.get_root::<frame::Reader<'_>>().unwrap();
+                    if let frame::ApprovalRequestFailed(f) = fr.which().unwrap() {
+                        let f = f.unwrap();
+                        let reason = f.get_reason().unwrap().to_str().unwrap().to_string();
+                        panic!(
+                            "unexpected ApprovalRequestFailed during reconnect window: \
+                             reason={reason}"
+                        );
+                    }
+                }
+                _ => break,
+            }
+        }
+    });
+
+    let identity = AdapterIdentity::generate("signal");
+    let allowlist = SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap();
+    let adapter = SignalAdapter::new(
+        identity,
+        signal_socket.to_string_lossy().into_owned(),
+        fixtures::FIXTURE_ACCOUNT.into(),
+        allowlist,
+    )
+    .expect("adapter construction");
+    let gw_socket_for_adapter = gw_socket.clone();
+    let adapter_task = tokio::spawn(async move {
+        std::sync::Arc::new(adapter)
+            .run(&gw_socket_for_adapter)
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(15), gateway_task)
+        .await
+        .expect("gateway side timed out")
+        .expect("gateway task panicked");
+
+    adapter_task.abort();
+    fake_signal.abort();
+
+    unsafe {
+        std::env::remove_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S");
+    }
+
+    let send_call = captured_send
+        .lock()
+        .await
+        .clone()
+        .expect("send RPC must have been captured after reconnect");
+    assert_eq!(send_call["params"]["groupId"], signal_group_id);
+    let body = send_call["params"]["message"]
+        .as_str()
+        .expect("body must be a string")
+        .to_string();
+    assert!(
+        body.contains(&format!("!approve {expected_prefix}")),
+        "body missing approve directive: {body:?}"
+    );
+    assert!(
+        body.contains(request_id),
+        "body missing full request id: {body:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Reconnect-cap timeout. signal-cli goes away and never comes back; the
+// adapter's `wait_for_connection` cap elapses and the gateway-side path
+// emits ApprovalRequestFailed with reason `reconnect_timeout`, distinct
+// from the immediate `channel_not_accessible` label that fires for cold-
+// start ConnectionClosed.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconnect_cap_emits_approval_request_failed_with_reason() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    use crate::SignalAdapter;
+
+    // SAFETY: the static RECONNECT_ENV_LOCK serializes this
+    // test against the reconnect-happy test above so they don't
+    // interleave on WIRKEN_SIGNAL_RECONNECT_WAIT_S. Short cap so
+    // the test completes quickly; the adapter's reconnect inner
+    // loop sleeps 500ms before its first attempt, so 1s leaves
+    // room for the cap to fire after one failed attempt.
+    let _env_guard = RECONNECT_ENV_LOCK.lock().unwrap();
+    unsafe {
+        std::env::set_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S", "1");
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let signal_socket = tmp.path().join("signal-cli.sock");
+    let gw_socket = tmp.path().join("gw.sock");
+    let signal_listener = UnixListener::bind(&signal_socket).unwrap();
+    let gw_listener = UnixListener::bind(&gw_socket).unwrap();
+
+    let request_id = "deadbeef-1234-5678-9abc-cafebabe0001";
+    let signal_group_id = "group-reconnect-timeout==";
+
+    // Same conn1_closed signal as the happy-path test: gateway
+    // sends only after fake_signal has dropped conn1, so the
+    // adapter is observably in the reconnect window when the
+    // frame arrives.
+    let (conn1_closed_tx, conn1_closed_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let fake_signal = tokio::spawn(async move {
+        // Accept one connection, respond to subscribe, then
+        // close everything. Dropping `signal_listener` cleans
+        // up the socket file so the adapter's reconnect
+        // attempts hit ENOENT immediately.
+        let (stream, _) = signal_listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let line = lines.next_line().await.unwrap().expect("subscribe");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let req_id = req["id"].as_u64().unwrap();
+        write
+            .write_all(fixtures::subscribe_response(req_id, 1).as_bytes())
+            .await
+            .unwrap();
+        drop(write);
+        drop(lines);
+        drop(signal_listener);
+        let _ = conn1_closed_tx.send(());
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gw_listener.accept().await.unwrap();
+        let (mut gr, mut gw) = split_stream(stream);
+        perform_gateway_handshake(&mut gr, &mut gw, |_, _| Ok(()))
+            .await
+            .unwrap();
+
+        conn1_closed_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let mut req_msg = capnp::message::Builder::new_default();
+        {
+            let fb = req_msg.init_root::<frame::Builder<'_>>();
+            let mut req = fb.init_approval_request();
+            req.set_request_id(request_id);
+            req.set_tool_name("shell");
+            req.set_action_key("shell:rm");
+            req.set_requested_tier("tier3");
+            req.set_triggering_agent("default");
+            req.set_trigger_message("clean logs");
+            req.set_target_conversation_id(signal_group_id);
+        }
+        gw.write_message(&req_msg).await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, gr.read_message()).await {
+                Ok(Ok(msg)) => {
+                    let fr = msg.get_root::<frame::Reader<'_>>().unwrap();
+                    if let frame::ApprovalRequestFailed(f) = fr.which().unwrap() {
+                        let f = f.unwrap();
+                        assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), request_id);
+                        assert_eq!(
+                            f.get_reason().unwrap().to_str().unwrap(),
+                            "reconnect_timeout",
+                            "post-fix cap-exceeded reason must be `reconnect_timeout` \
+                             (distinct from cold-start `channel_not_accessible`)"
+                        );
+                        return;
+                    }
+                }
+                _ => break,
+            }
+        }
+        panic!("never saw ApprovalRequestFailed");
+    });
+
+    let identity = AdapterIdentity::generate("signal");
+    let allowlist = SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap();
+    let adapter = SignalAdapter::new(
+        identity,
+        signal_socket.to_string_lossy().into_owned(),
+        fixtures::FIXTURE_ACCOUNT.into(),
+        allowlist,
+    )
+    .expect("adapter construction");
+    let gw_socket_for_adapter = gw_socket.clone();
+    let adapter_task =
+        tokio::spawn(async move { Arc::new(adapter).run(&gw_socket_for_adapter).await });
+
+    tokio::time::timeout(Duration::from_secs(15), gateway_task)
+        .await
+        .expect("gateway side timed out")
+        .expect("gateway task panicked");
+
+    adapter_task.abort();
+    fake_signal.abort();
+
+    unsafe {
+        std::env::remove_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S");
+    }
+}
