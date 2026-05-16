@@ -6820,6 +6820,7 @@ name = "wirken-agent"
 version = "1.5.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "bollard",
  "cap-std",
@@ -6877,6 +6878,7 @@ name = "wirken-cli"
 version = "1.5.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "capnp",
  "chrono",
  "clap",

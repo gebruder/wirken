@@ -991,6 +991,8 @@ mod session {
                     tier: Some("tier3".into()),
                     agent_id: "default".into(),
                     trigger: Some("delete the universe".into()),
+                    denied_via: None,
+                    denial_reason: None,
                 },
             ),
             (
@@ -1186,6 +1188,7 @@ mod session {
                 tier,
                 agent_id,
                 trigger,
+                ..
             } => {
                 assert_eq!(tool, "exec");
                 assert_eq!(action_key, "");
@@ -1196,6 +1199,137 @@ mod session {
             }
             other => panic!("expected PermissionDenied, got {other:?}"),
         }
+    }
+
+    /// Pre-slice rows have no `denied_via` / `denial_reason` fields
+    /// on the wire. They must deserialize with both fields `None`
+    /// so a forward-compat reader doesn't choke on archived audit
+    /// logs. This is the back-compat regression guard for the
+    /// stdin-gate slice.
+    #[test]
+    fn permission_denied_deserializes_without_denied_via_or_denial_reason() {
+        let legacy = r#"{"kind":"permission_denied","tool":"exec","action_key":"shell:curl","denial_source":"tier","tier":"tier3","agent_id":"default","trigger":"hi"}"#;
+        let event: SessionEvent = serde_json::from_str(legacy).unwrap();
+        match event {
+            SessionEvent::PermissionDenied {
+                denied_via,
+                denial_reason,
+                ..
+            } => {
+                assert!(denied_via.is_none());
+                assert!(denial_reason.is_none());
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    /// New-shape PermissionDenied row carries `denied_via:
+    /// Some(Stdin)` and an operator-supplied reason. Round-trips
+    /// cleanly and the audit chain verifies under the chain head.
+    #[test]
+    fn permission_denied_round_trips_with_stdin_denied_via_and_reason() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::PermissionDenied {
+                tool: "exec".into(),
+                action_key: "shell:rm".into(),
+                denial_source: crate::session_log::DenialSource::Tier,
+                tier: Some("tier3".into()),
+                agent_id: "default".into(),
+                trigger: Some("operator pasted a bad command".into()),
+                denied_via: Some(crate::session_log::ApprovalSource::Stdin),
+                denial_reason: Some("looks dangerous".into()),
+            },
+        )
+        .unwrap();
+        let events = log.get_range(&h, 0..1).unwrap();
+        match &events[0].event {
+            SessionEvent::PermissionDenied {
+                denied_via,
+                denial_reason,
+                ..
+            } => {
+                assert_eq!(
+                    *denied_via,
+                    Some(crate::session_log::ApprovalSource::Stdin)
+                );
+                assert_eq!(denial_reason.as_deref(), Some("looks dangerous"));
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+        match log.verify(&h).unwrap() {
+            SessionVerifyResult::Ok { rows_verified, .. } => {
+                assert_eq!(rows_verified, 1)
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// PermissionApproved gains `approved_via`. Pre-slice rows
+    /// without the field must deserialize with `None` so the
+    /// existing audit log archive keeps working.
+    #[test]
+    fn permission_approved_deserializes_without_approved_via() {
+        let legacy = r#"{"kind":"permission_approved","action_key":"shell:ls","agent_id":"default","approved_by":"operator","scope":"persisted"}"#;
+        let event: SessionEvent = serde_json::from_str(legacy).unwrap();
+        match event {
+            SessionEvent::PermissionApproved { approved_via, .. } => {
+                assert!(approved_via.is_none());
+            }
+            other => panic!("expected PermissionApproved, got {other:?}"),
+        }
+    }
+
+    /// New-shape PermissionApproved with `approved_via: Some(Stdin)`
+    /// round-trips and verifies under the chain head.
+    #[test]
+    fn permission_approved_round_trips_with_stdin_approved_via() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:ls".into(),
+                agent_id: "default".into(),
+                approved_by: "stdin".into(),
+                scope: crate::session_log::ApprovalScopeKind::Persisted,
+                session_id: None,
+                approved_via: Some(crate::session_log::ApprovalSource::Stdin),
+            },
+        )
+        .unwrap();
+        let events = log.get_range(&h, 0..1).unwrap();
+        match &events[0].event {
+            SessionEvent::PermissionApproved { approved_via, .. } => {
+                assert_eq!(
+                    *approved_via,
+                    Some(crate::session_log::ApprovalSource::Stdin)
+                );
+            }
+            other => panic!("expected PermissionApproved, got {other:?}"),
+        }
+        match log.verify(&h).unwrap() {
+            SessionVerifyResult::Ok { rows_verified, .. } => {
+                assert_eq!(rows_verified, 1)
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    /// `ApprovalSource::ChannelAdapter { channel }` round-trips
+    /// with the channel string preserved. Pins the wire shape so
+    /// future channel-adapter slices land without touching this
+    /// enum's serde representation.
+    #[test]
+    fn approval_source_channel_adapter_round_trips() {
+        let src = crate::session_log::ApprovalSource::ChannelAdapter {
+            channel: "telegram".into(),
+        };
+        let json = serde_json::to_string(&src).unwrap();
+        let back: crate::session_log::ApprovalSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, src);
     }
 
     #[test]

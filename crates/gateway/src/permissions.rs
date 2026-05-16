@@ -948,9 +948,60 @@ pub fn approve_and_log_by_key(
             approved_by: approval.approved_by.clone(),
             scope: scope_kind,
             session_id,
+            // `approve_and_log` is the durable path (writes to the
+            // store and emits the row); it predates `ApprovalSource`
+            // and is called by paths that do not carry surface info.
+            // The operator-mediated stdin / sse / cli paths call
+            // `emit_operator_approval` (below) which carries the
+            // structured surface.
+            approved_via: None,
         },
     )?;
     Ok(approval)
+}
+
+/// Operator-mediated approval that records the audit row WITHOUT
+/// writing to the permission store. This is the path the
+/// `ApprovalGate`-driven flow takes: an operator approved this one
+/// invocation via a specific surface (stdin, sse, channel-adapter),
+/// the agent retries the call once via the one-shot bypass, and the
+/// next call to the same tool prompts fresh. The lack of a store
+/// write is what makes this one-shot rather than session- or
+/// persistently-scoped.
+///
+/// The audit row carries `approved_via: Some(source)` so a SIEM
+/// detection can pivot per-surface, and `approved_by` for the actor
+/// label (operator username when available, surface name otherwise).
+/// `scope` is recorded as `Persisted` for wire-compat with prior
+/// approval rows; the absence of a store row is the truth and the
+/// audit chain is its only durable record.
+///
+/// Naming: sits alongside `approve_and_log` (Persisted) and a
+/// future `approve_and_log_with_scope(Session)` so the family is
+/// `emit_operator_approval` (one-shot) / `approve_and_log` (persisted) /
+/// `approve_and_log_with_scope(Session)` (session-scoped). Three
+/// functions, three scopes, one file.
+pub fn emit_operator_approval(
+    action_key: &str,
+    agent_id: &str,
+    approved_by: &str,
+    approved_via: wirken_audit::ApprovalSource,
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+) -> Result<(), GatewayError> {
+    log.append(
+        handle,
+        wirken_audit::TrustLevel::System,
+        wirken_audit::SessionEvent::PermissionApproved {
+            action_key: action_key.to_string(),
+            agent_id: agent_id.to_string(),
+            approved_by: approved_by.to_string(),
+            scope: wirken_audit::ApprovalScopeKind::Persisted,
+            session_id: None,
+            approved_via: Some(approved_via),
+        },
+    )?;
+    Ok(())
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
@@ -1482,6 +1533,7 @@ mod tier_tests {
                 approved_by,
                 scope,
                 session_id,
+                ..
             } => {
                 assert_eq!(action_key, "shell:ls");
                 assert_eq!(agent_id, "default");
@@ -1661,6 +1713,7 @@ mod tier_tests {
                     approved_by: "operator".to_string(),
                     scope: wirken_audit::ApprovalScopeKind::Session,
                     session_id: Some(session.to_string()),
+                    approved_via: None,
                 },
             )
             .unwrap();
@@ -1695,6 +1748,7 @@ mod tier_tests {
                 approved_by: "operator".to_string(),
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(session.to_string()),
+                approved_via: None,
             },
         )
         .unwrap();
@@ -1725,6 +1779,7 @@ mod tier_tests {
                 approved_by: "operator".to_string(),
                 scope: wirken_audit::ApprovalScopeKind::Persisted,
                 session_id: None,
+                approved_via: None,
             },
         )
         .unwrap();
@@ -1737,6 +1792,7 @@ mod tier_tests {
                 approved_by: "operator".to_string(),
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(target.to_string()),
+                approved_via: None,
             },
         )
         .unwrap();
@@ -1752,6 +1808,7 @@ mod tier_tests {
                 approved_by: "operator".to_string(),
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(other.to_string()),
+                approved_via: None,
             },
         )
         .unwrap();
@@ -1785,6 +1842,7 @@ mod tier_tests {
                 approved_by: approved_by.to_string(),
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(session_id.to_string()),
+                approved_via: None,
             },
         )
         .unwrap();

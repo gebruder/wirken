@@ -117,6 +117,17 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         .context("Failed to open permission store")?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 
+    // Attach the stdin approval gate when (and only when) stdin is
+    // a TTY. A piped / redirected `wirken ask` keeps the unmediated
+    // behavior — `NeedsApproval` short-circuits with a terminal
+    // deny — so a script doesn't hang on a prompt nobody will
+    // answer. Interactive sessions get the prompt-and-retry flow.
+    if super::oauth_scope::stdin_is_tty() {
+        agent.set_approval_gate(std::sync::Arc::new(
+            super::stdin_approval::StdinApprovalGate::new(),
+        ));
+    }
+
     let skills_dir = cfg.data_dir.join("skills");
     if skills_dir.is_dir() {
         let _ = agent.load_skills(&skills_dir);
@@ -207,6 +218,12 @@ async fn send_with_agent_config(
     let perms = PermissionStore::open(&cfg.permissions_db_path())
         .context("Failed to open permission store")?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
+
+    if super::oauth_scope::stdin_is_tty() {
+        agent.set_approval_gate(std::sync::Arc::new(
+            super::stdin_approval::StdinApprovalGate::new(),
+        ));
+    }
 
     let skills_dir = cfg.agent_skills_dir(&agent_cfg.id);
     if skills_dir.is_dir() {

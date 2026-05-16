@@ -606,6 +606,8 @@ fn snapshot_permission_denied_carries_denial_source_with_optional_tier() {
         tier: None,
         agent_id: "agent-1".into(),
         trigger: None,
+        denied_via: None,
+        denial_reason: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["denial_source"]);

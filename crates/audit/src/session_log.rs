@@ -214,6 +214,31 @@ pub enum DenialSource {
     OrgPolicy,
 }
 
+/// Which surface mediated an operator's approve / deny decision.
+/// `ApprovalScopeKind` answers "how long does this grant last"
+/// (Persisted vs Session); [`ApprovalSource`] answers "which UI did
+/// the operator click through". Both are useful for SIEM detections;
+/// they answer different questions.
+///
+/// `tag = "kind"` so future surfaces (channel adapters with
+/// `channel: String`, future SDK) slot in without breaking the wire
+/// for existing consumers. `Stdin` is the first surface to ship;
+/// `Sse`, `Cli`, `ChannelAdapter` are reserved for follow-up slices.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApprovalSource {
+    /// `wirken ask` reading a y/n prompt from stdin under a TTY.
+    Stdin,
+    /// Webchat SSE approval surface (next slice).
+    Sse,
+    /// `wirken permissions approve` CLI subcommand (next slice).
+    Cli,
+    /// Channel adapter approval (Telegram, Slack, etc.).
+    /// `channel` carries the adapter id exactly as the registry
+    /// stores it, so a SIEM detection can pivot per-channel.
+    ChannelAdapter { channel: String },
+}
+
 /// Storage lifetime of a recorded permission approval. Defined here
 /// rather than in `wirken-gateway::permissions` because audit cannot
 /// depend on gateway (the dependency direction is `gateway →
@@ -548,6 +573,26 @@ pub enum SessionEvent {
         tier: Option<String>,
         agent_id: String,
         trigger: Option<String>,
+        /// Which surface mediated the operator decision, when one
+        /// did. `None` for tier-gate or org-policy denials that
+        /// short-circuited without operator interaction (the
+        /// pre-slice default and the `approval_gate == None`
+        /// agent path); `Some` when an [`ApprovalGate`] returned
+        /// `Denied` or timed out. SIEM detections separate
+        /// "denied because of policy" (`denied_via == None`) from
+        /// "operator explicitly refused" (`denied_via == Some(_)`)
+        /// using this field alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denied_via: Option<ApprovalSource>,
+        /// Operator-supplied reason on a `Denied` outcome, or a
+        /// synthetic reason like `"approval timeout"` on a
+        /// `Timeout` outcome. `None` when the denial path is
+        /// non-operator (tier-gate / org-policy). The free-form
+        /// content surfaces directly to the LLM as the failed
+        /// tool result's output, so anything operator-typed lands
+        /// in the conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denial_reason: Option<String>,
     },
     /// Operator approved a Tier 2 action. `scope` distinguishes
     /// SQLite-persisted approvals (the default) from session-scoped
@@ -570,6 +615,18 @@ pub enum SessionEvent {
         scope: ApprovalScopeKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// Which surface mediated the operator's approval. `None`
+        /// for pre-slice rows and for non-operator approval paths
+        /// (none ship today, but the field is `Option` so any
+        /// future automation path stays representable). `Some` for
+        /// every `ApprovalGate`-driven approval starting with the
+        /// stdin gate slice. Distinct from `approved_by` which
+        /// carries the actor label (operator's name when known);
+        /// `approved_via` carries the mediation surface so a SIEM
+        /// detection can pivot per-surface without parsing
+        /// free-form actor strings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved_via: Option<ApprovalSource>,
     },
     /// Session-scoped approvals were cleared for `session_id`.
     /// Emitted once per session end (clean shutdown or crash
@@ -1801,6 +1858,7 @@ impl SqliteSessionLog {
                         tier,
                         agent_id: ev_agent,
                         trigger,
+                        ..
                     } if ev_agent == agent_id => Some(PermissionDenialRecord {
                         session_id,
                         seq,

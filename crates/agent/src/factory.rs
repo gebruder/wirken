@@ -534,6 +534,7 @@ fn replay_session_scoped_approvals(
                 approved_by,
                 scope: ApprovalScopeKind::Session,
                 session_id: Some(sid),
+                ..
             } => {
                 store.restore_session_scoped_approval(
                     action_key,
@@ -673,6 +674,7 @@ mod replay_tests {
                 approved_by: "operator".to_string(),
                 scope: ApprovalScopeKind::Session,
                 session_id: Some(session_id.to_string()),
+                approved_via: None,
             },
         )
         .unwrap();
@@ -784,6 +786,7 @@ mod replay_tests {
                 approved_by: "operator".to_string(),
                 scope: ApprovalScopeKind::Persisted,
                 session_id: None,
+                approved_via: None,
             },
         )
         .unwrap();

@@ -258,6 +258,23 @@ pub struct Agent {
     /// injects the real `HookDispatcher` at wake time when veto hooks
     /// are configured at the gateway.
     veto_dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
+    /// Operator-approval surface. `None` preserves the current
+    /// unmediated behavior — `NeedsApproval` short-circuits with a
+    /// terminal deny. `Some(gate)` enables the gate-consult flow:
+    /// on `NeedsApproval`, the runtime asks the gate, on `Approved`
+    /// sets [`Self::approval_bypass`] and retries the call once.
+    /// The `wirken ask` CLI path attaches a `StdinApprovalGate`
+    /// when stdin is a TTY; webchat / channel adapters install
+    /// their own gates in future slices.
+    approval_gate: Option<Arc<dyn crate::approval_gate::ApprovalGate>>,
+    /// One-shot approval bypass. Set by
+    /// [`Self::dispatch_tool_with_approval`] right before the retry
+    /// after the gate returns `Approved`; checked and cleared by
+    /// `execute_tool` at the `NeedsApproval` site. The semantics
+    /// match the slice's "per-tool-call, not session-wide" choice:
+    /// each grant covers exactly one execute_tool invocation; the
+    /// next call to the same tool prompts the gate fresh.
+    approval_bypass: Option<wirken_gateway::permissions::Action>,
 }
 
 impl Agent {
@@ -345,6 +362,8 @@ impl Agent {
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
             veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
+            approval_gate: None,
+            approval_bypass: None,
         })
     }
 
@@ -430,6 +449,8 @@ impl Agent {
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
             veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
+            approval_gate: None,
+            approval_bypass: None,
         })
     }
 
@@ -529,6 +550,25 @@ impl Agent {
         dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
     ) {
         self.veto_dispatcher = dispatcher;
+    }
+
+    /// Attach an operator-approval gate. When `Some`, `NeedsApproval`
+    /// short-circuits trigger a gate consult instead of terminating
+    /// the call. On `Approved` the runtime sets the one-shot bypass
+    /// and retries the call once. On `Denied` or `Timeout` the call
+    /// fails with the operator's reason (or `"approval timeout"`)
+    /// surfaced to the LLM as the tool's failure output. The audit
+    /// row records `approved_via: Some(gate.source())` or
+    /// `denied_via: Some(gate.source())` so SIEM detections can
+    /// pivot per-surface.
+    ///
+    /// Default `None` preserves the current behavior. The `wirken
+    /// ask` CLI path calls this with a `StdinApprovalGate` when
+    /// stdin is a TTY; non-TTY invocations leave it `None` so a
+    /// piped or redirected `wirken ask` exits cleanly rather than
+    /// blocking on a stdin prompt nobody can answer.
+    pub fn set_approval_gate(&mut self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        self.approval_gate = Some(gate);
     }
 
     /// Register a recovery observer. Forwarded to the
@@ -2026,36 +2066,15 @@ impl Agent {
                     )?;
 
                     for call in &calls {
-                        tracing::info!("Agent {} executing tool: {}", self.id, call.name);
-
-                        let result = match self.execute_tool(&call.name, &call.arguments).await {
-                            Ok(result) => result,
-                            Err(AgentError::PermissionDeniedCtx(ctx)) => {
-                                self.log_event(
-                                    TrustLevel::System,
-                                    SessionEvent::PermissionDenied {
-                                        tool: ctx.tool_name.clone(),
-                                        action_key: ctx.action.approval_key(),
-                                        denial_source: wirken_audit::DenialSource::Tier,
-                                        tier: Some(ctx.requested_tier.label().to_string()),
-                                        agent_id: ctx.agent_id.clone(),
-                                        trigger: ctx.trigger_message.clone(),
-                                    },
-                                )?;
-                                let output = format!(
-                                    "Permission denied: '{}' requires {} approval. \
-                                     This action was not executed.",
-                                    ctx.tool_name,
-                                    ctx.requested_tier.label(),
-                                );
-                                denials.push(ctx);
-                                crate::tool::ToolResult {
-                                    output,
-                                    success: false,
-                                }
-                            }
-                            Err(e) => return Err(e),
-                        };
+                        // Both dispatch paths (streaming and
+                        // non-streaming) route tool calls through
+                        // `execute_and_record_tool` so the
+                        // approval-gate consult and the
+                        // tool-validation-recovery branches live in
+                        // exactly one place. Pre-slice this site
+                        // inlined the catch; the new helper covers
+                        // both surfaces identically.
+                        let result = self.execute_and_record_tool(call, &mut denials).await?;
 
                         self.conversation
                             .add_tool_result(&call.id, &call.name, &result.output);
@@ -2315,6 +2334,8 @@ impl Agent {
                         tier: None,
                         agent_id: self.id.clone(),
                         trigger: self.current_trigger.clone(),
+                        denied_via: None,
+                        denial_reason: None,
                     },
                 )?;
                 return Ok(crate::tool::ToolResult {
@@ -2346,6 +2367,8 @@ impl Agent {
                             tier: Some(action.tier().label().to_string()),
                             agent_id: self.id.clone(),
                             trigger: self.current_trigger.clone(),
+                            denied_via: None,
+                            denial_reason: None,
                         },
                     )?;
                     return Ok(crate::tool::ToolResult {
@@ -2368,13 +2391,26 @@ impl Agent {
                     })?
                 };
                 if let PermissionCheck::NeedsApproval { tier } = check {
-                    return Err(AgentError::PermissionDeniedCtx(PermissionDenialContext {
-                        tool_name: name.to_string(),
-                        action,
-                        requested_tier: tier,
-                        agent_id: self.id.clone(),
-                        trigger_message: self.current_trigger.clone(),
-                    }));
+                    // One-shot bypass: set by
+                    // `dispatch_tool_with_approval` immediately
+                    // before retrying after the gate returned
+                    // `Approved`. Consumed by this check and
+                    // cleared so the next call to the same tool
+                    // re-prompts. The action equality is exact
+                    // (matches `Action`'s own `PartialEq`), so a
+                    // bypass granted for `shell:ls /tmp` does not
+                    // approve `shell:rm /tmp`.
+                    if self.approval_bypass.as_ref() == Some(&action) {
+                        self.approval_bypass = None;
+                    } else {
+                        return Err(AgentError::PermissionDeniedCtx(PermissionDenialContext {
+                            tool_name: name.to_string(),
+                            action,
+                            requested_tier: tier,
+                            agent_id: self.id.clone(),
+                            trigger_message: self.current_trigger.clone(),
+                        }));
+                    }
                 }
             }
         }
@@ -2537,34 +2573,7 @@ impl Agent {
         let result = match self.execute_tool(&call.name, &call.arguments).await {
             Ok(result) => result,
             Err(AgentError::PermissionDeniedCtx(ctx)) => {
-                tracing::warn!(
-                    "Permission denied: agent '{}' tool '{}' requires {}",
-                    ctx.agent_id,
-                    ctx.tool_name,
-                    ctx.requested_tier.label(),
-                );
-                self.log_event(
-                    TrustLevel::System,
-                    SessionEvent::PermissionDenied {
-                        tool: ctx.tool_name.clone(),
-                        action_key: ctx.action.approval_key(),
-                        denial_source: wirken_audit::DenialSource::Tier,
-                        tier: Some(ctx.requested_tier.label().to_string()),
-                        agent_id: ctx.agent_id.clone(),
-                        trigger: ctx.trigger_message.clone(),
-                    },
-                )?;
-                let output = format!(
-                    "Permission denied: '{}' requires {} approval. \
-                     This action was not executed.",
-                    ctx.tool_name,
-                    ctx.requested_tier.label(),
-                );
-                denials.push(ctx);
-                crate::tool::ToolResult {
-                    output,
-                    success: false,
-                }
+                self.handle_permission_denial(call, ctx, denials).await?
             }
             // agent-runtime-error-recovery: argument-validation
             // failures from the registry (`AgentError::Tool`) are
@@ -2586,6 +2595,180 @@ impl Agent {
             truncate(&result.output, 200)
         );
         Ok(result)
+    }
+
+    /// Mediate a `PermissionDeniedCtx` through the configured
+    /// [`ApprovalGate`] (when present) or fall through to the
+    /// current deny-terminal behavior (when no gate is attached).
+    ///
+    /// Branch shape:
+    ///
+    /// - **No gate** (`approval_gate == None`): preserves the
+    ///   pre-slice behavior exactly. Emits
+    ///   `PermissionDenied { denied_via: None, denial_reason: None }`
+    ///   and returns the current denial message. Regression tests
+    ///   pin this case.
+    /// - **Gate returns `Approved`**: emits
+    ///   `PermissionApproved { approved_via: Some(gate.source()) }`
+    ///   via `emit_operator_approval` (audit row, no store write —
+    ///   per-invocation grant, not session-scoped), sets the
+    ///   one-shot bypass, retries `execute_tool` exactly once. The
+    ///   retry's outcome flows through to the caller.
+    /// - **Gate returns `Denied { reason }`**: emits
+    ///   `PermissionDenied { denied_via: Some(gate.source()), denial_reason: reason }`
+    ///   and returns a failed ToolResult whose output is the
+    ///   operator's reason verbatim (or the default deny message
+    ///   when reason is `None`). The LLM sees the operator's text.
+    /// - **Gate returns `Timeout`**: emits
+    ///   `PermissionDenied { denied_via: Some(gate.source()), denial_reason: Some("approval timeout") }`
+    ///   and returns a failed ToolResult with the timeout message.
+    ///
+    /// Both catch sites (`execute_and_record_tool` for the
+    /// non-streaming dispatch and the inline catch at the streaming
+    /// dispatch in `process_message_stream_turn`) delegate to this
+    /// helper. Adding a new approval surface (sse, channel adapter)
+    /// involves adding a new `ApprovalSource` variant and a new
+    /// `ApprovalGate` impl; the runtime flow stays here.
+    async fn handle_permission_denial(
+        &mut self,
+        call: &crate::conversation::ToolCallRequest,
+        ctx: PermissionDenialContext,
+        denials: &mut Vec<PermissionDenialContext>,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        let gate = self.approval_gate.clone();
+        let outcome = match gate {
+            Some(ref g) => Some(g.request_approval(&ctx).await),
+            None => None,
+        };
+        let source = gate.as_ref().map(|g| g.source());
+
+        match outcome {
+            Some(crate::approval_gate::ApprovalOutcome::Approved) => {
+                if let Some(src) = source
+                    && let Err(e) = wirken_gateway::permissions::emit_operator_approval(
+                        &ctx.action.approval_key(),
+                        &ctx.agent_id,
+                        &approved_by_label(&src),
+                        src,
+                        &*self.session_log,
+                        &self.session_handle,
+                    )
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to emit operator-approval audit row; proceeding with retry",
+                    );
+                }
+                tracing::info!(
+                    "Operator-approved: agent '{}' tool '{}' (one-shot bypass)",
+                    ctx.agent_id,
+                    ctx.tool_name,
+                );
+                self.approval_bypass = Some(ctx.action.clone());
+                // Retry once. If the retry hits another
+                // `PermissionDeniedCtx` (which would mean a race
+                // changed the store state between the gate consult
+                // and the retry), fall through to the no-gate-this-
+                // time branch by clearing the gate temporarily.
+                match self.execute_tool(&call.name, &call.arguments).await {
+                    Ok(result) => Ok(result),
+                    Err(AgentError::PermissionDeniedCtx(ctx2)) => {
+                        // Surface the second-denial through the
+                        // standard unmediated path; the bypass was
+                        // single-shot and is already consumed.
+                        self.emit_unmediated_denial(&ctx2)?;
+                        let output = unmediated_deny_message(&ctx2);
+                        denials.push(ctx2);
+                        Ok(crate::tool::ToolResult {
+                            output,
+                            success: false,
+                        })
+                    }
+                    Err(AgentError::Tool(msg)) => {
+                        Ok(self.synthesize_validation_failure_result(&call.name, &msg))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Some(crate::approval_gate::ApprovalOutcome::Denied { reason }) => {
+                let denial_reason = reason.clone();
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::PermissionDenied {
+                        tool: ctx.tool_name.clone(),
+                        action_key: ctx.action.approval_key(),
+                        denial_source: wirken_audit::DenialSource::Tier,
+                        tier: Some(ctx.requested_tier.label().to_string()),
+                        agent_id: ctx.agent_id.clone(),
+                        trigger: ctx.trigger_message.clone(),
+                        denied_via: source.clone(),
+                        denial_reason,
+                    },
+                )?;
+                let output = reason.unwrap_or_else(|| unmediated_deny_message(&ctx));
+                denials.push(ctx);
+                Ok(crate::tool::ToolResult {
+                    output,
+                    success: false,
+                })
+            }
+            Some(crate::approval_gate::ApprovalOutcome::Timeout) => {
+                let output = "approval timeout".to_string();
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::PermissionDenied {
+                        tool: ctx.tool_name.clone(),
+                        action_key: ctx.action.approval_key(),
+                        denial_source: wirken_audit::DenialSource::Tier,
+                        tier: Some(ctx.requested_tier.label().to_string()),
+                        agent_id: ctx.agent_id.clone(),
+                        trigger: ctx.trigger_message.clone(),
+                        denied_via: source,
+                        denial_reason: Some(output.clone()),
+                    },
+                )?;
+                denials.push(ctx);
+                Ok(crate::tool::ToolResult {
+                    output,
+                    success: false,
+                })
+            }
+            None => {
+                // No gate attached: preserve the pre-slice behavior
+                // exactly. Same audit row shape (denied_via: None,
+                // denial_reason: None), same failure message.
+                self.emit_unmediated_denial(&ctx)?;
+                let output = unmediated_deny_message(&ctx);
+                denials.push(ctx);
+                Ok(crate::tool::ToolResult {
+                    output,
+                    success: false,
+                })
+            }
+        }
+    }
+
+    fn emit_unmediated_denial(&self, ctx: &PermissionDenialContext) -> Result<(), AgentError> {
+        tracing::warn!(
+            "Permission denied: agent '{}' tool '{}' requires {}",
+            ctx.agent_id,
+            ctx.tool_name,
+            ctx.requested_tier.label(),
+        );
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::PermissionDenied {
+                tool: ctx.tool_name.clone(),
+                action_key: ctx.action.approval_key(),
+                denial_source: wirken_audit::DenialSource::Tier,
+                tier: Some(ctx.requested_tier.label().to_string()),
+                agent_id: ctx.agent_id.clone(),
+                trigger: ctx.trigger_message.clone(),
+                denied_via: None,
+                denial_reason: None,
+            },
+        )?;
+        Ok(())
     }
 
     /// Convert an `AgentError::Tool` (argument validation, missing
@@ -3870,6 +4053,35 @@ fn sha256_hex(bytes: &[u8]) -> wirken_audit::HashHex {
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&digest);
     wirken_audit::HashHex::from_bytes(&arr)
+}
+
+/// Stable label for the `approved_by` field on
+/// `SessionEvent::PermissionApproved`. The field is free-form String
+/// today; we set it from `ApprovalSource` so SIEM detections that
+/// pivot on the string get a stable label per surface. Surface
+/// identity for cross-surface aggregation goes on the structured
+/// `approved_via: Option<ApprovalSource>` field instead.
+fn approved_by_label(source: &wirken_audit::ApprovalSource) -> String {
+    match source {
+        wirken_audit::ApprovalSource::Stdin => "stdin".to_string(),
+        wirken_audit::ApprovalSource::Sse => "sse".to_string(),
+        wirken_audit::ApprovalSource::Cli => "cli".to_string(),
+        wirken_audit::ApprovalSource::ChannelAdapter { channel } => {
+            format!("channel-adapter:{channel}")
+        }
+    }
+}
+
+/// Default tool-failure message for an unmediated denial. Matches
+/// the string the pre-slice path returned so a regression test on
+/// the no-gate-attached path doesn't catch a behavioral drift.
+fn unmediated_deny_message(ctx: &PermissionDenialContext) -> String {
+    format!(
+        "Permission denied: '{}' requires {} approval. \
+         This action was not executed.",
+        ctx.tool_name,
+        ctx.requested_tier.label(),
+    )
 }
 
 fn finish_reason_for(response: &LlmResponse) -> &'static str {

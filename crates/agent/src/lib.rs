@@ -1,4 +1,5 @@
 pub mod ansi;
+pub mod approval_gate;
 pub mod attestation;
 pub mod bundled_presets;
 pub mod bundled_skills;
