@@ -10,6 +10,133 @@ tagged.
 
 ## Unreleased
 
+## [1.6.0] - 2026-05-17
+
+### Approval gates
+
+- New `ApprovalGate` trait gating `NeedsApproval` tool-call requests
+  out-of-band rather than failing terminally at the agent. Five
+  surfaces: stdin (interactive `wirken ask`), CLI (`wirken
+  permissions pending approve|deny` over the permissions IPC socket
+  for daemon mode), Telegram (inline-keyboard approve/deny button),
+  SSE (webchat browser-side card), and Signal (first text-command
+  channel adapter: `!approve <prefix>` / `!deny <prefix> [reason]`,
+  prefix is the first 8 hex characters of the request UUID).
+- Wire-breaking schema rename on the channel-adapter approval frames:
+  `ApprovalRequest.targetChatId :Int64` -> `targetConversationId
+  :Text`; `ApprovalDecision.telegramUserId :Int64` -> `actorUserId
+  :Text`; `ApprovalDecision.telegramUserDisplay :Text` ->
+  `actorDisplay :Text`; `ApprovalDecisionKind.deny :Void` -> `:Text`
+  carrying the operator-supplied reason (Telegram writes empty; Signal
+  writes the text after the prefix). The rename generalizes the
+  frames off Telegram-specific naming so non-numeric conversation ids
+  (Signal base64 group ids, UUID/E.164 for DMs) work without
+  per-adapter shape forks.
+- SQLite schema: `adapter_approval_chats` table renamed to
+  `adapter_approval_conversations`; column type `INTEGER` ->
+  `TEXT` for the same conversation-id-string contract.
+- `wirken approvers set-chat <adapter_id> <conversation_id>` now
+  accepts a String (was i64), so Signal group ids configure the same
+  way Telegram chat ids always did.
+- Gateway-side authorization is centralized: every `ApprovalDecision`
+  frame is verified against `approver_registry::verify(adapter_id,
+  &actor_user_id)` before the queue resolves. Unauthorized actions
+  are silently dropped with a warn-level log; the queue stays open
+  until an authorized action arrives or the gate times out.
+
+### Hooks
+
+- New hook subsystem. Ed25519 handshake distinct from the adapter
+  handshake (domain-separated signing payloads); registry with
+  `wirken hooks register|list|unregister` CLI; audit events for
+  handshake accept/reject, dispatch, and response.
+- Two hook types selected at handshake time: `observe` (pull-cursor
+  batches of `SessionLogTail` events with a hook-supplied
+  `sinceSeq` cursor) and `veto` (synchronous `VetoRequest` /
+  `VetoResponse` exchange before each tool dispatch, with a serial
+  cumulative budget across all attached veto hooks).
+- Wire-level routing is handshake-derived, not payload-derived.
+  `tests/no_payload_routing.rs` pins the banned-field set so a
+  future schema addition cannot accidentally introduce an
+  `agent_id`-typed field on a wire frame.
+
+### Cost attribution
+
+- Per-call cost on `LlmResponse`, computed from a baked pricing
+  table keyed by `(provider, model)`. Records `input_cost_usd_micros`,
+  `output_cost_usd_micros`, and `total_cost_usd_micros` on every
+  `SessionEvent::LlmResponse` row.
+- Streaming cost attribution: the OpenAI-compat consumer reads the
+  trailing usage chunk that vLLM-backed servers (NIM, Privatemode,
+  Tinfoil) emit after the `finish_reason` chunk and before
+  `data: [DONE]`. The consumer never short-circuits on
+  `finish_reason`. New stub-server test pins the contract so a
+  future refactor cannot silently zero-count streaming tokens.
+
+### Providers
+
+- NIM as a new option in `wirken setup`, positioned next to Ollama.
+  Default endpoint `http://localhost:8000/v1` with optional bearer
+  auth (blank for local containers, `nvapi-...` keys for
+  `https://integrate.api.nvidia.com/v1`). Stored as
+  `provider="custom"`; the runtime's existing OpenAI-compat dispatch
+  handles it without a new match arm or cost-table entry.
+- New `list_openai_compatible_models` helper that lists models
+  without the OpenAI-name filter (so NIM's `meta/llama-*` and
+  `nvidia/...` model ids appear in the picker) and omits the
+  Authorization header when the key is empty (no malformed `Bearer `
+  with trailing space for proxies in front of NIM).
+- The helper surfaces three distinct failure modes -
+  `AuthRequired` (401/403), `Unreachable` (anything below HTTP,
+  collapsed because reqwest's taxonomy isn't reliable across
+  platforms), `OtherHttp(status)` - so a wrong-endpoint typo isn't
+  masked as "no models found, enter manually". NIM branch loops on
+  failure with re-enter-or-manual-fallback choice.
+
+### Signal adapter
+
+- Connect-before-send: first signal-cli connect completes before the
+  outbound handler is spawned. Gateway frames arriving in the
+  cold-start window no longer surface as `ApprovalRequestFailed`
+  with `channel_not_accessible`. First-attempt connect failure
+  exits `run()` with a clear error instead of looping in a degraded
+  state where every outbound frame fails.
+- Mid-session reconnect window: `send_message` parks on a
+  `Notify`-driven `wait_for_connection` cap (default 30s, override
+  via `WIRKEN_SIGNAL_RECONNECT_WAIT_S`) when `self.inner` is None.
+  Cap exceeded -> `ApprovalRequestFailed` with reason
+  `reconnect_timeout`, distinct from the cold-start
+  `channel_not_accessible` label.
+- Allowlist classifier checks canonical UUID layout before the
+  phone-shape heuristic. All-numeric ACI UUIDs
+  (`00000000-0000-4000-8000-000000000001`) now parse as UUIDs;
+  previously misclassified as malformed phones and rejected at
+  startup.
+
+### Audit chain
+
+- New `ApprovalSource` enum on `PermissionApproved` /
+  `PermissionDenied` rows: `Stdin`, `Cli`, `Sse`, and
+  `ChannelAdapter { channel: String }`. The operator-vs-surface
+  split (`approved_by` carries actor identity; `approved_via`
+  carries the surface enum) lets SIEM detections group by surface
+  without parsing free-text actor labels.
+- Channel-keyed approval-gate routing at the factory wake site:
+  sessions whose canonical id parses with channel
+  `telegram|signal|webchat` route through the matching gate;
+  everything else falls back to the default.
+
+### Notes
+
+- The approval-frame schema rename is coordinated across the adapter,
+  gateway, and gate at the same commit. Nothing reads the legacy
+  field names.
+- A small audit-chain race in `PendingApprovalQueue::resolve` is
+  documented in code: a `tx.send` that lands microseconds before the
+  receiver drops can return `Accepted` to the operator's HTTP path
+  while the gate already returned `Timeout`. Sub-millisecond window;
+  audit chain is authoritative.
+
 ## [1.5.3] - 2026-05-15
 
 ### OAuth
