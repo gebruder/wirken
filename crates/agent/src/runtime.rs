@@ -1630,22 +1630,24 @@ impl Agent {
                 )
                 .await?;
             let latency_ms = started.elapsed().as_millis() as u64;
-            let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
-                resolve_cost_micros(
-                    &self.llm.config().provider,
-                    &self.llm.config().model,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                );
+            let LlmResponseAttribution {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                input_cost_usd_micros,
+                output_cost_usd_micros,
+                total_cost_usd_micros,
+            } = attribute_llm_usage(&self.llm.config().provider, &self.llm.config().model, usage);
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
                     latency_ms,
                     agent_id: self.id.clone(),
                     credential_id: self.api_key_credential.clone(),
@@ -1943,7 +1945,7 @@ impl Agent {
             self.check_inference_or_deny()?;
             // Spawn streaming in background, forward text deltas to caller
             let started = std::time::Instant::now();
-            let response = {
+            let (response, usage) = {
                 let stream_future = self.llm.complete_stream(
                     self.conversation.messages(),
                     &tool_defs,
@@ -1965,31 +1967,24 @@ impl Agent {
                 result?
             };
             let latency_ms = started.elapsed().as_millis() as u64;
-            // Streaming path does not yet capture usage; issue #116
-            // captures it from each provider's terminal streaming
-            // event. Until then, bench mode and economics-reporting
-            // runs must use the non-streaming dispatch above; this
-            // path under-reports by recording zeros. With zero tokens
-            // the cost lookup returns Some(0, 0, 0) for priced models
-            // and None for unpriced ones, both arithmetically correct
-            // against zero usage.
-            let usage = crate::llm::Usage::default();
-            let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
-                resolve_cost_micros(
-                    &self.llm.config().provider,
-                    &self.llm.config().model,
-                    usage.input_tokens,
-                    usage.output_tokens,
-                );
+            let LlmResponseAttribution {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                input_cost_usd_micros,
+                output_cost_usd_micros,
+                total_cost_usd_micros,
+            } = attribute_llm_usage(&self.llm.config().provider, &self.llm.config().model, usage);
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
                     request_id,
                     finish_reason: finish_reason_for(&response).to_string(),
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    input_tokens,
+                    output_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
                     latency_ms,
                     agent_id: self.id.clone(),
                     credential_id: self.api_key_credential.clone(),
@@ -3905,6 +3900,152 @@ fn resolve_cost_micros(
         );
     }
     result
+}
+
+/// Projection of `Option<Usage>` from the LLM call into the
+/// audit-row token and cost fields. The `None` case keeps the cost
+/// fields `None` regardless of model pricing so the chain records
+/// "provider did not report usage" distinctly from "provider
+/// reported zero". Flattening them together would silently
+/// undercount real cost.
+pub(crate) struct LlmResponseAttribution {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+    pub input_cost_usd_micros: Option<u64>,
+    pub output_cost_usd_micros: Option<u64>,
+    pub total_cost_usd_micros: Option<u64>,
+}
+
+pub(crate) fn attribute_llm_usage(
+    provider: &str,
+    model: &str,
+    usage: Option<crate::llm::Usage>,
+) -> LlmResponseAttribution {
+    match usage {
+        Some(u) => {
+            let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
+                resolve_cost_micros(provider, model, u.input_tokens, u.output_tokens);
+            LlmResponseAttribution {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cache_creation_input_tokens: u.cache_creation_input_tokens,
+                cache_read_input_tokens: u.cache_read_input_tokens,
+                input_cost_usd_micros,
+                output_cost_usd_micros,
+                total_cost_usd_micros,
+            }
+        }
+        None => LlmResponseAttribution {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            input_cost_usd_micros: None,
+            output_cost_usd_micros: None,
+            total_cost_usd_micros: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+    use crate::llm::Usage;
+
+    /// Regression guard for the Some(0) vs None distinction. A future
+    /// refactor that flattens the unreported-usage case to
+    /// `Some(0, 0, 0)` would silently produce zero-cost rows for
+    /// streaming calls that didn't report usage. This test pins the
+    /// invariant: `None` usage MUST map to `None` cost fields
+    /// regardless of whether the model is in the pricing table.
+    #[test]
+    fn unreported_usage_maps_to_none_cost_fields() {
+        // claude-opus-4-7 IS priced. The test must still see None on
+        // every cost field because the input was None usage.
+        let attrib = attribute_llm_usage("anthropic", "claude-opus-4-7", None);
+        assert_eq!(attrib.input_tokens, 0);
+        assert_eq!(attrib.output_tokens, 0);
+        assert_eq!(attrib.input_cost_usd_micros, None);
+        assert_eq!(attrib.output_cost_usd_micros, None);
+        assert_eq!(attrib.total_cost_usd_micros, None);
+    }
+
+    /// Companion test: a `Some(usage)` with explicit zero tokens
+    /// against a priced model produces `Some(0)` cost fields, not
+    /// `None`. The chain records "provider reported zero" which is a
+    /// real fact, distinct from "we don't know".
+    #[test]
+    fn reported_zero_usage_maps_to_some_zero_cost() {
+        let attrib = attribute_llm_usage("anthropic", "claude-opus-4-7", Some(Usage::default()));
+        assert_eq!(attrib.input_tokens, 0);
+        assert_eq!(attrib.output_tokens, 0);
+        assert_eq!(attrib.input_cost_usd_micros, Some(0));
+        assert_eq!(attrib.output_cost_usd_micros, Some(0));
+        assert_eq!(attrib.total_cost_usd_micros, Some(0));
+    }
+
+    /// Streaming and non-streaming use the same projection, so the
+    /// arithmetic matches for the same `Some(Usage)`. Pins parity so
+    /// no double-rounding can creep in if a future refactor moves
+    /// one path to a different helper.
+    #[test]
+    fn reported_nonzero_usage_matches_non_streaming_cost() {
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let a = attribute_llm_usage("anthropic", "claude-opus-4-7", Some(usage));
+        let b = attribute_llm_usage("anthropic", "claude-opus-4-7", Some(usage));
+        assert_eq!(a.input_cost_usd_micros, b.input_cost_usd_micros);
+        assert_eq!(a.output_cost_usd_micros, b.output_cost_usd_micros);
+        assert_eq!(a.total_cost_usd_micros, b.total_cost_usd_micros);
+        // Sanity check the arithmetic matches the cost-fields slice.
+        // claude-opus-4-7 input price: $15/M, 1000 tokens -> 15_000 micros.
+        assert_eq!(a.input_cost_usd_micros, Some(15_000));
+        // Output price: $75/M, 500 tokens -> 37_500 micros.
+        assert_eq!(a.output_cost_usd_micros, Some(37_500));
+        assert_eq!(a.total_cost_usd_micros, Some(52_500));
+    }
+
+    /// Unpriced model with reported usage: tokens populated, costs
+    /// `None`. Matches the cost-fields slice's behavior; included
+    /// here so the projection helper's full matrix is covered.
+    #[test]
+    fn reported_usage_on_unpriced_model_drops_cost_fields() {
+        let usage = Usage {
+            input_tokens: 1_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let attrib = attribute_llm_usage("ollama", "llama3", Some(usage));
+        assert_eq!(attrib.input_tokens, 1_000);
+        assert_eq!(attrib.output_tokens, 500);
+        assert_eq!(attrib.input_cost_usd_micros, None);
+        assert_eq!(attrib.output_cost_usd_micros, None);
+        assert_eq!(attrib.total_cost_usd_micros, None);
+    }
+
+    /// Cache fields plumb through. Anthropic's prompt-caching is the
+    /// realistic shape: a streaming response that reports cache_read
+    /// and cache_creation tokens should land them on the audit row
+    /// alongside the regular input/output tokens.
+    #[test]
+    fn cache_fields_propagate_from_reported_usage() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 800,
+            cache_read_input_tokens: 9_000,
+        };
+        let attrib = attribute_llm_usage("anthropic", "claude-opus-4-7", Some(usage));
+        assert_eq!(attrib.cache_creation_input_tokens, 800);
+        assert_eq!(attrib.cache_read_input_tokens, 9_000);
+    }
 }
 
 // ---------------------------------------------------------------------------

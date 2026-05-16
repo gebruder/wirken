@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 
 use crate::conversation::{Message, Role, ToolCallRequest};
 use crate::error::AgentError;
-use crate::llm::{LlmClient, LlmResponse};
+use crate::llm::{LlmClient, LlmResponse, Usage};
 use crate::tool::ToolDef;
 
 /// Cap on the SSE accumulation buffer per response. A hostile or
@@ -36,23 +36,24 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<LlmResponse, AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         match self.config().provider.as_str() {
             "openai" | "ollama" | "custom" => {
                 self.stream_openai(messages, tools, api_key, &tx).await
             }
             "anthropic" => self.stream_anthropic(messages, tools, api_key, &tx).await,
             _ => {
-                // Fall back to non-streaming. Discards the usage tuple
-                // because complete_stream's return type does not yet
-                // carry it; issue #116 reshapes the return type and
-                // plumbs the discarded usage through.
-                let (response, _usage) = self.complete(messages, tools, api_key).await?;
+                // Fall back to non-streaming. Plumbs the underlying
+                // `complete` usage through unchanged so providers
+                // without their own streaming path (tinfoil,
+                // privatemode, gemini, bedrock) still produce
+                // accurate cost rows on the audit chain.
+                let (response, usage) = self.complete(messages, tools, api_key).await?;
                 if let LlmResponse::Text(ref text) = response {
                     let _ = tx.send(StreamEvent::TextDelta(text.clone())).await;
                 }
                 let _ = tx.send(StreamEvent::Done(response.clone())).await;
-                Ok(response)
+                Ok((response, usage))
             }
         }
     }
@@ -63,18 +64,26 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
         tx: &tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<LlmResponse, AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let url = format!("{}/chat/completions", self.config().base_url);
 
         let messages_json: Vec<serde_json::Value> =
             messages.iter().map(super::llm::message_to_json).collect();
 
+        // `stream_options.include_usage: true` is the OpenAI opt-in
+        // that makes the server emit a final usage chunk before
+        // `[DONE]`. Recent ollama versions honor this on their
+        // `/v1/chat/completions` surface; older ollama and some
+        // custom endpoints ignore it, in which case the parse below
+        // sees no `usage` block and the call returns `None` so the
+        // runtime records cost as `None` rather than `Some(0)`.
         let mut body = serde_json::json!({
             "model": self.config().model,
             "messages": messages_json,
             "max_tokens": self.config().max_tokens,
             "temperature": self.config().temperature,
             "stream": true,
+            "stream_options": { "include_usage": true },
         });
 
         if !tools.is_empty() {
@@ -107,6 +116,11 @@ impl LlmClient {
         let mut buffer = String::new();
         let mut full_text = String::new();
         let mut tool_calls: Vec<PartialToolCall> = Vec::new();
+        // `usage` stays `None` until the final pre-`[DONE]` chunk
+        // emits a `usage` block. When the server doesn't honor
+        // `stream_options.include_usage`, this remains `None` and
+        // the runtime records cost as `None` rather than `Some(0)`.
+        let mut usage: Option<Usage> = None;
 
         'stream: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
@@ -134,6 +148,15 @@ impl LlmClient {
                             Ok(v) => v,
                             Err(_) => continue,
                         };
+
+                        // OpenAI's final-chunk shape under
+                        // `include_usage: true` carries an empty
+                        // `choices` array and a top-level `usage`
+                        // block. The shared OpenAI extractor returns
+                        // `Some(Usage)` when the block is present.
+                        if let Some(parsed_usage) = super::llm::extract_openai_usage(&parsed) {
+                            usage = Some(parsed_usage);
+                        }
 
                         if let Some(delta) = parsed
                             .get("choices")
@@ -201,7 +224,7 @@ impl LlmClient {
         };
 
         let _ = tx.send(StreamEvent::Done(response.clone())).await;
-        Ok(response)
+        Ok((response, usage))
     }
 
     async fn stream_anthropic(
@@ -210,7 +233,7 @@ impl LlmClient {
         tools: &[ToolDef],
         api_key: Option<&str>,
         tx: &tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<LlmResponse, AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let url = format!("{}/messages", self.config().base_url);
 
         // Item 4 slice 2: Role::Compaction is folded into the
@@ -348,6 +371,13 @@ impl LlmClient {
         let mut current_tool_id = String::new();
         let mut current_tool_name = String::new();
         let mut in_tool_block = false;
+        // Anthropic emits `message_start` (input_tokens + initial
+        // cache fields) and one or more `message_delta` events
+        // (output_tokens accumulating to the final count). The slice
+        // tracks input/cache fields from `message_start` and overwrites
+        // output_tokens from each `message_delta`; the last one before
+        // `message_stop` carries the final cumulative count.
+        let mut usage: Option<Usage> = None;
 
         'stream: while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| AgentError::Http(format!("stream read: {e}")))?;
@@ -370,9 +400,11 @@ impl LlmClient {
                 for line in event_block.lines() {
                     if let Some(et) = line.strip_prefix("event: ") {
                         event_type = match et.trim() {
+                            "message_start" => "message_start",
                             "content_block_start" => "content_block_start",
                             "content_block_delta" => "content_block_delta",
                             "content_block_stop" => "content_block_stop",
+                            "message_delta" => "message_delta",
                             "message_stop" => "message_stop",
                             _ => "",
                         };
@@ -391,6 +423,33 @@ impl LlmClient {
                 };
 
                 match event_type {
+                    "message_start" => {
+                        // The `message_start` payload carries the
+                        // opening `usage` block: `input_tokens`,
+                        // `cache_creation_input_tokens`,
+                        // `cache_read_input_tokens`, plus an initial
+                        // `output_tokens` that's typically zero and
+                        // gets superseded by `message_delta` events.
+                        if let Some(message) = data.get("message")
+                            && let Some(parsed) = super::llm::extract_anthropic_usage(message)
+                        {
+                            usage = Some(parsed);
+                        }
+                    }
+                    "message_delta" => {
+                        // The cumulative `usage.output_tokens`
+                        // updates with each delta. Input and cache
+                        // fields are fixed by `message_start`; keep
+                        // them on the snapshot taken there and
+                        // overwrite only `output_tokens` from the
+                        // delta's `usage` block.
+                        if let Some(u_block) = data.get("usage")
+                            && let Some(out) = u_block.get("output_tokens").and_then(|v| v.as_u64())
+                        {
+                            let snapshot = usage.get_or_insert(Usage::default());
+                            snapshot.output_tokens = out as u32;
+                        }
+                    }
                     "content_block_start" => {
                         if let Some(block) = data.get("content_block") {
                             let bt = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -452,7 +511,7 @@ impl LlmClient {
         };
 
         let _ = tx.send(StreamEvent::Done(response.clone())).await;
-        Ok(response)
+        Ok((response, usage))
     }
 }
 

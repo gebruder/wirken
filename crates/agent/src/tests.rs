@@ -1096,6 +1096,7 @@ fn parse_ollama_response_text() {
         LlmResponse::Text(s) => assert_eq!(s, "hello"),
         other => panic!("expected text, got {other:?}"),
     }
+    let usage = usage.expect("ollama response with prompt_eval_count yields Some(Usage)");
     assert_eq!(usage.input_tokens, 50);
     assert_eq!(usage.output_tokens, 10);
 }
@@ -1132,6 +1133,7 @@ fn parse_ollama_response_tool_calls_synthesizes_id() {
         }
         other => panic!("expected tool calls, got {other:?}"),
     }
+    let usage = usage.expect("ollama response with prompt_eval_count yields Some(Usage)");
     assert_eq!(usage.input_tokens, 200);
     assert_eq!(usage.output_tokens, 30);
 }
@@ -1475,23 +1477,27 @@ fn anthropic_usage_extracted_with_cache_fields() {
         }
     });
     let (_, usage) = crate::llm::parse_anthropic_response(&body).unwrap();
+    let usage = usage.expect("anthropic body with usage block yields Some(Usage)");
     assert_eq!(usage.input_tokens, 1234);
     assert_eq!(usage.output_tokens, 567);
     assert_eq!(usage.cache_creation_input_tokens, 800);
     assert_eq!(usage.cache_read_input_tokens, 9000);
 }
 
+/// Anthropic without a `usage` block yields `None`. The runtime
+/// projects this to "tokens=0, cost=None" so the audit row records
+/// "we don't know" rather than "provider said zero".
 #[test]
-fn anthropic_usage_absent_yields_zeros() {
+fn anthropic_usage_absent_yields_none() {
     let body = serde_json::json!({
         "content": [{ "type": "text", "text": "ok" }],
         "stop_reason": "end_turn"
     });
     let (_, usage) = crate::llm::parse_anthropic_response(&body).unwrap();
-    assert_eq!(usage.input_tokens, 0);
-    assert_eq!(usage.output_tokens, 0);
-    assert_eq!(usage.cache_creation_input_tokens, 0);
-    assert_eq!(usage.cache_read_input_tokens, 0);
+    assert!(
+        usage.is_none(),
+        "no usage block must yield None, not Some(zero)"
+    );
 }
 
 #[test]
@@ -1501,22 +1507,27 @@ fn openai_usage_extracted_from_prompt_and_completion_tokens() {
         "usage": { "prompt_tokens": 42, "completion_tokens": 17 }
     });
     let (_, usage) = crate::llm::parse_completion_response(&body).unwrap();
+    let usage = usage.expect("openai body with usage block yields Some(Usage)");
     assert_eq!(usage.input_tokens, 42);
     assert_eq!(usage.output_tokens, 17);
     assert_eq!(usage.cache_creation_input_tokens, 0);
     assert_eq!(usage.cache_read_input_tokens, 0);
 }
 
-/// The ollama OpenAI-compat path does not populate a usage block.
-/// Capture must default cleanly to zero rather than crash or error.
+/// The ollama OpenAI-compat path on older versions does not populate
+/// a usage block. The extractor must return `None` so the runtime
+/// records cost as `None` rather than `Some(0)`. This is the Some(0)
+/// vs None regression guard for the OpenAI-compat surface.
 #[test]
-fn openai_usage_absent_yields_zeros_for_ollama_compat() {
+fn openai_usage_absent_yields_none() {
     let body = serde_json::json!({
         "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
     });
     let (_, usage) = crate::llm::parse_completion_response(&body).unwrap();
-    assert_eq!(usage.input_tokens, 0);
-    assert_eq!(usage.output_tokens, 0);
+    assert!(
+        usage.is_none(),
+        "missing OpenAI usage block must yield None, not Some(zero)"
+    );
 }
 
 #[test]
@@ -1526,6 +1537,7 @@ fn gemini_usage_extracted_from_usage_metadata() {
         "usageMetadata": { "promptTokenCount": 81, "candidatesTokenCount": 19 }
     });
     let (_, usage) = crate::llm::parse_gemini_response(&body).unwrap();
+    let usage = usage.expect("gemini body with usageMetadata yields Some(Usage)");
     assert_eq!(usage.input_tokens, 81);
     assert_eq!(usage.output_tokens, 19);
 }
@@ -1538,6 +1550,7 @@ fn bedrock_usage_extracted_from_usage_block() {
         "usage": { "inputTokens": 250, "outputTokens": 75 }
     });
     let (_, usage) = crate::llm::parse_bedrock_response(&body).unwrap();
+    let usage = usage.expect("bedrock body with usage block yields Some(Usage)");
     assert_eq!(usage.input_tokens, 250);
     assert_eq!(usage.output_tokens, 75);
 }

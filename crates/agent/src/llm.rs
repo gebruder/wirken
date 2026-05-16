@@ -207,9 +207,17 @@ pub enum LlmResponse {
 
 /// Token-usage metadata returned alongside an LLM response. Captured
 /// from each provider's `usage` block. Cache fields are
-/// anthropic-specific and stay zero for other providers. Endpoints
-/// that do not populate a usage block (some custom OpenAI-compatible
-/// servers, including ollama) yield an all-zero `Usage`.
+/// anthropic-specific and stay zero for other providers.
+///
+/// Callers receive `Option<Usage>` from `complete` and `complete_stream`.
+/// `None` means the provider did not include a usage block on the
+/// response (some custom OpenAI-compatible servers, older ollama
+/// versions, streaming-without-`include_usage`). `Some(Usage)` means
+/// the block was present, whatever the numeric values inside. The
+/// runtime projects `None` to "tokens=0, cost=None" on the audit row
+/// so a billing consumer can distinguish "provider reported zero"
+/// from "we don't know". Flattening these together would silently
+/// undercount cost.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u32,
@@ -346,7 +354,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         api_key: Option<&str>,
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         match self.config.provider.as_str() {
             "anthropic" => self.complete_anthropic(messages, tools, api_key).await,
             "gemini" => self.complete_gemini(messages, tools, api_key).await,
@@ -382,7 +390,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         api_key: Option<&str>,
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let api_key = api_key.ok_or_else(|| {
             AgentError::Llm(
                 "tinfoil provider requires an API key; none was passed to complete()".into(),
@@ -482,7 +490,7 @@ impl LlmClient {
         &self,
         messages: &[Message],
         tools: &[ToolDef],
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let url = ollama_chat_url(&self.config.base_url);
         let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
         let body = build_ollama_request_body(&self.config, messages_json, tools);
@@ -516,7 +524,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         api_key: Option<&str>,
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let url = format!("{}/chat/completions", self.config.base_url);
 
         let messages_json: Vec<serde_json::Value> = messages.iter().map(message_to_json).collect();
@@ -556,7 +564,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         api_key: Option<&str>,
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let url = format!("{}/messages", self.config.base_url);
 
         // Anthropic separates system prompt from messages.
@@ -705,7 +713,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         api_key: Option<&str>,
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let key = api_key.ok_or_else(|| AgentError::Llm("Gemini requires an API key".into()))?;
         let url = format!(
             "{}/models/{}:generateContent",
@@ -842,7 +850,7 @@ impl LlmClient {
         messages: &[Message],
         tools: &[ToolDef],
         api_key: Option<&str>,
-    ) -> Result<(LlmResponse, Usage), AgentError> {
+    ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let credentials =
             api_key.ok_or_else(|| AgentError::Llm("Bedrock requires AWS credentials".into()))?;
 
@@ -1166,19 +1174,31 @@ pub(crate) fn build_ollama_request_body(
 /// arguments may arrive as a JSON object (ollama's native shape) or
 /// as a JSON-encoded string; both are normalized to the
 /// JSON-encoded-string shape that [`crate::conversation::ToolCallRequest`] holds.
-pub fn parse_ollama_response(body: &serde_json::Value) -> Result<(LlmResponse, Usage), AgentError> {
+pub fn parse_ollama_response(
+    body: &serde_json::Value,
+) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let message = body
         .get("message")
         .ok_or_else(|| AgentError::Llm("no message in ollama response".into()))?;
 
-    let usage = Usage {
-        input_tokens: body
-            .get("prompt_eval_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
-        output_tokens: body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+    // Ollama's `/api/chat` non-streaming reply carries
+    // `prompt_eval_count` and `eval_count` on the top-level object.
+    // Returning `None` when neither key is present keeps the runtime's
+    // distinction between "provider reported zero" and "we don't know"
+    // intact: a malformed/legacy ollama response without these fields
+    // records cost as `None` rather than `Some(0)`.
+    let usage = if body.get("prompt_eval_count").is_some() || body.get("eval_count").is_some() {
+        Some(Usage {
+            input_tokens: body
+                .get("prompt_eval_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32,
+            output_tokens: body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        })
+    } else {
+        None
     };
 
     if let Some(tool_calls) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
@@ -1276,7 +1296,7 @@ pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {
 
 pub fn parse_completion_response(
     body: &serde_json::Value,
-) -> Result<(LlmResponse, Usage), AgentError> {
+) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let choice = body
         .get("choices")
         .and_then(|c| c.as_array())
@@ -1324,7 +1344,7 @@ pub fn parse_completion_response(
 /// Parse an Anthropic Messages API response.
 pub fn parse_anthropic_response(
     body: &serde_json::Value,
-) -> Result<(LlmResponse, Usage), AgentError> {
+) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let content = body
         .get("content")
         .and_then(|c| c.as_array())
@@ -1381,7 +1401,9 @@ pub fn parse_anthropic_response(
 }
 
 /// Parse a Google Gemini generateContent response.
-pub fn parse_gemini_response(body: &serde_json::Value) -> Result<(LlmResponse, Usage), AgentError> {
+pub fn parse_gemini_response(
+    body: &serde_json::Value,
+) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let parts = body
         .get("candidates")
         .and_then(|c| c.as_array())
@@ -1434,7 +1456,7 @@ pub fn parse_gemini_response(body: &serde_json::Value) -> Result<(LlmResponse, U
 /// Parse an AWS Bedrock Converse API response.
 pub fn parse_bedrock_response(
     body: &serde_json::Value,
-) -> Result<(LlmResponse, Usage), AgentError> {
+) -> Result<(LlmResponse, Option<Usage>), AgentError> {
     let content = body
         .get("output")
         .and_then(|o| o.get("message"))
@@ -1487,13 +1509,16 @@ pub fn parse_bedrock_response(
 
 /// Pull the anthropic `usage` block. Reads `input_tokens`,
 /// `output_tokens`, plus optional `cache_creation_input_tokens` and
-/// `cache_read_input_tokens` (anthropic prompt-caching). Missing fields
-/// default to zero.
-fn extract_anthropic_usage(body: &serde_json::Value) -> Usage {
-    let Some(u) = body.get("usage") else {
-        return Usage::default();
-    };
-    Usage {
+/// `cache_read_input_tokens` (anthropic prompt-caching).
+///
+/// Returns `None` iff the provider did NOT include a `usage` block on
+/// the response. Returning `Some(Usage { ..zero })` instead would
+/// flatten "provider reported zero" into "provider reported nothing"
+/// and lose the distinction the audit chain needs to honestly record
+/// cost as `None` rather than `Some(0)`. See [`Usage`].
+pub(crate) fn extract_anthropic_usage(body: &serde_json::Value) -> Option<Usage> {
+    let u = body.get("usage")?;
+    Some(Usage {
         input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         cache_creation_input_tokens: u
@@ -1504,18 +1529,17 @@ fn extract_anthropic_usage(body: &serde_json::Value) -> Usage {
             .get("cache_read_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as u32,
-    }
+    })
 }
 
 /// Pull the OpenAI-shape `usage` block. Reads `prompt_tokens` and
 /// `completion_tokens`. Endpoints that do not populate the block (some
-/// custom OpenAI-compatible servers, including ollama) yield
-/// `Usage::default()`.
-fn extract_openai_usage(body: &serde_json::Value) -> Usage {
-    let Some(u) = body.get("usage") else {
-        return Usage::default();
-    };
-    Usage {
+/// custom OpenAI-compatible servers, older ollama versions) yield
+/// `None` so the runtime can record cost as `None` rather than
+/// `Some(0)`.
+pub(crate) fn extract_openai_usage(body: &serde_json::Value) -> Option<Usage> {
+    let u = body.get("usage")?;
+    Some(Usage {
         input_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         output_tokens: u
             .get("completion_tokens")
@@ -1523,16 +1547,14 @@ fn extract_openai_usage(body: &serde_json::Value) -> Usage {
             .unwrap_or(0) as u32,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
-    }
+    })
 }
 
 /// Pull the gemini `usageMetadata` block. Reads `promptTokenCount` and
-/// `candidatesTokenCount`.
-fn extract_gemini_usage(body: &serde_json::Value) -> Usage {
-    let Some(u) = body.get("usageMetadata") else {
-        return Usage::default();
-    };
-    Usage {
+/// `candidatesTokenCount`. `None` iff the block is absent.
+fn extract_gemini_usage(body: &serde_json::Value) -> Option<Usage> {
+    let u = body.get("usageMetadata")?;
+    Some(Usage {
         input_tokens: u
             .get("promptTokenCount")
             .and_then(|v| v.as_u64())
@@ -1543,21 +1565,19 @@ fn extract_gemini_usage(body: &serde_json::Value) -> Usage {
             .unwrap_or(0) as u32,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
-    }
+    })
 }
 
 /// Pull the bedrock Converse `usage` block. Reads `inputTokens` and
-/// `outputTokens`.
-fn extract_bedrock_usage(body: &serde_json::Value) -> Usage {
-    let Some(u) = body.get("usage") else {
-        return Usage::default();
-    };
-    Usage {
+/// `outputTokens`. `None` iff the block is absent.
+fn extract_bedrock_usage(body: &serde_json::Value) -> Option<Usage> {
+    let u = body.get("usage")?;
+    Some(Usage {
         input_tokens: u.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         output_tokens: u.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
-    }
+    })
 }
 
 /// Build the tool definitions in OpenAI function calling format.
