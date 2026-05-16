@@ -307,6 +307,46 @@ enum PermissionCommands {
         #[arg(long, default_value = "default")]
         agent: String,
     },
+
+    /// Manage the live queue of in-flight `NeedsApproval` requests
+    /// from running agents. Distinct from `list-pending` above
+    /// which walks the audit log for historical denials without a
+    /// matching approval; the `pending` subgroup operates against
+    /// the gateway's in-memory queue and resumes the awaiting
+    /// agent task on `approve` or `deny`.
+    #[command(subcommand)]
+    Pending(PendingCommands),
+}
+
+#[derive(Subcommand)]
+enum PendingCommands {
+    /// List in-flight approval requests waiting for an operator
+    /// decision.
+    List,
+    /// Print full context for one pending request (tool, action,
+    /// agent, trigger message).
+    Show {
+        /// Request id from `pending list` (full UUID).
+        request_id: String,
+    },
+    /// Approve a pending request. The awaiting agent task resumes
+    /// and the tool dispatches. Audit row records
+    /// `approved_via: cli` with the OS username as `approved_by`.
+    Approve {
+        /// Request id from `pending list` (full UUID).
+        request_id: String,
+    },
+    /// Deny a pending request. The awaiting agent task resumes
+    /// with the tool call refused; the reason (if supplied)
+    /// surfaces to the LLM as the failed result's output.
+    Deny {
+        /// Request id from `pending list` (full UUID).
+        request_id: String,
+        /// Operator-supplied reason. Surfaces to the LLM as the
+        /// tool failure message and lands on the audit row's
+        /// `denial_reason`.
+        reason: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -833,6 +873,18 @@ async fn main() -> Result<()> {
             PermissionCommands::Revoke { key, agent } => {
                 commands::permission::revoke(&key, &agent).await
             }
+            PermissionCommands::Pending(cmd) => match cmd {
+                PendingCommands::List => commands::permission::pending_list().await,
+                PendingCommands::Show { request_id } => {
+                    commands::permission::pending_show(&request_id).await
+                }
+                PendingCommands::Approve { request_id } => {
+                    commands::permission::pending_approve(&request_id).await
+                }
+                PendingCommands::Deny { request_id, reason } => {
+                    commands::permission::pending_deny(&request_id, reason).await
+                }
+            },
             PermissionCommands::ListPending { agent } => {
                 commands::permission::list_pending(&agent).await
             }

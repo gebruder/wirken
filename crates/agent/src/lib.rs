@@ -3,6 +3,7 @@ pub mod approval_gate;
 pub mod attestation;
 pub mod bundled_presets;
 pub mod bundled_skills;
+pub mod cli_approval_gate;
 pub mod context;
 pub mod conversation;
 pub mod egress;

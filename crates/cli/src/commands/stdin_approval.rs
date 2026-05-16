@@ -103,6 +103,7 @@ where
         Err(_) => ApprovalOutcome::Timeout,
         Ok(Err(_)) | Ok(Ok(0)) => ApprovalOutcome::Denied {
             reason: Some("eof on stdin".into()),
+            actor: None,
         },
         Ok(Ok(_)) => parse_decision(&line),
     }
@@ -111,15 +112,22 @@ where
 fn parse_decision(line: &str) -> ApprovalOutcome {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return ApprovalOutcome::Denied { reason: None };
+        return ApprovalOutcome::Denied {
+            reason: None,
+            actor: None,
+        };
     }
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let head = parts.next().unwrap_or("").to_ascii_lowercase();
     let tail = parts.next().map(|s| s.trim().to_string());
+    // Stdin gate does not know an operator-identity label other
+    // than "this terminal session"; leave `actor: None` so the
+    // runtime falls back to the surface-derived "stdin" label.
     match head.as_str() {
-        "y" | "yes" => ApprovalOutcome::Approved,
+        "y" | "yes" => ApprovalOutcome::Approved { actor: None },
         _ => ApprovalOutcome::Denied {
             reason: tail.filter(|s| !s.is_empty()),
+            actor: None,
         },
     }
 }
@@ -133,14 +141,14 @@ mod tests {
     async fn y_approves() {
         let r = Cursor::new(b"y\n");
         let outcome = read_one_decision(r, Duration::from_secs(1)).await;
-        assert_eq!(outcome, ApprovalOutcome::Approved);
+        assert_eq!(outcome, ApprovalOutcome::Approved { actor: None });
     }
 
     #[tokio::test]
     async fn yes_approves_case_insensitive() {
         let r = Cursor::new(b"YES\n");
         let outcome = read_one_decision(r, Duration::from_secs(1)).await;
-        assert_eq!(outcome, ApprovalOutcome::Approved);
+        assert_eq!(outcome, ApprovalOutcome::Approved { actor: None });
     }
 
     #[tokio::test]
@@ -149,14 +157,20 @@ mod tests {
         // decision is the first token.
         let r = Cursor::new(b"y trust me\n");
         let outcome = read_one_decision(r, Duration::from_secs(1)).await;
-        assert_eq!(outcome, ApprovalOutcome::Approved);
+        assert_eq!(outcome, ApprovalOutcome::Approved { actor: None });
     }
 
     #[tokio::test]
     async fn n_denies_with_no_reason() {
         let r = Cursor::new(b"n\n");
         let outcome = read_one_decision(r, Duration::from_secs(1)).await;
-        assert_eq!(outcome, ApprovalOutcome::Denied { reason: None });
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }
+        );
     }
 
     #[tokio::test]
@@ -166,7 +180,8 @@ mod tests {
         assert_eq!(
             outcome,
             ApprovalOutcome::Denied {
-                reason: Some("unsafe path".into())
+                reason: Some("unsafe path".into()),
+                actor: None,
             }
         );
     }
@@ -176,14 +191,26 @@ mod tests {
         // First token is `cancel`, not `y`. Tail is empty.
         let r = Cursor::new(b"cancel\n");
         let outcome = read_one_decision(r, Duration::from_secs(1)).await;
-        assert_eq!(outcome, ApprovalOutcome::Denied { reason: None });
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }
+        );
     }
 
     #[tokio::test]
     async fn empty_line_denies_with_no_reason() {
         let r = Cursor::new(b"\n");
         let outcome = read_one_decision(r, Duration::from_secs(1)).await;
-        assert_eq!(outcome, ApprovalOutcome::Denied { reason: None });
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }
+        );
     }
 
     #[tokio::test]
@@ -197,7 +224,8 @@ mod tests {
         assert_eq!(
             outcome,
             ApprovalOutcome::Denied {
-                reason: Some("eof on stdin".into())
+                reason: Some("eof on stdin".into()),
+                actor: None,
             }
         );
     }

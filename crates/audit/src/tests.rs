@@ -1251,10 +1251,7 @@ mod session {
                 denial_reason,
                 ..
             } => {
-                assert_eq!(
-                    *denied_via,
-                    Some(crate::session_log::ApprovalSource::Stdin)
-                );
+                assert_eq!(*denied_via, Some(crate::session_log::ApprovalSource::Stdin));
                 assert_eq!(denial_reason.as_deref(), Some("looks dangerous"));
             }
             other => panic!("expected PermissionDenied, got {other:?}"),

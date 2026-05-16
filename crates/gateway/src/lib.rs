@@ -8,6 +8,7 @@ pub mod hook_registry;
 pub mod injection_detect;
 pub mod org;
 pub mod outbound_dispatcher;
+pub mod pending_approvals;
 pub mod permissions;
 pub mod rate_limit;
 pub mod router;

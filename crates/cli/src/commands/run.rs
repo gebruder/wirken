@@ -711,6 +711,42 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     tracing::info!("Hooks IPC socket: {}", hooks_socket_path.display());
 
+    // --- Setup permissions IPC listener (operator decisions) ---
+    //
+    // `wirken permissions pending {list,show,approve,deny}` invocations
+    // connect here, exchange one line-delimited JSON request and
+    // response (matching the orchestrator-push precedent), and
+    // disconnect. Trust model: SO_PEERCRED + 0o600 file perms. Same
+    // UID is the only gate; the operator-tool process is not
+    // crossing a trust boundary.
+    #[cfg(unix)]
+    let permissions_socket_path = cfg.socket_dir().join("gateway-permissions.sock");
+    #[cfg(unix)]
+    {
+        if permissions_socket_path.exists() {
+            let _ = std::fs::remove_file(&permissions_socket_path);
+        }
+    }
+    #[cfg(unix)]
+    let permissions_listener = UnixListener::bind(&permissions_socket_path).context(format!(
+        "Failed to bind permissions IPC at {}",
+        permissions_socket_path.display()
+    ))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &permissions_socket_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .context("Failed to chmod permissions socket to 0600")?;
+    }
+    #[cfg(unix)]
+    tracing::info!(
+        "Permissions IPC socket: {}",
+        permissions_socket_path.display()
+    );
+
     // --- Pre-flight: validate per-adapter vault entries ---
     //
     // Each adapter binary will fail at startup if its vault keys are
@@ -1019,6 +1055,35 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     ));
     let hook_dispatcher = Arc::new(wirken_gateway::hook_dispatcher::HookDispatcher::default());
     factory.attach_veto_dispatcher(hook_dispatcher.clone());
+
+    // --- Pending-approval queue + CLI approval gate ---
+    //
+    // Out-of-band approval for daemon-mode agents. The queue holds
+    // pending `NeedsApproval` requests; `wirken permissions pending
+    // {list,show,approve,deny}` invocations connect to
+    // `gateway-permissions.sock` and resolve them. The CliApprovalGate
+    // becomes the factory's default approval gate so every Agent the
+    // factory wakes (channel-driven sessions, cron jobs, webchat)
+    // routes its `NeedsApproval` short-circuits through this queue.
+    //
+    // Behavior change vs the prior slice: pre-this-slice, a
+    // daemon-mode agent that hit `NeedsApproval` failed terminally.
+    // Now it queues for `WIRKEN_CLI_APPROVAL_TIMEOUT_S` (default 300s)
+    // waiting for an operator decision via `wirken permissions
+    // pending approve <key>`. Past the timeout the call fails
+    // closed. `wirken ask` continues to attach its own
+    // `StdinApprovalGate` per-agent which takes precedence over
+    // this default.
+    let pending_approval_queue =
+        Arc::new(wirken_gateway::pending_approvals::PendingApprovalQueue::new());
+    factory.attach_default_approval_gate(Arc::new(
+        wirken_agent::cli_approval_gate::CliApprovalGate::new(pending_approval_queue.clone()),
+    ));
+    tracing::info!(
+        timeout_s = wirken_gateway::pending_approvals::resolve_cli_timeout().as_secs(),
+        "permissions IPC: daemon-mode NeedsApproval requests queue for operator decision \
+         via `wirken permissions pending approve <key>`",
+    );
 
     // --- Webchat ---
     if wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN") {
@@ -1419,6 +1484,59 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     });
 
+    // --- Permissions accept loop (operator decisions) ---
+    //
+    // Mirror of the orchestrator-push loop above. Same trust model
+    // (SO_PEERCRED + 0o600), same JSON-line protocol, different
+    // request shape. Per-connection handler in
+    // `handle_permissions_request` reads one JSON request, looks up
+    // the queue, writes one JSON response, closes.
+    #[cfg(unix)]
+    let permissions_queue_for_loop = pending_approval_queue.clone();
+    #[cfg(unix)]
+    let permissions_audit = audit.clone();
+    #[cfg(unix)]
+    let permissions_session_log = session_log.clone();
+    #[cfg(unix)]
+    let permissions_expected_principal = Principal::Uid(unsafe { libc::geteuid() });
+    #[cfg(unix)]
+    let permissions_handle = tokio::spawn(async move {
+        loop {
+            match permissions_listener.accept().await {
+                Ok((stream, _)) => {
+                    let actual_principal = match stream.peer_principal() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(
+                                "permissions: peer_principal unavailable, refusing: {e}"
+                            );
+                            continue;
+                        }
+                    };
+                    if actual_principal != permissions_expected_principal {
+                        tracing::warn!(
+                            "permissions: refusing peer {} (expected {})",
+                            actual_principal,
+                            permissions_expected_principal
+                        );
+                        continue;
+                    }
+                    let q = permissions_queue_for_loop.clone();
+                    let au = permissions_audit.clone();
+                    let slog = permissions_session_log.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_permissions_request(stream, q, au, slog).await {
+                            tracing::error!("permissions handler error: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("permissions accept error: {e}");
+                }
+            }
+        }
+    });
+
     // --- Wait for shutdown ---
     tokio::signal::ctrl_c().await?;
     println!();
@@ -1443,6 +1561,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     hooks_accept_handle.abort();
     #[cfg(unix)]
     orchestrator_handle.abort();
+    #[cfg(unix)]
+    permissions_handle.abort();
     webchat_handle.abort();
     scheduler_handle.abort();
 
@@ -1951,6 +2071,149 @@ async fn serve_veto_loop(
     }
     dispatcher.unregister(hook_id).await;
     crash_reason
+}
+
+/// Handle one inbound permissions-IPC connection. Reads one
+/// line-delimited JSON [`PermissionsRequest`] from the stream,
+/// routes it to the [`PendingApprovalQueue`], writes one JSON
+/// [`PermissionsResponse`] back, and closes.
+///
+/// The audit chain is NOT touched by this handler — the awaiting
+/// agent task emits `PermissionApproved` / `PermissionDenied`
+/// rows when its `request_approval` await wakes up. The handler's
+/// only responsibility is queue resolution.
+#[cfg(unix)]
+async fn handle_permissions_request(
+    stream: UnixStream,
+    queue: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
+    _audit: Arc<AuditWriter>,
+    _session_log: Arc<dyn wirken_audit::SessionLog>,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
+
+    let (reader, mut writer) = stream.into_split();
+    let mut br = BufReader::new(reader);
+    let mut line = String::new();
+    let n = br
+        .read_line(&mut line)
+        .await
+        .context("permissions: read request")?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let response = match serde_json::from_str::<PermissionsRequest>(line.trim_end()) {
+        Ok(req) => process_permissions_request(req, &queue),
+        Err(e) => PermissionsResponse::Error {
+            message: format!("invalid request JSON: {e}"),
+        },
+    };
+
+    let body = serde_json::to_string(&response).context("permissions: serialize response")?;
+    writer
+        .write_all(body.as_bytes())
+        .await
+        .context("permissions: write response body")?;
+    writer
+        .write_all(b"\n")
+        .await
+        .context("permissions: write response newline")?;
+    writer
+        .shutdown()
+        .await
+        .context("permissions: shutdown response")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_permissions_request(
+    req: wirken_ipc::permissions::PermissionsRequest,
+    queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
+) -> wirken_ipc::permissions::PermissionsResponse {
+    use wirken_gateway::pending_approvals::PendingDecision;
+    use wirken_ipc::permissions::{
+        DecisionResult, PendingDetail, PendingSummary, PermissionsRequest, PermissionsResponse,
+    };
+
+    match req {
+        PermissionsRequest::PendingList => {
+            let mut entries: Vec<PendingSummary> = queue
+                .list()
+                .into_iter()
+                .map(|s| PendingSummary {
+                    request_id: s.request_id,
+                    agent_id: s.agent_id,
+                    tool_name: s.tool_name,
+                    action_key: s.action_key,
+                    requested_tier: s.requested_tier,
+                    requested_at: s.requested_at.to_rfc3339(),
+                    age_seconds: s.age_seconds,
+                })
+                .collect();
+            entries.sort_by(|a, b| a.request_id.cmp(&b.request_id));
+            PermissionsResponse::PendingList { entries }
+        }
+        PermissionsRequest::PendingShow { request_id } => {
+            let detail = queue.show(&request_id).map(|d| PendingDetail {
+                summary: PendingSummary {
+                    request_id: d.request_id,
+                    agent_id: d.agent_id,
+                    tool_name: d.tool_name,
+                    action_key: d.action_key,
+                    requested_tier: d.requested_tier,
+                    requested_at: d.requested_at.to_rfc3339(),
+                    age_seconds: d.age_seconds,
+                },
+                trigger_message: d.trigger_message,
+            });
+            PermissionsResponse::PendingShow { entry: detail }
+        }
+        PermissionsRequest::PendingApprove {
+            request_id,
+            approved_by,
+        } => {
+            let result = queue.resolve(
+                &request_id,
+                PendingDecision::Allow {
+                    actor: Some(approved_by),
+                },
+            );
+            PermissionsResponse::Decision {
+                result: match result {
+                    wirken_gateway::pending_approvals::ResolveResult::Accepted => {
+                        DecisionResult::Accepted
+                    }
+                    wirken_gateway::pending_approvals::ResolveResult::UnknownKey => {
+                        DecisionResult::UnknownKey
+                    }
+                },
+            }
+        }
+        PermissionsRequest::PendingDeny {
+            request_id,
+            denied_by,
+            reason,
+        } => {
+            let result = queue.resolve(
+                &request_id,
+                PendingDecision::Deny {
+                    reason,
+                    actor: Some(denied_by),
+                },
+            );
+            PermissionsResponse::Decision {
+                result: match result {
+                    wirken_gateway::pending_approvals::ResolveResult::Accepted => {
+                        DecisionResult::Accepted
+                    }
+                    wirken_gateway::pending_approvals::ResolveResult::UnknownKey => {
+                        DecisionResult::UnknownKey
+                    }
+                },
+            }
+        }
+    }
 }
 
 /// Handle one orchestrator-push connection: read one JSON request,

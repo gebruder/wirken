@@ -25,15 +25,31 @@ use wirken_audit::ApprovalSource;
 
 use crate::error::PermissionDenialContext;
 
-/// Outcome of a single approval-gate consult. `Denied` carries the
-/// operator's reason verbatim (surfaced to the LLM as the tool
-/// call's failure message). `Timeout` is the read-deadline case;
-/// the runtime treats it as a deny with a synthetic
-/// `"approval timeout"` reason.
+/// Outcome of a single approval-gate consult.
+///
+/// `actor` carries an optional operator-identity label (e.g. an OS
+/// username from the CLI invocation, an authenticated SSE session
+/// user, a Telegram user-id-or-handle). When `Some`, the runtime
+/// records it as the audit row's `approved_by` / `denied_by` field
+/// — the actor in the actor-vs-surface split. When `None`, the
+/// runtime falls back to the surface-derived default label
+/// (`"stdin"`, `"cli"`, etc.) so the chain always has a non-empty
+/// value. The structured `approved_via` / `denied_via` field on the
+/// audit row continues to carry the surface independently.
+///
+/// `Denied` carries the operator's reason verbatim (surfaced to the
+/// LLM as the tool call's failure message). `Timeout` is the
+/// read-deadline case; the runtime treats it as a deny with a
+/// synthetic `"approval timeout"` reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalOutcome {
-    Approved,
-    Denied { reason: Option<String> },
+    Approved {
+        actor: Option<String>,
+    },
+    Denied {
+        reason: Option<String>,
+        actor: Option<String>,
+    },
     Timeout,
 }
 
@@ -98,6 +114,7 @@ pub(crate) mod test_support {
                 .pop()
                 .unwrap_or(ApprovalOutcome::Denied {
                     reason: Some("scripted gate empty".into()),
+                    actor: None,
                 })
         }
 

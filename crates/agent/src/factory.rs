@@ -215,6 +215,15 @@ pub struct AgentFactory {
     /// accept loop. Interior-mutable so the CLI can install it after
     /// the factory is already in an `Arc`.
     veto_dispatcher: std::sync::RwLock<Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>>,
+    /// Default approval gate injected into every waked Agent.
+    /// `None` preserves the pre-out-of-band behavior — `NeedsApproval`
+    /// short-circuits with a terminal deny. The daemon-mode `wirken
+    /// run` path attaches a `CliApprovalGate` here so calls hitting
+    /// `NeedsApproval` queue for an operator decision via
+    /// `wirken permissions pending approve`. `wirken ask` continues
+    /// to attach its own `StdinApprovalGate` per-agent and does NOT
+    /// inherit this default.
+    approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -275,10 +284,26 @@ impl AgentFactory {
             veto_dispatcher: std::sync::RwLock::new(Arc::new(
                 wirken_gateway::hook_dispatcher::NoopDispatcher,
             )),
+            approval_gate: std::sync::RwLock::new(None),
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
         })
+    }
+
+    /// Install a default approval gate for every Agent this factory
+    /// wakes. Called by `wirken run` once, after the
+    /// `PendingApprovalQueue` is built and the permissions-IPC
+    /// accept loop is bound. Per-agent overrides (e.g. `wirken ask`
+    /// attaching its own `StdinApprovalGate`) take precedence because
+    /// they call `agent.set_approval_gate` AFTER the factory injects
+    /// this default.
+    pub fn attach_default_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.approval_gate.write().unwrap() = Some(gate);
+    }
+
+    fn current_approval_gate(&self) -> Option<Arc<dyn crate::approval_gate::ApprovalGate>> {
+        self.approval_gate.read().unwrap().clone()
     }
 
     /// Install the veto-hook dispatcher. Called by the CLI after the
@@ -414,6 +439,9 @@ impl AgentFactory {
             agent.set_org_permissions(org.clone());
         }
         agent.set_veto_dispatcher(self.current_veto_dispatcher());
+        if let Some(gate) = self.current_approval_gate() {
+            agent.set_approval_gate(gate);
+        }
         if let Some(mcp) = &cfg.mcp_client {
             agent.attach_mcp(mcp.clone());
         }

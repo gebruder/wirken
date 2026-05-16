@@ -2,6 +2,7 @@ mod auth;
 mod channel;
 mod error;
 pub mod orchestrator;
+pub mod permissions;
 pub mod principal;
 pub mod stream;
 pub mod transport;

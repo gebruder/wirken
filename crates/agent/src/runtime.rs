@@ -2643,21 +2643,22 @@ impl Agent {
         let source = gate.as_ref().map(|g| g.source());
 
         match outcome {
-            Some(crate::approval_gate::ApprovalOutcome::Approved) => {
-                if let Some(src) = source
-                    && let Err(e) = wirken_gateway::permissions::emit_operator_approval(
+            Some(crate::approval_gate::ApprovalOutcome::Approved { actor }) => {
+                if let Some(src) = source.clone() {
+                    let approved_by = actor.unwrap_or_else(|| approved_by_label(&src));
+                    if let Err(e) = wirken_gateway::permissions::emit_operator_approval(
                         &ctx.action.approval_key(),
                         &ctx.agent_id,
-                        &approved_by_label(&src),
+                        &approved_by,
                         src,
                         &*self.session_log,
                         &self.session_handle,
-                    )
-                {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to emit operator-approval audit row; proceeding with retry",
-                    );
+                    ) {
+                        tracing::warn!(
+                            error = %e,
+                            "failed to emit operator-approval audit row; proceeding with retry",
+                        );
+                    }
                 }
                 tracing::info!(
                     "Operator-approved: agent '{}' tool '{}' (one-shot bypass)",
@@ -2690,7 +2691,20 @@ impl Agent {
                     Err(e) => Err(e),
                 }
             }
-            Some(crate::approval_gate::ApprovalOutcome::Denied { reason }) => {
+            Some(crate::approval_gate::ApprovalOutcome::Denied { reason, actor: _ }) => {
+                // The actor on a Denied outcome is recorded as the
+                // PermissionDenied row's trigger context via the
+                // existing `agent_id` + surface fields; the audit
+                // schema does not have a per-row `denied_by` field
+                // today (the denial path uses denial_source +
+                // denied_via to attribute who declined, not who
+                // they were). Future schema extension: add
+                // `denied_by_actor: Option<String>` if a SIEM
+                // detection needs per-operator denials separated
+                // from per-surface denials. For now actor is
+                // accepted on the wire but not separately
+                // recorded; the reason and surface are what's
+                // operationally load-bearing.
                 let denial_reason = reason.clone();
                 self.log_event(
                     TrustLevel::System,
