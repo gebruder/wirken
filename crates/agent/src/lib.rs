@@ -24,6 +24,7 @@ pub(crate) mod sigv4;
 pub mod skill;
 pub mod skill_perms;
 pub mod slash;
+pub mod telegram_approval_gate;
 pub mod tool;
 pub mod wasm_sandbox;
 

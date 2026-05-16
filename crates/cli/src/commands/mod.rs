@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod agent;
 pub mod agents;
+pub mod approvers;
 pub mod audit;
 pub mod channel;
 pub mod credential;

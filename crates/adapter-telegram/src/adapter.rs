@@ -2,7 +2,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{ChatId, MessageId, ParseMode, ReplyParameters};
+use teloxide::types::{
+    CallbackQuery, ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode,
+    ReplyParameters,
+};
 use tokio::sync::Mutex;
 
 use wirken_adapter_core::{OutboundFormatter, TelegramFormatter};
@@ -68,10 +71,20 @@ impl TelegramAdapter {
     }
 }
 
-/// Handle inbound Telegram messages and forward to gateway via IPC.
+/// Handle inbound Telegram messages and callback-query presses,
+/// forwarding both to the gateway via IPC. Two dispatcher branches:
+///
+/// - **Message branch**: existing path. Forwards as `InboundMessage`.
+/// - **Callback-query branch**: new for the approval slice. Parses
+///   `callback_data` of the form `req:<uuid>:allow|deny`, extracts
+///   the pressing user's id/display, and forwards as
+///   `ApprovalDecision`. Acknowledges the press via Telegram's
+///   `answer_callback_query` so the spinner clears on the operator's
+///   client.
 async fn run_inbound(bot: Bot, writer: Arc<Mutex<IpcFrameWriter>>) {
-    let handler = Update::filter_message().endpoint(move |msg: Message, _bot: Bot| {
-        let writer = writer.clone();
+    let msg_writer = writer.clone();
+    let message_branch = Update::filter_message().endpoint(move |msg: Message, _bot: Bot| {
+        let writer = msg_writer.clone();
         async move {
             let mut capnp_msg = capnp::message::Builder::new_default();
             convert::telegram_to_inbound(&msg, &mut capnp_msg);
@@ -87,11 +100,104 @@ async fn run_inbound(bot: Bot, writer: Arc<Mutex<IpcFrameWriter>>) {
         }
     });
 
+    let cb_writer = writer.clone();
+    let callback_branch =
+        Update::filter_callback_query().endpoint(move |q: CallbackQuery, bot: Bot| {
+            let writer = cb_writer.clone();
+            async move { handle_callback_query(q, bot, writer).await }
+        });
+
+    let handler = dptree::entry()
+        .branch(message_branch)
+        .branch(callback_branch);
+
     Dispatcher::builder(bot, handler)
         .enable_ctrlc_handler()
         .build()
         .dispatch()
         .await;
+}
+
+/// One callback-query press. Format of `callback_data`:
+/// `req:<uuid>:allow` or `req:<uuid>:deny`. Documented at the
+/// encode site in [`build_approval_message`] so the next channel
+/// adapter implementer can match the format. Other adapters'
+/// callback-data limits (Discord 100, Slack 255) accommodate the
+/// same shape trivially.
+async fn handle_callback_query(
+    q: CallbackQuery,
+    bot: Bot,
+    writer: Arc<Mutex<IpcFrameWriter>>,
+) -> Result<(), teloxide::RequestError> {
+    let id = q.id.clone();
+    let parsed = q.data.as_deref().and_then(parse_callback_data);
+    let Some((request_id, decision_is_allow)) = parsed else {
+        tracing::warn!(
+            user = q.from.id.0,
+            data = ?q.data,
+            "telegram callback: unrecognized callback_data; dropping"
+        );
+        let _ = bot.answer_callback_query(id).await;
+        return Ok(());
+    };
+
+    let user_id = q.from.id.0 as i64;
+    let user_display = q
+        .from
+        .username
+        .clone()
+        .unwrap_or_else(|| q.from.first_name.clone());
+
+    let mut capnp_msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut capnp_msg,
+        &request_id,
+        decision_is_allow,
+        user_id,
+        &user_display,
+    );
+
+    {
+        let mut w = writer.lock().await;
+        if let Err(e) = w.write_message(&capnp_msg).await {
+            tracing::error!("telegram callback: failed to send ApprovalDecision to gateway: {e}");
+        }
+    }
+
+    // Acknowledge so the operator's client clears the loading
+    // spinner. Operator-facing text reflects which button they
+    // pressed; the gateway-side authorization check may still
+    // silently reject the press (the queue stays open until
+    // another authorized press or timeout), but the operator's
+    // UI doesn't need to wait for that.
+    let ack_text = if decision_is_allow {
+        "Approved"
+    } else {
+        "Denied"
+    };
+    let _ = bot.answer_callback_query(id).text(ack_text).await;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn parse_callback_data_for_test(data: &str) -> Option<(String, bool)> {
+    parse_callback_data(data)
+}
+
+/// Parse `req:<uuid>:allow|deny`. Returns `(uuid, is_allow)`.
+/// Malformed payloads return None; the caller drops the press.
+fn parse_callback_data(data: &str) -> Option<(String, bool)> {
+    let stripped = data.strip_prefix("req:")?;
+    let (uuid, suffix) = stripped.rsplit_once(':')?;
+    let is_allow = match suffix {
+        "allow" => true,
+        "deny" => false,
+        _ => return None,
+    };
+    if uuid.is_empty() {
+        return None;
+    }
+    Some((uuid.to_string(), is_allow))
 }
 
 /// Handle outbound messages from gateway and send via Telegram.
@@ -126,6 +232,13 @@ async fn handle_outbound(mut reader: IpcFrameReader, bot: Bot, writer: Arc<Mutex
                     Ok(fields) => FrameAction::SendMessage(fields),
                     Err(e) => {
                         tracing::error!("Failed to parse outbound: {e}");
+                        FrameAction::Skip
+                    }
+                },
+                Ok(frame::ApprovalRequest(_)) => match convert::parse_approval_request(&msg) {
+                    Ok(fields) => FrameAction::SendApprovalRequest(fields),
+                    Err(e) => {
+                        tracing::error!("Failed to parse approval request: {e}");
                         FrameAction::Skip
                     }
                 },
@@ -173,14 +286,98 @@ async fn handle_outbound(mut reader: IpcFrameReader, bot: Bot, writer: Arc<Mutex
                     tracing::error!("Failed to send outbound result: {e}");
                 }
             }
+            FrameAction::SendApprovalRequest(fields) => {
+                send_approval_request(&bot, &writer, fields).await;
+            }
             FrameAction::Skip => {}
         }
     }
 }
 
+/// Render an approval message in the configured chat and ship it
+/// with an inline keyboard carrying Approve / Deny buttons.
+/// `callback_data` format: `req:<uuid>:allow` and `req:<uuid>:deny`.
+/// Documented format so the next channel adapter (Discord's
+/// `custom_id` is 100 bytes, Slack's `action_id` is 255) can match.
+///
+/// On send failure (chat not accessible, Telegram API rejection),
+/// emits an `ApprovalRequestFailed` frame back to the gateway with
+/// a snake_case reason label so the audit row records the failure
+/// distinctly from a generic timeout.
+async fn send_approval_request(
+    bot: &Bot,
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+    fields: convert::ApprovalRequestFields,
+) {
+    let text = format!(
+        "Agent <b>{}</b> requests <b>{}</b> (tier: <b>{}</b>).\n\
+         Action: <code>{}</code>\n\
+         Trigger: <i>{}</i>",
+        html_escape(&fields.triggering_agent),
+        html_escape(&fields.tool_name),
+        html_escape(&fields.requested_tier),
+        html_escape(&fields.action_key),
+        if fields.trigger_message.is_empty() {
+            "(none)".to_string()
+        } else {
+            html_escape(&fields.trigger_message)
+        },
+    );
+
+    let approve =
+        InlineKeyboardButton::callback("Approve", format!("req:{}:allow", fields.request_id));
+    let deny = InlineKeyboardButton::callback("Deny", format!("req:{}:deny", fields.request_id));
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![approve, deny]]);
+
+    let chat = ChatId(fields.target_chat_id);
+    let send = bot
+        .send_message(chat, text)
+        .parse_mode(ParseMode::Html)
+        .reply_markup(keyboard);
+
+    if let Err(e) = send.await {
+        tracing::error!(
+            request_id = %fields.request_id,
+            chat_id = fields.target_chat_id,
+            error = %e,
+            "telegram approval: send failed; emitting ApprovalRequestFailed"
+        );
+        let reason = classify_send_error(&e);
+        let mut failure = capnp::message::Builder::new_default();
+        convert::build_approval_request_failed(&mut failure, &fields.request_id, reason);
+        let mut w = writer.lock().await;
+        if let Err(send_err) = w.write_message(&failure).await {
+            tracing::error!("telegram approval: failed to send ApprovalRequestFailed: {send_err}");
+        }
+    }
+}
+
+/// Map a `teloxide::RequestError` to a stable snake_case label for
+/// `ApprovalRequestFailed.reason`. Used by SIEM detections to
+/// group failures without parsing free text. The longer error
+/// detail goes to gateway logs via the warn! above.
+fn classify_send_error(e: &teloxide::RequestError) -> &'static str {
+    use teloxide::RequestError;
+    match e {
+        RequestError::Api(_) => "telegram_api_error",
+        RequestError::MigrateToChatId(_) => "chat_not_accessible",
+        RequestError::RetryAfter(_) => "telegram_api_error",
+        RequestError::Network(_) => "network_error",
+        RequestError::InvalidJson { .. } => "telegram_api_error",
+        RequestError::Io(_) => "network_error",
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Intermediate enum so we can drop Cap'n Proto readers before .await
 enum FrameAction {
     SendMessage(convert::OutboundFields),
+    SendApprovalRequest(convert::ApprovalRequestFields),
     Skip,
 }
 

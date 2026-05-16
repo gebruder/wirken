@@ -1085,6 +1085,46 @@ pub async fn run(port: Option<u16>) -> Result<()> {
          via `wirken permissions pending approve <key>`",
     );
 
+    // --- Approver registry ---
+    //
+    // The registry holds the operator allowlist
+    // (`approver_registry` table, keyed by `(adapter_id, user_id)`)
+    // plus the approval-chat configuration
+    // (`adapter_approval_chats` table). The CLI subcommand
+    // `wirken approvers` writes both directly to SQLite; the
+    // registry's in-memory cache is loaded on next gateway start.
+    // The `TelegramApprovalGate` is constructed below where the
+    // `OutboundDispatcher` is available; the registry is plumbed
+    // through.
+    let approver_registry = Arc::new(
+        wirken_gateway::approver_registry::ApproverRegistry::open(
+            &cfg.data_dir.join("approvers.db"),
+        )
+        .context("Failed to open approver registry")?,
+    );
+
+    // Startup warn if any registered Telegram adapter has no
+    // approval_chat_id configured. The adapter is in a
+    // degraded-but-not-failed state: NeedsApproval requests on
+    // this adapter's sessions will fail-closed at the gate's
+    // preflight. Warn-level is the honest severity.
+    {
+        let known_adapters = registry.lock().await.list();
+        for entry in &known_adapters {
+            if entry.channel == "telegram"
+                && approver_registry.approval_chat(&entry.adapter_id).is_none()
+            {
+                tracing::warn!(
+                    adapter_id = %entry.adapter_id,
+                    "telegram adapter has no approval_chat_id configured; \
+                     NeedsApproval requests on this adapter's sessions will fail-closed. \
+                     Run `wirken approvers set-chat {} <chat_id>` to enable.",
+                    entry.adapter_id,
+                );
+            }
+        }
+    }
+
     // --- Webchat ---
     if wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN") {
         tracing::warn!(
@@ -1183,6 +1223,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // looks up the writer when forwarding a push.
     let dispatcher = Arc::new(OutboundDispatcher::new());
 
+    // Channel-adapter approval gate. Sessions whose id parses with
+    // channel `"telegram"` route through `TelegramApprovalGate`;
+    // other sessions fall back to the default CLI gate. The
+    // factory's `approval_gate_for(session_id)` does the routing
+    // at wake time.
+    factory.attach_telegram_approval_gate(Arc::new(
+        wirken_agent::telegram_approval_gate::TelegramApprovalGate::new(
+            pending_approval_queue.clone(),
+            approver_registry.clone(),
+            dispatcher.clone(),
+        ),
+    ));
+
     // --- Accept adapter connections ---
     let accept_registry = registry.clone();
     let accept_factory = factory.clone();
@@ -1191,6 +1244,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let accept_router = router.clone();
     let accept_detector = detector.clone();
     let accept_dispatcher = dispatcher.clone();
+    let accept_pending = pending_approval_queue.clone();
+    let accept_approvers = approver_registry.clone();
 
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
@@ -1265,11 +1320,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let rtr = accept_router.clone();
                     let det = accept_detector.clone();
                     let disp = accept_dispatcher.clone();
+                    let pend = accept_pending.clone();
+                    let apprv = accept_approvers.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_adapter_connection(stream, reg, fact, au, sess, rtr, det, disp)
-                                .await
+                        if let Err(e) = handle_adapter_connection(
+                            stream, reg, fact, au, sess, rtr, det, disp, pend, apprv,
+                        )
+                        .await
                         {
                             tracing::error!("Adapter connection error: {e}");
                         }
@@ -1672,6 +1730,8 @@ async fn handle_adapter_connection(
     router: Arc<Router>,
     detector: Arc<InjectionDetector>,
     dispatcher: Arc<OutboundDispatcher>,
+    pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
+    approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
 ) -> Result<()> {
     let (mut reader, mut writer) = split_stream(stream);
 
@@ -1753,6 +1813,8 @@ async fn handle_adapter_connection(
         sessions,
         router,
         detector,
+        pending_approvals,
+        approver_registry,
     )
     .await;
 
@@ -2336,6 +2398,8 @@ async fn message_loop(
     sessions: Arc<Mutex<SessionStore>>,
     router: Arc<Router>,
     detector: Arc<InjectionDetector>,
+    pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
+    approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
 ) -> Result<()> {
     loop {
         let msg = match reader.read_message().await {
@@ -2423,6 +2487,48 @@ async fn message_loop(
                     let success = r.get_success();
                     let msg_id = r.get_message_id()?.to_str().unwrap_or_default().to_string();
                     InboundAction::DeliveryResult { success, msg_id }
+                }
+                frame::ApprovalDecision(d) => {
+                    let d = d?;
+                    let request_id = d
+                        .get_request_id()?
+                        .to_str()
+                        .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
+                        .to_string();
+                    let user_id = d.get_telegram_user_id().to_string();
+                    let user_display = d
+                        .get_telegram_user_display()?
+                        .to_str()
+                        .map_err(|e| anyhow::anyhow!("user display not utf8: {e}"))?
+                        .to_string();
+                    let decision = match d.get_decision()?.which()? {
+                        wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {
+                            ApprovalDecisionKind::Allow
+                        }
+                        wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {
+                            ApprovalDecisionKind::Deny
+                        }
+                    };
+                    InboundAction::ApprovalDecision {
+                        request_id,
+                        decision,
+                        user_id,
+                        user_display,
+                    }
+                }
+                frame::ApprovalRequestFailed(f) => {
+                    let f = f?;
+                    let request_id = f
+                        .get_request_id()?
+                        .to_str()
+                        .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
+                        .to_string();
+                    let reason = f
+                        .get_reason()?
+                        .to_str()
+                        .map_err(|e| anyhow::anyhow!("failure reason not utf8: {e}"))?
+                        .to_string();
+                    InboundAction::ApprovalRequestFailed { request_id, reason }
                 }
                 _ => InboundAction::Unknown,
             }
@@ -2683,6 +2789,96 @@ async fn message_loop(
                 }
             }
 
+            InboundAction::ApprovalDecision {
+                request_id,
+                decision,
+                user_id,
+                user_display,
+            } => {
+                // Centralized authorization: validate the pressing
+                // user against `approver_registry` BEFORE resolving
+                // the queue. Unauthorized presses are silently
+                // dropped (queue stays open until timeout or until
+                // an authorized press arrives). Per the slice, an
+                // explicit "unauthorized attempt" audit variant is
+                // a follow-up if SIEM detections need to count
+                // attempts; today's signal is the warn-level log.
+                if !approver_registry.verify(adapter_id, &user_id) {
+                    tracing::warn!(
+                        adapter_id = adapter_id,
+                        user_id = %user_id,
+                        request_id = %request_id,
+                        "telegram approval: unauthorized user pressed approve/deny; dropping"
+                    );
+                    continue;
+                }
+                // Prefer the wire-supplied display name; fall back
+                // to the registry's stored display, then to the
+                // user id as a last resort. The chosen value lands
+                // on the audit row's `approved_by` / actor field.
+                let actor = if !user_display.is_empty() {
+                    user_display
+                } else {
+                    approver_registry
+                        .display_name(adapter_id, &user_id)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| user_id.clone())
+                };
+                let pending = match decision {
+                    ApprovalDecisionKind::Allow => {
+                        wirken_gateway::pending_approvals::PendingDecision::Allow {
+                            actor: Some(actor),
+                        }
+                    }
+                    ApprovalDecisionKind::Deny => {
+                        wirken_gateway::pending_approvals::PendingDecision::Deny {
+                            reason: None,
+                            actor: Some(actor),
+                        }
+                    }
+                };
+                let result = pending_approvals.resolve(&request_id, pending);
+                match result {
+                    wirken_gateway::pending_approvals::ResolveResult::Accepted => {
+                        tracing::info!(
+                            adapter_id = adapter_id,
+                            request_id = %request_id,
+                            "telegram approval resolved"
+                        );
+                    }
+                    wirken_gateway::pending_approvals::ResolveResult::UnknownKey => {
+                        tracing::warn!(
+                            adapter_id = adapter_id,
+                            request_id = %request_id,
+                            "telegram approval: unknown or already-resolved request id; \
+                             agent timeout may have fired or another press won the race"
+                        );
+                    }
+                }
+            }
+
+            InboundAction::ApprovalRequestFailed { request_id, reason } => {
+                // Adapter could not deliver the outbound approval
+                // message. Resolve the queue with Deny carrying the
+                // delivery-failure reason so the agent's audit row
+                // records the failure rather than a generic timeout.
+                let denial_reason = format!("approval delivery failed: {reason}");
+                let result = pending_approvals.resolve(
+                    &request_id,
+                    wirken_gateway::pending_approvals::PendingDecision::Deny {
+                        reason: Some(denial_reason),
+                        actor: None,
+                    },
+                );
+                tracing::warn!(
+                    adapter_id = adapter_id,
+                    request_id = %request_id,
+                    reason = %reason,
+                    result = ?result,
+                    "telegram approval delivery failed; queue entry resolved with denial"
+                );
+            }
+
             InboundAction::Unknown => {
                 tracing::warn!("Unknown frame from '{adapter_id}'");
             }
@@ -2710,7 +2906,35 @@ enum InboundAction {
         success: bool,
         msg_id: String,
     },
+    /// Channel-adapter approval decision. The adapter forwards the
+    /// pressing user's `(telegram_user_id, display)` plus the
+    /// `request_id` and decision verbatim. The gateway validates
+    /// the user against `approver_registry` here before resolving
+    /// the queue (centralized authorization). Unauthorized presses
+    /// are silently dropped at the validate step.
+    ApprovalDecision {
+        request_id: String,
+        decision: ApprovalDecisionKind,
+        user_id: String,
+        user_display: String,
+    },
+    /// Adapter could not deliver the outbound approval message.
+    /// Gateway resolves the queue with `Timeout` and the audit row
+    /// records `denial_reason` carrying the supplied label.
+    ApprovalRequestFailed {
+        request_id: String,
+        reason: String,
+    },
     Unknown,
+}
+
+/// Mirrors `frame::approval_decision_kind::Which` in owned form so
+/// the message-loop dispatch can match on it after the capnp
+/// Reader is dropped.
+#[derive(Debug, Clone)]
+enum ApprovalDecisionKind {
+    Allow,
+    Deny,
 }
 
 fn truncate(s: &str, max: usize) -> String {

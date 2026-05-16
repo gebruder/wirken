@@ -33,6 +33,7 @@ wasmtime = { workspace = true }
 wasmtime-wasi = "43.0.2"
 futures-util = "0.3"
 async-trait = { workspace = true }
+capnp = { workspace = true }
 # Capability-based filesystem handle for the agent workspace. Opened
 # once at ToolRegistry construction, then all read/write/list ops go
 # through Dir methods that refuse paths escaping the workspace. Used

@@ -318,3 +318,126 @@ async fn full_message_flow_simulation() {
         _ => panic!("expected OutboundResult"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Approval-frame conversions (slice: telegram approval gate)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "req-uuid", true, 12345, "davi");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(d.get_telegram_user_id(), 12345);
+            assert_eq!(
+                d.get_telegram_user_display().unwrap().to_str().unwrap(),
+                "davi"
+            );
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, 99, "");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {}
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "chat_not_accessible");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(
+                f.get_reason().unwrap().to_str().unwrap(),
+                "chat_not_accessible"
+            );
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_chat_id(-100123);
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.request_id, "abc");
+    assert_eq!(fields.tool_name, "shell");
+    assert_eq!(fields.action_key, "shell:rm");
+    assert_eq!(fields.requested_tier, "tier3");
+    assert_eq!(fields.triggering_agent, "default");
+    assert_eq!(fields.trigger_message, "clean logs");
+    assert_eq!(fields.target_chat_id, -100123);
+}
+
+// ---------------------------------------------------------------------------
+// Callback-data parse
+// ---------------------------------------------------------------------------
+
+#[test]
+fn callback_data_parse_allow() {
+    let (uuid, allow) = crate::adapter::parse_callback_data_for_test(
+        "req:9b8f1c0a-1234-4abc-9def-0123456789ab:allow",
+    )
+    .unwrap();
+    assert_eq!(uuid, "9b8f1c0a-1234-4abc-9def-0123456789ab");
+    assert!(allow);
+}
+
+#[test]
+fn callback_data_parse_deny() {
+    let (uuid, allow) = crate::adapter::parse_callback_data_for_test("req:abc:deny").unwrap();
+    assert_eq!(uuid, "abc");
+    assert!(!allow);
+}
+
+#[test]
+fn callback_data_parse_rejects_missing_prefix() {
+    assert!(crate::adapter::parse_callback_data_for_test("abc:allow").is_none());
+}
+
+#[test]
+fn callback_data_parse_rejects_unknown_suffix() {
+    assert!(crate::adapter::parse_callback_data_for_test("req:abc:wat").is_none());
+}
+
+#[test]
+fn callback_data_parse_rejects_empty_uuid() {
+    assert!(crate::adapter::parse_callback_data_for_test("req::allow").is_none());
+}

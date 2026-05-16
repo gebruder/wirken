@@ -6824,6 +6824,7 @@ dependencies = [
  "base64",
  "bollard",
  "cap-std",
+ "capnp",
  "chrono",
  "ed25519-dalek",
  "futures-util",

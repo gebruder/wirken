@@ -198,6 +198,92 @@ struct VetoResponse {
   }
 }
 
+# --- Channel-adapter approval (first surface: Telegram) ---
+#
+# Out-of-band approval for daemon-mode `NeedsApproval` requests
+# routed to a channel adapter. The gateway-side
+# `TelegramApprovalGate` registers an entry in the same
+# `PendingApprovalQueue` the CLI surface uses, then sends an
+# `ApprovalRequest` frame to the named adapter. The adapter renders
+# an inline-keyboard message in the configured approval chat; a
+# pressed callback button comes back as `ApprovalDecision`. On
+# delivery failure (no approval chat configured, bot missing from
+# chat, Telegram API rejection), the adapter emits
+# `ApprovalRequestFailed`. The gateway authorizes the pressing
+# user against `approver_registry` before resolving the queue.
+
+struct ApprovalRequest {
+  # Gateway → adapter. Render an inline-keyboard message in the
+  # approval chat with two buttons: Approve and Deny. The
+  # callback_data on each button is `req:<requestId>:allow` or
+  # `req:<requestId>:deny` so the adapter can parse the decision
+  # before constructing the response frame (no Unknown variant
+  # needed on ApprovalDecisionKind).
+  requestId @0 :Text;
+  toolName @1 :Text;
+  actionKey @2 :Text;
+  requestedTier @3 :Text;
+  # `triggeringAgent` rather than `agentId`: the latter is on the
+  # `tests/no_payload_routing.rs` banned list (routing must come
+  # from handshake, not payload). This field is the
+  # operator-display label for "which agent is asking" and the
+  # adapter renders it in the approval message; it is not used
+  # for routing.
+  triggeringAgent @4 :Text;
+  # Inbound user message that triggered the agent's tool call.
+  # Operator-facing context. Empty when the call has no inbound
+  # trigger (subagent recursion, cron, system-driven).
+  triggerMessage @5 :Text;
+  # Telegram chat to render the message in. The gateway reads this
+  # from `approver_registry` at `request_approval` time; the
+  # adapter does not consult registry state and treats the value
+  # as authoritative.
+  targetChatId @6 :Int64;
+}
+
+struct ApprovalDecisionKind {
+  union {
+    allow @0 :Void;
+    deny @1 :Void;
+    # Reason capture is a follow-up slice (no ForceReply pattern
+    # in the codebase today). For now Deny carries no payload;
+    # the audit row records `denial_reason: None`.
+  }
+}
+
+struct ApprovalDecision {
+  # Adapter → gateway. The pressing user pressed a callback
+  # button. The gateway validates `telegramUserId` against
+  # `approver_registry::verify(adapter_id, user_id)` BEFORE
+  # resolving the queue entry. An unauthorized press is silently
+  # dropped at the gateway (queue stays open until timeout); the
+  # adapter does not consult registry state.
+  requestId @0 :Text;
+  decision @1 :ApprovalDecisionKind;
+  # Telegram user id (numeric). Authorized against
+  # `approver_registry`.
+  telegramUserId @2 :Int64;
+  # Display name or username for the audit row's `approved_by` /
+  # actor field. Falls back to the user id stringified when the
+  # display is empty.
+  telegramUserDisplay @3 :Text;
+}
+
+struct ApprovalRequestFailed {
+  # Adapter → gateway. Approval message could not be delivered.
+  # The gateway resolves the queue entry as
+  # `PendingDecision::Timeout` and the audit row records
+  # `denial_reason: Some("approval delivery failed: <reason>")`.
+  # Distinct frame (not an error response) because the failure is
+  # asynchronous to the `request_approval` await.
+  requestId @0 :Text;
+  # Snake_case reason label. Stable strings for SIEM grouping:
+  # `no_approval_chat_configured`, `chat_not_accessible`,
+  # `telegram_api_error`. Operators see the label in the audit
+  # row; the longer error detail goes to gateway logs.
+  reason @1 :Text;
+}
+
 # --- Top-level frame ---
 #
 # Every message on the wire is a Frame. The tag determines
@@ -237,5 +323,11 @@ struct Frame {
     # Veto-hook synchronous request/response.
     vetoRequest @13 :VetoRequest;
     vetoResponse @14 :VetoResponse;
+
+    # Channel-adapter approval (Telegram is the first surface;
+    # other adapters inherit the wire shape unchanged).
+    approvalRequest @15 :ApprovalRequest;
+    approvalDecision @16 :ApprovalDecision;
+    approvalRequestFailed @17 :ApprovalRequestFailed;
   }
 }

@@ -71,6 +71,14 @@ enum Commands {
     #[command(subcommand)]
     Hooks(HookCommands),
 
+    /// Manage channel-adapter approver allowlist and per-adapter
+    /// approval chat configuration. Operators allowed to approve
+    /// tool-call requests on a given channel adapter live here;
+    /// `wirken run` loads the cache at startup and the gateway
+    /// validates every callback press against the allowlist.
+    #[command(subcommand)]
+    Approvers(ApproverCommands),
+
     /// Manage agents
     #[command(subcommand)]
     Agents(AgentCommands),
@@ -708,6 +716,37 @@ enum CredentialCommands {
 }
 
 #[derive(Subcommand)]
+enum ApproverCommands {
+    /// Add an allowed approver for the given channel adapter.
+    /// `user_id` is the platform-side id (Telegram numeric id as a
+    /// string, e.g. "12345"; future channels use whatever id their
+    /// platform exposes). `--display` is an optional human label
+    /// the audit row's `approved_by` field carries when the
+    /// adapter does not supply one.
+    Add {
+        adapter_id: String,
+        user_id: String,
+        #[arg(long)]
+        display: Option<String>,
+    },
+    /// List approvers, optionally filtered by adapter.
+    List {
+        #[arg(long)]
+        adapter: Option<String>,
+    },
+    /// Remove an approver.
+    Remove { adapter_id: String, user_id: String },
+    /// Configure the chat id where approval messages render for
+    /// the given channel adapter. For Telegram this is the chat
+    /// id (often negative for groups/supergroups). Without this
+    /// set, NeedsApproval requests on this adapter's sessions
+    /// fail-closed at the gate's preflight.
+    SetChat { adapter_id: String, chat_id: i64 },
+    /// Show the configured approval chat id for an adapter.
+    ShowChat { adapter_id: String },
+}
+
+#[derive(Subcommand)]
 enum HookCommands {
     /// Register an external hook process by its Ed25519 public key.
     /// The hook process must run independently and connect to
@@ -913,6 +952,25 @@ async fn main() -> Result<()> {
                 no_scopes,
                 all_scopes,
             } => commands::credential::rescope(&name, scope, no_scopes, all_scopes).await,
+        },
+        Commands::Approvers(cmd) => match cmd {
+            ApproverCommands::Add {
+                adapter_id,
+                user_id,
+                display,
+            } => commands::approvers::add(&adapter_id, &user_id, display.as_deref()),
+            ApproverCommands::List { adapter } => commands::approvers::list(adapter.as_deref()),
+            ApproverCommands::Remove {
+                adapter_id,
+                user_id,
+            } => commands::approvers::remove(&adapter_id, &user_id),
+            ApproverCommands::SetChat {
+                adapter_id,
+                chat_id,
+            } => commands::approvers::set_chat(&adapter_id, chat_id),
+            ApproverCommands::ShowChat { adapter_id } => {
+                commands::approvers::show_chat(&adapter_id)
+            }
         },
         Commands::Hooks(cmd) => match cmd {
             HookCommands::Register {

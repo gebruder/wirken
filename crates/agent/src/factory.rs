@@ -223,7 +223,16 @@ pub struct AgentFactory {
     /// `wirken permissions pending approve`. `wirken ask` continues
     /// to attach its own `StdinApprovalGate` per-agent and does NOT
     /// inherit this default.
+    /// Default approval gate for sessions that aren't channel-
+    /// routable (CLI invocations, cron, subagent paths) and the
+    /// fallback for channels with no dedicated gate installed.
     approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Channel-specific approval gate for Telegram sessions
+    /// (`{agent}/telegram/{conv}` session-id format). Installed by
+    /// `wirken run` when a telegram adapter is registered AND has
+    /// an `approval_chat_id` configured. `None` when telegram is
+    /// not configured; the factory falls back to `approval_gate`.
+    telegram_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -285,6 +294,7 @@ impl AgentFactory {
                 wirken_gateway::hook_dispatcher::NoopDispatcher,
             )),
             approval_gate: std::sync::RwLock::new(None),
+            telegram_approval_gate: std::sync::RwLock::new(None),
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
@@ -302,7 +312,28 @@ impl AgentFactory {
         *self.approval_gate.write().unwrap() = Some(gate);
     }
 
-    fn current_approval_gate(&self) -> Option<Arc<dyn crate::approval_gate::ApprovalGate>> {
+    /// Install the Telegram-specific approval gate. Sessions whose
+    /// id parses with channel `"telegram"` route through this gate;
+    /// other sessions fall back to the default gate. Per the
+    /// channel-specific dispatch sub-finding the slice flagged:
+    /// the factory chooses per-wake, not the gate runtime.
+    pub fn attach_telegram_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.telegram_approval_gate.write().unwrap() = Some(gate);
+    }
+
+    /// Pick the right gate for a session id. Telegram-channel
+    /// sessions get the telegram gate when installed; everything
+    /// else gets the default. `None` means no gate is configured
+    /// at all (NeedsApproval fails terminally — pre-bf974c9 behavior).
+    fn approval_gate_for(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<dyn crate::approval_gate::ApprovalGate>> {
+        if channel_from_session_id(session_id) == Some("telegram")
+            && let Some(g) = self.telegram_approval_gate.read().unwrap().clone()
+        {
+            return Some(g);
+        }
         self.approval_gate.read().unwrap().clone()
     }
 
@@ -439,7 +470,7 @@ impl AgentFactory {
             agent.set_org_permissions(org.clone());
         }
         agent.set_veto_dispatcher(self.current_veto_dispatcher());
-        if let Some(gate) = self.current_approval_gate() {
+        if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);
         }
         if let Some(mcp) = &cfg.mcp_client {

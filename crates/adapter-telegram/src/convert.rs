@@ -129,3 +129,109 @@ pub fn build_heartbeat(
     let mut hb = frame_builder.init_heartbeat();
     hb.set_seq(seq);
 }
+
+/// Build an `ApprovalDecision` frame to send back to the gateway
+/// when an operator presses an inline-keyboard button. The
+/// callback_data encoding is documented at the parse site
+/// (`adapter.rs::parse_callback_data`); the decision bool is
+/// derived there and passed in.
+pub fn build_approval_decision(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    is_allow: bool,
+    user_id: i64,
+    user_display: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut decision = frame_builder.init_approval_decision();
+    decision.set_request_id(request_id);
+    decision.set_telegram_user_id(user_id);
+    decision.set_telegram_user_display(user_display);
+    let mut kind = decision.init_decision();
+    if is_allow {
+        kind.set_allow(());
+    } else {
+        kind.set_deny(());
+    }
+}
+
+/// Fields parsed from an `ApprovalRequest` frame the adapter
+/// renders as an inline-keyboard message in the configured
+/// approval chat.
+pub struct ApprovalRequestFields {
+    pub request_id: String,
+    pub tool_name: String,
+    pub action_key: String,
+    pub requested_tier: String,
+    pub triggering_agent: String,
+    pub trigger_message: String,
+    pub target_chat_id: i64,
+}
+
+pub fn parse_approval_request(
+    msg: &capnp::message::Reader<capnp::serialize::OwnedSegments>,
+) -> Result<ApprovalRequestFields, capnp::Error> {
+    let frame_reader = msg.get_root::<frame::Reader<'_>>()?;
+    match frame_reader.which()? {
+        frame::ApprovalRequest(req) => {
+            let r = req?;
+            let request_id = r
+                .get_request_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("request_id not utf8: {e}")))?
+                .to_string();
+            let tool_name = r
+                .get_tool_name()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("tool_name not utf8: {e}")))?
+                .to_string();
+            let action_key = r
+                .get_action_key()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("action_key not utf8: {e}")))?
+                .to_string();
+            let requested_tier = r
+                .get_requested_tier()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("requested_tier not utf8: {e}")))?
+                .to_string();
+            let triggering_agent = r
+                .get_triggering_agent()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("triggering_agent not utf8: {e}")))?
+                .to_string();
+            let trigger_message = r
+                .get_trigger_message()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
+                .to_string();
+            let target_chat_id = r.get_target_chat_id();
+            Ok(ApprovalRequestFields {
+                request_id,
+                tool_name,
+                action_key,
+                requested_tier,
+                triggering_agent,
+                trigger_message,
+                target_chat_id,
+            })
+        }
+        _ => Err(capnp::Error::failed(
+            "expected ApprovalRequest frame".to_string(),
+        )),
+    }
+}
+
+/// Build an `ApprovalRequestFailed` frame for the adapter→gateway
+/// direction. Sent when the inline-keyboard message cannot be
+/// delivered (chat not accessible, Telegram API rejection, etc.).
+pub fn build_approval_request_failed(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    reason: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut failed = frame_builder.init_approval_request_failed();
+    failed.set_request_id(request_id);
+    failed.set_reason(reason);
+}
