@@ -977,6 +977,9 @@ mod session {
                     latency_ms: 1234,
                     agent_id: "test-agent".into(),
                     credential_id: None,
+                    input_cost_usd_micros: None,
+                    output_cost_usd_micros: None,
+                    total_cost_usd_micros: None,
                 },
             ),
             (
@@ -1211,6 +1214,9 @@ mod session {
                 latency_ms: 42,
                 agent_id: "test-agent".into(),
                 credential_id: None,
+                input_cost_usd_micros: None,
+                output_cost_usd_micros: None,
+                total_cost_usd_micros: None,
             },
         )
         .unwrap();
@@ -1260,6 +1266,149 @@ mod session {
     }
 
     #[test]
+    fn llm_response_round_trips_with_cost_fields() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::LlmResponse {
+                request_id: "req-cost".into(),
+                finish_reason: "end_turn".into(),
+                input_tokens: 1_000,
+                output_tokens: 500,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                latency_ms: 42,
+                agent_id: "test-agent".into(),
+                credential_id: None,
+                input_cost_usd_micros: Some(15_000),
+                output_cost_usd_micros: Some(37_500),
+                total_cost_usd_micros: Some(52_500),
+            },
+        )
+        .unwrap();
+        let events = log.get_range(&h, 0..1).unwrap();
+        match &events[0].event {
+            SessionEvent::LlmResponse {
+                input_cost_usd_micros,
+                output_cost_usd_micros,
+                total_cost_usd_micros,
+                ..
+            } => {
+                assert_eq!(*input_cost_usd_micros, Some(15_000));
+                assert_eq!(*output_cost_usd_micros, Some(37_500));
+                assert_eq!(*total_cost_usd_micros, Some(52_500));
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_response_deserializes_without_cost_fields() {
+        // Pre-cost wire shape (rows written before the three
+        // *_cost_usd_micros fields landed) must still deserialize with
+        // all three defaulting to None. Locks back-compat: a future
+        // edit that removed the #[serde(default)] would break it.
+        let payload = r#"{"kind":"llm_response","request_id":"req-1","finish_reason":"end_turn","input_tokens":100,"output_tokens":50,"latency_ms":1234,"agent_id":"test"}"#;
+        let event: SessionEvent = serde_json::from_str(payload).unwrap();
+        match event {
+            SessionEvent::LlmResponse {
+                input_cost_usd_micros,
+                output_cost_usd_micros,
+                total_cost_usd_micros,
+                ..
+            } => {
+                assert_eq!(input_cost_usd_micros, None);
+                assert_eq!(output_cost_usd_micros, None);
+                assert_eq!(total_cost_usd_micros, None);
+            }
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_response_omits_none_cost_fields_on_serialize() {
+        // Mirror of the cache-fields skip test: cost fields are
+        // skip_serializing_if = "Option::is_none" so a row from an
+        // unpriced model does not pollute the wire shape with three
+        // null fields. Important because every ollama/tinfoil call
+        // takes this path.
+        let event = SessionEvent::LlmResponse {
+            request_id: "r".into(),
+            finish_reason: "end_turn".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            latency_ms: 1,
+            agent_id: "test-agent".into(),
+            credential_id: None,
+            input_cost_usd_micros: None,
+            output_cost_usd_micros: None,
+            total_cost_usd_micros: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(
+            !json.contains("input_cost_usd_micros"),
+            "None input_cost_usd_micros should be skipped: {json}"
+        );
+        assert!(
+            !json.contains("output_cost_usd_micros"),
+            "None output_cost_usd_micros should be skipped: {json}"
+        );
+        assert!(
+            !json.contains("total_cost_usd_micros"),
+            "None total_cost_usd_micros should be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn chain_verifies_with_cost_fields_present() {
+        // Append a row that carries the three new cost fields, then
+        // re-run the per-session chain verifier. The leaf hash covers
+        // the serialized event payload, so adding fields could only
+        // break verify() if the serialize path were inconsistent
+        // with itself; this test pins that it isn't.
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "hi".into(),
+                inbound_id: Some("t:1".into()),
+                adapter_id: Some("telegram".into()),
+                sender_id: Some("u:42".into()),
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::LlmResponse {
+                request_id: "req-verify".into(),
+                finish_reason: "end_turn".into(),
+                input_tokens: 7,
+                output_tokens: 3,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                latency_ms: 12,
+                agent_id: "test-agent".into(),
+                credential_id: None,
+                input_cost_usd_micros: Some(1),
+                output_cost_usd_micros: Some(1),
+                total_cost_usd_micros: Some(2),
+            },
+        )
+        .unwrap();
+        match log.verify(&h).unwrap() {
+            SessionVerifyResult::Ok { rows_verified, .. } => {
+                assert_eq!(rows_verified, 2);
+            }
+            other => panic!("expected SessionVerifyResult::Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn llm_response_omits_zero_cache_fields_on_serialize() {
         // The skip_serializing_if predicate keeps the wire format
         // tight for non-cached responses (every openai/gemini/bedrock
@@ -1274,6 +1423,9 @@ mod session {
             latency_ms: 1,
             agent_id: "test-agent".into(),
             credential_id: None,
+            input_cost_usd_micros: None,
+            output_cost_usd_micros: None,
+            total_cost_usd_micros: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(

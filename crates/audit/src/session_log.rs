@@ -473,6 +473,14 @@ pub enum SessionEvent {
     /// existed continue to read cleanly. Endpoints that do not
     /// populate a usage block (some custom OpenAI-compatible servers,
     /// including ollama) record zeros across the board.
+    ///
+    /// The three `*_cost_usd_micros` fields carry per-call cost
+    /// derived from the baked pricing table (`crates/audit/src/pricing.toml`,
+    /// `include_str!`'d at compile time). `None` when the
+    /// (provider, model) pair is absent from the table; a warning is
+    /// logged at the emit site so a stale binary against a new model
+    /// is visible without blocking the call. All three default on
+    /// deserialize so pre-cost rows read cleanly.
     LlmResponse {
         request_id: String,
         finish_reason: String,
@@ -501,6 +509,20 @@ pub enum SessionEvent {
         /// paired `LlmResponse` always agree.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential_id: Option<String>,
+        /// Cost of input tokens in USD micros (1 USD = 1_000_000
+        /// micros), floor-rounded. `None` if the (provider, model)
+        /// pair is missing from the baked pricing table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_cost_usd_micros: Option<u64>,
+        /// Cost of output tokens in USD micros, floor-rounded. Same
+        /// `None` semantics as [`Self::LlmResponse::input_cost_usd_micros`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_cost_usd_micros: Option<u64>,
+        /// `input_cost_usd_micros + output_cost_usd_micros`, computed
+        /// once at emit time so SIEM consumers do not have to redo the
+        /// arithmetic. `None` if either operand is `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        total_cost_usd_micros: Option<u64>,
     },
     /// Permission denial recorded by the harness. `action_key` is
     /// the canonical key under which an operator can grant approval

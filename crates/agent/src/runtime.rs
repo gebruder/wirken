@@ -1609,6 +1609,13 @@ impl Agent {
                 )
                 .await?;
             let latency_ms = started.elapsed().as_millis() as u64;
+            let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
+                resolve_cost_micros(
+                    &self.llm.config().provider,
+                    &self.llm.config().model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                );
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
@@ -1621,6 +1628,9 @@ impl Agent {
                     latency_ms,
                     agent_id: self.id.clone(),
                     credential_id: self.api_key_credential.clone(),
+                    input_cost_usd_micros,
+                    output_cost_usd_micros,
+                    total_cost_usd_micros,
                 },
             )?;
 
@@ -1939,8 +1949,17 @@ impl Agent {
             // from each provider's streaming events. Until then,
             // bench mode and economics-reporting runs must use the
             // non-streaming dispatch above; this path under-reports
-            // by recording zeros.
+            // by recording zeros. With zero tokens the cost lookup
+            // returns Some(0, 0, 0) for priced models and None for
+            // unpriced ones — both are correct given zero usage.
             let usage = crate::llm::Usage::default();
+            let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
+                resolve_cost_micros(
+                    &self.llm.config().provider,
+                    &self.llm.config().model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                );
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmResponse {
@@ -1953,6 +1972,9 @@ impl Agent {
                     latency_ms,
                     agent_id: self.id.clone(),
                     credential_id: self.api_key_credential.clone(),
+                    input_cost_usd_micros,
+                    output_cost_usd_micros,
+                    total_cost_usd_micros,
                 },
             )?;
 
@@ -3780,6 +3802,28 @@ fn finish_reason_for(response: &LlmResponse) -> &'static str {
         LlmResponse::ToolCalls(_) => "tool_calls",
         LlmResponse::Empty => "empty",
     }
+}
+
+/// Look up per-call cost in micros against the baked pricing table.
+/// On miss, emit a `tracing::warn` so a stale binary against a new
+/// model is visible in the audit stream. The call itself is not
+/// blocked; the caller writes `None` cost fields onto the
+/// `SessionEvent::LlmResponse`.
+fn resolve_cost_micros(
+    provider: &str,
+    model: &str,
+    input_tokens: u32,
+    output_tokens: u32,
+) -> (Option<u64>, Option<u64>, Option<u64>) {
+    let result = wirken_audit::pricing::cost_micros(provider, model, input_tokens, output_tokens);
+    if result.0.is_none() {
+        tracing::warn!(
+            provider = provider,
+            model = model,
+            "no pricing entry for (provider, model); recording LlmResponse cost fields as None",
+        );
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

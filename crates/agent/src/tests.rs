@@ -5121,6 +5121,9 @@ mod verify {
                 latency_ms: 1,
                 agent_id: "test-agent".into(),
                 credential_id: None,
+                input_cost_usd_micros: None,
+                output_cost_usd_micros: None,
+                total_cost_usd_micros: None,
             },
         )
         .unwrap();

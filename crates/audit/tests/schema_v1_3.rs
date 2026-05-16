@@ -314,6 +314,9 @@ fn llm_response_with_credential_id_round_trips() {
         latency_ms: 1234,
         agent_id: "default".into(),
         credential_id: Some("anthropic-api-key".into()),
+        input_cost_usd_micros: None,
+        output_cost_usd_micros: None,
+        total_cost_usd_micros: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(json.contains("\"credential_id\":\"anthropic-api-key\""));
@@ -580,6 +583,9 @@ fn snapshot_llm_response_renames_tokens_and_carries_agent_id() {
         latency_ms: 1234,
         agent_id: "agent-1".into(),
         credential_id: None,
+        input_cost_usd_micros: None,
+        output_cost_usd_micros: None,
+        total_cost_usd_micros: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["input_tokens", "output_tokens", "agent_id"]);

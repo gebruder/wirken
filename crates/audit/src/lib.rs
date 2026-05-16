@@ -3,6 +3,7 @@ mod error;
 mod event;
 mod legacy_compat;
 mod log;
+pub mod pricing;
 mod session_log;
 pub mod siem;
 pub mod siem_typed;
