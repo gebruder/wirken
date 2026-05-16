@@ -202,6 +202,53 @@ pub async fn list_anthropic_models(api_key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Why a model-list lookup against an OpenAI-compatible endpoint
+/// failed. Three variants on purpose: distinguishing the rest
+/// (connection refused vs DNS vs timeout) is messier at the
+/// reqwest layer than it reads, and the user-facing message
+/// matters more than the taxonomy. The setup picker renders
+/// each variant with a specific reason so operators don't see
+/// "no models found, enter manually" for a wrong-endpoint typo.
+#[derive(Debug)]
+pub enum ModelListError {
+    /// 401 or 403 from the endpoint. Either the API key is
+    /// missing on a cloud endpoint that requires it, or the
+    /// supplied key is wrong.
+    AuthRequired,
+    /// Anything below HTTP: connection refused, DNS failure,
+    /// TLS handshake error, timeout. The endpoint URL is wrong,
+    /// the container isn't running, or a firewall is in the
+    /// way. Collapsed into one variant because reqwest's error
+    /// taxonomy doesn't reliably distinguish them across
+    /// platforms.
+    Unreachable(String),
+    /// HTTP response with a non-success status that isn't 401/403.
+    /// Carries the status code so the caller can mention it.
+    OtherHttp(u16),
+}
+
+impl std::fmt::Display for ModelListError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ModelListError::AuthRequired => {
+                write!(
+                    f,
+                    "endpoint rejected the request as unauthenticated (401/403) - is an API key required, or is the key wrong?"
+                )
+            }
+            ModelListError::Unreachable(detail) => {
+                write!(
+                    f,
+                    "endpoint not reachable ({detail}) - check the URL, that the container is running, and that nothing is in the way"
+                )
+            }
+            ModelListError::OtherHttp(status) => {
+                write!(f, "endpoint returned HTTP {status}")
+            }
+        }
+    }
+}
+
 /// List models from an OpenAI-compatible `{base_url}/models`
 /// endpoint without filtering by name. Used for endpoints that
 /// expose non-OpenAI model IDs (NIM serves `meta/llama-*`,
@@ -210,29 +257,42 @@ pub async fn list_anthropic_models(api_key: &str) -> Vec<String> {
 /// everything. Omits the Authorization header when `api_key`
 /// is empty so local containers without bearer auth (default
 /// for NIM local) don't get a malformed `Bearer ` header.
-pub async fn list_openai_compatible_models(base_url: &str, api_key: &str) -> Vec<String> {
-    let client = match reqwest::Client::builder()
+///
+/// Returns `Ok(Vec)` (possibly empty when the endpoint truly
+/// has no models) on a 2xx response, or `Err(ModelListError)`
+/// for the three classes of failure the setup picker
+/// surfaces distinctly.
+pub async fn list_openai_compatible_models(
+    base_url: &str,
+    api_key: &str,
+) -> Result<Vec<String>, ModelListError> {
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+        .map_err(|e| ModelListError::Unreachable(e.to_string()))?;
 
     let url = format!("{base_url}/models");
     let mut req = client.get(&url);
     if !api_key.is_empty() {
         req = req.header("Authorization", format!("Bearer {api_key}"));
     }
-    let resp = match req.send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Vec::new(),
-    };
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ModelListError::Unreachable(e.to_string()))?;
 
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(ModelListError::AuthRequired);
+    }
+    if !status.is_success() {
+        return Err(ModelListError::OtherHttp(status.as_u16()));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ModelListError::Unreachable(e.to_string()))?;
 
     let mut models: Vec<String> = body
         .get("data")
@@ -245,7 +305,7 @@ pub async fn list_openai_compatible_models(base_url: &str, api_key: &str) -> Vec
         .unwrap_or_default();
     models.sort();
     models.dedup();
-    models
+    Ok(models)
 }
 
 /// List models available from an OpenAI-compatible API.

@@ -198,20 +198,65 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 println!("  NIM serves open-weight models with an OpenAI-compatible API.");
                 println!("  Local containers default to no auth; the cloud endpoint at");
                 println!("  https://integrate.api.nvidia.com/v1 takes `nvapi-...` keys.");
-                let url: String = Input::new()
-                    .with_prompt("  Endpoint")
-                    .default("http://localhost:8000/v1".into())
-                    .interact_text()?;
-                let api_key: String = Input::new()
-                    .with_prompt("  API key (blank for local)")
-                    .allow_empty(true)
-                    .interact_text()?;
-                let models = super::list_openai_compatible_models(&url, &api_key).await;
-                let model = if models.is_empty() {
-                    println!(
-                        "  No models returned from {url}/models. Enter the model id manually."
-                    );
-                    Input::new().with_prompt("  Model ID").interact_text()?
+
+                // Retry loop: each iteration prompts for endpoint
+                // + key and tries the model listing. On any
+                // failure the operator picks between
+                // retry-with-new-input and manual model-id entry
+                // against the URL+key they just typed, with a
+                // specific error label for each failure class so a
+                // wrong-endpoint typo isn't surfaced as the same
+                // "no models found" message as a 401.
+                let (url, api_key, models, manual_model) = loop {
+                    let url: String = Input::new()
+                        .with_prompt("  Endpoint")
+                        .default("http://localhost:8000/v1".into())
+                        .interact_text()?;
+                    let api_key: String = Input::new()
+                        .with_prompt("  API key (blank for local)")
+                        .allow_empty(true)
+                        .interact_text()?;
+
+                    let summary = match super::list_openai_compatible_models(&url, &api_key).await {
+                        Ok(models) if models.is_empty() => {
+                            "endpoint reachable but /models returned no entries".to_string()
+                        }
+                        Ok(models) => break (url, api_key, models, None),
+                        Err(e) => e.to_string(),
+                    };
+
+                    println!("  {summary}");
+                    let retry = Confirm::new()
+                        .with_prompt("  Re-enter endpoint and key")
+                        .default(true)
+                        .interact()?;
+                    if retry {
+                        continue;
+                    }
+                    let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
+                    break (url, api_key, Vec::new(), Some(model));
+                };
+
+                let model = if let Some(manual) = manual_model {
+                    if !api_key.is_empty() {
+                        // Manual-fallback path still encrypts the
+                        // key so the vault is consistent with the
+                        // model-picker path. The empty `models`
+                        // vec forces store_key_and_pick_model's
+                        // free-text prompt; we discard its return
+                        // and use the model id the operator
+                        // already typed.
+                        let _ = store_key_and_pick_model(
+                            api_key.clone(),
+                            "custom",
+                            &url,
+                            &manual,
+                            Vec::new(),
+                            &cfg,
+                            &data,
+                        )?;
+                    }
+                    manual
                 } else if api_key.is_empty() {
                     let idx = Select::new()
                         .with_prompt("  Model")
