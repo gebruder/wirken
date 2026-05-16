@@ -82,13 +82,12 @@ Tracked in `skills/lyrik/FOLLOWUPS.md` (case-accumulating records from dogfood r
 
 For setup, configuration, and the channel target syntax, see `docs/lyrik.md`.
 
-For the report shape and JSON schema, see `docs/design/lyrik-json-schema.md`.
+A stable JSON output schema for ingestors (SIEM, ticketing, CI/CD gating) is forward-looking work tracked in issue #80.
 
 ## See also
 
 - `docs/lyrik.md` — setup, configuration, first-run.
 - `docs/lyrik-rubric-authoring.md` — how the team writes and refines `.lyrik/rubric.md`.
-- `docs/design/lyrik-json-schema.md` — JSON output schema; for implementers integrating Lyrik output (SIEM, ticketing, CI/CD), not for operators reading reports.
 - `skills/lyrik/SKILL.md` — the skill itself.
 - `skills/lyrik/FOLLOWUPS.md` — open design questions from real runs.
 - `lyrik.wirken.ai`
