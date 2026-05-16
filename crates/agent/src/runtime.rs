@@ -1944,14 +1944,14 @@ impl Agent {
                 result?
             };
             let latency_ms = started.elapsed().as_millis() as u64;
-            // Streaming path does not yet capture usage. The
-            // wirken-streaming-token-usage follow-up captures usage
-            // from each provider's streaming events. Until then,
-            // bench mode and economics-reporting runs must use the
-            // non-streaming dispatch above; this path under-reports
-            // by recording zeros. With zero tokens the cost lookup
-            // returns Some(0, 0, 0) for priced models and None for
-            // unpriced ones — both are correct given zero usage.
+            // Streaming path does not yet capture usage; issue #116
+            // captures it from each provider's terminal streaming
+            // event. Until then, bench mode and economics-reporting
+            // runs must use the non-streaming dispatch above; this
+            // path under-reports by recording zeros. With zero tokens
+            // the cost lookup returns Some(0, 0, 0) for priced models
+            // and None for unpriced ones, both arithmetically correct
+            // against zero usage.
             let usage = crate::llm::Usage::default();
             let (input_cost_usd_micros, output_cost_usd_micros, total_cost_usd_micros) =
                 resolve_cost_micros(

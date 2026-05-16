@@ -45,8 +45,8 @@ impl LlmClient {
             _ => {
                 // Fall back to non-streaming. Discards the usage tuple
                 // because complete_stream's return type does not yet
-                // carry it; the wirken-streaming-token-usage follow-up
-                // changes that.
+                // carry it; issue #116 reshapes the return type and
+                // plumbs the discarded usage through.
                 let (response, _usage) = self.complete(messages, tools, api_key).await?;
                 if let LlmResponse::Text(ref text) = response {
                     let _ = tx.send(StreamEvent::TextDelta(text.clone())).await;
