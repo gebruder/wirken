@@ -233,6 +233,12 @@ pub struct AgentFactory {
     /// an `approval_chat_id` configured. `None` when telegram is
     /// not configured; the factory falls back to `approval_gate`.
     telegram_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Channel-specific approval gate for Signal sessions
+    /// (`{agent}/signal/{conversation_id}`). Set when the gateway
+    /// has an `approver_chat` (group/DM conversation id) configured
+    /// for the Signal adapter. `None` when Signal is not
+    /// configured; the factory falls back to `approval_gate`.
+    signal_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     /// Channel-specific approval gate for webchat sessions
     /// (`{agent}/webchat/{conv}` session-id format). Installed by
     /// the `wirken webchat` command when serving locally; webchat
@@ -301,6 +307,7 @@ impl AgentFactory {
             )),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
+            signal_approval_gate: std::sync::RwLock::new(None),
             sse_approval_gate: std::sync::RwLock::new(None),
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
@@ -328,6 +335,13 @@ impl AgentFactory {
         *self.telegram_approval_gate.write().unwrap() = Some(gate);
     }
 
+    /// Install the Signal-specific approval gate. Sessions whose
+    /// id parses with channel `"signal"` will route through this
+    /// gate; everything else falls back to the default.
+    pub fn attach_signal_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.signal_approval_gate.write().unwrap() = Some(gate);
+    }
+
     /// Install the SSE webchat approval gate. Sessions whose id
     /// parses with channel `"webchat"` route through this gate.
     /// Installed by the `wirken webchat` command when constructing
@@ -351,6 +365,11 @@ impl AgentFactory {
         match channel_from_session_id(session_id) {
             Some("telegram") => {
                 if let Some(g) = self.telegram_approval_gate.read().unwrap().clone() {
+                    return Some(g);
+                }
+            }
+            Some("signal") => {
+                if let Some(g) = self.signal_approval_gate.read().unwrap().clone() {
                     return Some(g);
                 }
             }

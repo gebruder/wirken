@@ -20,6 +20,7 @@ pub mod rate_limit;
 pub mod recovery;
 pub mod runtime;
 pub mod sandbox;
+pub mod signal_approval_gate;
 pub(crate) mod sigv4;
 pub mod skill;
 pub mod skill_perms;

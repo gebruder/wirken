@@ -388,3 +388,125 @@ pub fn build_outbound_result(
     result.set_message_id(message_id);
     result.set_error(error);
 }
+
+/// Fields parsed from an `ApprovalRequest` frame the adapter
+/// renders as a text-command prompt in the configured approval
+/// conversation. `target_conversation_id` is adapter-native: a
+/// base64 group_id for groups; E.164 phone or ACI UUID for 1:1
+/// approval channels. The adapter passes it through to signal-cli
+/// verbatim; the existing `is_group_id` heuristic in `adapter.rs`
+/// routes to the right RPC param.
+pub struct ApprovalRequestFields {
+    pub request_id: String,
+    pub tool_name: String,
+    pub action_key: String,
+    pub requested_tier: String,
+    pub triggering_agent: String,
+    pub trigger_message: String,
+    pub target_conversation_id: String,
+}
+
+pub fn parse_approval_request(
+    msg: &capnp::message::Reader<capnp::serialize::OwnedSegments>,
+) -> Result<ApprovalRequestFields, capnp::Error> {
+    let frame_reader = msg.get_root::<frame::Reader<'_>>()?;
+    match frame_reader.which()? {
+        frame::ApprovalRequest(req) => {
+            let r = req?;
+            let request_id = r
+                .get_request_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("request_id not utf8: {e}")))?
+                .to_string();
+            let tool_name = r
+                .get_tool_name()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("tool_name not utf8: {e}")))?
+                .to_string();
+            let action_key = r
+                .get_action_key()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("action_key not utf8: {e}")))?
+                .to_string();
+            let requested_tier = r
+                .get_requested_tier()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("requested_tier not utf8: {e}")))?
+                .to_string();
+            let triggering_agent = r
+                .get_triggering_agent()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("triggering_agent not utf8: {e}")))?
+                .to_string();
+            let trigger_message = r
+                .get_trigger_message()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
+                .to_string();
+            let target_conversation_id = r
+                .get_target_conversation_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("target_conversation_id not utf8: {e}")))?
+                .to_string();
+            Ok(ApprovalRequestFields {
+                request_id,
+                tool_name,
+                action_key,
+                requested_tier,
+                triggering_agent,
+                trigger_message,
+                target_conversation_id,
+            })
+        }
+        _ => Err(capnp::Error::failed(
+            "expected ApprovalRequest frame".into(),
+        )),
+    }
+}
+
+/// Build an `ApprovalDecision` frame to send back to the gateway
+/// when an operator's `!approve` / `!deny` text command lands
+/// from an allowlisted sender. `actor_user_id` carries the
+/// Signal ACI UUID when available (preferred) or the E.164 phone
+/// number as fallback; the gateway authorizes against
+/// `approver_registry::verify("signal", &actor_user_id)`.
+/// `actor_display` is the sender's display name when the Signal
+/// envelope provided one, or empty when not (the gateway falls
+/// back to the registry-stored display, then to the user id).
+pub fn build_approval_decision(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    is_allow: bool,
+    deny_reason: &str,
+    actor_user_id: &str,
+    actor_display: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut decision = frame_builder.init_approval_decision();
+    decision.set_request_id(request_id);
+    decision.set_actor_user_id(actor_user_id);
+    decision.set_actor_display(actor_display);
+    let mut kind = decision.init_decision();
+    if is_allow {
+        kind.set_allow(());
+    } else {
+        kind.set_deny(deny_reason);
+    }
+}
+
+/// Build an `ApprovalRequestFailed` frame. Sent when the approval
+/// message cannot be delivered (signal-cli connection closed mid
+/// flight, signal-cli `send` RPC returned an error, configured
+/// conversation does not exist). Snake_case reason labels match
+/// the Telegram adapter's set so SIEM detections can group across
+/// channels.
+pub fn build_approval_request_failed(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    reason: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut failed = frame_builder.init_approval_request_failed();
+    failed.set_request_id(request_id);
+    failed.set_reason(reason);
+}

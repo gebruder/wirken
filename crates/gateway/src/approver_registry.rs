@@ -17,10 +17,15 @@
 //! reconnect, race between `remove` and a button press) for no
 //! operational benefit. Single source of truth.
 //!
-//! The approval-chat configuration lives alongside in a sibling
-//! `adapter_approval_chats` table keyed by `adapter_id`. Same
-//! schema-file, same connection, same cache reload semantics. CLI
-//! writes go through the same module so the cache stays coherent.
+//! The approval-conversation configuration lives alongside in a
+//! sibling `adapter_approval_conversations` table keyed by
+//! `adapter_id`. Stores the adapter-native conversation id as
+//! TEXT (Telegram serializes its `i64` chat_id; Signal carries
+//! the base64 group_id or E.164/UUID for DM channels; other
+//! adapters whatever their conversation primitive is). Same
+//! schema-file, same connection, same cache reload semantics as
+//! the `approvers` table; CLI writes go through the same module
+//! so the cache stays coherent.
 
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -45,7 +50,7 @@ pub struct ApproverEntry {
 }
 
 /// SQLite-backed approver allowlist with an in-memory cache.
-/// CLI writes go through `register` / `unregister` / `set_approval_chat`;
+/// CLI writes go through `register` / `unregister` / `set_approval_conversation`;
 /// the gateway reads via `verify` and `approval_chat` on every
 /// decision.
 /// `Connection` is `!Sync` because rusqlite holds a `RefCell` for
@@ -57,7 +62,7 @@ pub struct ApproverEntry {
 pub struct ApproverRegistry {
     conn: Mutex<Connection>,
     approvers: Arc<RwLock<HashMap<(String, String), ApproverEntry>>>,
-    chats: Arc<RwLock<HashMap<String, i64>>>,
+    conversations: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl ApproverRegistry {
@@ -75,9 +80,9 @@ impl ApproverRegistry {
                  added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                  PRIMARY KEY (adapter_id, user_id)
              );
-             CREATE TABLE IF NOT EXISTS adapter_approval_chats (
+             CREATE TABLE IF NOT EXISTS adapter_approval_conversations (
                  adapter_id TEXT PRIMARY KEY,
-                 chat_id INTEGER NOT NULL
+                 conversation_id TEXT NOT NULL
              );",
         )?;
 
@@ -104,25 +109,26 @@ impl ApproverRegistry {
             }
         }
 
-        let mut chats = HashMap::new();
+        let mut conversations = HashMap::new();
         {
-            let mut stmt =
-                conn.prepare("SELECT adapter_id, chat_id FROM adapter_approval_chats")?;
+            let mut stmt = conn.prepare(
+                "SELECT adapter_id, conversation_id FROM adapter_approval_conversations",
+            )?;
             let rows = stmt.query_map([], |row| {
                 let adapter_id: String = row.get(0)?;
-                let chat_id: i64 = row.get(1)?;
-                Ok((adapter_id, chat_id))
+                let conversation_id: String = row.get(1)?;
+                Ok((adapter_id, conversation_id))
             })?;
             for row in rows {
-                let (adapter_id, chat_id) = row?;
-                chats.insert(adapter_id, chat_id);
+                let (adapter_id, conversation_id) = row?;
+                conversations.insert(adapter_id, conversation_id);
             }
         }
 
         Ok(Self {
             conn: Mutex::new(conn),
             approvers: Arc::new(RwLock::new(approvers)),
-            chats: Arc::new(RwLock::new(chats)),
+            conversations: Arc::new(RwLock::new(conversations)),
         })
     }
 
@@ -195,29 +201,37 @@ impl ApproverRegistry {
             .map(|e| e.display_name.clone())
     }
 
-    /// Set the approval chat for `adapter_id`. The
-    /// `TelegramApprovalGate` reads this at `request_approval`
-    /// time to populate the `ApprovalRequest.targetChatId` field.
-    /// Overwrites any prior value.
-    pub fn set_approval_chat(&self, adapter_id: &str, chat_id: i64) -> Result<(), GatewayError> {
+    /// Set the approval conversation for `adapter_id`. Channel
+    /// gates read this at `request_approval` time to populate
+    /// `ApprovalRequest.targetConversationId`. Adapter-native
+    /// encoding (Telegram: stringified `i64`; Signal: base64
+    /// group_id or E.164/UUID); the registry stores the value
+    /// verbatim and the adapter parses on receipt. Overwrites any
+    /// prior value.
+    pub fn set_approval_conversation(
+        &self,
+        adapter_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), GatewayError> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO adapter_approval_chats (adapter_id, chat_id) \
+            "INSERT INTO adapter_approval_conversations (adapter_id, conversation_id) \
              VALUES (?1, ?2) \
-             ON CONFLICT(adapter_id) DO UPDATE SET chat_id = excluded.chat_id",
-            params![adapter_id, chat_id],
+             ON CONFLICT(adapter_id) DO UPDATE SET conversation_id = excluded.conversation_id",
+            params![adapter_id, conversation_id],
         )?;
-        self.chats
+        self.conversations
             .write()
             .unwrap()
-            .insert(adapter_id.to_string(), chat_id);
+            .insert(adapter_id.to_string(), conversation_id.to_string());
         Ok(())
     }
 
-    /// Approval chat id for `adapter_id`, or `None` when none is
-    /// configured. `None` triggers a startup `tracing::warn` at
-    /// `wirken run` and a fail-closed preflight in the gate.
-    pub fn approval_chat(&self, adapter_id: &str) -> Option<i64> {
-        self.chats.read().unwrap().get(adapter_id).copied()
+    /// Approval conversation id for `adapter_id`, or `None` when
+    /// none is configured. `None` triggers a startup
+    /// `tracing::warn` at `wirken run` and a fail-closed preflight
+    /// in the gate.
+    pub fn approval_conversation(&self, adapter_id: &str) -> Option<String> {
+        self.conversations.read().unwrap().get(adapter_id).cloned()
     }
 
     /// List approvers, optionally filtered by adapter. CLI
@@ -299,24 +313,45 @@ mod tests {
     }
 
     #[test]
-    fn set_and_get_approval_chat_round_trips() {
+    fn set_and_get_approval_conversation_round_trips() {
         let (_tmp, reg) = fresh();
-        reg.set_approval_chat("telegram", -100123456789).unwrap();
-        assert_eq!(reg.approval_chat("telegram"), Some(-100123456789));
+        reg.set_approval_conversation("telegram", "-100123456789")
+            .unwrap();
+        assert_eq!(
+            reg.approval_conversation("telegram").as_deref(),
+            Some("-100123456789")
+        );
     }
 
     #[test]
-    fn approval_chat_unset_returns_none() {
+    fn approval_conversation_unset_returns_none() {
         let (_tmp, reg) = fresh();
-        assert_eq!(reg.approval_chat("telegram"), None);
+        assert_eq!(reg.approval_conversation("telegram"), None);
     }
 
     #[test]
-    fn set_approval_chat_overwrites_prior_value() {
+    fn set_approval_conversation_overwrites_prior_value() {
         let (_tmp, reg) = fresh();
-        reg.set_approval_chat("telegram", 100).unwrap();
-        reg.set_approval_chat("telegram", 200).unwrap();
-        assert_eq!(reg.approval_chat("telegram"), Some(200));
+        reg.set_approval_conversation("telegram", "100").unwrap();
+        reg.set_approval_conversation("telegram", "200").unwrap();
+        assert_eq!(
+            reg.approval_conversation("telegram").as_deref(),
+            Some("200")
+        );
+    }
+
+    #[test]
+    fn approval_conversation_carries_non_numeric_signal_group_id() {
+        // Signal group ids are base64, not numeric. The TEXT-typed
+        // column is the contract that makes this work; this test
+        // pins the contract.
+        let (_tmp, reg) = fresh();
+        reg.set_approval_conversation("signal", "9LJqVbY9wKD2c3vH/abcDEF==")
+            .unwrap();
+        assert_eq!(
+            reg.approval_conversation("signal").as_deref(),
+            Some("9LJqVbY9wKD2c3vH/abcDEF==")
+        );
     }
 
     #[test]
@@ -341,10 +376,14 @@ mod tests {
         {
             let reg = ApproverRegistry::open(&path).unwrap();
             reg.register("telegram", "12345", "davi").unwrap();
-            reg.set_approval_chat("telegram", -100123456789).unwrap();
+            reg.set_approval_conversation("telegram", "-100123456789")
+                .unwrap();
         }
         let reg = ApproverRegistry::open(&path).unwrap();
         assert!(reg.verify("telegram", "12345"));
-        assert_eq!(reg.approval_chat("telegram"), Some(-100123456789));
+        assert_eq!(
+            reg.approval_conversation("telegram").as_deref(),
+            Some("-100123456789")
+        );
     }
 }

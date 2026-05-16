@@ -1516,3 +1516,391 @@ fn allowlist_empty_still_parses() {
     let list = SignalAllowlist::from_csv("  ,  , ").unwrap();
     assert!(list.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Approval-frame conversions (slice: signal approval gate)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_decision_allow_round_trips_with_empty_deny_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut msg,
+        "req-uuid",
+        true,
+        "",
+        "00000000-0000-4000-8000-000000000001",
+        "Alice",
+    );
+    let reader = serialize_and_read(&msg);
+    let fr = reader.get_root::<frame::Reader<'_>>().unwrap();
+    match fr.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "00000000-0000-4000-8000-000000000001"
+            );
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "Alice");
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips_with_reason_text() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, "rm is too risky", "+15559876543", "");
+    let reader = serialize_and_read(&msg);
+    let fr = reader.get_root::<frame::Reader<'_>>().unwrap();
+    match fr.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            // E.164 phone fallback when sender has no ACI UUID
+            // surfaces here verbatim.
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "+15559876543"
+            );
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(reason) => {
+                    assert_eq!(reason.unwrap().to_str().unwrap(), "rm is too risky");
+                }
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason_label() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "signal_rpc_timeout");
+    let reader = serialize_and_read(&msg);
+    match reader
+        .get_root::<frame::Reader<'_>>()
+        .unwrap()
+        .which()
+        .unwrap()
+    {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(
+                f.get_reason().unwrap().to_str().unwrap(),
+                "signal_rpc_timeout"
+            );
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+/// Construct a `SignalAdapter` with no live signal-cli or gateway
+/// connection. Useful for tests that exercise route-decision
+/// branches without spinning up the full fake-cli harness; calls
+/// into `send_message` will fail with `ConnectionClosed` which
+/// the route_approval_command's clarification path absorbs.
+fn test_adapter(allowlist: SignalAllowlist) -> std::sync::Arc<crate::SignalAdapter> {
+    let identity = AdapterIdentity::generate("signal");
+    let tmp = tempfile::tempdir().unwrap();
+    std::sync::Arc::new(
+        crate::SignalAdapter::new(
+            identity,
+            tmp.path()
+                .join("nonexistent.sock")
+                .to_string_lossy()
+                .into_owned(),
+            "+15551112222".into(),
+            allowlist,
+        )
+        .expect("adapter construction"),
+    )
+}
+
+#[tokio::test]
+async fn approval_prefix_miss_does_not_remove_other_entries() {
+    let adapter = test_adapter(SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap());
+    {
+        let mut map = adapter.approval_prefix_map_for_test().await;
+        map.insert(
+            "aaaa0000".into(),
+            vec!["aaaa0000-1234-1234-1234-aaaa00000000".into()],
+        );
+    }
+    let inbound = SignalInbound {
+        message_id: "m".into(),
+        sender: fixtures::FIXTURE_SOURCE.into(),
+        sender_name: "Alice".into(),
+        text: "!approve deadbeef".into(),
+        timestamp: 1,
+        sender_uuid: None,
+        group_id: None,
+    };
+    let cmd = crate::commands::CommandKind::Approve {
+        prefix: "deadbeef".into(),
+    };
+    adapter.route_approval_command_for_test(&inbound, cmd).await;
+    let map = adapter.approval_prefix_map_for_test().await;
+    assert!(
+        map.contains_key("aaaa0000"),
+        "miss-path must not touch unrelated entries"
+    );
+}
+
+#[tokio::test]
+async fn approval_prefix_collision_does_not_consume_entries() {
+    let adapter = test_adapter(SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap());
+    {
+        let mut map = adapter.approval_prefix_map_for_test().await;
+        map.insert(
+            "abcd1234".into(),
+            vec![
+                "abcd1234-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+                "abcd1234-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
+            ],
+        );
+    }
+    let inbound = SignalInbound {
+        message_id: "m".into(),
+        sender: fixtures::FIXTURE_SOURCE.into(),
+        sender_name: "Alice".into(),
+        text: "!approve abcd1234".into(),
+        timestamp: 1,
+        sender_uuid: None,
+        group_id: None,
+    };
+    let cmd = crate::commands::CommandKind::Approve {
+        prefix: "abcd1234".into(),
+    };
+    adapter.route_approval_command_for_test(&inbound, cmd).await;
+    let map = adapter.approval_prefix_map_for_test().await;
+    let entries = map.get("abcd1234").expect("collision must not consume");
+    assert_eq!(entries.len(), 2, "neither request resolved");
+}
+
+#[test]
+fn approval_request_round_trips_signal_shape_target_conversation_id() {
+    // Signal group ids are base64; the schema's Text-typed
+    // targetConversationId carries them through unchanged. This
+    // is the load-bearing property that motivated the wire
+    // rename in this slice.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("0f9d3c52-1234-5678-9abc-deadbeef0001");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("9LJqVbY9wKD2c3vH/abcDEF==");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.request_id, "0f9d3c52-1234-5678-9abc-deadbeef0001");
+    assert_eq!(fields.target_conversation_id, "9LJqVbY9wKD2c3vH/abcDEF==");
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end: gateway sends ApprovalRequest, the Signal adapter renders the
+// text-command prompt, the allowlisted sender replies with `!approve <prefix>`,
+// and the adapter emits ApprovalDecision back. Validates the prefix-map
+// lifecycle and the full surface contract.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approval_round_trip_via_text_command() {
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::sync::Mutex;
+
+    use crate::SignalAdapter;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let signal_socket = tmp.path().join("signal-cli.sock");
+    let gw_socket = tmp.path().join("gw.sock");
+    let signal_listener = UnixListener::bind(&signal_socket).unwrap();
+    let gw_listener = UnixListener::bind(&gw_socket).unwrap();
+
+    let captured_send: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let captured_send_for_fake = captured_send.clone();
+
+    // Pick a request_id whose first 8 hex chars form a unique
+    // prefix the adapter will render.
+    let request_id = "0f9d3c52-1234-5678-9abc-deadbeef0001";
+    let expected_prefix = "0f9d3c52";
+
+    // Subscribe-ack signal: fake_signal triggers this after
+    // responding to the adapter's subscribe RPC. Gateway_task
+    // waits on it before sending the ApprovalRequest so the
+    // adapter's `self.inner` is populated and `send_message`
+    // won't trip the cold-start ConnectionClosed path.
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let fake_signal = tokio::spawn(async move {
+        let (stream, _) = signal_listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+
+        // Subscribe.
+        let line = lines.next_line().await.unwrap().expect("subscribe");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let req_id = req["id"].as_u64().unwrap();
+        let sub_id: u64 = 555;
+        write
+            .write_all(fixtures::subscribe_response(req_id, sub_id).as_bytes())
+            .await
+            .unwrap();
+        // Signal readiness to the gateway side.
+        let _ = ready_tx.send(());
+
+        // The adapter renders the approval prompt; capture the
+        // outgoing `send` RPC and reply with a fake timestamp.
+        let line = lines.next_line().await.unwrap().expect("send approval");
+        let req: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(req["method"], "send");
+        let send_id = req["id"].as_u64().unwrap();
+        *captured_send_for_fake.lock().await = Some(req.clone());
+        write
+            .write_all(fixtures::send_response(send_id, 1711900000999).as_bytes())
+            .await
+            .unwrap();
+
+        // Push an inbound `!approve <prefix>` from the
+        // allowlisted sender. The adapter parses the command,
+        // looks up the prefix in its prefix-map, and writes an
+        // `ApprovalDecision` frame to the gateway. No further
+        // signal-cli RPC is expected on this path.
+        let cmd_body = format!("!approve {expected_prefix}");
+        write
+            .write_all(
+                fixtures::data_message_subscribed(sub_id, 1711900001000, &cmd_body).as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    });
+
+    // The base64 group id we configure as the approval
+    // conversation. The adapter sends the prompt to this id.
+    let signal_group_id = "9LJqVbY9wKD2c3vH/abcDEF==";
+
+    let gateway_task = tokio::spawn(async move {
+        let (stream, _) = gw_listener.accept().await.unwrap();
+        let (mut gr, mut gw) = split_stream(stream);
+        perform_gateway_handshake(&mut gr, &mut gw, |_, _| Ok(()))
+            .await
+            .unwrap();
+        // Block until the fake signal-cli has acknowledged the
+        // subscribe RPC; the adapter's `self.inner` is populated
+        // by `connect_once` before the subscribe is sent, so once
+        // this fires `send_message` will find a live connection.
+        ready_rx.await.expect("fake_signal must complete subscribe");
+
+        // Push an ApprovalRequest frame.
+        let mut req_msg = capnp::message::Builder::new_default();
+        {
+            let fb = req_msg.init_root::<frame::Builder<'_>>();
+            let mut req = fb.init_approval_request();
+            req.set_request_id(request_id);
+            req.set_tool_name("shell");
+            req.set_action_key("shell:rm");
+            req.set_requested_tier("tier3");
+            req.set_triggering_agent("default");
+            req.set_trigger_message("clean old logs");
+            req.set_target_conversation_id(signal_group_id);
+        }
+        gw.write_message(&req_msg).await.unwrap();
+
+        // The adapter responds with an ApprovalDecision after the
+        // operator's `!approve` command arrives. Drain all
+        // adapter-to-gateway traffic, ignoring heartbeats and
+        // the inbound message the adapter does NOT forward
+        // (because it parsed as a command), until we find the
+        // ApprovalDecision.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, gr.read_message()).await {
+                Ok(Ok(msg)) => {
+                    let fr = msg.get_root::<frame::Reader<'_>>().unwrap();
+                    if let frame::ApprovalDecision(d) = fr.which().unwrap() {
+                        let d = d.unwrap();
+                        assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), request_id);
+                        // Allowlisted sender ACI surfaces as
+                        // actor_user_id (preferred over the phone).
+                        assert_eq!(
+                            d.get_actor_user_id().unwrap().to_str().unwrap(),
+                            fixtures::FIXTURE_SOURCE_UUID
+                        );
+                        match d.get_decision().unwrap().which().unwrap() {
+                            wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                            _ => panic!("expected Allow"),
+                        }
+                        return;
+                    }
+                }
+                _ => break,
+            }
+        }
+        panic!("never saw an ApprovalDecision frame");
+    });
+
+    let identity = AdapterIdentity::generate("signal");
+    // Allowlist the fixture phone; the route_approval_command path
+    // surfaces the sender's UUID as `actor_user_id` regardless
+    // (UUID is preferred over phone when both are present), so
+    // the gateway-side assertion still checks the UUID below.
+    let allowlist = SignalAllowlist::from_csv(fixtures::FIXTURE_SOURCE).unwrap();
+    let adapter = SignalAdapter::new(
+        identity,
+        signal_socket.to_string_lossy().into_owned(),
+        fixtures::FIXTURE_ACCOUNT.into(),
+        allowlist,
+    )
+    .expect("adapter construction");
+    let gw_socket_for_adapter = gw_socket.clone();
+    let adapter_task = tokio::spawn(async move {
+        std::sync::Arc::new(adapter)
+            .run(&gw_socket_for_adapter)
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(15), gateway_task)
+        .await
+        .expect("gateway side timed out")
+        .expect("gateway task panicked");
+
+    adapter_task.abort();
+    fake_signal.abort();
+
+    // Validate the captured outbound `send` RPC: it goes to the
+    // configured Signal group id and the body embeds the prefix
+    // and the full request_id so the operator can use either form.
+    let send_call = captured_send
+        .lock()
+        .await
+        .clone()
+        .expect("fake signal-cli never received the approval-prompt send");
+    assert_eq!(send_call["params"]["groupId"], signal_group_id);
+    let body = send_call["params"]["message"]
+        .as_str()
+        .expect("body must be a string")
+        .to_string();
+    assert!(
+        body.contains(&format!("!approve {expected_prefix}")),
+        "body missing approve directive: {body:?}"
+    );
+    assert!(
+        body.contains(request_id),
+        "body missing full request id: {body:?}"
+    );
+}

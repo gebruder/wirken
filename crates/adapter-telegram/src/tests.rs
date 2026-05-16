@@ -332,11 +332,8 @@ fn approval_decision_allow_round_trips() {
         frame::ApprovalDecision(d) => {
             let d = d.unwrap();
             assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
-            assert_eq!(d.get_telegram_user_id(), 12345);
-            assert_eq!(
-                d.get_telegram_user_display().unwrap().to_str().unwrap(),
-                "davi"
-            );
+            assert_eq!(d.get_actor_user_id().unwrap().to_str().unwrap(), "12345");
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "davi");
             match d.get_decision().unwrap().which().unwrap() {
                 wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
                 _ => panic!("expected Allow"),
@@ -393,7 +390,7 @@ fn approval_request_round_trips() {
         req.set_requested_tier("tier3");
         req.set_triggering_agent("default");
         req.set_trigger_message("clean logs");
-        req.set_target_chat_id(-100123);
+        req.set_target_conversation_id("-100123");
     }
     let reader = serialize_and_read(&msg);
     let fields = convert::parse_approval_request(&reader).unwrap();

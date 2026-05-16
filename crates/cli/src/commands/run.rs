@@ -1090,12 +1090,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // The registry holds the operator allowlist
     // (`approver_registry` table, keyed by `(adapter_id, user_id)`)
     // plus the approval-chat configuration
-    // (`adapter_approval_chats` table). The CLI subcommand
-    // `wirken approvers` writes both directly to SQLite; the
-    // registry's in-memory cache is loaded on next gateway start.
-    // The `TelegramApprovalGate` is constructed below where the
-    // `OutboundDispatcher` is available; the registry is plumbed
-    // through.
+    // (`adapter_approval_conversations` table). The CLI
+    // subcommand `wirken approvers` writes both directly to
+    // SQLite; the registry's in-memory cache is loaded on next
+    // gateway start. The channel-adapter approval gates
+    // (`TelegramApprovalGate`, `SignalApprovalGate`) are
+    // constructed below where the `OutboundDispatcher` is
+    // available; the registry is plumbed through.
     let approver_registry = Arc::new(
         wirken_gateway::approver_registry::ApproverRegistry::open(
             &cfg.data_dir.join("approvers.db"),
@@ -1103,22 +1104,28 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .context("Failed to open approver registry")?,
     );
 
-    // Startup warn if any registered Telegram adapter has no
-    // approval_chat_id configured. The adapter is in a
-    // degraded-but-not-failed state: NeedsApproval requests on
-    // this adapter's sessions will fail-closed at the gate's
-    // preflight. Warn-level is the honest severity.
+    // Startup warn for any registered channel-approval adapter
+    // (Telegram, Signal, …) without an approval conversation
+    // configured. The adapter is in a degraded-but-not-failed
+    // state: NeedsApproval requests on this adapter's sessions
+    // will fail-closed at the gate's preflight. Warn-level is the
+    // honest severity.
     {
         let known_adapters = registry.lock().await.list();
         for entry in &known_adapters {
-            if entry.channel == "telegram"
-                && approver_registry.approval_chat(&entry.adapter_id).is_none()
+            let needs_conversation = matches!(entry.channel.as_str(), "telegram" | "signal");
+            if needs_conversation
+                && approver_registry
+                    .approval_conversation(&entry.adapter_id)
+                    .is_none()
             {
                 tracing::warn!(
                     adapter_id = %entry.adapter_id,
-                    "telegram adapter has no approval_chat_id configured; \
+                    channel = %entry.channel,
+                    "{} adapter has no approval conversation configured; \
                      NeedsApproval requests on this adapter's sessions will fail-closed. \
-                     Run `wirken approvers set-chat {} <chat_id>` to enable.",
+                     Run `wirken approvers set-chat {} <conversation_id>` to enable.",
+                    entry.channel,
                     entry.adapter_id,
                 );
             }
@@ -1249,6 +1256,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // at wake time.
     factory.attach_telegram_approval_gate(Arc::new(
         wirken_agent::telegram_approval_gate::TelegramApprovalGate::new(
+            pending_approval_queue.clone(),
+            approver_registry.clone(),
+            dispatcher.clone(),
+        ),
+    ));
+
+    // Signal sessions route through `SignalApprovalGate`, which
+    // shares the same `PendingApprovalQueue` and dispatcher and
+    // differs only in the channel constant and source variant.
+    factory.attach_signal_approval_gate(Arc::new(
+        wirken_agent::signal_approval_gate::SignalApprovalGate::new(
             pending_approval_queue.clone(),
             approver_registry.clone(),
             dispatcher.clone(),
@@ -2514,18 +2532,31 @@ async fn message_loop(
                         .to_str()
                         .map_err(|e| anyhow::anyhow!("approval request_id not utf8: {e}"))?
                         .to_string();
-                    let user_id = d.get_telegram_user_id().to_string();
-                    let user_display = d
-                        .get_telegram_user_display()?
+                    let user_id = d
+                        .get_actor_user_id()?
                         .to_str()
-                        .map_err(|e| anyhow::anyhow!("user display not utf8: {e}"))?
+                        .map_err(|e| anyhow::anyhow!("actor_user_id not utf8: {e}"))?
+                        .to_string();
+                    let user_display = d
+                        .get_actor_display()?
+                        .to_str()
+                        .map_err(|e| anyhow::anyhow!("actor_display not utf8: {e}"))?
                         .to_string();
                     let decision = match d.get_decision()?.which()? {
                         wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {
                             ApprovalDecisionKind::Allow
                         }
-                        wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {
-                            ApprovalDecisionKind::Deny
+                        wirken_ipc::wirken_capnp::approval_decision_kind::Deny(reason) => {
+                            let reason_text = reason?
+                                .to_str()
+                                .map_err(|e| anyhow::anyhow!("deny reason not utf8: {e}"))?
+                                .to_string();
+                            let reason = if reason_text.is_empty() {
+                                None
+                            } else {
+                                Some(reason_text)
+                            };
+                            ApprovalDecisionKind::Deny { reason }
                         }
                     };
                     InboundAction::ApprovalDecision {
@@ -2814,11 +2845,11 @@ async fn message_loop(
                 user_id,
                 user_display,
             } => {
-                // Centralized authorization: validate the pressing
-                // user against `approver_registry` BEFORE resolving
-                // the queue. Unauthorized presses are silently
-                // dropped (queue stays open until timeout or until
-                // an authorized press arrives). Per the slice, an
+                // Centralized authorization: validate the actor
+                // against `approver_registry` BEFORE resolving the
+                // queue. Unauthorized actions are silently dropped
+                // (queue stays open until timeout or until an
+                // authorized action arrives). Per the slice, an
                 // explicit "unauthorized attempt" audit variant is
                 // a follow-up if SIEM detections need to count
                 // attempts; today's signal is the warn-level log.
@@ -2827,7 +2858,7 @@ async fn message_loop(
                         adapter_id = adapter_id,
                         user_id = %user_id,
                         request_id = %request_id,
-                        "telegram approval: unauthorized user pressed approve/deny; dropping"
+                        "channel approval: unauthorized actor sent approve/deny; dropping"
                     );
                     continue;
                 }
@@ -2849,9 +2880,9 @@ async fn message_loop(
                             actor: Some(actor),
                         }
                     }
-                    ApprovalDecisionKind::Deny => {
+                    ApprovalDecisionKind::Deny { reason } => {
                         wirken_gateway::pending_approvals::PendingDecision::Deny {
-                            reason: None,
+                            reason,
                             actor: Some(actor),
                         }
                     }
@@ -2862,15 +2893,15 @@ async fn message_loop(
                         tracing::info!(
                             adapter_id = adapter_id,
                             request_id = %request_id,
-                            "telegram approval resolved"
+                            "channel approval resolved"
                         );
                     }
                     wirken_gateway::pending_approvals::ResolveResult::UnknownKey => {
                         tracing::warn!(
                             adapter_id = adapter_id,
                             request_id = %request_id,
-                            "telegram approval: unknown or already-resolved request id; \
-                             agent timeout may have fired or another press won the race"
+                            "channel approval: unknown or already-resolved request id; \
+                             agent timeout may have fired or another action won the race"
                         );
                     }
                 }
@@ -2894,7 +2925,7 @@ async fn message_loop(
                     request_id = %request_id,
                     reason = %reason,
                     result = ?result,
-                    "telegram approval delivery failed; queue entry resolved with denial"
+                    "channel approval delivery failed; queue entry resolved with denial"
                 );
             }
 
@@ -2926,11 +2957,11 @@ enum InboundAction {
         msg_id: String,
     },
     /// Channel-adapter approval decision. The adapter forwards the
-    /// pressing user's `(telegram_user_id, display)` plus the
-    /// `request_id` and decision verbatim. The gateway validates
-    /// the user against `approver_registry` here before resolving
-    /// the queue (centralized authorization). Unauthorized presses
-    /// are silently dropped at the validate step.
+    /// actor's `(user_id, display)` plus the `request_id` and
+    /// decision verbatim. The gateway validates the actor against
+    /// `approver_registry` here before resolving the queue
+    /// (centralized authorization). Unauthorized actions are
+    /// silently dropped at the validate step.
     ApprovalDecision {
         request_id: String,
         decision: ApprovalDecisionKind,
@@ -2949,11 +2980,14 @@ enum InboundAction {
 
 /// Mirrors `frame::approval_decision_kind::Which` in owned form so
 /// the message-loop dispatch can match on it after the capnp
-/// Reader is dropped.
+/// Reader is dropped. The deny variant carries the operator-
+/// supplied reason when the surface captured one (Signal text
+/// command), `None` otherwise (Telegram inline keyboard has no
+/// reason-capture UX wired today).
 #[derive(Debug, Clone)]
 enum ApprovalDecisionKind {
     Allow,
-    Deny,
+    Deny { reason: Option<String> },
 }
 
 fn truncate(s: &str, max: usize) -> String {

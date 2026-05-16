@@ -74,13 +74,14 @@ pub fn remove(adapter_id: &str, user_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn set_chat(adapter_id: &str, chat_id: i64) -> Result<()> {
+pub fn set_chat(adapter_id: &str, conversation_id: &str) -> Result<()> {
     let registry = open_registry()?;
     registry
-        .set_approval_chat(adapter_id, chat_id)
-        .context("set approval chat")?;
+        .set_approval_conversation(adapter_id, conversation_id)
+        .context("set approval conversation")?;
     println!(
-        "Approval chat set: adapter='{adapter_id}', chat_id={chat_id}.\n\
+        "Approval conversation set: adapter='{adapter_id}', \
+         conversation_id='{conversation_id}'.\n\
          Restart wirken to apply."
     );
     Ok(())
@@ -88,9 +89,9 @@ pub fn set_chat(adapter_id: &str, chat_id: i64) -> Result<()> {
 
 pub fn show_chat(adapter_id: &str) -> Result<()> {
     let registry = open_registry()?;
-    match registry.approval_chat(adapter_id) {
-        Some(c) => println!("adapter='{adapter_id}' approval_chat_id={c}"),
-        None => println!("adapter='{adapter_id}' has no approval_chat_id configured"),
+    match registry.approval_conversation(adapter_id) {
+        Some(c) => println!("adapter='{adapter_id}' approval_conversation_id='{c}'"),
+        None => println!("adapter='{adapter_id}' has no approval conversation configured"),
     }
     Ok(())
 }

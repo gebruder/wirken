@@ -736,13 +736,18 @@ enum ApproverCommands {
     },
     /// Remove an approver.
     Remove { adapter_id: String, user_id: String },
-    /// Configure the chat id where approval messages render for
-    /// the given channel adapter. For Telegram this is the chat
-    /// id (often negative for groups/supergroups). Without this
-    /// set, NeedsApproval requests on this adapter's sessions
-    /// fail-closed at the gate's preflight.
-    SetChat { adapter_id: String, chat_id: i64 },
-    /// Show the configured approval chat id for an adapter.
+    /// Configure the conversation where approval messages render
+    /// for the given channel adapter. Encoding is adapter-native:
+    /// Telegram takes its `i64` chat id as a decimal string (often
+    /// negative for groups/supergroups); Signal takes the base64
+    /// group_id (or E.164 phone / ACI UUID for 1:1 DM approval).
+    /// Without this set, NeedsApproval requests on this adapter's
+    /// sessions fail-closed at the gate's preflight.
+    SetChat {
+        adapter_id: String,
+        conversation_id: String,
+    },
+    /// Show the configured approval conversation for an adapter.
     ShowChat { adapter_id: String },
 }
 
@@ -966,8 +971,8 @@ async fn main() -> Result<()> {
             } => commands::approvers::remove(&adapter_id, &user_id),
             ApproverCommands::SetChat {
                 adapter_id,
-                chat_id,
-            } => commands::approvers::set_chat(&adapter_id, chat_id),
+                conversation_id,
+            } => commands::approvers::set_chat(&adapter_id, &conversation_id),
             ApproverCommands::ShowChat { adapter_id } => {
                 commands::approvers::show_chat(&adapter_id)
             }

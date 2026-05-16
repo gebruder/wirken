@@ -134,7 +134,10 @@ pub fn build_heartbeat(
 /// when an operator presses an inline-keyboard button. The
 /// callback_data encoding is documented at the parse site
 /// (`adapter.rs::parse_callback_data`); the decision bool is
-/// derived there and passed in.
+/// derived there and passed in. Telegram's numeric user id is
+/// stringified into `actorUserId`; the gateway side calls
+/// `approver_registry::verify("telegram", &actor_user_id)`
+/// against the registered allowlist.
 pub fn build_approval_decision(
     builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
     request_id: &str,
@@ -145,19 +148,27 @@ pub fn build_approval_decision(
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut decision = frame_builder.init_approval_decision();
     decision.set_request_id(request_id);
-    decision.set_telegram_user_id(user_id);
-    decision.set_telegram_user_display(user_display);
+    decision.set_actor_user_id(user_id.to_string());
+    decision.set_actor_display(user_display);
     let mut kind = decision.init_decision();
     if is_allow {
         kind.set_allow(());
     } else {
-        kind.set_deny(());
+        // Telegram inline keyboard has no ForceReply pattern
+        // wired today; the deny path carries no operator
+        // reason. Empty string maps to `denial_reason: None` on
+        // the gateway side.
+        kind.set_deny("");
     }
 }
 
 /// Fields parsed from an `ApprovalRequest` frame the adapter
 /// renders as an inline-keyboard message in the configured
-/// approval chat.
+/// approval chat. Telegram parses the platform-neutral
+/// `targetConversationId` Text field as an `i64` chat id (the
+/// shape `ChatId` requires); a non-numeric value indicates a
+/// gateway/operator misconfiguration and surfaces here as a
+/// capnp parse error rather than a runtime Telegram API error.
 pub struct ApprovalRequestFields {
     pub request_id: String,
     pub tool_name: String,
@@ -205,7 +216,16 @@ pub fn parse_approval_request(
                 .to_str()
                 .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
                 .to_string();
-            let target_chat_id = r.get_target_chat_id();
+            let target_chat_id = r
+                .get_target_conversation_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("target_conversation_id not utf8: {e}")))?
+                .parse::<i64>()
+                .map_err(|e| {
+                    capnp::Error::failed(format!(
+                        "telegram target_conversation_id must be a numeric chat id: {e}"
+                    ))
+                })?;
             Ok(ApprovalRequestFields {
                 request_id,
                 tool_name,

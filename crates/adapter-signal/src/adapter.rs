@@ -91,6 +91,27 @@ pub struct SignalAdapter {
     /// `SignalFormatter` strips the markdown vocabulary Signal shows
     /// as literal characters (`###`, `**`, pipes).
     formatter: SignalFormatter,
+    /// Adapter-local prefix → request_id map for the text-command
+    /// approval surface. Populated when an `ApprovalRequest` frame
+    /// arrives from the gateway (we render the prompt and remember
+    /// which prefix corresponds to which request_id). Looked up
+    /// when an inbound `!approve <prefix>` / `!deny <prefix>`
+    /// command arrives. Collisions on the 8-char prefix produce
+    /// a Vec of request_ids; the handler responds with a
+    /// clarification message and does not route. Entries live
+    /// until the operator decides, the gate times out, or the
+    /// adapter restarts (in-memory only; cross-restart in-flight
+    /// approvals would have to be re-issued by the gateway).
+    approval_prefix_map: Mutex<HashMap<String, Vec<String>>>,
+    /// Gateway-bound IPC writer, populated once at the top of
+    /// `run()` after the adapter handshake completes. The
+    /// inbound-command path (`handle_notification` ->
+    /// `route_approval_command`) takes a clone to send
+    /// `ApprovalDecision` frames back to the gateway without
+    /// re-routing through the inbound-pump task. `None` only
+    /// before `run()` populates it; production callers must call
+    /// `run()` before driving inbound notifications.
+    gateway_writer: Mutex<Option<Arc<Mutex<IpcFrameWriter>>>>,
 }
 
 /// Per-connection state. Recreated on every reconnect cycle. Shared
@@ -138,8 +159,16 @@ impl SignalAdapter {
             inbound_tx: tx,
             inbound_rx: Mutex::new(Some(rx)),
             formatter: SignalFormatter,
+            approval_prefix_map: Mutex::new(HashMap::new()),
+            gateway_writer: Mutex::new(None),
         })
     }
+
+    /// Length in hex characters of the prefix the operator types
+    /// to disambiguate a pending approval. The full request_id is
+    /// also included in the approval message body for operators
+    /// who hit a collision; 8 is the typing-ergonomic default.
+    pub(crate) const PREFIX_LEN: usize = 8;
 
     /// Run the adapter to completion (or indefinitely). Handles the
     /// gateway handshake once, spawns the long-lived gateway-side tasks
@@ -170,6 +199,7 @@ impl SignalAdapter {
         tracing::info!("Handshake complete");
 
         let gw_writer = Arc::new(Mutex::new(gw_writer));
+        *self.gateway_writer.lock().await = Some(gw_writer.clone());
 
         let hb_writer = gw_writer.clone();
         tokio::spawn(heartbeat_loop(hb_writer));
@@ -394,9 +424,135 @@ impl SignalAdapter {
             return;
         }
 
+        // Filter 4: text-command approval shortcut. If the
+        // allowlisted sender typed `!approve <prefix>` /
+        // `!deny <prefix> [reason]`, route directly to the
+        // approval-command handler and DO NOT forward to the
+        // gateway as a fresh inbound message. Otherwise continue
+        // the existing pipeline (regular agent-bound message).
+        if let Some(cmd) = crate::commands::parse_command(&inbound.text) {
+            self.route_approval_command(&inbound, cmd).await;
+            return;
+        }
+
         if let Err(e) = self.inbound_tx.send((inbound, _kind)).await {
             tracing::error!("inbound channel closed: {e}");
         }
+    }
+
+    /// Resolve a parsed approval command against the adapter's
+    /// prefix map and forward the operator's decision to the
+    /// gateway. Zero-match or multi-match on the prefix produces
+    /// a clarification reply (sent back to the conversation the
+    /// command came from) and does NOT send an `ApprovalDecision`
+    /// frame; the operator retries with a more specific prefix or
+    /// the full request_id. Authorization (allowlist vs the
+    /// approver registry) happens gateway-side after the
+    /// `ApprovalDecision` arrives; the adapter does not consult
+    /// registry state.
+    async fn route_approval_command(
+        &self,
+        inbound: &SignalInbound,
+        cmd: crate::commands::CommandKind,
+    ) {
+        let prefix = match &cmd {
+            crate::commands::CommandKind::Approve { prefix } => prefix.clone(),
+            crate::commands::CommandKind::Deny { prefix, .. } => prefix.clone(),
+        };
+        // The conversation to reply into for clarifications. In a
+        // group, that's the group; in a 1:1 approval, the sender.
+        let reply_conversation = inbound
+            .group_id
+            .clone()
+            .unwrap_or_else(|| inbound.sender.clone());
+
+        let matches: Vec<String> = {
+            let map = self.approval_prefix_map.lock().await;
+            map.get(&prefix).cloned().unwrap_or_default()
+        };
+
+        if matches.is_empty() {
+            let _ = self
+                .send_message(
+                    &reply_conversation,
+                    &format!("no pending request matching prefix `{prefix}`."),
+                )
+                .await;
+            return;
+        }
+        if matches.len() > 1 {
+            let count = matches.len();
+            let _ = self
+                .send_message(
+                    &reply_conversation,
+                    &format!(
+                        "prefix `{prefix}` matches {count} pending requests; use a longer \
+                         prefix or paste the full request id from the approval message."
+                    ),
+                )
+                .await;
+            return;
+        }
+
+        let request_id = matches.into_iter().next().expect("len == 1");
+        // Drop the prefix entry now so a duplicate command from
+        // another allowlisted operator doesn't double-resolve.
+        // The gateway's authorization step still gates the
+        // resolve; this just avoids redundant work on the wire.
+        {
+            let mut map = self.approval_prefix_map.lock().await;
+            map.remove(&prefix);
+        }
+
+        let (is_allow, deny_reason_wire): (bool, String) = match cmd {
+            crate::commands::CommandKind::Approve { .. } => (true, String::new()),
+            crate::commands::CommandKind::Deny { reason, .. } => {
+                (false, reason.unwrap_or_default())
+            }
+        };
+
+        // Actor identity: prefer ACI UUID (stable across phone
+        // number privacy changes), fall back to E.164 phone.
+        // Empty when neither is present (the allowlist already
+        // gated this so an empty fallback would be surprising).
+        let actor_user_id = inbound
+            .sender_uuid
+            .clone()
+            .unwrap_or_else(|| inbound.sender.clone());
+        let actor_display = inbound.sender_name.clone();
+
+        let Some(writer) = self.gateway_writer.lock().await.clone() else {
+            tracing::error!(
+                request_id = %request_id,
+                "signal approval: gateway writer not yet initialized; dropping command"
+            );
+            return;
+        };
+
+        let mut decision_msg = capnp::message::Builder::new_default();
+        convert::build_approval_decision(
+            &mut decision_msg,
+            &request_id,
+            is_allow,
+            &deny_reason_wire,
+            &actor_user_id,
+            &actor_display,
+        );
+        {
+            let mut w = writer.lock().await;
+            if let Err(e) = w.write_message(&decision_msg).await {
+                tracing::error!(
+                    request_id = %request_id,
+                    error = %e,
+                    "signal approval: failed to forward ApprovalDecision to gateway"
+                );
+            }
+        }
+        // `reply_conversation` is kept on the stack for a future
+        // in-channel acknowledgment (the Signal surface currently
+        // does not echo the decision back; the audit chain is the
+        // record of record). Suppress the unused-variable warn.
+        let _ = reply_conversation;
     }
 
     /// Send a Signal message and record the returned timestamp in the
@@ -565,8 +721,9 @@ async fn inbound_pump(
 }
 
 /// Handle outbound frames from the gateway: parse, route to
-/// `send_message`, and return a result frame upstream so the gateway
-/// can correlate.
+/// `send_message` (for `Outbound` messages) or to the approval
+/// renderer (for `ApprovalRequest`), and emit the corresponding
+/// upstream result so the gateway can correlate.
 async fn outbound_handler(
     mut reader: IpcFrameReader,
     adapter: Arc<SignalAdapter>,
@@ -585,7 +742,7 @@ async fn outbound_handler(
             }
         };
 
-        let fields = {
+        let action = {
             let frame_reader = match msg.get_root::<frame::Reader<'_>>() {
                 Ok(r) => r,
                 Err(e) => {
@@ -595,38 +752,159 @@ async fn outbound_handler(
             };
             match frame_reader.which() {
                 Ok(frame::Outbound(_)) => match convert::parse_outbound(&msg) {
-                    Ok(f) => Some(f),
+                    Ok(f) => GatewayBoundAction::SendMessage(f),
                     Err(e) => {
                         tracing::error!("Failed to parse outbound: {e}");
-                        None
+                        GatewayBoundAction::Skip
                     }
                 },
-                Ok(_) => None,
+                Ok(frame::ApprovalRequest(_)) => match convert::parse_approval_request(&msg) {
+                    Ok(f) => GatewayBoundAction::SendApprovalRequest(f),
+                    Err(e) => {
+                        tracing::error!("Failed to parse approval request: {e}");
+                        GatewayBoundAction::Skip
+                    }
+                },
+                Ok(_) => GatewayBoundAction::Skip,
                 Err(e) => {
                     tracing::error!("Frame variant error: {e}");
-                    None
+                    GatewayBoundAction::Skip
                 }
             }
         };
 
-        let Some(fields) = fields else {
-            continue;
-        };
+        match action {
+            GatewayBoundAction::SendMessage(fields) => {
+                let (success, msg_id, error) = match adapter
+                    .send_message(&fields.conversation_id, &fields.text)
+                    .await
+                {
+                    Ok(ts) => (true, ts.to_string(), String::new()),
+                    Err(e) => (false, String::new(), e.to_string()),
+                };
 
-        let (success, msg_id, error) = match adapter
-            .send_message(&fields.conversation_id, &fields.text)
-            .await
-        {
-            Ok(ts) => (true, ts.to_string(), String::new()),
-            Err(e) => (false, String::new(), e.to_string()),
-        };
-
-        let mut result_msg = capnp::message::Builder::new_default();
-        convert::build_outbound_result(&mut result_msg, success, &msg_id, &error);
-        let mut w = writer.lock().await;
-        if let Err(e) = w.write_message(&result_msg).await {
-            tracing::error!("Failed to send outbound result: {e}");
+                let mut result_msg = capnp::message::Builder::new_default();
+                convert::build_outbound_result(&mut result_msg, success, &msg_id, &error);
+                let mut w = writer.lock().await;
+                if let Err(e) = w.write_message(&result_msg).await {
+                    tracing::error!("Failed to send outbound result: {e}");
+                }
+            }
+            GatewayBoundAction::SendApprovalRequest(fields) => {
+                send_approval_request(adapter.clone(), &writer, fields).await;
+            }
+            GatewayBoundAction::Skip => {}
         }
+    }
+}
+
+/// Intermediate enum so we can drop Cap'n Proto readers before
+/// `.await`-ing on `send_message` or the writer mutex.
+enum GatewayBoundAction {
+    SendMessage(convert::OutboundFields),
+    SendApprovalRequest(convert::ApprovalRequestFields),
+    Skip,
+}
+
+/// Render the approval prompt in the configured conversation,
+/// register the prefix in the adapter's prefix map, and on send
+/// failure emit an `ApprovalRequestFailed` frame so the gateway
+/// resolves the queue entry with a delivery-failure denial
+/// rather than waiting for a timeout.
+async fn send_approval_request(
+    adapter: Arc<SignalAdapter>,
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+    fields: convert::ApprovalRequestFields,
+) {
+    let prefix: String = fields
+        .request_id
+        .chars()
+        .filter(|c| *c != '-')
+        .take(SignalAdapter::PREFIX_LEN)
+        .collect::<String>()
+        .to_ascii_lowercase();
+
+    // Register the prefix BEFORE sending so a fast operator who
+    // reads the message and responds within microseconds finds
+    // the entry. If the send fails below we remove it again.
+    {
+        let mut map = adapter.approval_prefix_map.lock().await;
+        map.entry(prefix.clone())
+            .or_default()
+            .push(fields.request_id.clone());
+    }
+
+    let trigger_block = if fields.trigger_message.is_empty() {
+        "Trigger: (none)".to_string()
+    } else {
+        format!("Trigger: {}", fields.trigger_message)
+    };
+    let body = format!(
+        "Approval requested\n\
+         Agent: {}\n\
+         Tool: {}\n\
+         Action: {}\n\
+         Tier: {}\n\
+         {}\n\
+         \n\
+         Reply: !approve {}  or  !deny {} [reason]\n\
+         Request: {}",
+        fields.triggering_agent,
+        fields.tool_name,
+        fields.action_key,
+        fields.requested_tier,
+        trigger_block,
+        prefix,
+        prefix,
+        fields.request_id,
+    );
+
+    if let Err(e) = adapter
+        .send_message(&fields.target_conversation_id, &body)
+        .await
+    {
+        tracing::warn!(
+            request_id = %fields.request_id,
+            error = %e,
+            "signal approval: send failed; emitting ApprovalRequestFailed"
+        );
+        // Roll back the prefix-map entry so a future legitimate
+        // request can reuse the same prefix without collision
+        // noise.
+        {
+            let mut map = adapter.approval_prefix_map.lock().await;
+            if let Some(entries) = map.get_mut(&prefix) {
+                entries.retain(|rid| rid != &fields.request_id);
+                if entries.is_empty() {
+                    map.remove(&prefix);
+                }
+            }
+        }
+        let reason = classify_send_error(&e);
+        let mut failure = capnp::message::Builder::new_default();
+        convert::build_approval_request_failed(&mut failure, &fields.request_id, reason);
+        let mut w = writer.lock().await;
+        if let Err(send_err) = w.write_message(&failure).await {
+            tracing::error!("signal approval: failed to send ApprovalRequestFailed: {send_err}");
+        }
+    }
+}
+
+/// Map a `SignalError` to a stable snake_case label for
+/// `ApprovalRequestFailed.reason`. Mirrors the Telegram adapter's
+/// label set so SIEM detections can group across channels without
+/// per-platform branching.
+fn classify_send_error(e: &SignalError) -> &'static str {
+    match e {
+        SignalError::ConnectionClosed => "channel_not_accessible",
+        SignalError::Timeout { .. } => "signal_rpc_timeout",
+        SignalError::Signal(_) => "signal_rpc_error",
+        SignalError::Io(_) => "network_error",
+        SignalError::Serde(_) => "signal_rpc_error",
+        SignalError::Ipc(_) => "network_error",
+        SignalError::Handshake(_) => "network_error",
+        SignalError::HttpEndpointRejected(_) => "signal_rpc_error",
+        SignalError::BadSubscribeResponse => "signal_rpc_error",
     }
 }
 
@@ -649,4 +927,28 @@ async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
 #[cfg(test)]
 pub(crate) fn test_parse_endpoint(raw: &str) -> Result<PathBuf, SignalError> {
     parse_endpoint(raw)
+}
+
+#[cfg(test)]
+impl SignalAdapter {
+    /// Test-only handle on the prefix-map mutex. Lets unit tests
+    /// seed entries and inspect post-call state without going
+    /// through the full gateway-side ApprovalRequest flow.
+    pub(crate) async fn approval_prefix_map_for_test(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, HashMap<String, Vec<String>>> {
+        self.approval_prefix_map.lock().await
+    }
+
+    /// Test-only accessor on `route_approval_command`. Wraps the
+    /// private async method so tests can exercise the
+    /// prefix-resolve and clarification branches without spinning
+    /// up the full fake-signal-cli harness.
+    pub(crate) async fn route_approval_command_for_test(
+        &self,
+        inbound: &SignalInbound,
+        cmd: crate::commands::CommandKind,
+    ) {
+        self.route_approval_command(inbound, cmd).await;
+    }
 }

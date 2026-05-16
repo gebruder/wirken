@@ -198,27 +198,31 @@ struct VetoResponse {
   }
 }
 
-# --- Channel-adapter approval (first surface: Telegram) ---
+# --- Channel-adapter approval ---
 #
 # Out-of-band approval for daemon-mode `NeedsApproval` requests
-# routed to a channel adapter. The gateway-side
-# `TelegramApprovalGate` registers an entry in the same
-# `PendingApprovalQueue` the CLI surface uses, then sends an
-# `ApprovalRequest` frame to the named adapter. The adapter renders
-# an inline-keyboard message in the configured approval chat; a
-# pressed callback button comes back as `ApprovalDecision`. On
-# delivery failure (no approval chat configured, bot missing from
-# chat, Telegram API rejection), the adapter emits
-# `ApprovalRequestFailed`. The gateway authorizes the pressing
-# user against `approver_registry` before resolving the queue.
+# routed to a channel adapter. The gateway-side channel gate (e.g.
+# `TelegramApprovalGate`, `SignalApprovalGate`) registers an entry
+# in the same `PendingApprovalQueue` the CLI surface uses, then
+# sends an `ApprovalRequest` frame to the named adapter. The
+# adapter renders the surface-native UX (Telegram inline keyboard,
+# Signal text-command prompt, …) in the configured approval
+# conversation; an operator action comes back as
+# `ApprovalDecision`. On delivery failure the adapter emits
+# `ApprovalRequestFailed`. The gateway authorizes the actor
+# against `approver_registry` before resolving the queue.
 
 struct ApprovalRequest {
-  # Gateway → adapter. Render an inline-keyboard message in the
-  # approval chat with two buttons: Approve and Deny. The
-  # callback_data on each button is `req:<requestId>:allow` or
-  # `req:<requestId>:deny` so the adapter can parse the decision
-  # before constructing the response frame (no Unknown variant
-  # needed on ApprovalDecisionKind).
+  # Gateway → adapter. Adapter renders the surface-native approval
+  # UX in the configured conversation. Telegram: inline keyboard
+  # with Approve / Deny buttons; `callback_data` encoding is
+  # `req:<requestId>:allow` or `req:<requestId>:deny` so the
+  # adapter parses the decision before building the response
+  # frame (no Unknown variant on ApprovalDecisionKind). Signal:
+  # text-command prompt of the form `!approve <prefix>` /
+  # `!deny <prefix> [reason]`, prefix is the first 8 hex chars of
+  # `requestId` and the adapter resolves prefix → requestId
+  # locally before responding.
   requestId @0 :Text;
   toolName @1 :Text;
   actionKey @2 :Text;
@@ -234,39 +238,54 @@ struct ApprovalRequest {
   # Operator-facing context. Empty when the call has no inbound
   # trigger (subagent recursion, cron, system-driven).
   triggerMessage @5 :Text;
-  # Telegram chat to render the message in. The gateway reads this
-  # from `approver_registry` at `request_approval` time; the
-  # adapter does not consult registry state and treats the value
-  # as authoritative.
-  targetChatId @6 :Int64;
+  # Adapter-native conversation identifier to render the approval
+  # message in. The gateway reads this from `approver_registry` at
+  # `request_approval` time; the adapter does not consult registry
+  # state and treats the value as authoritative. Adapter-native
+  # encoding: Telegram serializes its `i64` chat_id as a decimal
+  # string; Signal carries the base64 group_id (or E.164 phone /
+  # ACI UUID for 1:1 DM approval channels); other adapters
+  # whatever their conversation primitive is. Text rather than the
+  # original Int64 because Signal and other non-Telegram surfaces
+  # do not have numeric conversation ids.
+  targetConversationId @6 :Text;
 }
 
 struct ApprovalDecisionKind {
   union {
     allow @0 :Void;
-    deny @1 :Void;
-    # Reason capture is a follow-up slice (no ForceReply pattern
-    # in the codebase today). For now Deny carries no payload;
-    # the audit row records `denial_reason: None`.
+    deny @1 :Text;
+    # Operator-supplied reason for the denial, or empty string
+    # when the surface did not capture one. Surfaces that do not
+    # collect a reason (Telegram inline keyboard has no
+    # ForceReply pattern wired today) write empty; surfaces that
+    # do (Signal text command's trailing text after the prefix)
+    # write the typed reason. Empty maps to `denial_reason:
+    # None` on the gateway side; non-empty to `Some(reason)`.
   }
 }
 
 struct ApprovalDecision {
-  # Adapter → gateway. The pressing user pressed a callback
-  # button. The gateway validates `telegramUserId` against
+  # Adapter → gateway. An operator action on the approval surface
+  # (Telegram inline-keyboard press, Signal text command, …)
+  # arrived. The gateway validates `actorUserId` against
   # `approver_registry::verify(adapter_id, user_id)` BEFORE
-  # resolving the queue entry. An unauthorized press is silently
+  # resolving the queue entry. An unauthorized action is silently
   # dropped at the gateway (queue stays open until timeout); the
   # adapter does not consult registry state.
   requestId @0 :Text;
   decision @1 :ApprovalDecisionKind;
-  # Telegram user id (numeric). Authorized against
-  # `approver_registry`.
-  telegramUserId @2 :Int64;
+  # Adapter-native actor identifier. Authorized against
+  # `approver_registry`. Telegram serializes its `i64` user id as
+  # a decimal string; Signal carries the sender's ACI UUID
+  # (preferred) or E.164 phone fallback; other adapters whatever
+  # their stable per-user primitive is. Text rather than Int64
+  # because most non-Telegram platforms identify users by string.
+  actorUserId @2 :Text;
   # Display name or username for the audit row's `approved_by` /
-  # actor field. Falls back to the user id stringified when the
-  # display is empty.
-  telegramUserDisplay @3 :Text;
+  # actor field. Falls back to the user id when the display is
+  # empty.
+  actorDisplay @3 :Text;
 }
 
 struct ApprovalRequestFailed {
