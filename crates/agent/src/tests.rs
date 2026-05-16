@@ -7412,3 +7412,112 @@ mod phase_overlay {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI-compat stub server. Validates the `custom` provider path that
+// NIM (NVIDIA inference runtime), vLLM, and similar OpenAI-compatible
+// endpoints all go through. The verify-first audit for the NIM slice
+// flagged that the streaming consumer must terminate on `data: [DONE]`
+// rather than the first `finish_reason` chunk - vLLM/NIM emit the
+// trailing `usage` block in a separate chunk *after* finish_reason,
+// and early termination would silently zero-count tokens on every NIM
+// call. This stub reproduces the exact response shape and pins the
+// behavior. The same path covers Privatemode and Tinfoil cost rows.
+// ---------------------------------------------------------------------------
+mod openai_compat_stub {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::conversation::{Message, Role};
+    use crate::llm::{LlmClient, LlmConfig, LlmResponse};
+    use crate::llm_stream::StreamEvent;
+
+    #[tokio::test]
+    async fn streaming_reads_trailing_usage_chunk_after_finish_reason() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            // Drain request headers + body just enough that reqwest's
+            // send is unblocked. The stub doesn't validate request
+            // shape; the request side is exercised by every other
+            // provider's path.
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            // SSE body in vLLM/NIM shape: a content delta chunk, then
+            // a chunk carrying `finish_reason` (no usage yet), then
+            // the trailing `usage` chunk with an empty `choices`
+            // array, then `[DONE]`. The middle chunk is the trap: a
+            // consumer that terminates on `finish_reason` would miss
+            // the usage block.
+            let body = "\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello, NIM!\"}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                data: {\"choices\":[],\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":7,\"total_tokens\":20}}\n\n\
+                data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            // Dropping the socket closes the connection; reqwest
+            // treats close as the body terminator since we set
+            // `Connection: close` and omitted `Content-Length`.
+        });
+
+        let config = LlmConfig {
+            provider: "custom".into(),
+            model: "meta/llama-3.1-8b-instruct".into(),
+            base_url: format!("http://{addr}/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: false,
+            context_window: 32_000,
+        };
+        let client = LlmClient::new(config).unwrap();
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: "ping".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+
+        let result = client.complete_stream(&messages, &[], None, tx).await;
+        let _ = stub.await;
+
+        let (response, usage) = result.expect("stream must complete");
+
+        let mut deltas = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::TextDelta(t) = ev {
+                deltas.push(t);
+            }
+        }
+        assert_eq!(deltas.join(""), "Hello, NIM!");
+
+        match response {
+            LlmResponse::Text(t) => assert_eq!(t, "Hello, NIM!"),
+            other => panic!("expected Text response, got {other:?}"),
+        }
+
+        // The load-bearing assertion: the trailing usage chunk must
+        // be parsed. A consumer that short-circuits on finish_reason
+        // would see `usage` as None and silently zero-count every
+        // NIM call.
+        let usage = usage.expect("trailing usage chunk must reach the consumer");
+        assert_eq!(usage.input_tokens, 13);
+        assert_eq!(usage.output_tokens, 7);
+    }
+}
