@@ -654,33 +654,11 @@ impl SignalAdapter {
 }
 
 /// Heuristic: Signal 1:1 recipients are either E.164 phone numbers
-/// (start with `+`) or ACI UUIDs (36 chars, dashes at positions
-/// 8/13/18/23, hex everywhere else). Everything else in a
+/// (start with `+`) or ACI UUIDs (canonical layout, see
+/// [`convert::is_canonical_uuid`]). Everything else in a
 /// `conversation_id` slot is treated as a Signal group id.
 fn is_group_id(s: &str) -> bool {
-    !s.starts_with('+') && !is_uuid(s)
-}
-
-fn is_uuid(s: &str) -> bool {
-    if s.len() != 36 {
-        return false;
-    }
-    let b = s.as_bytes();
-    for (i, c) in b.iter().enumerate() {
-        match i {
-            8 | 13 | 18 | 23 => {
-                if *c != b'-' {
-                    return false;
-                }
-            }
-            _ => {
-                if !c.is_ascii_hexdigit() {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    !s.starts_with('+') && !convert::is_canonical_uuid(s)
 }
 
 /// Normalize and validate a configured endpoint string. Accepts

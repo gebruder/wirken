@@ -1517,6 +1517,118 @@ fn allowlist_empty_still_parses() {
     assert!(list.is_empty());
 }
 
+#[test]
+fn allowlist_accepts_all_numeric_canonical_uuid() {
+    // The bug we're fixing: a UUID whose hex digits happen to be
+    // all 0-9 (no letters) used to be classified as a phone-shaped
+    // string by `looks_like_phone`, then rejected by
+    // `normalize_phone` for missing the leading `+`. Canonical
+    // layout must win over phone-shape heuristics.
+    let list = SignalAllowlist::from_csv("00000000-0000-4000-8000-000000000001").unwrap();
+    let msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "00000000-0000-4000-8000-000000000001".into(),
+        sender_name: "Numeric".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: Some("00000000-0000-4000-8000-000000000001".into()),
+        group_id: None,
+    };
+    assert!(list.allows(&msg));
+}
+
+#[test]
+fn allowlist_hex_letter_uuid_still_parses() {
+    // Pre-fix behavior on UUIDs containing hex letters relied on
+    // `looks_like_phone` returning false (letters are not phone
+    // chars). Post-fix, the canonical layout check accepts them
+    // explicitly. Pin the existing case so a future refactor of
+    // the classifier doesn't drop letter-containing UUIDs.
+    let list = SignalAllowlist::from_csv("d48512b4-2571-404a-ac0c-500722870238").unwrap();
+    let msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "d48512b4-2571-404a-ac0c-500722870238".into(),
+        sender_name: "Hex".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: Some("d48512b4-2571-404a-ac0c-500722870238".into()),
+        group_id: None,
+    };
+    assert!(list.allows(&msg));
+}
+
+#[test]
+fn allowlist_e164_phone_still_classified_as_phone() {
+    // Reordering the classifier must not regress the happy-path
+    // phone case. E.164 input has fewer than 36 chars so the UUID
+    // check returns false immediately; phone parsing wins.
+    let list = SignalAllowlist::from_csv("+15559876543").unwrap();
+    let msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "+15559876543".into(),
+        sender_name: "Alice".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: None,
+        group_id: None,
+    };
+    assert!(list.allows(&msg));
+}
+
+#[test]
+fn allowlist_uuid_shaped_but_wrong_dash_position_rejected_as_phone() {
+    // A 36-char digit/dash string whose dashes are NOT at
+    // 8/13/18/23 fails the canonical UUID check. With only digits
+    // and dashes it still matches `looks_like_phone`, then falls
+    // through to `normalize_phone` which rejects on missing `+`.
+    let err = SignalAllowlist::from_csv("000000000-0000-4000-8000-00000000001")
+        .expect_err("ambiguous-shape input must not silently accept");
+    matches!(err, SignalAllowlistError::PhoneMissingPlus(_));
+}
+
+#[test]
+fn allowlist_uuid_shaped_but_non_hex_char_rejected() {
+    // A 36-char string with dashes in the right places but with
+    // a non-hex character (z) at a hex position fails the UUID
+    // check. Non-phone characters mean it falls past the phone
+    // branch too and lands as a verbatim group-id-style entry —
+    // not great, but not the bug this slice is fixing. The
+    // assertion documents the current shape: parsing succeeds
+    // and the entry is kept as-is.
+    let list = SignalAllowlist::from_csv("00000000-0000-4000-8000-00000000000z").unwrap();
+    assert_eq!(list.len(), 1);
+}
+
+#[test]
+fn allowlist_digit_only_uuid_does_not_collide_with_normalize_phone() {
+    // The digit-only UUID and a separately-listed phone live
+    // peacefully in the same allowlist; neither path mutates the
+    // other's canonical form on the way in.
+    let csv = "00000000-0000-4000-8000-000000000001,+15559876543";
+    let list = SignalAllowlist::from_csv(csv).unwrap();
+    assert_eq!(list.len(), 2);
+    let uuid_msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "00000000-0000-4000-8000-000000000001".into(),
+        sender_name: "u".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: Some("00000000-0000-4000-8000-000000000001".into()),
+        group_id: None,
+    };
+    let phone_msg = SignalInbound {
+        message_id: "m".into(),
+        sender: "+15559876543".into(),
+        sender_name: "p".into(),
+        text: "hi".into(),
+        timestamp: 0,
+        sender_uuid: None,
+        group_id: None,
+    };
+    assert!(list.allows(&uuid_msg));
+    assert!(list.allows(&phone_msg));
+}
+
 // ---------------------------------------------------------------------------
 // Approval-frame conversions (slice: signal approval gate)
 // ---------------------------------------------------------------------------

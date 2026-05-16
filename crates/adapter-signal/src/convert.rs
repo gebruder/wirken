@@ -118,15 +118,55 @@ impl SignalAllowlist {
     }
 }
 
-/// Normalize a single allowlist entry. Phone-shaped inputs go
-/// through `normalize_phone`; anything else (group ids) is returned
-/// verbatim after the caller has already trimmed it.
+/// Normalize a single allowlist entry. Classification order is
+/// load-bearing:
+///
+/// 1. Canonical UUID layout (36 chars, dashes at 8/13/18/23, hex
+///    elsewhere): return verbatim. Checked FIRST so an all-numeric
+///    ACI UUID like `00000000-0000-4000-8000-000000000001` is not
+///    misclassified as a phone-shaped string and rejected by the
+///    phone normalizer. Hex letters incidentally exclude most
+///    UUIDs from the phone path anyway; the layout check is the
+///    structural guarantee.
+/// 2. Phone-shaped (digits plus separators with at least one
+///    digit): go through `normalize_phone` which enforces the
+///    leading `+`.
+/// 3. Anything else (group ids): return verbatim.
 fn normalize_entry(entry: &str) -> Result<String, SignalAllowlistError> {
-    if looks_like_phone(entry) {
+    if is_canonical_uuid(entry) {
+        Ok(entry.to_string())
+    } else if looks_like_phone(entry) {
         normalize_phone(entry)
     } else {
         Ok(entry.to_string())
     }
+}
+
+/// `true` if `s` matches the canonical 8-4-4-4-12 hex UUID layout:
+/// 36 characters with dashes at positions 8/13/18/23 and ASCII hex
+/// (case-insensitive) everywhere else. Used by the allowlist
+/// classifier and by `adapter::is_group_id`; signal-cli only emits
+/// canonical UUIDs so we don't need to handle URN-prefixed or
+/// braced forms.
+pub(crate) fn is_canonical_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    for (i, c) in s.as_bytes().iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *c != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !c.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// `true` if every character is one of `+0-9` plus the common
