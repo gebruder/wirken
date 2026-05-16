@@ -220,7 +220,7 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Wirken 1.5.x is the current series. 1.5 gets fixes and features; 1.4 gets security fixes only. 1.3 and earlier are unsupported.
+Wirken 1.6.x is the current series. 1.6 gets fixes and features; 1.5 gets security fixes only. 1.4 and earlier are unsupported.
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
