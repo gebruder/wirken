@@ -202,6 +202,52 @@ pub async fn list_anthropic_models(api_key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// List models from an OpenAI-compatible `{base_url}/models`
+/// endpoint without filtering by name. Used for endpoints that
+/// expose non-OpenAI model IDs (NIM serves `meta/llama-*`,
+/// `nvidia/...`; Privatemode serves `kimi-*`; etc.) where the
+/// OpenAI-name filter in `list_openai_models` would drop
+/// everything. Omits the Authorization header when `api_key`
+/// is empty so local containers without bearer auth (default
+/// for NIM local) don't get a malformed `Bearer ` header.
+pub async fn list_openai_compatible_models(base_url: &str, api_key: &str) -> Vec<String> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let url = format!("{base_url}/models");
+    let mut req = client.get(&url);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let resp = match req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut models: Vec<String> = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort();
+    models.dedup();
+    models
+}
+
 /// List models available from an OpenAI-compatible API.
 /// Filters to chat-capable models (gpt-*, o1-*, o3-*, o4-*) and excludes
 /// legacy/embedding/audio models to keep the picker manageable.

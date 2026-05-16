@@ -102,6 +102,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
         let providers = &[
             "Ollama (local)",
+            "NIM (local or cloud)",
             "Anthropic",
             "OpenAI",
             "Google Gemini",
@@ -189,6 +190,50 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 ("ollama".to_string(), model, url, false)
             }
             1 => {
+                // NIM (NVIDIA inference runtime; OpenAI-compatible
+                // HTTP). Stored as provider="custom" because llm.rs
+                // already handles the bearer-auth + OpenAI-compat
+                // request shape via the `_` arm in its provider
+                // dispatch. No new match arm or cost-table entry.
+                println!("  NIM serves open-weight models with an OpenAI-compatible API.");
+                println!("  Local containers default to no auth; the cloud endpoint at");
+                println!("  https://integrate.api.nvidia.com/v1 takes `nvapi-...` keys.");
+                let url: String = Input::new()
+                    .with_prompt("  Endpoint")
+                    .default("http://localhost:8000/v1".into())
+                    .interact_text()?;
+                let api_key: String = Input::new()
+                    .with_prompt("  API key (blank for local)")
+                    .allow_empty(true)
+                    .interact_text()?;
+                let models = super::list_openai_compatible_models(&url, &api_key).await;
+                let model = if models.is_empty() {
+                    println!(
+                        "  No models returned from {url}/models. Enter the model id manually."
+                    );
+                    Input::new().with_prompt("  Model ID").interact_text()?
+                } else if api_key.is_empty() {
+                    let idx = Select::new()
+                        .with_prompt("  Model")
+                        .items(&models)
+                        .default(0)
+                        .interact()?;
+                    models[idx].clone()
+                } else {
+                    let default_model = models[0].clone();
+                    store_key_and_pick_model(
+                        api_key,
+                        "custom",
+                        &url,
+                        &default_model,
+                        models,
+                        &cfg,
+                        &data,
+                    )?
+                };
+                ("custom".to_string(), model, url, false)
+            }
+            2 => {
                 // Anthropic
                 let api_key = super::read_secret("  API key: ")?;
                 let models = super::list_anthropic_models(&api_key).await;
@@ -208,7 +253,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     false,
                 )
             }
-            2 => {
+            3 => {
                 // OpenAI
                 let api_key = super::read_secret("  API key: ")?;
                 let models = super::list_openai_models("https://api.openai.com/v1", &api_key).await;
@@ -228,7 +273,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     false,
                 )
             }
-            3 => {
+            4 => {
                 // Google Gemini
                 let api_key = super::read_secret("  API key: ")?;
                 let models = super::list_gemini_models(&api_key).await;
@@ -248,7 +293,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     false,
                 )
             }
-            4 => {
+            5 => {
                 // AWS Bedrock
                 let r: String = Input::new()
                     .with_prompt("  AWS region")
@@ -263,7 +308,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 region = Some(r);
                 ("bedrock".to_string(), model, base, true)
             }
-            5 => {
+            6 => {
                 // Tinfoil
                 println!(
                     "  Tinfoil runs open-source LLMs inside hardware enclaves (AMD SEV-SNP + NVIDIA H100)."
@@ -296,7 +341,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     false,
                 )
             }
-            6 => {
+            7 => {
                 // Privatemode
                 println!(
                     "  Privatemode runs open-source LLMs inside confidential enclaves (AMD SEV-SNP + Intel TDX)."
@@ -329,7 +374,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 };
                 ("openai".to_string(), model, base_url, false)
             }
-            7 => {
+            8 => {
                 // Custom
                 let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
                 let has_key = Confirm::new()
