@@ -931,6 +931,86 @@ pub enum SessionEvent {
         channel: Option<String>,
         detail: serde_json::Value,
     },
+    /// A hook completed its inbound handshake and is now connected.
+    /// `signature_status` distinguishes the production path (a
+    /// registered pubkey matched in `hook_registry`) from the dev
+    /// escape hatch (`WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` accepted an
+    /// unregistered peer). The dev path always emits a warning at
+    /// the gateway too; this audit row is the durable record.
+    HookRegistered {
+        hook_id: String,
+        hook_type: HookKind,
+        #[serde(default)]
+        signature_status: HookSignatureStatus,
+    },
+    /// One veto-hook invocation completed. Emitted per hook per tool
+    /// call (in series, in `hook_registry` insertion order). The
+    /// invocation runs after Wirken's tier and per-skill permission
+    /// gates already accepted the call, so a `Deny` here represents
+    /// an external policy refusing what the built-in gates already
+    /// allowed.
+    HookDispatched {
+        hook_id: String,
+        /// The tool name whose call triggered the invocation.
+        tool_name: String,
+        /// Agent that drove the tool call.
+        agent_id: String,
+        decision: HookDecision,
+    },
+    /// A hook's connection dropped or its veto invocation hit the
+    /// timeout / failed cleanly. `error` is a short snake_case label
+    /// (`"connection_dropped"`, `"veto_timeout"`,
+    /// `"veto_response_malformed"`, `"observe_send_failed"`) so SIEM
+    /// consumers can group on a stable string. The longer error
+    /// detail goes to gateway logs, not the audit chain.
+    HookCrashed { hook_id: String, error: String },
+}
+
+/// What kind of hook a [`SessionEvent::HookRegistered`] row
+/// describes. Mirrors `wirken_ipc::HookType` on the wire so audit
+/// consumers don't have to depend on the IPC crate to deserialize.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookKind {
+    Observe,
+    Veto,
+}
+
+/// Whether a [`SessionEvent::HookRegistered`] row represents an
+/// authenticated registered pubkey or an unregistered peer accepted
+/// under the dev escape hatch. `Default` is `Registered` so a row
+/// written by a future code path that forgets the field still
+/// classifies under the conservative production posture.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HookSignatureStatus {
+    /// Pubkey looked up in `hook_registry` and matched. Production
+    /// path.
+    #[default]
+    Registered,
+    /// `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` accepted an unregistered
+    /// peer. Dev mode only.
+    Unregistered,
+}
+
+/// The decision a veto hook returned for one invocation. `Deny`
+/// carries the operator-readable reason the hook returned on the
+/// wire; this text is also surfaced to the LLM as the tool call's
+/// failure message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HookDecision {
+    Allow,
+    Deny {
+        reason: String,
+    },
+    /// The hook did not respond within the configured timeout.
+    /// Production posture: fail-closed (the tool call is refused).
+    /// Dev posture (`WIRKEN_ALLOW_UNREGISTERED_HOOKS=1`):
+    /// fail-open with a warning. Either way this variant lands on
+    /// the chain so a reviewer can distinguish a timeout from an
+    /// explicit deny.
+    Timeout,
 }
 
 /// A single tool call request from the assistant.

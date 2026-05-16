@@ -6,6 +6,7 @@ pub mod channel;
 pub mod credential;
 pub mod cron;
 pub mod doctor;
+pub mod hooks;
 pub mod lyrik;
 pub mod lyrik_sarif;
 pub mod lyrik_walks;

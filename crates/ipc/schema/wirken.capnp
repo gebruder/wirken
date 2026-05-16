@@ -114,6 +114,90 @@ struct LlmChunk {
   }
 }
 
+# --- Hooks ---
+#
+# Hook handshake reuses the same Ed25519 wire shape as the adapter
+# handshake but binds the signature under a distinct domain
+# separator (see crates/ipc/src/auth.rs HOOK_HANDSHAKE_DOMAIN) so an
+# adapter signature can never replay against the hook acceptor and
+# vice versa. The wire-level structs are separate so the gateway can
+# route an inbound connection by which response variant the peer
+# sent first.
+
+struct HookAuthResponse {
+  publicKey @0 :Data;
+  # 32-byte Ed25519 public key of the hook process.
+  signature @1 :Data;
+  # 64-byte Ed25519 signature of the challenge nonce.
+  hookId @2 :Text;
+  # Identifier for this hook (e.g., "policy-eval", "ralph-loop").
+  hookType @3 :Text;
+  # "observe" or "veto". The gateway routes the post-handshake
+  # connection by this label; an unknown label is a handshake reject.
+}
+
+struct SessionLogTail {
+  # Hook → Gateway. Observe-hook pull request for events with
+  # sequence >= sinceSeq for the named session.
+  sessionId @0 :Text;
+  sinceSeq @1 :UInt64;
+  # Caller-supplied cursor. Hook advances on its own after each
+  # successful response.
+  maxRows @2 :UInt32;
+  # Soft cap on the response size so a hook coming back from a long
+  # downtime does not get an unboundedly large batch.
+}
+
+struct SessionLogTailEvent {
+  seq @0 :UInt64;
+  # Per-session monotonic sequence number, copied from the session
+  # log so the hook's cursor advances against the same numbers the
+  # gateway sees.
+  payload @1 :Text;
+  # JSON-serialized SessionEvent. The hook deserializes against its
+  # own copy of the SessionEvent enum; the JSON wire keeps the
+  # capnp schema independent of audit-side variant churn.
+}
+
+struct SessionLogTailResponse {
+  # Gateway → Hook. Batch response to a SessionLogTail.
+  events @0 :List(SessionLogTailEvent);
+  nextSeq @1 :UInt64;
+  # The sequence the hook should pass as `sinceSeq` on the next
+  # SessionLogTail to receive only newer rows. If `events` is empty
+  # this equals the request's `sinceSeq`.
+}
+
+struct VetoRequest {
+  # Gateway → Veto hook. Pre-dispatch tool call. The hook responds
+  # with a VetoResponse keyed by requestId.
+  #
+  # Intentionally narrow: tool name, arguments, and the session that
+  # surrounds the call. Per-call agent identity is not on the wire;
+  # routing must remain handshake-derived (see
+  # tests/no_payload_routing.rs). The gateway logs the local agent
+  # id onto the SessionEvent::HookDispatched row at dispatch time,
+  # so the audit chain still carries the attribution even though the
+  # hook never sees an agent_id field.
+  requestId @0 :Text;
+  toolName @1 :Text;
+  arguments @2 :Text;
+  # JSON-encoded tool arguments, as the agent received them from the
+  # LLM and after Wirken's per-skill / tier permission gate already
+  # passed.
+  sessionId @3 :Text;
+}
+
+struct VetoResponse {
+  requestId @0 :Text;
+  union {
+    allow @1 :Void;
+    deny @2 :Text;
+    # Operator-readable reason. Recorded on the audit chain and
+    # surfaced as the tool call's failure message.
+  }
+}
+
 # --- Top-level frame ---
 #
 # Every message on the wire is a Frame. The tag determines
@@ -140,5 +224,18 @@ struct Frame {
 
     # LLM streaming (gateway → agent, bidirectional)
     llmChunk @9 :LlmChunk;
+
+    # Hook handshake. authChallenge / authResult are reused; the
+    # response shape is distinct so the gateway routes by which
+    # response variant the peer sent.
+    hookAuthResponse @10 :HookAuthResponse;
+
+    # Observe-hook pull cursor (hook → gateway, gateway → hook).
+    sessionLogTail @11 :SessionLogTail;
+    sessionLogTailResponse @12 :SessionLogTailResponse;
+
+    # Veto-hook synchronous request/response.
+    vetoRequest @13 :VetoRequest;
+    vetoResponse @14 :VetoResponse;
   }
 }

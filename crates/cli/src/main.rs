@@ -67,6 +67,10 @@ enum Commands {
     #[command(subcommand)]
     Mcp(McpCommands),
 
+    /// Manage external hook processes (observe + veto)
+    #[command(subcommand)]
+    Hooks(HookCommands),
+
     /// Manage agents
     #[command(subcommand)]
     Agents(AgentCommands),
@@ -664,6 +668,30 @@ enum CredentialCommands {
 }
 
 #[derive(Subcommand)]
+enum HookCommands {
+    /// Register an external hook process by its Ed25519 public key.
+    /// The hook process must run independently and connect to
+    /// `<data_dir>/sockets/gateway-hooks.sock`. `--type observe`
+    /// receives audit events via pull cursor with no return path;
+    /// `--type veto` receives synchronous pre-dispatch tool calls and
+    /// returns allow or deny.
+    Register {
+        /// Hook identifier (printable, no whitespace).
+        hook_id: String,
+        /// 32-byte Ed25519 public key, hex-encoded (64 chars).
+        pubkey_hex: String,
+        /// `observe` or `veto`.
+        #[arg(long, value_name = "TYPE")]
+        r#type: String,
+    },
+    /// List registered hooks.
+    List,
+    /// Remove a hook from the registry. Does not signal an active
+    /// connection; the gateway notices on its next handshake.
+    Unregister { hook_id: String },
+}
+
+#[derive(Subcommand)]
 enum McpCommands {
     /// Run the OAuth2 authorization code flow for an HTTP MCP
     /// server with `auth.type = "oauth2"`. Opens the user's browser
@@ -833,6 +861,15 @@ async fn main() -> Result<()> {
                 no_scopes,
                 all_scopes,
             } => commands::credential::rescope(&name, scope, no_scopes, all_scopes).await,
+        },
+        Commands::Hooks(cmd) => match cmd {
+            HookCommands::Register {
+                hook_id,
+                pubkey_hex,
+                r#type,
+            } => commands::hooks::register(&hook_id, &pubkey_hex, &r#type),
+            HookCommands::List => commands::hooks::list(),
+            HookCommands::Unregister { hook_id } => commands::hooks::unregister(&hook_id),
         },
         Commands::Mcp(cmd) => match cmd {
             McpCommands::Authorize {

@@ -135,6 +135,9 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SubagentSpawned { .. } => "subagent_spawned",
         SessionEvent::SubagentResult { .. } => "subagent_result",
         SessionEvent::AuditLegacy { .. } => "audit_legacy",
+        SessionEvent::HookRegistered { .. } => "hook_registered",
+        SessionEvent::HookDispatched { .. } => "hook_dispatched",
+        SessionEvent::HookCrashed { .. } => "hook_crashed",
     }
 }
 

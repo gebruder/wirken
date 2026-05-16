@@ -32,6 +32,18 @@ pub enum HandshakeError {
     #[error("unknown adapter: {0}")]
     UnknownAdapter(String),
 
+    #[error("unknown hook: {0}")]
+    UnknownHook(String),
+
+    #[error(
+        "hook_type mismatch for {hook_id}: registered as {registered}, handshake claimed {claimed}"
+    )]
+    HookTypeMismatch {
+        hook_id: String,
+        registered: String,
+        claimed: String,
+    },
+
     #[error("timeout")]
     Timeout,
 

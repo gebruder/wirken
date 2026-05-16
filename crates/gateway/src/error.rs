@@ -20,6 +20,12 @@ pub enum GatewayError {
     #[error("adapter already registered: {0}")]
     AdapterAlreadyRegistered(String),
 
+    #[error("hook not registered: {0}")]
+    HookNotRegistered(String),
+
+    #[error("hook already registered: {0}")]
+    HookAlreadyRegistered(String),
+
     #[error("session not found: {0}")]
     SessionNotFound(String),
 

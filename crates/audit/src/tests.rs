@@ -1437,6 +1437,176 @@ mod session {
             "zero cache_read_input_tokens should be skipped: {json}"
         );
     }
+
+    // -----------------------------------------------------------------
+    // Hook variants: HookRegistered / HookDispatched / HookCrashed
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn hook_registered_round_trips() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::HookRegistered {
+                hook_id: "policy-eval".into(),
+                hook_type: crate::session_log::HookKind::Veto,
+                signature_status: crate::session_log::HookSignatureStatus::Registered,
+            },
+        )
+        .unwrap();
+        let events = log.get_range(&h, 0..1).unwrap();
+        match &events[0].event {
+            SessionEvent::HookRegistered {
+                hook_id,
+                hook_type,
+                signature_status,
+            } => {
+                assert_eq!(hook_id, "policy-eval");
+                assert_eq!(*hook_type, crate::session_log::HookKind::Veto);
+                assert_eq!(
+                    *signature_status,
+                    crate::session_log::HookSignatureStatus::Registered
+                );
+            }
+            other => panic!("expected HookRegistered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_dispatched_carries_decision_variants() {
+        let (log, h) = fresh();
+        for decision in [
+            crate::session_log::HookDecision::Allow,
+            crate::session_log::HookDecision::Deny {
+                reason: "policy/no-shell".into(),
+            },
+            crate::session_log::HookDecision::Timeout,
+        ] {
+            log.append(
+                &h,
+                TrustLevel::System,
+                SessionEvent::HookDispatched {
+                    hook_id: "policy-eval".into(),
+                    tool_name: "shell".into(),
+                    agent_id: "default".into(),
+                    decision,
+                },
+            )
+            .unwrap();
+        }
+        let events = log.get_range(&h, 0..3).unwrap();
+        let decisions: Vec<_> = events
+            .iter()
+            .map(|e| match &e.event {
+                SessionEvent::HookDispatched { decision, .. } => decision.clone(),
+                other => panic!("expected HookDispatched, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(decisions[0], crate::session_log::HookDecision::Allow);
+        assert!(matches!(
+            decisions[1],
+            crate::session_log::HookDecision::Deny { ref reason } if reason == "policy/no-shell"
+        ));
+        assert_eq!(decisions[2], crate::session_log::HookDecision::Timeout);
+    }
+
+    #[test]
+    fn hook_crashed_round_trips() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::HookCrashed {
+                hook_id: "policy-eval".into(),
+                error: "connection_dropped".into(),
+            },
+        )
+        .unwrap();
+        let events = log.get_range(&h, 0..1).unwrap();
+        match &events[0].event {
+            SessionEvent::HookCrashed { hook_id, error } => {
+                assert_eq!(hook_id, "policy-eval");
+                assert_eq!(error, "connection_dropped");
+            }
+            other => panic!("expected HookCrashed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_signature_status_defaults_to_registered_on_missing_field() {
+        // Pre-hook wire shape has no `signature_status` field; the
+        // default lands as Registered (the conservative production
+        // posture). Locks the #[serde(default)] in.
+        let payload = r#"{"kind":"hook_registered","hook_id":"h1","hook_type":"observe"}"#;
+        let event: SessionEvent = serde_json::from_str(payload).unwrap();
+        match event {
+            SessionEvent::HookRegistered {
+                signature_status, ..
+            } => {
+                assert_eq!(
+                    signature_status,
+                    crate::session_log::HookSignatureStatus::Registered
+                );
+            }
+            other => panic!("expected HookRegistered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_verifies_with_all_three_hook_variants() {
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::HookRegistered {
+                hook_id: "h1".into(),
+                hook_type: crate::session_log::HookKind::Veto,
+                signature_status: crate::session_log::HookSignatureStatus::Registered,
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::HookDispatched {
+                hook_id: "h1".into(),
+                tool_name: "shell".into(),
+                agent_id: "default".into(),
+                decision: crate::session_log::HookDecision::Deny {
+                    reason: "policy/no-shell".into(),
+                },
+            },
+        )
+        .unwrap();
+        log.append(
+            &h,
+            TrustLevel::System,
+            SessionEvent::HookCrashed {
+                hook_id: "h1".into(),
+                error: "veto_timeout".into(),
+            },
+        )
+        .unwrap();
+        match log.verify(&h).unwrap() {
+            SessionVerifyResult::Ok { rows_verified, .. } => {
+                assert_eq!(rows_verified, 3);
+            }
+            other => panic!("expected SessionVerifyResult::Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_hook_session_logs_still_deserialize() {
+        // A pre-hook row that knows nothing about HookRegistered et al
+        // must still deserialize; we never emit the new variants on
+        // legacy data, but any forward-compat reader must tolerate the
+        // existing variants without choking. UserMessage is the
+        // canonical pre-hook row.
+        let payload = r#"{"kind":"user_message","content":"hi","inbound_id":"t:1","adapter_id":"telegram","sender_id":"u:42"}"#;
+        let event: SessionEvent = serde_json::from_str(payload).unwrap();
+        assert!(matches!(event, SessionEvent::UserMessage { .. }));
+    }
 }
 
 // ---------------------------------------------------------------------------
