@@ -251,6 +251,13 @@ pub struct Agent {
     /// at registration time, and consulted by the validation-failure
     /// branch in [`Self::execute_and_record_tool`].
     recovery_observer: Option<Arc<dyn crate::recovery::RecoveryObserver>>,
+    /// External veto-hook dispatcher. Called after the built-in
+    /// `NeedsApproval` gate has accepted a tool call but before the
+    /// dispatch table routes it. Defaults to `NoopDispatcher` so
+    /// agents with no veto hooks configured pay no cost. The factory
+    /// injects the real `HookDispatcher` at wake time when veto hooks
+    /// are configured at the gateway.
+    veto_dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
 }
 
 impl Agent {
@@ -337,6 +344,7 @@ impl Agent {
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
+            veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
         })
     }
 
@@ -421,6 +429,7 @@ impl Agent {
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
+            veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
         })
     }
 
@@ -508,6 +517,18 @@ impl Agent {
     /// denial event written to the session log.
     pub fn set_org_permissions(&mut self, org: Arc<wirken_gateway::org::OrgPermissions>) {
         self.org_permissions = Some(org);
+    }
+
+    /// Attach the external veto-hook dispatcher. Called by the
+    /// factory at wake time when veto hooks are registered at the
+    /// gateway. Replaces the default `NoopDispatcher`. After this is
+    /// set, `execute_tool` invokes the dispatcher after the built-in
+    /// `NeedsApproval` gate and before the dispatch table.
+    pub fn set_veto_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
+    ) {
+        self.veto_dispatcher = dispatcher;
     }
 
     /// Register a recovery observer. Forwarded to the
@@ -2361,6 +2382,66 @@ impl Agent {
                     }));
                 }
             }
+        }
+
+        // External veto-hook dispatch. Runs after the built-in
+        // tier + per-skill permission gates have accepted the call,
+        // before the dispatch table routes it. Defaults to a
+        // `NoopDispatcher` when no veto hooks are configured.
+        //
+        // Serial cumulative-budget semantics (see
+        // `wirken_gateway::hook_dispatcher`): hooks invoked in
+        // registration order, first `Deny` short-circuits, the
+        // cumulative wall-clock cap (`WIRKEN_VETO_BUDGET_MS`, default
+        // 1000ms) bounds the iteration. `Skipped` outcomes do not
+        // emit audit rows; `Timeout` outcomes do (the chain
+        // distinguishes "earlier deny short-circuited me" from
+        // "budget exhausted").
+        //
+        // `Deny`: refuse the tool call with the hook's reason as
+        // the failure message, emit one `HookDispatched` per
+        // invoked-or-budget-timed-out hook in order.
+        // `Timeout`: production posture refuses the call;
+        // `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` flips to fail-open
+        // with a warning event.
+        let veto_outcome = self
+            .veto_dispatcher
+            .dispatch(name, arguments, self.session_handle.id().as_str())
+            .await;
+        for dispatched in &veto_outcome.per_hook {
+            if let Some(decision) = dispatched.decision.for_audit() {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::HookDispatched {
+                        hook_id: dispatched.hook_id.clone(),
+                        tool_name: name.to_string(),
+                        agent_id: self.id.clone(),
+                        decision,
+                    },
+                )?;
+            }
+        }
+        if let Some(deny_reason) = &veto_outcome.first_deny_reason {
+            return Ok(crate::tool::ToolResult {
+                output: format!("denied by veto hook: {deny_reason}"),
+                success: false,
+            });
+        }
+        if veto_outcome.any_timeout {
+            let allow_unregistered =
+                wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS");
+            if !allow_unregistered {
+                return Ok(crate::tool::ToolResult {
+                    output: "veto hook timed out (production fail-closed); \
+                            set WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 for dev fail-open"
+                        .to_string(),
+                    success: false,
+                });
+            }
+            tracing::warn!(
+                tool = name,
+                "veto hook timeout; WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 letting the call proceed",
+            );
         }
 
         // MCP tool names are prefixed `mcp_{server}_{tool}` by the proxy.

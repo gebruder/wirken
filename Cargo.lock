@@ -6919,7 +6919,9 @@ name = "wirken-gateway"
 version = "1.5.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
+ "capnp",
  "chrono",
  "cron",
  "ed25519-dalek",

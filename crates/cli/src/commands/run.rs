@@ -689,6 +689,28 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // confirming wirken started. `RUST_LOG=info wirken run` surfaces it.
     tracing::info!("IPC socket: {}", socket_path.display());
 
+    // --- Setup hooks IPC listener (parallel to adapter socket) ---
+    //
+    // External hook processes (observe + veto) connect inbound on
+    // this separate listener so the adapter and hook acceptors do
+    // not share a dispatch ambiguity at the wire layer. Same 0o600
+    // posture, same peer-credential gate at accept time.
+    let hooks_socket_path = cfg.socket_dir().join("gateway-hooks.sock");
+    if hooks_socket_path.exists() {
+        std::fs::remove_file(&hooks_socket_path)?;
+    }
+    let mut hooks_listener = wirken_ipc::bind(&hooks_socket_path).context(format!(
+        "Failed to bind hooks IPC at {}",
+        hooks_socket_path.display()
+    ))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hooks_socket_path, std::fs::Permissions::from_mode(0o600))
+            .context("Failed to chmod hooks socket to 0600")?;
+    }
+    tracing::info!("Hooks IPC socket: {}", hooks_socket_path.display());
+
     // --- Pre-flight: validate per-adapter vault entries ---
     //
     // Each adapter binary will fail at startup if its vault keys are
@@ -982,6 +1004,22 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         cache_capacity,
     );
 
+    // --- Hook registry + dispatcher ---
+    //
+    // Open the SQLite-backed hook registry the operator populated
+    // via `wirken hooks register`. Construct the veto-hook
+    // dispatcher and attach it to the factory so every Agent woken
+    // hereafter routes its tool-call dispatch through the active
+    // veto set. The registry is consulted at handshake time only;
+    // the dispatcher owns the in-process active set populated by
+    // the hooks accept loop below.
+    let hook_registry = Arc::new(Mutex::new(
+        wirken_gateway::hook_registry::HookRegistry::open(&cfg.data_dir.join("hooks.db"))
+            .context("Failed to open hook registry")?,
+    ));
+    let hook_dispatcher = Arc::new(wirken_gateway::hook_dispatcher::HookDispatcher::default());
+    factory.attach_veto_dispatcher(hook_dispatcher.clone());
+
     // --- Webchat ---
     if wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN") {
         tracing::warn!(
@@ -1093,6 +1131,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // failing and never invoking user-space callbacks.
     #[cfg(unix)]
     let gateway_expected_principal = Principal::Uid(unsafe { libc::geteuid() });
+    #[cfg(unix)]
+    let hooks_expected_principal = gateway_expected_principal.clone();
     let accept_handle = tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -1176,6 +1216,86 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             }
         }
     });
+
+    // --- Accept hook connections ---
+    //
+    // Parallel accept loop on `gateway-hooks.sock`. Snapshot-then-
+    // verify matches the adapter loop's locking model; same-UID
+    // peer-credential gate; routes by hook_type post-handshake.
+    let hooks_accept_registry = hook_registry.clone();
+    let hooks_accept_dispatcher = hook_dispatcher.clone();
+    let hooks_accept_audit = audit.clone();
+    let hooks_accept_session_log = session_log.clone();
+    let hooks_accept_handle =
+        tokio::spawn(async move {
+            loop {
+                match hooks_listener.accept().await {
+                    Ok(stream) => {
+                        #[cfg(unix)]
+                        match stream.peer_principal() {
+                            Ok(actual) if actual == hooks_expected_principal => {}
+                            Ok(actual) => {
+                                tracing::warn!(
+                                    "hooks gateway: refusing peer {} (expected {})",
+                                    actual,
+                                    hooks_expected_principal
+                                );
+                                let _ =
+                                    hooks_accept_audit
+                                        .log(
+                                            AuditEvent::new(
+                                                ActorKind::Service,
+                                                "gateway",
+                                                "hooks.peer.refused",
+                                                "gateway-hooks-socket",
+                                            )
+                                            .with_detail(serde_json::json!({
+                                                "reason": "principal_mismatch",
+                                                "expected": hooks_expected_principal.to_string(),
+                                                "actual": actual.to_string(),
+                                            })),
+                                        )
+                                        .await;
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "hooks gateway: peer_principal unavailable, refusing: {e}"
+                                );
+                                let _ =
+                                    hooks_accept_audit
+                                        .log(
+                                            AuditEvent::new(
+                                                ActorKind::Service,
+                                                "gateway",
+                                                "hooks.peer.refused",
+                                                "gateway-hooks-socket",
+                                            )
+                                            .with_detail(serde_json::json!({
+                                                "reason": "peer_principal_unavailable",
+                                                "error": e.to_string(),
+                                            })),
+                                        )
+                                        .await;
+                                continue;
+                            }
+                        }
+
+                        let reg = hooks_accept_registry.clone();
+                        let disp = hooks_accept_dispatcher.clone();
+                        let slog = hooks_accept_session_log.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_hook_connection(stream, reg, disp, slog).await {
+                                tracing::error!("Hook connection error: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Hooks accept error: {e}");
+                    }
+                }
+            }
+        });
 
     // --- Orchestrator-push listener (Zirkel C-Signal) ---
     //
@@ -1320,6 +1440,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     mcp_proxy_handle.abort();
     accept_handle.abort();
+    hooks_accept_handle.abort();
     #[cfg(unix)]
     orchestrator_handle.abort();
     webchat_handle.abort();
@@ -1534,6 +1655,302 @@ async fn handle_adapter_connection(
 
     tracing::info!("Adapter '{adapter_id}' disconnected");
     result
+}
+
+/// Handle one inbound hook connection. Snapshot-then-verify the
+/// hook_registry, perform the hook-domain handshake, emit
+/// `SessionEvent::HookRegistered` on the gateway-hooks sentinel
+/// session, then route by `hook_type`:
+///
+/// - **Observe**: serve `SessionLogTail` requests in a loop. The
+///   hook drives its own cursor. No fanout, no broadcast; the
+///   append path stays zero-touch.
+/// - **Veto**: register a live writer + a per-connection pending
+///   map with the `HookDispatcher`'s active set. Spawn a reader
+///   task that routes incoming `VetoResponse` frames to the
+///   matching pending oneshot by request_id. On reader EOF or read
+///   error, drain pending and emit `HookCrashed`.
+///
+/// The dev-mode escape hatch `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1`
+/// bypasses the registry verify in the handshake; the audit row
+/// records the unregistered status.
+async fn handle_hook_connection(
+    stream: wirken_ipc::BoxStream,
+    registry: Arc<Mutex<wirken_gateway::hook_registry::HookRegistry>>,
+    dispatcher: Arc<wirken_gateway::hook_dispatcher::HookDispatcher>,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
+) -> Result<()> {
+    use wirken_audit::{HookKind, HookSignatureStatus, SessionEvent, SessionId, TrustLevel};
+    use wirken_ipc::{HookType, perform_gateway_hook_handshake};
+
+    let (mut reader, mut writer) = split_stream(stream);
+
+    let allow_unregistered =
+        wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS");
+    let known: std::collections::HashMap<String, ([u8; 32], HookType)> = {
+        let reg = registry.lock().await;
+        reg.list()
+            .into_iter()
+            .map(|e| (e.hook_id, (e.public_key, e.hook_type)))
+            .collect()
+    };
+
+    // Track whether this connection was accepted via the dev escape
+    // hatch so the post-handshake audit row records the right
+    // signature status.
+    let unregistered_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let unregistered_flag_for_closure = unregistered_flag.clone();
+
+    let verified = perform_gateway_hook_handshake(&mut reader, &mut writer, move |id, pk, ty| {
+        match known.get(id) {
+            Some((expected_pk, expected_ty)) => {
+                if expected_pk != pk {
+                    Err(wirken_ipc::HandshakeError::InvalidSignature)
+                } else if *expected_ty != ty {
+                    Err(wirken_ipc::HandshakeError::HookTypeMismatch {
+                        hook_id: id.to_string(),
+                        registered: expected_ty.as_wire().to_string(),
+                        claimed: ty.as_wire().to_string(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            None if allow_unregistered => {
+                unregistered_flag_for_closure.store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::warn!(
+                    hook_id = id,
+                    "WIRKEN_ALLOW_UNREGISTERED_HOOKS=1: accepting unregistered hook",
+                );
+                Ok(())
+            }
+            None => Err(wirken_ipc::HandshakeError::UnknownHook(id.to_string())),
+        }
+    })
+    .await
+    .context("hook handshake failed")?;
+
+    let hook_id = verified.hook_id.clone();
+    let hook_type = verified.hook_type;
+    let signature_status = if unregistered_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        HookSignatureStatus::Unregistered
+    } else {
+        HookSignatureStatus::Registered
+    };
+
+    // Emit HookRegistered on a sentinel session id reserved for
+    // gateway-wide hook lifecycle events. Verifiable like any other
+    // session; not associated with any agent's chain.
+    let gateway_session = session_log.handle_for(SessionId::new("gateway-hooks"));
+    let audit_kind = match hook_type {
+        HookType::Observe => HookKind::Observe,
+        HookType::Veto => HookKind::Veto,
+    };
+    let _ = session_log.append(
+        &gateway_session,
+        TrustLevel::System,
+        SessionEvent::HookRegistered {
+            hook_id: hook_id.clone(),
+            hook_type: audit_kind,
+            signature_status,
+        },
+    );
+    registry.lock().await.set_connected(&hook_id, true);
+    tracing::info!(
+        hook_id = %hook_id,
+        hook_type = hook_type.as_wire(),
+        signature_status = ?signature_status,
+        "Hook authenticated and routed",
+    );
+
+    let crash_reason = match hook_type {
+        HookType::Observe => serve_observe_loop(reader, writer, &hook_id, &session_log).await,
+        HookType::Veto => serve_veto_loop(reader, writer, &hook_id, &dispatcher).await,
+    };
+
+    registry.lock().await.set_connected(&hook_id, false);
+    let _ = session_log.append(
+        &gateway_session,
+        TrustLevel::System,
+        SessionEvent::HookCrashed {
+            hook_id: hook_id.clone(),
+            error: crash_reason.clone(),
+        },
+    );
+    tracing::info!(hook_id = %hook_id, reason = %crash_reason, "Hook disconnected");
+    Ok(())
+}
+
+/// Observe-hook serving loop. Reads `SessionLogTail` requests from
+/// the hook and responds with batched `SessionLogTailResponse`
+/// frames. Returns the snake_case crash reason when the loop ends
+/// (clean EOF or read error).
+async fn serve_observe_loop(
+    mut reader: wirken_ipc::IpcFrameReader,
+    mut writer: wirken_ipc::IpcFrameWriter,
+    hook_id: &str,
+    session_log: &Arc<dyn wirken_audit::SessionLog>,
+) -> String {
+    use wirken_audit::SessionId;
+    use wirken_ipc::wirken_capnp::frame;
+
+    loop {
+        let msg = match reader.read_message().await {
+            Ok(m) => m,
+            Err(_) => return "connection_dropped".to_string(),
+        };
+        // Extract all data from the capnp Reader synchronously into
+        // owned types; the Reader contains raw pointers and is !Send,
+        // so it must be dropped before any subsequent await.
+        let extracted: Result<(String, u64, usize), &'static str> = (|| {
+            let frame_reader = msg
+                .get_root::<frame::Reader<'_>>()
+                .map_err(|_| "observe_frame_parse")?;
+            let which = frame_reader.which().map_err(|_| "observe_frame_variant")?;
+            let frame::SessionLogTail(tail) = which else {
+                return Err("observe_unexpected_frame");
+            };
+            let tail = tail.map_err(|_| "observe_frame_parse")?;
+            let session_id_str = tail
+                .get_session_id()
+                .map_err(|_| "observe_session_id_parse")?
+                .to_string()
+                .map_err(|_| "observe_session_id_parse")?;
+            let since_seq = tail.get_since_seq();
+            let max_rows = tail.get_max_rows() as usize;
+            Ok((session_id_str, since_seq, max_rows))
+        })();
+        let (session_id_str, since_seq, max_rows) = match extracted {
+            Ok(t) => t,
+            Err(label) => {
+                tracing::warn!(hook_id, label, "observe extract failed");
+                return label.to_string();
+            }
+        };
+        drop(msg);
+
+        let handle = session_log.handle_for(SessionId::new(session_id_str.clone()));
+        let rows = match session_log.get_since(&handle, since_seq) {
+            Ok(rs) => rs,
+            Err(e) => {
+                tracing::warn!(hook_id, error = %e, "observe get_since failed");
+                return "observe_session_log_read".to_string();
+            }
+        };
+
+        let capped: Vec<&wirken_audit::StoredSessionEvent> =
+            rows.iter().take(max_rows.max(1)).collect();
+        let next_seq = capped.last().map(|row| row.seq + 1).unwrap_or(since_seq);
+
+        let mut message = capnp::message::Builder::new_default();
+        {
+            let frame_builder = message.init_root::<frame::Builder<'_>>();
+            let mut resp = frame_builder.init_session_log_tail_response();
+            resp.set_next_seq(next_seq);
+            let mut events_builder = resp.init_events(capped.len() as u32);
+            for (idx, row) in capped.iter().enumerate() {
+                let mut ev = events_builder.reborrow().get(idx as u32);
+                ev.set_seq(row.seq);
+                let json = match serde_json::to_string(&row.event) {
+                    Ok(j) => j,
+                    Err(_) => return "observe_event_serialize".to_string(),
+                };
+                ev.set_payload(&json);
+            }
+        }
+        if writer.write_message(&message).await.is_err() {
+            return "connection_dropped".to_string();
+        }
+    }
+}
+
+/// Veto-hook serving loop. Registers the writer + a per-connection
+/// pending map with the dispatcher so subsequent `dispatch` calls
+/// route through this connection. Reads `VetoResponse` frames in a
+/// loop and routes them to the matching pending oneshot by
+/// request_id. Returns the snake_case crash reason on EOF or error;
+/// the caller is responsible for unregistering.
+async fn serve_veto_loop(
+    mut reader: wirken_ipc::IpcFrameReader,
+    writer: wirken_ipc::IpcFrameWriter,
+    hook_id: &str,
+    dispatcher: &Arc<wirken_gateway::hook_dispatcher::HookDispatcher>,
+) -> String {
+    use std::collections::HashMap;
+    use tokio::sync::Mutex as AsyncMutex;
+    use wirken_gateway::hook_dispatcher::VetoResult;
+    use wirken_ipc::wirken_capnp::frame;
+
+    let writer = Arc::new(AsyncMutex::new(writer));
+    let pending: Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<VetoResult>>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    dispatcher
+        .register(hook_id, writer.clone(), pending.clone())
+        .await;
+
+    let crash_reason = loop {
+        let msg = match reader.read_message().await {
+            Ok(m) => m,
+            Err(_) => break "connection_dropped".to_string(),
+        };
+        // Extract owned data from the capnp Reader before holding it
+        // across any await. Returns `Err(label)` for parse failures
+        // that the loop translates into a crash reason.
+        let extracted: Result<(String, VetoResult), &'static str> = (|| {
+            let frame_reader = msg
+                .get_root::<frame::Reader<'_>>()
+                .map_err(|_| "veto_frame_parse")?;
+            let which = frame_reader.which().map_err(|_| "veto_frame_variant")?;
+            let frame::VetoResponse(resp) = which else {
+                return Err("veto_unexpected_frame");
+            };
+            let resp = resp.map_err(|_| "veto_frame_parse")?;
+            let request_id = resp
+                .get_request_id()
+                .map_err(|_| "veto_request_id_parse")?
+                .to_string()
+                .map_err(|_| "veto_request_id_parse")?;
+            let result = match resp.which() {
+                Ok(wirken_ipc::wirken_capnp::veto_response::Allow(_)) => VetoResult::Allow,
+                Ok(wirken_ipc::wirken_capnp::veto_response::Deny(reason)) => {
+                    let reason = reason
+                        .ok()
+                        .and_then(|r| r.to_string().ok())
+                        .unwrap_or_default();
+                    VetoResult::Deny { reason }
+                }
+                Err(_) => return Err("veto_response_decision"),
+            };
+            Ok((request_id, result))
+        })();
+        let (request_id, result) = match extracted {
+            Ok(t) => t,
+            Err(label) => break label.to_string(),
+        };
+        drop(msg);
+
+        let sender = pending.lock().unwrap().remove(&request_id);
+        if let Some(sender) = sender {
+            let _ = sender.send(result);
+        } else {
+            tracing::warn!(
+                hook_id,
+                request_id = %request_id,
+                "veto response for unknown or timed-out request_id; dropping",
+            );
+        }
+    };
+
+    // Drain pending so all in-flight dispatchers see ConnectionDropped.
+    {
+        let mut guard = pending.lock().unwrap();
+        for (_, sender) in guard.drain() {
+            drop(sender);
+        }
+    }
+    dispatcher.unregister(hook_id).await;
+    crash_reason
 }
 
 /// Handle one orchestrator-push connection: read one JSON request,

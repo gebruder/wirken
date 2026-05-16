@@ -208,6 +208,13 @@ pub struct AgentFactory {
     /// permission check. Shared across every waked Agent because org
     /// policy is a gateway-wide setting, not a per-agent one.
     org_permissions: Option<Arc<OrgPermissions>>,
+    /// External veto-hook dispatcher. Defaults to `NoopDispatcher`
+    /// so factories built without a hook layer pay no cost. The CLI
+    /// runs `attach_veto_dispatcher` after constructing the factory
+    /// to install the real `HookDispatcher` populated by the hooks
+    /// accept loop. Interior-mutable so the CLI can install it after
+    /// the factory is already in an `Arc`.
+    veto_dispatcher: std::sync::RwLock<Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -265,10 +272,29 @@ impl AgentFactory {
             session_log,
             permissions,
             org_permissions,
+            veto_dispatcher: std::sync::RwLock::new(Arc::new(
+                wirken_gateway::hook_dispatcher::NoopDispatcher,
+            )),
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
         })
+    }
+
+    /// Install the veto-hook dispatcher. Called by the CLI after the
+    /// hooks accept loop has built the dispatcher and connected the
+    /// active set. Subsequent calls to [`Self::wake`] inject this
+    /// dispatcher into every constructed Agent. Idempotent; the
+    /// last writer wins.
+    pub fn attach_veto_dispatcher(
+        &self,
+        dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
+    ) {
+        *self.veto_dispatcher.write().unwrap() = dispatcher;
+    }
+
+    fn current_veto_dispatcher(&self) -> Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher> {
+        self.veto_dispatcher.read().unwrap().clone()
     }
 
     /// A `Weak<Self>` reference to this factory. Used internally by
@@ -387,6 +413,7 @@ impl AgentFactory {
         if let Some(org) = &self.org_permissions {
             agent.set_org_permissions(org.clone());
         }
+        agent.set_veto_dispatcher(self.current_veto_dispatcher());
         if let Some(mcp) = &cfg.mcp_client {
             agent.attach_mcp(mcp.clone());
         }
