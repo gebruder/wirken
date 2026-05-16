@@ -1137,12 +1137,31 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let webchat_factory = factory.clone();
     let webchat_audit = audit.clone();
     let webchat_sessions = sessions.clone();
+
+    // SSE approval gate. The per-process registry tracks live
+    // /api/chat senders so the gate can push ApprovalRequest
+    // events to the in-flight stream when an agent hits
+    // NeedsApproval mid-tool-dispatch. The gate routes
+    // webchat-channel sessions (`{agent}/webchat/{conv}`); other
+    // sessions fall back to the default CLI gate.
+    let sse_approval_registry =
+        Arc::new(wirken_gateway::sse_approval_registry::SseApprovalRegistry::new());
+    factory.attach_sse_approval_gate(Arc::new(
+        wirken_agent::sse_approval_gate::SseApprovalGate::new(
+            pending_approval_queue.clone(),
+            sse_approval_registry.clone(),
+        ),
+    ));
+    let webchat_pending = pending_approval_queue.clone();
+    let webchat_registry = sse_approval_registry.clone();
     let webchat_handle = tokio::spawn(async move {
         if let Err(e) = super::webchat::serve(
             webchat_port,
             webchat_factory,
             webchat_audit,
             webchat_sessions,
+            webchat_pending,
+            webchat_registry,
         )
         .await
         {

@@ -233,6 +233,12 @@ pub struct AgentFactory {
     /// an `approval_chat_id` configured. `None` when telegram is
     /// not configured; the factory falls back to `approval_gate`.
     telegram_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Channel-specific approval gate for webchat sessions
+    /// (`{agent}/webchat/{conv}` session-id format). Installed by
+    /// the `wirken webchat` command when serving locally; webchat
+    /// is loopback-only and bound to the gateway's owner so no
+    /// per-user allowlist exists yet (login is a separate slice).
+    sse_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -295,6 +301,7 @@ impl AgentFactory {
             )),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
+            sse_approval_gate: std::sync::RwLock::new(None),
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
@@ -321,18 +328,38 @@ impl AgentFactory {
         *self.telegram_approval_gate.write().unwrap() = Some(gate);
     }
 
-    /// Pick the right gate for a session id. Telegram-channel
-    /// sessions get the telegram gate when installed; everything
-    /// else gets the default. `None` means no gate is configured
-    /// at all (NeedsApproval fails terminally — pre-bf974c9 behavior).
+    /// Install the SSE webchat approval gate. Sessions whose id
+    /// parses with channel `"webchat"` route through this gate.
+    /// Installed by the `wirken webchat` command when constructing
+    /// the per-process registry; standalone tools that don't run
+    /// webchat leave it unset and webchat-channel sessions (which
+    /// shouldn't exist in those contexts anyway) fall back to the
+    /// default gate.
+    pub fn attach_sse_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
+        *self.sse_approval_gate.write().unwrap() = Some(gate);
+    }
+
+    /// Pick the right gate for a session id. Channel-specific
+    /// gates win when installed for the session's channel;
+    /// everything else falls back to the default gate. `None`
+    /// means no gate is configured at all (NeedsApproval fails
+    /// terminally — pre-bf974c9 behavior).
     fn approval_gate_for(
         &self,
         session_id: &str,
     ) -> Option<Arc<dyn crate::approval_gate::ApprovalGate>> {
-        if channel_from_session_id(session_id) == Some("telegram")
-            && let Some(g) = self.telegram_approval_gate.read().unwrap().clone()
-        {
-            return Some(g);
+        match channel_from_session_id(session_id) {
+            Some("telegram") => {
+                if let Some(g) = self.telegram_approval_gate.read().unwrap().clone() {
+                    return Some(g);
+                }
+            }
+            Some("webchat") => {
+                if let Some(g) = self.sse_approval_gate.read().unwrap().clone() {
+                    return Some(g);
+                }
+            }
+            _ => {}
         }
         self.approval_gate.read().unwrap().clone()
     }

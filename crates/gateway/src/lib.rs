@@ -16,6 +16,7 @@ pub mod router;
 pub mod scheduler;
 pub mod session;
 pub mod skill_registry;
+pub mod sse_approval_registry;
 
 #[cfg(test)]
 mod tests;
