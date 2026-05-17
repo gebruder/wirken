@@ -348,3 +348,176 @@ fn discord_and_telegram_sessions_are_distinct() {
     // let _: SessionHandle<Telegram> = dc;
     // let _: SessionHandle<Discord> = tg;
 }
+
+// ---------------------------------------------------------------------------
+// Approval-frame conversions (slice: discord approval gate per umbrella #119)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "req-uuid", true, 555_000_111_222, "davi");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "555000111222"
+            );
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "davi");
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, 99, "");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {}
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "discord_api_error");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(
+                f.get_reason().unwrap().to_str().unwrap(),
+                "discord_api_error"
+            );
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips() {
+    // u64 channel id: snowflake-shaped value. Confirms the
+    // discord-side parse accepts the platform-neutral string IPC
+    // field and produces a u64 channel id without truncation.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("1024851234567891234");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.request_id, "abc");
+    assert_eq!(fields.tool_name, "shell");
+    assert_eq!(fields.action_key, "shell:rm");
+    assert_eq!(fields.requested_tier, "tier3");
+    assert_eq!(fields.triggering_agent, "default");
+    assert_eq!(fields.trigger_message, "clean logs");
+    assert_eq!(fields.target_channel_id, 1024851234567891234u64);
+}
+
+#[test]
+fn approval_request_rejects_non_numeric_channel_id() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("not-a-channel-id");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(
+        convert::parse_approval_request(&reader).is_err(),
+        "discord channel ids are u64 snowflakes; non-numeric must reject"
+    );
+}
+
+#[test]
+fn approval_request_rejects_negative_channel_id() {
+    // Discord ids are unsigned. Telegram's i64 chat ids can be
+    // negative (group chats are negative); on Discord the parse
+    // must refuse them.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("-100123");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(
+        convert::parse_approval_request(&reader).is_err(),
+        "negative chat id (telegram-shaped) must reject on discord"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-adapter custom_id round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn custom_id_encoded_by_adapter_core_decodes_to_original_payload() {
+    use wirken_adapter_core::approval::{ApprovalPayload, Decision, decode, encode};
+    let original = ApprovalPayload {
+        request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+        decision: Decision::Allow,
+    };
+    // Simulate what happens on the wire: encode goes on the outbound
+    // button, decode runs on the inbound click. Discord's platform
+    // round-trips the custom_id opaquely, so the assertion is a
+    // direct decode of the encoded form.
+    let custom_id = encode(&original).unwrap();
+    let decoded = decode(&custom_id).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn malformed_custom_id_returns_decode_error() {
+    use wirken_adapter_core::approval::{DecodeError, decode};
+    // The adapter's interaction_create handler drops malformed
+    // presses with a warn and acknowledges to the clicker. The
+    // drop decision keys off `decode` returning `Err`; pinning the
+    // contract here so a regression in adapter-core surfaces in
+    // the adapter's test surface too.
+    assert!(matches!(
+        decode("notaprefix:550e8400-e29b-41d4-a716-446655440000:allow"),
+        Err(DecodeError::UnknownPrefix)
+    ));
+    assert!(matches!(
+        decode("req:550e8400-e29b-41d4-a716-446655440000:maybe"),
+        Err(DecodeError::UnknownDecision(_))
+    ));
+}

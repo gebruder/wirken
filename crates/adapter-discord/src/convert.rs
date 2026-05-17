@@ -141,3 +141,145 @@ pub fn build_heartbeat(
     let mut hb = frame_builder.init_heartbeat();
     hb.set_seq(seq);
 }
+
+/// Build an `ApprovalDecision` frame to send back to the gateway
+/// when an operator presses an approval button. The `custom_id`
+/// decoding lives at the press site in `adapter.rs`; the decision
+/// bool is derived there and passed in. Discord's u64 user id is
+/// stringified into `actorUserId`; the gateway side calls
+/// `approver_registry::verify("discord", &actor_user_id)` against
+/// the registered allowlist. The adapter does not call verify
+/// directly (layering: adapters do not depend on gateway state);
+/// unauthorized presses are silently dropped on the gateway side,
+/// matching the Telegram adapter's posture.
+pub fn build_approval_decision(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    is_allow: bool,
+    user_id: u64,
+    user_display: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut decision = frame_builder.init_approval_decision();
+    decision.set_request_id(request_id);
+    decision.set_actor_user_id(user_id.to_string());
+    decision.set_actor_display(user_display);
+    let mut kind = decision.init_decision();
+    if is_allow {
+        kind.set_allow(());
+    } else {
+        // Discord component buttons carry no operator reason field
+        // (a follow-up modal would; out of scope for the first
+        // adapter slice). Empty string maps to `denial_reason:
+        // None` on the gateway side, matching Telegram.
+        kind.set_deny("");
+    }
+}
+
+/// Fields parsed from an `ApprovalRequest` frame the adapter
+/// renders as a Components-v2 button row in the configured
+/// approval channel.
+///
+/// `target_channel_id` is parsed as `u64` because Discord channel
+/// ids are unsigned 64-bit snowflakes. The platform-neutral
+/// `targetConversationId` IPC field is a string; each adapter
+/// parses it according to its platform's identifier shape:
+///
+/// - Telegram chat ids are signed 64-bit (`i64`).
+/// - Discord channel ids are unsigned 64-bit (`u64`).
+/// - Slack, Teams, WhatsApp, Google Chat each have their own
+///   shape (string channel id, GUID, phone number, path id) and
+///   will land their own parse here in their respective adapter
+///   slices.
+///
+/// A non-numeric value indicates a gateway/operator
+/// misconfiguration and surfaces here as a capnp parse error
+/// rather than a runtime Discord API error.
+pub struct ApprovalRequestFields {
+    pub request_id: String,
+    pub tool_name: String,
+    pub action_key: String,
+    pub requested_tier: String,
+    pub triggering_agent: String,
+    pub trigger_message: String,
+    pub target_channel_id: u64,
+}
+
+pub fn parse_approval_request(
+    msg: &capnp::message::Reader<capnp::serialize::OwnedSegments>,
+) -> Result<ApprovalRequestFields, capnp::Error> {
+    let frame_reader = msg.get_root::<frame::Reader<'_>>()?;
+    match frame_reader.which()? {
+        frame::ApprovalRequest(req) => {
+            let r = req?;
+            let request_id = r
+                .get_request_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("request_id not utf8: {e}")))?
+                .to_string();
+            let tool_name = r
+                .get_tool_name()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("tool_name not utf8: {e}")))?
+                .to_string();
+            let action_key = r
+                .get_action_key()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("action_key not utf8: {e}")))?
+                .to_string();
+            let requested_tier = r
+                .get_requested_tier()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("requested_tier not utf8: {e}")))?
+                .to_string();
+            let triggering_agent = r
+                .get_triggering_agent()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("triggering_agent not utf8: {e}")))?
+                .to_string();
+            let trigger_message = r
+                .get_trigger_message()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
+                .to_string();
+            let target_channel_id = r
+                .get_target_conversation_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("target_conversation_id not utf8: {e}")))?
+                .parse::<u64>()
+                .map_err(|e| {
+                    capnp::Error::failed(format!(
+                        "discord target_conversation_id must be a numeric channel id: {e}"
+                    ))
+                })?;
+            Ok(ApprovalRequestFields {
+                request_id,
+                tool_name,
+                action_key,
+                requested_tier,
+                triggering_agent,
+                trigger_message,
+                target_channel_id,
+            })
+        }
+        _ => Err(capnp::Error::failed(
+            "expected ApprovalRequest frame".to_string(),
+        )),
+    }
+}
+
+/// Build an `ApprovalRequestFailed` frame back to the gateway when
+/// the adapter cannot deliver the approval message (channel
+/// inaccessible, Discord API rejection, etc.). The gateway-side
+/// audit row records the failure distinctly from a generic
+/// timeout.
+pub fn build_approval_request_failed(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    reason: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut failed = frame_builder.init_approval_request_failed();
+    failed.set_request_id(request_id);
+    failed.set_reason(reason);
+}
