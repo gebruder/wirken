@@ -601,3 +601,290 @@ mod jwt {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Approval-frame conversions (slice: google chat approval gate per umbrella #119)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "req-uuid", true, "users/12345", "Davi");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "users/12345"
+            );
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "Davi");
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, "users/12345", "");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {}
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "permission_denied");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(
+                f.get_reason().unwrap().to_str().unwrap(),
+                "permission_denied"
+            );
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips_path_shaped_space_name() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("spaces/AAAA123456");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.request_id, "abc");
+    assert_eq!(fields.tool_name, "shell");
+    assert_eq!(fields.target_channel_id, "spaces/AAAA123456");
+}
+
+#[test]
+fn approval_request_rejects_empty_space_name() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(convert::parse_approval_request(&reader).is_err());
+}
+
+#[test]
+fn wirken_approval_round_trip_through_shared_encoding() {
+    use wirken_adapter_core::approval::{ApprovalPayload, Decision, decode, encode};
+    let original = ApprovalPayload {
+        request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+        decision: Decision::Allow,
+    };
+    let wire = encode(&original).unwrap();
+    let decoded = decode(&wire).unwrap();
+    assert_eq!(decoded, original);
+}
+
+// ---------------------------------------------------------------------------
+// extract_approval_press
+// ---------------------------------------------------------------------------
+
+fn card_click_event(parameters: serde_json::Value, user: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": "CARD_CLICKED",
+        "user": user,
+        "common": { "parameters": parameters }
+    })
+}
+
+#[test]
+fn extract_approval_press_finds_payload() {
+    let event = card_click_event(
+        serde_json::json!({ "wirken_approval": "req:abc:allow" }),
+        serde_json::json!({ "name": "users/12345", "displayName": "Alice" }),
+    );
+    let press = convert::extract_approval_press(&event).unwrap();
+    assert_eq!(press.user_name, "users/12345");
+    assert_eq!(press.user_display, "Alice");
+    assert_eq!(press.encoded_payload, "req:abc:allow");
+}
+
+#[test]
+fn extract_approval_press_falls_back_display_to_user_name() {
+    let event = card_click_event(
+        serde_json::json!({ "wirken_approval": "req:abc:allow" }),
+        serde_json::json!({ "name": "users/12345" }),
+    );
+    let press = convert::extract_approval_press(&event).unwrap();
+    assert_eq!(press.user_display, "users/12345");
+}
+
+#[test]
+fn extract_approval_press_returns_none_when_parameter_missing() {
+    let event = card_click_event(
+        serde_json::json!({ "other_field": "x" }),
+        serde_json::json!({ "name": "users/12345" }),
+    );
+    assert!(convert::extract_approval_press(&event).is_none());
+}
+
+#[test]
+fn extract_approval_press_returns_none_when_user_name_missing() {
+    let event = card_click_event(
+        serde_json::json!({ "wirken_approval": "req:abc:allow" }),
+        serde_json::json!({ "displayName": "Alice" }),
+    );
+    assert!(convert::extract_approval_press(&event).is_none());
+}
+
+#[test]
+fn extract_approval_press_returns_none_when_user_name_empty() {
+    let event = card_click_event(
+        serde_json::json!({ "wirken_approval": "req:abc:allow" }),
+        serde_json::json!({ "name": "", "displayName": "Alice" }),
+    );
+    assert!(convert::extract_approval_press(&event).is_none());
+}
+
+#[test]
+fn extract_approval_press_returns_none_for_message_event() {
+    let event = serde_json::json!({
+        "type": "MESSAGE",
+        "message": { "text": "hello" }
+    });
+    assert!(convert::extract_approval_press(&event).is_none());
+}
+
+#[test]
+fn extract_approval_press_ignores_legacy_action_parameters_shape() {
+    // The legacy CARD_CLICKED shape carried parameters as an
+    // array of {key, value} under event.action.parameters. This
+    // extractor handles only the newer common.parameters shape;
+    // the legacy array does not match and the press drops with
+    // None. If a deployment ever needs legacy-shape support, a
+    // sibling extract_approval_press_legacy lands as a separate
+    // change, not as an if-let chain inside this function.
+    let event = serde_json::json!({
+        "type": "CARD_CLICKED",
+        "user": { "name": "users/12345" },
+        "action": {
+            "actionMethodName": "wirken_approve",
+            "parameters": [{ "key": "wirken_approval", "value": "req:abc:allow" }]
+        }
+    });
+    assert!(convert::extract_approval_press(&event).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// privateMessageViewer ephemeral response body
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_response_body_targets_clicker_with_private_message_viewer() {
+    let body = super::adapter::build_approval_response_body("users/12345", true);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["text"], "Approved");
+    assert_eq!(parsed["actionResponse"]["type"], "NEW_MESSAGE");
+    assert_eq!(parsed["privateMessageViewer"]["name"], "users/12345");
+}
+
+#[test]
+fn approval_response_body_deny_path() {
+    let body = super::adapter::build_approval_response_body("users/12345", false);
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed["text"], "Denied");
+}
+
+// ---------------------------------------------------------------------------
+// classify_send_error
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classify_send_error_maps_permission_denied() {
+    let body = serde_json::json!({
+        "error": {
+            "code": 403,
+            "status": "PERMISSION_DENIED",
+            "message": "The caller does not have permission"
+        }
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(403, &body),
+        "permission_denied"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_not_found_to_space_not_found() {
+    let body = serde_json::json!({
+        "error": {
+            "code": 404,
+            "status": "NOT_FOUND",
+            "message": "Space not found"
+        }
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(404, &body),
+        "space_not_found"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_unauthenticated() {
+    let body = serde_json::json!({
+        "error": { "code": 401, "status": "UNAUTHENTICATED" }
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(401, &body),
+        "googlechat_auth_error"
+    );
+}
+
+#[test]
+fn classify_send_error_falls_back_to_http_status_when_no_google_status() {
+    assert_eq!(
+        super::adapter::classify_send_error(403, ""),
+        "googlechat_auth_error"
+    );
+    assert_eq!(
+        super::adapter::classify_send_error(404, ""),
+        "space_not_found"
+    );
+    assert_eq!(
+        super::adapter::classify_send_error(500, ""),
+        "googlechat_api_error"
+    );
+}
