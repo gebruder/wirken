@@ -8,6 +8,7 @@ use teloxide::types::{
 };
 use tokio::sync::Mutex;
 
+use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
 use wirken_adapter_core::{OutboundFormatter, TelegramFormatter};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
@@ -118,27 +119,37 @@ async fn run_inbound(bot: Bot, writer: Arc<Mutex<IpcFrameWriter>>) {
         .await;
 }
 
-/// One callback-query press. Format of `callback_data`:
-/// `req:<uuid>:allow` or `req:<uuid>:deny`. Documented at the
-/// encode site in [`build_approval_message`] so the next channel
-/// adapter implementer can match the format. Other adapters'
-/// callback-data limits (Discord 100, Slack 255) accommodate the
-/// same shape trivially.
+/// One callback-query press. `callback_data` carries the
+/// cross-adapter approval payload encoded by
+/// `wirken_adapter_core::approval`. Unrecognised payloads are
+/// dropped after a neutral acknowledgement so the clicker's
+/// spinner clears regardless.
 async fn handle_callback_query(
     q: CallbackQuery,
     bot: Bot,
     writer: Arc<Mutex<IpcFrameWriter>>,
 ) -> Result<(), teloxide::RequestError> {
     let id = q.id.clone();
-    let parsed = q.data.as_deref().and_then(parse_callback_data);
-    let Some((request_id, decision_is_allow)) = parsed else {
-        tracing::warn!(
-            user = q.from.id.0,
-            data = ?q.data,
-            "telegram callback: unrecognized callback_data; dropping"
-        );
-        let _ = bot.answer_callback_query(id).await;
-        return Ok(());
+    let payload = match q.data.as_deref().map(approval::decode) {
+        Some(Ok(p)) => p,
+        Some(Err(e)) => {
+            tracing::warn!(
+                user = q.from.id.0,
+                data = ?q.data,
+                error = %e,
+                "telegram callback: unrecognized callback_data; dropping"
+            );
+            let _ = bot.answer_callback_query(id).await;
+            return Ok(());
+        }
+        None => {
+            tracing::warn!(
+                user = q.from.id.0,
+                "telegram callback: missing callback_data; dropping"
+            );
+            let _ = bot.answer_callback_query(id).await;
+            return Ok(());
+        }
     };
 
     let user_id = q.from.id.0 as i64;
@@ -147,11 +158,12 @@ async fn handle_callback_query(
         .username
         .clone()
         .unwrap_or_else(|| q.from.first_name.clone());
+    let decision_is_allow = matches!(payload.decision, Decision::Allow);
 
     let mut capnp_msg = capnp::message::Builder::new_default();
     convert::build_approval_decision(
         &mut capnp_msg,
-        &request_id,
+        &payload.request_id,
         decision_is_allow,
         user_id,
         &user_display,
@@ -177,27 +189,6 @@ async fn handle_callback_query(
     };
     let _ = bot.answer_callback_query(id).text(ack_text).await;
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn parse_callback_data_for_test(data: &str) -> Option<(String, bool)> {
-    parse_callback_data(data)
-}
-
-/// Parse `req:<uuid>:allow|deny`. Returns `(uuid, is_allow)`.
-/// Malformed payloads return None; the caller drops the press.
-fn parse_callback_data(data: &str) -> Option<(String, bool)> {
-    let stripped = data.strip_prefix("req:")?;
-    let (uuid, suffix) = stripped.rsplit_once(':')?;
-    let is_allow = match suffix {
-        "allow" => true,
-        "deny" => false,
-        _ => return None,
-    };
-    if uuid.is_empty() {
-        return None;
-    }
-    Some((uuid.to_string(), is_allow))
 }
 
 /// Handle outbound messages from gateway and send via Telegram.
@@ -324,9 +315,44 @@ async fn send_approval_request(
         },
     );
 
-    let approve =
-        InlineKeyboardButton::callback("Approve", format!("req:{}:allow", fields.request_id));
-    let deny = InlineKeyboardButton::callback("Deny", format!("req:{}:deny", fields.request_id));
+    // Encode the approval payloads under the cross-adapter
+    // convention from `wirken_adapter_core::approval`. Encoding
+    // failure would indicate a malformed request_id (empty, or
+    // containing a colon); emit ApprovalRequestFailed rather than
+    // building a half-shaped message.
+    let allow_data = match approval::encode(&ApprovalPayload {
+        request_id: fields.request_id.clone(),
+        decision: Decision::Allow,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "telegram approval: encode failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "encode_failed").await;
+            return;
+        }
+    };
+    let deny_data = match approval::encode(&ApprovalPayload {
+        request_id: fields.request_id.clone(),
+        decision: Decision::Deny,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "telegram approval: encode failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "encode_failed").await;
+            return;
+        }
+    };
+
+    let approve = InlineKeyboardButton::callback("Approve", allow_data);
+    let deny = InlineKeyboardButton::callback("Deny", deny_data);
     let keyboard = InlineKeyboardMarkup::new(vec![vec![approve, deny]]);
 
     let chat = ChatId(fields.target_chat_id);
@@ -343,12 +369,20 @@ async fn send_approval_request(
             "telegram approval: send failed; emitting ApprovalRequestFailed"
         );
         let reason = classify_send_error(&e);
-        let mut failure = capnp::message::Builder::new_default();
-        convert::build_approval_request_failed(&mut failure, &fields.request_id, reason);
-        let mut w = writer.lock().await;
-        if let Err(send_err) = w.write_message(&failure).await {
-            tracing::error!("telegram approval: failed to send ApprovalRequestFailed: {send_err}");
-        }
+        emit_approval_failure(writer, &fields.request_id, reason).await;
+    }
+}
+
+async fn emit_approval_failure(
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+    request_id: &str,
+    reason: &str,
+) {
+    let mut failure = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut failure, request_id, reason);
+    let mut w = writer.lock().await;
+    if let Err(send_err) = w.write_message(&failure).await {
+        tracing::error!("telegram approval: failed to send ApprovalRequestFailed: {send_err}");
     }
 }
 

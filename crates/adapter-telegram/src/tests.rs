@@ -404,37 +404,31 @@ fn approval_request_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
-// Callback-data parse
+// Callback-data round-trip through the shared adapter-core encoding
 // ---------------------------------------------------------------------------
+//
+// The Telegram adapter previously carried a local `parse_callback_data`
+// helper covering the `req:<uuid>:allow|deny` form. After the retrofit
+// to `wirken_adapter_core::approval` (umbrella #119), that local
+// parser is deleted and the per-parser unit tests with it; the
+// canonical edge-case coverage (missing prefix, unknown decision,
+// empty request_id) lives in `crates/adapter-core/src/approval.rs`
+// tests. The single Telegram-side assertion left here is the
+// end-to-end round-trip property: an `ApprovalPayload` encoded by
+// the shared module decodes back to the original value, which is
+// what the inline-keyboard callback flow does over the wire.
 
 #[test]
-fn callback_data_parse_allow() {
-    let (uuid, allow) = crate::adapter::parse_callback_data_for_test(
-        "req:9b8f1c0a-1234-4abc-9def-0123456789ab:allow",
-    )
-    .unwrap();
-    assert_eq!(uuid, "9b8f1c0a-1234-4abc-9def-0123456789ab");
-    assert!(allow);
-}
-
-#[test]
-fn callback_data_parse_deny() {
-    let (uuid, allow) = crate::adapter::parse_callback_data_for_test("req:abc:deny").unwrap();
-    assert_eq!(uuid, "abc");
-    assert!(!allow);
-}
-
-#[test]
-fn callback_data_parse_rejects_missing_prefix() {
-    assert!(crate::adapter::parse_callback_data_for_test("abc:allow").is_none());
-}
-
-#[test]
-fn callback_data_parse_rejects_unknown_suffix() {
-    assert!(crate::adapter::parse_callback_data_for_test("req:abc:wat").is_none());
-}
-
-#[test]
-fn callback_data_parse_rejects_empty_uuid() {
-    assert!(crate::adapter::parse_callback_data_for_test("req::allow").is_none());
+fn callback_data_round_trip_through_shared_encoding() {
+    use wirken_adapter_core::approval::{ApprovalPayload, Decision, decode, encode};
+    let original = ApprovalPayload {
+        request_id: "9b8f1c0a-1234-4abc-9def-0123456789ab".into(),
+        decision: Decision::Allow,
+    };
+    let callback_data = encode(&original).unwrap();
+    // Telegram's `callback_data` is byte-identical to the encoded
+    // form; the platform round-trips it opaquely back to the
+    // adapter on press.
+    let decoded = decode(&callback_data).unwrap();
+    assert_eq!(decoded, original);
 }
