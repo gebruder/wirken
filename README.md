@@ -75,7 +75,7 @@ Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Appl
 `wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken v1.6.0
+  wirken v1.7.0
   ──────
 
   Provider: ollama/llama3.2
@@ -220,12 +220,12 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Wirken 1.6.x is the current series. 1.6 gets fixes and features; 1.5 gets security fixes only. 1.4 and earlier are unsupported.
+Wirken 1.7.x is the current series. 1.7 gets fixes and features; 1.6 gets security fixes only. 1.5 and earlier are unsupported.
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
 - **16 bundled skills** under `skills/`.
-- **1482 tests** in the workspace, all green on main (`cargo test --workspace`).
+- **1802 tests** in the workspace, all green on main (`cargo test --workspace`).
 - **Signed releases.** `checksums.sha256` is signed offline with an Ed25519 SSH key. `install.sh` embeds the public key inline, fetches `checksums.sha256.sig` from the release, and fails closed on any verification failure. See [docs/release-signing.md](docs/release-signing.md) and [KEYS](KEYS).
 
 ## The name

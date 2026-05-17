@@ -10,6 +10,76 @@ tagged.
 
 ## Unreleased
 
+## [1.7.0] - 2026-05-17
+
+### Audit trust model
+
+- Verify failures discriminate schema-class (warn, continue) from
+  tamper-class (halt, surface). Three consecutive tamper failures still
+  cross `MAX_INTEGRITY_FAILURES` into halt; schema-class failures
+  accumulate on a separate counter and do not halt the writer. A
+  rename of an enum variant or a new optional field on
+  `SessionEvent` is no longer indistinguishable from a hash-chain
+  break. Closes #115.
+- Channel-routed verify events drain before the halt boundary
+  completes, so the operator's last view through any in-flight
+  surface (SSE, CLI permissions stream) sees the failure before the
+  writer goes dark. Earlier behavior could drop the verify event
+  mid-flush. Closes #107.
+- Boot-time refusal: if the audit chain finds an unacknowledged
+  alarm record from a prior session, `wirken run` fails closed at
+  boot rather than starting on top of an unobserved tamper signal.
+  Operator acknowledges via `wirken audit ack <event_id>`. Closes
+  #118.
+
+### Approval gates (cross-adapter umbrella)
+
+All nine channel adapters now carry an approval gate. The seven that
+had none (Discord, Slack, Teams, WhatsApp, Google Chat, Matrix,
+iMessage) gained one; the two that did (Telegram, Signal) realign on
+a shared payload contract.
+
+- `wirken-adapter-core::approval` adds a shared payload encoding
+  (`req:<uuid8>:allow|deny[:reason]`) consumed by every adapter that
+  emits an `ApprovalDecision` frame. One parser instead of nine
+  forks. Telegram retrofit moves to the shared encoding (previously
+  had an adapter-local shape).
+- Discord, Slack, Teams, WhatsApp, Google Chat: approval gate via
+  the platform's native interactive component (button / action /
+  interactive-button / chip / card-action). Approval press resolves
+  the pending request without an additional message round-trip.
+- Matrix: approval gate via `m.reaction` events against a
+  correlation table mapping `(room_id, event_id)` to request UUID.
+  `m.reaction` is the closest federated equivalent to a button on a
+  protocol with no vendor-specific interactive components.
+- iMessage: text-command approval gate (`!approve <prefix>` /
+  `!deny <prefix> [reason]`), same shape as Signal. Two of nine
+  adapters now use the text-command shape; the parser is factored
+  into `wirken-adapter-core::text_command` and consumed by both.
+
+### Lyrik output schema
+
+- `LYRIK_OUTPUT_SCHEMA.md` documents the JSON output contract at
+  version `1.0` and ships a reference validator (`lyrik-validate`).
+  Lyrik output consumers can pin to the schema version and detect
+  drift independent of the binary's release cadence. Closes #80.
+
+### Smaller fixes
+
+- Signal `ApprovalRequest` prompt normalized to the umbrella majority
+  shape (header, requested-by, request-id prefix). Removes a
+  Signal-only trailing `Request: <full-uuid>` line that did not
+  match the prompt convention used by the other adapters. Closes
+  #122.
+- Google Chat `MessageEvent::receive_text` derives `user_id` from
+  the canonical path identifier (`users/<id>`) consistent with the
+  approval-press path. Previously diverged: text events carried the
+  display-name path, approval-press events the canonical path.
+  Closes #120.
+- `wirken-adapter-core::text_command` module: the verbatim-clone
+  text-command parser previously duplicated across `adapter-signal`
+  and `adapter-imessage` is factored out of both. Closes #121.
+
 ## [1.6.0] - 2026-05-17
 
 ### Approval gates
