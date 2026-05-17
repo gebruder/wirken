@@ -1,14 +1,20 @@
-//! Channel-specific outbound formatters.
+//! Shared adapter primitives.
 //!
-//! Agents emit markdown. Each channel has its own rendering dialect
-//! (Signal: single-asterisk bold, no fenced blocks; Slack: mrkdwn;
-//! Telegram: MarkdownV2 with escape rules; …). Rendering each dialect
-//! in the agent core would couple it to every downstream channel. Keep
-//! the agent channel-agnostic; adapters apply their own [`OutboundFormatter`]
-//! on the way out.
+//! Two families of primitive live here:
 //!
-//! Scope: trait + [`PlainFormatter`] + [`SignalFormatter`] + [`SlackFormatter`]
-//! + [`DiscordFormatter`] + [`TelegramFormatter`].
+//! 1. Channel-specific outbound formatters. Agents emit markdown;
+//!    each channel has its own rendering dialect (Signal
+//!    single-asterisk bold, Slack mrkdwn, Telegram MarkdownV2, etc.)
+//!    and adapters apply their own [`OutboundFormatter`] on the way
+//!    out. The Matrix adapter still ships raw markdown; its
+//!    formatter is tracked as a follow-up in #71.
+//!
+//! 2. Approval-payload encoding for inline-button channels (see
+//!    [`approval`]). Lifted from the Telegram adapter as the
+//!    reference shape so the next button-native adapter slices
+//!    (Discord, Slack, Teams, WhatsApp, Google Chat per umbrella
+//!    #119) inherit one named convention rather than four
+//!    independent re-implementations.
 //!
 //! [`TelegramFormatter`] emits HTML, not MarkdownV2, because the escape
 //! surface is bounded (three characters: `<`, `>`, `&`) and the
@@ -16,9 +22,8 @@
 //! escape table covers fifteen-plus characters and is the kind of
 //! perfect-parser-over-hostile-input that fails silently on a single
 //! missed character; HTML mode collapses that surface.
-//!
-//! The Matrix adapter still ships raw markdown. Its formatter is
-//! tracked as a follow-up in #71.
+
+pub mod approval;
 
 /// Transform agent-emitted markdown into a string suitable for the
 /// target channel's plain-text or rich-text envelope.
