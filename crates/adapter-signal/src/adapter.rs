@@ -951,29 +951,22 @@ async fn send_approval_request(
             .push(fields.request_id.clone());
     }
 
-    let trigger_block = if fields.trigger_message.is_empty() {
-        "Trigger: (none)".to_string()
-    } else {
-        format!("Trigger: {}", fields.trigger_message)
-    };
     let body = format!(
-        "Approval requested\n\
-         Agent: {}\n\
-         Tool: {}\n\
+        "Agent {} requests {} (tier {}).\n\
          Action: {}\n\
-         Tier: {}\n\
-         {}\n\
-         \n\
-         Reply: !approve {}  or  !deny {} [reason]\n\
-         Request: {}",
+         Trigger: {}\n\
+         Reply !approve {} to approve or !deny {} [reason] to deny.",
         fields.triggering_agent,
         fields.tool_name,
-        fields.action_key,
         fields.requested_tier,
-        trigger_block,
+        fields.action_key,
+        if fields.trigger_message.is_empty() {
+            "(none)".to_string()
+        } else {
+            fields.trigger_message.clone()
+        },
         prefix,
         prefix,
-        fields.request_id,
     );
 
     if let Err(e) = adapter

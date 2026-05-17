@@ -2048,7 +2048,10 @@ async fn approval_round_trip_via_text_command() {
 
     // Validate the captured outbound `send` RPC: it goes to the
     // configured Signal group id and the body embeds the prefix
-    // and the full request_id so the operator can use either form.
+    // the operator types back. The full request_id is no longer
+    // rendered in the body (the umbrella majority sentence-with-
+    // parens form dropped that line per #122); prefix presence is
+    // the load-bearing assertion.
     let send_call = captured_send
         .lock()
         .await
@@ -2062,10 +2065,6 @@ async fn approval_round_trip_via_text_command() {
     assert!(
         body.contains(&format!("!approve {expected_prefix}")),
         "body missing approve directive: {body:?}"
-    );
-    assert!(
-        body.contains(request_id),
-        "body missing full request id: {body:?}"
     );
 }
 
@@ -2275,10 +2274,6 @@ async fn mid_session_reconnect_delivers_queued_frame() {
     assert!(
         body.contains(&format!("!approve {expected_prefix}")),
         "body missing approve directive: {body:?}"
-    );
-    assert!(
-        body.contains(request_id),
-        "body missing full request id: {body:?}"
     );
 }
 

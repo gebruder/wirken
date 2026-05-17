@@ -569,7 +569,7 @@ pub(crate) fn classify_send_error(http_status: u16, response_body: &str) -> &'st
         404 => "chat_not_found",
         429 => "imessage_api_error",
         500..=599 => match body_status {
-            Some(code) if code == 4006 => "chat_not_found",
+            Some(4006) => "chat_not_found",
             _ => "imessage_api_error",
         },
         _ => "imessage_api_error",

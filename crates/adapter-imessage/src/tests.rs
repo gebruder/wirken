@@ -403,14 +403,7 @@ fn serialize_and_read(
 #[test]
 fn approval_decision_allow_round_trips() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_approval_decision(
-        &mut msg,
-        "req-uuid",
-        true,
-        "+15551234567",
-        "Alice",
-        None,
-    );
+    convert::build_approval_decision(&mut msg, "req-uuid", true, "+15551234567", "Alice", None);
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
         frame::ApprovalDecision(d) => {
