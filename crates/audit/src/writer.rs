@@ -649,11 +649,25 @@ async fn flush_loop(
                     // falls back to its direct-write path.
                     let tx_strong = audit_tx.upgrade();
                     let outcome = run_verify_pass(&log, &alarms, tx_strong.as_ref()).await;
+                    // Drop the strong sender we briefly upgraded so it
+                    // does not keep the channel alive past the drain.
+                    drop(tx_strong);
                     if record_verify_outcome(
                         &mut integrity_failures,
                         &mut alarm_write_failures,
                         &outcome,
                     ) {
+                        // Drain channel-routed events the failing
+                        // verify pass dispatched (chain_broken and
+                        // any audit.row_unverifiable) plus the
+                        // pre-existing batched buffer, so the SIEM
+                        // forwarder sees them before the receiver
+                        // drops on `break`. Symmetric with the
+                        // rx-closed branch below.
+                        drain_channel_and_flush(
+                            &mut rx, &log, &mut buffer, &forwarder,
+                        )
+                        .await;
                         break;
                     }
                     flushes_since_verify = 0;
@@ -686,6 +700,43 @@ async fn flush_loop(
                 }
             }
         }
+    }
+}
+
+/// Drain pending events from `rx` into the shared flush `buffer`,
+/// then flush. Called from the verify-halt branch of [`flush_loop`]
+/// immediately before `break`, so any event the just-completed
+/// verify pass dispatched through the channel (typically a
+/// channel-routed `audit.chain_broken` or `audit.row_unverifiable`)
+/// reaches the SIEM forwarder before the receiver drops and the
+/// writer enters its halt state.
+///
+/// Safe to mutate `rx` here without contending with the receive arm
+/// of the surrounding `tokio::select!`: the verify pass has already
+/// returned, so no new events can be appended to the queue between
+/// the verify pass completing and this drain starting.
+///
+/// Reuses the shared `buffer` rather than a fresh `Vec`, which means
+/// pre-existing batched events are flushed too. That alignment is
+/// deliberate: graceful shutdown (the `rx.recv -> None` branch at
+/// the bottom of [`flush_loop`]) already does this, and matching
+/// behaviour on halt removes the perverse asymmetry of operators
+/// receiving fewer SIEM signals when something goes wrong than
+/// when everything is fine.
+///
+/// Best-effort: a `flush` error here does not reverse the halt
+/// decision. The loop is going to break either way.
+async fn drain_channel_and_flush(
+    rx: &mut mpsc::Receiver<AuditEvent>,
+    log: &AuditLog,
+    buffer: &mut Vec<AuditEvent>,
+    forwarder: &Option<SiemForwarder>,
+) {
+    while let Ok(event) = rx.try_recv() {
+        buffer.push(event);
+    }
+    if !buffer.is_empty() {
+        let _ = flush(log, buffer, forwarder).await;
     }
 }
 
@@ -956,6 +1007,205 @@ mod tests {
         assert!(
             !in_chain.is_empty(),
             "closed-channel fallback must land the row via direct write_batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_channel_and_flush_writes_pending_events_to_sqlite() {
+        // Basic helper contract: events sitting in the channel and in
+        // the shared buffer are both flushed through `flush` (SQLite
+        // landing + SIEM forwarding) before the helper returns.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let log = AuditLog::open(&db_path).unwrap();
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+
+        tx.try_send(AuditEvent::new(
+            ActorKind::Service,
+            "audit",
+            "audit.chain_broken",
+            "audit.db",
+        ))
+        .unwrap();
+        tx.try_send(AuditEvent::new(
+            ActorKind::Service,
+            "audit",
+            "audit.row_unverifiable",
+            "audit.db",
+        ))
+        .unwrap();
+        let mut buffer: Vec<AuditEvent> = vec![AuditEvent::new(
+            ActorKind::User,
+            "actor",
+            "pre-existing",
+            "t",
+        )];
+
+        drain_channel_and_flush(&mut rx, &log, &mut buffer, &None).await;
+
+        assert!(
+            buffer.is_empty(),
+            "drain must clear the buffer through flush"
+        );
+        // All three events landed in SQLite, including the
+        // pre-existing batched event (the asymmetry-removal property).
+        let stored = log
+            .query(&AuditQuery {
+                limit: Some(100),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            stored.len(),
+            3,
+            "expected drained channel events + pre-existing buffer in SQLite, got {stored:?}"
+        );
+        let actions: Vec<&str> = stored.iter().map(|e| e.event.action.as_str()).collect();
+        assert!(actions.contains(&"audit.chain_broken"));
+        assert!(actions.contains(&"audit.row_unverifiable"));
+        assert!(actions.contains(&"pre-existing"));
+    }
+
+    #[tokio::test]
+    async fn drain_channel_and_flush_is_noop_when_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let log = AuditLog::open(&db_path).unwrap();
+        let (_tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+        let mut buffer: Vec<AuditEvent> = Vec::new();
+
+        drain_channel_and_flush(&mut rx, &log, &mut buffer, &None).await;
+
+        assert!(buffer.is_empty());
+        let stored = log
+            .query(&AuditQuery {
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "empty drain must not write phantom events"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_routed_chain_broken_events_drain_at_halt_boundary() {
+        // The headline #107 property: when the verify pass routes
+        // chain_broken events through the channel and MAX_INTEGRITY_FAILURES
+        // is reached, every chain_broken event from the failing passes
+        // lands in SQLite (and would forward to SIEM) before the loop
+        // breaks. Prior to the drain wiring, the receiver dropped on
+        // halt with events still in-queue, producing the N-1 gap.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let new_payload = serde_json::to_string(&serde_json::json!({
+                "kind": "audit_legacy",
+                "actor": "actor",
+                "action": "HACKED",
+                "target": "t",
+                "channel": "",
+                "detail": null,
+            }))
+            .unwrap();
+            conn.execute(
+                "UPDATE session_events SET payload = ?1 WHERE id = 3",
+                rusqlite::params![new_payload],
+            )
+            .unwrap();
+        }
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+        let mut buffer: Vec<AuditEvent> = Vec::new();
+
+        // Simulate the flush-loop sequence: three failing verify
+        // passes (channel-routed), then the drain that the verify-halt
+        // branch performs before break.
+        for _ in 0..MAX_INTEGRITY_FAILURES {
+            let outcome = run_verify_pass(&log, &alarms, Some(&tx)).await;
+            assert!(!outcome.intact);
+        }
+        drain_channel_and_flush(&mut rx, &log, &mut buffer, &None).await;
+
+        // Three chain_broken events visible in SQLite: one per
+        // failing verify pass. Without the drain this would be zero
+        // (every event was routed through the channel and the
+        // receiver-drop on halt would have lost them all).
+        let chain_broken = log
+            .query(&AuditQuery {
+                action: Some("audit.chain_broken".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            chain_broken.len(),
+            MAX_INTEGRITY_FAILURES as usize,
+            "expected one chain_broken per failing pass in SQLite, got {chain_broken:?}"
+        );
+
+        // Alarm-log row count matches: each pass appended one alarm
+        // before try_send. SIEM-forwarder dispatch reliability now
+        // matches alarm-log reliability at the halt boundary.
+        let alarm_records = alarms.read_all().unwrap();
+        assert_eq!(
+            alarm_records.len(),
+            MAX_INTEGRITY_FAILURES as usize,
+            "alarm-log count must match chain_broken count"
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_routed_row_unverifiable_events_drain_at_halt_boundary() {
+        // Composition with #115: when the writer halts (here forced
+        // by repeated drift passes that don't themselves halt, then
+        // a drain call), audit.row_unverifiable events the verify
+        // pass routed through the channel land in SQLite before the
+        // receiver drops. The drain is event-agnostic; the property
+        // generalises to any future channel-routed verify event.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        rewrite_row_as_schema_drift(&db_path, 3, &schema_drift_payload());
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+        let mut buffer: Vec<AuditEvent> = Vec::new();
+
+        let outcome = run_verify_pass(&log, &alarms, Some(&tx)).await;
+        assert!(outcome.intact, "schema drift must not trigger halt itself");
+
+        // Drain captures the row_unverifiable event the verify pass
+        // try_sent into rx, even though the verify outcome was Ok.
+        drain_channel_and_flush(&mut rx, &log, &mut buffer, &None).await;
+
+        let stored = log
+            .query(&AuditQuery {
+                action: Some("audit.row_unverifiable".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            stored.len(),
+            1,
+            "row_unverifiable event must be drained and flushed, got {stored:?}"
         );
     }
 
