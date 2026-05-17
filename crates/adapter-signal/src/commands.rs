@@ -16,12 +16,17 @@
 //! (zero/multi-match -> clarification message, no resolve); this
 //! module only parses.
 //!
-//! This is the first text-command channel adapter in Wirken.
-//! Matrix and iMessage will likely follow the same shape when
-//! they land; if they do, the parser pattern factors to a shared
-//! crate at that point. Pre-building a shared crate before the
-//! second consumer arrives is the kind of abstraction shaped by
-//! an uncommitted boundary.
+//! This is the text-command channel adapter in Wirken. The
+//! prediction in this comment's original form (that Matrix and
+//! iMessage would follow the same shape) did not survive: Matrix
+//! adopted m.reaction with a correlation table on E2EE-posture
+//! grounds (reactions are unencrypted by spec, message bodies
+//! are not; the Matrix adapter is plaintext-only today and
+//! reaction approval inherits that posture without making it
+//! worse). iMessage is TBD. The parser pattern here factors to a
+//! shared crate only if a second text-command consumer arrives,
+//! which is now contingent on iMessage's shape decision rather
+//! than presumed for Matrix.
 
 /// Parsed Signal approval command. Returned by [`parse_command`]
 /// when the message body matches the wire format above. Anything

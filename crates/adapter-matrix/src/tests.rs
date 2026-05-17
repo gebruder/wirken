@@ -466,3 +466,274 @@ fn six_channel_types_are_distinct() {
     assert_eq!(tm.channel_id(), "teams");
     assert_eq!(mx.channel_id(), "matrix");
 }
+
+// ---------------------------------------------------------------------------
+// Approval gate (slice: matrix m.reaction approval per umbrella #119)
+// ---------------------------------------------------------------------------
+
+use wirken_adapter_core::approval::Decision;
+
+#[test]
+fn normalize_reaction_key_accepts_canonical_allow() {
+    assert_eq!(
+        convert::normalize_reaction_key("\u{2705}"),
+        Some(Decision::Allow)
+    );
+}
+
+#[test]
+fn normalize_reaction_key_accepts_allow_with_emoji_presentation_selector() {
+    assert_eq!(
+        convert::normalize_reaction_key("\u{2705}\u{FE0F}"),
+        Some(Decision::Allow)
+    );
+}
+
+#[test]
+fn normalize_reaction_key_accepts_allow_with_text_presentation_selector() {
+    assert_eq!(
+        convert::normalize_reaction_key("\u{2705}\u{FE0E}"),
+        Some(Decision::Allow)
+    );
+}
+
+#[test]
+fn normalize_reaction_key_accepts_canonical_deny() {
+    assert_eq!(
+        convert::normalize_reaction_key("\u{274C}"),
+        Some(Decision::Deny)
+    );
+}
+
+#[test]
+fn normalize_reaction_key_accepts_deny_with_emoji_presentation_selector() {
+    assert_eq!(
+        convert::normalize_reaction_key("\u{274C}\u{FE0F}"),
+        Some(Decision::Deny)
+    );
+}
+
+#[test]
+fn normalize_reaction_key_accepts_deny_with_text_presentation_selector() {
+    assert_eq!(
+        convert::normalize_reaction_key("\u{274C}\u{FE0E}"),
+        Some(Decision::Deny)
+    );
+}
+
+#[test]
+fn normalize_reaction_key_rejects_other_emoji() {
+    assert_eq!(convert::normalize_reaction_key("\u{1F44D}"), None); // 👍
+    assert_eq!(convert::normalize_reaction_key("\u{1F44E}"), None); // 👎
+}
+
+#[test]
+fn normalize_reaction_key_rejects_text_strings() {
+    assert_eq!(convert::normalize_reaction_key("approve"), None);
+    assert_eq!(convert::normalize_reaction_key("yes"), None);
+    assert_eq!(convert::normalize_reaction_key(""), None);
+}
+
+#[test]
+fn extract_reactions_finds_reaction_events() {
+    let events = vec![
+        serde_json::json!({
+            "type": "m.reaction",
+            "sender": "@alice:example.com",
+            "content": {
+                "m.relates_to": {
+                    "rel_type": "m.annotation",
+                    "event_id": "$bot-approval-msg",
+                    "key": "\u{2705}"
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "m.room.message",
+            "sender": "@bob:example.com",
+            "content": { "msgtype": "m.text", "body": "hello" }
+        }),
+    ];
+    let reactions = convert::extract_reactions(&events, "!room:example.com");
+    assert_eq!(reactions.len(), 1);
+    let r = &reactions[0];
+    assert_eq!(r.reactor_mxid, "@alice:example.com");
+    assert_eq!(r.room_id, "!room:example.com");
+    assert_eq!(r.reacted_to_event_id, "$bot-approval-msg");
+    assert_eq!(r.key, "\u{2705}");
+}
+
+#[test]
+fn extract_reactions_ignores_message_events() {
+    let events = vec![serde_json::json!({
+        "type": "m.room.message",
+        "sender": "@bob:example.com",
+        "content": { "msgtype": "m.text", "body": "hello" }
+    })];
+    assert!(convert::extract_reactions(&events, "!room:example.com").is_empty());
+}
+
+#[test]
+fn extract_reactions_drops_reactions_missing_relates_to() {
+    let events = vec![serde_json::json!({
+        "type": "m.reaction",
+        "sender": "@alice:example.com",
+        "content": {}
+    })];
+    assert!(convert::extract_reactions(&events, "!room:example.com").is_empty());
+}
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut msg,
+        "req-uuid",
+        true,
+        "@alice:example.com",
+        "@alice:example.com",
+    );
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "@alice:example.com"
+            );
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, "@a:b", "");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {}
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "matrix_auth_error");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(
+                f.get_reason().unwrap().to_str().unwrap(),
+                "matrix_auth_error"
+            );
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips_matrix_room_id() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("!opaque:server.tld");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.target_room_id, "!opaque:server.tld");
+}
+
+#[test]
+fn approval_request_rejects_empty_room_id() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(convert::parse_approval_request(&reader).is_err());
+}
+
+#[test]
+fn classify_send_error_maps_m_forbidden() {
+    let body = serde_json::json!({
+        "errcode": "M_FORBIDDEN",
+        "error": "You are not allowed to send messages to this room."
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(403, &body),
+        "matrix_auth_error"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_m_not_found_to_room_not_found() {
+    let body = serde_json::json!({
+        "errcode": "M_NOT_FOUND",
+        "error": "Room not found"
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(404, &body),
+        "room_not_found"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_m_unknown_token() {
+    let body = serde_json::json!({
+        "errcode": "M_UNKNOWN_TOKEN",
+        "error": "Access token expired"
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(401, &body),
+        "matrix_auth_error"
+    );
+}
+
+#[test]
+fn classify_send_error_falls_back_to_http_when_no_errcode() {
+    assert_eq!(
+        super::adapter::classify_send_error(403, ""),
+        "matrix_auth_error"
+    );
+    assert_eq!(
+        super::adapter::classify_send_error(404, ""),
+        "room_not_found"
+    );
+    assert_eq!(
+        super::adapter::classify_send_error(500, ""),
+        "matrix_api_error"
+    );
+}
