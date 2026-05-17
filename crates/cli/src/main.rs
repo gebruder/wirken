@@ -165,6 +165,14 @@ enum LyrikCommands {
         #[arg(long)]
         output: std::path::PathBuf,
     },
+    /// Validate a `findings.json` file against the lyrik 1.0 schema.
+    /// Exits non-zero with a structured error list on any conformance
+    /// failure; see `docs/lyrik-json-schema.md` for the spec.
+    Validate {
+        /// Path to findings.json.
+        #[arg(long)]
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1138,6 +1146,7 @@ async fn main() -> Result<()> {
             } => {
                 commands::lyrik::report(&format, findings.as_deref(), run.as_deref(), &output).await
             }
+            LyrikCommands::Validate { path } => commands::lyrik_validate::run(&path),
         },
     }
 }

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.0/docs/lyrik-json-schema.json",
+  "title": "Lyrik findings report (1.0)",
+  "description": "Lyrik security-assessment skill output. See docs/lyrik-json-schema.md for the prose spec.",
+  "type": "object",
+  "required": ["schema_version", "run_id", "produced_at", "findings"],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "produced_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": [
+        "id",
+        "stable_id",
+        "framing",
+        "location",
+        "title",
+        "summary",
+        "tier"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "stable_id": {
+          "type": "string",
+          "description": "Conforms to <framing>::<rel_file>:<line> with framing in {auth, injection} and line a decimal integer. Parse right-to-left for the line separator. See spec for full grammar.",
+          "pattern": "^(auth|injection)::[^/].*:[0-9]+$"
+        },
+        "framing": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["auth", "injection"]
+          }
+        },
+        "location": {
+          "type": "object",
+          "required": ["file", "line_start"],
+          "properties": {
+            "file": { "type": "string", "minLength": 1 },
+            "line_start": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
+        "tier": {
+          "type": "string",
+          "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        }
+      }
+    }
+  }
+}
