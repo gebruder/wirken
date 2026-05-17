@@ -383,3 +383,215 @@ fn new_accepts_non_empty_server_password() {
 // binding; tests on the loopback-only invariant belong at the
 // integration level (the `run` method refuses to start if the
 // bound local_addr is not loopback) rather than here.
+
+// ---------------------------------------------------------------------------
+// Approval gate (slice: imessage text-command approval per umbrella #119)
+// ---------------------------------------------------------------------------
+
+fn serialize_and_read(
+    builder: &capnp::message::Builder<capnp::message::HeapAllocator>,
+) -> capnp::message::Reader<capnp::serialize::OwnedSegments> {
+    let mut buf = Vec::new();
+    capnp::serialize::write_message(&mut buf, builder).unwrap();
+    capnp::serialize::read_message(
+        std::io::Cursor::new(buf),
+        capnp::message::ReaderOptions::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut msg,
+        "req-uuid",
+        true,
+        "+15551234567",
+        "Alice",
+        None,
+    );
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "+15551234567"
+            );
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "Alice");
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_with_reason_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut msg,
+        "r",
+        false,
+        "+15551234567",
+        "Alice",
+        Some("looks risky"),
+    );
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(reason) => {
+                    assert_eq!(reason.unwrap().to_str().unwrap(), "looks risky");
+                }
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_without_reason_empty_string() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, "+15551234567", "Alice", None);
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(reason) => {
+                    assert_eq!(reason.unwrap().to_str().unwrap(), "");
+                }
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "chat_not_found");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(f.get_reason().unwrap().to_str().unwrap(), "chat_not_found");
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips_dm_chat_guid() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("iMessage;-;+15551234567");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.target_chat_guid, "iMessage;-;+15551234567");
+}
+
+#[test]
+fn approval_request_round_trips_group_chat_guid() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("iMessage;+;chat123456789");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.target_chat_guid, "iMessage;+;chat123456789");
+}
+
+#[test]
+fn approval_request_rejects_empty_chat_guid() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(convert::parse_approval_request(&reader).is_err());
+}
+
+#[test]
+fn classify_send_error_maps_404_to_chat_not_found() {
+    assert_eq!(
+        super::adapter::classify_send_error(404, ""),
+        "chat_not_found"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_401_403_to_auth_error() {
+    assert_eq!(super::adapter::classify_send_error(401, ""), "auth_error");
+    assert_eq!(super::adapter::classify_send_error(403, ""), "auth_error");
+}
+
+#[test]
+fn classify_send_error_maps_429_to_generic_api_error() {
+    // 429 (rate-limit) groups with other API-class failures
+    // rather than getting a distinct label, matching the Slack /
+    // Teams / Google Chat convention.
+    assert_eq!(
+        super::adapter::classify_send_error(429, ""),
+        "imessage_api_error"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_5xx_to_generic_api_error() {
+    assert_eq!(
+        super::adapter::classify_send_error(500, ""),
+        "imessage_api_error"
+    );
+    assert_eq!(
+        super::adapter::classify_send_error(503, ""),
+        "imessage_api_error"
+    );
+}
+
+#[test]
+fn classify_send_error_maps_bluebubbles_4006_status_to_chat_not_found() {
+    let body = serde_json::json!({
+        "status": 4006,
+        "message": "Chat not found"
+    })
+    .to_string();
+    assert_eq!(
+        super::adapter::classify_send_error(500, &body),
+        "chat_not_found"
+    );
+}

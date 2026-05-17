@@ -1,6 +1,22 @@
-//! Text-command parser for the Signal approval surface. Signal
-//! has no native button or interaction primitive, so the approval
-//! UX is a text exchange in the configured approval conversation:
+//! Text-command parser for the iMessage approval surface.
+//!
+//! ## Verbatim-clone discipline
+//!
+//! This module is a verbatim clone of
+//! `crates/adapter-signal/src/commands.rs`. Identical match arms,
+//! identical edge-case behavior, identical prefix length (the
+//! 8-hex-character first run of `request_id`), identical
+//! whitespace and case handling. Subtle drift between the two
+//! parsers becomes debt the future shared-crate factoring would
+//! have to undo, so the discipline at this site is: do not
+//! diverge.
+//!
+//! When the shared-crate factoring lands (file as a follow-up
+//! after umbrella #119 closes), this module and the Signal one
+//! both delete in favor of a single shared parser. Until then,
+//! changes to one parser must land identically in the other.
+//!
+//! ## Wire format
 //!
 //! ```text
 //! !approve <prefix>
@@ -15,20 +31,8 @@
 //! handled by the approval-command handler in `adapter.rs`
 //! (zero/multi-match -> clarification message, no resolve); this
 //! module only parses.
-//!
-//! Two text-command channel adapters ship under umbrella #119:
-//! Signal (this module) and iMessage
-//! (`crates/adapter-imessage/src/commands.rs`, a verbatim clone
-//! of this file). Matrix went a different way (m.reaction with
-//! a correlation table) on E2EE-posture grounds; the original
-//! comment here predicted Matrix and iMessage would both follow
-//! text-command, and only the iMessage half of that prediction
-//! held. The shared-crate factoring this comment originally
-//! anticipated is now real follow-up work (filed against the
-//! umbrella-close) — two consumers exist with byte-identical
-//! parsers, and the abstraction is no longer speculative.
 
-/// Parsed Signal approval command. Returned by [`parse_command`]
+/// Parsed iMessage approval command. Returned by [`parse_command`]
 /// when the message body matches the wire format above. Anything
 /// else (regular agent-bound messages, malformed approvals,
 /// commands missing the prefix) returns `None` from
@@ -51,11 +55,11 @@ pub enum CommandKind {
     },
 }
 
-/// Parse a Signal message body. Returns `Some(CommandKind)` on a
-/// well-formed approval command, `None` otherwise. Strict shape:
+/// Parse an iMessage message body. Returns `Some(CommandKind)` on
+/// a well-formed approval command, `None` otherwise. Strict shape:
 ///
 /// - leading `!approve` or `!deny` (case-sensitive; lowercase
-///   only, matching the standard Signal-bot convention),
+///   only, matching the standard text-command convention),
 /// - exactly one whitespace between the command and the prefix,
 /// - prefix is a non-empty hex-only run (case-insensitive on the
 ///   hex digits themselves; `aBcD12Ef` and `abcd12ef` both work),
@@ -65,9 +69,7 @@ pub enum CommandKind {
 /// Multi-line bodies are rejected: an approval command is a
 /// single line, and a body whose first line is a valid command
 /// but whose subsequent lines carry agent-bound content would be
-/// ambiguous. The slice's contract is "an approval is just an
-/// approval"; the handler does not split a multi-line body into
-/// command-plus-agent-content.
+/// ambiguous.
 pub fn parse_command(body: &str) -> Option<CommandKind> {
     let trimmed = body.trim();
     if trimmed.contains('\n') {
@@ -76,10 +78,6 @@ pub fn parse_command(body: &str) -> Option<CommandKind> {
     if let Some(rest) = trimmed.strip_prefix("!approve") {
         let prefix = parse_prefix(rest)?;
         if !rest_after_prefix(rest, &prefix).is_empty() {
-            // `!approve abc 123` -> reject. The approve form
-            // takes only the prefix; trailing tokens indicate the
-            // operator was trying to add a reason on an approve,
-            // which is not a supported shape.
             return None;
         }
         Some(CommandKind::Approve { prefix })
@@ -114,11 +112,7 @@ fn parse_prefix(rest: &str) -> Option<String> {
 }
 
 /// Return the substring after the matched prefix, with leading
-/// whitespace trimmed. The caller passes the same `rest` it gave
-/// to [`parse_prefix`]; this re-walks to find the prefix end
-/// rather than reusing an offset because the prefix may have
-/// been lower-cased and offsets would have to be recomputed
-/// anyway.
+/// whitespace trimmed.
 fn rest_after_prefix<'a>(rest: &'a str, prefix: &str) -> &'a str {
     let after_cmd = rest.trim_start();
     let after_prefix = &after_cmd[prefix.len()..];
@@ -153,8 +147,6 @@ mod tests {
 
     #[test]
     fn approve_with_short_prefix() {
-        // Length is the handler's concern (unique-or-reject); the
-        // parser accepts any non-empty hex prefix.
         let r = parse_command("!approve ab").unwrap();
         assert_eq!(
             r,
@@ -166,10 +158,6 @@ mod tests {
 
     #[test]
     fn approve_with_trailing_text_rejects() {
-        // Approve takes only the prefix. A trailing token indicates
-        // either an operator confusion (typing a reason on approve)
-        // or a different command shape; either way the parser
-        // returns None and the handler does not route.
         assert!(parse_command("!approve abc12345 because").is_none());
     }
 
@@ -213,7 +201,6 @@ mod tests {
 
     #[test]
     fn leading_whitespace_tolerated() {
-        // Some Signal clients add a stray space on autocorrect.
         let r = parse_command("   !approve abc12345   ").unwrap();
         assert_eq!(
             r,
@@ -225,26 +212,16 @@ mod tests {
 
     #[test]
     fn missing_bang_prefix_not_a_command() {
-        // The leading `!` is required to disambiguate from a
-        // normal agent-bound message that happens to start with
-        // the word "approve" (e.g. "approve the spec doc").
         assert!(parse_command("approve abc12345").is_none());
     }
 
     #[test]
     fn uppercase_command_not_a_command() {
-        // Case-sensitive on the command; only lowercase
-        // `!approve` / `!deny` route. Keeps the parse simple and
-        // matches the convention.
         assert!(parse_command("!Approve abc12345").is_none());
     }
 
     #[test]
     fn nonhex_prefix_not_a_command() {
-        // The prefix must be hex (the leading slice of a UUID).
-        // Non-hex tokens come back as None and continue down the
-        // inbound pipeline; this prevents typo'd commands like
-        // `!approve allofit` from routing to the handler at all.
         assert!(parse_command("!approve nothex!").is_none());
     }
 
@@ -262,18 +239,11 @@ mod tests {
 
     #[test]
     fn multiline_body_rejected() {
-        // An approval is a single line. A body that mixes a
-        // command-shaped first line with subsequent lines is
-        // ambiguous; the slice's contract says we don't route
-        // it as approval.
         assert!(parse_command("!approve abc12345\nand more").is_none());
     }
 
     #[test]
     fn plain_message_is_not_a_command() {
-        // The most important negative case: a normal agent-bound
-        // message returns None, which lets the existing inbound
-        // pipeline carry on unchanged.
         assert!(parse_command("hey, please summarize the day").is_none());
     }
 }
