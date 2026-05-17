@@ -794,3 +794,148 @@ mod from_push_event {
         assert!(from_push_event(&evt, &bot()).is_some());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Approval-frame conversions (slice: slack approval gate per umbrella #119)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "req-uuid", true, "UA8RXUSPL", "davi");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "UA8RXUSPL"
+            );
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "davi");
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, "U0", "");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {}
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "slack_api_error");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(f.get_reason().unwrap().to_str().unwrap(), "slack_api_error");
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips_string_channel_id() {
+    // Slack channel ids are typed strings (e.g. "C0123ABCD"). The
+    // adapter forwards the platform-neutral IPC string verbatim,
+    // unlike Telegram (i64 chat id) and Discord (u64 snowflake)
+    // which parse to numeric shapes.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("C0123ABCD");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.request_id, "abc");
+    assert_eq!(fields.tool_name, "shell");
+    assert_eq!(fields.action_key, "shell:rm");
+    assert_eq!(fields.requested_tier, "tier3");
+    assert_eq!(fields.triggering_agent, "default");
+    assert_eq!(fields.trigger_message, "clean logs");
+    assert_eq!(fields.target_channel_id, "C0123ABCD");
+}
+
+#[test]
+fn approval_request_rejects_empty_channel_id() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(
+        convert::parse_approval_request(&reader).is_err(),
+        "empty channel id must reject"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-adapter action_id round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn action_id_encoded_by_adapter_core_decodes_to_original_payload() {
+    use wirken_adapter_core::approval::{ApprovalPayload, Decision, decode, encode};
+    let original = ApprovalPayload {
+        request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+        decision: Decision::Allow,
+    };
+    // Slack round-trips the action_id opaquely through the
+    // platform; the assertion is encode then decode.
+    let action_id = encode(&original).unwrap();
+    let decoded = decode(&action_id).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn malformed_action_id_returns_decode_error() {
+    use wirken_adapter_core::approval::{DecodeError, decode};
+    // The adapter's interaction callback drops malformed presses
+    // with a warn and returns Ok so slack-morphism acks the
+    // envelope. The drop decision keys off `decode` returning
+    // Err; pin the contract here so a regression in adapter-core
+    // surfaces in the adapter's test surface too.
+    assert!(matches!(
+        decode("notaprefix:550e8400-e29b-41d4-a716-446655440000:allow"),
+        Err(DecodeError::UnknownPrefix)
+    ));
+    assert!(matches!(
+        decode("req:550e8400-e29b-41d4-a716-446655440000:maybe"),
+        Err(DecodeError::UnknownDecision(_))
+    ));
+}
