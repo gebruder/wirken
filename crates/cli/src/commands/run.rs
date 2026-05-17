@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use wirken_agent::factory::CacheMode;
 use wirken_agent::llm::LlmConfig;
 use wirken_agent::{AgentFactory, AgentStaticConfig, SkillLoader, session_id_for};
-use wirken_audit::{ActorKind, AuditEvent, AuditWriter, SiemConfig, SiemTarget};
+use wirken_audit::{ActorKind, AlarmLog, AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::injection_detect::InjectionDetector;
@@ -39,6 +39,39 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!("  wirken v{}", env!("CARGO_PKG_VERSION"));
     println!("  ──────");
     println!();
+
+    // --- Boot-time refusal on unacknowledged alarm records ---
+    //
+    // Tamper records from a prior session that halted at
+    // MAX_INTEGRITY_FAILURES sit in `audit-alarms.log`. Refuse to
+    // start until an operator acknowledges them via
+    // `wirken audit acknowledge --all`. The allowlist of
+    // proceed-class alarm types is intentionally small (see
+    // `wirken_audit::ACKNOWLEDGE_PROCEED_TYPES`); refuse-by-default
+    // is the posture for any unrecognised record.
+    {
+        let alarm_log = AlarmLog::new(&cfg.data_dir);
+        if let Some(report) = alarm_log
+            .unacknowledged_blocks()
+            .context("scan audit-alarms.log for unacknowledged tamper records")?
+        {
+            eprintln!(
+                "  Refusing to start: {} unacknowledged alarm record(s) in {}",
+                report.total,
+                report.path.display()
+            );
+            for (alarm_type, count) in &report.blocking_by_type {
+                eprintln!("    {alarm_type}: {count}");
+            }
+            eprintln!();
+            eprintln!(
+                "  These records describe audit-chain integrity events from a prior session."
+            );
+            eprintln!("  Review the log, then run `wirken audit acknowledge --all` to archive it");
+            eprintln!("  to a timestamped sibling file and unblock the next gateway start.");
+            std::process::exit(1);
+        }
+    }
 
     // --- Start audit writer (with optional SIEM forwarding) ---
     //

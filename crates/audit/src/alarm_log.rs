@@ -23,6 +23,7 @@
 //! On non-unix the file is created without 0o600; the gateway already
 //! warns about file-permission posture there.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use hmac::{Hmac, Mac};
@@ -32,6 +33,43 @@ use sha2::Sha256;
 use crate::error::AuditError;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Alarm-type strings that the boot-time check treats as
+/// proceed-class on `wirken run` start. Refuse-by-default: any
+/// `alarm_type` not in this list is treated as a tamper-class
+/// block until an operator acknowledges it via
+/// `wirken audit acknowledge --all`.
+///
+/// The single entry is the upgrade-compat case: pre-#115 gateways
+/// emitted a `verify_error` bucket for "verify pass errored,
+/// classification unknown." The #115 slice replaced that bucket
+/// with structured tamper-class / schema-class discriminants, so
+/// any `verify_error` record on disk today comes from an older
+/// gateway version and is not evidence of tampering by the
+/// current binary.
+///
+/// New `alarm_type` strings must be added here explicitly to be
+/// treated as proceed-class. The symmetry is intentional: the
+/// `tool_to_action` permissions table uses explicit registration
+/// to grant capability, not to deny it, and the boot-time
+/// integrity surface follows the same posture.
+pub const ACKNOWLEDGE_PROCEED_TYPES: &[&str] = &["verify_error"];
+
+/// Outcome of [`AlarmLog::unacknowledged_blocks`]. Carries the
+/// count of records per blocking `alarm_type` so the operator
+/// message can name what they are unblocking from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnacknowledgedBlocksReport {
+    /// Path the boot check scanned.
+    pub path: PathBuf,
+    /// `alarm_type` -> count, for records whose `alarm_type` is
+    /// not on [`ACKNOWLEDGE_PROCEED_TYPES`].
+    pub blocking_by_type: BTreeMap<String, usize>,
+    /// Total blocking-record count. Equal to the sum of
+    /// `blocking_by_type` values; carried separately so the CLI
+    /// message can lead with the total.
+    pub total: usize,
+}
 
 /// One entry in the audit-alarm log. Field shape is intentionally
 /// flat so a SIEM ingestor or operator with `tail` and `jq` can
@@ -199,6 +237,71 @@ impl AlarmLog {
             }
         }
         Ok(out)
+    }
+
+    /// Scan the alarm log for records whose `alarm_type` is not on
+    /// the proceed allowlist [`ACKNOWLEDGE_PROCEED_TYPES`]. Returns
+    /// `Ok(None)` when the log is missing, empty, or contains only
+    /// proceed-class records; `Ok(Some(report))` when blocking
+    /// records are present.
+    ///
+    /// Called from the gateway's startup path before opening the
+    /// audit writer for writes. Tamper records that survived a
+    /// prior session's halt must be acknowledged by an operator
+    /// (via `wirken audit acknowledge --all`) before the gateway
+    /// will start writing to the same chain again.
+    pub fn unacknowledged_blocks(&self) -> Result<Option<UnacknowledgedBlocksReport>, AuditError> {
+        let records = self.read_all()?;
+        let mut blocking_by_type: BTreeMap<String, usize> = BTreeMap::new();
+        for r in &records {
+            if !ACKNOWLEDGE_PROCEED_TYPES.contains(&r.record.alarm_type.as_str()) {
+                *blocking_by_type
+                    .entry(r.record.alarm_type.clone())
+                    .or_insert(0) += 1;
+            }
+        }
+        if blocking_by_type.is_empty() {
+            return Ok(None);
+        }
+        let total = blocking_by_type.values().sum();
+        Ok(Some(UnacknowledgedBlocksReport {
+            path: self.path.clone(),
+            blocking_by_type,
+            total,
+        }))
+    }
+
+    /// Rename the alarm log to `audit-alarms.log.<rfc3339>` so the
+    /// next `wirken run` starts with an empty alarm-log surface
+    /// while the tamper history is preserved on disk for forensic
+    /// review. Returns the new path, or `None` when the log did
+    /// not exist (acknowledgement is a no-op against a fresh
+    /// install).
+    ///
+    /// RFC 3339 colons are illegal in Windows filenames, so the
+    /// archive timestamp uses hyphens in their place; the encoded
+    /// form is unambiguous (RFC 3339 has no other use of `:`).
+    pub fn acknowledge_all(&self) -> Result<Option<PathBuf>, AuditError> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let ts = chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            .replace(':', "-");
+        let filename = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "audit-alarms.log".to_string());
+        let archive = self.path.with_file_name(format!("{filename}.{ts}"));
+        std::fs::rename(&self.path, &archive).map_err(|e| {
+            AuditError::SiemConfig(format!(
+                "rename {} to {}: {e}",
+                self.path.display(),
+                archive.display()
+            ))
+        })?;
+        Ok(Some(archive))
     }
 
     fn verify_record(&self, record: &AlarmRecord) -> AlarmVerifyStatus {
@@ -429,6 +532,138 @@ mod tests {
         let read_back = log.read_all().unwrap();
         assert_eq!(read_back.len(), 1);
         assert_eq!(read_back[0].status, AlarmVerifyStatus::Tampered);
+    }
+
+    #[test]
+    fn unacknowledged_blocks_returns_none_when_file_missing() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        assert_eq!(log.unacknowledged_blocks().unwrap(), None);
+    }
+
+    #[test]
+    fn unacknowledged_blocks_returns_none_when_file_empty() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        std::fs::write(log.path(), b"").unwrap();
+        assert_eq!(log.unacknowledged_blocks().unwrap(), None);
+    }
+
+    #[test]
+    fn chain_broken_record_blocks_boot() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "chain_broken")).unwrap();
+        let report = log
+            .unacknowledged_blocks()
+            .unwrap()
+            .expect("chain_broken must block");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.blocking_by_type.get("chain_broken"), Some(&1));
+    }
+
+    #[test]
+    fn signature_invalid_record_blocks_boot() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "signature_invalid")).unwrap();
+        let report = log
+            .unacknowledged_blocks()
+            .unwrap()
+            .expect("signature_invalid must block");
+        assert_eq!(report.total, 1);
+    }
+
+    #[test]
+    fn verify_error_record_alone_does_not_block() {
+        // Pre-#115 upgrade-compat: a `verify_error` record from an
+        // older gateway is the one explicit proceed-class type.
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "verify_error")).unwrap();
+        assert_eq!(log.unacknowledged_blocks().unwrap(), None);
+    }
+
+    #[test]
+    fn unknown_alarm_type_blocks_by_default() {
+        // Refuse-by-default: an alarm_type the current binary does
+        // not recognise must block. Catches future record types
+        // that get added without an explicit proceed-class
+        // classification.
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "some_future_alarm_type"))
+            .unwrap();
+        let report = log
+            .unacknowledged_blocks()
+            .unwrap()
+            .expect("unknown alarm_type must block by default");
+        assert_eq!(
+            report.blocking_by_type.get("some_future_alarm_type"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn mixed_records_block_when_any_non_allowlisted_present() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "verify_error")).unwrap();
+        log.append(&fixture(&tmp, "chain_broken")).unwrap();
+        log.append(&fixture(&tmp, "verify_error")).unwrap();
+        let report = log
+            .unacknowledged_blocks()
+            .unwrap()
+            .expect("mixed with chain_broken must block");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.blocking_by_type.get("chain_broken"), Some(&1));
+        // verify_error entries are proceed-class so they are not
+        // counted in `blocking_by_type`.
+        assert!(!report.blocking_by_type.contains_key("verify_error"));
+    }
+
+    #[test]
+    fn acknowledge_all_renames_file_to_timestamped_archive() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "chain_broken")).unwrap();
+        assert!(log.path().exists());
+        let archive = log
+            .acknowledge_all()
+            .unwrap()
+            .expect("rename must produce an archive path");
+        assert!(!log.path().exists(), "original log must be moved");
+        assert!(archive.exists(), "archive must exist");
+        let archive_name = archive.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            archive_name.starts_with("audit-alarms.log."),
+            "archive name {archive_name:?} must extend the original"
+        );
+        // Timestamp segment encodes RFC 3339 with `:` replaced by
+        // `-` (illegal on Windows). Verify the colon substitution.
+        assert!(
+            !archive_name.contains(':'),
+            "archive name {archive_name:?} must not contain colons"
+        );
+    }
+
+    #[test]
+    fn acknowledge_unblocks_subsequent_boot_check() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        log.append(&fixture(&tmp, "chain_broken")).unwrap();
+        assert!(log.unacknowledged_blocks().unwrap().is_some());
+        log.acknowledge_all().unwrap();
+        // After acknowledgement the original log path no longer
+        // exists; the next boot check sees a clean slate.
+        assert_eq!(log.unacknowledged_blocks().unwrap(), None);
+    }
+
+    #[test]
+    fn acknowledge_on_missing_file_is_a_no_op() {
+        let tmp = TempDir::new().unwrap();
+        let log = AlarmLog::new(tmp.path());
+        assert_eq!(log.acknowledge_all().unwrap(), None);
     }
 
     #[test]

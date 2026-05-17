@@ -251,6 +251,18 @@ enum AuditCommands {
     },
     /// Verify session attestation signatures across every session
     VerifyAttestations,
+    /// Acknowledge unacknowledged alarm records by archiving the
+    /// current `audit-alarms.log` to a timestamped sibling file.
+    /// Required after a prior session halted on
+    /// MAX_INTEGRITY_FAILURES before the next `wirken run` will
+    /// start (refuse-by-default on unrecognised alarm types).
+    Acknowledge {
+        /// Acknowledge every record currently in the alarm log.
+        /// Only mode supported in 1.0; selective acknowledgement
+        /// is YAGNI until a use case surfaces.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -907,6 +919,7 @@ async fn main() -> Result<()> {
                 require_signed,
             } => commands::audit::verify(&format, require_signed).await,
             AuditCommands::VerifyAttestations => commands::audit::verify_attestations().await,
+            AuditCommands::Acknowledge { all } => commands::audit::acknowledge(all).await,
         },
         Commands::Sessions(cmd) => match cmd {
             SessionCommands::List { channel, parent } => {

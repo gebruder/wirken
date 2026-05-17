@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::json;
 
-use wirken_audit::{AuditLog, AuditQuery, VerifyResult};
+use wirken_audit::{AlarmLog, AuditLog, AuditQuery, VerifyResult};
 
 use super::config;
 
@@ -155,6 +155,40 @@ pub async fn verify_attestations() -> Result<()> {
             println!("  Verified before break: {attestations_verified_before}");
             println!("  Reason: {reason}");
             std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
+/// Acknowledge every record currently in `audit-alarms.log` by
+/// renaming it to a timestamped sibling file. The next `wirken
+/// run` starts with an empty alarm-log surface while the history
+/// is preserved on disk. `--all` is currently the only mode; we
+/// intentionally do not support selective acknowledgement.
+pub async fn acknowledge(all: bool) -> Result<()> {
+    if !all {
+        anyhow::bail!("--all is required (selective acknowledgement is not supported)");
+    }
+    let cfg = config();
+    let alarm_log = AlarmLog::new(&cfg.data_dir);
+    match alarm_log
+        .acknowledge_all()
+        .context("rename audit-alarms.log")?
+    {
+        Some(archive) => {
+            println!(
+                "  Acknowledged. Alarm log archived to {}",
+                archive.display()
+            );
+            println!(
+                "  History is preserved on disk; the gateway will start on next `wirken run`."
+            );
+        }
+        None => {
+            println!(
+                "  No alarm records to acknowledge ({} does not exist).",
+                alarm_log.path().display()
+            );
         }
     }
     Ok(())
