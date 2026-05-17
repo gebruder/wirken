@@ -3,8 +3,27 @@ use wirken_ipc::wirken_capnp::frame;
 /// Parsed inbound Google Chat message.
 pub struct GoogleChatInbound {
     pub message_id: String,
+    /// Sender's path-shaped canonical identifier
+    /// (`"users/<id>"`). Sourced from `message.sender.name`. The
+    /// load-bearing identity assertion: this is what flows into
+    /// `frame::Inbound.sender_id`, and what
+    /// `approver_registry::verify("googlechat", &id)` matches
+    /// against the registered allowlist. Same shape the
+    /// approval-press path uses (`event.user.name`), so a user
+    /// who sends a text command and a user who presses a button
+    /// are identified by the same string.
+    pub sender_path: String,
+    /// Human-readable display name from `message.sender.displayName`.
+    /// Used for the audit row's display field; not load-bearing
+    /// for identity.
+    pub sender_display: String,
+    /// Supplementary email from `message.sender.email`. Forwarded
+    /// to the gateway via the `frame::Inbound.metadata` JSON field
+    /// (under key `"sender_email"`) so operators reading audit
+    /// rows can correlate path identifiers with human-readable
+    /// email addresses. Not the identity binding; the path
+    /// identifier is.
     pub sender_email: String,
-    pub sender_name: String,
     pub text: String,
     pub timestamp: i64,
     /// The space (room/DM) identifier, e.g. "spaces/SPACE_ID".
@@ -25,7 +44,17 @@ pub fn should_process(msg: &GoogleChatInbound) -> bool {
     !msg.text.is_empty()
 }
 
-/// Convert a Google Chat inbound message to a Cap'n Proto inbound frame.
+/// Convert a Google Chat inbound message to a Cap'n Proto inbound
+/// frame. The `sender_id` field carries the path-shaped canonical
+/// identifier (`users/<id>`); the email goes to the `metadata`
+/// JSON under the `sender_email` key as supplementary audit data.
+///
+/// This is the first consumer of `InboundMessage.metadata` for
+/// cross-adapter audit-readability metadata. If other adapters
+/// have similar supplementary-metadata candidates (Telegram
+/// username vs phone, Slack workspace id, etc.), the convention
+/// is now: load-bearing identity in `sender_id`, audit-supplementary
+/// fields under named keys in `metadata`.
 pub fn google_chat_to_inbound(
     msg: &GoogleChatInbound,
     builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
@@ -33,13 +62,17 @@ pub fn google_chat_to_inbound(
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut inbound = frame_builder.init_inbound();
     inbound.set_id(&msg.message_id);
-    inbound.set_sender_id(&msg.sender_email);
-    inbound.set_sender_name(&msg.sender_name);
+    inbound.set_sender_id(&msg.sender_path);
+    inbound.set_sender_name(&msg.sender_display);
     inbound.set_channel("google-chat");
     inbound.set_conversation_id(&msg.space_name);
     inbound.set_text(&msg.text);
     inbound.set_timestamp(msg.timestamp);
     inbound.set_is_group(!msg.is_dm);
+    let meta = serde_json::json!({
+        "sender_email": msg.sender_email,
+    });
+    inbound.set_metadata(meta.to_string());
 }
 
 /// Parse an outbound frame from the gateway.
@@ -134,14 +167,27 @@ pub fn extract_message(json: &serde_json::Value) -> Option<GoogleChatInbound> {
         .to_string();
 
     let sender = message.get("sender");
+    let sender_path = sender
+        .and_then(|s| s.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    if sender_path.is_empty() {
+        // Canonical path identifier is the load-bearing identity
+        // assertion; events that lack it cannot be authenticated
+        // against the approver registry by design. Mirrors the
+        // approval-press path's drop-on-missing-user.name in
+        // `extract_approval_press`.
+        return None;
+    }
+    let sender_display = sender
+        .and_then(|s| s.get("displayName"))
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
     let sender_email = sender
         .and_then(|s| s.get("email"))
         .and_then(|e| e.as_str())
-        .unwrap_or("")
-        .to_string();
-    let sender_name = sender
-        .and_then(|s| s.get("displayName"))
-        .and_then(|d| d.as_str())
         .unwrap_or("")
         .to_string();
 
@@ -177,8 +223,9 @@ pub fn extract_message(json: &serde_json::Value) -> Option<GoogleChatInbound> {
 
     Some(GoogleChatInbound {
         message_id,
+        sender_path,
+        sender_display,
         sender_email,
-        sender_name,
         text,
         timestamp,
         space_name,

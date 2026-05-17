@@ -37,8 +37,9 @@ fn parse_google_chat_message() {
     let msg = convert::extract_message(&payload).unwrap();
 
     assert_eq!(msg.message_id, "spaces/SPACE_123/messages/MSG_456");
+    assert_eq!(msg.sender_path, "users/USER_789");
+    assert_eq!(msg.sender_display, "Alice");
     assert_eq!(msg.sender_email, "alice@example.com");
-    assert_eq!(msg.sender_name, "Alice");
     assert_eq!(msg.text, "Hello wirken!");
     assert_eq!(msg.space_name, "spaces/SPACE_123");
     assert!(msg.is_dm);
@@ -82,11 +83,36 @@ fn room_message_processed() {
 }
 
 #[test]
+fn message_with_empty_sender_path_drops_at_extract() {
+    // The path-shaped identifier is the load-bearing identity
+    // assertion; events lacking it cannot be authenticated
+    // against the approver registry. Drop at the extractor
+    // (returns None), parallel to extract_approval_press's
+    // missing-user.name handling.
+    let payload = serde_json::json!({
+        "type": "MESSAGE",
+        "message": {
+            "name": "spaces/S/messages/M",
+            "sender": {
+                "displayName": "Anonymous",
+                "email": "anon@example.com"
+                // no `name` field
+            },
+            "text": "hello",
+            "createTime": "2024-01-01T00:00:00Z",
+            "space": { "name": "spaces/S", "type": "DM" }
+        }
+    });
+    assert!(convert::extract_message(&payload).is_none());
+}
+
+#[test]
 fn empty_text_not_processed() {
     let msg = convert::GoogleChatInbound {
         message_id: "spaces/S/messages/M".into(),
+        sender_path: "users/BOB".into(),
+        sender_display: "Bob".into(),
         sender_email: "bob@example.com".into(),
-        sender_name: "Bob".into(),
         text: "".into(),
         timestamp: 0,
         space_name: "spaces/S".into(),
@@ -99,8 +125,9 @@ fn empty_text_not_processed() {
 fn valid_text_processed() {
     let msg = convert::GoogleChatInbound {
         message_id: "spaces/S/messages/M".into(),
+        sender_path: "users/BOB".into(),
+        sender_display: "Bob".into(),
         sender_email: "bob@example.com".into(),
-        sender_name: "Bob".into(),
         text: "hello".into(),
         timestamp: 0,
         space_name: "spaces/S".into(),
@@ -117,8 +144,9 @@ fn valid_text_processed() {
 fn google_chat_to_inbound_frame() {
     let msg = convert::GoogleChatInbound {
         message_id: "spaces/S/messages/M".into(),
+        sender_path: "users/ALICE".into(),
+        sender_display: "Alice".into(),
         sender_email: "alice@example.com".into(),
-        sender_name: "Alice".into(),
         text: "Hello from Google Chat".into(),
         timestamp: 1704067200000,
         space_name: "spaces/S".into(),
@@ -133,10 +161,9 @@ fn google_chat_to_inbound_frame() {
         frame::Inbound(ib) => {
             let m = ib.unwrap();
             assert_eq!(m.get_id().unwrap().to_str().unwrap(), "spaces/S/messages/M");
-            assert_eq!(
-                m.get_sender_id().unwrap().to_str().unwrap(),
-                "alice@example.com"
-            );
+            // Sender id is now the canonical path identifier;
+            // email moves to metadata per umbrella convention.
+            assert_eq!(m.get_sender_id().unwrap().to_str().unwrap(), "users/ALICE");
             assert_eq!(m.get_sender_name().unwrap().to_str().unwrap(), "Alice");
             assert_eq!(m.get_channel().unwrap().to_str().unwrap(), "google-chat");
             assert_eq!(
@@ -149,6 +176,11 @@ fn google_chat_to_inbound_frame() {
             );
             assert_eq!(m.get_timestamp(), 1704067200000);
             assert!(!m.get_is_group()); // DM -> not group
+            // Email surfaces in metadata as supplementary audit
+            // data, not as the identity binding.
+            let meta_str = m.get_metadata().unwrap().to_str().unwrap();
+            let meta: serde_json::Value = serde_json::from_str(meta_str).unwrap();
+            assert_eq!(meta["sender_email"], "alice@example.com");
         }
         _ => panic!("expected Inbound"),
     }
@@ -158,8 +190,9 @@ fn google_chat_to_inbound_frame() {
 fn room_message_sets_is_group() {
     let msg = convert::GoogleChatInbound {
         message_id: "spaces/R/messages/M".into(),
+        sender_path: "users/BOB".into(),
+        sender_display: "Bob".into(),
         sender_email: "bob@example.com".into(),
-        sender_name: "Bob".into(),
         text: "hello room".into(),
         timestamp: 0,
         space_name: "spaces/R".into(),
@@ -319,8 +352,9 @@ async fn full_message_flow_simulation() {
     // Phase 2: Adapter sends inbound (simulating a Google Chat message)
     let chat_msg = convert::GoogleChatInbound {
         message_id: "spaces/S/messages/M".into(),
+        sender_path: "users/ALICE".into(),
+        sender_display: "Alice".into(),
         sender_email: "alice@example.com".into(),
-        sender_name: "Alice".into(),
         text: "Hello from Google Chat".into(),
         timestamp: 1704067200000,
         space_name: "spaces/S".into(),
