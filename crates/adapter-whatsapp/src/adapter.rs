@@ -13,7 +13,9 @@ use wirken_ipc::{
     split_stream,
 };
 
-use crate::convert::{self, WhatsAppInbound};
+use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
+
+use crate::convert::{self, ApprovalPress, WhatsAppInbound};
 use crate::error::WhatsAppError;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -150,7 +152,11 @@ async fn handle_webhook(
 
         let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
 
-        // Parse WhatsApp Cloud API webhook format
+        // Two extractors over the same payload, two output types:
+        // text messages route through `frame::Inbound`, button
+        // presses through `frame::ApprovalDecision`. Folding both
+        // into a single function would mix unrelated domain
+        // objects through one return type.
         if let Some(messages) = extract_messages(&json) {
             for msg in messages {
                 if !convert::should_process(&msg) {
@@ -163,6 +169,9 @@ async fn handle_webhook(
                     tracing::error!("Failed to forward to gateway: {e}");
                 }
             }
+        }
+        for press in extract_button_replies(&json) {
+            forward_approval_decision(&press, &writer).await;
         }
 
         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -303,6 +312,124 @@ pub(crate) fn extract_messages(json: &serde_json::Value) -> Option<Vec<WhatsAppI
     Some(messages)
 }
 
+/// Extract button-press approval interactions from a Meta webhook
+/// payload. Sibling to [`extract_messages`]: same JSON walk shape
+/// but a different output type. Returns an empty vec on payloads
+/// with no `interactive`/`button_reply` entries.
+///
+/// Filters out interactive messages whose subtype is not
+/// `button_reply` (e.g. `list_reply`); those are out of scope for
+/// the approval flow.
+pub(crate) fn extract_button_replies(json: &serde_json::Value) -> Vec<ApprovalPress> {
+    let mut out = Vec::new();
+    let Some(entry) = json
+        .get("entry")
+        .and_then(|e| e.as_array())
+        .and_then(|a| a.first())
+    else {
+        return out;
+    };
+    let Some(changes) = entry.get("changes").and_then(|c| c.as_array()) else {
+        return out;
+    };
+    for change in changes {
+        let Some(value) = change.get("value") else {
+            continue;
+        };
+        let contacts = value.get("contacts").and_then(|c| c.as_array());
+        let Some(messages) = value.get("messages").and_then(|m| m.as_array()) else {
+            continue;
+        };
+        for msg in messages {
+            if msg.get("type").and_then(|t| t.as_str()) != Some("interactive") {
+                continue;
+            }
+            let Some(interactive) = msg.get("interactive") else {
+                continue;
+            };
+            if interactive.get("type").and_then(|t| t.as_str()) != Some("button_reply") {
+                continue;
+            }
+            let Some(button) = interactive.get("button_reply") else {
+                continue;
+            };
+            let Some(encoded) = button.get("id").and_then(|i| i.as_str()) else {
+                continue;
+            };
+            let from = msg
+                .get("from")
+                .and_then(|f| f.as_str())
+                .unwrap_or("")
+                .to_string();
+            if from.is_empty() {
+                continue;
+            }
+            let from_name = contacts
+                .and_then(|c| {
+                    c.iter().find_map(|contact| {
+                        let wa_id = contact.get("wa_id").and_then(|w| w.as_str()).unwrap_or("");
+                        if wa_id == from {
+                            contact
+                                .get("profile")
+                                .and_then(|p| p.get("name"))
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_else(|| from.clone());
+            let message_id = msg
+                .get("id")
+                .and_then(|i| i.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push(ApprovalPress {
+                from,
+                from_name,
+                encoded_payload: encoded.to_string(),
+                message_id,
+            });
+        }
+    }
+    out
+}
+
+/// Decode an extracted press and forward an `ApprovalDecision`
+/// frame to the gateway. Drops the press on the malformed-payload
+/// path with a warn log; the 200 OK has already gone back to Meta
+/// by the time this runs, so the webhook is acknowledged either
+/// way. Mirrors Telegram / Discord / Slack / Teams's posture for
+/// malformed input.
+async fn forward_approval_decision(press: &ApprovalPress, writer: &Arc<Mutex<IpcFrameWriter>>) {
+    let payload = match approval::decode(&press.encoded_payload) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                from = %press.from,
+                button_id = %press.encoded_payload,
+                error = %e,
+                "whatsapp interaction: unrecognized button_reply.id; dropping"
+            );
+            return;
+        }
+    };
+    let is_allow = matches!(payload.decision, Decision::Allow);
+    let mut capnp_msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut capnp_msg,
+        &payload.request_id,
+        is_allow,
+        &press.from,
+        &press.from_name,
+    );
+    let mut w = writer.lock().await;
+    if let Err(e) = w.write_message(&capnp_msg).await {
+        tracing::error!("whatsapp interaction: failed to send ApprovalDecision to gateway: {e}");
+    }
+}
+
 /// Handle outbound messages from gateway to WhatsApp.
 async fn handle_outbound(
     mut reader: IpcFrameReader,
@@ -339,6 +466,13 @@ async fn handle_outbound(
                     Ok(fields) => FrameAction::SendMessage(fields),
                     Err(e) => {
                         tracing::error!("Failed to parse outbound: {e}");
+                        FrameAction::Skip
+                    }
+                },
+                Ok(frame::ApprovalRequest(_)) => match convert::parse_approval_request(&msg) {
+                    Ok(fields) => FrameAction::SendApprovalRequest(fields),
+                    Err(e) => {
+                        tracing::error!("Failed to parse approval request: {e}");
                         FrameAction::Skip
                     }
                 },
@@ -401,6 +535,10 @@ async fn handle_outbound(
                     tracing::error!("Failed to send outbound result: {e}");
                 }
             }
+            FrameAction::SendApprovalRequest(fields) => {
+                send_approval_request(&http, &access_token, &phone_number_id, fields, &writer)
+                    .await;
+            }
             FrameAction::Skip => {}
         }
     }
@@ -408,7 +546,174 @@ async fn handle_outbound(
 
 enum FrameAction {
     SendMessage(convert::OutboundFields),
+    SendApprovalRequest(convert::ApprovalRequestFields),
     Skip,
+}
+
+/// Render an approval request as a WhatsApp interactive button
+/// message and POST it to the Cloud API. Each button's `id` carries
+/// the cross-adapter encoded payload from
+/// `wirken_adapter_core::approval`; the inbound press path reads it
+/// back via `extract_button_replies`.
+///
+/// On send failure, emits an `ApprovalRequestFailed` frame. The
+/// failure reason is classified by `classify_send_error` against
+/// Meta's documented error taxonomy; the 24-hour-window-closed
+/// case maps to `"window_closed"` so the gateway-side audit row
+/// distinguishes "send refused by platform" from "network broken"
+/// or "malformed request".
+async fn send_approval_request(
+    http: &reqwest::Client,
+    access_token: &str,
+    phone_number_id: &str,
+    fields: convert::ApprovalRequestFields,
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+) {
+    let allow_id = match approval::encode(&ApprovalPayload {
+        request_id: fields.request_id.clone(),
+        decision: Decision::Allow,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "whatsapp approval: encode failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "encode_failed").await;
+            return;
+        }
+    };
+    let deny_id = match approval::encode(&ApprovalPayload {
+        request_id: fields.request_id.clone(),
+        decision: Decision::Deny,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "whatsapp approval: encode failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "encode_failed").await;
+            return;
+        }
+    };
+
+    let prompt = format!(
+        "Agent {} requests {} (tier {}).\nAction: {}\nTrigger: {}",
+        fields.triggering_agent,
+        fields.tool_name,
+        fields.requested_tier,
+        fields.action_key,
+        if fields.trigger_message.is_empty() {
+            "(none)".to_string()
+        } else {
+            fields.trigger_message.clone()
+        },
+    );
+
+    let body = serde_json::json!({
+        "messaging_product": "whatsapp",
+        "to": fields.target_channel_id,
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "body": { "text": prompt },
+            "action": {
+                "buttons": [
+                    {
+                        "type": "reply",
+                        "reply": { "id": allow_id, "title": "Approve" }
+                    },
+                    {
+                        "type": "reply",
+                        "reply": { "id": deny_id, "title": "Deny" }
+                    }
+                ]
+            }
+        }
+    });
+
+    let url = format!("https://graph.facebook.com/v21.0/{phone_number_id}/messages");
+    let resp = http
+        .post(&url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .json(&body)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            let status = r.status();
+            let response_body = r.text().await.unwrap_or_default();
+            let reason = classify_send_error(&response_body);
+            tracing::error!(
+                request_id = %fields.request_id,
+                channel_id = %fields.target_channel_id,
+                status = status.as_u16(),
+                body = %response_body,
+                reason = %reason,
+                "whatsapp approval: send failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, reason).await;
+        }
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "whatsapp approval: network error; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "network_error").await;
+        }
+    }
+}
+
+async fn emit_approval_failure(
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+    request_id: &str,
+    reason: &str,
+) {
+    let mut failure = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut failure, request_id, reason);
+    let mut w = writer.lock().await;
+    if let Err(send_err) = w.write_message(&failure).await {
+        tracing::error!("whatsapp approval: failed to send ApprovalRequestFailed: {send_err}");
+    }
+}
+
+/// Classify a Meta Cloud API error response body into a stable
+/// snake_case `reason` label for `ApprovalRequestFailed`.
+///
+/// The body is JSON shaped like:
+/// `{"error":{"message":"...","code":131047,"type":"OAuthException",...}}`.
+///
+/// The 24-hour-window-closed case is the load-bearing classification
+/// for this slice: Meta's documented codes for "more than 24 hours
+/// since recipient's last inbound" are `131047` and `131026`. These
+/// codes come from the Meta error-taxonomy reference. The exact set
+/// of codes Meta returns for window-closed has shifted historically;
+/// re-verify against current Meta documentation when bumping the
+/// Graph API version (the URL above is the canonical reference, not
+/// this comment).
+///
+/// All other Cloud API error codes collapse to
+/// `"whatsapp_api_error"`; non-JSON or shape-mismatched bodies
+/// collapse to `"whatsapp_api_error"` as well. Network failures
+/// before a response arrives are classified upstream as
+/// `"network_error"`.
+pub(crate) fn classify_send_error(response_body: &str) -> &'static str {
+    let code = serde_json::from_str::<serde_json::Value>(response_body)
+        .ok()
+        .as_ref()
+        .and_then(|v| v.get("error"))
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_i64());
+    match code {
+        Some(131047) | Some(131026) => "window_closed",
+        _ => "whatsapp_api_error",
+    }
 }
 
 async fn heartbeat_loop(writer: Arc<Mutex<IpcFrameWriter>>) {
