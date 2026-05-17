@@ -1176,6 +1176,31 @@ pub struct SessionSignatureVerifyResult {
     /// First invalid signature observed, if any. The session-level
     /// caller treats any invalid signature as a hard fail.
     pub first_invalid: Option<InvalidSignatureDetail>,
+    /// Rows in this session whose payload could not be deserialized.
+    /// Schema-class, not tamper-class: the writer's continuous-verify
+    /// loop logs and emits an in-chain `audit.row_unverifiable` event
+    /// per record but does not halt.
+    pub schema_drift_records: Vec<SchemaDriftRecord>,
+}
+
+/// A row whose stored payload could not be deserialized into a
+/// [`SessionEvent`]. Surfaced separately from tamper-class failures:
+/// the chain hash is computed over raw payload bytes and verifies
+/// even when serde rejects the structure, so an unparseable row is
+/// evidence of a schema mismatch (a variant that gained a field
+/// without a default, an unknown variant tag from an older binary,
+/// etc.), not of tampering. Carried back from the signature pass so
+/// the writer's continuous-verify loop can warn-and-continue without
+/// charging the integrity-halt counter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaDriftRecord {
+    pub session_id: String,
+    pub seq: u64,
+    /// The serde error string. Aggregating callers categorise by the
+    /// leading token of this string (e.g. `missing field`,
+    /// `unknown variant`) so 10k similar failures collapse to one
+    /// summary line.
+    pub reason: String,
 }
 
 /// Details of the first invalid `ChainHead` signature in a session.
@@ -1639,10 +1664,15 @@ impl SqliteSessionLog {
         handle: &SessionHandle<OwnSession>,
     ) -> Result<SessionSignatureVerifyResult, AuditError> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        let rows = self.session_rows(handle)?;
+        let (rows, schema_drift_records) = self.session_rows(handle)?;
+        // `session_total_events` counts parsed rows; unparseable rows
+        // are surfaced separately in `schema_drift_records` so the
+        // signed-tail accounting is not skewed by rows the verifier
+        // could not classify.
         let total = rows.len();
         let mut result = SessionSignatureVerifyResult {
             session_total_events: total,
+            schema_drift_records,
             ..Default::default()
         };
         if rows.is_empty() {
@@ -1803,10 +1833,16 @@ impl SqliteSessionLog {
         Ok(result)
     }
 
+    /// Parse every row for `handle`, returning successfully parsed
+    /// events alongside per-row schema-drift records for rows whose
+    /// payload could not be deserialized. Schema-drift skips do not
+    /// abort the parse: chain hashes ride on raw payload bytes and
+    /// verify independently in [`Self::verify`], so an unparseable
+    /// row is not chain-breaking. Database errors still propagate.
     fn session_rows(
         &self,
         handle: &SessionHandle<OwnSession>,
-    ) -> Result<Vec<StoredSessionEvent>, AuditError> {
+    ) -> Result<(Vec<StoredSessionEvent>, Vec<SchemaDriftRecord>), AuditError> {
         let conn = self.conn.lock().expect("session log mutex");
         let raw = collect_rows(
             &conn,
@@ -1816,7 +1852,24 @@ impl SqliteSessionLog {
              ORDER BY seq ASC",
             params![handle.id.as_str()],
         )?;
-        raw.into_iter().map(parse_row).collect()
+        let mut parsed = Vec::with_capacity(raw.len());
+        let mut drift = Vec::new();
+        for row in raw {
+            match parse_row(row) {
+                Ok(event) => parsed.push(event),
+                Err(AuditError::SchemaDrift {
+                    session_id,
+                    seq,
+                    reason,
+                }) => drift.push(SchemaDriftRecord {
+                    session_id,
+                    seq,
+                    reason,
+                }),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((parsed, drift))
     }
 
     /// Scan every session for `PermissionDenied` events belonging to
@@ -2267,7 +2320,12 @@ fn collect_rows(
 
 fn parse_row(row: RawRow) -> Result<StoredSessionEvent, AuditError> {
     let (id, session_id, seq, ts_str, trust_str, payload, leaf_hash, prev_hash, hash) = row;
-    let event: SessionEvent = serde_json::from_str(&payload)?;
+    let event: SessionEvent =
+        serde_json::from_str(&payload).map_err(|e| AuditError::SchemaDrift {
+            session_id: session_id.clone(),
+            seq: seq as u64,
+            reason: e.to_string(),
+        })?;
     let trust = trust_from_str(&trust_str)?;
     let ts = DateTime::parse_from_rfc3339(&ts_str)
         .map_err(|e| AuditError::SiemConfig(format!("invalid timestamp in session_events: {e}")))?

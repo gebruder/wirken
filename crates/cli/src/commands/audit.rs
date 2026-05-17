@@ -239,6 +239,7 @@ fn print_verify_human(result: &VerifyResult, require_signed: bool) -> Result<()>
             sessions_with_no_signed_heads,
             signing_key_ids_seen,
             unsigned_tail_max_len,
+            schema_drift_records,
         } => {
             println!("  Audit log integrity: OK");
             println!(
@@ -267,6 +268,24 @@ fn print_verify_human(result: &VerifyResult, require_signed: bool) -> Result<()>
             }
             if *unsigned_tail_max_len > 0 {
                 println!("  Unsigned tail (max events past last head): {unsigned_tail_max_len}.");
+            }
+            if !schema_drift_records.is_empty() {
+                let n = schema_drift_records.len();
+                let seq_min = schema_drift_records
+                    .iter()
+                    .map(|r| r.seq)
+                    .min()
+                    .unwrap_or(0);
+                let seq_max = schema_drift_records
+                    .iter()
+                    .map(|r| r.seq)
+                    .max()
+                    .unwrap_or(0);
+                println!(
+                    "  Unverifiable rows (schema drift): {n}. seq range [{seq_min}..={seq_max}]. \
+                     Chain hashes verified on raw payload bytes; rows could not be deserialized. \
+                     See audit.row_unverifiable events for per-row detail."
+                );
             }
         }
         VerifyResult::Broken {
@@ -379,6 +398,7 @@ fn print_verify_json(result: &VerifyResult, require_signed: bool) -> Result<()> 
             sessions_with_no_signed_heads,
             signing_key_ids_seen,
             unsigned_tail_max_len,
+            schema_drift_records,
         } => json!({
             "schema_version": SCHEMA_VERSION,
             "wirken_version": WIRKEN_VERSION,
@@ -391,6 +411,11 @@ fn print_verify_json(result: &VerifyResult, require_signed: bool) -> Result<()> 
             "sessions_with_no_signed_heads": sessions_with_no_signed_heads,
             "signing_key_ids_seen": signing_key_ids_seen,
             "unsigned_tail_max_len": unsigned_tail_max_len,
+            "schema_drift_records": schema_drift_records.iter().map(|r| json!({
+                "session": r.session_id,
+                "seq": r.seq,
+                "reason": r.reason,
+            })).collect::<Vec<_>>(),
             "require_signed": require_signed,
         }),
         VerifyResult::Empty => json!({

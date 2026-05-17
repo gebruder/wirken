@@ -17,9 +17,9 @@ pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use session_log::{
     ApprovalScopeKind, ApprovalSource, ChainHeadReason, DenialSource, HashHex, HexBytes,
     HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, OwnSession,
-    PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, SessionEvent, SessionHandle,
-    SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason, SqliteSessionLog,
-    StoredSessionEvent, SubagentStatus, ToolCallRecord, TrustLevel,
+    PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, SchemaDriftRecord, SessionEvent,
+    SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,
+    SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord, TrustLevel,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

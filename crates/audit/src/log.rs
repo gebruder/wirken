@@ -33,7 +33,7 @@ use chrono::{DateTime, Utc};
 use crate::error::AuditError;
 use crate::event::{AuditEvent, StoredEvent};
 use crate::legacy_compat;
-use crate::session_log::{SessionId, SqliteSessionLog};
+use crate::session_log::{SchemaDriftRecord, SessionId, SqliteSessionLog};
 use crate::signing::AuditSigningKey;
 
 /// Query parameters for filtering audit events.
@@ -95,6 +95,14 @@ pub enum VerifyResult {
         /// Operators can use this to surface stale tails without
         /// failing the verify outright.
         unsigned_tail_max_len: usize,
+        /// Rows whose payload could not be deserialized into a
+        /// [`crate::SessionEvent`]. The chain hash is computed over
+        /// raw payload bytes and verifies independently, so these
+        /// rows do not break chain integrity; they are surfaced
+        /// here so the writer's continuous-verify loop can warn,
+        /// emit `audit.row_unverifiable` events, and continue.
+        /// Empty in the common case.
+        schema_drift_records: Vec<SchemaDriftRecord>,
     },
     /// At least one per-session chain is broken.
     Broken {

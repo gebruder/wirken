@@ -383,6 +383,7 @@ pub(crate) fn verify_legacy(
     let mut sessions_with_no_signed_heads = 0usize;
     let mut signing_key_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut unsigned_tail_max_len = 0usize;
+    let mut schema_drift_records: Vec<crate::session_log::SchemaDriftRecord> = Vec::new();
 
     for sid in &session_ids {
         let handle = log.handle_for(SessionId::new(sid.clone()));
@@ -448,6 +449,7 @@ pub(crate) fn verify_legacy(
         if sigres.unsigned_tail_len > unsigned_tail_max_len {
             unsigned_tail_max_len = sigres.unsigned_tail_len;
         }
+        schema_drift_records.extend(sigres.schema_drift_records);
     }
 
     if total == 0 {
@@ -462,6 +464,7 @@ pub(crate) fn verify_legacy(
             sessions_with_no_signed_heads,
             signing_key_ids_seen: signing_key_ids.into_iter().collect(),
             unsigned_tail_max_len,
+            schema_drift_records,
         })
     }
 }

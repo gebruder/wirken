@@ -7,6 +7,7 @@ use crate::alarm_log::{AlarmLog, AlarmRecord, hostname_best_effort, now_rfc3339}
 use crate::error::AuditError;
 use crate::event::{ActorKind, AuditEvent};
 use crate::log::{AuditLog, VerifyResult};
+use crate::session_log::SchemaDriftRecord;
 use crate::siem::{SiemConfig, SiemForwarder};
 use crate::signing::AuditSigningKey;
 
@@ -206,17 +207,120 @@ fn verify_every_flushes() -> u64 {
 /// to SIEM is unavailable. `None` skips the in-chain emission
 /// entirely; tests that don't care about the channel pass `None` and
 /// rely on the alarm log to prove the verify pass fired.
+/// Categorise a serde error string by its leading clause so a flood of
+/// near-identical messages collapses to a small number of category
+/// counts on the aggregated warn line. Inputs look like
+/// `missing field `actor_kind` at line 1 column 42` or
+/// `unknown variant `Foo`, expected one of ...`. The category is the
+/// span before the first backtick, colon, or comma.
+fn drift_reason_category(reason: &str) -> String {
+    reason
+        .chars()
+        .take_while(|c| !matches!(c, '`' | ':' | ','))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// One aggregated WARN line per verify pass summarising schema-drift
+/// rows: total count, the seq range they fell within, and counts per
+/// category. Keeps the operator log readable when a backward-compat
+/// schema gap touches many rows at once.
+fn report_schema_drift(records: &[SchemaDriftRecord]) {
+    if records.is_empty() {
+        return;
+    }
+    let count = records.len();
+    let seq_min = records.iter().map(|r| r.seq).min().unwrap_or(0);
+    let seq_max = records.iter().map(|r| r.seq).max().unwrap_or(0);
+    let mut by_category: std::collections::BTreeMap<String, usize> = Default::default();
+    for r in records {
+        *by_category
+            .entry(drift_reason_category(&r.reason))
+            .or_insert(0) += 1;
+    }
+    let categories: Vec<String> = by_category
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    tracing::warn!(
+        count,
+        seq_min,
+        seq_max,
+        categories = %categories.join(","),
+        "audit chain verification: {count} row(s) unverifiable (schema drift). \
+         seq range [{seq_min}..={seq_max}]. categories: {}",
+        categories.join(", "),
+    );
+}
+
+/// Emit one `audit.row_unverifiable` event per drift record so an
+/// operator reading the chain sees exactly which rows the verifier
+/// could not deserialize. Mirrors the channel-routed dispatch path
+/// used by `audit.chain_broken` so SIEM forwarders pick the events
+/// up on the next flush; falls back to direct write when the channel
+/// is unavailable.
+async fn emit_drift_events(
+    log: &AuditLog,
+    audit_tx: Option<&mpsc::Sender<AuditEvent>>,
+    records: &[SchemaDriftRecord],
+) {
+    for record in records {
+        let category = drift_reason_category(&record.reason);
+        let event = AuditEvent::new(
+            ActorKind::Service,
+            "audit",
+            "audit.row_unverifiable",
+            "audit.db",
+        )
+        .with_detail(serde_json::json!({
+            "session": record.session_id,
+            "seq": record.seq,
+            "reason": record.reason,
+            "reason_category": category,
+        }));
+        let routed = match audit_tx {
+            Some(tx) => match tx.try_send(event.clone()) {
+                Ok(()) => true,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "audit channel full; landing row_unverifiable via direct \
+                         write_batch (SIEM forwarding on this event is lost)"
+                    );
+                    false
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+            },
+            None => false,
+        };
+        if !routed && let Err(e) = log.write_batch(&[event]) {
+            tracing::error!("audit row_unverifiable event write failed: {e}");
+        }
+    }
+}
+
 async fn run_verify_pass(
     log: &AuditLog,
     alarms: &AlarmLog,
     audit_tx: Option<&mpsc::Sender<AuditEvent>>,
 ) -> VerifyPassOutcome {
     match log.verify() {
-        Ok(VerifyResult::Ok { rows_verified, .. }) => {
+        Ok(VerifyResult::Ok {
+            rows_verified,
+            schema_drift_records,
+            ..
+        }) => {
             tracing::debug!(
                 rows_verified,
                 "audit chain verification: ok (continuous pass)"
             );
+            report_schema_drift(&schema_drift_records);
+            emit_drift_events(log, audit_tx, &schema_drift_records).await;
+            // Schema drift is not tamper: chain hashes verified on
+            // every row's raw payload bytes. The unverifiable rows
+            // are surfaced via the WARN line above and per-row
+            // `audit.row_unverifiable` events; the integrity counter
+            // is not incremented.
             VerifyPassOutcome {
                 intact: true,
                 alarm_write_ok: true,
@@ -852,6 +956,274 @@ mod tests {
         assert!(
             !in_chain.is_empty(),
             "closed-channel fallback must land the row via direct write_batch"
+        );
+    }
+
+    /// Rewrite the payload of the row with `id` so that it no longer
+    /// deserializes as a `SessionEvent`, recomputing `leaf_hash` and
+    /// `hash` from the new bytes (and the prior row's chain hash) so
+    /// the chain itself still verifies. This is the on-disk shape of
+    /// schema drift: a row that hashes consistently but whose
+    /// structure the current binary cannot parse (the 1.5.1 first-run
+    /// regression case, generalised).
+    fn rewrite_row_as_schema_drift(db_path: &Path, id: i64, new_payload: &str) {
+        use sha2::{Digest, Sha256};
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let prev_hash: String = conn
+            .query_row(
+                "SELECT prev_hash FROM session_events WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let leaf_hash = {
+            let mut h = Sha256::new();
+            h.update(new_payload.as_bytes());
+            let bytes = h.finalize();
+            let mut s = String::with_capacity(64);
+            for b in bytes {
+                use std::fmt::Write;
+                write!(&mut s, "{b:02x}").unwrap();
+            }
+            s
+        };
+        let chain_hash = {
+            let mut h = Sha256::new();
+            h.update(prev_hash.as_bytes());
+            h.update(leaf_hash.as_bytes());
+            let bytes = h.finalize();
+            let mut s = String::with_capacity(64);
+            for b in bytes {
+                use std::fmt::Write;
+                write!(&mut s, "{b:02x}").unwrap();
+            }
+            s
+        };
+        // Update the row, then patch the prev_hash of the next row in
+        // this session so chain continuity past the drifted row stays
+        // intact (the hash check at row N+1 reads our new chain_hash
+        // as its prev_hash).
+        let session_id: String = conn
+            .query_row(
+                "SELECT session_id FROM session_events WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let seq: i64 = conn
+            .query_row(
+                "SELECT seq FROM session_events WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE session_events SET payload = ?1, leaf_hash = ?2, hash = ?3 WHERE id = ?4",
+            rusqlite::params![new_payload, leaf_hash, chain_hash, id],
+        )
+        .unwrap();
+        let _ = conn.execute(
+            "UPDATE session_events SET prev_hash = ?1
+             WHERE session_id = ?2 AND seq = ?3",
+            rusqlite::params![chain_hash, session_id, seq + 1],
+        );
+        // The next-row hash itself now mismatches (it was computed
+        // from the old chain_hash). Recompute it.
+        if let Ok((next_leaf, next_seq)) = conn.query_row(
+            "SELECT leaf_hash, seq FROM session_events
+             WHERE session_id = ?1 AND seq = ?2",
+            rusqlite::params![session_id, seq + 1],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        ) {
+            let new_next_chain = {
+                let mut h = Sha256::new();
+                h.update(chain_hash.as_bytes());
+                h.update(next_leaf.as_bytes());
+                let bytes = h.finalize();
+                let mut s = String::with_capacity(64);
+                for b in bytes {
+                    use std::fmt::Write;
+                    write!(&mut s, "{b:02x}").unwrap();
+                }
+                s
+            };
+            conn.execute(
+                "UPDATE session_events SET hash = ?1
+                 WHERE session_id = ?2 AND seq = ?3",
+                rusqlite::params![new_next_chain, session_id, next_seq],
+            )
+            .unwrap();
+            // Cascade: every later row's chain_hash depends on the
+            // prior one. Walk forward until we run out of rows.
+            let mut prev_chain = new_next_chain;
+            let mut s = next_seq;
+            loop {
+                s += 1;
+                match conn.query_row(
+                    "SELECT leaf_hash FROM session_events
+                     WHERE session_id = ?1 AND seq = ?2",
+                    rusqlite::params![session_id, s],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    Ok(leaf) => {
+                        let new_chain = {
+                            let mut h = Sha256::new();
+                            h.update(prev_chain.as_bytes());
+                            h.update(leaf.as_bytes());
+                            let bytes = h.finalize();
+                            let mut out = String::with_capacity(64);
+                            for b in bytes {
+                                use std::fmt::Write;
+                                write!(&mut out, "{b:02x}").unwrap();
+                            }
+                            out
+                        };
+                        conn.execute(
+                            "UPDATE session_events SET prev_hash = ?1, hash = ?2
+                             WHERE session_id = ?3 AND seq = ?4",
+                            rusqlite::params![prev_chain, new_chain, session_id, s],
+                        )
+                        .unwrap();
+                        prev_chain = new_chain;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    /// JSON payload that round-trips through serde but is not a valid
+    /// `SessionEvent` (no matching variant tag), so `parse_row` fails
+    /// with a serde error and the row surfaces as schema drift.
+    fn schema_drift_payload() -> String {
+        serde_json::to_string(&serde_json::json!({
+            "kind": "totally_unknown_variant_for_testing",
+            "field": "value",
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_verify_pass_treats_schema_drift_as_intact() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        rewrite_row_as_schema_drift(&db_path, 3, &schema_drift_payload());
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let outcome = run_verify_pass(&log, &alarms, None).await;
+
+        assert!(
+            outcome.intact,
+            "schema drift must not be classified as tamper"
+        );
+        assert!(outcome.alarm_write_ok);
+
+        // No alarm-log entry: schema drift is not tamper-class.
+        let alarm_records = alarms.read_all().unwrap();
+        assert!(
+            alarm_records.is_empty(),
+            "alarm log must stay empty on schema drift, got {alarm_records:?}"
+        );
+
+        // The drifted row is surfaced via an in-chain
+        // `audit.row_unverifiable` event (channel was None so the
+        // direct-write fallback fired).
+        let events = log
+            .query(&AuditQuery {
+                action: Some("audit.row_unverifiable".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "expected one audit.row_unverifiable event, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn schema_drift_does_not_halt_after_repeated_passes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        rewrite_row_as_schema_drift(&db_path, 3, &schema_drift_payload());
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let mut integrity = 0u32;
+        let mut alarm = 0u32;
+
+        // Run more passes than the integrity halt threshold; counter
+        // must never increment because every pass reports intact.
+        for _ in 0..MAX_INTEGRITY_FAILURES + 2 {
+            let outcome = run_verify_pass(&log, &alarms, None).await;
+            let halt = record_verify_outcome(&mut integrity, &mut alarm, &outcome);
+            assert!(!halt, "schema drift must never trigger halt");
+            assert_eq!(
+                integrity, 0,
+                "integrity counter must stay zero on schema drift"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_verify_pass_routes_row_unverifiable_through_channel() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        {
+            let log = AuditLog::open(&db_path).unwrap();
+            let events: Vec<AuditEvent> = (0..6)
+                .map(|i| AuditEvent::new(ActorKind::User, "actor", format!("step-{i}"), "t"))
+                .collect();
+            log.write_batch(&events).unwrap();
+        }
+        rewrite_row_as_schema_drift(&db_path, 3, &schema_drift_payload());
+
+        let log = AuditLog::open(&db_path).unwrap();
+        let alarms = AlarmLog::new(tmp.path());
+        let (tx, mut rx) = mpsc::channel::<AuditEvent>(16);
+
+        let outcome = run_verify_pass(&log, &alarms, Some(&tx)).await;
+        assert!(outcome.intact);
+
+        let routed = rx
+            .try_recv()
+            .expect("row_unverifiable event must be on the channel");
+        assert_eq!(routed.action, "audit.row_unverifiable");
+        assert_eq!(routed.target, "audit.db");
+        assert!(matches!(routed.actor_kind, ActorKind::Service));
+        assert_eq!(routed.detail.get("seq").and_then(|v| v.as_u64()), Some(2));
+        assert!(routed.detail.get("reason").is_some());
+        assert!(routed.detail.get("reason_category").is_some());
+    }
+
+    #[test]
+    fn drift_reason_category_collapses_serde_messages() {
+        assert_eq!(
+            drift_reason_category("missing field `actor_kind` at line 1 column 42"),
+            "missing field"
+        );
+        assert_eq!(
+            drift_reason_category("unknown variant `Foo`, expected one of `Bar`"),
+            "unknown variant"
+        );
+        assert_eq!(
+            drift_reason_category("invalid type: string \"x\", expected u64"),
+            "invalid type"
         );
     }
 

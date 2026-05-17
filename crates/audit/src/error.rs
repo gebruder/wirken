@@ -18,6 +18,13 @@ pub enum AuditError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    #[error("schema drift at session {session_id} seq {seq}: {reason}")]
+    SchemaDrift {
+        session_id: String,
+        seq: u64,
+        reason: String,
+    },
+
     #[error("SIEM configuration error: {0}")]
     SiemConfig(String),
 }
