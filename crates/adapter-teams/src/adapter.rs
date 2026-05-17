@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
+use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
 use wirken_ipc::wirken_capnp::frame;
 use wirken_ipc::{
     AdapterIdentity, IpcFrameReader, IpcFrameWriter, connect, perform_adapter_handshake,
@@ -14,6 +16,30 @@ use wirken_ipc::{
 use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, Activity};
 use crate::error::TeamsError;
+
+/// Per-conversation cache of `service_url`. Bot Connector requires
+/// the originating regional service URL for any outbound activity;
+/// each conversation is anchored to a region at creation. We learn
+/// it from inbound activities and look it up on outbound.
+///
+/// TODO #119-followup: this is a slice-local fix; the correct
+/// destination is for the gateway's `ApprovalRequest` IPC frame to
+/// carry `service_url` directly (the gateway has it at frame-mint
+/// time from the originating inbound activity, no staleness window).
+/// Adapter cache holes (conversations that have had zero inbound
+/// activity before an approval request) fall back to the hardcoded
+/// default below, which happens to work for the public-cloud
+/// production case but is not universally correct (sovereign clouds,
+/// regional pinning). See umbrella #119 for the IPC frame extension.
+type ServiceUrlCache = Arc<RwLock<HashMap<String, String>>>;
+
+/// Public-cloud Bot Connector default. Falls back to this URL when
+/// the service_url cache has no entry for a conversation.
+///
+/// TODO #119-followup: replace with `service_url` threaded through
+/// the `ApprovalRequest` IPC frame so the adapter does not depend on
+/// having previously seen an inbound activity in the conversation.
+const DEFAULT_SERVICE_URL: &str = "https://smba.trafficmanager.net";
 
 /// MS Teams adapter: bridges Bot Framework REST API <-> Wirken gateway IPC.
 /// Receives activities via HTTP webhook, sends replies via Bot Framework REST API.
@@ -73,13 +99,22 @@ impl TeamsAdapter {
         let writer = Arc::new(Mutex::new(writer));
         let http = reqwest::Client::new();
         let jwks = Arc::new(JwksCache::new(http.clone()));
+        let service_url_cache: ServiceUrlCache = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn outbound handler (gateway -> Teams via Bot Framework REST API)
         let outbound_writer = writer.clone();
         let outbound_app_id = self.app_id.clone();
         let outbound_password = self.app_password.clone();
+        let outbound_service_urls = service_url_cache.clone();
         let _outbound_handle = tokio::spawn(async move {
-            handle_outbound(reader, outbound_app_id, outbound_password, outbound_writer).await;
+            handle_outbound(
+                reader,
+                outbound_app_id,
+                outbound_password,
+                outbound_writer,
+                outbound_service_urls,
+            )
+            .await;
         });
 
         // Spawn heartbeat
@@ -102,9 +137,10 @@ impl TeamsAdapter {
             let w = writer.clone();
             let bid = bot_id.clone();
             let j = jwks.clone();
+            let svc_urls = service_url_cache.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_webhook_request(&mut stream, &bid, &j, w).await {
+                if let Err(e) = handle_webhook_request(&mut stream, &bid, &j, w, svc_urls).await {
                     tracing::error!("Webhook request error: {e}");
                 }
             });
@@ -125,6 +161,7 @@ pub(crate) async fn handle_webhook_request(
     bot_id: &str,
     jwks: &JwksCache,
     writer: Arc<Mutex<IpcFrameWriter>>,
+    service_url_cache: ServiceUrlCache,
 ) -> Result<(), TeamsError> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await?;
@@ -174,6 +211,32 @@ pub(crate) async fn handle_webhook_request(
     // Respond 200 immediately (Bot Framework expects fast response)
     let _ = respond(stream, "200 OK").await;
 
+    // Cache the conversation's service_url so subsequent outbound
+    // activities know which Bot Connector regional endpoint to use.
+    // TODO #119-followup: replace this cache with `service_url`
+    // threaded through the `ApprovalRequest` IPC frame so outbound
+    // does not depend on having seen an inbound first.
+    if let (Some(conv), Some(svc_url)) = (
+        activity.conversation.as_ref().and_then(|c| c.id.as_deref()),
+        activity.service_url.as_deref(),
+    ) && !conv.is_empty()
+        && !svc_url.is_empty()
+    {
+        let mut cache = service_url_cache.write().await;
+        cache.insert(conv.to_string(), svc_url.to_string());
+    }
+
+    // Approval-button presses arrive as `message` activities with a
+    // populated `value` field carrying the Action.Submit `data`
+    // payload. Route them directly past the mention-gate; the
+    // gate is a chitchat filter, structured presses are
+    // intentional and the platform-authenticated JWT above already
+    // vouches for the press identity.
+    if convert::extract_approval_payload(&activity).is_some() {
+        forward_approval_decision(&activity, writer).await;
+        return Ok(());
+    }
+
     // Check if we should process this message
     if !convert::should_process(&activity, bot_id) {
         return Ok(());
@@ -194,12 +257,66 @@ pub(crate) async fn handle_webhook_request(
     Ok(())
 }
 
+/// Decode an approval press's `wirken_approval` payload and forward
+/// an `ApprovalDecision` frame to the gateway. Drops the press on
+/// the malformed-payload or missing-aad_object_id paths with a
+/// warn log; the 200 OK has already gone back to Bot Connector so
+/// the envelope is acknowledged either way. Mirrors Telegram /
+/// Discord / Slack's "drop with warn" posture for malformed input.
+async fn forward_approval_decision(activity: &Activity, writer: Arc<Mutex<IpcFrameWriter>>) {
+    let Some(raw) = convert::extract_approval_payload(activity) else {
+        return;
+    };
+    let payload = match approval::decode(raw) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                payload = %raw,
+                error = %e,
+                "teams interaction: unrecognized wirken_approval; dropping"
+            );
+            return;
+        }
+    };
+    let Some(from) = activity.from.as_ref() else {
+        tracing::warn!("teams interaction: activity has no `from`; dropping approval press");
+        return;
+    };
+    let Some(aad_object_id) = from.aad_object_id.as_deref() else {
+        tracing::warn!(
+            user_id = ?from.id,
+            "teams interaction: approval press missing aadObjectId; dropping (anonymous \
+             participants and external guests cannot be authenticated against the approver \
+             registry by design)"
+        );
+        return;
+    };
+    let is_allow = matches!(payload.decision, Decision::Allow);
+    let display = from
+        .name
+        .clone()
+        .unwrap_or_else(|| aad_object_id.to_string());
+    let mut capnp_msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(
+        &mut capnp_msg,
+        &payload.request_id,
+        is_allow,
+        aad_object_id,
+        &display,
+    );
+    let mut w = writer.lock().await;
+    if let Err(e) = w.write_message(&capnp_msg).await {
+        tracing::error!("teams interaction: failed to send ApprovalDecision to gateway: {e}");
+    }
+}
+
 /// Handle outbound messages from gateway — POST to Bot Framework REST API.
 async fn handle_outbound(
     mut reader: IpcFrameReader,
     app_id: String,
     app_password: String,
     writer: Arc<Mutex<IpcFrameWriter>>,
+    service_url_cache: ServiceUrlCache,
 ) {
     let http = reqwest::Client::new();
     // Cache for service URL -> access token
@@ -232,6 +349,13 @@ async fn handle_outbound(
                     Ok(fields) => FrameAction::SendMessage(fields),
                     Err(e) => {
                         tracing::error!("Failed to parse outbound: {e}");
+                        FrameAction::Skip
+                    }
+                },
+                Ok(frame::ApprovalRequest(_)) => match convert::parse_approval_request(&msg) {
+                    Ok(fields) => FrameAction::SendApprovalRequest(fields),
+                    Err(e) => {
+                        tracing::error!("Failed to parse approval request: {e}");
                         FrameAction::Skip
                     }
                 },
@@ -321,8 +445,208 @@ async fn handle_outbound(
                     tracing::error!("Failed to send outbound result: {e}");
                 }
             }
+            FrameAction::SendApprovalRequest(fields) => {
+                if access_token.is_none() {
+                    match get_bot_framework_token(&http, &app_id, &app_password).await {
+                        Ok(token) => access_token = Some(token),
+                        Err(e) => {
+                            tracing::error!(
+                                request_id = %fields.request_id,
+                                "teams approval: token mint failed: {e}"
+                            );
+                            emit_approval_failure(&writer, &fields.request_id, "token_mint_failed")
+                                .await;
+                            continue;
+                        }
+                    }
+                }
+                let token = access_token.as_ref().unwrap();
+                let svc_url = lookup_service_url(&service_url_cache, &fields.target_channel_id)
+                    .await
+                    .unwrap_or_else(|| DEFAULT_SERVICE_URL.to_string());
+                send_approval_request(&http, token, &svc_url, &fields, &writer).await;
+            }
             FrameAction::Skip => {}
         }
+    }
+}
+
+/// Look up the cached `service_url` for a conversation. None when
+/// the adapter has not yet seen an inbound activity in this
+/// conversation; the caller falls back to [`DEFAULT_SERVICE_URL`].
+///
+/// TODO #119-followup: this lookup goes away once `service_url` is
+/// threaded through the gateway's `ApprovalRequest` IPC frame.
+async fn lookup_service_url(cache: &ServiceUrlCache, conversation_id: &str) -> Option<String> {
+    cache.read().await.get(conversation_id).cloned()
+}
+
+async fn emit_approval_failure(
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+    request_id: &str,
+    reason: &str,
+) {
+    let mut failure = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut failure, request_id, reason);
+    let mut w = writer.lock().await;
+    if let Err(send_err) = w.write_message(&failure).await {
+        tracing::error!("teams approval: failed to send ApprovalRequestFailed: {send_err}");
+    }
+}
+
+/// Render an approval message as an Adaptive Card with two
+/// Action.Submit buttons (Approve, Deny). Each button's `data`
+/// object carries the cross-adapter encoded payload under the
+/// `wirken_approval` field (see `convert::APPROVAL_FIELD`); the
+/// inbound press path reads it back via `extract_approval_payload`.
+///
+/// On send failure (token-mint, Bot Connector REST error, encode
+/// failure on a malformed `request_id`), emits
+/// `ApprovalRequestFailed` with a snake_case reason. Card stays in
+/// place on success; no per-press edit or in-conversation reply
+/// (Teams has no ephemeral equivalent to Slack's chat.postEphemeral
+/// or Telegram's callback-query toast, so silent ack is the
+/// umbrella-consistent choice).
+async fn send_approval_request(
+    http: &reqwest::Client,
+    token: &str,
+    service_url: &str,
+    fields: &convert::ApprovalRequestFields,
+    writer: &Arc<Mutex<IpcFrameWriter>>,
+) {
+    let allow_id = match approval::encode(&ApprovalPayload {
+        request_id: fields.request_id.clone(),
+        decision: Decision::Allow,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "teams approval: encode failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "encode_failed").await;
+            return;
+        }
+    };
+    let deny_id = match approval::encode(&ApprovalPayload {
+        request_id: fields.request_id.clone(),
+        decision: Decision::Deny,
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "teams approval: encode failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "encode_failed").await;
+            return;
+        }
+    };
+
+    let prompt = format!(
+        "Agent **{}** requests **{}** (tier `{}`).\n\
+         Action: `{}`\n\
+         Trigger: _{}_",
+        fields.triggering_agent,
+        fields.tool_name,
+        fields.requested_tier,
+        fields.action_key,
+        if fields.trigger_message.is_empty() {
+            "(none)".to_string()
+        } else {
+            fields.trigger_message.clone()
+        },
+    );
+
+    let card = serde_json::json!({
+        "type": "AdaptiveCard",
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "version": "1.4",
+        "body": [
+            { "type": "TextBlock", "text": prompt, "wrap": true }
+        ],
+        "actions": [
+            {
+                "type": "Action.Submit",
+                "title": "Approve",
+                "style": "positive",
+                "data": { convert::APPROVAL_FIELD: allow_id }
+            },
+            {
+                "type": "Action.Submit",
+                "title": "Deny",
+                "style": "destructive",
+                "data": { convert::APPROVAL_FIELD: deny_id }
+            }
+        ]
+    });
+
+    let reply_url = format!(
+        "{}/v3/conversations/{}/activities",
+        service_url.trim_end_matches('/'),
+        fields.target_channel_id
+    );
+    let body = serde_json::json!({
+        "type": "message",
+        "conversation": { "id": fields.target_channel_id },
+        "attachments": [
+            {
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": card
+            }
+        ]
+    });
+
+    let resp = http
+        .post(&reply_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            tracing::error!(
+                request_id = %fields.request_id,
+                channel_id = %fields.target_channel_id,
+                status = status.as_u16(),
+                body = %body,
+                "teams approval: send failed; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(
+                writer,
+                &fields.request_id,
+                classify_http_status(status.as_u16()),
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(
+                request_id = %fields.request_id,
+                error = %e,
+                "teams approval: network error; emitting ApprovalRequestFailed"
+            );
+            emit_approval_failure(writer, &fields.request_id, "network_error").await;
+        }
+    }
+}
+
+/// Map Bot Connector REST status codes to stable snake_case labels
+/// for `ApprovalRequestFailed.reason`. Used by SIEM detections to
+/// group failures without parsing free text.
+fn classify_http_status(status: u16) -> &'static str {
+    match status {
+        401 | 403 => "teams_auth_error",
+        404 => "conversation_not_accessible",
+        429 => "teams_api_error",
+        500..=599 => "teams_api_error",
+        _ => "teams_api_error",
     }
 }
 
@@ -381,6 +705,7 @@ fn url_encode(s: &str) -> String {
 
 enum FrameAction {
     SendMessage(convert::OutboundFields),
+    SendApprovalRequest(convert::ApprovalRequestFields),
     Skip,
 }
 

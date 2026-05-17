@@ -19,6 +19,13 @@ pub struct Activity {
     pub channel_data: Option<serde_json::Value>,
     /// Entities — includes mentions
     pub entities: Option<Vec<serde_json::Value>>,
+    /// Action.Submit payload. Bot Framework delivers a card-button
+    /// press as a `message` activity with `value` populated from the
+    /// card's `data` field. For approval buttons the adapter
+    /// publishes, `value` is an object containing
+    /// `wirken_approval: "req:<uuid>:allow|deny"` per the
+    /// cross-adapter encoding in `wirken_adapter_core::approval`.
+    pub value: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,4 +261,179 @@ pub fn build_heartbeat(
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut hb = frame_builder.init_heartbeat();
     hb.set_seq(seq);
+}
+
+/// JSON field name carrying the cross-adapter approval payload
+/// inside an Action.Submit `data` object. Outbound: set
+/// `data.wirken_approval = encode(...)`. Inbound: read
+/// `activity.value.wirken_approval` and pass to `decode(...)`.
+pub const APPROVAL_FIELD: &str = "wirken_approval";
+
+/// Extract the cross-adapter encoded approval payload from an
+/// activity's Action.Submit `value` object. Returns `None` when the
+/// value is absent, not an object, or missing the
+/// `wirken_approval` string field — none of which are errors;
+/// they just mean the press is not an approval interaction.
+pub fn extract_approval_payload(activity: &Activity) -> Option<&str> {
+    activity
+        .value
+        .as_ref()
+        .and_then(|v| v.as_object())
+        .and_then(|obj| obj.get(APPROVAL_FIELD))
+        .and_then(|v| v.as_str())
+}
+
+/// Build an `ApprovalDecision` frame to send back to the gateway
+/// when an operator presses an approval button. The decoded
+/// payload from `wirken_adapter_core::approval` is unpacked at the
+/// press site in `adapter.rs`; the decision bool is derived there
+/// and passed in.
+///
+/// `user_id` is the Azure AD object id from
+/// `activity.from.aad_object_id`. The gateway side calls
+/// `approver_registry::verify("teams", &actor_user_id)` against
+/// the registered allowlist. The adapter does not call verify
+/// directly (layering: adapters do not depend on gateway state);
+/// unauthorized presses are silently dropped on the gateway side,
+/// matching Telegram, Discord, and Slack.
+pub fn build_approval_decision(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    is_allow: bool,
+    user_id: &str,
+    user_display: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut decision = frame_builder.init_approval_decision();
+    decision.set_request_id(request_id);
+    decision.set_actor_user_id(user_id);
+    decision.set_actor_display(user_display);
+    let mut kind = decision.init_decision();
+    if is_allow {
+        kind.set_allow(());
+    } else {
+        // Teams Action.Submit buttons carry no operator reason
+        // field. Empty string maps to `denial_reason: None` on the
+        // gateway side, matching the other button-native adapters.
+        kind.set_deny("");
+    }
+}
+
+/// Fields parsed from an `ApprovalRequest` frame the adapter
+/// renders as an Adaptive Card with two Action.Submit buttons.
+///
+/// `target_channel_id` is forwarded verbatim. Teams conversation
+/// ids are compound strings with format-specific subcategories
+/// (`19:meeting_...@thread.v2` for meetings, `a:...` for 1:1
+/// chats, `19:abc...@thread.tacv2` for channel threads); the
+/// adapter rounds them through unchanged.
+///
+/// ## Per-adapter `target_channel_id` parse spectrum
+///
+/// Each button-native adapter parses the platform-neutral
+/// `targetConversationId` IPC string according to its platform's
+/// identifier shape. Four shapes have landed against umbrella #119
+/// so far, on a spectrum from most-constrained to least:
+///
+/// - **Numeric, fixed-width**: Telegram (`i64`, including negative
+///   group ids), Discord (`u64`, snowflakes). Parse rejects on
+///   non-numeric input.
+/// - **Opaque string, short**: Slack (`String`, e.g. `"C0123ABCD"`).
+///   No format check beyond non-empty.
+/// - **Opaque string, compound**: Teams (this adapter). Compound
+///   ids with channel-specific format subcategories. No format
+///   check beyond non-empty; the platform validates shape on
+///   send.
+///
+/// The next adapters slot into the spectrum: WhatsApp uses phone
+/// numbers (`String`, opaque-with-loose-format), Google Chat uses
+/// path ids (`String`, opaque-with-path-shape). Each lands its own
+/// parse in its adapter slice; the comment is the convention.
+pub struct ApprovalRequestFields {
+    pub request_id: String,
+    pub tool_name: String,
+    pub action_key: String,
+    pub requested_tier: String,
+    pub triggering_agent: String,
+    pub trigger_message: String,
+    pub target_channel_id: String,
+}
+
+pub fn parse_approval_request(
+    msg: &capnp::message::Reader<capnp::serialize::OwnedSegments>,
+) -> Result<ApprovalRequestFields, capnp::Error> {
+    let frame_reader = msg.get_root::<frame::Reader<'_>>()?;
+    match frame_reader.which()? {
+        frame::ApprovalRequest(req) => {
+            let r = req?;
+            let request_id = r
+                .get_request_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("request_id not utf8: {e}")))?
+                .to_string();
+            let tool_name = r
+                .get_tool_name()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("tool_name not utf8: {e}")))?
+                .to_string();
+            let action_key = r
+                .get_action_key()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("action_key not utf8: {e}")))?
+                .to_string();
+            let requested_tier = r
+                .get_requested_tier()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("requested_tier not utf8: {e}")))?
+                .to_string();
+            let triggering_agent = r
+                .get_triggering_agent()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("triggering_agent not utf8: {e}")))?
+                .to_string();
+            let trigger_message = r
+                .get_trigger_message()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
+                .to_string();
+            let target_channel_id = r
+                .get_target_conversation_id()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("target_conversation_id not utf8: {e}")))?
+                .to_string();
+            if target_channel_id.is_empty() {
+                return Err(capnp::Error::failed(
+                    "teams target_conversation_id must be a non-empty conversation id".to_string(),
+                ));
+            }
+            Ok(ApprovalRequestFields {
+                request_id,
+                tool_name,
+                action_key,
+                requested_tier,
+                triggering_agent,
+                trigger_message,
+                target_channel_id,
+            })
+        }
+        _ => Err(capnp::Error::failed(
+            "expected ApprovalRequest frame".to_string(),
+        )),
+    }
+}
+
+/// Build an `ApprovalRequestFailed` frame back to the gateway when
+/// the adapter cannot deliver the approval message (token mint
+/// failure, Bot Connector REST rejection, encode failure on a
+/// malformed `request_id`). The gateway-side audit row records the
+/// failure distinctly from a generic timeout.
+pub fn build_approval_request_failed(
+    builder: &mut capnp::message::Builder<capnp::message::HeapAllocator>,
+    request_id: &str,
+    reason: &str,
+) {
+    let frame_builder = builder.init_root::<frame::Builder<'_>>();
+    let mut failed = frame_builder.init_approval_request_failed();
+    failed.set_request_id(request_id);
+    failed.set_reason(reason);
 }

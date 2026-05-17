@@ -34,6 +34,7 @@ fn personal_message(text: &str) -> Activity {
         reply_to_id: None,
         channel_data: None,
         entities: None,
+        value: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn group_message(text: &str, bot_mentioned: bool) -> Activity {
         reply_to_id: None,
         channel_data: None,
         entities: Some(entities),
+        value: None,
     }
 }
 
@@ -728,4 +730,208 @@ fn five_channel_types_are_distinct() {
     assert_eq!(dc.channel_id(), "discord");
     assert_eq!(sl.channel_id(), "slack");
     assert_eq!(tm.channel_id(), "teams");
+}
+
+// ---------------------------------------------------------------------------
+// Approval-frame conversions (slice: teams approval gate per umbrella #119)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_decision_allow_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "req-uuid", true, "aad-object-id-guid", "Davi");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            assert_eq!(d.get_request_id().unwrap().to_str().unwrap(), "req-uuid");
+            assert_eq!(
+                d.get_actor_user_id().unwrap().to_str().unwrap(),
+                "aad-object-id-guid"
+            );
+            assert_eq!(d.get_actor_display().unwrap().to_str().unwrap(), "Davi");
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Allow(_) => {}
+                _ => panic!("expected Allow"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_decision_deny_round_trips() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_decision(&mut msg, "r", false, "aad", "");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalDecision(d) => {
+            let d = d.unwrap();
+            match d.get_decision().unwrap().which().unwrap() {
+                wirken_ipc::wirken_capnp::approval_decision_kind::Deny(_) => {}
+                _ => panic!("expected Deny"),
+            }
+        }
+        _ => panic!("expected ApprovalDecision"),
+    }
+}
+
+#[test]
+fn approval_request_failed_carries_reason() {
+    let mut msg = capnp::message::Builder::new_default();
+    convert::build_approval_request_failed(&mut msg, "req-x", "teams_api_error");
+    let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
+    match reader.which().unwrap() {
+        frame::ApprovalRequestFailed(f) => {
+            let f = f.unwrap();
+            assert_eq!(f.get_request_id().unwrap().to_str().unwrap(), "req-x");
+            assert_eq!(f.get_reason().unwrap().to_str().unwrap(), "teams_api_error");
+        }
+        _ => panic!("expected ApprovalRequestFailed"),
+    }
+}
+
+#[test]
+fn approval_request_round_trips_compound_conversation_id() {
+    // Teams conversation ids are compound strings with format
+    // subcategories: meetings, 1:1 chats, channel threads. The
+    // adapter rounds them through unchanged; the platform validates
+    // shape on send.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("19:meeting_abc123@thread.v2");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.request_id, "abc");
+    assert_eq!(fields.tool_name, "shell");
+    assert_eq!(fields.action_key, "shell:rm");
+    assert_eq!(fields.requested_tier, "tier3");
+    assert_eq!(fields.triggering_agent, "default");
+    assert_eq!(fields.trigger_message, "clean logs");
+    assert_eq!(fields.target_channel_id, "19:meeting_abc123@thread.v2");
+}
+
+#[test]
+fn approval_request_rejects_empty_conversation_id() {
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("");
+    }
+    let reader = serialize_and_read(&msg);
+    assert!(
+        convert::parse_approval_request(&reader).is_err(),
+        "empty conversation id must reject"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-adapter wirken_approval round-trip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wirken_approval_round_trip_through_shared_encoding() {
+    use wirken_adapter_core::approval::{ApprovalPayload, Decision, decode, encode};
+    let original = ApprovalPayload {
+        request_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+        decision: Decision::Allow,
+    };
+    let wire = encode(&original).unwrap();
+    let decoded = decode(&wire).unwrap();
+    assert_eq!(decoded, original);
+}
+
+// ---------------------------------------------------------------------------
+// extract_approval_payload + drop-path coverage
+// ---------------------------------------------------------------------------
+
+fn approval_press_activity(value: Option<serde_json::Value>) -> Activity {
+    Activity {
+        activity_type: "message".into(),
+        id: Some("press-001".into()),
+        timestamp: Some("2026-05-17T00:00:00Z".into()),
+        text: None,
+        from: Some(ChannelAccount {
+            id: Some("user-123".into()),
+            name: Some("Alice".into()),
+            aad_object_id: Some("aad-guid-abc".into()),
+        }),
+        conversation: Some(ConversationAccount {
+            id: Some("19:thread@thread.tacv2".into()),
+            name: None,
+            conversation_type: Some("channel".into()),
+            is_group: Some(true),
+            tenant_id: Some("tenant-abc".into()),
+        }),
+        channel_id: Some("msteams".into()),
+        service_url: Some("https://smba.trafficmanager.net".into()),
+        reply_to_id: None,
+        channel_data: None,
+        entities: None,
+        value,
+    }
+}
+
+#[test]
+fn extract_approval_payload_returns_value() {
+    let activity = approval_press_activity(Some(serde_json::json!({
+        "wirken_approval": "req:550e8400-e29b-41d4-a716-446655440000:allow",
+    })));
+    let extracted = convert::extract_approval_payload(&activity);
+    assert_eq!(
+        extracted,
+        Some("req:550e8400-e29b-41d4-a716-446655440000:allow")
+    );
+}
+
+#[test]
+fn extract_approval_payload_returns_none_when_missing() {
+    // No value at all (chat message, not a press).
+    let activity = approval_press_activity(None);
+    assert_eq!(convert::extract_approval_payload(&activity), None);
+}
+
+#[test]
+fn extract_approval_payload_returns_none_when_field_absent() {
+    // Value is an object but no wirken_approval field (some other
+    // Action.Submit unrelated to approval).
+    let activity = approval_press_activity(Some(serde_json::json!({
+        "other_field": "x",
+    })));
+    assert_eq!(convert::extract_approval_payload(&activity), None);
+}
+
+#[test]
+fn extract_approval_payload_returns_none_when_value_is_not_object() {
+    // Value is a JSON string, not an object. extract should
+    // return None so the routing falls through to the regular
+    // message path.
+    let activity = approval_press_activity(Some(serde_json::json!("just a string")));
+    assert_eq!(convert::extract_approval_payload(&activity), None);
+}
+
+#[test]
+fn extract_approval_payload_returns_none_when_value_is_not_string() {
+    // Value object has wirken_approval but it's a number, not
+    // a string. extract returns None and the press drops cleanly.
+    let activity = approval_press_activity(Some(serde_json::json!({
+        "wirken_approval": 42,
+    })));
+    assert_eq!(convert::extract_approval_payload(&activity), None);
 }
