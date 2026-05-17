@@ -1,5 +1,4 @@
 pub mod adapter;
-pub mod commands;
 pub mod convert;
 pub mod error;
 

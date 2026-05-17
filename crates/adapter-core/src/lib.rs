@@ -1,6 +1,6 @@
 //! Shared adapter primitives.
 //!
-//! Two families of primitive live here:
+//! Three families of primitive live here:
 //!
 //! 1. Channel-specific outbound formatters. Agents emit markdown;
 //!    each channel has its own rendering dialect (Signal
@@ -16,6 +16,14 @@
 //!    #119) inherit one named convention rather than four
 //!    independent re-implementations.
 //!
+//! 3. Text-command approval parser (see [`text_command`]). The
+//!    `!approve <prefix>` / `!deny <prefix> [reason]` parser used
+//!    by the Signal and iMessage adapters. Both adapters
+//!    originally carried a verbatim-clone copy under the
+//!    discipline that the duplication was deliberate until a
+//!    second consumer existed; once iMessage shipped, the
+//!    factoring landed (#121).
+//!
 //! [`TelegramFormatter`] emits HTML, not MarkdownV2, because the escape
 //! surface is bounded (three characters: `<`, `>`, `&`) and the
 //! converter shares structure with the Matrix HTML path. MarkdownV2's
@@ -24,6 +32,7 @@
 //! missed character; HTML mode collapses that surface.
 
 pub mod approval;
+pub mod text_command;
 
 /// Transform agent-emitted markdown into a string suitable for the
 /// target channel's plain-text or rich-text envelope.

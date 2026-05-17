@@ -556,7 +556,7 @@ impl SignalAdapter {
         // approval-command handler and DO NOT forward to the
         // gateway as a fresh inbound message. Otherwise continue
         // the existing pipeline (regular agent-bound message).
-        if let Some(cmd) = crate::commands::parse_command(&inbound.text) {
+        if let Some(cmd) = wirken_adapter_core::text_command::parse_command(&inbound.text) {
             self.route_approval_command(&inbound, cmd).await;
             return;
         }
@@ -579,11 +579,11 @@ impl SignalAdapter {
     async fn route_approval_command(
         &self,
         inbound: &SignalInbound,
-        cmd: crate::commands::CommandKind,
+        cmd: wirken_adapter_core::text_command::CommandKind,
     ) {
         let prefix = match &cmd {
-            crate::commands::CommandKind::Approve { prefix } => prefix.clone(),
-            crate::commands::CommandKind::Deny { prefix, .. } => prefix.clone(),
+            wirken_adapter_core::text_command::CommandKind::Approve { prefix } => prefix.clone(),
+            wirken_adapter_core::text_command::CommandKind::Deny { prefix, .. } => prefix.clone(),
         };
         // The conversation to reply into for clarifications. In a
         // group, that's the group; in a 1:1 approval, the sender.
@@ -631,8 +631,8 @@ impl SignalAdapter {
         }
 
         let (is_allow, deny_reason_wire): (bool, String) = match cmd {
-            crate::commands::CommandKind::Approve { .. } => (true, String::new()),
-            crate::commands::CommandKind::Deny { reason, .. } => {
+            wirken_adapter_core::text_command::CommandKind::Approve { .. } => (true, String::new()),
+            wirken_adapter_core::text_command::CommandKind::Deny { reason, .. } => {
                 (false, reason.unwrap_or_default())
             }
         };
@@ -1058,7 +1058,7 @@ impl SignalAdapter {
     pub(crate) async fn route_approval_command_for_test(
         &self,
         inbound: &SignalInbound,
-        cmd: crate::commands::CommandKind,
+        cmd: wirken_adapter_core::text_command::CommandKind,
     ) {
         self.route_approval_command(inbound, cmd).await;
     }

@@ -12,9 +12,9 @@ use wirken_ipc::{
     split_stream,
 };
 
-use crate::commands::{self, CommandKind};
 use crate::convert;
 use crate::error::IMessageError;
+use wirken_adapter_core::text_command::{self as commands, CommandKind};
 
 /// Per-process map from 8-hex-char `request_id` prefix to the
 /// list of full `request_id`s sharing that prefix. The adapter

@@ -1812,7 +1812,7 @@ async fn approval_prefix_miss_does_not_remove_other_entries() {
         sender_uuid: None,
         group_id: None,
     };
-    let cmd = crate::commands::CommandKind::Approve {
+    let cmd = wirken_adapter_core::text_command::CommandKind::Approve {
         prefix: "deadbeef".into(),
     };
     adapter.route_approval_command_for_test(&inbound, cmd).await;
@@ -1845,7 +1845,7 @@ async fn approval_prefix_collision_does_not_consume_entries() {
         sender_uuid: None,
         group_id: None,
     };
-    let cmd = crate::commands::CommandKind::Approve {
+    let cmd = wirken_adapter_core::text_command::CommandKind::Approve {
         prefix: "abcd1234".into(),
     };
     adapter.route_approval_command_for_test(&inbound, cmd).await;

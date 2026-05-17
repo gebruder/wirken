@@ -1,39 +1,44 @@
-//! Text-command parser for the Signal approval surface. Signal
-//! has no native button or interaction primitive, so the approval
-//! UX is a text exchange in the configured approval conversation:
+//! Text-command approval parser for channels with no button or
+//! interaction primitive. Two adapters consume this: Signal and
+//! iMessage, both in the umbrella's
+//! "text-command-with-no-toast-by-shape" group. The approval UX is
+//! a text exchange in the configured approval conversation:
 //!
 //! ```text
 //! !approve <prefix>
 //! !deny <prefix> [reason text]
 //! ```
 //!
-//! `<prefix>` is the first 8 hex characters of the
-//! `request_id` UUID embedded in the bot's approval message. The
-//! prefix is short enough to type on a phone keyboard, long
-//! enough that collisions are rare with the small set of
-//! in-flight approvals typical for this surface. A collision is
-//! handled by the approval-command handler in `adapter.rs`
-//! (zero/multi-match -> clarification message, no resolve); this
-//! module only parses.
+//! `<prefix>` is the first 8 hex characters of the `request_id`
+//! UUID embedded in the bot's approval message. The prefix is
+//! short enough to type on a phone keyboard, long enough that
+//! collisions are rare with the small set of in-flight approvals
+//! typical for this surface. A collision is handled by the
+//! approval-command handler in each adapter (zero/multi-match ->
+//! clarification message, no resolve); this module only parses.
 //!
-//! Two text-command channel adapters ship under umbrella #119:
-//! Signal (this module) and iMessage
-//! (`crates/adapter-imessage/src/commands.rs`, a verbatim clone
-//! of this file). Matrix went a different way (m.reaction with
-//! a correlation table) on E2EE-posture grounds; the original
-//! comment here predicted Matrix and iMessage would both follow
-//! text-command, and only the iMessage half of that prediction
-//! held. The shared-crate factoring this comment originally
-//! anticipated is now real follow-up work (filed against the
-//! umbrella-close) — two consumers exist with byte-identical
-//! parsers, and the abstraction is no longer speculative.
+//! ## Factoring history
+//!
+//! This module originated as duplicated parsers in
+//! `adapter-signal/src/commands.rs` and
+//! `adapter-imessage/src/commands.rs`. Both copies were byte-
+//! identical by construction: the iMessage slice landed with a
+//! verbatim-clone discipline pinned at the top of its file, on the
+//! reasoning that shared crates shaped by an uncommitted boundary
+//! become debt, and a one-consumer abstraction is shaped by
+//! conjecture rather than by observation. Once both consumers
+//! existed with stable shapes, the boundary was visible and the
+//! factoring became mechanical (#121).
+//!
+//! The richer comments below are from the Signal version; the
+//! iMessage clone trimmed them when cloning. The full prose is
+//! the original intent.
 
-/// Parsed Signal approval command. Returned by [`parse_command`]
-/// when the message body matches the wire format above. Anything
-/// else (regular agent-bound messages, malformed approvals,
-/// commands missing the prefix) returns `None` from
-/// [`parse_command`] and continues down the normal inbound
-/// pipeline.
+/// Parsed approval command. Returned by [`parse_command`] when the
+/// message body matches the wire format above. Anything else
+/// (regular agent-bound messages, malformed approvals, commands
+/// missing the prefix) returns `None` from [`parse_command`] and
+/// continues down the normal inbound pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandKind {
     /// `!approve <prefix>`. The prefix is the verbatim hex string
@@ -51,11 +56,11 @@ pub enum CommandKind {
     },
 }
 
-/// Parse a Signal message body. Returns `Some(CommandKind)` on a
+/// Parse a message body. Returns `Some(CommandKind)` on a
 /// well-formed approval command, `None` otherwise. Strict shape:
 ///
 /// - leading `!approve` or `!deny` (case-sensitive; lowercase
-///   only, matching the standard Signal-bot convention),
+///   only, matching the standard text-command convention),
 /// - exactly one whitespace between the command and the prefix,
 /// - prefix is a non-empty hex-only run (case-insensitive on the
 ///   hex digits themselves; `aBcD12Ef` and `abcd12ef` both work),
@@ -65,8 +70,8 @@ pub enum CommandKind {
 /// Multi-line bodies are rejected: an approval command is a
 /// single line, and a body whose first line is a valid command
 /// but whose subsequent lines carry agent-bound content would be
-/// ambiguous. The slice's contract is "an approval is just an
-/// approval"; the handler does not split a multi-line body into
+/// ambiguous. The contract is "an approval is just an approval";
+/// the handler does not split a multi-line body into
 /// command-plus-agent-content.
 pub fn parse_command(body: &str) -> Option<CommandKind> {
     let trimmed = body.trim();
@@ -213,7 +218,8 @@ mod tests {
 
     #[test]
     fn leading_whitespace_tolerated() {
-        // Some Signal clients add a stray space on autocorrect.
+        // Some clients (Signal autocorrect, iMessage paste) add a
+        // stray leading space.
         let r = parse_command("   !approve abc12345   ").unwrap();
         assert_eq!(
             r,
@@ -264,8 +270,8 @@ mod tests {
     fn multiline_body_rejected() {
         // An approval is a single line. A body that mixes a
         // command-shaped first line with subsequent lines is
-        // ambiguous; the slice's contract says we don't route
-        // it as approval.
+        // ambiguous; the contract says we don't route it as
+        // approval.
         assert!(parse_command("!approve abc12345\nand more").is_none());
     }
 
