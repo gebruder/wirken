@@ -1021,6 +1021,25 @@ pub enum SessionEvent {
     /// consumers can group on a stable string. The longer error
     /// detail goes to gateway logs, not the audit chain.
     HookCrashed { hook_id: String, error: String },
+    /// An MCP entry in `mcp.json` passed signature verification at
+    /// proxy load. Emitted once per accepted entry on the
+    /// `gateway-mcp` sentinel session. `signer` is the hex-encoded
+    /// Ed25519 public key that verified, or the literal
+    /// `"<unsigned-bypass>"` when the load proceeded under
+    /// `WIRKEN_ALLOW_UNSIGNED_MCP=1` against an anchored build, or
+    /// the literal `"<no-anchor>"` when no compile-time anchor is
+    /// configured and the entry carried no signature. The string
+    /// form keeps SIEM consumers free of an extra enum to model;
+    /// reviewers reading the chain can distinguish the bypass paths
+    /// at a glance.
+    McpEntryVerified { server_name: String, signer: String },
+    /// An MCP entry was refused at proxy load. `reason` is a stable
+    /// snake_case label (`"signature_invalid"`, `"unsigned"`,
+    /// `"signer_key_missing"`, `"signer_key_decode_failed"`,
+    /// `"delegation_required"`) so SIEM detections pivot on a
+    /// closed set of strings. The entry's spawn never happened; the
+    /// MCP client is not in the proxy's registry.
+    McpEntryRefused { server_name: String, reason: String },
 }
 
 /// What kind of hook a [`SessionEvent::HookRegistered`] row

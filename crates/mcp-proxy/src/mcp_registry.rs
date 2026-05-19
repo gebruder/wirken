@@ -22,14 +22,31 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::VerifyingKey;
+use wirken_audit::{SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_vault::CredentialStore;
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
 use crate::error::ProxyError;
 use crate::mcp_client::{McpClient, McpToolResult};
 use crate::mcp_config::{McpAuth, McpConfig, McpServerConfig};
+use crate::mcp_signing::{McpVerifyResult, bundled_mcp_pubkey, verify_mcp_entry};
 use crate::mcp_transport::{HttpTransport, StdioTransport, Transport};
 use crate::wire::ToolDefWire;
+
+/// Sentinel session id for cross-cutting MCP load-time events.
+/// Parallels `gateway-hooks` used by the hook accept loop.
+pub const MCP_SENTINEL_SESSION: &str = "gateway-mcp";
+
+/// Outcome of [`pre_spawn_verify`]: do we spawn, and what audit row
+/// do we emit?
+enum PreSpawnDecision {
+    /// Spawn the entry. `signer` is the attribution label for the
+    /// audit row.
+    Spawn { signer: String },
+    /// Refuse the entry. `reason` is the snake_case label for the
+    /// audit row and the operator log.
+    Refuse { reason: String },
+}
 
 /// Vault handle shared by every auth provider in the proxy. Wrapped
 /// in `Arc<Mutex<Option<_>>>` because:
@@ -95,15 +112,61 @@ impl ProxyRegistry {
     /// by long-lived auth providers; vault `vault:`-prefixed env
     /// values are resolved here at load time and baked into the
     /// MCP server's spawn environment (legacy stdio behavior).
+    ///
+    /// `audit` is an optional session-log handle. When supplied, each
+    /// entry's signature-verification outcome is recorded on the
+    /// `gateway-mcp` sentinel session via
+    /// [`SessionEvent::McpEntryVerified`] or
+    /// [`SessionEvent::McpEntryRefused`]. The proxy passes `None` in
+    /// callers that have no audit-log access (tests, dev rigs).
     pub async fn load_agent(
         &mut self,
         agent_id: &str,
         config: &McpConfig,
         vault: SharedVault,
+        audit: Option<&Arc<dyn SessionLog>>,
     ) -> Result<usize, ProxyError> {
         let mut clients = HashMap::new();
+        let bundled_root = bundled_mcp_pubkey();
 
         for (name, server_config) in &config.servers {
+            let decision = pre_spawn_verify(name, server_config, bundled_root.as_ref());
+            let signer = match &decision {
+                PreSpawnDecision::Spawn { signer } => signer.clone(),
+                PreSpawnDecision::Refuse { reason } => {
+                    tracing::warn!(
+                        agent_id,
+                        server = name,
+                        reason,
+                        "MCP entry refused by signature gate; not spawning"
+                    );
+                    if let Some(log) = audit {
+                        let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
+                        let _ = log.append(
+                            &handle,
+                            TrustLevel::System,
+                            SessionEvent::McpEntryRefused {
+                                server_name: name.clone(),
+                                reason: reason.clone(),
+                            },
+                        );
+                    }
+                    continue;
+                }
+            };
+
+            if let Some(log) = audit {
+                let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
+                let _ = log.append(
+                    &handle,
+                    TrustLevel::System,
+                    SessionEvent::McpEntryVerified {
+                        server_name: name.clone(),
+                        signer: signer.clone(),
+                    },
+                );
+            }
+
             match server_config {
                 McpServerConfig::Stdio {
                     command, args, env, ..
@@ -257,6 +320,71 @@ async fn init_and_list(client: &mut McpClient, agent_id: &str) -> Result<(), Pro
         tools.len()
     );
     Ok(())
+}
+
+/// Resolve the pre-spawn signature decision for one MCP entry. The
+/// extracts on each variant pull the signature triplet uniformly so
+/// the verify call has one shape regardless of Stdio vs Http.
+fn pre_spawn_verify(
+    name: &str,
+    config: &McpServerConfig,
+    bundled_root: Option<&VerifyingKey>,
+) -> PreSpawnDecision {
+    let (sig, key, delegation) = match config {
+        McpServerConfig::Stdio {
+            signature,
+            signer_key,
+            signer_key_delegation,
+            ..
+        } => (
+            signature.as_deref(),
+            signer_key.as_deref(),
+            signer_key_delegation.as_deref(),
+        ),
+        McpServerConfig::Http {
+            signature,
+            signer_key,
+            signer_key_delegation,
+            ..
+        } => (
+            signature.as_deref(),
+            signer_key.as_deref(),
+            signer_key_delegation.as_deref(),
+        ),
+    };
+
+    let result = verify_mcp_entry(name, config, sig, key, delegation, bundled_root);
+    let allow_unsigned = wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_MCP");
+
+    match result {
+        McpVerifyResult::Valid { signer } => PreSpawnDecision::Spawn { signer },
+        McpVerifyResult::Invalid => PreSpawnDecision::Refuse {
+            reason: "signature_invalid".to_string(),
+        },
+        McpVerifyResult::Unsigned => {
+            // No signature on the entry. Three sub-cases:
+            //  - No anchor configured: pre-anchor parity, allow.
+            //  - Anchor configured + bypass set: allow with attribution.
+            //  - Anchor configured + bypass unset: refuse.
+            if bundled_root.is_none() {
+                PreSpawnDecision::Spawn {
+                    signer: "<no-anchor>".to_string(),
+                }
+            } else if allow_unsigned {
+                tracing::warn!(
+                    server = name,
+                    "WIRKEN_ALLOW_UNSIGNED_MCP=1: loading unsigned MCP entry under anchored build"
+                );
+                PreSpawnDecision::Spawn {
+                    signer: "<unsigned-bypass>".to_string(),
+                }
+            } else {
+                PreSpawnDecision::Refuse {
+                    reason: "unsigned".to_string(),
+                }
+            }
+        }
+    }
 }
 
 /// Resolve `vault:`-prefixed env values from the credential store.

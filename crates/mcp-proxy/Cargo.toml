@@ -12,6 +12,7 @@ path = "src/lib.rs"
 wirken-vault = { path = "../vault" }
 wirken-gateway = { path = "../gateway" }
 wirken-ipc = { path = "../ipc" }
+wirken-audit = { path = "../audit" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -25,6 +26,7 @@ chrono = { workspace = true }
 open = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

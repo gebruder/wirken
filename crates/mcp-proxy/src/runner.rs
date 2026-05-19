@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use ed25519_dalek::VerifyingKey;
 use tokio::sync::Mutex;
 
+use wirken_audit::{SessionLog, SqliteSessionLog};
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::config::GatewayConfig;
 use wirken_vault::{CredentialStore, probe_keychain};
@@ -55,21 +56,64 @@ pub async fn run() -> Result<(), ProxyError> {
 
     let mut registry = ProxyRegistry::new();
 
+    // Open the audit log so MCP signature-verify outcomes land on the
+    // `gateway-mcp` sentinel session. The proxy is the sole writer of
+    // that session id; the gateway never appends there.
+    //
+    // Failure to open does not block proxy startup. The gateway opens
+    // the same DB independently, and the proxy's per-entry decisions
+    // are computable from the same inputs even without audit. Log and
+    // continue.
+    let audit_path = data_dir.join("audit.db");
+    let audit: Option<Arc<dyn SessionLog>> = match SqliteSessionLog::open(&audit_path) {
+        Ok(log) => Some(Arc::new(log) as Arc<dyn SessionLog>),
+        Err(e) => {
+            tracing::warn!(
+                path = %audit_path.display(),
+                error = %e,
+                "MCP proxy could not open audit log; entry verify outcomes will not be \
+                 recorded on the gateway-mcp sentinel session"
+            );
+            None
+        }
+    };
+
     // Load each agent's MCP config (per-agent or shared fallback).
     let agent_ids = list_agent_ids(&data_dir);
     let mut identity_agent_ids: Vec<String> = Vec::new();
     if agent_ids.is_empty() {
         // No multi-agent setup. Load the shared mcp.json under "default".
-        load_for_agent(&mut registry, "default", &data_dir, vault.clone()).await;
+        load_for_agent(
+            &mut registry,
+            "default",
+            &data_dir,
+            vault.clone(),
+            audit.as_ref(),
+        )
+        .await;
         identity_agent_ids.push("default".to_string());
     } else {
         for agent_id in &agent_ids {
-            load_for_agent(&mut registry, agent_id, &data_dir, vault.clone()).await;
+            load_for_agent(
+                &mut registry,
+                agent_id,
+                &data_dir,
+                vault.clone(),
+                audit.as_ref(),
+            )
+            .await;
             identity_agent_ids.push(agent_id.clone());
         }
         // Also load the shared config under "default" for unbound channels.
         if !agent_ids.iter().any(|id| id == "default") {
-            load_for_agent(&mut registry, "default", &data_dir, vault.clone()).await;
+            load_for_agent(
+                &mut registry,
+                "default",
+                &data_dir,
+                vault.clone(),
+                audit.as_ref(),
+            )
+            .await;
             identity_agent_ids.push("default".to_string());
         }
     }
@@ -198,6 +242,7 @@ async fn load_for_agent(
     agent_id: &str,
     data_dir: &Path,
     vault: SharedVault,
+    audit: Option<&Arc<dyn SessionLog>>,
 ) {
     let per_agent = data_dir.join("agents").join(agent_id).join("mcp.json");
     let shared = data_dir.join("mcp.json");
@@ -223,7 +268,7 @@ async fn load_for_agent(
         return;
     }
 
-    match registry.load_agent(agent_id, &config, vault).await {
+    match registry.load_agent(agent_id, &config, vault, audit).await {
         Ok(n) if n > 0 => {
             tracing::info!("loaded {n} MCP server(s) for agent '{agent_id}'");
         }

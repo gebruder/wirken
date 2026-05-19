@@ -7,8 +7,13 @@
 
 use anyhow::{Context, Result};
 use dialoguer::Password;
+use ed25519_dalek::SigningKey;
 
+use wirken_gateway::skill_registry::{self, generate_signing_keypair};
 use wirken_mcp_proxy::mcp_config::{McpAuth, McpConfig, McpServerConfig};
+use wirken_mcp_proxy::mcp_signing::{
+    McpVerifyResult, bundled_mcp_pubkey, sign_mcp_entry, verify_mcp_entry,
+};
 use wirken_mcp_proxy::{
     OAuthCredential, lookup_provider, run_authorization_code_flow, store_oauth,
 };
@@ -146,4 +151,220 @@ pub async fn authorize(
     println!("  Authorized. Tokens stored in vault under '{credential_name}'.");
     println!("  The MCP proxy will refresh the access token automatically when it expires.");
     Ok(())
+}
+
+/// Sign one MCP entry in `mcp.json`. Reuses the operator's
+/// `signing-key.hex` (the same file `wirken skills sign` uses);
+/// generates one on first use. Writes `signature` + `signer_key`
+/// back into the entry and saves the file.
+pub fn sign(server: &str, agent: Option<&str>) -> Result<()> {
+    let cfg = config();
+    let mcp_path = match agent {
+        Some(a) => cfg.mcp_config_path(a),
+        None => cfg.data_dir.join("mcp.json"),
+    };
+    if !mcp_path.exists() {
+        anyhow::bail!("MCP config not found at {}.", mcp_path.display());
+    }
+
+    // Round-trip through the typed schema so the file we write back
+    // is a normalized form (sorted maps, dropped Nones), but parse
+    // first into a serde_json::Value so unknown keys survive.
+    let raw = std::fs::read_to_string(&mcp_path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", mcp_path.display()))?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", mcp_path.display()))?;
+
+    // Build a typed view to verify the entry's shape and to derive
+    // the canonical hash. The signature is computed over the typed
+    // representation; the raw Value carries the write-back.
+    let typed: McpConfig = serde_json::from_value(value.clone())
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", mcp_path.display()))?;
+    let entry = typed
+        .servers
+        .get(server)
+        .ok_or_else(|| anyhow::anyhow!("server '{server}' not found in {}", mcp_path.display()))?;
+
+    let key_path = cfg.data_dir.join("signing-key.hex");
+    let signing_key = load_or_create_signing_key(&key_path)?;
+
+    let signature = sign_mcp_entry(server, entry, &signing_key);
+    let signer_pub = hex_encode(&signing_key.verifying_key().to_bytes());
+
+    // Patch the signature + signer_key fields onto the entry in the
+    // raw JSON tree. `signer_key_delegation` is operator-supplied at
+    // a higher trust tier and is not minted here; this command signs
+    // with the operator's local key only.
+    let server_obj = value
+        .get_mut("servers")
+        .and_then(|s| s.get_mut(server))
+        .and_then(|v| v.as_object_mut())
+        .ok_or_else(|| anyhow::anyhow!("server '{server}' missing from JSON tree (parse drift)"))?;
+    server_obj.insert(
+        "signature".into(),
+        serde_json::Value::String(signature.clone()),
+    );
+    server_obj.insert(
+        "signer_key".into(),
+        serde_json::Value::String(signer_pub.clone()),
+    );
+
+    let pretty =
+        serde_json::to_string_pretty(&value).map_err(|e| anyhow::anyhow!("serialize: {e}"))?;
+    std::fs::write(&mcp_path, pretty)
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", mcp_path.display()))?;
+
+    println!("  Signed: {server} in {}", mcp_path.display());
+    println!(
+        "  Signature: {}...{}",
+        &signature[..16],
+        &signature[signature.len() - 16..]
+    );
+    println!("  Public key: {signer_pub}");
+    Ok(())
+}
+
+/// Verify the signature on one or every entry in `mcp.json`. Prints
+/// `valid`, `invalid`, or `unsigned` per entry. Exit status is 0
+/// when every entry is valid or unsigned; non-zero when any entry
+/// reports `invalid`.
+pub fn verify(server: Option<&str>, agent: Option<&str>) -> Result<()> {
+    let cfg = config();
+    let mcp_path = match agent {
+        Some(a) => cfg.mcp_config_path(a),
+        None => cfg.data_dir.join("mcp.json"),
+    };
+    if !mcp_path.exists() {
+        anyhow::bail!("MCP config not found at {}.", mcp_path.display());
+    }
+
+    let mcp_config = McpConfig::load(&mcp_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let bundled_root = bundled_mcp_pubkey();
+
+    let mut had_invalid = false;
+    let names: Vec<&String> = match server {
+        Some(s) => mcp_config
+            .servers
+            .iter()
+            .filter(|(n, _)| n.as_str() == s)
+            .map(|(n, _)| n)
+            .collect(),
+        None => mcp_config.servers.keys().collect(),
+    };
+    if let Some(s) = server
+        && names.is_empty()
+    {
+        anyhow::bail!("server '{}' not found in {}", s, mcp_path.display());
+    }
+    if names.is_empty() {
+        println!("  No MCP servers configured.");
+        return Ok(());
+    }
+
+    let mut sorted: Vec<&String> = names;
+    sorted.sort();
+    for name in sorted {
+        let entry = mcp_config
+            .servers
+            .get(name)
+            .expect("name came from this map");
+        let (sig, key, delegation) = match entry {
+            McpServerConfig::Stdio {
+                signature,
+                signer_key,
+                signer_key_delegation,
+                ..
+            }
+            | McpServerConfig::Http {
+                signature,
+                signer_key,
+                signer_key_delegation,
+                ..
+            } => (
+                signature.as_deref(),
+                signer_key.as_deref(),
+                signer_key_delegation.as_deref(),
+            ),
+        };
+        let result = verify_mcp_entry(name, entry, sig, key, delegation, bundled_root.as_ref());
+        let label = match &result {
+            McpVerifyResult::Valid { signer } => format!("valid (signer {}...)", &signer[..16]),
+            McpVerifyResult::Invalid => {
+                had_invalid = true;
+                "invalid".to_string()
+            }
+            McpVerifyResult::Unsigned => "unsigned".to_string(),
+        };
+        println!("  {name:.<24} {label}");
+    }
+
+    if bundled_root.is_none() {
+        println!();
+        println!(
+            "  Note: no compile-time MCP anchor in this build. \
+             Unsigned entries load by default; signed entries verify against \
+             their inline signer_key."
+        );
+    } else {
+        println!();
+        println!(
+            "  Anchor configured in this build. Unsigned entries refuse to \
+             load unless WIRKEN_ALLOW_UNSIGNED_MCP=1 is set."
+        );
+    }
+
+    if had_invalid {
+        anyhow::bail!("one or more entries failed verification");
+    }
+    Ok(())
+}
+
+fn load_or_create_signing_key(key_path: &std::path::Path) -> Result<SigningKey> {
+    if key_path.exists() {
+        let hex = std::fs::read_to_string(key_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", key_path.display()))?;
+        let bytes = skill_registry::hex_decode_public(hex.trim())
+            .map_err(|e| anyhow::anyhow!("decode signing key: {e}"))?;
+        if bytes.len() != 32 {
+            anyhow::bail!(
+                "signing key at {} has {} bytes, expected 32",
+                key_path.display(),
+                bytes.len()
+            );
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(SigningKey::from_bytes(&arr))
+    } else {
+        let (secret_hex, public_hex) = generate_signing_keypair();
+        let parent = key_path.parent().ok_or_else(|| {
+            anyhow::anyhow!("signing key path has no parent: {}", key_path.display())
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("create {}: {e}", parent.display()))?;
+        std::fs::write(key_path, &secret_hex)
+            .map_err(|e| anyhow::anyhow!("write {}: {e}", key_path.display()))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| anyhow::anyhow!("chmod {}: {e}", key_path.display()))?;
+        }
+
+        println!("  Generated new signing keypair.");
+        println!("  Public key: {public_hex}");
+        println!("  Secret key saved to {}", key_path.display());
+        println!();
+
+        let bytes = skill_registry::hex_decode_public(&secret_hex)
+            .map_err(|e| anyhow::anyhow!("decode generated key: {e}"))?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(SigningKey::from_bytes(&arr))
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

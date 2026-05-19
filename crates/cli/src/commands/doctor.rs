@@ -3,6 +3,8 @@ use anyhow::Result;
 use super::config;
 use wirken_audit::{AlarmLog, AlarmVerifyStatus, AuditLog, VerifyResult};
 use wirken_gateway::adapter_registry::AdapterRegistry;
+use wirken_mcp_proxy::mcp_config::{McpConfig, McpServerConfig};
+use wirken_mcp_proxy::mcp_signing::{McpVerifyResult, bundled_mcp_pubkey, verify_mcp_entry};
 use wirken_vault::probe_keychain;
 
 pub async fn run() -> Result<()> {
@@ -74,6 +76,97 @@ pub async fn run() -> Result<()> {
         }
     } else {
         print_warn("  No channels configured.");
+    }
+
+    // Check MCP signing posture
+    let mcp_path = cfg.data_dir.join("mcp.json");
+    print_check("MCP signing", &mcp_path.display().to_string());
+    if !mcp_path.exists() {
+        print_ok();
+        println!("    No MCP servers configured.");
+    } else {
+        match McpConfig::load(&mcp_path) {
+            Ok(mcp_cfg) if mcp_cfg.servers.is_empty() => {
+                print_ok();
+                println!("    No MCP servers configured.");
+            }
+            Ok(mcp_cfg) => {
+                let bundled_root = bundled_mcp_pubkey();
+                let mut invalid = 0usize;
+                let mut unsigned = 0usize;
+                let mut signed = 0usize;
+                let mut entries: Vec<(&String, &McpServerConfig)> =
+                    mcp_cfg.servers.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                let mut details: Vec<String> = Vec::new();
+                for (name, entry) in entries {
+                    let (sig, key, delegation) = match entry {
+                        McpServerConfig::Stdio {
+                            signature,
+                            signer_key,
+                            signer_key_delegation,
+                            ..
+                        }
+                        | McpServerConfig::Http {
+                            signature,
+                            signer_key,
+                            signer_key_delegation,
+                            ..
+                        } => (
+                            signature.as_deref(),
+                            signer_key.as_deref(),
+                            signer_key_delegation.as_deref(),
+                        ),
+                    };
+                    match verify_mcp_entry(name, entry, sig, key, delegation, bundled_root.as_ref())
+                    {
+                        McpVerifyResult::Valid { signer } => {
+                            signed += 1;
+                            details.push(format!("{name}: valid (signer {}...)", &signer[..16]));
+                        }
+                        McpVerifyResult::Invalid => {
+                            invalid += 1;
+                            details.push(format!("{name}: INVALID"));
+                        }
+                        McpVerifyResult::Unsigned => {
+                            unsigned += 1;
+                            details.push(format!("{name}: unsigned"));
+                        }
+                    }
+                }
+
+                if invalid > 0 {
+                    print_fail(&format!("  {invalid} MCP entry signature(s) invalid"));
+                    issues += 1;
+                } else if unsigned > 0 && bundled_root.is_some() {
+                    print_warn(&format!(
+                        "  {unsigned} MCP entry/entries unsigned under anchored build; \
+                         set WIRKEN_ALLOW_UNSIGNED_MCP=1 to load anyway (logged on every spawn)"
+                    ));
+                } else {
+                    print_ok();
+                    if bundled_root.is_none() {
+                        println!(
+                            "    No MCP anchor in this build (default posture). \
+                             Signed entries verify against their inline signer_key; \
+                             unsigned entries load."
+                        );
+                    }
+                }
+                if signed > 0 || unsigned > 0 || invalid > 0 {
+                    for d in details.iter().take(5) {
+                        println!("    {d}");
+                    }
+                    if details.len() > 5 {
+                        println!("    ... and {} more", details.len() - 5);
+                    }
+                }
+            }
+            Err(e) => {
+                print_fail(&format!("  {e}"));
+                issues += 1;
+            }
+        }
     }
 
     // Check audit log

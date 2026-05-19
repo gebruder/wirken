@@ -83,6 +83,25 @@ pub enum McpServerConfig {
         url: String,
         #[serde(default)]
         auth: Option<McpAuth>,
+        /// Hex-encoded Ed25519 signature over the canonical entry
+        /// hash defined by [`crate::mcp_signing::hash_mcp_entry`].
+        /// Absent on unsigned entries (legacy `mcp.json` files);
+        /// when an MCP root anchor is configured at build time,
+        /// absence is refused unless `WIRKEN_ALLOW_UNSIGNED_MCP=1`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        /// Hex-encoded 32-byte Ed25519 public key of the signer.
+        /// Must be present whenever `signature` is present; absence
+        /// with a present signature is a hard fail (the verifier
+        /// has nothing to check against).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer_key: Option<String>,
+        /// Hex-encoded Ed25519 signature by the compile-time
+        /// bundled root over the raw 32-byte `signer_key`.
+        /// Required when [`crate::mcp_signing::bundled_mcp_pubkey`]
+        /// returns `Some`; ignored when the bundled root is empty.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer_key_delegation: Option<String>,
     },
     /// Stdio transport: spawn a process and communicate over stdin/stdout.
     Stdio {
@@ -96,6 +115,15 @@ pub enum McpServerConfig {
         args: Vec<String>,
         #[serde(default)]
         env: HashMap<String, String>,
+        /// See [`Self::Http::signature`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        /// See [`Self::Http::signer_key`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer_key: Option<String>,
+        /// See [`Self::Http::signer_key_delegation`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signer_key_delegation: Option<String>,
     },
 }
 
@@ -175,6 +203,7 @@ mod tests {
                 args,
                 env,
                 transport,
+                ..
             } => {
                 assert_eq!(command, "npx");
                 assert_eq!(args.len(), 3);

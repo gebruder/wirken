@@ -834,6 +834,29 @@ enum McpCommands {
         #[arg(long, conflicts_with_all = ["scope", "no_scopes"])]
         all_scopes: bool,
     },
+    /// Sign an MCP server entry in `mcp.json`. Computes the
+    /// canonical entry hash, signs it with the operator's
+    /// signing key, and writes `signature` + `signer_key` back to
+    /// the file. Reuses `~/.wirken/signing-key.hex` (the same key
+    /// `wirken skills sign` uses); generates one on first use.
+    Sign {
+        /// MCP server name from mcp.json.
+        server: String,
+        /// Per-agent mcp.json (default: shared ~/.wirken/mcp.json).
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Verify the signature on one or every MCP server entry in
+    /// `mcp.json`. Reports `valid`, `invalid`, or `unsigned` per
+    /// entry. Reads the compile-time anchor and applies the
+    /// delegation gate when one is configured.
+    Verify {
+        /// MCP server name. Omit to verify every entry.
+        server: Option<String>,
+        /// Per-agent mcp.json (default: shared ~/.wirken/mcp.json).
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -1017,6 +1040,10 @@ async fn main() -> Result<()> {
             } => {
                 commands::mcp::authorize(&server, agent.as_deref(), scope, no_scopes, all_scopes)
                     .await
+            }
+            McpCommands::Sign { server, agent } => commands::mcp::sign(&server, agent.as_deref()),
+            McpCommands::Verify { server, agent } => {
+                commands::mcp::verify(server.as_deref(), agent.as_deref())
             }
         },
         Commands::Skills(cmd) => match cmd {

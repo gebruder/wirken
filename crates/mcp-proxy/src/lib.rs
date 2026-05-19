@@ -14,6 +14,7 @@ pub mod error;
 pub mod mcp_client;
 pub mod mcp_config;
 pub mod mcp_registry;
+pub mod mcp_signing;
 pub mod mcp_transport;
 pub mod oauth;
 pub mod server;

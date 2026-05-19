@@ -52,6 +52,8 @@ pub const TYPED_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// - `SubagentSpawned`, `SubagentResult`: child-process fork
 ///   correlation.
 /// - `ChainHead`: per-session signed-head feed.
+/// - `McpEntryVerified`, `McpEntryRefused`: MCP load-time signature
+///   posture on the `gateway-mcp` sentinel session.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -84,6 +86,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::SubagentSpawned { .. }
             | SessionEvent::SubagentResult { .. }
             | SessionEvent::ChainHead { .. }
+            | SessionEvent::McpEntryVerified { .. }
+            | SessionEvent::McpEntryRefused { .. }
     );
     if !in_default {
         return false;
@@ -138,6 +142,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::HookRegistered { .. } => "hook_registered",
         SessionEvent::HookDispatched { .. } => "hook_dispatched",
         SessionEvent::HookCrashed { .. } => "hook_crashed",
+        SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",
+        SessionEvent::McpEntryRefused { .. } => "mcp_entry_refused",
     }
 }
 

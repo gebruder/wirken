@@ -110,6 +110,27 @@ At risk (the operator's blast radius if an MCP server is malicious or compromise
 - Use a per-server `env` block to pass only the credentials that server actually needs. Don't dump shared secrets across multiple MCP servers.
 - For MCP servers that don't need the operator's network reach, run `wirken-mcp-proxy` (or the operator's whole gateway) inside a network-namespaced container or a `firejail` profile. Wirken does not yet ship per-MCP-server sandboxing — see the next section.
 
+### Signing MCP entries
+
+`mcp.json` entries can carry an Ed25519 signature over the entry's canonical hash. The pattern mirrors signed skills: signatures are computed by an operator (or registry) key, an optional compile-time bundled root anchors trust, and the proxy refuses unsigned entries under an anchored build unless an explicit bypass is set.
+
+**Default build.** `crates/mcp-proxy/src/wirken-mcp-pubkey.pub` ships empty. With no anchor, unsigned entries load (pre-anchor parity); signed entries verify against their inline `signer_key`; an invalid signature is always a hard fail.
+
+**Anchored build.** Populate `wirken-mcp-pubkey.pub` with a hex-encoded 32-byte Ed25519 public key and rebuild. Under an anchor, each entry's `signer_key` must additionally carry a `signer_key_delegation` Ed25519 signature by the anchor over the raw 32-byte signer key. Unsigned entries refuse to load unless `WIRKEN_ALLOW_UNSIGNED_MCP=1` is set, in which case the bypass is logged on every spawn and recorded on the audit chain as `mcp_entry_verified` with signer `<unsigned-bypass>`.
+
+**Anchor rotation requires rebuilding the binary.** An anchor file at the same UID as the gateway adds no real defense; the anchor is meaningful only when the binary itself is what an attacker cannot replace without operator action.
+
+**Canonical hash layout.** `crates/mcp-proxy/src/mcp_signing.rs::hash_mcp_entry` is the source of truth.
+
+- **Stdio:** `sha256("stdio\0" || name_len_le || name || command_len_le || command || arg_count_le || (per-arg arg_len_le || arg) || env_count_le || (per-env key_len_le || key))`. Env keys, sorted ascending. Env values are not in the payload because they are `vault:NAME` references the proxy resolves at load time; the signature stays stable across vault rotations of the same logical credential.
+- **Http:** `sha256("http\0" || name_len_le || name || url_len_le || url || auth_kind_le)` where `auth_kind_le` is `u8`: 0 = none, 1 = bearer, 2 = oauth2. The credential ref is not in the payload for the same reason.
+
+**What the signature attests.** "This is the entry config the publisher intended." It does not attest to the binary at `command` resolving to a specific artifact on disk: a signed entry whose `command` is `/usr/local/bin/foo` verifies the same on two operator machines where `foo` is built differently. Per-binary attestation is a separate concern (operator's package manager, sandbox posture).
+
+**CLI.** `wirken mcp sign <server>` signs one entry against `~/.wirken/signing-key.hex` (shared with `wirken skills sign`; generated on first use). `wirken mcp verify [<server>]` reports `valid` / `invalid` / `unsigned` per entry, applying the delegation gate when an anchor is configured.
+
+**Audit.** Every load attempt lands on the `gateway-mcp` sentinel session as `SessionEvent::McpEntryVerified { server_name, signer }` or `SessionEvent::McpEntryRefused { server_name, reason }`. Both variants are on the default typed-SIEM forwarded set; consumers can pivot on `kind == "mcp_entry_refused"` without an opt-in.
+
 ### What this is not
 
 This is not a sandbox. There is no `cap_drop`, seccomp filter, namespace, gVisor, or Wasm runtime around the MCP child. The `exec` tool runs in a Docker / gVisor sandbox per `docs/sandbox-properties.md`; MCP servers do not. Closing that asymmetry is design work that lands together with — or after — the broader decision about whether agents themselves should run as subprocesses (see `docs/architecture.md` §6 "Direct LLM calls"). Doing it before that decision would lock in container-isolation shapes around a process boundary the project hasn't yet committed to.
