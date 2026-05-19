@@ -175,6 +175,8 @@ The per-session SHA-256 hash chain gives tamper evidence for every event. The ch
 
 **Live update:** Changing SIEM targets requires editing `siem.json` and restarting the gateway. Event forwarding is non-blocking -- failures are logged but do not block the audit pipeline.
 
+**External consumers:** The webhook target is one of two subscription surfaces for out-of-process consumers; the observe-hook IPC pipe carries the same `SessionEvent` payloads under an Ed25519 handshake. See [`external-consumers.md`](external-consumers.md).
+
 ### Sandbox Configuration
 
 **Crate:** `wirken-agent` | **File:** `crates/agent/src/sandbox.rs`

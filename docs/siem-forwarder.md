@@ -2,6 +2,8 @@
 
 Wirken pushes audit events to an operator-configured SIEM endpoint over HTTPS. Two pipes run in parallel: a legacy pipe carrying `AuditEvent` flat-tuple rows, and a typed pipe carrying `SessionEvent` rows polled from `session_events`. Both pipes share one `SiemConfig`; the typed pipe is opt-in.
 
+The webhook target documented here is one of two subscription surfaces for external consumers; for a same-UID consumer the observe-hook IPC pipe in [`external-consumers.md`](external-consumers.md) carries the same `SessionEvent` payloads under an Ed25519 handshake.
+
 ## Two pipes
 
 ### Legacy pipe
