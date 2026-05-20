@@ -10,6 +10,81 @@ tagged.
 
 ## Unreleased
 
+## [1.7.1] - 2026-05-20
+
+### Subscription surface
+
+- New `docs/external-consumers.md` describes the two existing
+  surfaces an out-of-process consumer can use to tail the audit
+  chain: the observe-hook Cap'n Proto IPC pipe (Ed25519 handshake,
+  pull cursor) and the SIEM webhook (HTTPS, optional HMAC). Code
+  was already in place; this page is the operator-facing contract.
+
+### MCP signing anchor
+
+- `mcp.json` entries can carry an Ed25519 signature over a
+  canonical hash of the entry's load-bearing fields. The proxy
+  refuses entries that fail verification; default builds ship
+  `wirken-mcp-pubkey.pub` empty, which keeps pre-anchor behavior
+  intact. Anchored builds (operator populates the file before
+  compile) refuse unsigned entries unless
+  `WIRKEN_ALLOW_UNSIGNED_MCP=1` is set. `wirken mcp sign <server>`
+  and `wirken mcp verify [<server>]` are the operator surfaces.
+- Env values and OAuth credential refs are excluded from the
+  signed surface so vault rotation does not invalidate
+  signatures.
+- `SessionEvent::McpEntryVerified` and `McpEntryRefused` land on
+  the `gateway-mcp` sentinel session and are in the default
+  typed-SIEM forwarded set.
+- `wirken doctor` reports MCP signing posture.
+
+### Same-row attribution on policy rows
+
+- `PermissionDenied`, `PermissionApproved`, and `HookDispatched`
+  gain optional `adapter_id` and `sender_id` fields populated
+  from `current_inbound` at every emit site. SIEM detections on
+  policy decisions pivot on one row instead of joining back to
+  the sibling tool-call row. `#[serde(default,
+  skip_serializing_if = "Option::is_none")]` keeps pre-upgrade
+  rows byte-identical on disk so the per-session leaf hash still
+  verifies.
+
+### Egress hook dispatcher
+
+- Twin of the veto-hook dispatcher on the post-execution path.
+  After a tool returns and before its output enters the LLM
+  conversation, the runtime calls
+  `EgressDispatcher::dispatch(tool_name, output_bytes,
+  session_id)`. Hooks run in registration order under
+  `WIRKEN_EGRESS_BUDGET_MS` (1000ms default) with a 500ms
+  per-hook cap and return `Allow`, `Replace { bytes }`, or
+  `Refuse { reason }`. Replace mutates the working bytes for the
+  next hook; Refuse short-circuits the pipeline.
+- `HookType::Egress` joins `Observe` and `Veto`; register with
+  `wirken hooks register <id> <pubkey-hex> --type egress`. Same
+  Ed25519 handshake the other types use.
+- `SessionEvent::EgressHookDispatched` and `ToolOutputRedacted`
+  land on the chain. The original output bytes are not on the
+  chain by design; `ToolOutputRedacted` carries
+  `original_sha256` and `redacted_sha256` only. `ToolResult.output`
+  is the post-mediation bytes verbatim, which is what the
+  conversation surfaces and what `messages_hash` verifies against.
+- Deterministic-tool re-execution divergence checks
+  (`wirken session verify`) skip rows that have a paired
+  `ToolOutputRedacted` row: the redaction is operator policy,
+  not wirken behavior, and re-execution would compare freshly
+  produced source bytes against operator-redacted bytes.
+
+### Dependencies
+
+- Bumped `openssl` 0.10.79 to 0.10.80 to clear
+  `GHSA-phqj-4mhp-q6mq` (CVE-2026-45784). The vulnerable
+  `CipherCtxRef::cipher_update_inplace` path is not reachable in
+  wirken: no workspace code calls `openssl::*`, and the
+  transitive dependency through `native-tls` exercises only TLS
+  record encryption, not AES key-wrap-with-padding. Lockfile-only
+  change.
+
 ## [1.7.0] - 2026-05-17
 
 ### Audit trust model
