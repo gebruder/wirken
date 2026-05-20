@@ -902,6 +902,7 @@ pub fn list_active_session_scoped_grants_for_agent(
 ///   surface the inconsistency. This matches the existing pattern
 ///   where `?` on an `AuditError` short-circuits gateway flows that
 ///   require audit integrity.
+#[allow(clippy::too_many_arguments)]
 pub fn approve_and_log(
     store: &PermissionStore,
     action: &Action,
@@ -910,6 +911,8 @@ pub fn approve_and_log(
     scope: ApprovalScope,
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    adapter_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<Approval, GatewayError> {
     approve_and_log_by_key(
         store,
@@ -919,6 +922,8 @@ pub fn approve_and_log(
         scope,
         log,
         handle,
+        adapter_id,
+        sender_id,
     )
 }
 
@@ -928,6 +933,7 @@ pub fn approve_and_log(
 /// reconstruction. Same emission semantics as [`approve_and_log`]:
 /// every successful approval emits a `PermissionApproved` event,
 /// `session_id` populated iff `scope == Session`.
+#[allow(clippy::too_many_arguments)]
 pub fn approve_and_log_by_key(
     store: &PermissionStore,
     action_key: &str,
@@ -936,6 +942,8 @@ pub fn approve_and_log_by_key(
     scope: ApprovalScope,
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    adapter_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<Approval, GatewayError> {
     let approval = store.approve_with_scope_by_key(action_key, agent_id, approved_by, scope)?;
     let (scope_kind, session_id) = approval.scope.to_audit_repr();
@@ -955,6 +963,8 @@ pub fn approve_and_log_by_key(
             // `emit_operator_approval` (below) which carries the
             // structured surface.
             approved_via: None,
+            adapter_id: adapter_id.map(str::to_string),
+            sender_id: sender_id.map(str::to_string),
         },
     )?;
     Ok(approval)
@@ -981,6 +991,7 @@ pub fn approve_and_log_by_key(
 /// `emit_operator_approval` (one-shot) / `approve_and_log` (persisted) /
 /// `approve_and_log_with_scope(Session)` (session-scoped). Three
 /// functions, three scopes, one file.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_operator_approval(
     action_key: &str,
     agent_id: &str,
@@ -988,6 +999,8 @@ pub fn emit_operator_approval(
     approved_via: wirken_audit::ApprovalSource,
     log: &dyn wirken_audit::SessionLog,
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    adapter_id: Option<&str>,
+    sender_id: Option<&str>,
 ) -> Result<(), GatewayError> {
     log.append(
         handle,
@@ -999,6 +1012,8 @@ pub fn emit_operator_approval(
             scope: wirken_audit::ApprovalScopeKind::Persisted,
             session_id: None,
             approved_via: Some(approved_via),
+            adapter_id: adapter_id.map(str::to_string),
+            sender_id: sender_id.map(str::to_string),
         },
     )?;
     Ok(())
@@ -1509,6 +1524,8 @@ mod tier_tests {
             session_scope(session),
             &log,
             &handle,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1565,6 +1582,8 @@ mod tier_tests {
             ApprovalScope::Persisted,
             &log,
             &handle,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1612,6 +1631,8 @@ mod tier_tests {
             session_scope(session),
             &log,
             &handle,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1714,6 +1735,8 @@ mod tier_tests {
                     scope: wirken_audit::ApprovalScopeKind::Session,
                     session_id: Some(session.to_string()),
                     approved_via: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -1749,6 +1772,8 @@ mod tier_tests {
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(session.to_string()),
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1780,6 +1805,8 @@ mod tier_tests {
                 scope: wirken_audit::ApprovalScopeKind::Persisted,
                 session_id: None,
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1793,6 +1820,8 @@ mod tier_tests {
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(target.to_string()),
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1809,6 +1838,8 @@ mod tier_tests {
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(other.to_string()),
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1843,6 +1874,8 @@ mod tier_tests {
                 scope: wirken_audit::ApprovalScopeKind::Session,
                 session_id: Some(session_id.to_string()),
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();

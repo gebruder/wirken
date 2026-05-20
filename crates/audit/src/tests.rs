@@ -993,6 +993,8 @@ mod session {
                     trigger: Some("delete the universe".into()),
                     denied_via: None,
                     denial_reason: None,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             ),
             (
@@ -1241,6 +1243,8 @@ mod session {
                 trigger: Some("operator pasted a bad command".into()),
                 denied_via: Some(crate::session_log::ApprovalSource::Stdin),
                 denial_reason: Some("looks dangerous".into()),
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1294,6 +1298,8 @@ mod session {
                 scope: crate::session_log::ApprovalScopeKind::Persisted,
                 session_id: None,
                 approved_via: Some(crate::session_log::ApprovalSource::Stdin),
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1622,6 +1628,8 @@ mod session {
                     tool_name: "shell".into(),
                     agent_id: "default".into(),
                     decision,
+                    adapter_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -1707,6 +1715,8 @@ mod session {
                 decision: crate::session_log::HookDecision::Deny {
                     reason: "policy/no-shell".into(),
                 },
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();

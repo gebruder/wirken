@@ -593,6 +593,19 @@ pub enum SessionEvent {
         /// in the conversation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         denial_reason: Option<String>,
+        /// Adapter that delivered the inbound message that drove
+        /// the denied tool call. Matches the field on the sibling
+        /// `AssistantToolCalls` and `ToolResult` rows so a SIEM
+        /// detection pivots on one row instead of joining back to
+        /// the inbound message by session_id. `None` for paths
+        /// without an inbound adapter (CLI, cron, subagent
+        /// recursion).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        /// Platform sender that drove the denied tool call. Same
+        /// source and `None` semantics as `adapter_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// Operator approved a Tier 2 action. `scope` distinguishes
     /// SQLite-persisted approvals (the default) from session-scoped
@@ -627,6 +640,15 @@ pub enum SessionEvent {
         /// free-form actor strings.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approved_via: Option<ApprovalSource>,
+        /// Adapter that delivered the inbound message that drove
+        /// the approved tool call. See
+        /// [`SessionEvent::PermissionDenied::adapter_id`] for the
+        /// same-row attribution rationale.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        /// Platform sender that drove the approved tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// Session-scoped approvals were cleared for `session_id`.
     /// Emitted once per session end (clean shutdown or crash
@@ -1013,6 +1035,15 @@ pub enum SessionEvent {
         /// Agent that drove the tool call.
         agent_id: String,
         decision: HookDecision,
+        /// Adapter that delivered the inbound message that drove
+        /// the tool call. See
+        /// [`SessionEvent::PermissionDenied::adapter_id`] for the
+        /// same-row attribution rationale.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        /// Platform sender that drove the tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// A hook's connection dropped or its veto invocation hit the
     /// timeout / failed cleanly. `error` is a short snake_case label

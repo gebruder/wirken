@@ -302,11 +302,12 @@ pub async fn approve(key: &str, agent: &str, session: Option<&str>) -> Result<()
             let scope = ApprovalScope::Session {
                 session_id: session_id.to_string(),
             };
-            let approval =
-                approve_and_log_by_key(&store, key, agent, "operator", scope, &log, &handle)
-                    .context(format!(
-                        "Failed to approve permission '{key}' for session '{session_id}'"
-                    ))?;
+            let approval = approve_and_log_by_key(
+                &store, key, agent, "operator", scope, &log, &handle, None, None,
+            )
+            .context(format!(
+                "Failed to approve permission '{key}' for session '{session_id}'"
+            ))?;
             println!(
                 "  Approved '{}' for session '{}' (agent '{}'); cleared on session end.",
                 approval.action_key, session_id, approval.agent_id,

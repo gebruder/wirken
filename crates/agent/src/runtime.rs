@@ -2336,6 +2336,8 @@ impl Agent {
                         trigger: self.current_trigger.clone(),
                         denied_via: None,
                         denial_reason: None,
+                        adapter_id: self.current_inbound.adapter_id.clone(),
+                        sender_id: self.current_inbound.sender_id.clone(),
                     },
                 )?;
                 return Ok(crate::tool::ToolResult {
@@ -2369,6 +2371,8 @@ impl Agent {
                             trigger: self.current_trigger.clone(),
                             denied_via: None,
                             denial_reason: None,
+                            adapter_id: self.current_inbound.adapter_id.clone(),
+                            sender_id: self.current_inbound.sender_id.clone(),
                         },
                     )?;
                     return Ok(crate::tool::ToolResult {
@@ -2448,6 +2452,8 @@ impl Agent {
                         tool_name: name.to_string(),
                         agent_id: self.id.clone(),
                         decision,
+                        adapter_id: self.current_inbound.adapter_id.clone(),
+                        sender_id: self.current_inbound.sender_id.clone(),
                     },
                 )?;
             }
@@ -2653,6 +2659,8 @@ impl Agent {
                         src,
                         &*self.session_log,
                         &self.session_handle,
+                        self.current_inbound.adapter_id.as_deref(),
+                        self.current_inbound.sender_id.as_deref(),
                     ) {
                         tracing::warn!(
                             error = %e,
@@ -2717,6 +2725,8 @@ impl Agent {
                         trigger: ctx.trigger_message.clone(),
                         denied_via: source.clone(),
                         denial_reason,
+                        adapter_id: self.current_inbound.adapter_id.clone(),
+                        sender_id: self.current_inbound.sender_id.clone(),
                     },
                 )?;
                 let output = reason.unwrap_or_else(|| unmediated_deny_message(&ctx));
@@ -2739,6 +2749,8 @@ impl Agent {
                         trigger: ctx.trigger_message.clone(),
                         denied_via: source,
                         denial_reason: Some(output.clone()),
+                        adapter_id: self.current_inbound.adapter_id.clone(),
+                        sender_id: self.current_inbound.sender_id.clone(),
                     },
                 )?;
                 denials.push(ctx);
@@ -2780,6 +2792,8 @@ impl Agent {
                 trigger: ctx.trigger_message.clone(),
                 denied_via: None,
                 denial_reason: None,
+                adapter_id: self.current_inbound.adapter_id.clone(),
+                sender_id: self.current_inbound.sender_id.clone(),
             },
         )?;
         Ok(())

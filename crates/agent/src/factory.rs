@@ -780,6 +780,8 @@ mod replay_tests {
                 scope: ApprovalScopeKind::Session,
                 session_id: Some(session_id.to_string()),
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -892,6 +894,8 @@ mod replay_tests {
                 scope: ApprovalScopeKind::Persisted,
                 session_id: None,
                 approved_via: None,
+                adapter_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
