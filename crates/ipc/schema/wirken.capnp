@@ -132,8 +132,9 @@ struct HookAuthResponse {
   hookId @2 :Text;
   # Identifier for this hook (e.g., "policy-eval", "ralph-loop").
   hookType @3 :Text;
-  # "observe" or "veto". The gateway routes the post-handshake
-  # connection by this label; an unknown label is a handshake reject.
+  # "observe", "veto", or "egress". The gateway routes the
+  # post-handshake connection by this label; an unknown label is a
+  # handshake reject.
 }
 
 struct SessionLogTail {
@@ -195,6 +196,43 @@ struct VetoResponse {
     deny @2 :Text;
     # Operator-readable reason. Recorded on the audit chain and
     # surfaced as the tool call's failure message.
+  }
+}
+
+struct EgressRequest {
+  # Gateway -> Egress hook. Post-execution mediation of one tool
+  # call's output bytes before they enter the LLM conversation. The
+  # hook responds with an EgressResponse keyed by requestId.
+  #
+  # `output` is raw bytes because tool outputs are not utf-8
+  # guaranteed (binary content, malformed text from a misbehaving
+  # tool). The runtime converts via String::from_utf8_lossy on the
+  # final working copy after every hook has had its say; the chain
+  # row records the lossy form so the conversation surface stays
+  # String-typed end to end.
+  requestId @0 :Text;
+  toolName @1 :Text;
+  output @2 :Data;
+  sessionId @3 :Text;
+}
+
+struct EgressResponse {
+  requestId @0 :Text;
+  union {
+    allow @1 :Void;
+    # Pass the bytes through unchanged. The next hook in the
+    # pipeline sees the same working copy.
+    replace @2 :Data;
+    # Substitute these bytes for the working copy. The next hook
+    # sees the new bytes; on completion, the runtime feeds the
+    # final working copy into add_tool_result and the ToolResult
+    # audit row. The original bytes are not on the chain; the
+    # paired ToolOutputRedacted row carries original_sha256 only.
+    refuse @3 :Text;
+    # Refuse the tool result outright. Operator-readable reason.
+    # Short-circuits the pipeline. The runtime emits a refusal
+    # placeholder as the tool's output so the LLM sees that the
+    # call did not produce usable bytes.
   }
 }
 
@@ -348,5 +386,11 @@ struct Frame {
     approvalRequest @15 :ApprovalRequest;
     approvalDecision @16 :ApprovalDecision;
     approvalRequestFailed @17 :ApprovalRequestFailed;
+
+    # Egress-hook synchronous request/response. Post-execution
+    # mediation of one tool call's output bytes before they enter
+    # the LLM conversation. Twin of veto on the return path.
+    egressRequest @18 :EgressRequest;
+    egressResponse @19 :EgressResponse;
   }
 }

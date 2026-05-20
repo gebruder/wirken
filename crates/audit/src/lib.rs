@@ -18,8 +18,8 @@ pub use error::AuditError;
 pub use event::{ActorKind, AuditEvent, StoredEvent};
 pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use session_log::{
-    ApprovalScopeKind, ApprovalSource, ChainHeadReason, DenialSource, HashHex, HexBytes,
-    HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, OwnSession,
+    ApprovalScopeKind, ApprovalSource, ChainHeadReason, DenialSource, EgressDecision, HashHex,
+    HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, OwnSession,
     PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, SchemaDriftRecord, SessionEvent,
     SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,
     SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord, TrustLevel,

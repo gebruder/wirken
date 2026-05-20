@@ -337,8 +337,15 @@ pub enum HookType {
     Observe,
     /// Veto: receives synchronous `VetoRequest` and replies
     /// `Allow` or `Deny { reason }`. Runs after Wirken's built-in
-    /// permission gate.
+    /// permission gate, before the tool dispatches.
     Veto,
+    /// Egress: receives synchronous `EgressRequest` after the tool
+    /// has produced output, before that output enters the LLM
+    /// conversation. Replies `Allow`, `Replace { bytes }`, or
+    /// `Refuse { reason }`. The pipeline mutates the working
+    /// output bytes hook by hook; the final working copy is what
+    /// lands on the `ToolResult` row and in the conversation.
+    Egress,
 }
 
 impl HookType {
@@ -346,6 +353,7 @@ impl HookType {
         match self {
             Self::Observe => "observe",
             Self::Veto => "veto",
+            Self::Egress => "egress",
         }
     }
 
@@ -353,6 +361,7 @@ impl HookType {
         match s {
             "observe" => Ok(Self::Observe),
             "veto" => Ok(Self::Veto),
+            "egress" => Ok(Self::Egress),
             other => Err(HandshakeError::Protocol(format!(
                 "unknown hook_type on wire: {other:?}"
             ))),

@@ -1088,6 +1088,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     ));
     let hook_dispatcher = Arc::new(wirken_gateway::hook_dispatcher::HookDispatcher::default());
     factory.attach_veto_dispatcher(hook_dispatcher.clone());
+    let egress_dispatcher =
+        Arc::new(wirken_gateway::egress_dispatcher::EgressDispatcher::default());
+    factory.attach_egress_dispatcher(egress_dispatcher.clone());
 
     // --- Pending-approval queue + CLI approval gate ---
     //
@@ -1417,78 +1420,82 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // peer-credential gate; routes by hook_type post-handshake.
     let hooks_accept_registry = hook_registry.clone();
     let hooks_accept_dispatcher = hook_dispatcher.clone();
+    let hooks_accept_egress_dispatcher = egress_dispatcher.clone();
     let hooks_accept_audit = audit.clone();
     let hooks_accept_session_log = session_log.clone();
-    let hooks_accept_handle =
-        tokio::spawn(async move {
-            loop {
-                match hooks_listener.accept().await {
-                    Ok(stream) => {
-                        #[cfg(unix)]
-                        match stream.peer_principal() {
-                            Ok(actual) if actual == hooks_expected_principal => {}
-                            Ok(actual) => {
-                                tracing::warn!(
-                                    "hooks gateway: refusing peer {} (expected {})",
-                                    actual,
-                                    hooks_expected_principal
-                                );
-                                let _ =
-                                    hooks_accept_audit
-                                        .log(
-                                            AuditEvent::new(
-                                                ActorKind::Service,
-                                                "gateway",
-                                                "hooks.peer.refused",
-                                                "gateway-hooks-socket",
-                                            )
-                                            .with_detail(serde_json::json!({
-                                                "reason": "principal_mismatch",
-                                                "expected": hooks_expected_principal.to_string(),
-                                                "actual": actual.to_string(),
-                                            })),
-                                        )
-                                        .await;
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "hooks gateway: peer_principal unavailable, refusing: {e}"
-                                );
-                                let _ =
-                                    hooks_accept_audit
-                                        .log(
-                                            AuditEvent::new(
-                                                ActorKind::Service,
-                                                "gateway",
-                                                "hooks.peer.refused",
-                                                "gateway-hooks-socket",
-                                            )
-                                            .with_detail(serde_json::json!({
-                                                "reason": "peer_principal_unavailable",
-                                                "error": e.to_string(),
-                                            })),
-                                        )
-                                        .await;
-                                continue;
-                            }
+    let hooks_accept_handle = tokio::spawn(async move {
+        loop {
+            match hooks_listener.accept().await {
+                Ok(stream) => {
+                    #[cfg(unix)]
+                    match stream.peer_principal() {
+                        Ok(actual) if actual == hooks_expected_principal => {}
+                        Ok(actual) => {
+                            tracing::warn!(
+                                "hooks gateway: refusing peer {} (expected {})",
+                                actual,
+                                hooks_expected_principal
+                            );
+                            let _ = hooks_accept_audit
+                                .log(
+                                    AuditEvent::new(
+                                        ActorKind::Service,
+                                        "gateway",
+                                        "hooks.peer.refused",
+                                        "gateway-hooks-socket",
+                                    )
+                                    .with_detail(
+                                        serde_json::json!({
+                                            "reason": "principal_mismatch",
+                                            "expected": hooks_expected_principal.to_string(),
+                                            "actual": actual.to_string(),
+                                        }),
+                                    ),
+                                )
+                                .await;
+                            continue;
                         }
+                        Err(e) => {
+                            tracing::warn!(
+                                "hooks gateway: peer_principal unavailable, refusing: {e}"
+                            );
+                            let _ = hooks_accept_audit
+                                .log(
+                                    AuditEvent::new(
+                                        ActorKind::Service,
+                                        "gateway",
+                                        "hooks.peer.refused",
+                                        "gateway-hooks-socket",
+                                    )
+                                    .with_detail(
+                                        serde_json::json!({
+                                            "reason": "peer_principal_unavailable",
+                                            "error": e.to_string(),
+                                        }),
+                                    ),
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
 
-                        let reg = hooks_accept_registry.clone();
-                        let disp = hooks_accept_dispatcher.clone();
-                        let slog = hooks_accept_session_log.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_hook_connection(stream, reg, disp, slog).await {
-                                tracing::error!("Hook connection error: {e}");
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        tracing::error!("Hooks accept error: {e}");
-                    }
+                    let reg = hooks_accept_registry.clone();
+                    let disp = hooks_accept_dispatcher.clone();
+                    let edisp = hooks_accept_egress_dispatcher.clone();
+                    let slog = hooks_accept_session_log.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_hook_connection(stream, reg, disp, edisp, slog).await
+                        {
+                            tracing::error!("Hook connection error: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Hooks accept error: {e}");
                 }
             }
-        });
+        }
+    });
 
     // --- Orchestrator-push listener (Zirkel C-Signal) ---
     //
@@ -1926,10 +1933,12 @@ async fn handle_adapter_connection(
 /// The dev-mode escape hatch `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1`
 /// bypasses the registry verify in the handshake; the audit row
 /// records the unregistered status.
+#[allow(clippy::too_many_arguments)]
 async fn handle_hook_connection(
     stream: wirken_ipc::BoxStream,
     registry: Arc<Mutex<wirken_gateway::hook_registry::HookRegistry>>,
     dispatcher: Arc<wirken_gateway::hook_dispatcher::HookDispatcher>,
+    egress_dispatcher: Arc<wirken_gateway::egress_dispatcher::EgressDispatcher>,
     session_log: Arc<dyn wirken_audit::SessionLog>,
 ) -> Result<()> {
     use wirken_audit::{HookKind, HookSignatureStatus, SessionEvent, SessionId, TrustLevel};
@@ -1997,6 +2006,7 @@ async fn handle_hook_connection(
     let audit_kind = match hook_type {
         HookType::Observe => HookKind::Observe,
         HookType::Veto => HookKind::Veto,
+        HookType::Egress => HookKind::Egress,
     };
     let _ = session_log.append(
         &gateway_session,
@@ -2018,6 +2028,7 @@ async fn handle_hook_connection(
     let crash_reason = match hook_type {
         HookType::Observe => serve_observe_loop(reader, writer, &hook_id, &session_log).await,
         HookType::Veto => serve_veto_loop(reader, writer, &hook_id, &dispatcher).await,
+        HookType::Egress => serve_egress_loop(reader, writer, &hook_id, &egress_dispatcher).await,
     };
 
     registry.lock().await.set_connected(&hook_id, false);
@@ -2195,6 +2206,96 @@ async fn serve_veto_loop(
     };
 
     // Drain pending so all in-flight dispatchers see ConnectionDropped.
+    {
+        let mut guard = pending.lock().unwrap();
+        for (_, sender) in guard.drain() {
+            drop(sender);
+        }
+    }
+    dispatcher.unregister(hook_id).await;
+    crash_reason
+}
+
+/// Egress-hook serving loop. Twin of [`serve_veto_loop`] on the
+/// post-execution path. Registers the writer + a per-connection
+/// pending map with the egress dispatcher so subsequent `dispatch`
+/// calls route through this connection. Reads `EgressResponse`
+/// frames in a loop and routes them by request_id. Returns the
+/// snake_case crash reason on EOF or error.
+async fn serve_egress_loop(
+    mut reader: wirken_ipc::IpcFrameReader,
+    writer: wirken_ipc::IpcFrameWriter,
+    hook_id: &str,
+    dispatcher: &Arc<wirken_gateway::egress_dispatcher::EgressDispatcher>,
+) -> String {
+    use std::collections::HashMap;
+    use tokio::sync::Mutex as AsyncMutex;
+    use wirken_gateway::egress_dispatcher::EgressResult;
+    use wirken_ipc::wirken_capnp::frame;
+
+    let writer = Arc::new(AsyncMutex::new(writer));
+    let pending: Arc<
+        std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<EgressResult>>>,
+    > = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+    dispatcher
+        .register(hook_id, writer.clone(), pending.clone())
+        .await;
+
+    let crash_reason = loop {
+        let msg = match reader.read_message().await {
+            Ok(m) => m,
+            Err(_) => break "connection_dropped".to_string(),
+        };
+        let extracted: Result<(String, EgressResult), &'static str> = (|| {
+            let frame_reader = msg
+                .get_root::<frame::Reader<'_>>()
+                .map_err(|_| "egress_frame_parse")?;
+            let which = frame_reader.which().map_err(|_| "egress_frame_variant")?;
+            let frame::EgressResponse(resp) = which else {
+                return Err("egress_unexpected_frame");
+            };
+            let resp = resp.map_err(|_| "egress_frame_parse")?;
+            let request_id = resp
+                .get_request_id()
+                .map_err(|_| "egress_request_id_parse")?
+                .to_string()
+                .map_err(|_| "egress_request_id_parse")?;
+            let result = match resp.which() {
+                Ok(wirken_ipc::wirken_capnp::egress_response::Allow(_)) => EgressResult::Allow,
+                Ok(wirken_ipc::wirken_capnp::egress_response::Replace(bytes)) => {
+                    let bytes = bytes.map_err(|_| "egress_replace_payload")?.to_vec();
+                    EgressResult::Replace { bytes }
+                }
+                Ok(wirken_ipc::wirken_capnp::egress_response::Refuse(reason)) => {
+                    let reason = reason
+                        .ok()
+                        .and_then(|r| r.to_string().ok())
+                        .unwrap_or_default();
+                    EgressResult::Refuse { reason }
+                }
+                Err(_) => return Err("egress_response_decision"),
+            };
+            Ok((request_id, result))
+        })();
+        let (request_id, result) = match extracted {
+            Ok(t) => t,
+            Err(label) => break label.to_string(),
+        };
+        drop(msg);
+
+        let sender = pending.lock().unwrap().remove(&request_id);
+        if let Some(sender) = sender {
+            let _ = sender.send(result);
+        } else {
+            tracing::warn!(
+                hook_id,
+                request_id = %request_id,
+                "egress response for unknown or timed-out request_id; dropping",
+            );
+        }
+    };
+
     {
         let mut guard = pending.lock().unwrap();
         for (_, sender) in guard.drain() {

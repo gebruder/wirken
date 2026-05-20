@@ -3,6 +3,7 @@ pub mod agent_config;
 pub mod approver_registry;
 pub mod config;
 pub mod cron;
+pub mod egress_dispatcher;
 pub mod error;
 pub mod hook_dispatcher;
 pub mod hook_registry;

@@ -54,6 +54,9 @@ pub const TYPED_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// - `ChainHead`: per-session signed-head feed.
 /// - `McpEntryVerified`, `McpEntryRefused`: MCP load-time signature
 ///   posture on the `gateway-mcp` sentinel session.
+/// - `EgressHookDispatched`, `ToolOutputRedacted`: post-execution
+///   egress-hook outcomes and redaction events. Plaintext is never
+///   on the row; both carry sha256 hashes only.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -88,6 +91,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::ChainHead { .. }
             | SessionEvent::McpEntryVerified { .. }
             | SessionEvent::McpEntryRefused { .. }
+            | SessionEvent::EgressHookDispatched { .. }
+            | SessionEvent::ToolOutputRedacted { .. }
     );
     if !in_default {
         return false;
@@ -144,6 +149,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::HookCrashed { .. } => "hook_crashed",
         SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",
         SessionEvent::McpEntryRefused { .. } => "mcp_entry_refused",
+        SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
+        SessionEvent::ToolOutputRedacted { .. } => "tool_output_redacted",
     }
 }
 

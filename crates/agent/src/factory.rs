@@ -215,6 +215,14 @@ pub struct AgentFactory {
     /// accept loop. Interior-mutable so the CLI can install it after
     /// the factory is already in an `Arc`.
     veto_dispatcher: std::sync::RwLock<Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>>,
+    /// External egress-hook dispatcher. Defaults to
+    /// `NoopEgressDispatcher` so factories built without a hook
+    /// layer pay no cost. The CLI runs `attach_egress_dispatcher`
+    /// after constructing the factory to install the real
+    /// `EgressDispatcher` populated by the hooks accept loop.
+    /// Interior-mutable for the same reason as `veto_dispatcher`.
+    egress_dispatcher:
+        std::sync::RwLock<Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher>>,
     /// Default approval gate injected into every waked Agent.
     /// `None` preserves the pre-out-of-band behavior — `NeedsApproval`
     /// short-circuits with a terminal deny. The daemon-mode `wirken
@@ -304,6 +312,9 @@ impl AgentFactory {
             org_permissions,
             veto_dispatcher: std::sync::RwLock::new(Arc::new(
                 wirken_gateway::hook_dispatcher::NoopDispatcher,
+            )),
+            egress_dispatcher: std::sync::RwLock::new(Arc::new(
+                wirken_gateway::egress_dispatcher::NoopEgressDispatcher,
             )),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
@@ -397,6 +408,21 @@ impl AgentFactory {
 
     fn current_veto_dispatcher(&self) -> Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher> {
         self.veto_dispatcher.read().unwrap().clone()
+    }
+
+    /// Install the post-execution egress-hook dispatcher. Same
+    /// shape and life cycle as [`Self::attach_veto_dispatcher`].
+    pub fn attach_egress_dispatcher(
+        &self,
+        dispatcher: Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher>,
+    ) {
+        *self.egress_dispatcher.write().unwrap() = dispatcher;
+    }
+
+    fn current_egress_dispatcher(
+        &self,
+    ) -> Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher> {
+        self.egress_dispatcher.read().unwrap().clone()
     }
 
     /// A `Weak<Self>` reference to this factory. Used internally by
@@ -516,6 +542,7 @@ impl AgentFactory {
             agent.set_org_permissions(org.clone());
         }
         agent.set_veto_dispatcher(self.current_veto_dispatcher());
+        agent.set_egress_dispatcher(self.current_egress_dispatcher());
         if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);
         }

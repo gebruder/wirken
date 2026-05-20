@@ -15,7 +15,7 @@ Wirken's audit chain is exposed to out-of-process consumers (a local SIEM forwar
 
 Pick the observe-hook surface for a same-UID consumer that wants Ed25519 authentication, pull-based backpressure, and cursor-driven replay. Pick the webhook surface for a cloud SIEM that cannot run a local connector at the wirken UID, where HMAC over HTTPS is the right trust model.
 
-A single hook process can register against both an observe role and a veto role under different hook ids; one consumer can both tail the chain and reject specific tool calls.
+A single hook process can register against any combination of `observe`, `veto`, and `egress` roles under different hook ids; one consumer can tail the chain, veto pre-dispatch tool calls, and mediate post-execution tool output.
 
 ## Observe hook (IPC)
 

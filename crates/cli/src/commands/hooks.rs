@@ -24,7 +24,10 @@ fn parse_hook_type(s: &str) -> Result<HookType> {
     match s {
         "observe" => Ok(HookType::Observe),
         "veto" => Ok(HookType::Veto),
-        other => anyhow::bail!("unknown hook type {other:?}; expected `observe` or `veto`"),
+        "egress" => Ok(HookType::Egress),
+        other => {
+            anyhow::bail!("unknown hook type {other:?}; expected `observe`, `veto`, or `egress`")
+        }
     }
 }
 
@@ -107,6 +110,7 @@ mod tests {
     fn parse_hook_type_accepts_known_labels() {
         assert_eq!(parse_hook_type("observe").unwrap(), HookType::Observe);
         assert_eq!(parse_hook_type("veto").unwrap(), HookType::Veto);
+        assert_eq!(parse_hook_type("egress").unwrap(), HookType::Egress);
     }
 
     #[test]

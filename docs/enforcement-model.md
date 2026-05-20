@@ -177,6 +177,28 @@ The per-session SHA-256 hash chain gives tamper evidence for every event. The ch
 
 **External consumers:** The webhook target is one of two subscription surfaces for out-of-process consumers; the observe-hook IPC pipe carries the same `SessionEvent` payloads under an Ed25519 handshake. See [`external-consumers.md`](external-consumers.md).
 
+### Veto and egress hooks
+
+**Crate:** `wirken-gateway` | **Files:** `crates/gateway/src/hook_dispatcher.rs`, `crates/gateway/src/egress_dispatcher.rs`
+
+Operators register external hook processes via `wirken hooks register <id> <pubkey-hex> --type <observe|veto|egress>`. Each hook process holds its own Ed25519 keypair, connects inbound on `<data_dir>/sockets/gateway-hooks.sock`, and is matched against the registry at handshake time. The handshake binds the signature under a domain separator distinct from the adapter handshake so a key valid for one cannot replay against the other.
+
+**Veto hooks** run pre-dispatch. After the built-in tier and per-skill permission gates accept a tool call, the runtime calls `HookDispatcher::dispatch(tool_name, arguments, session_id)`. Hooks run in registration order under a cumulative wall-clock budget (`WIRKEN_VETO_BUDGET_MS`, 1000ms default) with a per-hook ceiling of 500ms. The first `Deny` short-circuits; remaining hooks are recorded as `Skipped` (no audit row); a `Timeout` row lands on the chain to distinguish budget exhaustion from operator deny. Each non-skipped outcome emits one `HookDispatched` row.
+
+**Egress hooks** run post-execution. After a tool returns and before its output enters the LLM conversation, the runtime calls `EgressDispatcher::dispatch(tool_name, output_bytes, session_id)`. Hooks run in registration order under a `WIRKEN_EGRESS_BUDGET_MS` budget (1000ms default; same 500ms per-hook cap). Each hook returns one of:
+
+- `Allow`: the working bytes pass through unchanged.
+- `Replace { bytes }`: the working bytes are substituted; the next hook in the pipeline sees the new bytes.
+- `Refuse { reason }`: short-circuits the pipeline; the tool's output becomes a refusal placeholder and the LLM sees that the call did not produce usable bytes.
+
+Each non-skipped outcome emits one `EgressHookDispatched` row carrying the operator-readable `EgressDecision` (Allow / Replace / Refuse / Timeout). When the final working bytes differ from the original, a paired `ToolOutputRedacted` row records `original_sha256`, `original_size`, `redacted_sha256`, `redacted_size`, and the attribution fields (`hook_id`, `agent_id`, `adapter_id`, `sender_id`). **The original output bytes are not on the chain by design**: an egress hook's purpose is preventing those bytes from spreading; recording them defeats the redaction. The original sha256 is the only on-chain reference, sufficient for an auditor with a candidate plaintext to verify the redaction was applied to the bytes they expect.
+
+**Chain invariant.** `ToolResult.output` carries the post-mediation bytes verbatim. The conversation that produced the next `LlmRequest`'s `messages_hash` was built from those same bytes, so `wirken session verify` reconstitutes an identical conversation by calling `add_tool_result(stored_output_bytes)` and the hash matches. Deterministic-tool re-execution divergence checks (`read_file`, `list_files`) skip rows that have a `ToolOutputRedacted` paired row at a higher seq for the same `call_id`: the redaction is operator policy, not wirken behavior, and re-execution would compare freshly-produced source bytes against operator-redacted bytes.
+
+**Timeout posture.** Both dispatchers fail-closed by default. `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` flips the timeout path to fail-open with a `tracing::warn!`; the audit row records the timeout regardless so a reviewer can distinguish "hook timed out" from "hook ran clean".
+
+**Live update:** Registering or unregistering a hook is durable in the `hooks.db` SQLite registry. Active connections survive a registry edit and continue dispatching until disconnect; new connections honor the updated registry at handshake time.
+
 ### Sandbox Configuration
 
 **Crate:** `wirken-agent` | **File:** `crates/agent/src/sandbox.rs`

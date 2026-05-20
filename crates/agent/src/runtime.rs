@@ -258,6 +258,14 @@ pub struct Agent {
     /// injects the real `HookDispatcher` at wake time when veto hooks
     /// are configured at the gateway.
     veto_dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
+    /// External egress-hook dispatcher. Called after a tool returns
+    /// and before its output enters the LLM conversation. Mediates
+    /// the working bytes by allow / replace / refuse. Defaults to
+    /// `NoopEgressDispatcher` so agents with no egress hooks
+    /// configured pay no cost. The factory injects the real
+    /// `EgressDispatcher` at wake time when egress hooks are
+    /// registered at the gateway.
+    egress_dispatcher: Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher>,
     /// Operator-approval surface. `None` preserves the current
     /// unmediated behavior — `NeedsApproval` short-circuits with a
     /// terminal deny. `Some(gate)` enables the gate-consult flow:
@@ -362,6 +370,7 @@ impl Agent {
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
             veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
+            egress_dispatcher: Arc::new(wirken_gateway::egress_dispatcher::NoopEgressDispatcher),
             approval_gate: None,
             approval_bypass: None,
         })
@@ -449,6 +458,7 @@ impl Agent {
             tool_validation_failures: HashMap::new(),
             recovery_observer: None,
             veto_dispatcher: Arc::new(wirken_gateway::hook_dispatcher::NoopDispatcher),
+            egress_dispatcher: Arc::new(wirken_gateway::egress_dispatcher::NoopEgressDispatcher),
             approval_gate: None,
             approval_bypass: None,
         })
@@ -550,6 +560,18 @@ impl Agent {
         dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
     ) {
         self.veto_dispatcher = dispatcher;
+    }
+
+    /// Attach the external egress-hook dispatcher. Called by the
+    /// factory at wake time when egress hooks are registered at the
+    /// gateway. Replaces the default `NoopEgressDispatcher`. After
+    /// this is set, every tool result flows through
+    /// `mediate_tool_output` before reaching the conversation.
+    pub fn set_egress_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher>,
+    ) {
+        self.egress_dispatcher = dispatcher;
     }
 
     /// Attach an operator-approval gate. When `Some`, `NeedsApproval`
@@ -2565,6 +2587,12 @@ impl Agent {
 
     /// Execute a single tool call and handle permission denials.
     /// Shared by both regular-tool and spawn-tool execution paths.
+    /// The returned `ToolResult` has already been mediated by the
+    /// egress dispatcher: any operator-configured egress hook has
+    /// inspected the output, optionally replaced or refused it, and
+    /// the audit chain carries one `EgressHookDispatched` per
+    /// non-skipped hook outcome plus a `ToolOutputRedacted` row
+    /// when the bytes diverged from the original.
     async fn execute_and_record_tool(
         &mut self,
         call: &crate::conversation::ToolCallRequest,
@@ -2583,7 +2611,7 @@ impl Agent {
             }
             // agent-runtime-error-recovery: argument-validation
             // failures from the registry (`AgentError::Tool`) are
-            // recoverable — feed the error back as a non-success
+            // recoverable: feed the error back as a non-success
             // ToolResult so the model can retry with corrected
             // arguments. Per-turn counter, capped at
             // MAX_TOOL_VALIDATION_RETRIES; after that the tool is
@@ -2594,6 +2622,7 @@ impl Agent {
             }
             Err(e) => return Err(e),
         };
+        let result = self.mediate_tool_output(call, result).await?;
         tracing::debug!(
             "Tool {} result (success={}): {}",
             call.name,
@@ -2601,6 +2630,194 @@ impl Agent {
             truncate(&result.output, 200)
         );
         Ok(result)
+    }
+
+    /// Post-execution egress mediation. Mirrors the pre-execution
+    /// veto path in shape: snapshot the active hook set, run them
+    /// in registration order under a cumulative wall-clock budget,
+    /// emit one audit row per non-skipped per-hook outcome, then
+    /// branch on the aggregate decision.
+    ///
+    /// Pipeline semantics: each hook sees the current working
+    /// bytes. `Replace` mutates the working copy for the next hook;
+    /// `Refuse` short-circuits and substitutes a refusal placeholder
+    /// as the tool's output; `Timeout` under production posture
+    /// also refuses (dev posture under
+    /// `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` is fail-open with a
+    /// warn).
+    ///
+    /// Chain invariant: the `ToolResult` row that immediately
+    /// follows this call carries the post-mediation bytes verbatim.
+    /// `messages_hash` on the next `LlmRequest` is computed over a
+    /// conversation that includes these same bytes, so replay
+    /// reconstitutes an identical conversation by calling
+    /// `add_tool_result(stored_output_bytes)` and produces the same
+    /// digest. The original bytes are not on the chain by design;
+    /// the paired `ToolOutputRedacted` row carries
+    /// `original_sha256` only.
+    async fn mediate_tool_output(
+        &mut self,
+        call: &crate::conversation::ToolCallRequest,
+        result: crate::tool::ToolResult,
+    ) -> Result<crate::tool::ToolResult, AgentError> {
+        use sha2::{Digest, Sha256};
+
+        let original_bytes = result.output.as_bytes().to_vec();
+        let original_size = original_bytes.len() as u64;
+        let original_sha256 = sha256_hashhex(&original_bytes);
+
+        let outcome = self
+            .egress_dispatcher
+            .dispatch(
+                &call.name,
+                &original_bytes,
+                self.session_handle.id().as_str(),
+            )
+            .await;
+
+        // Emit one EgressHookDispatched per non-skipped outcome,
+        // populated with adapter / sender attribution. The Skipped
+        // outcomes drop from the chain by the same absent-row
+        // convention as the veto dispatcher.
+        for dispatched in &outcome.per_hook {
+            let audit_decision = match &dispatched.decision {
+                wirken_gateway::egress_dispatcher::InternalDecision::Allow => {
+                    Some(wirken_audit::EgressDecision::Allow)
+                }
+                wirken_gateway::egress_dispatcher::InternalDecision::Replace { bytes } => {
+                    let mut hasher = Sha256::new();
+                    hasher.update(bytes);
+                    let replacement_sha256 = wirken_audit::HashHex(hex_string(&hasher.finalize()));
+                    Some(wirken_audit::EgressDecision::Replace {
+                        original_sha256: original_sha256.clone(),
+                        original_size,
+                        replacement_sha256,
+                        replacement_size: bytes.len() as u64,
+                    })
+                }
+                wirken_gateway::egress_dispatcher::InternalDecision::Refuse { reason } => {
+                    Some(wirken_audit::EgressDecision::Refuse {
+                        reason: reason.clone(),
+                    })
+                }
+                wirken_gateway::egress_dispatcher::InternalDecision::Timeout => {
+                    Some(wirken_audit::EgressDecision::Timeout)
+                }
+                wirken_gateway::egress_dispatcher::InternalDecision::Skipped => None,
+            };
+            if let Some(decision) = audit_decision {
+                self.log_event(
+                    TrustLevel::System,
+                    SessionEvent::EgressHookDispatched {
+                        hook_id: dispatched.hook_id.clone(),
+                        tool_name: call.name.clone(),
+                        agent_id: self.id.clone(),
+                        decision,
+                        adapter_id: self.current_inbound.adapter_id.clone(),
+                        sender_id: self.current_inbound.sender_id.clone(),
+                    },
+                )?;
+            }
+        }
+
+        // Branch on aggregate. Refuse and timeout (production
+        // posture) both substitute a refusal placeholder; the
+        // `replaced` case keeps a successful ToolResult but with
+        // the working bytes. Plain Allow path returns the original.
+        let (mediated_bytes, mediated_success, redacted_reason) = if let Some(refuse) =
+            &outcome.first_refuse_reason
+        {
+            let placeholder = format!("(egress hook refused: {refuse})");
+            (
+                placeholder.into_bytes(),
+                false,
+                Some(format!("refused: {refuse}")),
+            )
+        } else if outcome.any_timeout {
+            let allow_unregistered =
+                wirken_gateway::org::parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS");
+            if allow_unregistered {
+                tracing::warn!(
+                    tool = %call.name,
+                    "egress hook timeout; WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 letting the original output through",
+                );
+                (outcome.final_bytes.clone(), result.success, None)
+            } else {
+                let placeholder = "(egress hook timed out; production fail-closed; \
+                                       set WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 for dev fail-open)"
+                    .to_string();
+                (
+                    placeholder.into_bytes(),
+                    false,
+                    Some("egress hook timeout".to_string()),
+                )
+            }
+        } else if outcome.replaced {
+            (outcome.final_bytes.clone(), result.success, {
+                // Build a stable "<hook-id> replaced" label from
+                // the first hook that returned Replace. If
+                // several hooks replaced in pipeline order, the
+                // first one's id is the canonical attribution.
+                let first_replacer = outcome.per_hook.iter().find_map(|d| {
+                    if matches!(
+                        d.decision,
+                        wirken_gateway::egress_dispatcher::InternalDecision::Replace { .. }
+                    ) {
+                        Some(d.hook_id.clone())
+                    } else {
+                        None
+                    }
+                });
+                first_replacer.map(|id| format!("{id} replaced"))
+            })
+        } else {
+            return Ok(result);
+        };
+
+        let redacted_sha256 = sha256_hashhex(&mediated_bytes);
+        let redacted_size = mediated_bytes.len() as u64;
+        let mediated_output = String::from_utf8_lossy(&mediated_bytes).into_owned();
+
+        if let Some(reason) = redacted_reason {
+            // Identify the first hook that produced the mediation
+            // for attribution. For refuse / replace the iteration
+            // finds the first matching outcome; for timeout the
+            // first Timeout entry stands in. Empty fallback if for
+            // some reason no entry was produced (no active hooks,
+            // edge case in concurrent register/unregister).
+            let hook_id = outcome
+                .per_hook
+                .iter()
+                .find_map(|d| match d.decision {
+                    wirken_gateway::egress_dispatcher::InternalDecision::Refuse { .. }
+                    | wirken_gateway::egress_dispatcher::InternalDecision::Replace { .. }
+                    | wirken_gateway::egress_dispatcher::InternalDecision::Timeout => {
+                        Some(d.hook_id.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::ToolOutputRedacted {
+                    call_id: call.id.clone(),
+                    hook_id,
+                    reason,
+                    original_sha256,
+                    original_size,
+                    redacted_sha256,
+                    redacted_size,
+                    agent_id: self.id.clone(),
+                    adapter_id: self.current_inbound.adapter_id.clone(),
+                    sender_id: self.current_inbound.sender_id.clone(),
+                },
+            )?;
+        }
+
+        Ok(crate::tool::ToolResult {
+            output: mediated_output,
+            success: mediated_success,
+        })
     }
 
     /// Mediate a `PermissionDeniedCtx` through the configured
@@ -3611,10 +3828,36 @@ impl Agent {
                 } => {
                     conv.add_tool_result(call_id, tool_name, output);
                     if crate::tool::is_deterministic_tool(tool_name) {
-                        // Re-execute and compare. The arguments live
-                        // on the prior AssistantToolCalls event; we
-                        // need to find them.
-                        if let Some(args) = find_call_arguments(&rows, call_id) {
+                        // A ToolOutputRedacted row at a higher seq for
+                        // the same call_id means an operator-configured
+                        // egress hook replaced the original bytes. The
+                        // stored ToolResult.output is the post-redaction
+                        // bytes (load-bearing: that is what
+                        // `add_tool_result` was called with at original
+                        // run time, and so what `messages_hash` on the
+                        // next LlmRequest was computed against). Re-
+                        // executing the deterministic tool here would
+                        // compare freshly-produced source bytes against
+                        // operator-redacted bytes and report a spurious
+                        // divergence. Skip the re-exec compare and mark
+                        // as unverifiable; the redaction itself is
+                        // audited on the paired row.
+                        let redacted = rows.iter().any(|r| {
+                            r.seq > row.seq
+                                && matches!(
+                                    &r.event,
+                                    wirken_audit::SessionEvent::ToolOutputRedacted {
+                                        call_id: redact_call,
+                                        ..
+                                    } if redact_call == call_id
+                                )
+                        });
+                        if redacted {
+                            events_unverifiable += 1;
+                        } else if let Some(args) = find_call_arguments(&rows, call_id) {
+                            // Re-execute and compare. The arguments live
+                            // on the prior AssistantToolCalls event; we
+                            // need to find them.
                             match self.tools.execute(tool_name, &args).await {
                                 Ok(result) => {
                                     if &result.output == output {
@@ -3633,7 +3876,7 @@ impl Agent {
                                 }
                             }
                         } else {
-                            // Couldn't find the matching call —
+                            // Couldn't find the matching call:
                             // unusual but defensive.
                             events_unverifiable += 1;
                         }
@@ -4047,6 +4290,23 @@ fn truncate(s: &str, max: usize) -> String {
         }
         format!("{}...", &s[..end])
     }
+}
+
+/// Lowercase-hex encode a byte slice. Used by the egress-mediation
+/// audit emit to format sha256 digests for the chain.
+fn hex_string(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Sha256 of `bytes` as a `HashHex` ready to drop on an audit
+/// payload. Centralizes the digest path so the egress mediator and
+/// any future caller produce hashes the verifier reads back as
+/// hex-encoded sha256.
+fn sha256_hashhex(bytes: &[u8]) -> wirken_audit::HashHex {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    wirken_audit::HashHex(hex_string(&hasher.finalize()))
 }
 
 // ---------------------------------------------------------------------------

@@ -1071,6 +1071,51 @@ pub enum SessionEvent {
     /// closed set of strings. The entry's spawn never happened; the
     /// MCP client is not in the proxy's registry.
     McpEntryRefused { server_name: String, reason: String },
+    /// One egress-hook invocation completed. Emitted per hook per
+    /// tool result in registration order (parallel to
+    /// `HookDispatched` on the veto path). The invocation runs
+    /// after the tool produced output and before that output
+    /// enters the LLM conversation; a `Replace` here mutates the
+    /// working bytes that the next hook sees and that eventually
+    /// land on the `ToolResult` row.
+    EgressHookDispatched {
+        hook_id: String,
+        tool_name: String,
+        agent_id: String,
+        decision: EgressDecision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
+    /// A tool's output was redacted before it entered the LLM
+    /// conversation. Emitted by the runtime after an egress hook
+    /// returned `Replace` or `Refuse` and the working copy of the
+    /// output bytes diverged from what the tool produced.
+    ///
+    /// `reason` is a short label (`"<hook-id> replaced"`,
+    /// `"refused: <text>"`, `"egress hook timeout"`) so SIEM
+    /// detections pivot on a stable string.
+    /// `original_sha256` is the hash of the bytes the tool
+    /// produced; this is the only on-chain reference to those
+    /// bytes. The bytes themselves are not on the chain by design.
+    /// `redacted_sha256` is the hash of the bytes that actually
+    /// reached the conversation and landed on the next-hop
+    /// `ToolResult` row.
+    ToolOutputRedacted {
+        call_id: String,
+        hook_id: String,
+        reason: String,
+        original_sha256: HashHex,
+        original_size: u64,
+        redacted_sha256: HashHex,
+        redacted_size: u64,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
 }
 
 /// What kind of hook a [`SessionEvent::HookRegistered`] row
@@ -1081,6 +1126,7 @@ pub enum SessionEvent {
 pub enum HookKind {
     Observe,
     Veto,
+    Egress,
 }
 
 /// Whether a [`SessionEvent::HookRegistered`] row represents an
@@ -1117,6 +1163,32 @@ pub enum HookDecision {
     /// fail-open with a warning. Either way this variant lands on
     /// the chain so a reviewer can distinguish a timeout from an
     /// explicit deny.
+    Timeout,
+}
+
+/// The decision an egress hook returned for one invocation. `Replace`
+/// and `Refuse` are the post-execution analogues of veto's `Deny`;
+/// `Allow` passes the working bytes through. Plaintext does not
+/// appear here: `Replace` carries the replacement's sha256 and size,
+/// not its bytes; the replacement itself lands on the next-hop
+/// `ToolResult` row. `original_sha256` is the hash of the bytes the
+/// hook received as input, which is what an auditor uses to
+/// reconstruct what was redacted given a candidate plaintext.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EgressDecision {
+    Allow,
+    Replace {
+        original_sha256: HashHex,
+        original_size: u64,
+        replacement_sha256: HashHex,
+        replacement_size: u64,
+    },
+    Refuse {
+        reason: String,
+    },
+    /// The hook did not respond within the configured timeout.
+    /// Same fail-closed posture as veto.
     Timeout,
 }
 

@@ -72,6 +72,7 @@ impl HookRegistry {
                 let hook_type = match ty_str.as_str() {
                     "observe" => HookType::Observe,
                     "veto" => HookType::Veto,
+                    "egress" => HookType::Egress,
                     other => {
                         return Err(GatewayError::Config(format!(
                             "hook {id}: unknown hook_type {other:?} in database"

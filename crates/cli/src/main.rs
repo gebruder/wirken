@@ -778,13 +778,15 @@ enum HookCommands {
     /// `<data_dir>/sockets/gateway-hooks.sock`. `--type observe`
     /// receives audit events via pull cursor with no return path;
     /// `--type veto` receives synchronous pre-dispatch tool calls and
-    /// returns allow or deny.
+    /// returns allow or deny; `--type egress` receives synchronous
+    /// post-execution tool output and returns allow, replace, or
+    /// refuse.
     Register {
         /// Hook identifier (printable, no whitespace).
         hook_id: String,
         /// 32-byte Ed25519 public key, hex-encoded (64 chars).
         pubkey_hex: String,
-        /// `observe` or `veto`.
+        /// `observe`, `veto`, or `egress`.
         #[arg(long, value_name = "TYPE")]
         r#type: String,
     },
