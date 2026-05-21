@@ -18,22 +18,23 @@
 //!
 //! ## Module status
 //!
-//! Active development on issue #130. The `invoke_agent` root and
-//! the `chat` child span are implemented. The root carries its
-//! full mandatory all-span attribute set
-//! (`gen_ai.operation.name`, input and output message bodies,
-//! `client.address`, `server.address`, `server.port`,
-//! `microsoft.channel.name` with an `internal` fallback for
-//! adapter-less runs, `gen_ai.conversation.id`,
+//! Active development on issue #130. The `invoke_agent` root, the
+//! `chat` child, and the `execute_tool` child spans are
+//! implemented. The root carries its full mandatory all-span
+//! attribute set (`gen_ai.operation.name`, input and output
+//! message bodies, `client.address`, `server.address`,
+//! `server.port`, `microsoft.channel.name` with an `internal`
+//! fallback for adapter-less runs, `gen_ai.conversation.id`,
 //! `microsoft.session.id` as a per-wake UUIDv4, `user.id` via the
 //! [`crate::UserResolver`], plus whatever the active
 //! [`crate::FederatedIdentity::span_attributes`] returns). `chat`
 //! children pair `LlmRequest` and `LlmResponse` rows by
-//! `request_id`, parent to the run's `invoke_agent` root, and
-//! carry `gen_ai.request.model`, `gen_ai.provider.name`,
-//! `gen_ai.usage.input_tokens`, and `gen_ai.usage.output_tokens`.
-//! Remaining branches (`execute_tool`, `output_messages`,
-//! error-status, agent-to-agent) land in follow-up commits.
+//! `request_id`. `execute_tool` children pair `AssistantToolCalls`
+//! and `ToolResult` rows by `call_id`, with `tool.type` resolved
+//! through the gateway's name-prefix dispatch contract (see
+//! [`Self::tool_type_for`]). Remaining branches
+//! (`output_messages`, error-status, agent-to-agent) land in
+//! follow-up commits.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,7 +43,7 @@ use chrono::{DateTime, Utc};
 use rand::TryRng;
 
 use crate::otel_exporter::OtelConfig;
-use crate::session_log::{SessionEvent, SessionId};
+use crate::session_log::{SessionEvent, SessionId, ToolCallRecord};
 use crate::user_resolver::{UserResolver, format_uuid_v4_shape};
 
 /// 16-byte OTLP trace identifier, serialized as 32 lowercase hex
@@ -175,6 +176,15 @@ struct RunBuffer {
     /// this map at `close_run` are also logged and dropped
     /// (unpaired request).
     pending_chat_requests: HashMap<String, PendingChat>,
+    /// Completed `AssistantToolCalls` and `ToolResult` pairs, in
+    /// arrival order. One entry produces one `execute_tool` span
+    /// at `close_run` time.
+    execute_tool_calls: Vec<ExecuteToolCall>,
+    /// `ToolCallRecord` entries from `AssistantToolCalls` whose
+    /// paired `ToolResult` has not yet arrived, keyed by the
+    /// `call_id` the pair shares. Same orphan and unpaired
+    /// semantics as `pending_chat_requests`.
+    pending_execute_tools: HashMap<String, PendingExecuteTool>,
 }
 
 /// `LlmRequest` row buffered while waiting for its paired
@@ -198,6 +208,31 @@ struct ChatCall {
     model: String,
     input_tokens: u32,
     output_tokens: u32,
+}
+
+/// `ToolCallRecord` from an `AssistantToolCalls` row buffered
+/// while waiting for its paired `ToolResult`. Carries the
+/// projector-allocated `SpanId` and start timestamp so the pair
+/// shares one span on the wire.
+struct PendingExecuteTool {
+    span_id: SpanId,
+    started_at_nanos: u128,
+    tool_name: String,
+    tool_arguments: String,
+}
+
+/// One completed `AssistantToolCalls` and `ToolResult` pair,
+/// ready to project into an `execute_tool` span at `close_run`
+/// time.
+struct ExecuteToolCall {
+    span_id: SpanId,
+    started_at_nanos: u128,
+    ended_at_nanos: u128,
+    tool_name: String,
+    tool_arguments: String,
+    tool_call_id: String,
+    tool_result: String,
+    success: bool,
 }
 
 /// Projects `SessionEvent` rows into OTel GenAI spans.
@@ -291,10 +326,26 @@ impl OtelProjector {
                 );
                 Vec::new()
             }
-            // Remaining child variants (AssistantToolCalls/ToolResult
-            // for execute_tool, SubagentSpawned for agent-to-agent,
-            // PermissionDenied for error status) project in
-            // follow-up commits on issue #130.
+            SessionEvent::AssistantToolCalls { calls, .. } => {
+                self.start_execute_tools(session_id, timestamp, calls);
+                Vec::new()
+            }
+            SessionEvent::ToolResult {
+                call_id,
+                tool_name,
+                output,
+                success,
+                ..
+            } => {
+                self.finish_execute_tool(
+                    session_id, timestamp, call_id, tool_name, output, *success,
+                );
+                Vec::new()
+            }
+            // Remaining child variants (SubagentSpawned for
+            // agent-to-agent, PermissionDenied for error status,
+            // dedicated output_messages span) project in follow-up
+            // commits on issue #130.
             _ => Vec::new(),
         }
     }
@@ -322,6 +373,8 @@ impl OtelProjector {
             session_id_uuid: random_uuid_v4(),
             chat_calls: Vec::new(),
             pending_chat_requests: HashMap::new(),
+            execute_tool_calls: Vec::new(),
+            pending_execute_tools: HashMap::new(),
         };
         if self.runs.insert(session_id.clone(), buf).is_some() {
             tracing::warn!(
@@ -401,6 +454,80 @@ impl OtelProjector {
         });
     }
 
+    fn start_execute_tools(
+        &mut self,
+        session_id: &SessionId,
+        timestamp: DateTime<Utc>,
+        calls: &[ToolCallRecord],
+    ) {
+        let Some(buf) = self.runs.get_mut(session_id) else {
+            tracing::warn!(
+                session_id = %session_id,
+                tool_call_count = calls.len(),
+                "OtelProjector saw an AssistantToolCalls with no open run buffer; execute_tool spans will not be produced",
+            );
+            return;
+        };
+        let started_at_nanos = datetime_to_unix_nanos(timestamp);
+        for call in calls {
+            let pending = PendingExecuteTool {
+                span_id: SpanId::random(),
+                started_at_nanos,
+                tool_name: call.name.clone(),
+                tool_arguments: call.arguments.clone(),
+            };
+            if buf
+                .pending_execute_tools
+                .insert(call.id.clone(), pending)
+                .is_some()
+            {
+                tracing::warn!(
+                    session_id = %session_id,
+                    call_id = %call.id,
+                    "OtelProjector saw a duplicate tool call_id in AssistantToolCalls; previous pending entry replaced",
+                );
+            }
+        }
+    }
+
+    fn finish_execute_tool(
+        &mut self,
+        session_id: &SessionId,
+        timestamp: DateTime<Utc>,
+        call_id: &str,
+        tool_name: &str,
+        output: &str,
+        success: bool,
+    ) {
+        let Some(buf) = self.runs.get_mut(session_id) else {
+            tracing::warn!(
+                session_id = %session_id,
+                call_id,
+                "OtelProjector saw a ToolResult with no open run buffer; execute_tool span will not be produced",
+            );
+            return;
+        };
+        let Some(pending) = buf.pending_execute_tools.remove(call_id) else {
+            tracing::warn!(
+                session_id = %session_id,
+                call_id,
+                tool_name,
+                "OtelProjector saw a ToolResult with no matching AssistantToolCalls.call_id; orphan result dropped",
+            );
+            return;
+        };
+        buf.execute_tool_calls.push(ExecuteToolCall {
+            span_id: pending.span_id,
+            started_at_nanos: pending.started_at_nanos,
+            ended_at_nanos: datetime_to_unix_nanos(timestamp),
+            tool_name: pending.tool_name,
+            tool_arguments: pending.tool_arguments,
+            tool_call_id: call_id.to_string(),
+            tool_result: output.to_string(),
+            success,
+        });
+    }
+
     fn close_run(
         &mut self,
         session_id: &SessionId,
@@ -427,15 +554,28 @@ impl OtelProjector {
                 "OtelProjector run closed with an unpaired LlmRequest; chat span dropped",
             );
         }
+        // Same posture for unpaired AssistantToolCalls entries.
+        for call_id in buf.pending_execute_tools.keys() {
+            tracing::warn!(
+                session_id = %session_id,
+                call_id = %call_id,
+                "OtelProjector run closed with an unpaired tool call; execute_tool span dropped",
+            );
+        }
 
         let ended_at_nanos = datetime_to_unix_nanos(timestamp);
 
-        // Build chat children first; root closes last.
+        // Build children first; root closes last.
         let mut emit: Vec<Span> = buf
             .chat_calls
             .iter()
             .map(|call| self.build_chat_span(&buf, call, session_id, identity_attributes))
             .collect();
+        emit.extend(
+            buf.execute_tool_calls.iter().map(|call| {
+                self.build_execute_tool_span(&buf, call, session_id, identity_attributes)
+            }),
+        );
 
         let root = self.build_root_span(
             &buf,
@@ -446,6 +586,27 @@ impl OtelProjector {
         );
         emit.push(root);
         emit
+    }
+
+    /// Map a tool name to the `tool.type` enum value Microsoft's
+    /// closed enumeration expects. Mirrors the gateway's actual
+    /// dispatch contract at
+    /// `crates/agent/src/runtime.rs::execute_tool`: tool names
+    /// prefixed `mcp_` are routed to the MCP proxy client at
+    /// execution time, so the same prefix identifies them as
+    /// `MCP Server` for Defender's `ExecuteToolByMCPServer`
+    /// ActionType. Everything else (built-in tools, Wasm skills,
+    /// `exec`, `web_search`, `generate_image`) runs in-process at
+    /// the gateway and is reported as `function` for Defender's
+    /// `ExecuteToolByGateway` ActionType. Microsoft's enum has no
+    /// Wasm-skill category; `function` is the documented catch-all
+    /// for runtime-executed tools.
+    fn tool_type_for(tool_name: &str) -> &'static str {
+        if tool_name.starts_with("mcp_") {
+            "MCP Server"
+        } else {
+            "function"
+        }
     }
 
     /// Run-wide attributes shared by `invoke_agent`, `execute_tool`,
@@ -532,6 +693,57 @@ impl OtelProjector {
             start_time_unix_nano: buf.started_at_nanos,
             end_time_unix_nano: ended_at_nanos,
             status: SpanStatus::Ok,
+            attributes,
+        }
+    }
+
+    fn build_execute_tool_span(
+        &self,
+        buf: &RunBuffer,
+        call: &ExecuteToolCall,
+        session_id: &SessionId,
+        identity_attributes: &[(String, String)],
+    ) -> Span {
+        let mut attributes = self.ia_et_ch_base_attrs(buf, session_id, identity_attributes);
+        attributes.extend([
+            (
+                "gen_ai.operation.name".to_string(),
+                "execute_tool".to_string(),
+            ),
+            ("tool.name".to_string(), call.tool_name.clone()),
+            (
+                "tool.type".to_string(),
+                Self::tool_type_for(&call.tool_name).to_string(),
+            ),
+            ("tool.call.id".to_string(), call.tool_call_id.clone()),
+            (
+                "tool.call.arguments".to_string(),
+                call.tool_arguments.clone(),
+            ),
+            ("tool.call.result".to_string(), call.tool_result.clone()),
+        ]);
+
+        let status = if call.success {
+            SpanStatus::Ok
+        } else {
+            SpanStatus::Error
+        };
+
+        Span {
+            trace_id: buf.trace_id.clone(),
+            span_id: call.span_id.clone(),
+            parent_span_id: Some(buf.root_span_id.clone()),
+            name: "execute_tool".to_string(),
+            // `Internal` for execute_tool: from the agent's
+            // perspective the call is in-process (built-in tool,
+            // Wasm skill, or local MCP proxy), not a direct
+            // outbound HTTPS call. Defender's ActionType split
+            // between gateway and MCP server dispatch is carried
+            // by `tool.type`, not span.kind.
+            kind: SpanKind::Internal,
+            start_time_unix_nano: call.started_at_nanos,
+            end_time_unix_nano: call.ended_at_nanos,
+            status,
             attributes,
         }
     }
@@ -694,8 +906,40 @@ mod tests {
         }
     }
 
+    fn assistant_tool_calls(calls: &[(&str, &str, &str)]) -> SessionEvent {
+        SessionEvent::AssistantToolCalls {
+            calls: calls
+                .iter()
+                .map(|(id, name, args)| ToolCallRecord {
+                    id: (*id).to_string(),
+                    name: (*name).to_string(),
+                    arguments: (*args).to_string(),
+                })
+                .collect(),
+            agent_id: "default".to_string(),
+            adapter_id: None,
+            sender_id: None,
+        }
+    }
+
+    fn tool_result(call_id: &str, tool_name: &str, output: &str, success: bool) -> SessionEvent {
+        SessionEvent::ToolResult {
+            call_id: call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            output: output.to_string(),
+            success,
+            agent_id: "default".to_string(),
+            adapter_id: None,
+            sender_id: None,
+        }
+    }
+
     fn chat_spans(spans: &[Span]) -> Vec<&Span> {
         spans.iter().filter(|s| s.name == "chat").collect()
+    }
+
+    fn execute_tool_spans(spans: &[Span]) -> Vec<&Span> {
+        spans.iter().filter(|s| s.name == "execute_tool").collect()
     }
 
     fn root_span(spans: &[Span]) -> &Span {
@@ -1313,6 +1557,312 @@ mod tests {
         // request that never paired with a response.
         assert!(chat_spans(&spans).is_empty());
         assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn paired_tool_call_and_result_produce_one_execute_tool_span_parented_to_root() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", Some("slack")), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{\"q\":\"hi\"}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "result body", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        let tools = execute_tool_spans(&spans);
+        assert_eq!(tools.len(), 1);
+        let tool = tools[0];
+        let root = root_span(&spans);
+        assert_eq!(tool.kind, SpanKind::Internal);
+        assert_eq!(tool.parent_span_id.as_ref(), Some(&root.span_id));
+        assert_eq!(tool.trace_id, root.trace_id);
+        assert_eq!(tool.start_time_unix_nano, 1_000_000_000);
+        assert_eq!(tool.end_time_unix_nano, 2_000_000_000);
+    }
+
+    #[test]
+    fn execute_tool_span_carries_tool_name_call_id_arguments_and_result() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-xyz", "web_search", "{\"q\":\"hi\"}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-xyz", "web_search", "ok body", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        let a = attrs(execute_tool_spans(&spans)[0]);
+        assert_eq!(a.get("tool.name"), Some(&"web_search".to_string()));
+        assert_eq!(a.get("tool.call.id"), Some(&"call-xyz".to_string()));
+        assert_eq!(
+            a.get("tool.call.arguments"),
+            Some(&"{\"q\":\"hi\"}".to_string())
+        );
+        assert_eq!(a.get("tool.call.result"), Some(&"ok body".to_string()));
+    }
+
+    #[test]
+    fn execute_tool_span_carries_gen_ai_operation_name_execute_tool() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "ok", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        assert_eq!(
+            attrs(execute_tool_spans(&spans)[0]).get("gen_ai.operation.name"),
+            Some(&"execute_tool".to_string())
+        );
+    }
+
+    #[test]
+    fn execute_tool_span_marks_function_tool_type_for_non_mcp_prefix() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "ok", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        assert_eq!(
+            attrs(execute_tool_spans(&spans)[0]).get("tool.type"),
+            Some(&"function".to_string()),
+            "non-mcp_ prefixed names dispatch in-process at the gateway; Defender derives ExecuteToolByGateway from tool.type=function",
+        );
+    }
+
+    #[test]
+    fn execute_tool_span_marks_mcp_server_tool_type_for_mcp_prefix() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "mcp_github_create_issue", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "mcp_github_create_issue", "ok", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        assert_eq!(
+            attrs(execute_tool_spans(&spans)[0]).get("tool.type"),
+            Some(&"MCP Server".to_string()),
+            "mcp_ prefixed names are routed to the MCP proxy at agent/src/runtime.rs::execute_tool; Defender derives ExecuteToolByMCPServer from tool.type=MCP Server",
+        );
+    }
+
+    #[test]
+    fn execute_tool_span_status_is_error_when_tool_result_success_is_false() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "boom", false),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        assert_eq!(execute_tool_spans(&spans)[0].status, SpanStatus::Error);
+    }
+
+    #[test]
+    fn execute_tool_span_status_is_ok_when_tool_result_success_is_true() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "ok", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        assert_eq!(execute_tool_spans(&spans)[0].status, SpanStatus::Ok);
+    }
+
+    #[test]
+    fn multiple_tool_calls_in_one_assistant_batch_produce_distinct_execute_tool_spans() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[
+                ("call-1", "web_search", "{\"q\":\"a\"}"),
+                ("call-2", "workspace_files", "{\"path\":\"x\"}"),
+            ]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "r1", true),
+            &session,
+            at(2),
+            &[],
+        );
+        p.project(
+            &tool_result("call-2", "workspace_files", "r2", true),
+            &session,
+            at(3),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(4), &[]);
+        let tools = execute_tool_spans(&spans);
+        assert_eq!(tools.len(), 2);
+        assert_ne!(tools[0].span_id, tools[1].span_id);
+        let root = root_span(&spans);
+        assert_eq!(tools[0].parent_span_id.as_ref(), Some(&root.span_id));
+        assert_eq!(tools[1].parent_span_id.as_ref(), Some(&root.span_id));
+        // tool.name comes from the AssistantToolCalls record, not
+        // from the ToolResult, so each tool span carries the
+        // distinct call's name.
+        let a0 = attrs(tools[0]);
+        let a1 = attrs(tools[1]);
+        let names: Vec<&str> = [a0.get("tool.name"), a1.get("tool.name")]
+            .iter()
+            .filter_map(|o| o.map(String::as_str))
+            .collect();
+        assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"workspace_files"));
+    }
+
+    #[test]
+    fn orphan_tool_result_with_no_matching_assistant_call_is_dropped() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &tool_result("call-unknown", "web_search", "result", true),
+            &session,
+            at(1),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(2), &[]);
+        assert!(execute_tool_spans(&spans).is_empty());
+    }
+
+    #[test]
+    fn unpaired_tool_call_at_run_close_is_dropped() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-orphan", "web_search", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(2), &[]);
+        assert!(execute_tool_spans(&spans).is_empty());
+        assert_eq!(
+            spans.len(),
+            1,
+            "only the root emits when no tool call paired"
+        );
+    }
+
+    #[test]
+    fn execute_tool_span_inherits_run_wide_attrs_from_root() {
+        let mut p = projector_with_server("gateway.internal", 18790);
+        let session = SessionId::new("sess-thread-7");
+        p.project(&user_message("q", Some("teams")), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "ok", true),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        let tool_attrs = attrs(execute_tool_spans(&spans)[0]);
+        let root_attrs = attrs(root_span(&spans));
+        assert_eq!(
+            tool_attrs.get("microsoft.channel.name"),
+            Some(&"msteams".to_string())
+        );
+        assert_eq!(
+            tool_attrs.get("server.address"),
+            Some(&"gateway.internal".to_string())
+        );
+        assert_eq!(tool_attrs.get("server.port"), Some(&"18790".to_string()));
+        assert_eq!(
+            tool_attrs.get("gen_ai.conversation.id"),
+            Some(&"sess-thread-7".to_string())
+        );
+        assert_eq!(
+            tool_attrs.get("microsoft.session.id"),
+            root_attrs.get("microsoft.session.id"),
+        );
+    }
+
+    #[test]
+    fn tool_type_for_classifies_prefix_correctly() {
+        assert_eq!(OtelProjector::tool_type_for("web_search"), "function");
+        assert_eq!(OtelProjector::tool_type_for("workspace_files"), "function");
+        assert_eq!(OtelProjector::tool_type_for("exec"), "function");
+        assert_eq!(OtelProjector::tool_type_for("wasm_my_skill"), "function");
+        assert_eq!(
+            OtelProjector::tool_type_for("mcp_github_issue"),
+            "MCP Server"
+        );
+        assert_eq!(OtelProjector::tool_type_for("mcp_x_y_z"), "MCP Server");
     }
 
     #[test]
