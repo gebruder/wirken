@@ -147,6 +147,16 @@ pub enum SpanKind {
 /// attributes produces spans Agent 365 rejects at ingestion, which
 /// is the reason this projector hand-builds the OTLP/HTTP+JSON
 /// envelope rather than depending on the OpenTelemetry SDK.
+///
+/// `status_message` carries the OTel `Status.Message` string. Per
+/// the reference's picking-values guidance, the pipeline only
+/// consults this field when [`Self::status`] is
+/// [`SpanStatus::Error`]; populating it on an `Ok` span is wasted
+/// bytes the consumer never reads. The projector sets the two
+/// fields as a coupled pair (Error plus `Some(message)` on failed
+/// spans; Ok plus `None` on every other span) so the success path
+/// keeps the message slot empty and the error path always
+/// carries a readable reason.
 #[derive(Clone, Debug)]
 pub struct Span {
     pub trace_id: TraceId,
@@ -157,6 +167,7 @@ pub struct Span {
     pub start_time_unix_nano: u128,
     pub end_time_unix_nano: u128,
     pub status: SpanStatus,
+    pub status_message: Option<String>,
     pub attributes: Vec<(String, String)>,
 }
 
@@ -958,6 +969,7 @@ impl OtelProjector {
             start_time_unix_nano: buf.started_at_nanos,
             end_time_unix_nano: ended_at_nanos,
             status: SpanStatus::Ok,
+            status_message: None,
             attributes,
         }
     }
@@ -999,6 +1011,7 @@ impl OtelProjector {
             start_time_unix_nano: ended_at_nanos,
             end_time_unix_nano: ended_at_nanos,
             status: SpanStatus::Ok,
+            status_message: None,
             attributes,
         }
     }
@@ -1032,10 +1045,18 @@ impl OtelProjector {
             ),
         ]);
 
-        let status = if call.success {
-            SpanStatus::Ok
+        // Status code and message are coupled: the reference's
+        // picking-values rule says the pipeline reads
+        // status_message only when status is Error, and that a
+        // successful span sets OK / 1 and omits the message.
+        // Setting both in lockstep here prevents an Error
+        // without a message (Defender's ErrorMessage field
+        // empty) and a message without Error (a string the
+        // consumer never reads).
+        let (status, status_message) = if call.success {
+            (SpanStatus::Ok, None)
         } else {
-            SpanStatus::Error
+            (SpanStatus::Error, Some(call.tool_result.clone()))
         };
 
         Span {
@@ -1048,11 +1069,12 @@ impl OtelProjector {
             // Wasm skill, or local MCP proxy), not a direct
             // outbound HTTPS call. Defender's ActionType split
             // between gateway and MCP server dispatch is carried
-            // by `tool.type`, not span.kind.
+            // by `gen_ai.tool.type`, not span.kind.
             kind: SpanKind::Internal,
             start_time_unix_nano: call.started_at_nanos,
             end_time_unix_nano: call.ended_at_nanos,
             status,
+            status_message,
             attributes,
         }
     }
@@ -1090,6 +1112,7 @@ impl OtelProjector {
             start_time_unix_nano: call.started_at_nanos,
             end_time_unix_nano: call.ended_at_nanos,
             status: SpanStatus::Ok,
+            status_message: None,
             attributes,
         }
     }
@@ -2038,7 +2061,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_tool_span_status_is_error_when_tool_result_success_is_false() {
+    fn execute_tool_span_couples_error_status_with_failure_output_as_status_message() {
         let mut p = projector();
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", None), &session, at(0), &[]);
@@ -2049,17 +2072,23 @@ mod tests {
             &[],
         );
         p.project(
-            &tool_result("call-1", "web_search", "boom", false),
+            &tool_result("call-1", "web_search", "boom: rate limited", false),
             &session,
             at(2),
             &[],
         );
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
-        assert_eq!(execute_tool_spans(&spans)[0].status, SpanStatus::Error);
+        let failed = execute_tool_spans(&spans)[0];
+        assert_eq!(failed.status, SpanStatus::Error);
+        // The reference pairs span.Status.Code with span.Status.Message,
+        // and Agent 365 only reads the message when status is Error.
+        // Setting both in lockstep keeps Defender's ErrorMessage field
+        // populated for every failed run.
+        assert_eq!(failed.status_message.as_deref(), Some("boom: rate limited"));
     }
 
     #[test]
-    fn execute_tool_span_status_is_ok_when_tool_result_success_is_true() {
+    fn execute_tool_span_couples_ok_status_with_no_status_message() {
         let mut p = projector();
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", None), &session, at(0), &[]);
@@ -2070,13 +2099,83 @@ mod tests {
             &[],
         );
         p.project(
-            &tool_result("call-1", "web_search", "ok", true),
+            &tool_result("call-1", "web_search", "ok body", true),
             &session,
             at(2),
             &[],
         );
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
-        assert_eq!(execute_tool_spans(&spans)[0].status, SpanStatus::Ok);
+        let succeeded = execute_tool_spans(&spans)[0];
+        assert_eq!(succeeded.status, SpanStatus::Ok);
+        // Per the picking-values rule, a non-error span omits the
+        // message; populating it would be bytes Agent 365 never
+        // reads.
+        assert_eq!(succeeded.status_message, None);
+    }
+
+    #[test]
+    fn permission_denied_via_synthetic_tool_result_lands_as_execute_tool_error() {
+        // wirken's denial paths in agent/src/runtime.rs::execute_tool
+        // synthesize Ok(ToolResult { success: false, output: <reason> })
+        // and the caller writes SessionEvent::ToolResult with
+        // success=false to the chain. From the projector's view a
+        // denied call is identical in shape to an executed-and-failed
+        // call: the execute_tool span carries the denial reason in
+        // status_message.
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "exec", "{\"cmd\":\"rm -rf /\"}")]),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(
+            &tool_result(
+                "call-1",
+                "exec",
+                "denied by tier gate: action requires Tier 3 approval",
+                false,
+            ),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        let denied = execute_tool_spans(&spans)[0];
+        assert_eq!(denied.status, SpanStatus::Error);
+        assert_eq!(
+            denied.status_message.as_deref(),
+            Some("denied by tier gate: action requires Tier 3 approval"),
+        );
+    }
+
+    #[test]
+    fn non_execute_tool_spans_carry_ok_status_and_no_status_message() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &llm_request("req-1", "anthropic", "sonnet"),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(&llm_response("req-1", 1, 1), &session, at(2), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
+        // Root, chat, and output_messages spans must all be Ok with
+        // no message; only execute_tool ever carries an error state
+        // in the current projector.
+        let root = root_span(&spans);
+        assert_eq!(root.status, SpanStatus::Ok);
+        assert_eq!(root.status_message, None);
+        let chat = chat_spans(&spans)[0];
+        assert_eq!(chat.status, SpanStatus::Ok);
+        assert_eq!(chat.status_message, None);
+        let om = output_messages_spans(&spans)[0];
+        assert_eq!(om.status, SpanStatus::Ok);
+        assert_eq!(om.status_message, None);
     }
 
     #[test]
