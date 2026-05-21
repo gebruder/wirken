@@ -782,17 +782,20 @@ impl OtelProjector {
                 "gen_ai.operation.name".to_string(),
                 "execute_tool".to_string(),
             ),
-            ("tool.name".to_string(), call.tool_name.clone()),
+            ("gen_ai.tool.name".to_string(), call.tool_name.clone()),
             (
-                "tool.type".to_string(),
+                "gen_ai.tool.type".to_string(),
                 Self::tool_type_for(&call.tool_name).to_string(),
             ),
-            ("tool.call.id".to_string(), call.tool_call_id.clone()),
+            ("gen_ai.tool.call.id".to_string(), call.tool_call_id.clone()),
             (
-                "tool.call.arguments".to_string(),
+                "gen_ai.tool.call.arguments".to_string(),
                 call.tool_arguments.clone(),
             ),
-            ("tool.call.result".to_string(), call.tool_result.clone()),
+            (
+                "gen_ai.tool.call.result".to_string(),
+                call.tool_result.clone(),
+            ),
         ]);
 
         let status = if call.success {
@@ -1691,13 +1694,16 @@ mod tests {
         );
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
         let a = attrs(execute_tool_spans(&spans)[0]);
-        assert_eq!(a.get("tool.name"), Some(&"web_search".to_string()));
-        assert_eq!(a.get("tool.call.id"), Some(&"call-xyz".to_string()));
+        assert_eq!(a.get("gen_ai.tool.name"), Some(&"web_search".to_string()));
+        assert_eq!(a.get("gen_ai.tool.call.id"), Some(&"call-xyz".to_string()));
         assert_eq!(
-            a.get("tool.call.arguments"),
+            a.get("gen_ai.tool.call.arguments"),
             Some(&"{\"q\":\"hi\"}".to_string())
         );
-        assert_eq!(a.get("tool.call.result"), Some(&"ok body".to_string()));
+        assert_eq!(
+            a.get("gen_ai.tool.call.result"),
+            Some(&"ok body".to_string())
+        );
     }
 
     #[test]
@@ -1743,7 +1749,7 @@ mod tests {
         );
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
         assert_eq!(
-            attrs(execute_tool_spans(&spans)[0]).get("tool.type"),
+            attrs(execute_tool_spans(&spans)[0]).get("gen_ai.tool.type"),
             Some(&"function".to_string()),
             "non-mcp_ prefixed names dispatch in-process at the gateway; Defender derives ExecuteToolByGateway from tool.type=function",
         );
@@ -1768,7 +1774,7 @@ mod tests {
         );
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
         assert_eq!(
-            attrs(execute_tool_spans(&spans)[0]).get("tool.type"),
+            attrs(execute_tool_spans(&spans)[0]).get("gen_ai.tool.type"),
             Some(&"MCP Server".to_string()),
             "mcp_ prefixed names are routed to the MCP proxy at agent/src/runtime.rs::execute_tool; Defender derives ExecuteToolByMCPServer from tool.type=MCP Server",
         );
@@ -1854,7 +1860,7 @@ mod tests {
         // distinct call's name.
         let a0 = attrs(tools[0]);
         let a1 = attrs(tools[1]);
-        let names: Vec<&str> = [a0.get("tool.name"), a1.get("tool.name")]
+        let names: Vec<&str> = [a0.get("gen_ai.tool.name"), a1.get("gen_ai.tool.name")]
             .iter()
             .filter_map(|o| o.map(String::as_str))
             .collect();
