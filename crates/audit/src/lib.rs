@@ -4,6 +4,7 @@ mod event;
 mod legacy_compat;
 mod log;
 pub mod otel_exporter;
+pub mod otel_projector;
 pub mod pricing;
 mod session_log;
 pub mod siem;
@@ -19,6 +20,7 @@ pub use error::AuditError;
 pub use event::{ActorKind, AuditEvent, StoredEvent};
 pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use otel_exporter::{FederatedIdentity, OtelConfig, OtelError, StaticFederatedIdentity};
+pub use otel_projector::{OtelProjector, Span, SpanId, SpanKind, SpanStatus, TraceId};
 pub use session_log::{
     ApprovalScopeKind, ApprovalSource, ChainHeadReason, DenialSource, EgressDecision, HashHex,
     HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, OwnSession,
