@@ -7,9 +7,10 @@
 //! terminates, then emits all spans for the run as a single batch.
 //! "Root closes last" is a hard projector invariant: the
 //! `invoke_agent` root span holds the run's input and output
-//! messages and the run's duration, so it cannot emit until the
-//! terminating `AssistantMessage` arrives. Children buffer alongside
-//! it and emit in the same batch.
+//! messages, the run's duration, and the per-run identity
+//! attributes, so it cannot emit until the terminating
+//! `AssistantMessage` arrives. Children buffer alongside it and
+//! emit in the same batch.
 //!
 //! Wirken processes each session sequentially (one inbound message
 //! wakes the agent, runs to a final assistant message, terminates),
@@ -17,20 +18,29 @@
 //!
 //! ## Module status
 //!
-//! Second commit on issue #130. Lands the projector types
-//! (`Span`, `TraceId`, `SpanId`, `SpanKind`, `SpanStatus`), the run
-//! buffer, and the `invoke_agent` root projection driven by
-//! `UserMessage` start and `AssistantMessage` close. Child span
-//! projection (`chat`, `execute_tool`, `output_messages`, error,
+//! Active development on issue #130. The `invoke_agent` root span
+//! carries its full mandatory all-span attribute set:
+//! `gen_ai.operation.name`, input and output message bodies,
+//! `client.address`, `server.address`, `server.port`,
+//! `microsoft.channel.name` (with the `internal` fallback for
+//! adapter-less runs), `gen_ai.conversation.id`,
+//! `microsoft.session.id` as a per-wake UUIDv4, `user.id` via the
+//! [`crate::UserResolver`], plus whatever the active
+//! [`crate::FederatedIdentity::span_attributes`] returns
+//! (`microsoft.tenant.id`, `gen_ai.agent.id`, `gen_ai.agent.name`,
+//! `microsoft.a365.agent.blueprint.id`). Child span projection
+//! (`chat`, `execute_tool`, `output_messages`, error-status,
 //! agent-to-agent) lands in follow-up commits.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use rand::TryRng;
 
 use crate::otel_exporter::OtelConfig;
 use crate::session_log::{SessionEvent, SessionId};
+use crate::user_resolver::{UserResolver, format_uuid_v4_shape};
 
 /// 16-byte OTLP trace identifier, serialized as 32 lowercase hex
 /// characters. The Agent 365 ingestion endpoint expects hex-encoded
@@ -80,6 +90,17 @@ fn hex_encode(bytes: &[u8]) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+/// Generate a fresh random UUIDv4-shape string, used for the
+/// `microsoft.session.id` attribute the projector stamps on every
+/// span emitted in one run.
+fn random_uuid_v4() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng()
+        .try_fill_bytes(&mut bytes)
+        .expect("OS RNG must not fail when filling 16 bytes for a UUIDv4 microsoft.session.id");
+    format_uuid_v4_shape(bytes)
 }
 
 /// OTLP span status code. Carried as the documented integer value
@@ -135,6 +156,11 @@ struct RunBuffer {
     user_message: String,
     adapter_id: Option<String>,
     sender_id: Option<String>,
+    /// `microsoft.session.id` value for every span in this run.
+    /// One UUIDv4 allocated when the run opens; stamped identically
+    /// on the root and every child so cross-span correlation in
+    /// Defender pivots cleanly at run granularity.
+    session_id_uuid: String,
     children: Vec<Span>,
 }
 
@@ -147,13 +173,24 @@ struct RunBuffer {
 /// pure derivation.
 pub struct OtelProjector {
     config: OtelConfig,
+    user_resolver: Arc<dyn UserResolver>,
     runs: HashMap<SessionId, RunBuffer>,
 }
 
 impl OtelProjector {
-    pub fn new(config: OtelConfig) -> Self {
+    /// Construct a projector against a config and a user resolver.
+    ///
+    /// The user resolver fills the `user.id` attribute on each
+    /// `invoke_agent` root from the run's `(adapter_id, sender_id)`
+    /// pair. Wirken's chat-platform callers have no real Microsoft
+    /// Entra identity by construction, so the resolver synthesizes
+    /// a stable per-caller value; see [`crate::UserResolver`] for
+    /// the contract and [`crate::DeterministicUserResolver`] for the
+    /// development default.
+    pub fn new(config: OtelConfig, user_resolver: Arc<dyn UserResolver>) -> Self {
         Self {
             config,
+            user_resolver,
             runs: HashMap::new(),
         }
     }
@@ -166,8 +203,8 @@ impl OtelProjector {
     /// exporter's batcher.
     ///
     /// `identity_attributes` are the run-wide attribute pairs
-    /// returned by the active [`crate::FederatedIdentity`]. They are
-    /// stamped on every span emitted in the run.
+    /// returned by the active [`crate::FederatedIdentity::span_attributes`].
+    /// They are stamped on every span emitted in the run.
     pub fn project(
         &mut self,
         event: &SessionEvent,
@@ -223,6 +260,7 @@ impl OtelProjector {
             user_message,
             adapter_id,
             sender_id,
+            session_id_uuid: random_uuid_v4(),
             children: Vec::new(),
         };
         if self.runs.insert(session_id.clone(), buf).is_some() {
@@ -249,8 +287,13 @@ impl OtelProjector {
         };
 
         let ended_at_nanos = datetime_to_unix_nanos(timestamp);
-        let root =
-            self.build_root_span(&buf, ended_at_nanos, assistant_message, identity_attributes);
+        let root = self.build_root_span(
+            &buf,
+            session_id,
+            ended_at_nanos,
+            assistant_message,
+            identity_attributes,
+        );
         let mut emit = buf.children;
         emit.push(root);
         emit
@@ -259,6 +302,7 @@ impl OtelProjector {
     fn build_root_span(
         &self,
         buf: &RunBuffer,
+        session_id: &SessionId,
         ended_at_nanos: u128,
         assistant_message: &str,
         identity_attributes: &[(String, String)],
@@ -281,23 +325,34 @@ impl OtelProjector {
                 assistant_message.to_string(),
             ),
             ("client.address".to_string(), "0.0.0.0".to_string()),
+            (
+                "server.address".to_string(),
+                self.config.server_address.clone(),
+            ),
+            (
+                "server.port".to_string(),
+                self.config.server_port.to_string(),
+            ),
+            (
+                "microsoft.channel.name".to_string(),
+                self.channel_name_for(buf.adapter_id.as_deref()),
+            ),
+            (
+                "gen_ai.conversation.id".to_string(),
+                session_id.as_str().to_string(),
+            ),
+            (
+                "microsoft.session.id".to_string(),
+                buf.session_id_uuid.clone(),
+            ),
+            (
+                "user.id".to_string(),
+                self.user_resolver
+                    .resolve_user(buf.adapter_id.as_deref(), buf.sender_id.as_deref())
+                    .as_str()
+                    .to_string(),
+            ),
         ];
-        if let Some(adapter) = &buf.adapter_id {
-            let channel = self
-                .config
-                .channel_name_overrides
-                .get(adapter)
-                .cloned()
-                .unwrap_or_else(|| adapter.clone());
-            attributes.push(("microsoft.channel.name".to_string(), channel));
-        }
-        if let Some(sender) = &buf.sender_id {
-            // Sender id is carried as a wirken-namespaced attribute
-            // until the UserResolver lands in issue #132; that
-            // ticket replaces this placeholder with `user.id`
-            // resolved against the resolver precedence chain.
-            attributes.push(("wirken.sender.id".to_string(), sender.clone()));
-        }
         attributes.extend(identity_attributes.iter().cloned());
 
         Span {
@@ -312,6 +367,25 @@ impl OtelProjector {
             attributes,
         }
     }
+
+    /// Resolve the `microsoft.channel.name` value for a given
+    /// adapter id. The default override map renames `teams` to
+    /// `msteams` so the Microsoft Teams adapter lands in Defender's
+    /// built-in channel pivot; other adapters pass through their
+    /// own name. Adapter-less runs (subagent recursion, CLI, cron)
+    /// stamp the literal `internal` because the attribute is
+    /// mandatory on every span and the value must be deterministic.
+    fn channel_name_for(&self, adapter_id: Option<&str>) -> String {
+        match adapter_id {
+            Some(adapter) => self
+                .config
+                .channel_name_overrides
+                .get(adapter)
+                .cloned()
+                .unwrap_or_else(|| adapter.to_string()),
+            None => "internal".to_string(),
+        }
+    }
 }
 
 fn datetime_to_unix_nanos(ts: DateTime<Utc>) -> u128 {
@@ -323,6 +397,7 @@ fn datetime_to_unix_nanos(ts: DateTime<Utc>) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user_resolver::DeterministicUserResolver;
 
     fn at(seconds_since_epoch: i64) -> DateTime<Utc> {
         DateTime::<Utc>::from_timestamp(seconds_since_epoch, 0).unwrap()
@@ -337,6 +412,19 @@ mod tests {
         }
     }
 
+    fn user_message_with_sender(
+        content: &str,
+        adapter: Option<&str>,
+        sender: Option<&str>,
+    ) -> SessionEvent {
+        SessionEvent::UserMessage {
+            content: content.to_string(),
+            inbound_id: None,
+            adapter_id: adapter.map(str::to_string),
+            sender_id: sender.map(str::to_string),
+        }
+    }
+
     fn assistant_message(content: &str) -> SessionEvent {
         SessionEvent::AssistantMessage {
             content: content.to_string(),
@@ -345,7 +433,20 @@ mod tests {
     }
 
     fn projector() -> OtelProjector {
-        OtelProjector::new(OtelConfig::default())
+        OtelProjector::new(OtelConfig::default(), Arc::new(DeterministicUserResolver))
+    }
+
+    fn projector_with_server(addr: &str, port: u16) -> OtelProjector {
+        let config = OtelConfig {
+            server_address: addr.to_string(),
+            server_port: port,
+            ..OtelConfig::default()
+        };
+        OtelProjector::new(config, Arc::new(DeterministicUserResolver))
+    }
+
+    fn attrs(span: &Span) -> HashMap<String, String> {
+        span.attributes.iter().cloned().collect()
     }
 
     #[test]
@@ -395,13 +496,10 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", None), &session, at(100), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(101), &[]);
-        let span = &spans[0];
-        let op = span
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "gen_ai.operation.name")
-            .expect("invoke_agent root must carry gen_ai.operation.name");
-        assert_eq!(op.1, "invoke_agent");
+        assert_eq!(
+            attrs(&spans[0]).get("gen_ai.operation.name"),
+            Some(&"invoke_agent".to_string())
+        );
     }
 
     #[test]
@@ -410,19 +508,15 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("question text", None), &session, at(100), &[]);
         let spans = p.project(&assistant_message("answer text"), &session, at(101), &[]);
-        let span = &spans[0];
-        let input = span
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "gen_ai.input.messages")
-            .map(|(_, v)| v.as_str());
-        let output = span
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "gen_ai.output.messages")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(input, Some("question text"));
-        assert_eq!(output, Some("answer text"));
+        let a = attrs(&spans[0]);
+        assert_eq!(
+            a.get("gen_ai.input.messages"),
+            Some(&"question text".to_string())
+        );
+        assert_eq!(
+            a.get("gen_ai.output.messages"),
+            Some(&"answer text".to_string())
+        );
     }
 
     #[test]
@@ -431,13 +525,121 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", Some("telegram")), &session, at(0), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
-        let span = &spans[0];
-        let client_addr = span
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "client.address")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(client_addr, Some("0.0.0.0"));
+        assert_eq!(
+            attrs(&spans[0]).get("client.address"),
+            Some(&"0.0.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn root_span_carries_server_address_and_port_from_config_as_strings() {
+        let mut p = projector_with_server("gateway.example.internal", 18790);
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let a = attrs(&spans[0]);
+        assert_eq!(
+            a.get("server.address"),
+            Some(&"gateway.example.internal".to_string())
+        );
+        // server.port is stamped as a string because every OTel
+        // attribute value must be stringValue for Agent 365.
+        assert_eq!(a.get("server.port"), Some(&"18790".to_string()));
+    }
+
+    #[test]
+    fn root_span_carries_gen_ai_conversation_id_matching_session_id() {
+        let mut p = projector();
+        let session = SessionId::new("sess-thread-42");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        assert_eq!(
+            attrs(&spans[0]).get("gen_ai.conversation.id"),
+            Some(&"sess-thread-42".to_string())
+        );
+    }
+
+    #[test]
+    fn root_span_carries_microsoft_session_id_in_uuid_shape() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let ms_session = attrs(&spans[0])
+            .get("microsoft.session.id")
+            .cloned()
+            .expect("root must carry microsoft.session.id");
+        // 8-4-4-4-12 layout, 36 chars with dashes.
+        assert_eq!(ms_session.len(), 36);
+        assert_eq!(&ms_session[14..15], "4", "version nibble must be 4");
+    }
+
+    #[test]
+    fn microsoft_session_id_differs_across_runs_in_same_session() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q1", None), &session, at(0), &[]);
+        let spans_a = p.project(&assistant_message("a1"), &session, at(1), &[]);
+        p.project(&user_message("q2", None), &session, at(2), &[]);
+        let spans_b = p.project(&assistant_message("a2"), &session, at(3), &[]);
+        let id_a = attrs(&spans_a[0]).get("microsoft.session.id").cloned();
+        let id_b = attrs(&spans_b[0]).get("microsoft.session.id").cloned();
+        assert!(id_a.is_some());
+        assert!(id_b.is_some());
+        assert_ne!(
+            id_a, id_b,
+            "each agent wake must allocate its own microsoft.session.id"
+        );
+    }
+
+    #[test]
+    fn root_span_carries_user_id_via_resolver_for_chat_caller() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(
+            &user_message_with_sender("q", Some("telegram"), Some("user-42")),
+            &session,
+            at(0),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let user_id = attrs(&spans[0])
+            .get("user.id")
+            .cloned()
+            .expect("root must carry user.id");
+        // Deterministic resolver produces a UUIDv4-shape string.
+        assert_eq!(user_id.len(), 36);
+        // No wirken-namespaced fallback should remain on the root.
+        assert!(
+            !attrs(&spans[0]).contains_key("wirken.sender.id"),
+            "wirken.sender.id placeholder should not appear once user.id is wired",
+        );
+    }
+
+    #[test]
+    fn user_id_is_stable_per_caller_across_runs() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(
+            &user_message_with_sender("q1", Some("telegram"), Some("user-42")),
+            &session,
+            at(0),
+            &[],
+        );
+        let spans_a = p.project(&assistant_message("a1"), &session, at(1), &[]);
+        p.project(
+            &user_message_with_sender("q2", Some("telegram"), Some("user-42")),
+            &session,
+            at(2),
+            &[],
+        );
+        let spans_b = p.project(&assistant_message("a2"), &session, at(3), &[]);
+        let id_a = attrs(&spans_a[0]).get("user.id").cloned();
+        let id_b = attrs(&spans_b[0]).get("user.id").cloned();
+        assert_eq!(
+            id_a, id_b,
+            "same (adapter, sender) must resolve to the same user.id across runs",
+        );
     }
 
     #[test]
@@ -446,12 +648,10 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", Some("teams")), &session, at(0), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
-        let channel = spans[0]
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "microsoft.channel.name")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(channel, Some("msteams"));
+        assert_eq!(
+            attrs(&spans[0]).get("microsoft.channel.name"),
+            Some(&"msteams".to_string())
+        );
     }
 
     #[test]
@@ -460,12 +660,23 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", Some("discord")), &session, at(0), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
-        let channel = spans[0]
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "microsoft.channel.name")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(channel, Some("discord"));
+        assert_eq!(
+            attrs(&spans[0]).get("microsoft.channel.name"),
+            Some(&"discord".to_string())
+        );
+    }
+
+    #[test]
+    fn adapter_less_run_stamps_internal_channel_name_default() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        assert_eq!(
+            attrs(&spans[0]).get("microsoft.channel.name"),
+            Some(&"internal".to_string()),
+            "adapter-less runs (subagent, CLI) must carry the internal default for the mandatory channel.name attribute",
+        );
     }
 
     #[test]
@@ -475,17 +686,24 @@ mod tests {
         p.project(&user_message("q", None), &session, at(0), &[]);
         let identity = vec![
             ("gen_ai.agent.id".to_string(), "agent-uuid".to_string()),
+            ("gen_ai.agent.name".to_string(), "wirken".to_string()),
             ("microsoft.tenant.id".to_string(), "tenant-uuid".to_string()),
+            (
+                "microsoft.a365.agent.blueprint.id".to_string(),
+                "agent-uuid".to_string(),
+            ),
         ];
         let spans = p.project(&assistant_message("a"), &session, at(1), &identity);
-        let attrs: HashMap<String, String> = spans[0].attributes.iter().cloned().collect();
+        let a = attrs(&spans[0]);
+        assert_eq!(a.get("gen_ai.agent.id"), Some(&"agent-uuid".to_string()));
+        assert_eq!(a.get("gen_ai.agent.name"), Some(&"wirken".to_string()));
         assert_eq!(
-            attrs.get("gen_ai.agent.id"),
-            Some(&"agent-uuid".to_string())
+            a.get("microsoft.tenant.id"),
+            Some(&"tenant-uuid".to_string())
         );
         assert_eq!(
-            attrs.get("microsoft.tenant.id"),
-            Some(&"tenant-uuid".to_string())
+            a.get("microsoft.a365.agent.blueprint.id"),
+            Some(&"agent-uuid".to_string())
         );
     }
 
@@ -506,12 +724,10 @@ mod tests {
         p.project(&user_message("second", None), &session, at(1), &[]);
         assert_eq!(p.in_flight_run_count(), 1);
         let spans = p.project(&assistant_message("a"), &session, at(2), &[]);
-        let input = spans[0]
-            .attributes
-            .iter()
-            .find(|(k, _)| k == "gen_ai.input.messages")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(input, Some("second"));
+        assert_eq!(
+            attrs(&spans[0]).get("gen_ai.input.messages"),
+            Some(&"second".to_string())
+        );
     }
 
     #[test]

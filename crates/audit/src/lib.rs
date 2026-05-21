@@ -10,6 +10,7 @@ mod session_log;
 pub mod siem;
 pub mod siem_typed;
 pub mod signing;
+pub mod user_resolver;
 mod writer;
 
 pub use alarm_log::{
@@ -38,6 +39,7 @@ pub use siem_typed::{TYPED_POLL_INTERVAL, TypedEventForwarder, TypedSink, TypedT
 pub use signing::{
     AuditSigningKey, CHAIN_HEAD_DOMAIN, CHAIN_HEAD_SCHEMA_VERSION, audit_signing_dir,
 };
+pub use user_resolver::{DeterministicUserResolver, UserId, UserResolver};
 pub use writer::AuditWriter;
 
 #[cfg(test)]

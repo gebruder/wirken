@@ -74,13 +74,29 @@ pub trait FederatedIdentity: Send + Sync {
 
     /// Run-wide attributes the projector stamps on every span.
     ///
-    /// Vendor-neutral pairs only at the trait level
-    /// (`gen_ai.agent.id`, `gen_ai.agent.name`); Microsoft-namespaced
-    /// attributes such as `microsoft.tenant.id` and
-    /// `microsoft.a365.agent.blueprint.id` are returned here by the
-    /// Microsoft-Entra implementation specifically, as
-    /// `(String, String)` pairs the projector concatenates onto each
-    /// span's attribute set.
+    /// The Agent 365 ingestion endpoint requires several attributes
+    /// whose values are knowable only via the federated identity.
+    /// The Microsoft-Entra implementation (issue #132) returns the
+    /// full Microsoft-namespaced set:
+    ///
+    /// - `microsoft.tenant.id` (must equal the URL `{tenantId}`
+    ///   the exporter targets; mismatch is a documented 403)
+    /// - `gen_ai.agent.id` (must equal the URL `{agentId}` and the
+    ///   authenticated app id from the bearer token)
+    /// - `gen_ai.agent.name` (else Defender shows the raw GUID)
+    /// - `microsoft.a365.agent.blueprint.id` (no-blueprint case
+    ///   reuses `gen_ai.agent.id`, else blueprint roll-ups break)
+    ///
+    /// Vendor-neutral implementations (Keycloak for non-Microsoft
+    /// backends, issue #131) return the vendor-neutral subset
+    /// (`gen_ai.agent.id`, `gen_ai.agent.name`) and omit the
+    /// Microsoft-namespaced attributes the backend does not
+    /// consume.
+    ///
+    /// The projector concatenates the returned pairs onto every
+    /// span without validating them; the trait contract is that
+    /// the implementation provides whatever the configured backend
+    /// requires.
     fn span_attributes(&self) -> Vec<(String, String)>;
 }
 
@@ -175,6 +191,25 @@ pub struct OtelConfig {
     /// adapters default to their wirken adapter id when no override
     /// is configured.
     pub channel_name_overrides: HashMap<String, String>,
+
+    /// `server.address` attribute stamped on every `invoke_agent`,
+    /// `execute_tool`, and `chat` span. Mandatory on the wire even
+    /// when no downstream HTTP call is made (the documented
+    /// fallback for runtime-only execution is the gateway's own
+    /// hostname). Defaults to `127.0.0.1` for wirken's local-first
+    /// gateway; operators with a meaningful network identity can
+    /// override.
+    pub server_address: String,
+
+    /// `server.port` attribute stamped on every `invoke_agent`,
+    /// `execute_tool`, and `chat` span. Mandatory on the wire.
+    /// Defaults to 0 because wirken's gateway has no single bind
+    /// port the OTel reporter can canonicalize (adapters and
+    /// WebChat each bind their own); operators can override. The
+    /// attribute is emitted as a stringified integer because every
+    /// OTel attribute value must be serialized as `stringValue`
+    /// for Agent 365.
+    pub server_port: u16,
 }
 
 impl Default for OtelConfig {
@@ -186,6 +221,8 @@ impl Default for OtelConfig {
             poll_interval_ms: 50,
             max_batch_bytes: 900 * 1024,
             channel_name_overrides,
+            server_address: "127.0.0.1".to_string(),
+            server_port: 0,
         }
     }
 }
