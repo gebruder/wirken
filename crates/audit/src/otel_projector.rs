@@ -20,24 +20,30 @@
 //!
 //! Active development on issue #130. The `invoke_agent` root,
 //! `chat`, `execute_tool`, and `output_messages` spans are
-//! implemented. The root carries its full mandatory all-span
-//! attribute set (`gen_ai.operation.name`, input and output
-//! message bodies, `client.address`, `server.address`,
-//! `server.port`, `microsoft.channel.name` with an `internal`
-//! fallback for adapter-less runs, `gen_ai.conversation.id`,
+//! implemented, plus the agent-to-agent caller block on the
+//! `invoke_agent` root of a spawned subagent. The root carries
+//! its full mandatory all-span attribute set
+//! (`gen_ai.operation.name`, input and output message bodies,
+//! `client.address`, `server.address`, `server.port`,
+//! `microsoft.channel.name` with an `internal` fallback for
+//! adapter-less runs, `gen_ai.conversation.id`,
 //! `microsoft.session.id` as a per-wake UUIDv4, `user.id` via the
 //! [`crate::UserResolver`], plus whatever the active
 //! [`crate::FederatedIdentity::span_attributes`] returns). `chat`
 //! children pair `LlmRequest` and `LlmResponse` rows by
 //! `request_id`. `execute_tool` children pair `AssistantToolCalls`
-//! and `ToolResult` rows by `call_id`, with `tool.type` resolved
-//! through the gateway's name-prefix dispatch contract (see
-//! [`Self::tool_type_for`]). The `output_messages` child carries
-//! `gen_ai.output.messages` from the closing `AssistantMessage`
-//! additively to the root's own copy (per the verified OTel
-//! GenAI semconv reference, output messages live on both
-//! `invoke_agent` and `output_messages`). Remaining branches
-//! (error-status, agent-to-agent) land in follow-up commits.
+//! and `ToolResult` rows by `call_id`, with `gen_ai.tool.type`
+//! resolved through the gateway's name-prefix dispatch contract
+//! (see [`Self::tool_type_for`]). The `output_messages` child
+//! carries `gen_ai.output.messages` from the closing
+//! `AssistantMessage` additively to the root's own copy. A
+//! spawned subagent's `invoke_agent` root carries the
+//! `microsoft.a365.caller.agent.*` block plus
+//! `gen_ai.execution.type = "Agent2Agent"`, populated from a
+//! cross-session snapshot taken when the parent's
+//! `SubagentSpawned` event is projected (see
+//! [`Self::snapshot_subagent_caller`]). The error-status branch
+//! lands in a follow-up commit.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -188,6 +194,25 @@ struct RunBuffer {
     /// `call_id` the pair shares. Same orphan and unpaired
     /// semantics as `pending_chat_requests`.
     pending_execute_tools: HashMap<String, PendingExecuteTool>,
+    /// Most recent `agent_id` seen on an event in this run. Used
+    /// when this run spawns a subagent: the subagent's caller
+    /// block needs the spawning wirken-agent's per-agent name
+    /// (e.g. `default`, `researcher`) rather than the
+    /// installation-wide name from `identity_attributes`. Updated
+    /// on every `agent_id`-bearing event the projector handles.
+    recent_agent_id: Option<String>,
+    /// If this run was opened as a spawned subagent (a matching
+    /// `SubagentSpawned` snapshot existed in
+    /// `pending_subagent_callers` when the `UserMessage` opened
+    /// the run), the snapshot lives here. The
+    /// `build_root_span` adds the `microsoft.a365.caller.agent.*`
+    /// block plus `gen_ai.execution.type = "Agent2Agent"` to the
+    /// `invoke_agent` root when this is `Some`. `None` for normal
+    /// user-triggered runs and for subagent runs that opened
+    /// without a snapshot (the snapshot-miss degradation path:
+    /// emit a normal single-agent root rather than block or
+    /// stamp a partial caller block).
+    caller_context: Option<SubagentCallerContext>,
 }
 
 /// `LlmRequest` row buffered while waiting for its paired
@@ -238,6 +263,47 @@ struct ExecuteToolCall {
     success: bool,
 }
 
+/// Snapshot of the spawning agent's identity at the moment of a
+/// `SubagentSpawned` event. The projector keys these by the
+/// child's session id and consumes the entry when the child's
+/// own `UserMessage` opens its run, so the child's
+/// `invoke_agent` root can carry the caller block naming the
+/// parent.
+///
+/// The five values map to the M*² caller block in the canonical
+/// observability-attribute-reference: caller agent id, name,
+/// blueprint id, user id. The reference also lists caller user
+/// email as M*², but wirken has no email model so the snapshot
+/// does not carry one; the projector omits the attribute. The
+/// reference's two N/A entries (`microsoft.a365.caller.agent.platform.id`,
+/// `gen_ai.caller.agent.type`) are auto-classified by Agent 365
+/// and intentionally not represented here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SubagentCallerContext {
+    /// Calling agent's Entra appId. Sourced from the spawning
+    /// agent's `gen_ai.agent.id` in
+    /// [`crate::FederatedIdentity::span_attributes`] at snapshot
+    /// time.
+    caller_agent_id: String,
+    /// Calling agent's display name. Threaded from the parent's
+    /// most recent agent-id-bearing event so the value is the
+    /// spawning wirken-agent's name (e.g. `default`, `researcher`),
+    /// not the installation-wide identity name. Falls back to the
+    /// identity's `gen_ai.agent.name` if no agent-id-bearing event
+    /// has been seen in the parent run yet.
+    caller_agent_name: String,
+    /// Calling agent's blueprint appId. The reference's no-blueprint
+    /// rule applies: reuses the caller appId when no separate
+    /// blueprint identity exists. The snapshot stores whatever the
+    /// parent's identity supplied for `microsoft.a365.agent.blueprint.id`.
+    caller_blueprint_id: String,
+    /// Resolved Entra-object-id-shape value for the spawning
+    /// caller's `user.id`. Comes from the [`crate::UserResolver`]
+    /// applied to the parent's `(adapter_id, sender_id)` at
+    /// snapshot time.
+    caller_user_id: String,
+}
+
 /// Projects `SessionEvent` rows into OTel GenAI spans.
 ///
 /// Holds in-memory run buffers keyed by [`SessionId`]. State is not
@@ -249,6 +315,26 @@ pub struct OtelProjector {
     config: OtelConfig,
     user_resolver: Arc<dyn UserResolver>,
     runs: HashMap<SessionId, RunBuffer>,
+    /// Cross-session snapshots of agent-to-agent caller context.
+    /// Keyed by the child session id the parent's
+    /// `SubagentSpawned` event named. Consumed when the child's
+    /// `UserMessage` opens its run, populating the new
+    /// `RunBuffer.caller_context`.
+    ///
+    /// Single-projector-instance assumption: this map relies on
+    /// the same projector instance seeing both the parent's
+    /// `SubagentSpawned` event and the child's `UserMessage`. In
+    /// wirken's current deployment one `OtelExporter` runs one
+    /// `OtelProjector` over the unified session-event stream, so
+    /// the assumption holds. A future per-session-instance
+    /// deployment would need a different mechanism (the dispatch
+    /// contract is named at `runtime.rs:2511`; a similar
+    /// cross-session signal would need its own contract). When
+    /// the assumption fails and the child opens without a
+    /// snapshot, [`Self::open_run`] degrades to a normal
+    /// single-agent root rather than blocking or stamping a
+    /// partial caller block.
+    pending_subagent_callers: HashMap<SessionId, SubagentCallerContext>,
 }
 
 impl OtelProjector {
@@ -266,6 +352,7 @@ impl OtelProjector {
             config,
             user_resolver,
             runs: HashMap::new(),
+            pending_subagent_callers: HashMap::new(),
         }
     }
 
@@ -309,8 +396,10 @@ impl OtelProjector {
                 request_id,
                 provider,
                 model,
+                agent_id,
                 ..
             } => {
+                self.record_recent_agent_id(session_id, agent_id);
                 self.start_chat(session_id, timestamp, request_id, provider, model);
                 Vec::new()
             }
@@ -318,8 +407,10 @@ impl OtelProjector {
                 request_id,
                 input_tokens,
                 output_tokens,
+                agent_id,
                 ..
             } => {
+                self.record_recent_agent_id(session_id, agent_id);
                 self.finish_chat(
                     session_id,
                     timestamp,
@@ -329,8 +420,17 @@ impl OtelProjector {
                 );
                 Vec::new()
             }
-            SessionEvent::AssistantToolCalls { calls, .. } => {
+            SessionEvent::AssistantToolCalls {
+                calls, agent_id, ..
+            } => {
+                self.record_recent_agent_id(session_id, agent_id);
                 self.start_execute_tools(session_id, timestamp, calls);
+                Vec::new()
+            }
+            SessionEvent::SubagentSpawned {
+                child_session_id, ..
+            } => {
+                self.snapshot_subagent_caller(session_id, child_session_id, identity_attributes);
                 Vec::new()
             }
             SessionEvent::ToolResult {
@@ -345,10 +445,9 @@ impl OtelProjector {
                 );
                 Vec::new()
             }
-            // Remaining child variants (SubagentSpawned for
-            // agent-to-agent, PermissionDenied for error status,
-            // dedicated output_messages span) project in follow-up
-            // commits on issue #130.
+            // Remaining child variants (PermissionDenied for
+            // error status) project in follow-up commits on
+            // issue #130.
             _ => Vec::new(),
         }
     }
@@ -356,6 +455,95 @@ impl OtelProjector {
     /// Number of in-flight run buffers. Test seam.
     pub fn in_flight_run_count(&self) -> usize {
         self.runs.len()
+    }
+
+    /// Number of subagent caller snapshots waiting for the matching
+    /// child session to open its run. Test seam.
+    pub fn pending_subagent_caller_count(&self) -> usize {
+        self.pending_subagent_callers.len()
+    }
+
+    fn record_recent_agent_id(&mut self, session_id: &SessionId, agent_id: &str) {
+        if agent_id.is_empty() {
+            return;
+        }
+        if let Some(buf) = self.runs.get_mut(session_id) {
+            buf.recent_agent_id = Some(agent_id.to_string());
+        }
+    }
+
+    fn snapshot_subagent_caller(
+        &mut self,
+        parent_session_id: &SessionId,
+        child_session_id: &str,
+        identity_attributes: &[(String, String)],
+    ) {
+        let Some(parent_buf) = self.runs.get(parent_session_id) else {
+            tracing::warn!(
+                session_id = %parent_session_id,
+                child_session_id,
+                "OtelProjector saw a SubagentSpawned with no open parent run buffer; caller context for the child cannot be snapshotted",
+            );
+            return;
+        };
+
+        let caller_agent_id = identity_attributes
+            .iter()
+            .find(|(k, _)| k == "gen_ai.agent.id")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        // The per-wirken-agent name (e.g. `default`, `researcher`)
+        // comes from the parent's most recent agent-id-bearing
+        // event so the caller block names the spawning agent,
+        // not the installation-wide identity. Falls back to the
+        // identity's gen_ai.agent.name when no event has carried
+        // an agent_id yet (rare: the parent must at least have
+        // run one LlmRequest or AssistantToolCalls before
+        // SubagentSpawned can fire, but defended for safety).
+        let caller_agent_name = parent_buf.recent_agent_id.clone().unwrap_or_else(|| {
+            identity_attributes
+                .iter()
+                .find(|(k, _)| k == "gen_ai.agent.name")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        });
+        // The reference's no-blueprint rule: reuse the caller
+        // appId when no separate blueprint identity exists. The
+        // active identity supplies this; for a standard Entra
+        // app with no blueprint, the FederatedIdentity impl
+        // sources both gen_ai.agent.id and
+        // microsoft.a365.agent.blueprint.id to the same appId,
+        // and the snapshot stores whatever it provided.
+        let caller_blueprint_id = identity_attributes
+            .iter()
+            .find(|(k, _)| k == "microsoft.a365.agent.blueprint.id")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| caller_agent_id.clone());
+        let caller_user_id = self
+            .user_resolver
+            .resolve_user(
+                parent_buf.adapter_id.as_deref(),
+                parent_buf.sender_id.as_deref(),
+            )
+            .as_str()
+            .to_string();
+
+        let snapshot = SubagentCallerContext {
+            caller_agent_id,
+            caller_agent_name,
+            caller_blueprint_id,
+            caller_user_id,
+        };
+        if self
+            .pending_subagent_callers
+            .insert(SessionId::new(child_session_id), snapshot)
+            .is_some()
+        {
+            tracing::warn!(
+                child_session_id,
+                "OtelProjector replaced an existing subagent caller snapshot for the same child_session_id; the prior parent's snapshot is lost",
+            );
+        }
     }
 
     fn open_run(
@@ -366,6 +554,16 @@ impl OtelProjector {
         adapter_id: Option<String>,
         sender_id: Option<String>,
     ) {
+        // Consume any subagent caller snapshot the parent's
+        // SubagentSpawned event registered for this session id.
+        // Snapshot-miss degradation: if no entry exists, this is
+        // a normal single-agent run (or a subagent run whose
+        // parent's SubagentSpawned was projected by a different
+        // projector instance; per the single-instance assumption
+        // documented on `pending_subagent_callers`, that case
+        // degrades to a normal root rather than blocking).
+        let caller_context = self.pending_subagent_callers.remove(session_id);
+
         let buf = RunBuffer {
             trace_id: TraceId::random(),
             root_span_id: SpanId::random(),
@@ -378,6 +576,8 @@ impl OtelProjector {
             pending_chat_requests: HashMap::new(),
             execute_tool_calls: Vec::new(),
             pending_execute_tools: HashMap::new(),
+            recent_agent_id: None,
+            caller_context,
         };
         if self.runs.insert(session_id.clone(), buf).is_some() {
             tracing::warn!(
@@ -715,6 +915,40 @@ impl OtelProjector {
             ),
         ]);
 
+        // Agent-to-agent caller block plus execution.type if this
+        // run opened with a SubagentSpawned snapshot present. The
+        // reference's two N/A entries
+        // (microsoft.a365.caller.agent.platform.id,
+        // gen_ai.caller.agent.type) are intentionally not
+        // stamped; Agent 365 auto-classifies them. caller user
+        // email is also omitted because wirken has no email
+        // model (M*² mandatory in the reference but the projector
+        // has no value to supply; absence is honest).
+        if let Some(caller) = &buf.caller_context {
+            attributes.extend([
+                (
+                    "microsoft.a365.caller.agent.id".to_string(),
+                    caller.caller_agent_id.clone(),
+                ),
+                (
+                    "microsoft.a365.caller.agent.name".to_string(),
+                    caller.caller_agent_name.clone(),
+                ),
+                (
+                    "microsoft.a365.caller.agent.blueprint.id".to_string(),
+                    caller.caller_blueprint_id.clone(),
+                ),
+                (
+                    "microsoft.a365.caller.agent.user.id".to_string(),
+                    caller.caller_user_id.clone(),
+                ),
+                (
+                    "gen_ai.execution.type".to_string(),
+                    "Agent2Agent".to_string(),
+                ),
+            ]);
+        }
+
         Span {
             trace_id: buf.trace_id.clone(),
             span_id: buf.root_span_id.clone(),
@@ -1022,6 +1256,29 @@ mod tests {
             .iter()
             .filter(|s| s.name == "output_messages")
             .collect()
+    }
+
+    fn subagent_spawned(child_session_id: &str, child_agent_id: &str) -> SessionEvent {
+        SessionEvent::SubagentSpawned {
+            child_session_id: child_session_id.to_string(),
+            child_agent_id: child_agent_id.to_string(),
+            tools_granted: Vec::new(),
+        }
+    }
+
+    fn ms_identity() -> Vec<(String, String)> {
+        vec![
+            ("gen_ai.agent.id".to_string(), "agent-app-id".to_string()),
+            (
+                "gen_ai.agent.name".to_string(),
+                "wirken-installation".to_string(),
+            ),
+            ("microsoft.tenant.id".to_string(), "tenant-uuid".to_string()),
+            (
+                "microsoft.a365.agent.blueprint.id".to_string(),
+                "agent-app-id".to_string(),
+            ),
+        ]
     }
 
     fn root_span(spans: &[Span]) -> &Span {
@@ -2200,6 +2457,293 @@ mod tests {
             captured[0],
             (None, None),
             "subagent and CLI runs have no adapter or sender; the resolver must receive None not a synthesized placeholder",
+        );
+    }
+
+    #[test]
+    fn subagent_spawned_snapshots_caller_context_keyed_by_child_session_id() {
+        let mut p = projector();
+        let parent = SessionId::new("sess-parent");
+        let identity = ms_identity();
+        p.project(&user_message("q", Some("teams")), &parent, at(0), &identity);
+        // Cause recent_agent_id to be populated with the parent's
+        // wirken-agent name via an LlmRequest before the spawn.
+        p.project(
+            &SessionEvent::LlmRequest {
+                provider: "anthropic".to_string(),
+                model: "sonnet".to_string(),
+                request_id: "req-1".to_string(),
+                tools_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                agent_id: "researcher".to_string(),
+                credential_id: None,
+            },
+            &parent,
+            at(1),
+            &identity,
+        );
+        assert_eq!(p.pending_subagent_caller_count(), 0);
+        p.project(
+            &subagent_spawned("sess-parent#sub-0", "codebot"),
+            &parent,
+            at(2),
+            &identity,
+        );
+        assert_eq!(
+            p.pending_subagent_caller_count(),
+            1,
+            "SubagentSpawned must register one snapshot keyed by the child_session_id",
+        );
+    }
+
+    #[test]
+    fn child_run_opening_consumes_snapshot_into_run_buffer() {
+        let mut p = projector();
+        let parent = SessionId::new("sess-parent");
+        let identity = ms_identity();
+        p.project(&user_message("q", None), &parent, at(0), &identity);
+        p.project(
+            &SessionEvent::LlmRequest {
+                provider: "anthropic".to_string(),
+                model: "sonnet".to_string(),
+                request_id: "req-1".to_string(),
+                tools_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                agent_id: "researcher".to_string(),
+                credential_id: None,
+            },
+            &parent,
+            at(1),
+            &identity,
+        );
+        p.project(
+            &subagent_spawned("sess-parent#sub-0", "codebot"),
+            &parent,
+            at(2),
+            &identity,
+        );
+        assert_eq!(p.pending_subagent_caller_count(), 1);
+
+        let child = SessionId::new("sess-parent#sub-0");
+        p.project(&user_message("child q", None), &child, at(3), &identity);
+        assert_eq!(
+            p.pending_subagent_caller_count(),
+            0,
+            "child UserMessage must consume the snapshot",
+        );
+    }
+
+    #[test]
+    fn spawned_child_root_carries_caller_block_and_agent2agent_execution_type() {
+        let mut p = projector();
+        let parent = SessionId::new("sess-parent");
+        let identity = ms_identity();
+        p.project(
+            &user_message_with_sender("q", Some("teams"), Some("user-42")),
+            &parent,
+            at(0),
+            &identity,
+        );
+        p.project(
+            &SessionEvent::LlmRequest {
+                provider: "anthropic".to_string(),
+                model: "sonnet".to_string(),
+                request_id: "req-1".to_string(),
+                tools_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                agent_id: "researcher".to_string(),
+                credential_id: None,
+            },
+            &parent,
+            at(1),
+            &identity,
+        );
+        p.project(
+            &subagent_spawned("sess-parent#sub-0", "codebot"),
+            &parent,
+            at(2),
+            &identity,
+        );
+
+        let child = SessionId::new("sess-parent#sub-0");
+        p.project(&user_message("do work", None), &child, at(3), &identity);
+        let spans = p.project(&assistant_message("done"), &child, at(4), &identity);
+        let child_root_attrs = attrs(root_span(&spans));
+
+        assert_eq!(
+            child_root_attrs.get("microsoft.a365.caller.agent.id"),
+            Some(&"agent-app-id".to_string()),
+            "caller.agent.id must come from the spawning identity's gen_ai.agent.id",
+        );
+        assert_eq!(
+            child_root_attrs.get("microsoft.a365.caller.agent.name"),
+            Some(&"researcher".to_string()),
+            "caller.agent.name must be the parent's per-wirken-agent name from the most recent agent-id event, not the installation-wide name from identity_attributes",
+        );
+        assert_eq!(
+            child_root_attrs.get("microsoft.a365.caller.agent.blueprint.id"),
+            Some(&"agent-app-id".to_string()),
+            "caller.blueprint.id reuses caller appId in the no-blueprint case per the reference",
+        );
+        assert!(
+            child_root_attrs.contains_key("microsoft.a365.caller.agent.user.id"),
+            "caller.user.id must be present and resolved from the parent's (adapter, sender)",
+        );
+        assert_eq!(
+            child_root_attrs.get("gen_ai.execution.type"),
+            Some(&"Agent2Agent".to_string()),
+            "spawned child root must carry execution.type Agent2Agent",
+        );
+    }
+
+    #[test]
+    fn spawned_child_caller_block_omits_email_and_n_a_fields() {
+        let mut p = projector();
+        let parent = SessionId::new("sess-parent");
+        let identity = ms_identity();
+        p.project(&user_message("q", None), &parent, at(0), &identity);
+        p.project(
+            &SessionEvent::LlmRequest {
+                provider: "anthropic".to_string(),
+                model: "sonnet".to_string(),
+                request_id: "req-1".to_string(),
+                tools_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                agent_id: "researcher".to_string(),
+                credential_id: None,
+            },
+            &parent,
+            at(1),
+            &identity,
+        );
+        p.project(
+            &subagent_spawned("sess-parent#sub-0", "codebot"),
+            &parent,
+            at(2),
+            &identity,
+        );
+
+        let child = SessionId::new("sess-parent#sub-0");
+        p.project(&user_message("do work", None), &child, at(3), &identity);
+        let spans = p.project(&assistant_message("done"), &child, at(4), &identity);
+        let child_root_attrs = attrs(root_span(&spans));
+
+        // wirken has no email model; the M*² caller.agent.user.email
+        // is honestly omitted rather than stamped with a placeholder.
+        assert!(!child_root_attrs.contains_key("microsoft.a365.caller.agent.user.email"));
+        // The reference marks these two as N/A (auto-classified by
+        // Agent 365); the projector must not emit them.
+        assert!(!child_root_attrs.contains_key("microsoft.a365.caller.agent.platform.id"));
+        assert!(!child_root_attrs.contains_key("gen_ai.caller.agent.type"));
+    }
+
+    #[test]
+    fn non_a2a_run_root_omits_caller_block_and_execution_type() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        let identity = ms_identity();
+        p.project(&user_message("q", None), &session, at(0), &identity);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &identity);
+        let root_attrs = attrs(root_span(&spans));
+        assert!(!root_attrs.contains_key("microsoft.a365.caller.agent.id"));
+        assert!(!root_attrs.contains_key("microsoft.a365.caller.agent.name"));
+        assert!(!root_attrs.contains_key("microsoft.a365.caller.agent.blueprint.id"));
+        assert!(!root_attrs.contains_key("microsoft.a365.caller.agent.user.id"));
+        assert!(!root_attrs.contains_key("gen_ai.execution.type"));
+    }
+
+    #[test]
+    fn snapshot_miss_degrades_child_root_to_normal_single_agent() {
+        // A child session that opens without a prior
+        // SubagentSpawned snapshot in pending_subagent_callers
+        // (the separate-projector-instance or replayed-cursor
+        // case) must emit a normal single-agent root rather than
+        // a partial caller block or a blocking error.
+        let mut p = projector();
+        let child = SessionId::new("sess-parent#sub-0");
+        let identity = ms_identity();
+        // No SubagentSpawned was projected; the child opens its
+        // run directly.
+        p.project(
+            &user_message("orphan child q", None),
+            &child,
+            at(0),
+            &identity,
+        );
+        let spans = p.project(&assistant_message("done"), &child, at(1), &identity);
+        let root_attrs = attrs(root_span(&spans));
+        assert!(
+            !root_attrs.contains_key("gen_ai.execution.type"),
+            "without a snapshot the child root degrades to a normal single-agent root; no Agent2Agent stamp",
+        );
+        assert!(!root_attrs.contains_key("microsoft.a365.caller.agent.id"));
+        assert!(!root_attrs.contains_key("microsoft.a365.caller.agent.name"));
+    }
+
+    #[test]
+    fn subagent_spawned_with_no_open_parent_buffer_drops_snapshot() {
+        let mut p = projector();
+        let parent = SessionId::new("sess-parent");
+        // No UserMessage opened the parent run; SubagentSpawned
+        // arriving on a non-open session must not register a
+        // snapshot (parent context is unknowable).
+        p.project(
+            &subagent_spawned("sess-parent#sub-0", "codebot"),
+            &parent,
+            at(0),
+            &ms_identity(),
+        );
+        assert_eq!(p.pending_subagent_caller_count(), 0);
+    }
+
+    #[test]
+    fn caller_user_id_resolved_from_parent_adapter_and_sender() {
+        let recorder = Arc::new(RecordingUserResolver::new());
+        let mut p = OtelProjector::new(OtelConfig::default(), recorder.clone());
+        let parent = SessionId::new("sess-parent");
+        let identity = ms_identity();
+        p.project(
+            &user_message_with_sender("q", Some("teams"), Some("user-42")),
+            &parent,
+            at(0),
+            &identity,
+        );
+        p.project(
+            &SessionEvent::LlmRequest {
+                provider: "anthropic".to_string(),
+                model: "sonnet".to_string(),
+                request_id: "req-1".to_string(),
+                tools_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
+                agent_id: "researcher".to_string(),
+                credential_id: None,
+            },
+            &parent,
+            at(1),
+            &identity,
+        );
+        // Clear the recorder so we only see the snapshot-time
+        // resolver call.
+        recorder
+            .captured
+            .lock()
+            .expect("captured Mutex must not be poisoned")
+            .clear();
+        p.project(
+            &subagent_spawned("sess-parent#sub-0", "codebot"),
+            &parent,
+            at(2),
+            &identity,
+        );
+        let captured = recorder
+            .captured
+            .lock()
+            .expect("captured Mutex must not be poisoned");
+        assert!(
+            captured
+                .iter()
+                .any(|(a, s)| a.as_deref() == Some("teams") && s.as_deref() == Some("user-42")),
+            "caller.user.id resolution must use the parent's adapter_id and sender_id verbatim",
         );
     }
 }
