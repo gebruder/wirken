@@ -18,8 +18,8 @@
 //!
 //! ## Module status
 //!
-//! Active development on issue #130. The `invoke_agent` root, the
-//! `chat` child, and the `execute_tool` child spans are
+//! Active development on issue #130. The `invoke_agent` root,
+//! `chat`, `execute_tool`, and `output_messages` spans are
 //! implemented. The root carries its full mandatory all-span
 //! attribute set (`gen_ai.operation.name`, input and output
 //! message bodies, `client.address`, `server.address`,
@@ -32,9 +32,12 @@
 //! `request_id`. `execute_tool` children pair `AssistantToolCalls`
 //! and `ToolResult` rows by `call_id`, with `tool.type` resolved
 //! through the gateway's name-prefix dispatch contract (see
-//! [`Self::tool_type_for`]). Remaining branches
-//! (`output_messages`, error-status, agent-to-agent) land in
-//! follow-up commits.
+//! [`Self::tool_type_for`]). The `output_messages` child carries
+//! `gen_ai.output.messages` from the closing `AssistantMessage`
+//! additively to the root's own copy (per the verified OTel
+//! GenAI semconv reference, output messages live on both
+//! `invoke_agent` and `output_messages`). Remaining branches
+//! (error-status, agent-to-agent) land in follow-up commits.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -577,6 +580,14 @@ impl OtelProjector {
             }),
         );
 
+        emit.push(self.build_output_messages_span(
+            &buf,
+            session_id,
+            ended_at_nanos,
+            assistant_message,
+            identity_attributes,
+        ));
+
         let root = self.build_root_span(
             &buf,
             session_id,
@@ -609,33 +620,27 @@ impl OtelProjector {
         }
     }
 
-    /// Run-wide attributes shared by `invoke_agent`, `execute_tool`,
-    /// and `chat` span classes. Returned in a fresh `Vec` the
-    /// caller extends with class-specific attributes. Includes the
-    /// IA/ET/CH-mandatory `client.address`, `server.address`,
-    /// `server.port` set plus the run-correlation attributes
-    /// (`microsoft.channel.name`, `gen_ai.conversation.id`,
-    /// `microsoft.session.id`) and the `FederatedIdentity`-supplied
-    /// run-wide attributes (`microsoft.tenant.id`,
-    /// `gen_ai.agent.id`, `gen_ai.agent.name`,
-    /// `microsoft.a365.agent.blueprint.id` when the active
-    /// identity provides them).
-    fn ia_et_ch_base_attrs(
+    /// Run-correlation attributes carried by every span class
+    /// (root, `chat`, `execute_tool`, `output_messages`, and the
+    /// upcoming error and agent-to-agent branches). Returned in a
+    /// fresh `Vec` the caller extends with class-specific
+    /// attributes.
+    ///
+    /// The mandatory-on-every-span set: `microsoft.channel.name`
+    /// with the per-adapter override map applied,
+    /// `gen_ai.conversation.id` from the wirken session id,
+    /// `microsoft.session.id` as the per-wake UUIDv4 the run
+    /// allocated, plus the `FederatedIdentity`-supplied attrs
+    /// (`microsoft.tenant.id`, `gen_ai.agent.id`,
+    /// `gen_ai.agent.name`, `microsoft.a365.agent.blueprint.id`
+    /// when the active identity provides them).
+    fn run_wide_attrs(
         &self,
         buf: &RunBuffer,
         session_id: &SessionId,
         identity_attributes: &[(String, String)],
     ) -> Vec<(String, String)> {
         let mut attrs: Vec<(String, String)> = vec![
-            ("client.address".to_string(), "0.0.0.0".to_string()),
-            (
-                "server.address".to_string(),
-                self.config.server_address.clone(),
-            ),
-            (
-                "server.port".to_string(),
-                self.config.server_port.to_string(),
-            ),
             (
                 "microsoft.channel.name".to_string(),
                 self.channel_name_for(buf.adapter_id.as_deref()),
@@ -650,6 +655,32 @@ impl OtelProjector {
             ),
         ];
         attrs.extend(identity_attributes.iter().cloned());
+        attrs
+    }
+
+    /// Run-wide attributes plus the IA/ET/CH-specific addressing
+    /// trio (`client.address`, `server.address`, `server.port`).
+    /// `invoke_agent`, `execute_tool`, and `chat` are the three
+    /// span classes the verified reference marks as requiring
+    /// these; `output_messages` does not.
+    fn ia_et_ch_base_attrs(
+        &self,
+        buf: &RunBuffer,
+        session_id: &SessionId,
+        identity_attributes: &[(String, String)],
+    ) -> Vec<(String, String)> {
+        let mut attrs = self.run_wide_attrs(buf, session_id, identity_attributes);
+        attrs.extend([
+            ("client.address".to_string(), "0.0.0.0".to_string()),
+            (
+                "server.address".to_string(),
+                self.config.server_address.clone(),
+            ),
+            (
+                "server.port".to_string(),
+                self.config.server_port.to_string(),
+            ),
+        ]);
         attrs
     }
 
@@ -691,6 +722,47 @@ impl OtelProjector {
             name: "invoke_agent".to_string(),
             kind: SpanKind::Internal,
             start_time_unix_nano: buf.started_at_nanos,
+            end_time_unix_nano: ended_at_nanos,
+            status: SpanStatus::Ok,
+            attributes,
+        }
+    }
+
+    fn build_output_messages_span(
+        &self,
+        buf: &RunBuffer,
+        session_id: &SessionId,
+        ended_at_nanos: u128,
+        assistant_message: &str,
+        identity_attributes: &[(String, String)],
+    ) -> Span {
+        // output_messages is not in the IA/ET/CH set; the
+        // addressing trio is omitted. The verified reference puts
+        // `gen_ai.output.messages` both here AND on the
+        // `invoke_agent` root; the dedicated child is additive,
+        // not a relocation.
+        let mut attributes = self.run_wide_attrs(buf, session_id, identity_attributes);
+        attributes.extend([
+            (
+                "gen_ai.operation.name".to_string(),
+                "output_messages".to_string(),
+            ),
+            (
+                "gen_ai.output.messages".to_string(),
+                assistant_message.to_string(),
+            ),
+        ]);
+
+        Span {
+            trace_id: buf.trace_id.clone(),
+            span_id: SpanId::random(),
+            parent_span_id: Some(buf.root_span_id.clone()),
+            name: "output_messages".to_string(),
+            // Instantaneous span: the moment the agent emitted its
+            // final output. Wirken's chain marks this as a single
+            // `AssistantMessage` row; start and end coincide.
+            kind: SpanKind::Internal,
+            start_time_unix_nano: ended_at_nanos,
             end_time_unix_nano: ended_at_nanos,
             status: SpanStatus::Ok,
             attributes,
@@ -942,6 +1014,13 @@ mod tests {
         spans.iter().filter(|s| s.name == "execute_tool").collect()
     }
 
+    fn output_messages_spans(spans: &[Span]) -> Vec<&Span> {
+        spans
+            .iter()
+            .filter(|s| s.name == "output_messages")
+            .collect()
+    }
+
     fn root_span(spans: &[Span]) -> &Span {
         spans
             .iter()
@@ -996,8 +1075,10 @@ mod tests {
             at(1_700_000_010),
             &[],
         );
-        assert_eq!(spans.len(), 1);
-        let span = &spans[0];
+        // Run close emits the canonical pair: output_messages
+        // child plus invoke_agent root.
+        assert_eq!(spans.len(), 2);
+        let span = root_span(&spans);
         assert_eq!(span.name, "invoke_agent");
         assert_eq!(span.kind, SpanKind::Internal);
         assert_eq!(span.status, SpanStatus::Ok);
@@ -1014,7 +1095,7 @@ mod tests {
         p.project(&user_message("q", None), &session, at(100), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(101), &[]);
         assert_eq!(
-            attrs(&spans[0]).get("gen_ai.operation.name"),
+            attrs(root_span(&spans)).get("gen_ai.operation.name"),
             Some(&"invoke_agent".to_string())
         );
     }
@@ -1025,7 +1106,7 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("question text", None), &session, at(100), &[]);
         let spans = p.project(&assistant_message("answer text"), &session, at(101), &[]);
-        let a = attrs(&spans[0]);
+        let a = attrs(root_span(&spans));
         assert_eq!(
             a.get("gen_ai.input.messages"),
             Some(&"question text".to_string())
@@ -1043,7 +1124,7 @@ mod tests {
         p.project(&user_message("q", Some("telegram")), &session, at(0), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
         assert_eq!(
-            attrs(&spans[0]).get("client.address"),
+            attrs(root_span(&spans)).get("client.address"),
             Some(&"0.0.0.0".to_string())
         );
     }
@@ -1054,7 +1135,7 @@ mod tests {
         let session = SessionId::new("sess-1");
         p.project(&user_message("q", None), &session, at(0), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
-        let a = attrs(&spans[0]);
+        let a = attrs(root_span(&spans));
         assert_eq!(
             a.get("server.address"),
             Some(&"gateway.example.internal".to_string())
@@ -1120,7 +1201,8 @@ mod tests {
             &[],
         );
         let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
-        let user_id = attrs(&spans[0])
+        let root = root_span(&spans);
+        let user_id = attrs(root)
             .get("user.id")
             .cloned()
             .expect("root must carry user.id");
@@ -1128,7 +1210,7 @@ mod tests {
         assert_eq!(user_id.len(), 36);
         // No wirken-namespaced fallback should remain on the root.
         assert!(
-            !attrs(&spans[0]).contains_key("wirken.sender.id"),
+            !attrs(root).contains_key("wirken.sender.id"),
             "wirken.sender.id placeholder should not appear once user.id is wired",
         );
     }
@@ -1242,7 +1324,7 @@ mod tests {
         assert_eq!(p.in_flight_run_count(), 1);
         let spans = p.project(&assistant_message("a"), &session, at(2), &[]);
         assert_eq!(
-            attrs(&spans[0]).get("gen_ai.input.messages"),
+            attrs(root_span(&spans)).get("gen_ai.input.messages"),
             Some(&"second".to_string())
         );
     }
@@ -1346,7 +1428,8 @@ mod tests {
         p.project(&llm_response("req-1", 100, 50), &session, at(2), &[]);
         let spans = p.project(&assistant_message("a"), &session, at(3), &[]);
 
-        assert_eq!(spans.len(), 2, "one chat plus one root");
+        // chat child + output_messages child + invoke_agent root.
+        assert_eq!(spans.len(), 3);
         let chats = chat_spans(&spans);
         assert_eq!(chats.len(), 1);
         let chat = chats[0];
@@ -1553,10 +1636,11 @@ mod tests {
             &[],
         );
         let spans = p.project(&assistant_message("a"), &session, at(2), &[]);
-        // Only the root emits; no chat span is produced for a
-        // request that never paired with a response.
+        // No chat span is produced for a request that never
+        // paired with a response. The output_messages child and
+        // the invoke_agent root still emit unconditionally.
         assert!(chat_spans(&spans).is_empty());
-        assert_eq!(spans.len(), 1);
+        assert_eq!(spans.len(), 2);
     }
 
     #[test]
@@ -1806,11 +1890,9 @@ mod tests {
         );
         let spans = p.project(&assistant_message("a"), &session, at(2), &[]);
         assert!(execute_tool_spans(&spans).is_empty());
-        assert_eq!(
-            spans.len(),
-            1,
-            "only the root emits when no tool call paired"
-        );
+        // No execute_tool span emitted for the unpaired call; the
+        // output_messages child and invoke_agent root still emit.
+        assert_eq!(spans.len(), 2);
     }
 
     #[test]
@@ -1850,6 +1932,217 @@ mod tests {
             tool_attrs.get("microsoft.session.id"),
             root_attrs.get("microsoft.session.id"),
         );
+    }
+
+    #[test]
+    fn run_close_emits_output_messages_child_parented_to_root() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("final answer"), &session, at(1), &[]);
+        let oms = output_messages_spans(&spans);
+        assert_eq!(oms.len(), 1);
+        let om = oms[0];
+        let root = root_span(&spans);
+        assert_eq!(om.parent_span_id.as_ref(), Some(&root.span_id));
+        assert_eq!(om.trace_id, root.trace_id);
+        assert_eq!(om.kind, SpanKind::Internal);
+        assert_eq!(om.status, SpanStatus::Ok);
+        // Instantaneous span: start equals end at the
+        // AssistantMessage moment.
+        assert_eq!(om.start_time_unix_nano, 1_000_000_000);
+        assert_eq!(om.end_time_unix_nano, 1_000_000_000);
+    }
+
+    #[test]
+    fn output_messages_span_carries_gen_ai_operation_name_output_messages() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        assert_eq!(
+            attrs(output_messages_spans(&spans)[0]).get("gen_ai.operation.name"),
+            Some(&"output_messages".to_string())
+        );
+    }
+
+    #[test]
+    fn output_messages_span_carries_gen_ai_output_messages_attribute() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(
+            &assistant_message("final answer body"),
+            &session,
+            at(1),
+            &[],
+        );
+        assert_eq!(
+            attrs(output_messages_spans(&spans)[0]).get("gen_ai.output.messages"),
+            Some(&"final answer body".to_string())
+        );
+    }
+
+    #[test]
+    fn output_messages_span_inherits_run_wide_attrs() {
+        let mut p = projector_with_server("gateway.example.internal", 18790);
+        let session = SessionId::new("sess-thread-99");
+        let identity = vec![
+            ("gen_ai.agent.id".to_string(), "agent-uuid".to_string()),
+            ("microsoft.tenant.id".to_string(), "tenant-uuid".to_string()),
+        ];
+        p.project(
+            &user_message("q", Some("teams")),
+            &session,
+            at(0),
+            &identity,
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(1), &identity);
+        let om_attrs = attrs(output_messages_spans(&spans)[0]);
+        assert_eq!(
+            om_attrs.get("microsoft.channel.name"),
+            Some(&"msteams".to_string())
+        );
+        assert_eq!(
+            om_attrs.get("gen_ai.conversation.id"),
+            Some(&"sess-thread-99".to_string())
+        );
+        assert!(om_attrs.contains_key("microsoft.session.id"));
+        assert_eq!(
+            om_attrs.get("gen_ai.agent.id"),
+            Some(&"agent-uuid".to_string())
+        );
+        assert_eq!(
+            om_attrs.get("microsoft.tenant.id"),
+            Some(&"tenant-uuid".to_string())
+        );
+    }
+
+    #[test]
+    fn output_messages_span_omits_ia_et_ch_addressing_trio() {
+        // output_messages is not in the IA/ET/CH set per the
+        // verified reference; the addressing trio
+        // (client.address, server.address, server.port) belongs
+        // on the root, chat, and execute_tool spans only.
+        let mut p = projector_with_server("gateway.example", 18790);
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", Some("telegram")), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let om_attrs = attrs(output_messages_spans(&spans)[0]);
+        assert!(
+            !om_attrs.contains_key("client.address"),
+            "output_messages is outside the IA/ET/CH set; client.address must not be stamped",
+        );
+        assert!(!om_attrs.contains_key("server.address"));
+        assert!(!om_attrs.contains_key("server.port"));
+    }
+
+    #[test]
+    fn output_messages_span_omits_root_only_attributes() {
+        // user.id is mandatory on invoke_agent only; the
+        // input.messages attribute is also root-only (the output
+        // message lives on both root and output_messages per the
+        // verified reference, but the input lives only on root).
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(
+            &user_message_with_sender("q", Some("telegram"), Some("user-42")),
+            &session,
+            at(0),
+            &[],
+        );
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let om_attrs = attrs(output_messages_spans(&spans)[0]);
+        assert!(!om_attrs.contains_key("user.id"));
+        assert!(!om_attrs.contains_key("gen_ai.input.messages"));
+    }
+
+    #[test]
+    fn root_keeps_gen_ai_output_messages_alongside_output_messages_child() {
+        // The verified OTel GenAI semconv reference treats
+        // gen_ai.output.messages as mandatory on invoke_agent and
+        // present on output_messages. The dedicated child is
+        // additive to the root attribute, not a relocation.
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("final answer"), &session, at(1), &[]);
+        let root_attrs = attrs(root_span(&spans));
+        assert_eq!(
+            root_attrs.get("gen_ai.output.messages"),
+            Some(&"final answer".to_string()),
+            "the invoke_agent root must keep gen_ai.output.messages even after the output_messages child is emitted",
+        );
+        let om_attrs = attrs(output_messages_spans(&spans)[0]);
+        assert_eq!(
+            om_attrs.get("gen_ai.output.messages"),
+            Some(&"final answer".to_string()),
+            "the output_messages child carries the same value",
+        );
+    }
+
+    #[test]
+    fn output_messages_span_emits_before_root_in_emit_order() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let om_pos = spans
+            .iter()
+            .position(|s| s.name == "output_messages")
+            .unwrap();
+        let root_pos = spans.iter().position(|s| s.name == "invoke_agent").unwrap();
+        assert!(
+            om_pos < root_pos,
+            "output_messages must precede the invoke_agent root in emit order; root closes last",
+        );
+    }
+
+    #[test]
+    fn full_canonical_tree_emits_root_chat_execute_tool_and_output_messages() {
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(
+            &llm_request("req-1", "anthropic", "sonnet"),
+            &session,
+            at(1),
+            &[],
+        );
+        p.project(&llm_response("req-1", 10, 5), &session, at(2), &[]);
+        p.project(
+            &assistant_tool_calls(&[("call-1", "web_search", "{}")]),
+            &session,
+            at(3),
+            &[],
+        );
+        p.project(
+            &tool_result("call-1", "web_search", "ok", true),
+            &session,
+            at(4),
+            &[],
+        );
+        let spans = p.project(&assistant_message("final"), &session, at(5), &[]);
+
+        assert_eq!(spans.iter().filter(|s| s.name == "invoke_agent").count(), 1);
+        assert_eq!(spans.iter().filter(|s| s.name == "chat").count(), 1);
+        assert_eq!(spans.iter().filter(|s| s.name == "execute_tool").count(), 1);
+        assert_eq!(
+            spans.iter().filter(|s| s.name == "output_messages").count(),
+            1
+        );
+
+        let root = root_span(&spans);
+        assert!(root.parent_span_id.is_none());
+        for span in spans.iter().filter(|s| s.name != "invoke_agent") {
+            assert_eq!(
+                span.parent_span_id.as_ref(),
+                Some(&root.span_id),
+                "every non-root span must parent to the invoke_agent root: span name {}",
+                span.name,
+            );
+            assert_eq!(span.trace_id, root.trace_id);
+        }
     }
 
     #[test]
