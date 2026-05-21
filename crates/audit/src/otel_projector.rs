@@ -396,8 +396,36 @@ fn datetime_to_unix_nanos(ts: DateTime<Utc>) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
-    use crate::user_resolver::DeterministicUserResolver;
+    use crate::user_resolver::{DeterministicUserResolver, UserId};
+
+    /// A `UserResolver` that records its inputs so the projector
+    /// can be asserted to forward the exact `(adapter_id, sender_id)`
+    /// pair from the `SessionEvent::UserMessage` rather than
+    /// placeholder values.
+    struct RecordingUserResolver {
+        captured: Mutex<Vec<(Option<String>, Option<String>)>>,
+    }
+
+    impl RecordingUserResolver {
+        fn new() -> Self {
+            Self {
+                captured: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl UserResolver for RecordingUserResolver {
+        fn resolve_user(&self, adapter_id: Option<&str>, sender_id: Option<&str>) -> UserId {
+            self.captured
+                .lock()
+                .expect("captured Mutex must not be poisoned")
+                .push((adapter_id.map(String::from), sender_id.map(String::from)));
+            UserId::new("00000000-0000-4000-8000-000000000000")
+        }
+    }
 
     fn at(seconds_since_epoch: i64) -> DateTime<Utc> {
         DateTime::<Utc>::from_timestamp(seconds_since_epoch, 0).unwrap()
@@ -769,5 +797,68 @@ mod tests {
         let ts = DateTime::<Utc>::from_timestamp(1_700_000_000, 250_000_000).unwrap();
         let nanos = datetime_to_unix_nanos(ts);
         assert_eq!(nanos, 1_700_000_000 * 1_000_000_000 + 250_000_000);
+    }
+
+    #[test]
+    fn root_span_omits_microsoft_identity_attrs_when_identity_returns_empty() {
+        // The three Microsoft-namespaced identity attributes
+        // Agent 365 enforces (`microsoft.tenant.id`, `gen_ai.agent.id`,
+        // `gen_ai.agent.name`, `microsoft.a365.agent.blueprint.id`)
+        // ride in via `FederatedIdentity::span_attributes`. The
+        // projector must not synthesize them; against a Jaeger or
+        // Keycloak target where the identity returns no Microsoft
+        // attrs, the root span legitimately omits them.
+        let mut p = projector();
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", Some("telegram")), &session, at(0), &[]);
+        let spans = p.project(&assistant_message("a"), &session, at(1), &[]);
+        let a = attrs(&spans[0]);
+        assert!(!a.contains_key("microsoft.tenant.id"));
+        assert!(!a.contains_key("gen_ai.agent.id"));
+        assert!(!a.contains_key("gen_ai.agent.name"));
+        assert!(!a.contains_key("microsoft.a365.agent.blueprint.id"));
+    }
+
+    #[test]
+    fn resolver_receives_exact_adapter_and_sender_from_user_message_event() {
+        let recorder = Arc::new(RecordingUserResolver::new());
+        let mut p = OtelProjector::new(OtelConfig::default(), recorder.clone());
+        let session = SessionId::new("sess-1");
+        p.project(
+            &user_message_with_sender("q", Some("telegram"), Some("user-42")),
+            &session,
+            at(0),
+            &[],
+        );
+        p.project(&assistant_message("a"), &session, at(1), &[]);
+        let captured = recorder
+            .captured
+            .lock()
+            .expect("captured Mutex must not be poisoned");
+        assert_eq!(captured.len(), 1, "resolver must be called once per run");
+        assert_eq!(
+            captured[0],
+            (Some("telegram".to_string()), Some("user-42".to_string())),
+            "resolver must be called with the exact (adapter_id, sender_id) the SessionEvent::UserMessage carried, not placeholders",
+        );
+    }
+
+    #[test]
+    fn resolver_receives_none_for_adapter_less_run() {
+        let recorder = Arc::new(RecordingUserResolver::new());
+        let mut p = OtelProjector::new(OtelConfig::default(), recorder.clone());
+        let session = SessionId::new("sess-1");
+        p.project(&user_message("q", None), &session, at(0), &[]);
+        p.project(&assistant_message("a"), &session, at(1), &[]);
+        let captured = recorder
+            .captured
+            .lock()
+            .expect("captured Mutex must not be poisoned");
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0],
+            (None, None),
+            "subagent and CLI runs have no adapter or sender; the resolver must receive None not a synthesized placeholder",
+        );
     }
 }
