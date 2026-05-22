@@ -11,6 +11,7 @@ pub mod error;
 pub mod factory;
 pub mod identity;
 pub mod inbound_interceptor;
+pub mod keycloak_identity;
 pub mod llm;
 pub mod llm_stream;
 pub mod mcp;

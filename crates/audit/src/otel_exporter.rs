@@ -57,6 +57,12 @@ pub trait FederatedIdentity: Send + Sync {
     /// URL (the `{tenantId}` URL segment for Agent 365). For
     /// non-Microsoft backends this is the configured tenant
     /// equivalent or an arbitrary string the operator picks.
+    ///
+    /// Implementations must derive this from the same internal
+    /// field that supplies `microsoft.tenant.id` in
+    /// [`Self::span_attributes`] (for Microsoft-namespaced
+    /// backends), so the URL slot and the stamped attribute cannot
+    /// disagree. Two paths, one source.
     fn tenant_id(&self) -> &str;
 
     /// Agent identifier interpolated into the exporter's outbound
@@ -64,12 +70,29 @@ pub trait FederatedIdentity: Send + Sync {
     /// the authenticated app id of the token returned by
     /// [`Self::current_token`] for Agent 365 acceptance; a mismatch
     /// is a documented 403.
+    ///
+    /// Implementations must derive this from the same internal
+    /// field that supplies `gen_ai.agent.id` in
+    /// [`Self::span_attributes`], so the URL slot and the stamped
+    /// attribute cannot disagree. Two paths (URL interpolation and
+    /// per-span attribute), one source.
     fn agent_id(&self) -> &str;
 
     /// Acquire (or return a cached) bearer token for the outbound
     /// POST. Implementations are expected to refresh ahead of expiry
     /// and to surface acquisition failures as
     /// [`OtelError::TokenAcquisition`].
+    ///
+    /// The trait does not require single-flight acquisition under
+    /// concurrent callers. An implementation that caches an
+    /// expired token and receives N concurrent calls before the
+    /// next acquisition completes may issue N redundant token
+    /// requests; the last write wins, the data stays consistent,
+    /// but the upstream IdP sees the redundant traffic. Deployments
+    /// running a single forwarder poller tolerate this by
+    /// construction; impls that need single-flight must add it
+    /// explicitly with an acquisition lock distinct from the
+    /// cache-read lock.
     async fn current_token(&self) -> Result<String, OtelError>;
 
     /// Run-wide attributes the projector stamps on every span.
