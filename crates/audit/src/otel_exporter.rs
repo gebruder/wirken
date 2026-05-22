@@ -210,6 +210,18 @@ pub struct OtelConfig {
     /// OTel attribute value must be serialized as `stringValue`
     /// for Agent 365.
     pub server_port: u16,
+
+    /// Initial backoff in milliseconds for 429, 5xx, and network-
+    /// failure retries. Doubles per attempt, capped at
+    /// [`Self::max_backoff_ms`]. Configurable so unit tests run
+    /// at submillisecond cadence rather than the production
+    /// default that would otherwise dominate test wall-clock
+    /// time.
+    pub initial_backoff_ms: u64,
+
+    /// Upper bound on the per-retry sleep in milliseconds. Caps
+    /// runaway exponential growth on a long-running 5xx storm.
+    pub max_backoff_ms: u64,
 }
 
 impl Default for OtelConfig {
@@ -223,6 +235,8 @@ impl Default for OtelConfig {
             channel_name_overrides,
             server_address: "127.0.0.1".to_string(),
             server_port: 0,
+            initial_backoff_ms: 100,
+            max_backoff_ms: 30_000,
         }
     }
 }
