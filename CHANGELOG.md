@@ -10,6 +10,20 @@ tagged.
 
 ## Unreleased
 
+### OpenTelemetry projection
+
+- New `wirken_audit::otel_*` modules. Project session events into
+  OpenTelemetry GenAI semantic-convention spans and ship
+  OTLP/HTTP+JSON to any OTLP-compatible backend. Microsoft documents
+  a direct OTLP contract for non-SDK Agent 365 integration, which
+  this projection implements. See
+  [`docs/integrations/agent365.md`](docs/integrations/agent365.md).
+- Pluggable `FederatedIdentity` trait with `KeycloakFederatedIdentity`
+  on `main`. The Microsoft Entra identity, conformance suite, and
+  Graph registration are consolidated under
+  [#135](https://github.com/gebruder/wirken/issues/135) and deferred
+  pending a licensed tenant fixture.
+
 ## [1.7.1] - 2026-05-20
 
 ### Subscription surface
