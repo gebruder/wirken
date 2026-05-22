@@ -4,6 +4,7 @@ mod event;
 mod legacy_compat;
 mod log;
 pub mod otel_exporter;
+pub mod otel_otlp;
 pub mod otel_projector;
 pub mod pricing;
 mod session_log;
