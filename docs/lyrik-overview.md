@@ -70,9 +70,27 @@ Each report records the source code's location (git URL, commit SHA, and whether
 
 ## What ships today and what is in design
 
-Today: scoring against a committed guide, two-pass scoring with third-pass tiebreak, human-review routing with the three disagreement kinds, separate streams for new and repeat findings, concentration numbers, scanner dispatch (semgrep, gitleaks, secret scanners, custom checkers, with versions logged), audit logs, markdown reports.
+Today:
 
-In design: JSON output for tools (SIEM, ticketing, CI/CD gating, run-to-run diff). Per-finding source tags showing which detector produced the finding. Static checks for prompt injection running alongside model-based detection. Per-skill restricted tool lists. Opt-in for auto-running.
+- **Scoring against the inline rubric in SKILL.md.** The rubric used to derive every finding's tier lives in the skill body. The production-mode committed-guide workflow (Phase 0 sign-off that writes `.lyrik/rubric.md` and `.lyrik/context.md` to the repo for the team to review) auto-approves under bench mode and is not yet wired in production runs.
+- **Two-pass scoring, disagreement marked, lower tier picked, not averaged.** Each finding is scored by two independent passes. When the passes disagree by more than one step on any axis, the finding carries `scoring_disagreement: true` and the runner picks the lower-implied tier. This is the mechanism behind "will not average disagreeing scorers": disagreement is recorded and resolved conservatively, not collapsed into a synthetic consensus.
+- **Grade caps at 0.5.** A finding gets `grade: 0.5` when both passes mark `real_bug: yes` and `reachable: yes`; everything else gets `grade: 0`. The 0.5 ceiling is by design: Lyrik confirms real-and-reachable, exploit verification is a separate workload that runs against the same findings later.
+- **Per-finding `detection_source` provenance.** Closed enum `static_prescreen | model_reasoning | both` on every emitted finding, enforced when present per schema-v1.1.
+- **Opt-in Semgrep scanner dispatch.** When `scanner.semgrep.enabled` is set in `.lyrik/config.json`, the runner invokes a pinned Semgrep version against the target before the LLM passes, materialises taint/dataflow candidates as seeds the model rules on, and records `lyrik.scanner.dispatched` with the binary version and bundled ruleset sha. Binary absent or version mismatch degrades to LLM-only with a `lyrik.scanner.unavailable` audit row. Semgrep is the only scanner that ships today.
+- **Per-skill restricted tool lists.** Every skill's `permissions:` block (tools, egress, filesystem, inference) is enforced at runtime by the gateway. The Lyrik skill ships its own block; operators can review or tighten before install.
+- **Audit logs.** Per-run NDJSON `<run>/audit.log` for every dispatch decision plus the signed hash-chained gateway audit chain at `~/.wirken/audit.db` for cross-session integrity.
+- **JSON findings schema.** Schema-v1.1 with a reference validator (`wirken lyrik validate <path>`) and a SARIF report emitter (`wirken lyrik report --format sarif`) for SIEM and CI consumers.
+
+In design:
+
+- Three-pass scoring with tiebreak when the two passes disagree by more than one step, and the framing-split resolution shape that goes with it.
+- Production-mode human gate routing to channel adapters with the three disagreement-kind tags (`rubric_clarification`, `framing_split`, `scope_expansion_required`).
+- Separate streams for new and repeat findings, sourced from a `.lyrik/prior/` dedup pass against past CVEs, pentest reports, and internal disclosures.
+- Concentration index reporting what severity total would look like without the worst finding, the worst five, the worst ten.
+- Additional scanner dispatch beyond Semgrep.
+- Markdown report output alongside the existing SARIF emitter.
+- Prompt-injection framing wired into Lyrik alongside model-based detection. The static `InjectionDetector` already ships in the gateway; the Lyrik-side integration is what's pending.
+- Opt-in for auto-running.
 
 In research: capability tokens, runtime watchdog mode, sub-context isolation.
 
@@ -81,8 +99,6 @@ Tracked in `skills/lyrik/FOLLOWUPS.md` (case-accumulating records from dogfood r
 ## Setup and use
 
 For setup, configuration, and the channel target syntax, see `docs/lyrik.md`.
-
-A stable JSON output schema for ingestors (SIEM, ticketing, CI/CD gating) is forward-looking work tracked in issue #80.
 
 ## See also
 
