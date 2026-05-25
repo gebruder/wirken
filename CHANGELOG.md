@@ -10,6 +10,29 @@ tagged.
 
 ## Unreleased
 
+## [1.7.2] - 2026-05-25
+
+### Sandbox security fix (wasmtime 43 → 45)
+
+- Bump bundled wasmtime to `45.0.0` for RUSTSEC-2026-0149: WASI
+  `path_open(TRUNCATE)` was bypassing the host `FilePerms::WRITE`
+  restriction. Fixed upstream; sandbox semantics unchanged, enforcement
+  correct. No API change in `wirken_agent::wasm_sandbox`.
+
+### Zirkel score calibration
+
+- New `wirken zirkel calibrate` subcommand. Reads
+  `~/.wirken/zirkel/aggregator.db`, joins
+  `candidates.llm_relevance_score` against the user keep/skip label
+  set from `digest_items.decision` (orchestrator skips never reach
+  `digest_items` so the exclusion is structural; `NULL` decisions are
+  excluded so absence-of-engagement does not masquerade as rejection),
+  and emits AUC (Mann-Whitney U with mid-rank tie handling) plus an
+  equal-frequency reliability diagram. Optional `--run-id`,
+  `--buckets`, and `--by overall|source|keyword`. Low-n buckets are
+  not suppressed or smoothed; per-bucket `n` prints on every row.
+  Computation only; the corpus stays in `~/.wirken/`.
+
 ### Lyrik Semgrep-seed pass + schema-v1.1
 
 - Pre-LLM Semgrep dataflow pass, opt-in via
