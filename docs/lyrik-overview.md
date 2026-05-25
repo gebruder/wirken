@@ -102,8 +102,8 @@ For setup, configuration, and the channel target syntax, see `docs/lyrik.md`.
 
 ## See also
 
-- `docs/lyrik.md` — setup, configuration, first-run.
-- `docs/lyrik-rubric-authoring.md` — how the team writes and refines `.lyrik/rubric.md`.
-- `skills/lyrik/SKILL.md` — the skill itself.
-- `skills/lyrik/FOLLOWUPS.md` — open design questions from real runs.
+- `docs/lyrik.md`: setup, configuration, first-run.
+- `docs/lyrik-rubric-authoring.md`: how the team writes and refines `.lyrik/rubric.md`.
+- `skills/lyrik/SKILL.md`: the skill itself.
+- `skills/lyrik/FOLLOWUPS.md`: open design questions from real runs.
 - `lyrik.wirken.ai`
