@@ -58,30 +58,30 @@ Run top to bottom. Replace `0.7.4` with the target version.
        && echo "install.sh SHA matches README pin" \
        || { echo "install.sh SHA drift"; exit 1; }
    cargo test --workspace
+   cargo deny check
    ./scripts/test-install.sh
    gh api repos/gebruder/wirken/dependabot/alerts \
        --jq '.[] | select(.state == "open") | {num: .number, sev: .security_advisory.severity, pkg: .dependency.package.name, ghsa: .security_advisory.ghsa_id}'
+   gh api repos/gebruder/wirken/code-scanning/alerts \
+       --jq '.[] | select(.state == "open") | {num: .number, sev: .rule.security_severity_level, rule: .rule.id, tool: .tool.name, path: .most_recent_instance.location.path}'
+   gh api repos/gebruder/wirken/secret-scanning/alerts \
+       --jq '.[] | select(.state == "open") | {num: .number, type: .secret_type_display_name}' 2>/dev/null || true
    gh pr list --label dependencies --state open
    ```
 
    The `shellcheck` and SHA checks exist because a locally modified
    `install.sh` that has not been pushed will not be caught by the
    `installer-pin` CI workflow until push, and a release tagged before
-   push will ship with a mismatched pin. `cargo fmt` and `cargo clippy`
-   are redundant with CI but serve as a local fast-fail.
+   push will ship with a mismatched pin. `cargo fmt`, `cargo clippy`,
+   and `cargo deny check` are redundant with CI but serve as a local
+   fast-fail.
 
-   The dependabot alert and PR list checks are non-empty by default;
-   the requirement is that you have read both and made an explicit
-   call on each. Open security alerts must be folded into the
-   release or consciously deferred (the deferral lives in the
-   CHANGELOG, not implicit). Open dependabot PRs that are CI-green
-   and patch-within-range fold cleanly; minor-in-0.x or major bumps
-   take a soak cycle. Tagging while ignoring an open high-severity
-   advisory ships a known-vulnerable release; a v1.0.2 -> v1.1.0 cut
-   missed the openssl 0.10.79 advisory at first tag, was caught by
-   GitHub's push-time alert banner, and required deleting the tag
-   under the [Recovery](#recovery-during-a-release) "tag exists, no
-   draft" path.
+   The security-surface queries and the dependency-PR list are
+   non-empty by default. Read every open row on every surface. For
+   each, fold the fix into this release or defer it explicitly in
+   the CHANGELOG. Patch and non-0.x-minor dependabot bumps fold
+   cleanly; 0.x-minor and major bumps take a soak cycle. Do not tag
+   while a critical or high-severity advisory is open on any surface.
 
 2. **Bump the workspace version.** Edit `Cargo.toml`:
    ```toml
