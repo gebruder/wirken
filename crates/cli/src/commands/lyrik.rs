@@ -254,17 +254,102 @@ async fn dispatch_via_agent_runtime(
     let walks_source_dir = default_walks_source_dir();
     let walks_cfg = parse_walks_config(config, &walks_source_dir).context("parse walks config")?;
 
+    let run_dir = target
+        .join(".lyrik")
+        .join("state")
+        .join("runs")
+        .join(run_id);
+
+    // Resolve the LLM pin and credentials first so the preflight
+    // tool-call probe runs before any target-touching work (scanner,
+    // staging-dir population, agent build). A model that cannot emit
+    // tool calls produces a worthless audit, so fail-closed here
+    // beats wasting a run.
+    let pin = resolve_phase_pin(config)?;
+    let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
+    if let Some(cw) = pin.context_window {
+        llm_config.context_window = cw as usize;
+    }
+
+    let cfg = super::config();
+
+    // Slot name the api_key was resolved from. Stamped on every
+    // `LlmRequest` / `LlmResponse` for SIEM correlation. `None` for
+    // ollama (no vault lookup).
+    let mut api_key_credential: Option<String> = None;
+    let api_key = if pin.provider != "ollama" {
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
+        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("open credential store")?;
+        let cred_name = format!("{}-api-key", pin.provider);
+        match store.retrieve(&cred_name) {
+            Ok((secret, _)) => {
+                api_key_credential = Some(cred_name.clone());
+                Some(secret.expose().to_string())
+            }
+            Err(e) => anyhow::bail!(
+                "API key '{cred_name}' missing from vault: {e}; \
+                 add it with `wirken credentials add {cred_name}` \
+                 or change the target's .lyrik/config.json pin"
+            ),
+        }
+    } else {
+        None
+    };
+
+    // Preflight tool-call probe. Mirrors the dispatch path the real
+    // run uses (LlmClient::complete) with one tool defined and a
+    // prompt asking the model to call it. Fail-closed: a model that
+    // cannot return a structured tool_call here would produce zero
+    // staged findings, so bail before any audit work begins.
+    match super::lyrik_preflight::probe_tool_calling(&llm_config, api_key.as_deref()).await {
+        Ok(super::lyrik_preflight::ProbeOutcome::Pass) => {
+            audit.emit(
+                "lyrik.model.tool_calls_supported",
+                serde_json::json!({
+                    "provider": pin.provider,
+                    "model": pin.model,
+                }),
+            )?;
+        }
+        Ok(super::lyrik_preflight::ProbeOutcome::Fail { case, detail }) => {
+            audit.emit(
+                "lyrik.model.tool_calls_unsupported",
+                serde_json::json!({
+                    "provider": pin.provider,
+                    "model": pin.model,
+                    "case": case.as_str(),
+                    "detail": detail,
+                }),
+            )?;
+            anyhow::bail!(
+                "preflight: model {} (provider {}) cannot emit tool calls (case: {}); aborting before any audit work",
+                pin.model,
+                pin.provider,
+                case.as_str(),
+            );
+        }
+        Err(e) => {
+            audit.emit(
+                "lyrik.model.tool_calls_unsupported",
+                serde_json::json!({
+                    "provider": pin.provider,
+                    "model": pin.model,
+                    "case": "preflight_error",
+                    "detail": e.to_string(),
+                }),
+            )?;
+            return Err(e.context("preflight tool-call probe"));
+        }
+    }
+
     // Opt-in pre-LLM scanner dispatch. Default off; an absent or
     // false `scanner.semgrep.enabled` field means zero behavioural
     // change. Enabled runs that find the pinned binary materialise
     // dataflow seeds the model rules on; absent binary / version
     // mismatch / parse failure degrade-and-log (the runner pin is
     // the contract, mismatched binary on PATH is unavailable).
-    let run_dir = target
-        .join(".lyrik")
-        .join("state")
-        .join("runs")
-        .join(run_id);
     let scanner_cfg = parse_scanner_config(config).context("parse scanner config")?;
     let seeds: Vec<Seed> = if scanner_cfg.semgrep_enabled {
         let ruleset_path =
@@ -309,39 +394,6 @@ async fn dispatch_via_agent_runtime(
         Vec::new()
     };
     let seeds_present = !seeds.is_empty();
-
-    let pin = resolve_phase_pin(config)?;
-    let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
-    if let Some(cw) = pin.context_window {
-        llm_config.context_window = cw as usize;
-    }
-
-    let cfg = super::config();
-
-    // Slot name the api_key was resolved from. Stamped on every
-    // `LlmRequest` / `LlmResponse` for SIEM correlation. `None` for
-    // ollama (no vault lookup).
-    let mut api_key_credential: Option<String> = None;
-    let api_key = if pin.provider != "ollama" {
-        let pp = super::cached_vault_passphrase()?;
-        let keychain = probe_keychain(&cfg.data_dir, move || pp);
-        let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
-            .context("open credential store")?;
-        let cred_name = format!("{}-api-key", pin.provider);
-        match store.retrieve(&cred_name) {
-            Ok((secret, _)) => {
-                api_key_credential = Some(cred_name.clone());
-                Some(secret.expose().to_string())
-            }
-            Err(e) => anyhow::bail!(
-                "API key '{cred_name}' missing from vault: {e}; \
-                 add it with `wirken credentials add {cred_name}` \
-                 or change the target's .lyrik/config.json pin"
-            ),
-        }
-    } else {
-        None
-    };
 
     // Inherit the gateway's signed audit chain. ChainHead records
     // bracket the run: the SessionStart head fires implicitly on
