@@ -63,8 +63,10 @@ secret-service = "5.1"
 # IPC
 capnp = "0.25"
 
-# Sandbox
-wasmtime = "43.0.2"
+# Sandbox. Pinned >=45 per RUSTSEC-2026-0149 (wasmtime-wasi
+# path_open(TRUNCATE) bypasses FilePerms::WRITE; fixed in 44.0.2 /
+# 45.0.0).
+wasmtime = "45.0.0"
 bollard = "0.21"
 
 # CLI
