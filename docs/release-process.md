@@ -180,8 +180,11 @@ Run top to bottom. Replace `0.7.4` with the target version.
     broken. Go to [Recovery](#recovery-during-a-release).
 
 Post-release housekeeping: update the README Status section counts if
-any shifted (adapters, providers, skills, tests). Clean up
-`/tmp/wirken-release` and `/tmp/wirken-smoke`.
+any shifted (adapters, providers, skills, tests). If
+`crates/audit/src/session_log.rs` changed since the previous release,
+sync the `wirken-siem` repo's compatibility table and field index in
+the same sitting. Clean up `/tmp/wirken-release` and
+`/tmp/wirken-smoke`.
 
 ## Recovery during a release
 
