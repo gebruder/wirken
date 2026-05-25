@@ -620,6 +620,8 @@ async fn dispatch_via_agent_runtime(
         run_id,
         dedup_active,
         &seed_locations,
+        target,
+        audit,
     )
     .context("aggregate findings")?;
     // remove_dir succeeds only if empty — exactly the semantics we
@@ -983,15 +985,24 @@ async fn dispatch_walks_concurrent(
 /// upgrades the pair `{static_prescreen, model_reasoning}` to
 /// `both` (single-call mode has no dedup and never produces
 /// `both` — documented in `docs/lyrik-json-schema.md`).
+#[allow(clippy::too_many_arguments)]
 fn aggregate_findings_multi(
     sources: &[(Option<String>, PathBuf)],
     dest: &Path,
     run_id: &str,
     dedup_active: bool,
     seed_locations: &std::collections::HashSet<String>,
+    workspace: &Path,
+    audit: &mut AuditLogger,
 ) -> Result<()> {
+    use super::lyrik_citation;
+
     let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
+    let mut literal_claim_resolved: usize = 0;
+    let mut literal_claim_unresolved: usize = 0;
+    let mut file_line_only_resolved: usize = 0;
+    let mut file_line_only_unresolved: usize = 0;
     for (walk_name, source) in sources {
         if !source.is_dir() {
             continue;
@@ -1008,6 +1019,43 @@ fn aggregate_findings_multi(
             let mut parsed: serde_json::Value = serde_json::from_str(&body)
                 .with_context(|| format!("parse staged finding {}", p.display()))?;
             annotate_detection_source(&mut parsed, seed_locations);
+
+            let outcome = lyrik_citation::check(&parsed, workspace);
+            match (outcome.gate, outcome.status) {
+                (lyrik_citation::Gate::LiteralClaim, lyrik_citation::Status::Resolved) => {
+                    literal_claim_resolved += 1
+                }
+                (lyrik_citation::Gate::LiteralClaim, lyrik_citation::Status::Unresolved) => {
+                    literal_claim_unresolved += 1
+                }
+                (lyrik_citation::Gate::FileLineOnly, lyrik_citation::Status::Resolved) => {
+                    file_line_only_resolved += 1
+                }
+                (lyrik_citation::Gate::FileLineOnly, lyrik_citation::Status::Unresolved) => {
+                    file_line_only_unresolved += 1
+                }
+            }
+            audit.emit(
+                "lyrik.citation.checked",
+                serde_json::json!({
+                    "staged_path": p.display().to_string(),
+                    "finding_id": parsed.get("id").and_then(|v| v.as_str()),
+                    "stable_id": parsed.get("stable_id").and_then(|v| v.as_str()),
+                    "location_file": parsed
+                        .get("location")
+                        .and_then(|v| v.get("file"))
+                        .and_then(|v| v.as_str()),
+                    "location_line": parsed
+                        .get("location")
+                        .and_then(|v| v.get("line_start"))
+                        .and_then(|v| v.as_u64()),
+                    "gate": outcome.gate.as_str(),
+                    "status": outcome.status.as_str(),
+                    "reason": outcome.reason,
+                }),
+            )?;
+            lyrik_citation::annotate(&mut parsed, &outcome);
+
             tagged.push((walk_name.clone(), parsed));
         }
         if !entries.is_empty() {
@@ -1028,6 +1076,16 @@ fn aggregate_findings_multi(
         "schema_version": "1.1",
         "run_id": run_id,
         "produced_at": chrono::Utc::now().to_rfc3339(),
+        "citation_check": {
+            "literal_claim": {
+                "resolved": literal_claim_resolved,
+                "unresolved": literal_claim_unresolved,
+            },
+            "file_line_only": {
+                "resolved": file_line_only_resolved,
+                "unresolved": file_line_only_unresolved,
+            },
+        },
         "findings": findings,
     });
     if let Some(parent) = dest.parent() {
@@ -2047,7 +2105,20 @@ mod tests {
             (Some("graph-walk".to_string()), graph_dir),
         ];
         let no_seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
-        aggregate_findings_multi(&sources, &dest, "sample/run-007", true, &no_seeds).unwrap();
+        let workspace = tmp.path();
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "sample/run-007", true)
+                .unwrap();
+        aggregate_findings_multi(
+            &sources,
+            &dest,
+            "sample/run-007",
+            true,
+            &no_seeds,
+            workspace,
+            &mut audit,
+        )
+        .unwrap();
 
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
@@ -2098,8 +2169,20 @@ mod tests {
         );
         let dest = tmp.path().join("findings.json");
         let no_seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
-        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-008", false, &no_seeds)
-            .unwrap();
+        let workspace = tmp.path();
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "sample/run-008", true)
+                .unwrap();
+        aggregate_findings_multi(
+            &[(None, dir)],
+            &dest,
+            "sample/run-008",
+            false,
+            &no_seeds,
+            workspace,
+            &mut audit,
+        )
+        .unwrap();
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         let arr = body.get("findings").and_then(|v| v.as_array()).unwrap();
@@ -2204,7 +2287,20 @@ mod tests {
         );
         let dest = tmp.path().join("findings.json");
         let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
-        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-009", false, &seeds).unwrap();
+        let workspace = tmp.path();
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "sample/run-009", true)
+                .unwrap();
+        aggregate_findings_multi(
+            &[(None, dir)],
+            &dest,
+            "sample/run-009",
+            false,
+            &seeds,
+            workspace,
+            &mut audit,
+        )
+        .unwrap();
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         assert_eq!(body["schema_version"].as_str(), Some("1.1"));
@@ -2222,7 +2318,20 @@ mod tests {
         let dest = tmp.path().join("findings.json");
         let mut seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
         seeds.insert("src/a.rs:10".to_string());
-        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-010", false, &seeds).unwrap();
+        let workspace = tmp.path();
+        let mut audit =
+            super::AuditLogger::open(&tmp.path().join("audit.log"), "sample/run-010", true)
+                .unwrap();
+        aggregate_findings_multi(
+            &[(None, dir)],
+            &dest,
+            "sample/run-010",
+            false,
+            &seeds,
+            workspace,
+            &mut audit,
+        )
+        .unwrap();
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         let arr = body["findings"].as_array().unwrap();
