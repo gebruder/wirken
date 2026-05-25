@@ -134,6 +134,29 @@ Per-walk outcome lands in the audit log as `lyrik.walk.started` and `lyrik.walk.
 
 When `walks` is absent, the runner takes the existing one-call slice path: a single `/lyrik` turn, no per-walk staging, no dedup. Operators opt in when they want the parallelism.
 
+### `scanner`
+
+Optional. Opt-in for the pre-LLM static-prescreen pass. Absent the block (default), Lyrik runs LLM-only and emits findings without `detection_source`.
+
+```json
+{
+  "scanner": {
+    "semgrep": { "enabled": true }
+  }
+}
+```
+
+When `scanner.semgrep.enabled` is `true`, the runner invokes a pinned Semgrep version with a bundled ruleset against the target before the LLM passes, materialises taint/dataflow candidates as seed files under `.lyrik/state/runs/<run-id>/seeds/seed-NNN.json`, and amends the dispatch prompt so the model rules on each seed. The model accepts a seed by emitting a finding at the seed's location (the runner annotates `detection_source` post-turn based on location match — see schema-v1.1 spec for the closed enum), or declines by writing `staging/<walk?>/declines/decline-NNN.json` with `{seed_id, reason}`.
+
+Per-seed disposition is recorded in the per-run NDJSON `audit.log`:
+
+- `lyrik.scanner.dispatched` — Semgrep ran. Detail: `{tool, version, ruleset_url, ruleset_sha, target, seed_count}`.
+- `lyrik.scanner.unavailable` — binary absent, version mismatch against the runner's pin, or invocation/parse failure. Detail: `{tool, reason, detail}` with `reason` a stable snake_case label. Run proceeds LLM-only.
+- `lyrik.candidate.declined` — model wrote a decline file for a seed. One row per (walk, decline) pair so per-walk decline rationales stay distinguishable.
+- `lyrik.candidate.unaddressed` — seed matched no finding and no decline. One row per seed.
+
+The runner pin is the contract: a different `semgrep --version` on PATH counts as `version_mismatch`. None of the scanner rows are signed; they live in the per-run NDJSON only (see issue tracker for the typed signed-`SessionLog` variant).
+
 ### `bench_mode`
 
 Boolean. Defaults to `false`. When `true`, two human gates are short-circuited so the run can complete without an interactive reviewer:

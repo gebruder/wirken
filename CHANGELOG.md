@@ -10,6 +10,35 @@ tagged.
 
 ## Unreleased
 
+### Lyrik Semgrep-seed pass + schema-v1.1
+
+- Pre-LLM Semgrep dataflow pass, opt-in via
+  `.lyrik/config.json::scanner.semgrep.enabled`. Pinned binary
+  version + bundled ruleset (sha computed at first use).
+  Taint/dataflow candidates materialise as seeds under
+  `.lyrik/state/runs/<run-id>/seeds/seed-NNN.json`; the model
+  rules on each. Explicit decline files (`staging/<walk?>/declines/decline-NNN.json`,
+  `{seed_id, reason}`) separate "considered and rejected" from
+  "never ruled." Binary absent, version mismatch against the
+  runner's pin, or invocation failure degrade-and-log via
+  `lyrik.scanner.unavailable` and proceed LLM-only. Default off:
+  absent the config block, zero behavioural change.
+- New per-run audit events: `lyrik.scanner.dispatched`,
+  `lyrik.scanner.unavailable`, `lyrik.candidate.declined`,
+  `lyrik.candidate.unaddressed`. Per-run NDJSON only; no
+  signed-`SessionLog` typed variant in this slice.
+- **Lyrik JSON schema bumps to 1.1.** `detection_source` is
+  promoted from the allowed-extras band to an enforced-when-present
+  closed enum (`static_prescreen`, `model_reasoning`, `both`).
+  `both` is produced only by per-walk dedup convergence between a
+  scanner-seeded finding and a model-native finding at the same
+  location; single-call mode has no aggregator and never emits
+  `both`. The validator strictly accepts `schema_version: "1.1"`;
+  pre-1.1 archives stay readable by a pre-1.1 binary. New git tag
+  `schema-v1.1` anchors the `$id` URL. See
+  [`docs/lyrik-json-schema.md`](docs/lyrik-json-schema.md) and
+  [`docs/lyrik.md`](docs/lyrik.md).
+
 ### OpenTelemetry projection
 
 - New `wirken_audit::otel_*` modules. Project session events into

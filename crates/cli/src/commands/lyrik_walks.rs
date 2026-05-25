@@ -236,7 +236,7 @@ pub fn ensure_walk_staging(run_dir: &Path, walks: &[String]) -> Result<()> {
 /// the runner only needs to supply the run-id, the staging path,
 /// and the workspace pointer. Walks read the rest from the staged
 /// SKILL.md body.
-pub fn build_walk_prompt(walk_name: &str, run_id: &str) -> String {
+pub fn build_walk_prompt(walk_name: &str, run_id: &str, seed_protocol_suffix: &str) -> String {
     format!(
         "/{walk_name} Run {walk_name} on this workspace. Run-id: `{run_id}`. \
          Emission is staged. Findings: write each finding to \
@@ -246,7 +246,7 @@ pub fn build_walk_prompt(walk_name: &str, run_id: &str) -> String {
          Rubric (if produced): `.lyrik/state/runs/{run_id}/staging/{walk_name}/rubric/<NN>-<tier>.md`. \
          Do not write `findings.json` directly; the Lyrik runner aggregates \
          per-walk staging into the canonical findings.json after every walk \
-         turn returns."
+         turn returns.{seed_protocol_suffix}"
     )
 }
 
@@ -398,9 +398,16 @@ mod tests {
 
     #[test]
     fn build_walk_prompt_includes_walk_name_run_id_and_staging_path() {
-        let p = build_walk_prompt("sink-walk", "sample/run-001");
+        let p = build_walk_prompt("sink-walk", "sample/run-001", "");
         assert!(p.starts_with("/sink-walk "));
         assert!(p.contains("Run-id: `sample/run-001`"));
         assert!(p.contains("staging/sink-walk/findings/finding-NNN.json"));
+    }
+
+    #[test]
+    fn build_walk_prompt_appends_seed_protocol_suffix_when_supplied() {
+        let suffix = " SEEDS-MARKER";
+        let p = build_walk_prompt("sink-walk", "sample/run-001", suffix);
+        assert!(p.ends_with(suffix));
     }
 }

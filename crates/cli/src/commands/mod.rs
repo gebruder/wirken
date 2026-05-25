@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod hooks;
 pub mod lyrik;
 pub mod lyrik_sarif;
+pub mod lyrik_semgrep;
 pub mod lyrik_validate;
 pub mod lyrik_walks;
 pub mod mcp;

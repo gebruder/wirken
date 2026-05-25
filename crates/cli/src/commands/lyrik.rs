@@ -19,6 +19,9 @@ use wirken_agent::recovery::RecoveryObserver;
 use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
+use super::lyrik_semgrep::{
+    self, DispatchOutcome, Seed, parse_scanner_config, write_bundled_ruleset, write_seed_files,
+};
 use super::lyrik_walks::{
     build_walk_prompt, default_walks_source_dir, ensure_walk_staging, parse_walks_config,
     stage_walk_skills,
@@ -219,7 +222,7 @@ impl RecoveryObserver for LyrikRecoveryObserver {
 /// instead of silently losing the run.
 fn write_empty_findings(path: &Path, run_id: &str) -> Result<()> {
     let body = serde_json::json!({
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "run_id": run_id,
         "produced_at": chrono::Utc::now().to_rfc3339(),
         "findings": [],
@@ -250,6 +253,62 @@ async fn dispatch_via_agent_runtime(
     // existing single-prompt /lyrik dispatch path.
     let walks_source_dir = default_walks_source_dir();
     let walks_cfg = parse_walks_config(config, &walks_source_dir).context("parse walks config")?;
+
+    // Opt-in pre-LLM scanner dispatch. Default off; an absent or
+    // false `scanner.semgrep.enabled` field means zero behavioural
+    // change. Enabled runs that find the pinned binary materialise
+    // dataflow seeds the model rules on; absent binary / version
+    // mismatch / parse failure degrade-and-log (the runner pin is
+    // the contract, mismatched binary on PATH is unavailable).
+    let run_dir = target
+        .join(".lyrik")
+        .join("state")
+        .join("runs")
+        .join(run_id);
+    let scanner_cfg = parse_scanner_config(config).context("parse scanner config")?;
+    let seeds: Vec<Seed> = if scanner_cfg.semgrep_enabled {
+        let ruleset_path =
+            write_bundled_ruleset(&run_dir).context("materialise bundled semgrep ruleset")?;
+        match lyrik_semgrep::dispatch_semgrep(target, &ruleset_path) {
+            DispatchOutcome::Dispatched {
+                version,
+                ruleset_sha,
+                seeds,
+            } => {
+                write_seed_files(&run_dir, &seeds).context("write seed files")?;
+                audit.emit(
+                    "lyrik.scanner.dispatched",
+                    serde_json::json!({
+                        "tool": "semgrep",
+                        "version": version,
+                        "ruleset_url": lyrik_semgrep::RULESET_URL,
+                        "ruleset_sha": ruleset_sha,
+                        "target": target.display().to_string(),
+                        "seed_count": seeds.len(),
+                    }),
+                )?;
+                seeds
+            }
+            DispatchOutcome::Unavailable { reason, detail } => {
+                tracing::warn!(
+                    reason = %reason,
+                    "lyrik scanner unavailable; proceeding with LLM-only scanning"
+                );
+                audit.emit(
+                    "lyrik.scanner.unavailable",
+                    serde_json::json!({
+                        "tool": "semgrep",
+                        "reason": reason,
+                        "detail": detail,
+                    }),
+                )?;
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let seeds_present = !seeds.is_empty();
 
     let pin = resolve_phase_pin(config)?;
     let mut llm_config = LlmConfig::from_provider(&pin.provider, &pin.base_url, &pin.model);
@@ -348,16 +407,10 @@ async fn dispatch_via_agent_runtime(
     // frontmatter, then merge them into the agent's loaded skills.
     // Each walk becomes a `/<walk-name>` slash invocation with the
     // operator's installed body intact.
-    let run_dir_for_staging = target
-        .join(".lyrik")
-        .join("state")
-        .join("runs")
-        .join(run_id);
     let walks_staged_dir = match walks_cfg.as_ref() {
         Some(wc) => {
-            ensure_walk_staging(&run_dir_for_staging, &wc.walks)
-                .context("ensure per-walk staging dirs")?;
-            let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir_for_staging)
+            ensure_walk_staging(&run_dir, &wc.walks).context("ensure per-walk staging dirs")?;
+            let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir)
                 .context("stage walk skills")?;
             agent
                 .extend_skills(&staged)
@@ -422,6 +475,11 @@ async fn dispatch_via_agent_runtime(
             // observer, and the LLM config. Sharing the session_id
             // is what makes "one session, N walk turns" land in a
             // single signed chain.
+            let walk_seed_suffix = if seeds_present {
+                seed_protocol_text(run_id, Some("<walk>"))
+            } else {
+                String::new()
+            };
             let outcomes = dispatch_walks_concurrent(
                 wc.walks.clone(),
                 wc.max_concurrent_walks,
@@ -438,6 +496,7 @@ async fn dispatch_via_agent_runtime(
                 walks_staged_dir
                     .clone()
                     .expect("walks_staged_dir is Some when walks_cfg is Some"),
+                walk_seed_suffix,
                 audit,
             )
             .await?;
@@ -446,6 +505,11 @@ async fn dispatch_via_agent_runtime(
             walk_outcomes = Some(outcomes);
         }
         None => {
+            let seed_protocol = if seeds_present {
+                seed_protocol_text(run_id, None)
+            } else {
+                String::new()
+            };
             let prompt = format!(
                 "/lyrik Run a full assessment on the codebase in this workspace. \
                  Run-id: `{run_id}`. Bench mode is enabled: phase_0_signoff and \
@@ -462,7 +526,7 @@ async fn dispatch_via_agent_runtime(
                  `00-axes.md`. Do not write `findings.json`, `.lyrik/context.md`, \
                  or `.lyrik/rubric.md` directly. The runner aggregates the \
                  staging directories into the final files after the assessment \
-                 turn returns."
+                 turn returns.{seed_protocol}"
             );
             let inbound_id = format!("lyrik-run-{}", uuid::Uuid::new_v4());
             let result = match agent.process_message(&prompt, inbound_id).await {
@@ -507,11 +571,6 @@ async fn dispatch_via_agent_runtime(
     // skip-Phase-0 rule), and `staging/findings/` may be absent if
     // the agent wrote findings.json directly via the legacy
     // single-write path.
-    let run_dir = target
-        .join(".lyrik")
-        .join("state")
-        .join("runs")
-        .join(run_id);
     let staging = run_dir.join("staging");
     aggregate_phase0_section(
         &staging.join("context"),
@@ -536,9 +595,33 @@ async fn dispatch_via_agent_runtime(
             }
         }
     }
+    let seed_locations: std::collections::HashSet<String> = seeds
+        .iter()
+        .map(|s| format!("{}:{}", s.file, s.line))
+        .collect();
     let dedup_active = walks_cfg.is_some();
-    aggregate_findings_multi(&finding_sources, expected_findings, run_id, dedup_active)
-        .context("aggregate findings")?;
+
+    // Decline + unaddressed accounting runs before aggregation so it
+    // reads the as-staged finding locations and the per-walk
+    // staging/<walk?>/declines/ trees while they still exist.
+    // aggregate_findings_multi removes consumed staging dirs.
+    process_seed_dispositions(
+        &staging,
+        walks_cfg.as_ref().map(|wc| wc.walks.as_slice()),
+        &seeds,
+        &finding_sources,
+        audit,
+    )
+    .context("process seed dispositions")?;
+
+    aggregate_findings_multi(
+        &finding_sources,
+        expected_findings,
+        run_id,
+        dedup_active,
+        &seed_locations,
+    )
+    .context("aggregate findings")?;
     // remove_dir succeeds only if empty — exactly the semantics we
     // want for cleaning up the parent staging/ once each subdir
     // aggregator has removed its own. A non-empty parent (partial
@@ -712,6 +795,10 @@ async fn dispatch_walks_concurrent(
     permissions: Arc<Mutex<PermissionStore>>,
     skills_dir: PathBuf,
     walks_staged_dir: PathBuf,
+    // `walk_seed_suffix`: per-walk seed/decline protocol text appended
+    // to the prompt when a non-empty seed set was materialised. Empty
+    // string when the scanner pass produced no seeds.
+    walk_seed_suffix: String,
     audit: &mut AuditLogger,
 ) -> Result<Vec<WalkOutcome>> {
     use tokio::sync::Semaphore;
@@ -740,6 +827,11 @@ async fn dispatch_walks_concurrent(
         let skills_dir_t = skills_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
         let walk_name = name.clone();
+        // Substitute the per-spawn walk name into the seed protocol
+        // template so each walk's prompt names its own declines
+        // staging path. The template carries a `<walk>` sentinel the
+        // dispatch site built once for the whole run.
+        let walk_seed_suffix_t = walk_seed_suffix.replace("<walk>", &walk_name);
 
         let h = tokio::spawn(async move {
             // Permit drops on task exit (success or panic) so a
@@ -788,7 +880,7 @@ async fn dispatch_walks_concurrent(
                 };
             }
 
-            let prompt = build_walk_prompt(&walk_name, &run_id_t);
+            let prompt = build_walk_prompt(&walk_name, &run_id_t, &walk_seed_suffix_t);
             let inbound_id = format!("lyrik-walk-{}-{}", walk_name, uuid::Uuid::new_v4());
             match local_agent.process_message(&prompt, inbound_id).await {
                 Ok(r) => {
@@ -883,11 +975,20 @@ async fn dispatch_walks_concurrent(
 /// `dedup_sources: [walk_name, ...]` lists every walk that
 /// contributed. When false (one-call path), every staged finding
 /// is preserved verbatim.
+///
+/// `seed_locations` is the set of `"file:line"` keys produced by
+/// the pre-LLM scanner pass. Every emitted finding is annotated
+/// with `detection_source`: `static_prescreen` when its location
+/// matches a seed, `model_reasoning` otherwise. Per-walk dedup
+/// upgrades the pair `{static_prescreen, model_reasoning}` to
+/// `both` (single-call mode has no dedup and never produces
+/// `both` — documented in `docs/lyrik-json-schema.md`).
 fn aggregate_findings_multi(
     sources: &[(Option<String>, PathBuf)],
     dest: &Path,
     run_id: &str,
     dedup_active: bool,
+    seed_locations: &std::collections::HashSet<String>,
 ) -> Result<()> {
     let mut tagged: Vec<(Option<String>, serde_json::Value)> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
@@ -904,8 +1005,9 @@ fn aggregate_findings_multi(
         for p in &entries {
             let body =
                 std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
-            let parsed: serde_json::Value = serde_json::from_str(&body)
+            let mut parsed: serde_json::Value = serde_json::from_str(&body)
                 .with_context(|| format!("parse staged finding {}", p.display()))?;
+            annotate_detection_source(&mut parsed, seed_locations);
             tagged.push((walk_name.clone(), parsed));
         }
         if !entries.is_empty() {
@@ -923,7 +1025,7 @@ fn aggregate_findings_multi(
     };
 
     let body = serde_json::json!({
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "run_id": run_id,
         "produced_at": chrono::Utc::now().to_rfc3339(),
         "findings": findings,
@@ -938,6 +1040,28 @@ fn aggregate_findings_multi(
             .with_context(|| format!("remove staging dir {}", source.display()))?;
     }
     Ok(())
+}
+
+/// Set `detection_source` on a staged finding based on whether its
+/// `(file, line_start)` matches a seed location. Does not overwrite
+/// an existing value: a future producer that sets the field itself
+/// stays authoritative. Findings whose location cannot be derived
+/// pass through unchanged (the validator will reject them on the
+/// missing-location ground).
+pub(super) fn annotate_detection_source(
+    finding: &mut serde_json::Value,
+    seed_locations: &std::collections::HashSet<String>,
+) {
+    let key = location_key(finding);
+    let provenance = match key {
+        Some(k) if seed_locations.contains(&k) => "static_prescreen",
+        Some(_) => "model_reasoning",
+        None => return,
+    };
+    if let Some(obj) = finding.as_object_mut() {
+        obj.entry("detection_source".to_string())
+            .or_insert(serde_json::Value::String(provenance.to_string()));
+    }
 }
 
 /// Numeric severity ordering used by the dedup tier-rises rule.
@@ -1018,6 +1142,8 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
     let mut top_severity = 0u32;
     let mut top_tier = String::new();
     let mut tiers_disagree = false;
+    let mut detection_sources: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
 
     for (walk_name, f) in &group {
         if let Some(arr) = f.get("framing").and_then(|v| v.as_array()) {
@@ -1042,7 +1168,31 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
                 top_tier = t.to_string();
             }
         }
+        if let Some(ds) = f.get("detection_source").and_then(|v| v.as_str()) {
+            detection_sources.insert(ds.to_string());
+        }
     }
+
+    // `both` upgrade: when a static_prescreen-tagged finding
+    // converges with a model_reasoning-tagged finding on the same
+    // location across walks, the merged record reports `both`. This
+    // is the per-walk convergence case the schema-v1.1 enum's
+    // `both` variant exists for; single-call mode has no
+    // aggregator and therefore never produces `both`. An existing
+    // `both` on any input member also resolves to `both` so a
+    // future producer that sets the field itself isn't downgraded.
+    let merged_detection_source = if detection_sources.contains("both")
+        || (detection_sources.contains("static_prescreen")
+            && detection_sources.contains("model_reasoning"))
+    {
+        Some("both".to_string())
+    } else if detection_sources.contains("static_prescreen") {
+        Some("static_prescreen".to_string())
+    } else if detection_sources.contains("model_reasoning") {
+        Some("model_reasoning".to_string())
+    } else {
+        None
+    };
 
     let (_, mut canonical) = group.into_iter().next().expect("group non-empty");
     if let Some(obj) = canonical.as_object_mut() {
@@ -1072,6 +1222,12 @@ fn merge_finding_group(group: Vec<(Option<String>, serde_json::Value)>) -> serde
             "dedup_disagreement".to_string(),
             serde_json::Value::Bool(tiers_disagree),
         );
+        if let Some(ds) = merged_detection_source {
+            obj.insert(
+                "detection_source".to_string(),
+                serde_json::Value::String(ds),
+            );
+        }
     }
     canonical
 }
@@ -1084,6 +1240,220 @@ fn location_key(finding: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_u64())
         .or_else(|| loc.get("line").and_then(|v| v.as_u64()))?;
     Some(format!("{file}:{line}"))
+}
+
+// ---------------------------------------------------------------------------
+// Scanner-seed protocol + post-turn disposition accounting
+// ---------------------------------------------------------------------------
+
+/// Per-run instruction text appended to the dispatch prompt when the
+/// scanner pass materialised a non-empty seed set. `walk_name`:
+/// `None` for the single-call `/lyrik` dispatch path, `Some("<walk>")`
+/// for the per-walk path (the `<walk>` sentinel is substituted with
+/// each spawn's name when the per-walk prompt is built).
+///
+/// The protocol asks the model to rule on each seed: emit a finding
+/// at the seed location if the candidate is a real bug, or write a
+/// decline file naming the seed_id and the reason when it isn't.
+/// Anything the model neither accepts nor declines is treated as
+/// `lyrik.candidate.unaddressed` by the runner (a third bucket
+/// distinct from acceptance and decline) so the differential signal
+/// separates "considered and rejected" from "never ruled."
+pub(super) fn seed_protocol_text(run_id: &str, walk_name: Option<&str>) -> String {
+    let staging_root = match walk_name {
+        Some(w) => format!(".lyrik/state/runs/{run_id}/staging/{w}"),
+        None => format!(".lyrik/state/runs/{run_id}/staging"),
+    };
+    format!(
+        " \
+         \
+         Static-prescreen seeds: a pinned Semgrep pass produced \
+         candidate locations at `.lyrik/state/runs/{run_id}/seeds/seed-NNN.json`. \
+         Read every seed file. For each seed: if it names a real bug \
+         under the active framings, write a finding at the seed's \
+         `location` per the staging instructions above (the runner \
+         annotates `detection_source` based on location match — do \
+         not set it yourself). If it does NOT name a real bug, write \
+         a decline file to \
+         `{staging_root}/declines/decline-NNN.json` with body \
+         `{{\"seed_id\": \"<seed_id>\", \"reason\": \"<one-sentence \
+         rationale>\"}}` (zero-padded ordinal). A seed you do not \
+         accept and do not decline lands on \
+         `lyrik.candidate.unaddressed` audit rows the runner emits \
+         after the turn — explicit declines are the structured \
+         disposition signal."
+    )
+}
+
+/// Post-turn accounting for every seed the scanner produced.
+///
+/// For each seed the runner classifies disposition as exactly one of:
+///
+/// - **accepted** — at least one staged finding's `(file,
+///   line_start)` matches the seed location. Emits no audit row
+///   here; the finding itself in `findings.json` is the record.
+/// - **declined** — at least one decline file under
+///   `<staging>/declines/` or `<staging>/<walk>/declines/` names the
+///   `seed_id`. Emits `lyrik.candidate.declined` for every (walk,
+///   decline-file) pair so per-walk decline rationales stay
+///   distinguishable.
+/// - **unaddressed** — neither matched by a finding nor referenced
+///   by a decline file. Emits `lyrik.candidate.unaddressed` once
+///   per seed.
+///
+/// Reads staging without removing it; the aggregator runs after this
+/// pass and is what cleans the staging tree.
+fn process_seed_dispositions(
+    staging: &Path,
+    walks: Option<&[String]>,
+    seeds: &[Seed],
+    finding_sources: &[(Option<String>, PathBuf)],
+    audit: &mut AuditLogger,
+) -> Result<()> {
+    if seeds.is_empty() {
+        return Ok(());
+    }
+
+    // Build the accepted set: every (file, line) covered by a staged
+    // finding across all walks / the single-call source.
+    let mut accepted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (_, source) in finding_sources {
+        if !source.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(source)
+            .with_context(|| format!("read {}", source.display()))?
+            .flatten()
+        {
+            let p = entry.path();
+            if !p.is_file() || p.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let body =
+                std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
+            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Some(key) = location_key(&parsed) {
+                accepted.insert(key);
+            }
+        }
+    }
+
+    // Collect decline files keyed by seed_id, tagged with the walk
+    // that emitted them. `walk_name` is `None` for the single-call
+    // staging/declines/ path.
+    let mut decline_dirs: Vec<(Option<String>, PathBuf)> = Vec::new();
+    let top = staging.join("declines");
+    if top.is_dir() {
+        decline_dirs.push((None, top));
+    }
+    if let Some(walks) = walks {
+        for w in walks {
+            let d = staging.join(w).join("declines");
+            if d.is_dir() {
+                decline_dirs.push((Some(w.clone()), d));
+            }
+        }
+    }
+
+    let mut declined_by_seed: std::collections::BTreeMap<
+        String,
+        Vec<(Option<String>, serde_json::Value)>,
+    > = std::collections::BTreeMap::new();
+    for (walk_name, dir) in &decline_dirs {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .with_context(|| format!("read {}", dir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
+            .collect();
+        entries.sort();
+        for p in &entries {
+            let body =
+                std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %p.display(),
+                        error = %e,
+                        "lyrik: ignoring malformed decline file"
+                    );
+                    continue;
+                }
+            };
+            let Some(seed_id) = parsed.get("seed_id").and_then(|v| v.as_str()) else {
+                tracing::warn!(
+                    path = %p.display(),
+                    "lyrik: decline file missing `seed_id`"
+                );
+                continue;
+            };
+            declined_by_seed
+                .entry(seed_id.to_string())
+                .or_default()
+                .push((walk_name.clone(), parsed));
+        }
+    }
+
+    // Classify and emit per-seed.
+    for seed in seeds {
+        let seed_key = format!("{}:{}", seed.file, seed.line);
+        let is_accepted = accepted.contains(&seed_key);
+        let declines = declined_by_seed.get(&seed.seed_id);
+
+        if let Some(rows) = declines {
+            // Emit a decline row per (walk, decline-file) pair so
+            // per-walk reasoning stays distinguishable. Acceptance
+            // elsewhere does not silence a decline row: the
+            // differential signal is that this walk thought the
+            // seed wasn't a bug, irrespective of what other walks
+            // concluded.
+            for (walk_name, decline) in rows {
+                audit.emit(
+                    "lyrik.candidate.declined",
+                    serde_json::json!({
+                        "tool": "semgrep",
+                        "seed_id": seed.seed_id,
+                        "rule_id": seed.rule_id,
+                        "location": {
+                            "file": seed.file,
+                            "line_start": seed.line,
+                        },
+                        "walk": walk_name,
+                        "reason": decline.get("reason").and_then(|v| v.as_str()),
+                    }),
+                )?;
+            }
+            // If at least one walk produced a finding at this
+            // location the seed is also accepted; the decline rows
+            // already captured the per-walk dissent so no further
+            // unaddressed/acceptance row fires.
+            let _ = is_accepted;
+        } else if !is_accepted {
+            audit.emit(
+                "lyrik.candidate.unaddressed",
+                serde_json::json!({
+                    "tool": "semgrep",
+                    "seed_id": seed.seed_id,
+                    "rule_id": seed.rule_id,
+                    "location": {
+                        "file": seed.file,
+                        "line_start": seed.line,
+                    },
+                }),
+            )?;
+        }
+    }
+
+    // Remove decline staging dirs once accounted for so the
+    // aggregator's `remove_dir(staging)` call can succeed.
+    for (_, dir) in decline_dirs {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    Ok(())
 }
 
 /// Aggregate `staging/findings/finding-NNN.json` files into the final
@@ -1113,7 +1483,7 @@ fn aggregate_findings(source: &Path, dest: &Path, run_id: &str) -> Result<()> {
         findings.push(parsed);
     }
     let body = serde_json::json!({
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "run_id": run_id,
         "produced_at": chrono::Utc::now().to_rfc3339(),
         "findings": findings,
@@ -1676,7 +2046,8 @@ mod tests {
             (Some("sink-walk".to_string()), sink_dir),
             (Some("graph-walk".to_string()), graph_dir),
         ];
-        aggregate_findings_multi(&sources, &dest, "sample/run-007", true).unwrap();
+        let no_seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        aggregate_findings_multi(&sources, &dest, "sample/run-007", true, &no_seeds).unwrap();
 
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
@@ -1726,11 +2097,139 @@ mod tests {
             &finding("src/a.rs", 10, "injection", "HIGH"),
         );
         let dest = tmp.path().join("findings.json");
-        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-008", false).unwrap();
+        let no_seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-008", false, &no_seeds)
+            .unwrap();
         let body: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
         let arr = body.get("findings").and_then(|v| v.as_array()).unwrap();
         assert_eq!(arr.len(), 2);
+    }
+
+    use super::annotate_detection_source;
+
+    #[test]
+    fn annotate_detection_source_marks_seed_match_as_static_prescreen() {
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        let mut seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seeds.insert("src/a.rs:10".to_string());
+        annotate_detection_source(&mut f, &seeds);
+        assert_eq!(
+            f.get("detection_source").and_then(|v| v.as_str()),
+            Some("static_prescreen")
+        );
+    }
+
+    #[test]
+    fn annotate_detection_source_marks_no_match_as_model_reasoning() {
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        annotate_detection_source(&mut f, &seeds);
+        assert_eq!(
+            f.get("detection_source").and_then(|v| v.as_str()),
+            Some("model_reasoning")
+        );
+    }
+
+    #[test]
+    fn annotate_detection_source_does_not_overwrite_existing_value() {
+        let mut f = finding("src/a.rs", 10, "auth", "HIGH");
+        f.as_object_mut()
+            .unwrap()
+            .insert("detection_source".to_string(), serde_json::json!("both"));
+        let mut seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seeds.insert("src/a.rs:10".to_string());
+        annotate_detection_source(&mut f, &seeds);
+        assert_eq!(
+            f.get("detection_source").and_then(|v| v.as_str()),
+            Some("both"),
+            "annotator must not downgrade an existing value"
+        );
+    }
+
+    #[test]
+    fn dedup_upgrades_static_prescreen_plus_model_reasoning_to_both() {
+        let mut a = finding("src/a.rs", 10, "auth", "MEDIUM");
+        a.as_object_mut().unwrap().insert(
+            "detection_source".to_string(),
+            serde_json::json!("static_prescreen"),
+        );
+        let mut b = finding("src/a.rs", 10, "injection", "HIGH");
+        b.as_object_mut().unwrap().insert(
+            "detection_source".to_string(),
+            serde_json::json!("model_reasoning"),
+        );
+        let merged = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].get("detection_source").and_then(|v| v.as_str()),
+            Some("both"),
+        );
+    }
+
+    #[test]
+    fn dedup_keeps_homogeneous_static_prescreen_label_on_convergence() {
+        let mut a = finding("src/a.rs", 10, "auth", "MEDIUM");
+        a.as_object_mut().unwrap().insert(
+            "detection_source".to_string(),
+            serde_json::json!("static_prescreen"),
+        );
+        let mut b = finding("src/a.rs", 10, "injection", "HIGH");
+        b.as_object_mut().unwrap().insert(
+            "detection_source".to_string(),
+            serde_json::json!("static_prescreen"),
+        );
+        let merged = dedup_findings(vec![
+            (Some("sink-walk".into()), a),
+            (Some("graph-walk".into()), b),
+        ]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].get("detection_source").and_then(|v| v.as_str()),
+            Some("static_prescreen"),
+        );
+    }
+
+    #[test]
+    fn aggregate_findings_multi_writes_schema_version_one_one() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("staging").join("findings");
+        write_finding(
+            &dir,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "HIGH"),
+        );
+        let dest = tmp.path().join("findings.json");
+        let seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-009", false, &seeds).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        assert_eq!(body["schema_version"].as_str(), Some("1.1"));
+    }
+
+    #[test]
+    fn aggregate_findings_multi_annotates_seed_match_as_static_prescreen_end_to_end() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("staging").join("findings");
+        write_finding(
+            &dir,
+            "finding-001.json",
+            &finding("src/a.rs", 10, "auth", "HIGH"),
+        );
+        let dest = tmp.path().join("findings.json");
+        let mut seeds: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seeds.insert("src/a.rs:10".to_string());
+        aggregate_findings_multi(&[(None, dir)], &dest, "sample/run-010", false, &seeds).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&dest).unwrap()).unwrap();
+        let arr = body["findings"].as_array().unwrap();
+        assert_eq!(
+            arr[0].get("detection_source").and_then(|v| v.as_str()),
+            Some("static_prescreen"),
+        );
     }
 
     /// Multiple appends sharing one session_id (the shape that N

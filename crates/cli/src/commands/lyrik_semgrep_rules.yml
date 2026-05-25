@@ -1,0 +1,54 @@
+# Lyrik Semgrep ruleset (schema-v1.1 slice).
+#
+# Pinned content. The runner computes a sha-256 of these bytes at
+# first use and stamps it onto the lyrik.scanner.dispatched audit row
+# so a reviewer can confirm which ruleset produced which seed.
+#
+# Two taint rules. The aim is exercising the seed pipeline against
+# realistic Rust dataflow shapes, not exhaustive coverage. Add rules
+# in PRs that name the framing each rule supports.
+
+rules:
+  - id: lyrik.rust.command-injection-taint
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: std::env::args()
+              - pattern: std::env::var($X)
+              - pattern: std::env::var_os($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: std::process::Command::new($X)
+              - pattern: tokio::process::Command::new($X)
+    languages: [rust]
+    message: |
+      Untrusted environment input flows into Command::new without
+      sanitization. Auth framing: the spawned process inherits the
+      caller's privileges. Injection framing: argument-string
+      construction across the source/sink path is an interpreter
+      boundary.
+    severity: WARNING
+
+  - id: lyrik.rust.format-sql-taint
+    mode: taint
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern: std::env::args()
+              - pattern: std::env::var($X)
+              - pattern-regex: '\.headers\(\)\.get\('
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: format!("SELECT $...", $X)
+              - pattern: format!("UPDATE $...", $X)
+              - pattern: format!("DELETE $...", $X)
+              - pattern: format!("INSERT $...", $X)
+    languages: [rust]
+    message: |
+      Untrusted input flows into a SQL string built via format!. The
+      injection framing's classical parameter-binding defence does not
+      apply across the source/sink path.
+    severity: WARNING

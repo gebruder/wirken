@@ -205,13 +205,9 @@ Closed:
 
 ### `findings[].detection_source` enum
 
-Closed:
+**Landed in schema-v1.1.** See `docs/lyrik-json-schema.md` for the enforced semantics. The three values (`static_prescreen`, `model_reasoning`, `both`) match the design captured here; the `both` value is produced only by per-walk dedup convergence.
 
-- `model_reasoning` — produced by the framing pass through model reasoning over the recon output.
-- `static_prescreen` — produced by a deterministic pattern-match detector before the framing pass. Today's lyrik does not yet ship a static pre-screen; this enum value is reserved for the design that lands as item 5 (static pre-screen + detector provenance) in `skills/lyrik/FOLLOWUPS.md`.
-- `both` — both detectors produced the candidate. Default for findings the framing pass and any future static pre-screen converge on.
-
-Detector disagreement (only one of the two detectors produces a candidate) is **not** the same as scoring disagreement. It is upstream of scoring (Stage 1, candidate generation). It does not route through the `scoring_disagreement` gate. The detector-level handling lives in item 5 (static pre-screen + detector provenance).
+Detector disagreement (only one of the two detectors produces a candidate) is **not** the same as scoring disagreement. It is upstream of scoring (Stage 1, candidate generation). It does not route through the `scoring_disagreement` gate. The detector-level handling lives in `lyrik.candidate.declined` / `lyrik.candidate.unaddressed` audit rows that the runner emits per seed.
 
 ### Six ingestion behaviors the schema must support
 

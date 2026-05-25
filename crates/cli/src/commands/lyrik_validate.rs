@@ -1,24 +1,30 @@
 //! `wirken lyrik validate <path>`: conformance check for
-//! `findings.json` files against the 1.0 spec at
+//! `findings.json` files against the 1.1 spec at
 //! `docs/lyrik-json-schema.md`. The grammar and the required-field
 //! list live in the spec; this module is the reference enforcement.
 //!
 //! The validator embeds the canonical JSON Schema as a static string
 //! so callers can validate offline. The `$id` URL in the schema is
 //! used as identity only; the validator never fetches it.
+//!
+//! Schema 1.1 changes from 1.0: `detection_source` promoted from
+//! the allowed-extras band to a closed enum enforced when present.
+//! `schema_version` strictly equals `"1.1"`. Pre-1.1 archives
+//! continue to be readable by a pre-1.1 binary (tag-pinned).
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-/// Canonical `$id` of the lyrik 1.0 schema. Reports that carry a
+/// Canonical `$id` of the lyrik 1.1 schema. Reports that carry a
 /// `$schema` field (current producer does not, future ones may)
 /// must string-equal this value.
 pub const SCHEMA_ID: &str =
-    "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.0/docs/lyrik-json-schema.json";
+    "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json";
 
 const ALLOWED_FRAMINGS: &[&str] = &["auth", "injection"];
 const ALLOWED_TIERS: &[&str] = &["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
+const ALLOWED_DETECTION_SOURCES: &[&str] = &["static_prescreen", "model_reasoning", "both"];
 
 /// One conformance error, scoped to a JSON pointer-like path so a
 /// user can find the offending value in their report.
@@ -45,11 +51,11 @@ pub fn run(path: &Path) -> Result<()> {
 
     let errors = validate_value(&value);
     if errors.is_empty() {
-        println!("{}: conforms to lyrik schema 1.0", path.display());
+        println!("{}: conforms to lyrik schema 1.1", path.display());
         return Ok(());
     }
     eprintln!(
-        "{}: {} conformance error(s) against lyrik schema 1.0",
+        "{}: {} conformance error(s) against lyrik schema 1.1",
         path.display(),
         errors.len()
     );
@@ -59,7 +65,7 @@ pub fn run(path: &Path) -> Result<()> {
     std::process::exit(1);
 }
 
-/// Validate a parsed JSON value against the lyrik 1.0 spec. Returns
+/// Validate a parsed JSON value against the lyrik 1.1 spec. Returns
 /// the full list of errors so callers can report them all rather
 /// than stopping at the first. Empty vec means conformance.
 pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
@@ -93,10 +99,10 @@ pub fn validate_value(root: &serde_json::Value) -> Vec<ValidationError> {
 
     // Required top-level fields.
     match obj.get("schema_version").and_then(|v| v.as_str()) {
-        Some("1.0") => {}
+        Some("1.1") => {}
         Some(other) => errs.push(ValidationError {
             path: "/schema_version".into(),
-            message: format!("must be \"1.0\", got {other:?}"),
+            message: format!("must be \"1.1\", got {other:?}"),
         }),
         None => errs.push(ValidationError {
             path: "/schema_version".into(),
@@ -256,6 +262,26 @@ fn validate_finding(value: &serde_json::Value, index: usize, errs: &mut Vec<Vali
             message: "missing required string field".into(),
         }),
     }
+
+    // detection_source: optional in 1.1; when present must be one
+    // of the closed enum (static_prescreen, model_reasoning, both).
+    // Absence is not an error — a producer that does not run the
+    // scanner pass emits findings without the field.
+    if let Some(v) = obj.get("detection_source") {
+        match v.as_str() {
+            Some(s) if ALLOWED_DETECTION_SOURCES.contains(&s) => {}
+            Some(s) => errs.push(ValidationError {
+                path: format!("{prefix}/detection_source"),
+                message: format!(
+                    "must be one of {ALLOWED_DETECTION_SOURCES:?} when present, got {s:?}"
+                ),
+            }),
+            None => errs.push(ValidationError {
+                path: format!("{prefix}/detection_source"),
+                message: "must be a string when present".into(),
+            }),
+        }
+    }
 }
 
 fn require_nonempty_string(
@@ -356,7 +382,7 @@ mod tests {
 
     fn good_report() -> serde_json::Value {
         json!({
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "run_id": "run-001",
             "produced_at": "2026-05-17T00:00:00Z",
             "findings": [ good_finding() ],
@@ -537,5 +563,68 @@ mod tests {
             Some(SCHEMA_ID),
             "schema file $id must match SCHEMA_ID constant"
         );
+    }
+
+    #[test]
+    fn detection_source_absent_is_valid() {
+        let r = good_report();
+        assert!(r["findings"][0].get("detection_source").is_none());
+        let errs = validate_value(&r);
+        assert!(
+            errs.is_empty(),
+            "absent detection_source must be valid: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn detection_source_static_prescreen_is_valid() {
+        let mut r = good_report();
+        r["findings"][0]["detection_source"] = json!("static_prescreen");
+        assert!(validate_value(&r).is_empty());
+    }
+
+    #[test]
+    fn detection_source_model_reasoning_is_valid() {
+        let mut r = good_report();
+        r["findings"][0]["detection_source"] = json!("model_reasoning");
+        assert!(validate_value(&r).is_empty());
+    }
+
+    #[test]
+    fn detection_source_both_is_valid() {
+        let mut r = good_report();
+        r["findings"][0]["detection_source"] = json!("both");
+        assert!(validate_value(&r).is_empty());
+    }
+
+    #[test]
+    fn detection_source_unknown_value_rejects() {
+        let mut r = good_report();
+        r["findings"][0]["detection_source"] = json!("semgrep_seeded");
+        let errs = validate_value(&r);
+        assert!(
+            errs.iter()
+                .any(|e| e.path == "/findings/0/detection_source"),
+            "got {errs:?}"
+        );
+    }
+
+    #[test]
+    fn detection_source_non_string_rejects() {
+        let mut r = good_report();
+        r["findings"][0]["detection_source"] = json!(42);
+        let errs = validate_value(&r);
+        assert!(
+            errs.iter()
+                .any(|e| e.path == "/findings/0/detection_source")
+        );
+    }
+
+    #[test]
+    fn schema_version_one_zero_rejects_under_one_one_validator() {
+        let mut r = good_report();
+        r["schema_version"] = json!("1.0");
+        let errs = validate_value(&r);
+        assert!(errs.iter().any(|e| e.path == "/schema_version"));
     }
 }

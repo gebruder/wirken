@@ -18,5 +18,8 @@
   },
   "prior_findings_path": "./.lyrik/prior",
   "memory_path": "./.lyrik/memory",
+  "scanner": {
+    "semgrep": { "enabled": false }
+  },
   "bench_mode": false
 }

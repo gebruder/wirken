@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.0/docs/lyrik-json-schema.json",
-  "title": "Lyrik findings report (1.0)",
+  "$id": "https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json",
+  "title": "Lyrik findings report (1.1)",
   "description": "Lyrik security-assessment skill output. See docs/lyrik-json-schema.md for the prose spec.",
   "type": "object",
   "required": ["schema_version", "run_id", "produced_at", "findings"],
   "properties": {
     "schema_version": {
       "type": "string",
-      "const": "1.0"
+      "const": "1.1"
     },
     "run_id": {
       "type": "string",
@@ -63,6 +63,11 @@
         "tier": {
           "type": "string",
           "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        },
+        "detection_source": {
+          "description": "Provenance of the candidate. Promoted from the allowed-extras band in 1.1; optional, but enforced as a closed enum when present. `both` is produced only by per-walk dedup when static_prescreen and model_reasoning converge on the same location; single-call mode never produces it.",
+          "type": "string",
+          "enum": ["static_prescreen", "model_reasoning", "both"]
         }
       }
     }

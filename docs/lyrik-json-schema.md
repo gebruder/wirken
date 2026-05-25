@@ -1,4 +1,4 @@
-# Lyrik JSON output schema (1.0)
+# Lyrik JSON output schema (1.1)
 
 This document specifies the contract that `findings.json` files
 produced by Lyrik conform to. External consumers (SIEM ingestors,
@@ -6,27 +6,35 @@ ticketing systems, CI/CD gates, report-to-report diff tools) pin
 against the surface described here.
 
 A larger funnel-disclosure surface is forward-looking work; see
-`docs/design/lyrik-json-schema-future.md`. 1.0 is what the current
+`docs/design/lyrik-json-schema-future.md`. 1.1 is what the current
 producer emits, nothing more.
 
 ## Identity
 
-- `$id`: `https://raw.githubusercontent.com/gebruder/wirken/schema-v1.0/docs/lyrik-json-schema.json`
+- `$id`: `https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json`
 - Versioning policy: the schema is tag-pinned, not release-pinned.
   Patch and minor wirken releases that do not change the schema do
-  not move the tag; consumers pinned against `schema-v1.0` stay
+  not move the tag; consumers pinned against `schema-v1.1` stay
   valid across wirken updates. Schema changes cut a new tag
-  (`schema-v1.1`, `schema-v2.0`) and a new spec document.
+  (`schema-v1.2`, `schema-v2.0`) and a new spec document.
 - `$id` is canonical identity. It resolves to a fetchable copy of
-  the schema once the `schema-v1.0` tag is cut. `wirken lyrik
+  the schema once the `schema-v1.1` tag is cut. `wirken lyrik
   validate` embeds the schema bytes and never fetches `$id` over
   the network; the URL is for external JSON Schema validators.
+
+## What changed from 1.0
+
+- `detection_source` is promoted from the allowed-extras band to an
+  enforced-when-present closed enum (see Finding shape below). 1.0
+  archives validate against 1.0; 1.1 producers and 1.1 validators
+  move together.
+- `schema_version` strictly equals `"1.1"`.
 
 ## Top-level shape
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "run_id": "<non-empty string>",
   "produced_at": "<RFC 3339 timestamp>",
   "findings": [ /* zero or more finding objects */ ]
@@ -37,14 +45,14 @@ Required fields:
 
 | Field            | Type   | Notes                                  |
 |------------------|--------|----------------------------------------|
-| `schema_version` | string | Must be `"1.0"` for this version       |
+| `schema_version` | string | Must be `"1.1"` for this version       |
 | `run_id`         | string | Non-empty                              |
 | `produced_at`    | string | RFC 3339 timestamp                     |
 | `findings`       | array  | Zero or more finding objects           |
 
 Extra top-level fields are allowed and ignored. Producers may carry
 optional metadata (`comparison`, `cost`, `reproducibility`,
-forward-looking forms of `target`/`funnel`/`concentration`); 1.0
+forward-looking forms of `target`/`funnel`/`concentration`); 1.1
 validators do not enforce their shape.
 
 ## Finding shape
@@ -62,15 +70,46 @@ Required per-finding fields:
 | `summary`              | string  | One sentence                            |
 | `tier`                 | string  | Closed enum (see below)                 |
 
+Optional fields enforced when present:
+
+| Field               | Type   | Notes                                                     |
+|---------------------|--------|-----------------------------------------------------------|
+| `detection_source`  | string | Closed enum: `static_prescreen`, `model_reasoning`, `both` |
+
 Closed enums:
 
 - `framing[*]`: `"auth"` or `"injection"`.
 - `tier`: `"CRITICAL"`, `"HIGH"`, `"MEDIUM"`, `"LOW"`, `"INFO"`.
+- `detection_source`: `"static_prescreen"`, `"model_reasoning"`, `"both"`.
+
+### `detection_source` semantics
+
+Origin of the candidate that produced this finding:
+
+- `static_prescreen` — the candidate location was raised by the
+  pinned pre-LLM scanner pass (`lyrik.scanner.dispatched` audit row)
+  and the model ruled it a real bug.
+- `model_reasoning` — the model raised the finding through its own
+  reasoning without a matching scanner candidate at the same
+  location.
+- `both` — a `static_prescreen` and a `model_reasoning` finding
+  converged on the same `(location.file, location.line_start)`
+  across walks. **Produced only by per-walk dedup.** Single-call
+  mode has no aggregator and therefore never emits `both`; absent
+  the `walks` config entry, `detection_source` is always one of
+  `static_prescreen` / `model_reasoning`.
+
+The field is optional. A producer that does not run the scanner
+pass emits findings without the field, and 1.1 validators accept
+that. Operators who opt into `scanner.semgrep.enabled` in
+`.lyrik/config.json` get the field on every emitted finding; the
+runner annotates it post-turn based on seed-location match.
 
 Extra per-finding fields are allowed and ignored (`stream`, `grade`,
 `rung`, `deferral`, `scoring_passes`, `scoring_disagreement`,
-`location.line_end`, `location.function`, etc.). Producers may carry
-them through; 1.0 validators do not enforce their shape.
+`dedup_sources`, `dedup_disagreement`, `location.line_end`,
+`location.function`, etc.). Producers may carry them through; 1.1
+validators do not enforce their shape.
 
 ## Stable-ID grammar
 
@@ -131,11 +170,11 @@ The validator embeds the canonical schema; no network fetch.
 ascending. Stable across runs of the same scope; a finding moving
 between framings does not jump positions.
 
-## What is not in 1.0
+## What is not in 1.1
 
 The fields below are described in
 `docs/design/lyrik-json-schema-future.md` as forward-looking work
-and are not part of the 1.0 surface. Consumers must not pin against
+and are not part of the 1.1 surface. Consumers must not pin against
 them. They will land in a future schema version alongside producer
 changes.
 
@@ -143,9 +182,9 @@ changes.
 - Top-level `funnel` block and its reconciliation invariants.
 - Top-level `concentration` block.
 - Top-level `observations` block.
-- Per-finding `gate_routed`, `dedup_match`, `stream`,
-  `detection_source` as closed enums.
+- Per-finding `gate_routed`, `dedup_match`, `stream` as closed
+  enums.
 - `triage_status` reserved field.
-- Schema URL embedded in reports as `$schema`. 1.0 does not require
+- Schema URL embedded in reports as `$schema`. 1.1 does not require
   producers to emit `$schema`; if a report carries one, the
   validator asserts it string-equals `$id`.
