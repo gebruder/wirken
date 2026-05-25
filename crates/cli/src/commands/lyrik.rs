@@ -454,6 +454,30 @@ async fn dispatch_via_agent_runtime(
         0
     };
 
+    // Stage and self-sign the bundled Lyrik skill into the run dir,
+    // then merge it into the agent's loaded set. The `/lyrik` slash
+    // invocation in the dispatch prompt resolves to this staged copy
+    // regardless of operator state under `<data_dir>/skills/`: if the
+    // installed copy is unsigned (pre-signature-gate setup) or absent,
+    // the run still has a known-good Lyrik skill loaded.
+    //
+    // Self-sign with a one-shot keypair, mirroring
+    // [`wirken_agent::bundled_skills::install_bundled_skills`]: the
+    // pair gives tamper detection across the run and discards the key
+    // after sign.
+    let lyrik_staged_dir = stage_lyrik_skill(&run_dir).context("stage Lyrik skill")?;
+    let lyrik_staged_loaded = agent
+        .extend_skills(&lyrik_staged_dir)
+        .with_context(|| format!("extend agent skills from {}", lyrik_staged_dir.display()))?;
+    audit.emit(
+        "lyrik.skill.staged",
+        serde_json::json!({
+            "name": "lyrik",
+            "staged_dir": lyrik_staged_dir.display().to_string(),
+            "loaded_count": lyrik_staged_loaded,
+        }),
+    )?;
+
     // When per-walk dispatch is enabled, stage the selected walk
     // SKILLs under the run directory with synthesized wirken
     // frontmatter, then merge them into the agent's loaded skills.
@@ -760,9 +784,36 @@ async fn dispatch_via_agent_runtime(
     Ok(())
 }
 
+/// Stage the bundled Lyrik SKILL.md into a per-run dir and self-sign
+/// it so `agent.extend_skills` accepts it under the signature gate.
+/// The staged dir layout is `<run_dir>/lyrik-skill/lyrik/SKILL.md`
+/// plus `SKILL.sig` and `SKILL.pub`. The returned path is the
+/// containing directory (`<run_dir>/lyrik-skill`) so it can be
+/// passed to [`wirken_agent::Agent::extend_skills`] which expects a
+/// directory of skill subdirectories.
+///
+/// One-shot keypair, discarded after the signature is written. Same
+/// pattern as [`wirken_agent::bundled_skills::install_bundled_skills`].
+fn stage_lyrik_skill(run_dir: &Path) -> Result<PathBuf> {
+    let body = wirken_agent::bundled_skills::bundled_skill_content("lyrik")
+        .ok_or_else(|| anyhow::anyhow!("bundled Lyrik skill content missing from binary"))?;
+
+    let staged_root = run_dir.join("lyrik-skill");
+    let lyrik_dir = staged_root.join("lyrik");
+    std::fs::create_dir_all(&lyrik_dir)
+        .with_context(|| format!("create {}", lyrik_dir.display()))?;
+    let skill_md = lyrik_dir.join("SKILL.md");
+    std::fs::write(&skill_md, body).with_context(|| format!("write {}", skill_md.display()))?;
+
+    wirken_agent::bundled_skills::self_sign_skill_dir(&lyrik_dir)
+        .with_context(|| format!("sign staged Lyrik skill at {}", lyrik_dir.display()))?;
+
+    Ok(staged_root)
+}
+
 /// Aggregate one Phase 0 staging directory (context or rubric) into a
 /// single markdown file. Empty or missing source directories are
-/// no-ops — the destination is left untouched, which preserves any
+/// no-ops; the destination is left untouched, which preserves any
 /// prior `.lyrik/context.md` or `.lyrik/rubric.md` from earlier runs.
 /// On success the source directory is removed.
 fn aggregate_phase0_section(source: &Path, dest: &Path) -> Result<()> {
@@ -2112,6 +2163,46 @@ mod tests {
         AuditSigningKey, ChainHeadReason, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
         TrustLevel, VerifyResult,
     };
+
+    /// Staged lyrik dir verifies under the same signature gate the loader
+    /// applies. Catches the silent regression where someone changes
+    /// `stage_lyrik_skill` to skip the signing step (or breaks the key
+    /// derivation) and the run starts hitting the unsigned-skill path
+    /// again. The end-to-end run on qwen3-coder:30b also covers this,
+    /// but takes ~9 minutes on CPU; this is the fast guard.
+    #[test]
+    fn stage_lyrik_skill_writes_signature_pair_that_verifies() {
+        use wirken_gateway::skill_registry::{
+            VerifyResult as SkillVerifyResult, verify_skill_self_signed,
+        };
+
+        let tmp = tempdir().unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path()).unwrap();
+        let lyrik_dir = staged.join("lyrik");
+
+        assert!(lyrik_dir.join("SKILL.md").exists(), "SKILL.md missing");
+        assert!(lyrik_dir.join("SKILL.sig").exists(), "SKILL.sig missing");
+        assert!(lyrik_dir.join("SKILL.pub").exists(), "SKILL.pub missing");
+
+        let result = verify_skill_self_signed(&lyrik_dir).unwrap();
+        assert!(
+            matches!(result, SkillVerifyResult::Valid { .. }),
+            "signature did not verify under skill_registry::verify_skill_self_signed: {result:?}"
+        );
+    }
+
+    /// Staged SKILL.md content matches the bundled body byte-for-byte.
+    /// Guards against the bundled accessor returning the wrong entry or
+    /// the staging function trimming/wrapping the body.
+    #[test]
+    fn stage_lyrik_skill_writes_bundled_content_byte_for_byte() {
+        let tmp = tempdir().unwrap();
+        let staged = super::stage_lyrik_skill(tmp.path()).unwrap();
+        let written = std::fs::read_to_string(staged.join("lyrik").join("SKILL.md")).unwrap();
+        let bundled =
+            wirken_agent::bundled_skills::bundled_skill_content("lyrik").expect("lyrik bundled");
+        assert_eq!(written, bundled);
+    }
 
     fn write_finding(dir: &std::path::Path, name: &str, content: &serde_json::Value) {
         std::fs::create_dir_all(dir).unwrap();

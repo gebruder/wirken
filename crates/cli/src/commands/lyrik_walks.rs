@@ -162,6 +162,8 @@ pub fn stage_walk_skills(
         let dest = dest_dir.join("SKILL.md");
         let wrapped = wrap_with_wirken_frontmatter(name, &body);
         std::fs::write(&dest, wrapped).with_context(|| format!("write {}", dest.display()))?;
+        wirken_agent::bundled_skills::self_sign_skill_dir(&dest_dir)
+            .with_context(|| format!("sign staged walk skill at {}", dest_dir.display()))?;
     }
     Ok(staged)
 }
@@ -376,6 +378,44 @@ mod tests {
         assert!(staged.join("chain-walk/SKILL.md").is_file());
         let body = std::fs::read_to_string(staged.join("sink-walk/SKILL.md")).unwrap();
         assert!(body.contains("permissions:"));
+    }
+
+    /// Each staged walk dir carries a SKILL.sig + SKILL.pub pair that
+    /// verifies under the same loader gate the agent runtime applies.
+    /// Catches the silent regression where stage_walk_skills stops
+    /// calling self_sign_skill_dir and walks load empty again.
+    #[test]
+    fn stage_walk_skills_self_signs_each_staged_dir() {
+        use wirken_gateway::skill_registry::{
+            VerifyResult as SkillVerifyResult, verify_skill_self_signed,
+        };
+
+        let src = tempdir().unwrap();
+        install_walk_fixture(src.path(), "sink-walk", &minimal_walk_body("sink-walk"));
+        install_walk_fixture(src.path(), "chain-walk", &minimal_walk_body("chain-walk"));
+        let run = tempdir().unwrap();
+        let staged = stage_walk_skills(
+            &["sink-walk".to_string(), "chain-walk".to_string()],
+            src.path(),
+            run.path(),
+        )
+        .unwrap();
+        for walk in ["sink-walk", "chain-walk"] {
+            let walk_dir = staged.join(walk);
+            assert!(
+                walk_dir.join("SKILL.sig").exists(),
+                "{walk}: SKILL.sig missing"
+            );
+            assert!(
+                walk_dir.join("SKILL.pub").exists(),
+                "{walk}: SKILL.pub missing"
+            );
+            let result = verify_skill_self_signed(&walk_dir).unwrap();
+            assert!(
+                matches!(result, SkillVerifyResult::Valid { .. }),
+                "{walk}: signature did not verify: {result:?}"
+            );
+        }
     }
 
     #[test]
