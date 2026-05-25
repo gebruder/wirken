@@ -627,6 +627,30 @@ enum ZirkelCommands {
     /// List zirkel-bound API keys currently in the vault (names
     /// only — values stay encrypted).
     AuthList,
+    /// Compute discrimination (AUC) and reliability calibration of
+    /// `candidates.llm_relevance_score` against the user
+    /// keep/skip label set from `digest_items.decision`. Reads the
+    /// operator's local `~/.wirken/zirkel/aggregator.db`;
+    /// computation only, corpus never leaves the machine. See
+    /// issue #138 for the data-source rationale (SQLite over the
+    /// audit chain).
+    Calibrate {
+        /// Optional `candidates.run_id` filter. Absent → all runs.
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Number of equal-frequency reliability buckets. Capped
+        /// at the per-group labeled-set size at compute time so a
+        /// small corpus never emits more buckets than rows.
+        #[arg(long, default_value_t = 10)]
+        buckets: u32,
+        /// Stratification axis. `overall` is one report; `source`
+        /// groups by `candidates.source_name`; `keyword` explodes
+        /// `candidates.matched_keywords` so a multi-keyword
+        /// candidate contributes to every keyword's bucket
+        /// (per-keyword n's sum to more than the candidate count).
+        #[arg(long, default_value = "overall")]
+        by: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1127,6 +1151,11 @@ async fn main() -> Result<()> {
             ZirkelCommands::Status => commands::zirkel::status().await,
             ZirkelCommands::AuthSet { source } => commands::zirkel::auth_set(&source).await,
             ZirkelCommands::AuthList => commands::zirkel::auth_list().await,
+            ZirkelCommands::Calibrate {
+                run_id,
+                buckets,
+                by,
+            } => commands::zirkel::calibrate(run_id.as_deref(), buckets, &by).await,
         },
         Commands::Agents(cmd) => match cmd {
             AgentCommands::Add => commands::agents::add().await,

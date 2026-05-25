@@ -28,6 +28,7 @@ pub mod stdin_approval;
 pub mod ui;
 pub mod webchat;
 pub mod zirkel;
+pub mod zirkel_calibrate;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

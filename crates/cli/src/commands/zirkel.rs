@@ -420,6 +420,41 @@ pub async fn auth_list() -> Result<()> {
     Ok(())
 }
 
+/// `wirken zirkel calibrate` — compute AUC and reliability of the
+/// LLM relevance score against the user keep/skip label set from
+/// `~/.wirken/zirkel/aggregator.db`. Computation only; the corpus
+/// stays local. Missing-db is handled cleanly like
+/// [`status`] does, not as a panic.
+pub async fn calibrate(run_id: Option<&str>, buckets: u32, by: &str) -> Result<()> {
+    let strat: super::zirkel_calibrate::StratBy =
+        by.parse().map_err(|e: String| anyhow!("--by {e}"))?;
+
+    let zirkel_db = super::data_dir()?.join("zirkel").join("aggregator.db");
+    if !zirkel_db.exists() {
+        println!(
+            "No zirkel state at {} — nothing to calibrate.",
+            zirkel_db.display()
+        );
+        println!("Run `wirken zirkel run` against a bound digest first.");
+        return Ok(());
+    }
+    let conn = Connection::open(&zirkel_db)
+        .map_err(|e| anyhow!("open zirkel db at {}: {e}", zirkel_db.display()))?;
+
+    let cfg = super::zirkel_calibrate::CalibrationConfig {
+        run_id: run_id.map(String::from),
+        buckets,
+        by: strat,
+    };
+    let report = super::zirkel_calibrate::compute_calibration(
+        &conn,
+        &cfg,
+        &zirkel_db.display().to_string(),
+    )?;
+    super::zirkel_calibrate::render_report(&report);
+    Ok(())
+}
+
 /// Per-source validation target. Each variant knows its host (for
 /// human-readable messages) and a minimal endpoint that costs one
 /// request against the operator's quota.
