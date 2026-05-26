@@ -1,47 +1,63 @@
 //! Citation-resolution gate for staged Lyrik findings.
 //!
-//! Runs between staging emission and report aggregation. For each
-//! finding, opens the cited file at the cited line and verifies two
-//! things:
+//! Runs between staging emission and report aggregation. For every
+//! finding the runner confirms the cited file exists and the cited
+//! line resolves. Beyond that, class-specific structural sub-gates
+//! fire based on title/summary keywords. Each sub-gate is a parser-
+//! free check on the cited line plus a small window around it. The
+//! gate tag on every per-finding annotation and audit row names
+//! which sub-gate ran, so a reader can see exactly what was checked.
 //!
-//! 1. **File + line resolve.** `location.file` must exist inside the
-//!    workspace and `location.line_start` must point at a real line.
-//! 2. **Literal claim is honest.** If the finding's title or summary
-//!    contains a hardcoded-literal claim word (`hardcoded`,
-//!    `hard-coded`, `literal`), the cited line, or any line within a
-//!    small window around it, must carry a string or numeric literal.
-//!    A field declaration, a type reference, or a comment line carries
-//!    no literal and fails the gate.
+//! The three sub-gates landed today:
 //!
-//! The gate is intentionally narrow. It catches the failure shape
-//! observed during the qwen3-coder local-emit run (`adapter.rs:105`
-//! cited as "hardcoded phone number" when the line was an
-//! `mpsc::Receiver` field) plus the immediate class around it. It
-//! does NOT verify citations for other claim shapes ("missing
-//! access check", "race condition", "broken comparison"). Per-finding
-//! annotation names the gate that ran so consumers can read the
-//! scope honestly.
+//! 1. `literal_claim`: title/summary mentions `hardcoded`,
+//!    `hard-coded`, or `literal`. The cited window must carry a
+//!    string `"..."` or a numeric literal. A doc comment, a field
+//!    declaration, or a type reference fails.
+//! 2. `injection_structural`: title/summary mentions `injection`,
+//!    `shell=true`, `subprocess`, or `eval`. The cited window must
+//!    carry an `ident(` call shape on a non-comment line. Confirms
+//!    the cited line could host a call-shaped bug; does NOT prove
+//!    the call's input is attacker-controlled.
+//! 3. `file_line_only`: no claim-class keywords matched. The file
+//!    exists and the line resolves; nothing further is checked.
+//!
+//! Priority order on multi-keyword findings: literal > injection >
+//! file_line_only. The most-specific matching sub-gate runs.
+//!
+//! **Structural, not exploitability.** Every sub-gate confirms that
+//! the cited line *could plausibly host* the claimed bug class. None
+//! of them prove the bug is real or attacker-reachable. That is the
+//! deliberate boundary: Lyrik confirms real-and-reachable, exploit
+//! verification is a separate workload (Lyrik's grade-0.5 ceiling).
+//!
+//! Claim classes without a wired matcher (missing access check,
+//! race condition, broken comparison, SQL injection, data leakage,
+//! etc.) fall to `file_line_only`. An earlier draft of this slice
+//! included an `access_control_structural` sub-gate that required
+//! the cited window to carry a call site or conditional keyword;
+//! it was dropped before commit because the check resolved on
+//! nearly any code line (any call site looks like "executable code
+//! where an auth check could live"), which would pad the verified
+//! side of the header count without verifying the missing-check
+//! claim. A real access-control sub-gate needs a stronger
+//! discriminator and is tracked in GitHub issue #143 alongside the
+//! other class-specific detectors.
 //!
 //! Failure mode: keep the finding in the report, annotate it with
 //! `citation_check.status = "unresolved"`, emit an audit row, and
 //! surface counts in the canonical `findings.json` top-level
-//! `citation_check` block. Counts split by gate so a skimmer cannot
-//! infer "two citations verified" from `resolved: 2` when one of the
-//! two only had file+line existence checked:
+//! `citation_check` block split by sub-gate:
 //!
 //! ```json
 //! "citation_check": {
-//!   "literal_claim":   { "resolved": N, "unresolved": M },
-//!   "file_line_only":  { "resolved": N, "unresolved": M }
+//!   "literal_claim":        { "resolved": N, "unresolved": M },
+//!   "injection_structural": { "resolved": N, "unresolved": M },
+//!   "file_line_only":       { "resolved": N, "unresolved": M }
 //! }
 //! ```
 //!
-//! `resolved` under `literal_claim` means the literal heuristic ran
-//! and the cited window carries a literal. `resolved` under
-//! `file_line_only` means the file and line exist; the title/summary
-//! carried no literal-claim keyword, so the heuristic was not engaged
-//! and the citation is not "verified" beyond existence. Findings are
-//! never silently dropped.
+//! Findings are never silently dropped.
 
 use std::path::Path;
 
@@ -78,6 +94,7 @@ impl Status {
 pub enum Gate {
     FileLineOnly,
     LiteralClaim,
+    InjectionStructural,
 }
 
 impl Gate {
@@ -85,12 +102,14 @@ impl Gate {
         match self {
             Gate::FileLineOnly => "file_line_only",
             Gate::LiteralClaim => "literal_claim",
+            Gate::InjectionStructural => "injection_structural",
         }
     }
 }
 
-const LITERAL_WINDOW: usize = 2;
+const STRUCTURAL_WINDOW: usize = 2;
 const LITERAL_CLAIM_WORDS: &[&str] = &["hardcoded", "hard-coded", "literal"];
+const INJECTION_CLAIM_WORDS: &[&str] = &["injection", "shell=true", "subprocess", "eval"];
 
 /// Check a parsed staged finding against the citation gate. `workspace`
 /// is the path the agent received as its sandbox root (the target
@@ -140,23 +159,34 @@ pub fn check(finding: &serde_json::Value, workspace: &Path) -> Outcome {
         );
     }
 
-    if !claims_literal(finding) {
-        return resolved(Gate::FileLineOnly);
-    }
+    let window_lo = line_idx.saturating_sub(STRUCTURAL_WINDOW);
+    let window_hi = (line_idx + STRUCTURAL_WINDOW).min(lines.len() - 1);
+    let snippet = lines[line_idx].trim();
 
-    let window_lo = line_idx.saturating_sub(LITERAL_WINDOW);
-    let window_hi = (line_idx + LITERAL_WINDOW).min(lines.len() - 1);
-    if (window_lo..=window_hi).any(|i| line_has_literal(lines[i])) {
-        return resolved(Gate::LiteralClaim);
+    if claims_literal(finding) {
+        if (window_lo..=window_hi).any(|i| line_has_literal(lines[i])) {
+            return resolved(Gate::LiteralClaim);
+        }
+        return unresolved(
+            Gate::LiteralClaim,
+            format!(
+                "title/summary claims a hardcoded literal but no string or numeric literal appears in {file}:{line} (line content: {snippet:?})"
+            ),
+        );
     }
-    unresolved(
-        Gate::LiteralClaim,
-        format!(
-            "title/summary claims a hardcoded literal but no string or numeric literal appears in {file}:{} (line content: {:?})",
-            line,
-            lines[line_idx].trim()
-        ),
-    )
+    if claims_injection(finding) {
+        if (window_lo..=window_hi).any(|i| line_has_call_or_exec(lines[i])) {
+            return resolved(Gate::InjectionStructural);
+        }
+        return unresolved(
+            Gate::InjectionStructural,
+            format!(
+                "title/summary claims an injection vulnerability but no call/exec/spawn-shaped construct appears in {file}:{line} (line content: {snippet:?})"
+            ),
+        );
+    }
+    let _ = snippet;
+    resolved(Gate::FileLineOnly)
 }
 
 fn resolved(gate: Gate) -> Outcome {
@@ -175,7 +205,7 @@ fn unresolved(gate: Gate, reason: String) -> Outcome {
     }
 }
 
-fn claims_literal(finding: &serde_json::Value) -> bool {
+fn claim_text(finding: &serde_json::Value) -> String {
     let title = finding
         .get("title")
         .and_then(|v| v.as_str())
@@ -186,9 +216,17 @@ fn claims_literal(finding: &serde_json::Value) -> bool {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_lowercase();
-    LITERAL_CLAIM_WORDS
-        .iter()
-        .any(|w| title.contains(w) || summary.contains(w))
+    format!("{title} {summary}")
+}
+
+fn claims_literal(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    LITERAL_CLAIM_WORDS.iter().any(|w| t.contains(w))
+}
+
+fn claims_injection(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    INJECTION_CLAIM_WORDS.iter().any(|w| t.contains(w))
 }
 
 /// True if the line contains a string or numeric literal. Permissive
@@ -242,6 +280,54 @@ pub fn line_has_literal(s: &str) -> bool {
 
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
+}
+
+/// Heuristic comment-line detector for Rust source. Lines starting with
+/// `//`, `///`, `//!`, `/*`, `*/`, or a `* ` block-continuation count.
+/// A line starting with `*` followed by an ident-char (deref) is code,
+/// not a comment.
+fn is_comment_line(s: &str) -> bool {
+    let t = s.trim_start();
+    if t.starts_with("//") || t.starts_with("/*") || t.starts_with("*/") {
+        return true;
+    }
+    if t == "*" {
+        return true;
+    }
+    if let Some(rest) = t.strip_prefix('*') {
+        match rest.chars().next() {
+            Some(c) if c.is_whitespace() => return true,
+            Some('*') => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// True when the line carries an `ident(` call shape on a non-comment
+/// line. Catches function calls, method calls, macro calls, constructor
+/// calls, and exec/spawn shapes (`Command::new(...)`, `subprocess.run(...)`,
+/// `eval(...)`, etc.) without parsing. Rejects comment lines and lines
+/// whose `(` follows whitespace or punctuation (tuple literals,
+/// parenthesized expressions, control-flow head `if (cond)` already
+/// covered by [`line_has_conditional`]).
+pub fn line_has_call_or_exec(s: &str) -> bool {
+    if is_comment_line(s) {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    for i in 1..bytes.len() {
+        if bytes[i] != b'(' {
+            continue;
+        }
+        let prev = bytes[i - 1];
+        // ident/digit before `(` is the standard call shape; `!` is
+        // the Rust macro-call shape (`println!(...)`, `format!(...)`).
+        if is_ident_char(prev) || prev.is_ascii_digit() || prev == b'!' {
+            return true;
+        }
+    }
+    false
 }
 
 /// Annotate a parsed finding with the gate outcome. Adds a
@@ -416,7 +502,12 @@ fn main() {}
     }
 
     #[test]
-    fn non_literal_claim_skips_heuristic() {
+    fn missing_access_claim_routes_to_file_line_only() {
+        // Access-control claims have no class-specific sub-gate
+        // today (an earlier draft included one that resolved on
+        // nearly any code line; dropped to keep the header honest).
+        // The claim falls through to file_line_only, which the gate
+        // tag discloses on every such row.
         let dir = tmpdir();
         let src = "\
 fn process_request(req: Request) {
@@ -525,5 +616,207 @@ fn process_request(req: Request) {
         let block = finding.get("citation_check").unwrap();
         assert_eq!(block.get("status").unwrap().as_str(), Some("unresolved"));
         assert_eq!(block.get("reason").unwrap().as_str(), Some("kept"));
+    }
+
+    /// F002-shape: HIGH command-injection finding citing a doc-comment
+    /// line with no executable construct anywhere in the cited window.
+    /// The probe surfaced this exact failure (`adapter.rs:125`
+    /// "command injection" landing on a doc-comment line). The
+    /// injection_structural sub-gate must flag it unresolved.
+    #[test]
+    fn injection_claim_cited_at_doc_comment_fails() {
+        let dir = tmpdir();
+        let src = "\
+/// Reads frames from the channel adapter. The reader runs on a
+/// dedicated task and feeds the gateway directly without buffering
+/// across reconnects. Frames that arrive while the gateway is
+/// transiently unreachable are dropped; the channel adapter is
+/// expected to re-emit them when it next connects.
+struct Reader {
+    inner: Inner,
+}
+";
+        write_src(&dir, "src/adapter.rs", src);
+        let finding = json!({
+            "title": "Potential command injection via user-controlled input in Signal adapter",
+            "summary": "The send_message function may pass unsanitised input to a shell.",
+            "location": {"file": "src/adapter.rs", "line_start": 3},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Unresolved);
+        assert_eq!(out.gate, Gate::InjectionStructural);
+        assert!(
+            out.reason
+                .unwrap()
+                .contains("no call/exec/spawn-shaped construct")
+        );
+    }
+
+    #[test]
+    fn injection_claim_at_call_site_passes() {
+        let dir = tmpdir();
+        let src = "\
+fn run_signal(cmd: &str) {
+    let output = Command::new(\"sh\").arg(\"-c\").arg(cmd).output();
+    drop(output);
+}
+";
+        write_src(&dir, "src/run.rs", src);
+        let finding = json!({
+            "title": "Potential command injection in run_signal",
+            "summary": "subprocess invocation may accept attacker-controlled input.",
+            "location": {"file": "src/run.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::InjectionStructural);
+        assert!(out.reason.is_none());
+    }
+
+    // Note: an earlier draft of this slice carried two
+    // access-control structural tests (cite-at-comment-fails and
+    // cite-at-conditional-passes) against a Gate::AccessControlStructural
+    // sub-gate. The sub-gate was dropped before commit because its
+    // resolved count nearly always lit up under the "executable code"
+    // check, padding the verified side of the header without
+    // verifying the missing-check claim. Access-control claims now
+    // route to file_line_only; see missing_access_claim_routes_to_file_line_only
+
+    #[test]
+    fn unrecognized_claim_class_falls_to_file_line_only() {
+        let dir = tmpdir();
+        let src = "\
+fn timing_sensitive() {
+    let elapsed = std::time::Instant::now().elapsed();
+    drop(elapsed);
+}
+";
+        write_src(&dir, "src/timing.rs", src);
+        // Claim is a class with no matcher today: timing side-channel.
+        // No literal/injection/access-control keywords in title or
+        // summary, so the gate falls to file_line_only and the tag
+        // discloses that.
+        let finding = json!({
+            "title": "Possible timing side-channel via elapsed measurement",
+            "summary": "Information leak through wall-clock difference between branches.",
+            "location": {"file": "src/timing.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(
+            out.gate,
+            Gate::FileLineOnly,
+            "no class matcher should fall to file_line_only and tag must say so"
+        );
+        assert!(out.reason.is_none());
+    }
+
+    #[test]
+    fn literal_path_unchanged_by_new_gates() {
+        // Regression guard: the existing literal-claim shape still
+        // routes through Gate::LiteralClaim, not InjectionStructural,
+        // even when the title mentions an interpreter-shaped sink.
+        let dir = tmpdir();
+        let src = "\
+const PHONE: &str = \"+15551234567\";
+fn main() {}
+";
+        write_src(&dir, "src/lib.rs", src);
+        let finding = json!({
+            "title": "Hardcoded phone number used as eval target",
+            "summary": "A hardcoded literal is interpolated into a subprocess invocation.",
+            "location": {"file": "src/lib.rs", "line_start": 1},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        // Literal wins on priority even though `eval` and `subprocess`
+        // both appear in title/summary.
+        assert_eq!(out.gate, Gate::LiteralClaim);
+    }
+
+    #[test]
+    fn line_has_call_or_exec_rejects_comments_and_field_decls() {
+        assert!(!line_has_call_or_exec(
+            "/// doc: signal-cli is invoked here"
+        ));
+        assert!(!line_has_call_or_exec("// run shell command"));
+        assert!(!line_has_call_or_exec("    inbound_rx: Receiver<Frame>,"));
+        assert!(!line_has_call_or_exec("let v: Vec<u8> = something;"));
+        assert!(!line_has_call_or_exec("let x = (a, b);"));
+    }
+
+    #[test]
+    fn line_has_call_or_exec_accepts_call_shapes() {
+        assert!(line_has_call_or_exec(
+            "let out = Command::new(\"sh\").arg(cmd).output();"
+        ));
+        assert!(line_has_call_or_exec("subprocess.run(user_input);"));
+        assert!(line_has_call_or_exec("eval(payload);"));
+        assert!(line_has_call_or_exec("self.inner.process(frame);"));
+        assert!(line_has_call_or_exec("println!(\"x = {x}\");"));
+    }
+
+    /// On-demand demonstration of the F002-shape gate behaviour and
+    /// audit-row content. Marked `#[ignore]` so the regular test
+    /// suite does not run it; invoke manually with
+    /// `cargo test -p wirken-cli --bins -- --ignored --nocapture
+    /// f002_outcome_demo`.
+    #[test]
+    #[ignore]
+    fn f002_outcome_demo() {
+        let dir = tmpdir();
+        let src = "\
+/// Reads frames from the channel adapter. The reader runs on a
+/// dedicated task and feeds the gateway directly without buffering
+/// across reconnects. Frames that arrive while the gateway is
+/// transiently unreachable are dropped; the channel adapter is
+/// expected to re-emit them when it next connects.
+struct Reader {
+    inner: Inner,
+}
+";
+        write_src(&dir, "src/adapter.rs", src);
+
+        // F002-shape: a HIGH command-injection finding cited at a
+        // doc-comment line. Reproduces the qwen3-coder hallucination
+        // the gate is built to catch.
+        let mut finding = json!({
+            "id": "F002",
+            "stable_id": "injection::src/adapter.rs:3",
+            "framing": ["injection"],
+            "location": {"file": "src/adapter.rs", "line_start": 3},
+            "title": "Potential command injection via user-controlled input in Signal adapter",
+            "summary": "The send_message function may pass unsanitised input to a shell.",
+            "tier": "HIGH",
+        });
+        let outcome = check(&finding, &dir);
+        annotate(&mut finding, &outcome);
+
+        eprintln!("\n=== F002 outcome ===");
+        eprintln!("gate:   {}", outcome.gate.as_str());
+        eprintln!("status: {}", outcome.status.as_str());
+        eprintln!("reason: {}", outcome.reason.as_deref().unwrap_or("(none)"));
+        eprintln!("\n=== F002 audit-row payload shape ===");
+        let audit_payload = json!({
+            "staged_path": dir.join("staging/findings/finding-001.json").display().to_string(),
+            "finding_id": finding.get("id"),
+            "stable_id": finding.get("stable_id"),
+            "location_file": finding.pointer("/location/file"),
+            "location_line": finding.pointer("/location/line_start"),
+            "gate": outcome.gate.as_str(),
+            "status": outcome.status.as_str(),
+            "reason": outcome.reason,
+        });
+        eprintln!("{}", serde_json::to_string_pretty(&audit_payload).unwrap());
+        eprintln!("\n=== F002 per-finding annotation ===");
+        eprintln!(
+            "{}",
+            serde_json::to_string_pretty(finding.get("citation_check").unwrap()).unwrap()
+        );
+
+        // Sanity asserts so the demo still functions as a regression
+        // guard if someone runs it on purpose.
+        assert_eq!(outcome.status, Status::Unresolved);
+        assert_eq!(outcome.gate, Gate::InjectionStructural);
     }
 }

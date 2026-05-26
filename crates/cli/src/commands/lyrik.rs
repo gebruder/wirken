@@ -1132,6 +1132,8 @@ fn aggregate_findings_multi(
     let mut consumed: Vec<PathBuf> = Vec::new();
     let mut literal_claim_resolved: usize = 0;
     let mut literal_claim_unresolved: usize = 0;
+    let mut injection_structural_resolved: usize = 0;
+    let mut injection_structural_unresolved: usize = 0;
     let mut file_line_only_resolved: usize = 0;
     let mut file_line_only_unresolved: usize = 0;
     for (walk_name, source) in sources {
@@ -1152,19 +1154,16 @@ fn aggregate_findings_multi(
             annotate_detection_source(&mut parsed, seed_locations);
 
             let outcome = lyrik_citation::check(&parsed, workspace);
+            use lyrik_citation::{Gate, Status};
             match (outcome.gate, outcome.status) {
-                (lyrik_citation::Gate::LiteralClaim, lyrik_citation::Status::Resolved) => {
-                    literal_claim_resolved += 1
+                (Gate::LiteralClaim, Status::Resolved) => literal_claim_resolved += 1,
+                (Gate::LiteralClaim, Status::Unresolved) => literal_claim_unresolved += 1,
+                (Gate::InjectionStructural, Status::Resolved) => injection_structural_resolved += 1,
+                (Gate::InjectionStructural, Status::Unresolved) => {
+                    injection_structural_unresolved += 1
                 }
-                (lyrik_citation::Gate::LiteralClaim, lyrik_citation::Status::Unresolved) => {
-                    literal_claim_unresolved += 1
-                }
-                (lyrik_citation::Gate::FileLineOnly, lyrik_citation::Status::Resolved) => {
-                    file_line_only_resolved += 1
-                }
-                (lyrik_citation::Gate::FileLineOnly, lyrik_citation::Status::Unresolved) => {
-                    file_line_only_unresolved += 1
-                }
+                (Gate::FileLineOnly, Status::Resolved) => file_line_only_resolved += 1,
+                (Gate::FileLineOnly, Status::Unresolved) => file_line_only_unresolved += 1,
             }
             audit.emit(
                 "lyrik.citation.checked",
@@ -1211,6 +1210,10 @@ fn aggregate_findings_multi(
             "literal_claim": {
                 "resolved": literal_claim_resolved,
                 "unresolved": literal_claim_unresolved,
+            },
+            "injection_structural": {
+                "resolved": injection_structural_resolved,
+                "unresolved": injection_structural_unresolved,
             },
             "file_line_only": {
                 "resolved": file_line_only_resolved,
