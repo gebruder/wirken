@@ -8,67 +8,116 @@
 //! gate tag on every per-finding annotation and audit row names
 //! which sub-gate ran, so a reader can see exactly what was checked.
 //!
-//! The five sub-gates landed today:
+//! The eight sub-gates landed today. Real checks run a structural
+//! test against the cited window; deferred sub-gates resolve on
+//! file+line existence and the tag discloses that no structural
+//! check ran.
 //!
-//! 1. `literal_claim`: title/summary mentions `hardcoded`,
+//! 1. `literal_claim` (real): title/summary mentions `hardcoded`,
 //!    `hard-coded`, or `literal`. The cited window must carry a
 //!    string `"..."` or a numeric literal. A doc comment, a field
 //!    declaration, or a type reference fails.
-//! 2. `prompt_injection_deferred`: title/summary mentions `prompt
-//!    injection` or `prompt-injection`. **No structural check
-//!    runs.** Prompt injection is a semantic property (untrusted
-//!    text reaching model context inherits surrounding prompt's
-//!    authority); the failure modes do not have a structural
-//!    signature an in-line, parser-free check can verify. The
-//!    finding resolves under file+line existence only. The gate
-//!    tag exists to disclose that the routing was deliberate for
-//!    this class, not a default fallthrough, so a reader skimming
-//!    `prompt_injection_deferred` counts knows the citation has
-//!    not been structurally checked. **`prompt_injection_deferred.resolved`
-//!    carries the same caveat as `file_line_only.resolved`**: it
-//!    means the file and line exist, nothing more. Do not count
-//!    it in the "verified" column when summarizing a run; if
-//!    anything, the deferred bucket is weaker than file_line_only
-//!    because it always resolves on existence by design, never
-//!    flagging a citation as unresolved even when the model is
-//!    clearly hallucinating.
-//! 3. `sql_injection_structural`: title/summary mentions `sql
-//!    injection`, `sql-injection`, or `sqli`. The cited window
-//!    must contain a SQL keyword (`SELECT`, `INSERT`, `UPDATE`,
-//!    `DELETE`, `WHERE`, `FROM`, `JOIN`, `UNION`) AND an
-//!    interpolation marker (`format!`, `{}` inside a string
+//! 2. `prompt_injection_deferred` (deferred): title/summary
+//!    mentions `prompt injection` or `prompt-injection`. **No
+//!    structural check runs.** Prompt injection is a semantic
+//!    property (untrusted text reaching model context inherits
+//!    surrounding prompt's authority); the failure modes do not
+//!    have a structural signature an in-line, parser-free check
+//!    can verify. The finding resolves under file+line existence
+//!    only. **`prompt_injection_deferred.resolved` carries the
+//!    same caveat as `file_line_only.resolved`**: file and line
+//!    exist, nothing more. Do not count it in the "verified"
+//!    column.
+//! 3. `sql_injection_structural` (real): title/summary mentions
+//!    `sql injection`, `sql-injection`, or `sqli`. The cited
+//!    window must contain a SQL keyword (`SELECT`, `INSERT`,
+//!    `UPDATE`, `DELETE`, `WHERE`, `FROM`, `JOIN`, `UNION`) AND
+//!    an interpolation marker (`format!`, `{}` inside a string
 //!    literal, or `+` adjacent to an identifier) AND NOT a
-//!    parameter-binding marker (`?` placeholder in a string, `$N`
-//!    postgres placeholder, `.bind(`, `query!(` macro). A
+//!    parameter-binding marker (`?` placeholder in a string,
+//!    `$N` postgres placeholder, `.bind(`, `query!(` macro). A
 //!    parameterized query is the negative case and does NOT
 //!    resolve. Limits: multi-line queries where the SQL keyword
 //!    and the interpolation are more than 2 lines apart get
 //!    missed; ORM-level injection that does not surface raw SQL
 //!    keywords (Diesel DSL, sea-orm builder) gets missed.
-//! 4. `command_injection_structural`: title/summary mentions
-//!    `command injection`, `shell injection`, `shell=true`,
-//!    `subprocess`, `eval`, `sh -c`, or generic `injection`
-//!    fallback after prompt and sql have been ruled out. The
-//!    cited window must carry an `ident(` call shape on a
-//!    non-comment line. Confirms the cited line could host a
+//! 4. `broken_comparison_structural` (real): title/summary
+//!    mentions `broken comparison`, `insecure comparison`,
+//!    `timing comparison`, `timing attack`, `non-constant-time`,
+//!    or `weak comparison`. The cited window must
+//!    carry `==` or `!=` AND a credential-shaped identifier
+//!    (`secret`, `token`, `password`, `passwd`, `passphrase`,
+//!    `key`, `mac`, `sig`, `signature`, `hmac`, `hash`, `digest`,
+//!    matched as a word with non-alphanumeric boundaries to avoid
+//!    snake_case false positives) AND NOT a constant-time marker
+//!    (`.ct_eq(`, `ConstantTimeEq`, `constant_time`, `subtle::`).
+//!    The constant-time markers are the negative case: a finding
+//!    citing a `subtle::ConstantTimeEq` call does NOT resolve as
+//!    a bug site. This is the only new real check in this slice;
+//!    it discriminates because the bug shape (`==` of secret) and
+//!    the safe shape (constant-time comparison) are
+//!    syntactically distinct.
+//! 5. `race_condition_deferred` (deferred): title/summary
+//!    mentions `race condition`, `race-condition`, `toctou`, or
+//!    `data race`. **No structural check runs.** The available
+//!    single-line signals (`Mutex<`, `RwLock<`, `Atomic*`,
+//!    `Arc<...>`, `.lock()`, `static mut`) resolve on essentially
+//!    every line of concurrent Rust code. TOCTOU and the
+//!    classical race shapes are multi-line by definition (check,
+//!    release lock, use result); a +/-2-line window cannot see
+//!    them. Shipping a "touches shared state" detector would
+//!    reproduce the same skim-trap the dropped
+//!    access_control_structural draft surfaced: a check that
+//!    resolves on anything pads the verified side of the header
+//!    without verifying the claim. The deferred tag carries the
+//!    disclosure on every row.
+//! 6. `access_control_deferred` (deferred): title/summary
+//!    mentions `missing access check`, `missing auth`,
+//!    `unauthenticated`, `unauthorized`, `access control`,
+//!    `authorization bypass`, `privilege escalation`, or
+//!    `auth bypass`. **No structural check runs.** An earlier
+//!    draft tried `access_control_structural` (required a call
+//!    site or conditional keyword in the window); the check
+//!    resolved on nearly any code line because any call site
+//!    looks like "executable code where an auth check could
+//!    live." The sub-gate was dropped before the per-class
+//!    slice landed. Access-control claims then fell to
+//!    `file_line_only` silently; this slice promotes them to
+//!    their own deferred tag so the header surfaces the
+//!    no-structural-check verdict per class, parallel to
+//!    `prompt_injection_deferred` and `race_condition_deferred`,
+//!    rather than burying access-control existence-only
+//!    resolutions inside `file_line_only`.
+//! 7. `command_injection_structural` (real): title/summary
+//!    mentions `command injection`, `shell injection`,
+//!    `shell=true`, `subprocess`, `eval`, `sh -c`, or generic
+//!    `injection` fallback after prompt and sql have been ruled
+//!    out. The cited window must carry an `ident(` call shape on
+//!    a non-comment line. Confirms the cited line could host a
 //!    call-shaped bug; does NOT prove the call's input is
 //!    attacker-controlled. **The bare-`injection` fallback
 //!    inherits the call-shape check.** A finding titled simply
 //!    "injection vulnerability" with no class qualifier, or a
 //!    deserialization-injection / header-injection / template-
 //!    injection claim that doesn't carry one of the listed
-//!    keywords, lands in `command_injection_structural` and is
-//!    checked against call-shape. That may resolve or fail for
-//!    the wrong reason (the underlying claim is about a
-//!    different interpreter sink, but the check is generic). The
-//!    gate tag discloses what ran; further class-specific
-//!    detectors are tracked in #143.
-//! 5. `file_line_only`: no claim-class keywords matched. The file
-//!    exists and the line resolves; nothing further is checked.
+//!    keywords, lands here and is checked against call-shape.
+//!    That may resolve or fail for the wrong reason (the
+//!    underlying claim is about a different interpreter sink,
+//!    but the check is generic). The gate tag discloses what
+//!    ran; further class-specific detectors are tracked in #143.
+//! 8. `file_line_only` (fallback): no claim-class keywords
+//!    matched. The file exists and the line resolves; nothing
+//!    further is checked.
 //!
 //! Priority order on multi-keyword findings: literal > prompt >
-//! sql > command > file_line_only. The most-specific matching
-//! sub-gate runs.
+//! sql > broken_comparison > race > access > command >
+//! file_line_only. The most-specific matching sub-gate runs.
+//! Real checks and deferred tags are interleaved by claim
+//! specificity, not bucketed by check-vs-defer, because the
+//! per-finding tag is more informative when the most-specific
+//! claim routing wins (a "race condition" finding is better
+//! tagged as race_condition_deferred than as a generic
+//! file_line_only, even though both resolve on existence only).
 //!
 //! **Structural, not exploitability.** Every sub-gate confirms that
 //! the cited line *could plausibly host* the claimed bug class. None
@@ -76,27 +125,26 @@
 //! deliberate boundary: Lyrik confirms real-and-reachable, exploit
 //! verification is a separate workload (Lyrik's grade-0.5 ceiling).
 //!
-//! Claim classes without a wired matcher (missing access check,
-//! race condition, broken comparison, data leakage, etc.) fall to
-//! `file_line_only`. Two prior drafts of this slice included
-//! sub-gates that were dropped before commit on the same honesty
-//! principle:
+//! Three classes carry a `*_deferred` tag rather than a real
+//! check: prompt_injection, race_condition, and access_control.
+//! Each was assessed and shipped as deferred on the same honesty
+//! principle: a parser-free in-line structural check would resolve
+//! on nearly anything in their respective domains (any model call
+//! for prompt, any shared-state marker for race, any executable
+//! line for access). Shipping such a check would pad the verified
+//! side of the header at the per-finding level without verifying
+//! the claim. The deferred tag is the disclosure: same resolution
+//! semantics as `file_line_only.resolved` (file+line exist,
+//! nothing more), but the class-specific name surfaces in the
+//! header so the unverified fraction is visible per class.
 //!
-//! - `access_control_structural`: required the cited window to
-//!   carry a call site or conditional keyword. Dropped because
-//!   the check resolved on nearly any code line (any call site
-//!   looks like "executable code where an auth check could live"),
-//!   which would pad the verified side of the header count
-//!   without verifying the missing-check claim.
-//! - The earlier generic `injection_structural` is now split into
-//!   `sql_injection_structural`, `command_injection_structural`,
-//!   and `prompt_injection_deferred` per claim class. The same
-//!   generic call-shape check is reused for the command-injection
-//!   sub-class only; SQL and prompt have their own routing.
-//!
-//! Real detectors for the remaining unmatched classes need
-//! stronger discriminators than a structural in-line check can
-//! provide and are tracked in GitHub issue #143.
+//! Class-specific detectors that would do more than this slice
+//! does need stronger discriminators than a structural in-line
+//! check can provide (flow analysis, dataflow taint, multi-line
+//! pattern matching). They are tracked in GitHub issue #143; this
+//! slice closes the issue's first pass by handling every claim
+//! class the bench has surfaced, with the honesty discipline
+//! consistent across all of them.
 //!
 //! Failure mode: keep the finding in the report, annotate it with
 //! `citation_check.status = "unresolved"`, emit an audit row, and
@@ -105,11 +153,14 @@
 //!
 //! ```json
 //! "citation_check": {
-//!   "literal_claim":               { "resolved": N, "unresolved": M },
-//!   "prompt_injection_deferred":   { "resolved": N, "unresolved": M },
-//!   "sql_injection_structural":    { "resolved": N, "unresolved": M },
-//!   "command_injection_structural":{ "resolved": N, "unresolved": M },
-//!   "file_line_only":              { "resolved": N, "unresolved": M }
+//!   "literal_claim":                  { "resolved": N, "unresolved": M },
+//!   "prompt_injection_deferred":      { "resolved": N, "unresolved": M },
+//!   "sql_injection_structural":       { "resolved": N, "unresolved": M },
+//!   "broken_comparison_structural":   { "resolved": N, "unresolved": M },
+//!   "race_condition_deferred":        { "resolved": N, "unresolved": M },
+//!   "access_control_deferred":        { "resolved": N, "unresolved": M },
+//!   "command_injection_structural":   { "resolved": N, "unresolved": M },
+//!   "file_line_only":                 { "resolved": N, "unresolved": M }
 //! }
 //! ```
 //!
@@ -152,6 +203,9 @@ pub enum Gate {
     LiteralClaim,
     PromptInjectionDeferred,
     SqlInjectionStructural,
+    BrokenComparisonStructural,
+    RaceConditionDeferred,
+    AccessControlDeferred,
     CommandInjectionStructural,
 }
 
@@ -162,6 +216,9 @@ impl Gate {
             Gate::LiteralClaim => "literal_claim",
             Gate::PromptInjectionDeferred => "prompt_injection_deferred",
             Gate::SqlInjectionStructural => "sql_injection_structural",
+            Gate::BrokenComparisonStructural => "broken_comparison_structural",
+            Gate::RaceConditionDeferred => "race_condition_deferred",
+            Gate::AccessControlDeferred => "access_control_deferred",
             Gate::CommandInjectionStructural => "command_injection_structural",
         }
     }
@@ -171,6 +228,26 @@ const STRUCTURAL_WINDOW: usize = 2;
 const LITERAL_CLAIM_WORDS: &[&str] = &["hardcoded", "hard-coded", "literal"];
 const PROMPT_INJECTION_CLAIM_WORDS: &[&str] = &["prompt injection", "prompt-injection"];
 const SQL_INJECTION_CLAIM_WORDS: &[&str] = &["sql injection", "sql-injection", "sqli"];
+const BROKEN_COMPARISON_CLAIM_WORDS: &[&str] = &[
+    "broken comparison",
+    "insecure comparison",
+    "timing comparison",
+    "timing attack",
+    "non-constant-time",
+    "weak comparison",
+];
+const RACE_CONDITION_CLAIM_WORDS: &[&str] =
+    &["race condition", "race-condition", "toctou", "data race"];
+const ACCESS_CONTROL_CLAIM_WORDS: &[&str] = &[
+    "missing access check",
+    "missing auth",
+    "unauthenticated",
+    "unauthorized",
+    "access control",
+    "authorization bypass",
+    "privilege escalation",
+    "auth bypass",
+];
 const COMMAND_INJECTION_CLAIM_WORDS: &[&str] = &[
     "command injection",
     "shell injection",
@@ -179,6 +256,20 @@ const COMMAND_INJECTION_CLAIM_WORDS: &[&str] = &[
     "eval",
     "sh -c",
     "injection",
+];
+const CREDENTIAL_KEYWORDS: &[&str] = &[
+    "secret",
+    "token",
+    "password",
+    "passwd",
+    "passphrase",
+    "key",
+    "mac",
+    "sig",
+    "signature",
+    "hmac",
+    "hash",
+    "digest",
 ];
 
 /// Check a parsed staged finding against the citation gate. `workspace`
@@ -275,6 +366,43 @@ pub fn check(finding: &serde_json::Value, workspace: &Path) -> Outcome {
         };
         return unresolved(Gate::SqlInjectionStructural, reason);
     }
+    if claims_broken_comparison(finding) {
+        if (window_lo..=window_hi).any(|i| line_has_broken_comparison_shape(lines[i])) {
+            return resolved(Gate::BrokenComparisonStructural);
+        }
+        let reason = if (window_lo..=window_hi).any(|i| line_has_constant_time_marker(lines[i])) {
+            format!(
+                "title/summary claims a broken/timing comparison but {file}:{line} uses a constant-time marker (.ct_eq, ConstantTimeEq, subtle::); negative case, not a bug site (line content: {snippet:?})"
+            )
+        } else {
+            format!(
+                "title/summary claims a broken/timing comparison but no `==`/`!=` against a credential-shaped identifier (secret/token/password/key/mac/sig/hmac/hash) appears in {file}:{line} window (line content: {snippet:?})"
+            )
+        };
+        return unresolved(Gate::BrokenComparisonStructural, reason);
+    }
+    if claims_race_condition(finding) {
+        // Deferred-by-design: race conditions are multi-line by
+        // shape (check, release lock, use result); a single-line
+        // signal (Mutex<, .lock(), Atomic*) resolves on essentially
+        // any concurrent code and would pad the verified side of
+        // the header. The gate tag discloses that no structural
+        // check ran. Same semantics as prompt_injection_deferred.
+        let _ = snippet;
+        return resolved(Gate::RaceConditionDeferred);
+    }
+    if claims_access_control(finding) {
+        // Deferred-by-design: an earlier draft tried a structural
+        // check (call site or conditional keyword in the window);
+        // it resolved on nearly any code line and was dropped. This
+        // slice promotes the no-structural-check verdict to its
+        // own gate tag so the header surfaces it per class, parallel
+        // to prompt_injection_deferred and race_condition_deferred,
+        // rather than burying access-control existence-only
+        // resolutions inside file_line_only.
+        let _ = snippet;
+        return resolved(Gate::AccessControlDeferred);
+    }
     if claims_command_injection(finding) {
         if (window_lo..=window_hi).any(|i| line_has_call_or_exec(lines[i])) {
             return resolved(Gate::CommandInjectionStructural);
@@ -333,6 +461,21 @@ fn claims_prompt_injection(finding: &serde_json::Value) -> bool {
 fn claims_sql_injection(finding: &serde_json::Value) -> bool {
     let t = claim_text(finding);
     SQL_INJECTION_CLAIM_WORDS.iter().any(|w| t.contains(w))
+}
+
+fn claims_broken_comparison(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    BROKEN_COMPARISON_CLAIM_WORDS.iter().any(|w| t.contains(w))
+}
+
+fn claims_race_condition(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    RACE_CONDITION_CLAIM_WORDS.iter().any(|w| t.contains(w))
+}
+
+fn claims_access_control(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    ACCESS_CONTROL_CLAIM_WORDS.iter().any(|w| t.contains(w))
 }
 
 fn claims_command_injection(finding: &serde_json::Value) -> bool {
@@ -498,6 +641,73 @@ pub fn line_has_param_binding(s: &str) -> bool {
         }
     }
     false
+}
+
+/// True when `line` contains `token` with non-alphanumeric boundaries
+/// on both sides. Used by the broken-comparison sub-gate's credential-
+/// identifier check: a snake_case identifier like `api_token` counts
+/// as a token-bearing identifier (the `_` and the surrounding
+/// non-alphanumeric chars act as boundaries), but `keyword` does not
+/// match `key` (the trailing `w` is alphanumeric). Lowercase match.
+fn line_has_word_token(line: &str, token: &str) -> bool {
+    let lower = line.to_lowercase();
+    let bytes = lower.as_bytes();
+    let token_bytes = token.as_bytes();
+    if token_bytes.is_empty() || bytes.len() < token_bytes.len() {
+        return false;
+    }
+    let mut pos = 0;
+    while pos + token_bytes.len() <= bytes.len() {
+        if &bytes[pos..pos + token_bytes.len()] == token_bytes {
+            let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+            let after_pos = pos + token_bytes.len();
+            let after_ok = after_pos >= bytes.len() || !bytes[after_pos].is_ascii_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        pos += 1;
+    }
+    false
+}
+
+/// True when the line carries a credential-shaped identifier (matched
+/// as a word with non-alphanumeric boundaries against
+/// [`CREDENTIAL_KEYWORDS`]). Used by the broken-comparison sub-gate.
+pub fn line_has_credential_identifier(s: &str) -> bool {
+    CREDENTIAL_KEYWORDS
+        .iter()
+        .any(|kw| line_has_word_token(s, kw))
+}
+
+/// True when the line carries a constant-time-comparison marker
+/// (`.ct_eq(`, `ConstantTimeEq`, `constant_time`, or the `subtle::`
+/// crate prefix). The broken-comparison sub-gate uses this as the
+/// **negative** signal: a line carrying a constant-time marker is
+/// the safe shape and does NOT resolve as a bug site.
+pub fn line_has_constant_time_marker(s: &str) -> bool {
+    s.contains(".ct_eq(")
+        || s.contains("ConstantTimeEq")
+        || s.contains("constant_time")
+        || s.contains("subtle::")
+}
+
+/// True when the line carries a broken-comparison shape: `==` or `!=`
+/// against a credential-shaped identifier on a non-comment, non-
+/// constant-time line. The constant-time check is the negative
+/// suppressor.
+pub fn line_has_broken_comparison_shape(s: &str) -> bool {
+    if is_comment_line(s) {
+        return false;
+    }
+    if line_has_constant_time_marker(s) {
+        return false;
+    }
+    let has_eq = s.contains("==") || s.contains("!=");
+    if !has_eq {
+        return false;
+    }
+    line_has_credential_identifier(s)
 }
 
 /// Heuristic comment-line detector for Rust source. Lines starting with
@@ -720,12 +930,12 @@ fn main() {}
     }
 
     #[test]
-    fn missing_access_claim_routes_to_file_line_only() {
-        // Access-control claims have no class-specific sub-gate
-        // today (an earlier draft included one that resolved on
-        // nearly any code line; dropped to keep the header honest).
-        // The claim falls through to file_line_only, which the gate
-        // tag discloses on every such row.
+    fn missing_access_claim_routes_to_access_control_deferred() {
+        // Access-control claims route to access_control_deferred:
+        // a named non-check tag, parallel to prompt_injection_deferred
+        // and race_condition_deferred. Same existence-only
+        // resolution semantics as file_line_only, with the
+        // disclosure carried in the gate name.
         let dir = tmpdir();
         let src = "\
 fn process_request(req: Request) {
@@ -741,7 +951,188 @@ fn process_request(req: Request) {
         });
         let out = check(&finding, &dir);
         assert_eq!(out.status, Status::Resolved);
-        assert_eq!(out.gate, Gate::FileLineOnly);
+        assert_eq!(out.gate, Gate::AccessControlDeferred);
+    }
+
+    /// Broken-comparison positive: `==` against a credential
+    /// identifier, no constant-time marker. Resolves.
+    #[test]
+    fn broken_comparison_claim_at_eq_on_credential_passes() {
+        let dir = tmpdir();
+        let src = "\
+fn verify_token(received_token: &str, expected_token: &str) -> bool {
+    received_token == expected_token
+}
+";
+        write_src(&dir, "src/auth.rs", src);
+        let finding = json!({
+            "title": "Weak comparison of secret token in verify_token",
+            "summary": "Non-constant-time `==` on a token value leaks timing information.",
+            "location": {"file": "src/auth.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::BrokenComparisonStructural);
+        assert!(out.reason.is_none());
+    }
+
+    /// Broken-comparison negative: cited line uses
+    /// `subtle::ConstantTimeEq` / `.ct_eq()`. The structural check
+    /// suppresses on the constant-time marker; this is the
+    /// discrimination test the sub-gate exists to pass.
+    #[test]
+    fn broken_comparison_claim_at_ct_eq_fails() {
+        let dir = tmpdir();
+        let src = "\
+use subtle::ConstantTimeEq;
+fn verify_token(received_token: &[u8], expected_token: &[u8]) -> bool {
+    received_token.ct_eq(expected_token).into()
+}
+";
+        write_src(&dir, "src/auth.rs", src);
+        let finding = json!({
+            "title": "Weak comparison of secret token in verify_token",
+            "summary": "Suspected non-constant-time comparison of token bytes.",
+            "location": {"file": "src/auth.rs", "line_start": 3},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Unresolved);
+        assert_eq!(out.gate, Gate::BrokenComparisonStructural);
+        assert!(out.reason.unwrap().contains("constant-time"));
+    }
+
+    /// Broken-comparison non-match: `==` on a non-credential
+    /// identifier. Unresolved.
+    #[test]
+    fn broken_comparison_claim_at_non_credential_eq_fails() {
+        let dir = tmpdir();
+        let src = "\
+fn role_matches(user_role: &str, admin_role: &str) -> bool {
+    user_role == admin_role
+}
+";
+        write_src(&dir, "src/role.rs", src);
+        let finding = json!({
+            "title": "Weak comparison in role_matches (timing attack risk)",
+            "summary": "Comparison may leak information through timing.",
+            "location": {"file": "src/role.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Unresolved);
+        assert_eq!(out.gate, Gate::BrokenComparisonStructural);
+    }
+
+    /// Race-condition routing: claim routes to
+    /// `race_condition_deferred` with existence-only resolution.
+    /// Any single-line structural test would resolve on every
+    /// `Mutex` or `.lock()` line; the deferred tag carries the
+    /// disclosure rather than padding the verified column.
+    #[test]
+    fn race_condition_claim_routes_to_deferred() {
+        let dir = tmpdir();
+        let src = "\
+async fn next_id(counter: &Mutex<u64>) -> u64 {
+    let mut guard = counter.lock().await;
+    *guard += 1;
+    *guard
+}
+";
+        write_src(&dir, "src/seq.rs", src);
+        let finding = json!({
+            "title": "Potential race condition in next_id increment",
+            "summary": "TOCTOU between load and store of the shared counter.",
+            "location": {"file": "src/seq.rs", "line_start": 3},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::RaceConditionDeferred);
+        assert!(out.reason.is_none());
+    }
+
+    /// Priority regression: a finding mentioning both
+    /// `broken comparison` and `race condition` routes to
+    /// broken_comparison (higher priority).
+    #[test]
+    fn broken_comparison_wins_priority_over_race_condition() {
+        let dir = tmpdir();
+        let src = "\
+fn check(token: &str, expected: &str) -> bool {
+    token == expected
+}
+";
+        write_src(&dir, "src/check.rs", src);
+        let finding = json!({
+            "title": "Weak comparison and race condition in check",
+            "summary": "Token check may leak timing and is also a TOCTOU site.",
+            "location": {"file": "src/check.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.gate, Gate::BrokenComparisonStructural);
+        assert_eq!(out.status, Status::Resolved);
+    }
+
+    /// Priority regression: race wins over access_control wins over
+    /// command. Verify chain.
+    #[test]
+    fn race_wins_priority_over_access_control_wins_over_command() {
+        let dir = tmpdir();
+        let src = "fn main() { let x = 1; }\n";
+        write_src(&dir, "src/main.rs", src);
+
+        let race_then_access = json!({
+            "title": "Race condition and missing access check",
+            "summary": "TOCTOU plus missing auth on a privileged path.",
+            "location": {"file": "src/main.rs", "line_start": 1},
+        });
+        let out = check(&race_then_access, &dir);
+        assert_eq!(out.gate, Gate::RaceConditionDeferred);
+
+        let access_then_command = json!({
+            "title": "Missing access check before command injection sink",
+            "summary": "Unauthenticated caller reaches a shell-spawn.",
+            "location": {"file": "src/main.rs", "line_start": 1},
+        });
+        let out = check(&access_then_command, &dir);
+        assert_eq!(out.gate, Gate::AccessControlDeferred);
+    }
+
+    #[test]
+    fn line_has_credential_identifier_word_boundary_check() {
+        assert!(line_has_credential_identifier(
+            "if user_token == expected_token {"
+        ));
+        assert!(line_has_credential_identifier(
+            "let api_secret = std::env::var(\"X\");"
+        ));
+        assert!(line_has_credential_identifier(
+            "verify_hmac(received_mac, expected_mac);"
+        ));
+        // snake_case underscore is a boundary, so `api_key` matches `key`.
+        assert!(line_has_credential_identifier(
+            "if api_key == provided_key {"
+        ));
+        // No credential keyword as a standalone word.
+        assert!(!line_has_credential_identifier("if keyword == \"admin\" {"));
+        assert!(!line_has_credential_identifier(
+            "let monkey = banana_count;"
+        ));
+        assert!(!line_has_credential_identifier(
+            "if role_matches(user_role, admin_role) {"
+        ));
+    }
+
+    #[test]
+    fn line_has_constant_time_marker_accepts_known_markers() {
+        assert!(line_has_constant_time_marker(
+            "received_token.ct_eq(expected_token).into()"
+        ));
+        assert!(line_has_constant_time_marker(
+            "subtle::ConstantTimeEq::ct_eq(&a, &b)"
+        ));
+        assert!(line_has_constant_time_marker("use subtle::ConstantTimeEq;"));
+        assert!(!line_has_constant_time_marker(
+            "received_token == expected_token"
+        ));
     }
 
     #[test]

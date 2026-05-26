@@ -1136,6 +1136,12 @@ fn aggregate_findings_multi(
     let mut prompt_injection_deferred_unresolved: usize = 0;
     let mut sql_injection_structural_resolved: usize = 0;
     let mut sql_injection_structural_unresolved: usize = 0;
+    let mut broken_comparison_structural_resolved: usize = 0;
+    let mut broken_comparison_structural_unresolved: usize = 0;
+    let mut race_condition_deferred_resolved: usize = 0;
+    let mut race_condition_deferred_unresolved: usize = 0;
+    let mut access_control_deferred_resolved: usize = 0;
+    let mut access_control_deferred_unresolved: usize = 0;
     let mut command_injection_structural_resolved: usize = 0;
     let mut command_injection_structural_unresolved: usize = 0;
     let mut file_line_only_resolved: usize = 0;
@@ -1173,6 +1179,24 @@ fn aggregate_findings_multi(
                 }
                 (Gate::SqlInjectionStructural, Status::Unresolved) => {
                     sql_injection_structural_unresolved += 1
+                }
+                (Gate::BrokenComparisonStructural, Status::Resolved) => {
+                    broken_comparison_structural_resolved += 1
+                }
+                (Gate::BrokenComparisonStructural, Status::Unresolved) => {
+                    broken_comparison_structural_unresolved += 1
+                }
+                (Gate::RaceConditionDeferred, Status::Resolved) => {
+                    race_condition_deferred_resolved += 1
+                }
+                (Gate::RaceConditionDeferred, Status::Unresolved) => {
+                    race_condition_deferred_unresolved += 1
+                }
+                (Gate::AccessControlDeferred, Status::Resolved) => {
+                    access_control_deferred_resolved += 1
+                }
+                (Gate::AccessControlDeferred, Status::Unresolved) => {
+                    access_control_deferred_unresolved += 1
                 }
                 (Gate::CommandInjectionStructural, Status::Resolved) => {
                     command_injection_structural_resolved += 1
@@ -1236,6 +1260,18 @@ fn aggregate_findings_multi(
             "sql_injection_structural": {
                 "resolved": sql_injection_structural_resolved,
                 "unresolved": sql_injection_structural_unresolved,
+            },
+            "broken_comparison_structural": {
+                "resolved": broken_comparison_structural_resolved,
+                "unresolved": broken_comparison_structural_unresolved,
+            },
+            "race_condition_deferred": {
+                "resolved": race_condition_deferred_resolved,
+                "unresolved": race_condition_deferred_unresolved,
+            },
+            "access_control_deferred": {
+                "resolved": access_control_deferred_resolved,
+                "unresolved": access_control_deferred_unresolved,
             },
             "command_injection_structural": {
                 "resolved": command_injection_structural_resolved,
