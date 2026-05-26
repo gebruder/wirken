@@ -10,6 +10,58 @@ tagged.
 
 ## Unreleased
 
+## [1.7.3] - 2026-05-26
+
+### Lyrik dispatch gates
+
+- New preflight tool-call probe at run start. Runs once against the
+  configured pin via the same `LlmClient::complete` path the real
+  dispatch uses, with one tool defined and a prompt asking the model
+  to call it. Classifies the response as `provider_rejected` (HTTP
+  4xx), `tool_call_as_text` (tool-call-shaped JSON in `content`),
+  `no_tool_call`, or `unparseable_arguments`. Pass emits
+  `lyrik.model.tool_calls_supported` and continues. Fail-closed:
+  emits `lyrik.model.tool_calls_unsupported` with `{provider, model,
+  case, detail}` and aborts before any target-touching work.
+- Citation-resolution gate runs between staged emission and report
+  aggregation. Confirms the cited file and line resolve; when the
+  finding's title or summary contains a hardcoded-literal claim word
+  (`hardcoded`, `hard-coded`, `literal`), confirms the cited line or
+  a `+/-2`-line window around it carries a string or numeric literal.
+  Findings stay in the report; each carries a `citation_check`
+  annotation `{gate, status, reason}`. Counts split by gate in the
+  top-level `citation_check` block: `literal_claim.{resolved,unresolved}`
+  and `file_line_only.{resolved,unresolved}`, so a skim of
+  "file_line_only.resolved" cannot be read as a verified citation.
+  Audit row: `lyrik.citation.checked` per finding.
+- The bundled Lyrik skill is staged into the per-run dir at dispatch
+  and self-signed with a one-shot keypair so the loader's signature
+  gate accepts the bundle. `/lyrik` in the dispatch prompt resolves
+  regardless of operator state under `<data_dir>/skills/`. The walks
+  staging path applies the same self-sign step per selected walk.
+  Shared helper `wirken_agent::bundled_skills::self_sign_skill_dir`.
+  New audit row: `lyrik.skill.staged`.
+
+### Effective context budget
+
+- `lyrik.dispatch.started` records both `context_window` and
+  `effective_budget_tokens` so the configured budget and the budget
+  the runtime actually enforces are both visible at dispatch start.
+  The runtime trims and enforces at SAFETY_FACTOR (0.80) of the
+  configured window; the budget the operator pinned and the budget
+  the agent applies are now side by side in the audit log. New
+  public helper `wirken_agent::context::effective_budget`.
+
+### Non-convergent end state
+
+- `AgentError::ContextOverflow` from the dispatch arm is caught and
+  emitted as `lyrik.dispatch.non_convergent` with `{reason:
+  "context_overflow", current_tokens, budget_tokens, context_window}`.
+  An empty (schema-valid) `findings.json` is written and the runner
+  exits 0; the operator sees a named end state instead of a context
+  overflow stack message and a missing artifact. Mirrors the
+  `RateLimitExhausted` arm.
+
 ## [1.7.2] - 2026-05-25
 
 ### Sandbox security fix (wasmtime 43 → 45)
