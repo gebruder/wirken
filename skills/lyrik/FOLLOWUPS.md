@@ -184,3 +184,70 @@ gpt-5) on small targets like the AVB sample for cost.
   vulnerability whose only job is "emit one finding." Removes the
   multi-call loop from the parent's responsibility. Heavier
   infrastructure; only worth it if there's another driver.
+
+## 8. Multi-run aggregation for local-model intrinsic drift
+
+Surfaced 2026-05-26 during the qwen3-coder:30b single-framing probe
+on `crates/adapter-signal`. Bench writeup at
+`~/code/lyrik-bench/local-emit-test/qwen3-coder-30b-stability.md`.
+
+Seven runs of the same target on the same model, same context
+budget, same commit, varying only the framing scope (3 multi-framing
++ 4 single-framing). The single-framing probe discriminated two
+phenomena that were tangled in the multi-framing baseline:
+
+- **Convergence is a load knob.** Multi-framing: 2 of 3 converged.
+  Single-framing: 4 of 4 converged. The non-convergence under
+  multi-framing was the model failing to terminate the multi-finding
+  loop, not the model fundamentally broken.
+- **Bug selection is intrinsic to the model.** Single-framing did
+  not reduce wandering at all. Within `auth`: run 1 found a
+  hardcoded phone number at line 265, run 2 found a missing auth
+  check at line 210. Different *bugs*, not different lines for the
+  same bug. Within `injection`: run 3 found `eval`-like functionality
+  at line 103, run 4 found command injection via socket path at
+  line 273. Same model, same code, same framing, only the sampling
+  seed varied. The model is sampling from a distribution of
+  plausible vulnerability stories about the code, not enumerating
+  the actual vulnerabilities.
+
+A single local run is therefore one snapshot from a distribution of
+N plausible stories, not an enumeration. That is disqualifying for
+Lyrik's defensible-report goal on the merits, not on a tuning
+failure.
+
+**Design question, distinct from #1's new/repeat-stream item:** the
+new/repeat-stream design compares findings against a `.lyrik/prior/`
+history (across-run-history dedup). Multi-run aggregation runs the
+same framing N times in one assessment, aggregates by recurrence
+frequency, and reports frequency as a confidence signal. A bug
+found in 5 of 5 runs is qualitatively different from one found in
+1 of 5. Same axis is recurrence, but the storage and lifecycle are
+different (within-assessment, not across-assessment).
+
+Schema questions:
+
+- Where in the pipeline does aggregation run? Per-run staged findings
+  feed into an aggregator that emits a single `findings.json` per
+  assessment, with a `recurrence` field on each finding (`{seen_in:
+  N, of_runs: M}`).
+- How is N chosen? Operator config, with a default that trades cost
+  for confidence. Five runs is a reasonable starting point; the
+  bench can refine.
+- How are findings clustered across runs into "same bug"? The
+  citation gate's gap (#143) bites here: same-bug detection has to
+  bridge "same claim at slightly different line" without using
+  literal-claim heuristics that don't fire for most findings.
+- How does this compose with the per-walk dispatch path? Each walk
+  could itself be aggregated, or the union of N runs across walks
+  could form the corpus.
+
+**Trigger:** the single-framing probe is one data point that drift
+is intrinsic. One more local-model bench on a different target
+(say, `crates/mcp-proxy` or a sibling repo) would confirm the
+shape generalizes. Once confirmed, multi-run aggregation is the
+path to a defensible local report and is worth design weight.
+
+**Worked case:** see the writeup at
+`~/code/lyrik-bench/local-emit-test/qwen3-coder-30b-stability.md`
+for the full 7-run table and the convergence-vs-drift split.
