@@ -71,7 +71,21 @@ pub struct TrimmedMessage {
 /// 4-chars-per-token estimator is rough, so leave headroom for the
 /// LLM's max response and for the difference between estimated and
 /// actual tokens.
-const SAFETY_FACTOR: f64 = 0.80;
+pub const SAFETY_FACTOR: f64 = 0.80;
+
+/// Compute the effective conversation budget the runtime will
+/// enforce for a configured model context window. The runtime keeps
+/// [`SAFETY_FACTOR`] of the configured window for the conversation;
+/// the remainder is headroom for the response and tokenizer drift.
+///
+/// Exposed so runners (lyrik) can surface the effective budget in
+/// audit rows at dispatch time. Operators set `context_window` and
+/// see the value the runtime will actually enforce, without reading
+/// the agent crate or learning the number from an overflow stack
+/// trace.
+pub fn effective_budget(context_window: usize) -> usize {
+    ((context_window as f64) * SAFETY_FACTOR) as usize
+}
 
 /// Minimum number of recent turns (user messages and everything after
 /// them) that fit() will refuse to trim. A "turn" is bounded by user
@@ -114,9 +128,8 @@ impl ContextEngine {
     /// `context_window` to leave headroom for the LLM's response
     /// and tokenizer-vs-estimator drift.
     pub fn for_model(llm: &LlmConfig) -> Self {
-        let budget_tokens = ((llm.context_window as f64) * SAFETY_FACTOR) as usize;
         Self {
-            budget_tokens,
+            budget_tokens: effective_budget(llm.context_window),
             min_recent_turns: DEFAULT_MIN_RECENT_TURNS,
         }
     }

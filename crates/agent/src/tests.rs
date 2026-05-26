@@ -4484,6 +4484,27 @@ mod context_engine {
         assert_eq!(engine.budget_tokens(), 800);
     }
 
+    /// `effective_budget` is the public form the lyrik runner uses to
+    /// surface the budget in the dispatch.started audit row, ahead
+    /// of the agent. Keep it in lockstep with `ContextEngine::for_model`
+    /// so the operator-visible number matches what the runtime enforces.
+    #[test]
+    fn effective_budget_matches_context_engine_for_model() {
+        for window in [1_000usize, 32_768, 128_000, 200_000] {
+            let mut cfg = LlmConfig::ollama("test");
+            cfg.context_window = window;
+            let engine = ContextEngine::for_model(&cfg);
+            assert_eq!(
+                crate::context::effective_budget(window),
+                engine.budget_tokens(),
+                "window={window}"
+            );
+        }
+        // Spot-check the value the lyrik runner emits for the
+        // typical ollama pin: 32768 * 0.80 = 26214.4 -> 26214 (usize cast).
+        assert_eq!(crate::context::effective_budget(32_768), 26_214);
+    }
+
     #[test]
     fn empty_conversation_no_op() {
         let engine = ContextEngine::for_test(1_000, 3);

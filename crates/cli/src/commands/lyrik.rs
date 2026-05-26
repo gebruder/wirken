@@ -496,6 +496,8 @@ async fn dispatch_via_agent_runtime(
         None => None,
     };
 
+    let effective_budget_tokens =
+        wirken_agent::context::effective_budget(llm_config.context_window);
     audit.emit(
         "lyrik.dispatch.started",
         serde_json::json!({
@@ -512,6 +514,8 @@ async fn dispatch_via_agent_runtime(
             "walks": walks_cfg.as_ref().map(|c| c.walks.clone()),
             "max_concurrent_walks": walks_cfg.as_ref().map(|c| c.max_concurrent_walks),
             "workspace": target.display().to_string(),
+            "context_window": llm_config.context_window,
+            "effective_budget_tokens": effective_budget_tokens,
         }),
     )?;
 
@@ -611,6 +615,30 @@ async fn dispatch_via_agent_runtime(
                     tracing::warn!(
                         "rate limit exhausted after {attempts} attempts; \
                          writing empty findings.json"
+                    );
+                    write_empty_findings(expected_findings, run_id)?;
+                    return Ok(());
+                }
+                Err(AgentError::ContextOverflow {
+                    current_tokens,
+                    budget_tokens,
+                }) => {
+                    audit.emit(
+                        "lyrik.dispatch.non_convergent",
+                        serde_json::json!({
+                            "mode": "agent_runtime",
+                            "reason": "context_overflow",
+                            "current_tokens": current_tokens,
+                            "budget_tokens": budget_tokens,
+                            "context_window": llm_config.context_window,
+                        }),
+                    )?;
+                    tracing::warn!(
+                        current_tokens,
+                        budget_tokens,
+                        context_window = llm_config.context_window,
+                        "lyrik dispatch did not converge within the effective context \
+                         budget; writing empty findings.json"
                     );
                     write_empty_findings(expected_findings, run_id)?;
                     return Ok(());
