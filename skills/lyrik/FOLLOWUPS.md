@@ -225,6 +225,31 @@ found in 5 of 5 runs is qualitatively different from one found in
 1 of 5. Same axis is recurrence, but the storage and lifecycle are
 different (within-assessment, not across-assessment).
 
+**Dependency on #143, identity not just verification.** Aggregation
+counts recurrence by `stable_id` (`framing::file:line`). The intrinsic
+drift this entry exists to handle breaks that identity directly: the
+same vulnerability cited at line 265 in one run and line 210 in
+another gets two different stable_ids and looks like two findings,
+while two genuinely different bugs at a coincidentally-shared line
+look like one. Aggregating by `stable_id` will mismeasure recurrence
+in exactly the dimension drift introduces noise. The bench data is
+already this shape: `auth-r1` and `auth-r2` describe two different
+bugs at two different lines, but a recurrence aggregator built on
+positional identity would count them either as zero matches
+(reporting "no overlap, low confidence") or two separate single-shot
+findings (reporting "two distinct 1-of-2 findings"), neither of which
+matches what the model is actually doing.
+
+A useful notion of "same finding" is class-shape-aware: two findings
+are the same when they describe the same vulnerability class at code
+that does the same thing, not when their citation numerics match.
+That is the same work that #143 needs for its non-literal claim-shape
+detectors. The two items share the identity-of-a-finding question;
+design them together, not sequentially. Building aggregation on top
+of `stable_id` first and revisiting identity later means measuring
+recurrence on a key the drift breaks, then having to migrate the
+schema.
+
 Schema questions:
 
 - Where in the pipeline does aggregation run? Per-run staged findings
