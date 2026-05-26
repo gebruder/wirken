@@ -8,22 +8,67 @@
 //! gate tag on every per-finding annotation and audit row names
 //! which sub-gate ran, so a reader can see exactly what was checked.
 //!
-//! The three sub-gates landed today:
+//! The five sub-gates landed today:
 //!
 //! 1. `literal_claim`: title/summary mentions `hardcoded`,
 //!    `hard-coded`, or `literal`. The cited window must carry a
 //!    string `"..."` or a numeric literal. A doc comment, a field
 //!    declaration, or a type reference fails.
-//! 2. `injection_structural`: title/summary mentions `injection`,
-//!    `shell=true`, `subprocess`, or `eval`. The cited window must
-//!    carry an `ident(` call shape on a non-comment line. Confirms
-//!    the cited line could host a call-shaped bug; does NOT prove
-//!    the call's input is attacker-controlled.
-//! 3. `file_line_only`: no claim-class keywords matched. The file
+//! 2. `prompt_injection_deferred`: title/summary mentions `prompt
+//!    injection` or `prompt-injection`. **No structural check
+//!    runs.** Prompt injection is a semantic property (untrusted
+//!    text reaching model context inherits surrounding prompt's
+//!    authority); the failure modes do not have a structural
+//!    signature an in-line, parser-free check can verify. The
+//!    finding resolves under file+line existence only. The gate
+//!    tag exists to disclose that the routing was deliberate for
+//!    this class, not a default fallthrough, so a reader skimming
+//!    `prompt_injection_deferred` counts knows the citation has
+//!    not been structurally checked. **`prompt_injection_deferred.resolved`
+//!    carries the same caveat as `file_line_only.resolved`**: it
+//!    means the file and line exist, nothing more. Do not count
+//!    it in the "verified" column when summarizing a run; if
+//!    anything, the deferred bucket is weaker than file_line_only
+//!    because it always resolves on existence by design, never
+//!    flagging a citation as unresolved even when the model is
+//!    clearly hallucinating.
+//! 3. `sql_injection_structural`: title/summary mentions `sql
+//!    injection`, `sql-injection`, or `sqli`. The cited window
+//!    must contain a SQL keyword (`SELECT`, `INSERT`, `UPDATE`,
+//!    `DELETE`, `WHERE`, `FROM`, `JOIN`, `UNION`) AND an
+//!    interpolation marker (`format!`, `{}` inside a string
+//!    literal, or `+` adjacent to an identifier) AND NOT a
+//!    parameter-binding marker (`?` placeholder in a string, `$N`
+//!    postgres placeholder, `.bind(`, `query!(` macro). A
+//!    parameterized query is the negative case and does NOT
+//!    resolve. Limits: multi-line queries where the SQL keyword
+//!    and the interpolation are more than 2 lines apart get
+//!    missed; ORM-level injection that does not surface raw SQL
+//!    keywords (Diesel DSL, sea-orm builder) gets missed.
+//! 4. `command_injection_structural`: title/summary mentions
+//!    `command injection`, `shell injection`, `shell=true`,
+//!    `subprocess`, `eval`, `sh -c`, or generic `injection`
+//!    fallback after prompt and sql have been ruled out. The
+//!    cited window must carry an `ident(` call shape on a
+//!    non-comment line. Confirms the cited line could host a
+//!    call-shaped bug; does NOT prove the call's input is
+//!    attacker-controlled. **The bare-`injection` fallback
+//!    inherits the call-shape check.** A finding titled simply
+//!    "injection vulnerability" with no class qualifier, or a
+//!    deserialization-injection / header-injection / template-
+//!    injection claim that doesn't carry one of the listed
+//!    keywords, lands in `command_injection_structural` and is
+//!    checked against call-shape. That may resolve or fail for
+//!    the wrong reason (the underlying claim is about a
+//!    different interpreter sink, but the check is generic). The
+//!    gate tag discloses what ran; further class-specific
+//!    detectors are tracked in #143.
+//! 5. `file_line_only`: no claim-class keywords matched. The file
 //!    exists and the line resolves; nothing further is checked.
 //!
-//! Priority order on multi-keyword findings: literal > injection >
-//! file_line_only. The most-specific matching sub-gate runs.
+//! Priority order on multi-keyword findings: literal > prompt >
+//! sql > command > file_line_only. The most-specific matching
+//! sub-gate runs.
 //!
 //! **Structural, not exploitability.** Every sub-gate confirms that
 //! the cited line *could plausibly host* the claimed bug class. None
@@ -32,17 +77,26 @@
 //! verification is a separate workload (Lyrik's grade-0.5 ceiling).
 //!
 //! Claim classes without a wired matcher (missing access check,
-//! race condition, broken comparison, SQL injection, data leakage,
-//! etc.) fall to `file_line_only`. An earlier draft of this slice
-//! included an `access_control_structural` sub-gate that required
-//! the cited window to carry a call site or conditional keyword;
-//! it was dropped before commit because the check resolved on
-//! nearly any code line (any call site looks like "executable code
-//! where an auth check could live"), which would pad the verified
-//! side of the header count without verifying the missing-check
-//! claim. A real access-control sub-gate needs a stronger
-//! discriminator and is tracked in GitHub issue #143 alongside the
-//! other class-specific detectors.
+//! race condition, broken comparison, data leakage, etc.) fall to
+//! `file_line_only`. Two prior drafts of this slice included
+//! sub-gates that were dropped before commit on the same honesty
+//! principle:
+//!
+//! - `access_control_structural`: required the cited window to
+//!   carry a call site or conditional keyword. Dropped because
+//!   the check resolved on nearly any code line (any call site
+//!   looks like "executable code where an auth check could live"),
+//!   which would pad the verified side of the header count
+//!   without verifying the missing-check claim.
+//! - The earlier generic `injection_structural` is now split into
+//!   `sql_injection_structural`, `command_injection_structural`,
+//!   and `prompt_injection_deferred` per claim class. The same
+//!   generic call-shape check is reused for the command-injection
+//!   sub-class only; SQL and prompt have their own routing.
+//!
+//! Real detectors for the remaining unmatched classes need
+//! stronger discriminators than a structural in-line check can
+//! provide and are tracked in GitHub issue #143.
 //!
 //! Failure mode: keep the finding in the report, annotate it with
 //! `citation_check.status = "unresolved"`, emit an audit row, and
@@ -51,9 +105,11 @@
 //!
 //! ```json
 //! "citation_check": {
-//!   "literal_claim":        { "resolved": N, "unresolved": M },
-//!   "injection_structural": { "resolved": N, "unresolved": M },
-//!   "file_line_only":       { "resolved": N, "unresolved": M }
+//!   "literal_claim":               { "resolved": N, "unresolved": M },
+//!   "prompt_injection_deferred":   { "resolved": N, "unresolved": M },
+//!   "sql_injection_structural":    { "resolved": N, "unresolved": M },
+//!   "command_injection_structural":{ "resolved": N, "unresolved": M },
+//!   "file_line_only":              { "resolved": N, "unresolved": M }
 //! }
 //! ```
 //!
@@ -94,7 +150,9 @@ impl Status {
 pub enum Gate {
     FileLineOnly,
     LiteralClaim,
-    InjectionStructural,
+    PromptInjectionDeferred,
+    SqlInjectionStructural,
+    CommandInjectionStructural,
 }
 
 impl Gate {
@@ -102,14 +160,26 @@ impl Gate {
         match self {
             Gate::FileLineOnly => "file_line_only",
             Gate::LiteralClaim => "literal_claim",
-            Gate::InjectionStructural => "injection_structural",
+            Gate::PromptInjectionDeferred => "prompt_injection_deferred",
+            Gate::SqlInjectionStructural => "sql_injection_structural",
+            Gate::CommandInjectionStructural => "command_injection_structural",
         }
     }
 }
 
 const STRUCTURAL_WINDOW: usize = 2;
 const LITERAL_CLAIM_WORDS: &[&str] = &["hardcoded", "hard-coded", "literal"];
-const INJECTION_CLAIM_WORDS: &[&str] = &["injection", "shell=true", "subprocess", "eval"];
+const PROMPT_INJECTION_CLAIM_WORDS: &[&str] = &["prompt injection", "prompt-injection"];
+const SQL_INJECTION_CLAIM_WORDS: &[&str] = &["sql injection", "sql-injection", "sqli"];
+const COMMAND_INJECTION_CLAIM_WORDS: &[&str] = &[
+    "command injection",
+    "shell injection",
+    "shell=true",
+    "subprocess",
+    "eval",
+    "sh -c",
+    "injection",
+];
 
 /// Check a parsed staged finding against the citation gate. `workspace`
 /// is the path the agent received as its sandbox root (the target
@@ -174,14 +244,45 @@ pub fn check(finding: &serde_json::Value, workspace: &Path) -> Outcome {
             ),
         );
     }
-    if claims_injection(finding) {
+    if claims_prompt_injection(finding) {
+        // Deferred-by-design: prompt injection has no parser-free
+        // structural signature. The gate tag discloses this; the
+        // resolve is existence-only on file+line, identical
+        // semantics to file_line_only but tagged distinctly so the
+        // routing is visible.
+        let _ = snippet;
+        return resolved(Gate::PromptInjectionDeferred);
+    }
+    if claims_sql_injection(finding) {
+        let has_sql = (window_lo..=window_hi).any(|i| line_has_sql_keyword(lines[i]));
+        let has_param = (window_lo..=window_hi).any(|i| line_has_param_binding(lines[i]));
+        let has_interp = (window_lo..=window_hi).any(|i| line_has_concat_or_interp(lines[i]));
+        if has_sql && has_interp && !has_param {
+            return resolved(Gate::SqlInjectionStructural);
+        }
+        let reason = if !has_sql {
+            format!(
+                "title/summary claims SQL injection but no SQL keyword appears in {file}:{line} window (line content: {snippet:?})"
+            )
+        } else if has_param {
+            format!(
+                "title/summary claims SQL injection but {file}:{line} uses parameter binding (?/$N/.bind/query!), not concatenation (line content: {snippet:?})"
+            )
+        } else {
+            format!(
+                "title/summary claims SQL injection but no interpolation marker (format!, {{}}, +) appears in {file}:{line} window (line content: {snippet:?})"
+            )
+        };
+        return unresolved(Gate::SqlInjectionStructural, reason);
+    }
+    if claims_command_injection(finding) {
         if (window_lo..=window_hi).any(|i| line_has_call_or_exec(lines[i])) {
-            return resolved(Gate::InjectionStructural);
+            return resolved(Gate::CommandInjectionStructural);
         }
         return unresolved(
-            Gate::InjectionStructural,
+            Gate::CommandInjectionStructural,
             format!(
-                "title/summary claims an injection vulnerability but no call/exec/spawn-shaped construct appears in {file}:{line} (line content: {snippet:?})"
+                "title/summary claims a command injection vulnerability but no call/exec/spawn-shaped construct appears in {file}:{line} (line content: {snippet:?})"
             ),
         );
     }
@@ -224,9 +325,19 @@ fn claims_literal(finding: &serde_json::Value) -> bool {
     LITERAL_CLAIM_WORDS.iter().any(|w| t.contains(w))
 }
 
-fn claims_injection(finding: &serde_json::Value) -> bool {
+fn claims_prompt_injection(finding: &serde_json::Value) -> bool {
     let t = claim_text(finding);
-    INJECTION_CLAIM_WORDS.iter().any(|w| t.contains(w))
+    PROMPT_INJECTION_CLAIM_WORDS.iter().any(|w| t.contains(w))
+}
+
+fn claims_sql_injection(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    SQL_INJECTION_CLAIM_WORDS.iter().any(|w| t.contains(w))
+}
+
+fn claims_command_injection(finding: &serde_json::Value) -> bool {
+    let t = claim_text(finding);
+    COMMAND_INJECTION_CLAIM_WORDS.iter().any(|w| t.contains(w))
 }
 
 /// True if the line contains a string or numeric literal. Permissive
@@ -280,6 +391,113 @@ pub fn line_has_literal(s: &str) -> bool {
 
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
+}
+
+const SQL_KEYWORDS: &[&str] = &[
+    "SELECT", "INSERT", "UPDATE", "DELETE", "WHERE", "FROM", "JOIN", "UNION",
+];
+
+/// True when the line carries a SQL keyword (case-insensitive). Used
+/// by the SQL-injection sub-gate as the first of three conditions
+/// (SQL keyword + interpolation + no param-binding).
+pub fn line_has_sql_keyword(s: &str) -> bool {
+    if is_comment_line(s) {
+        return false;
+    }
+    let upper = s.to_uppercase();
+    SQL_KEYWORDS.iter().any(|kw| upper.contains(kw))
+}
+
+/// True when the line carries a string-interpolation or
+/// concatenation marker that could fold caller-controlled data into
+/// a constructed SQL string. Catches `format!`, `write!`,
+/// `println!`-shaped macros, `{}` placeholders inside a double-quoted
+/// string, and `"..." + ident` / `ident + "..."` concatenation.
+pub fn line_has_concat_or_interp(s: &str) -> bool {
+    if is_comment_line(s) {
+        return false;
+    }
+    for macro_kw in ["format!", "format_args!", "write!", "writeln!"] {
+        if s.contains(macro_kw) {
+            return true;
+        }
+    }
+    // `{}` inside a string literal.
+    let bytes = s.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if in_string && bytes[i] == b'{' && bytes.get(i + 1) != Some(&b'{') {
+            return true;
+        }
+        i += 1;
+    }
+    // `"..." +` or `+ "..."` concatenation patterns.
+    if s.contains("\" +") || s.contains("+ \"") {
+        return true;
+    }
+    false
+}
+
+/// True when the line carries a parameter-binding marker that
+/// indicates a parameterized (safe) query rather than concatenation.
+/// `?` or `$N` placeholders inside a string literal, `.bind(` calls,
+/// and the sqlx `query!`/`query_as!`/`query_scalar!` macros which
+/// are parameterized by design. This is the **negative case** for
+/// the SQL-injection sub-gate: a window with these markers does NOT
+/// resolve as a bug site.
+pub fn line_has_param_binding(s: &str) -> bool {
+    if is_comment_line(s) {
+        return false;
+    }
+    if s.contains(".bind(") || s.contains(".bind_") {
+        return true;
+    }
+    for macro_kw in [
+        "query!(",
+        "query_as!(",
+        "query_scalar!(",
+        "query_unchecked!(",
+    ] {
+        if s.contains(macro_kw) {
+            return true;
+        }
+    }
+    // `?` placeholder inside a string literal.
+    let bytes = s.as_bytes();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if in_string && bytes[i] == b'?' {
+            return true;
+        }
+        i += 1;
+    }
+    // `$N` postgres placeholder.
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'$' && bytes[i + 1].is_ascii_digit() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Heuristic comment-line detector for Rust source. Lines starting with
@@ -622,9 +840,9 @@ fn process_request(req: Request) {
     /// line with no executable construct anywhere in the cited window.
     /// The probe surfaced this exact failure (`adapter.rs:125`
     /// "command injection" landing on a doc-comment line). The
-    /// injection_structural sub-gate must flag it unresolved.
+    /// command_injection_structural sub-gate must flag it unresolved.
     #[test]
-    fn injection_claim_cited_at_doc_comment_fails() {
+    fn command_injection_claim_cited_at_doc_comment_fails() {
         let dir = tmpdir();
         let src = "\
 /// Reads frames from the channel adapter. The reader runs on a
@@ -644,7 +862,7 @@ struct Reader {
         });
         let out = check(&finding, &dir);
         assert_eq!(out.status, Status::Unresolved);
-        assert_eq!(out.gate, Gate::InjectionStructural);
+        assert_eq!(out.gate, Gate::CommandInjectionStructural);
         assert!(
             out.reason
                 .unwrap()
@@ -653,7 +871,7 @@ struct Reader {
     }
 
     #[test]
-    fn injection_claim_at_call_site_passes() {
+    fn command_injection_claim_at_call_site_passes() {
         let dir = tmpdir();
         let src = "\
 fn run_signal(cmd: &str) {
@@ -669,8 +887,227 @@ fn run_signal(cmd: &str) {
         });
         let out = check(&finding, &dir);
         assert_eq!(out.status, Status::Resolved);
-        assert_eq!(out.gate, Gate::InjectionStructural);
+        assert_eq!(out.gate, Gate::CommandInjectionStructural);
         assert!(out.reason.is_none());
+    }
+
+    /// Negative case: a SQL-injection finding citing a parameterized
+    /// query (sqlx `query!` macro) must NOT resolve. The structural
+    /// detector sees the SQL keyword AND the parameterized-binding
+    /// marker; that combination is the safe shape, not the bug
+    /// shape.
+    #[test]
+    fn sql_injection_claim_at_parameterized_query_fails() {
+        let dir = tmpdir();
+        let src = "\
+async fn lookup_user(pool: &PgPool, user_id: i64) -> Result<User, Error> {
+    let row = sqlx::query!(\"SELECT * FROM users WHERE id = ?\", user_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(User::from_row(row))
+}
+";
+        write_src(&dir, "src/db.rs", src);
+        let finding = json!({
+            "title": "Potential SQL injection in lookup_user",
+            "summary": "User-controlled id appears in a database query.",
+            "location": {"file": "src/db.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Unresolved);
+        assert_eq!(out.gate, Gate::SqlInjectionStructural);
+        assert!(out.reason.unwrap().contains("parameter binding"));
+    }
+
+    /// Positive case: a SQL-injection finding citing concatenated
+    /// query text resolves. The detector sees a SQL keyword AND
+    /// `format!` interpolation AND no parameter-binding marker.
+    #[test]
+    fn sql_injection_claim_at_concatenated_query_passes() {
+        let dir = tmpdir();
+        let src = "\
+async fn search(pool: &PgPool, keyword: &str) -> Result<Vec<Row>, Error> {
+    let q = format!(\"SELECT * FROM items WHERE name = '{}'\", keyword);
+    sqlx::raw(&q).fetch_all(pool).await
+}
+";
+        write_src(&dir, "src/search.rs", src);
+        let finding = json!({
+            "title": "Potential SQL injection in search handler",
+            "summary": "User keyword is interpolated into the query string via format!.",
+            "location": {"file": "src/search.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::SqlInjectionStructural);
+        assert!(out.reason.is_none());
+    }
+
+    /// SQL-injection claim cited at a line with no SQL keyword
+    /// (model hallucinated a SQL bug at a non-SQL site): unresolved.
+    #[test]
+    fn sql_injection_claim_at_non_sql_site_fails() {
+        let dir = tmpdir();
+        let src = "\
+fn handle_message(msg: &str) {
+    log::info!(\"received message: {}\", msg);
+    process(msg);
+}
+";
+        write_src(&dir, "src/handler.rs", src);
+        let finding = json!({
+            "title": "Potential SQL injection in handle_message",
+            "summary": "Attacker-controlled message may reach the database layer.",
+            "location": {"file": "src/handler.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Unresolved);
+        assert_eq!(out.gate, Gate::SqlInjectionStructural);
+        assert!(out.reason.unwrap().contains("no SQL keyword"));
+    }
+
+    /// Prompt-injection claim routes to the deferred sub-gate.
+    /// The cited line and file just need to exist; no structural
+    /// check runs. The gate tag discloses the routing.
+    #[test]
+    fn prompt_injection_claim_routes_to_deferred() {
+        let dir = tmpdir();
+        let src = "\
+fn build_prompt(user_input: &str) -> String {
+    format!(\"You are a helpful assistant. User says: {}\", user_input)
+}
+";
+        write_src(&dir, "src/agent.rs", src);
+        let finding = json!({
+            "title": "Potential prompt injection in build_prompt",
+            "summary": "Untrusted user input folded into the system prompt.",
+            "location": {"file": "src/agent.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::PromptInjectionDeferred);
+        assert!(out.reason.is_none());
+    }
+
+    /// Priority ordering: a finding mentioning both "prompt injection"
+    /// and "command injection" routes to prompt (higher priority),
+    /// not command. Regression guard on the dispatch ordering.
+    #[test]
+    fn prompt_injection_wins_priority_over_command_injection() {
+        let dir = tmpdir();
+        let src = "fn main() { let x = 1; }\n";
+        write_src(&dir, "src/main.rs", src);
+        let finding = json!({
+            "title": "Prompt injection and command injection combined risk",
+            "summary": "User input reaches both shell and model context.",
+            "location": {"file": "src/main.rs", "line_start": 1},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.gate, Gate::PromptInjectionDeferred);
+    }
+
+    /// Priority ordering: a finding mentioning both "sql injection"
+    /// and "command injection" routes to sql (higher priority), not
+    /// command.
+    #[test]
+    fn sql_injection_wins_priority_over_command_injection() {
+        let dir = tmpdir();
+        let src = "\
+fn lookup(id: &str) -> String {
+    format!(\"SELECT * FROM t WHERE id = '{}'\", id)
+}
+";
+        write_src(&dir, "src/db.rs", src);
+        let finding = json!({
+            "title": "SQL injection or possibly command injection in lookup",
+            "summary": "User id may flow into both query and a shell call.",
+            "location": {"file": "src/db.rs", "line_start": 2},
+        });
+        let out = check(&finding, &dir);
+        // sql wins over command; window has SQL+interp+no-param, so resolved.
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::SqlInjectionStructural);
+    }
+
+    /// Regression: the literal-claim path is unchanged by the
+    /// injection split. A "hardcoded shell command" finding still
+    /// routes to LiteralClaim (highest priority), not command.
+    #[test]
+    fn literal_path_still_wins_over_command_injection() {
+        let dir = tmpdir();
+        let src = "\
+const SHELL_PATH: &str = \"/bin/sh\";
+fn run() {}
+";
+        write_src(&dir, "src/lib.rs", src);
+        let finding = json!({
+            "title": "Hardcoded shell path used in command injection sink",
+            "summary": "A hardcoded literal feeds a subprocess invocation.",
+            "location": {"file": "src/lib.rs", "line_start": 1},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::LiteralClaim);
+    }
+
+    /// Regression: unrecognized claim class still falls to
+    /// file_line_only. The split didn't affect the fallback path.
+    #[test]
+    fn unrecognized_claim_class_still_falls_to_file_line_only() {
+        let dir = tmpdir();
+        let src = "fn slow() { /* compute */ }\n";
+        write_src(&dir, "src/perf.rs", src);
+        let finding = json!({
+            "title": "Possible timing side-channel via elapsed measurement",
+            "summary": "Branch timing leaks information.",
+            "location": {"file": "src/perf.rs", "line_start": 1},
+        });
+        let out = check(&finding, &dir);
+        assert_eq!(out.status, Status::Resolved);
+        assert_eq!(out.gate, Gate::FileLineOnly);
+    }
+
+    #[test]
+    fn line_has_sql_keyword_accepts_common_keywords() {
+        assert!(line_has_sql_keyword(
+            "let q = format!(\"SELECT * FROM t WHERE id = {}\", id);"
+        ));
+        assert!(line_has_sql_keyword(
+            "    \"INSERT INTO users (name) VALUES ($1)\","
+        ));
+        assert!(line_has_sql_keyword(
+            "let upd = \"UPDATE t SET x = 1 WHERE id = ?\";"
+        ));
+        assert!(!line_has_sql_keyword("// SELECT * FROM t -- in a comment"));
+        assert!(!line_has_sql_keyword("let elapsed = inst.elapsed();"));
+    }
+
+    #[test]
+    fn line_has_param_binding_accepts_safe_shapes() {
+        assert!(line_has_param_binding(
+            "sqlx::query!(\"SELECT * FROM t WHERE id = ?\", id)"
+        ));
+        assert!(line_has_param_binding(
+            "client.query(\"SELECT * FROM t WHERE id = $1\", &[&id])"
+        ));
+        assert!(line_has_param_binding("stmt.bind(0, &user_id);"));
+        assert!(!line_has_param_binding(
+            "let q = format!(\"SELECT * FROM t WHERE id = {}\", id);"
+        ));
+    }
+
+    #[test]
+    fn line_has_concat_or_interp_accepts_interpolation() {
+        assert!(line_has_concat_or_interp(
+            "let q = format!(\"SELECT * FROM t WHERE id = {}\", id);"
+        ));
+        assert!(line_has_concat_or_interp(
+            "let q = \"SELECT * FROM t WHERE id = \" + &id_str;"
+        ));
+        assert!(!line_has_concat_or_interp(
+            "sqlx::query!(\"SELECT * FROM t WHERE id = ?\", id)"
+        ));
+        assert!(!line_has_concat_or_interp("let x = 1;"));
     }
 
     // Note: an earlier draft of this slice carried two
@@ -817,6 +1254,6 @@ struct Reader {
         // Sanity asserts so the demo still functions as a regression
         // guard if someone runs it on purpose.
         assert_eq!(outcome.status, Status::Unresolved);
-        assert_eq!(outcome.gate, Gate::InjectionStructural);
+        assert_eq!(outcome.gate, Gate::CommandInjectionStructural);
     }
 }

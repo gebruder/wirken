@@ -1132,8 +1132,12 @@ fn aggregate_findings_multi(
     let mut consumed: Vec<PathBuf> = Vec::new();
     let mut literal_claim_resolved: usize = 0;
     let mut literal_claim_unresolved: usize = 0;
-    let mut injection_structural_resolved: usize = 0;
-    let mut injection_structural_unresolved: usize = 0;
+    let mut prompt_injection_deferred_resolved: usize = 0;
+    let mut prompt_injection_deferred_unresolved: usize = 0;
+    let mut sql_injection_structural_resolved: usize = 0;
+    let mut sql_injection_structural_unresolved: usize = 0;
+    let mut command_injection_structural_resolved: usize = 0;
+    let mut command_injection_structural_unresolved: usize = 0;
     let mut file_line_only_resolved: usize = 0;
     let mut file_line_only_unresolved: usize = 0;
     for (walk_name, source) in sources {
@@ -1158,9 +1162,23 @@ fn aggregate_findings_multi(
             match (outcome.gate, outcome.status) {
                 (Gate::LiteralClaim, Status::Resolved) => literal_claim_resolved += 1,
                 (Gate::LiteralClaim, Status::Unresolved) => literal_claim_unresolved += 1,
-                (Gate::InjectionStructural, Status::Resolved) => injection_structural_resolved += 1,
-                (Gate::InjectionStructural, Status::Unresolved) => {
-                    injection_structural_unresolved += 1
+                (Gate::PromptInjectionDeferred, Status::Resolved) => {
+                    prompt_injection_deferred_resolved += 1
+                }
+                (Gate::PromptInjectionDeferred, Status::Unresolved) => {
+                    prompt_injection_deferred_unresolved += 1
+                }
+                (Gate::SqlInjectionStructural, Status::Resolved) => {
+                    sql_injection_structural_resolved += 1
+                }
+                (Gate::SqlInjectionStructural, Status::Unresolved) => {
+                    sql_injection_structural_unresolved += 1
+                }
+                (Gate::CommandInjectionStructural, Status::Resolved) => {
+                    command_injection_structural_resolved += 1
+                }
+                (Gate::CommandInjectionStructural, Status::Unresolved) => {
+                    command_injection_structural_unresolved += 1
                 }
                 (Gate::FileLineOnly, Status::Resolved) => file_line_only_resolved += 1,
                 (Gate::FileLineOnly, Status::Unresolved) => file_line_only_unresolved += 1,
@@ -1211,9 +1229,17 @@ fn aggregate_findings_multi(
                 "resolved": literal_claim_resolved,
                 "unresolved": literal_claim_unresolved,
             },
-            "injection_structural": {
-                "resolved": injection_structural_resolved,
-                "unresolved": injection_structural_unresolved,
+            "prompt_injection_deferred": {
+                "resolved": prompt_injection_deferred_resolved,
+                "unresolved": prompt_injection_deferred_unresolved,
+            },
+            "sql_injection_structural": {
+                "resolved": sql_injection_structural_resolved,
+                "unresolved": sql_injection_structural_unresolved,
+            },
+            "command_injection_structural": {
+                "resolved": command_injection_structural_resolved,
+                "unresolved": command_injection_structural_unresolved,
             },
             "file_line_only": {
                 "resolved": file_line_only_resolved,
