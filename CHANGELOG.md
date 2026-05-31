@@ -10,6 +10,70 @@ tagged.
 
 ## Unreleased
 
+## [1.7.4] - 2026-05-31
+
+### Citation gate: per-class structural sub-gates (closes #143)
+
+- The citation-resolution gate now routes each finding to one of
+  eight class-specific sub-gates based on title/summary keywords.
+  Real structural checks: `literal_claim` (string/numeric literal
+  in window), `sql_injection_structural` (SQL keyword AND
+  interpolation marker AND NOT parameter-binding marker;
+  parameterized queries are the negative case and do not resolve),
+  `broken_comparison_structural` (`==`/`!=` against a
+  credential-shaped identifier AND NOT a constant-time marker;
+  `subtle::ConstantTimeEq` / `.ct_eq()` is the negative case),
+  `command_injection_structural` (`ident(` call shape on a
+  non-comment line). Deferred-by-design tags carry a named
+  non-check with existence-only resolution:
+  `prompt_injection_deferred` (semantic property, no parser-free
+  signature), `race_condition_deferred` (single-line check would
+  resolve on any concurrent code), `access_control_deferred`
+  (promoted from the silent fall-through to file_line_only that
+  prior slices established).
+- Priority on multi-keyword findings: literal > prompt > sql >
+  broken_comparison > race > access > command > file_line_only.
+- Header counts split by all eight sub-gates so the unverified
+  fraction stays visible per class. `*_structural.resolved` is
+  the "verified" column; `*_deferred.resolved` and
+  `file_line_only.resolved` carry the same existence-only caveat
+  and are not verified.
+- Tag rename: the prior `injection_structural` is replaced by
+  `command_injection_structural` when the keyword vocabulary
+  routed there. Schema-1.1 treats `citation_check` as an extra
+  block consumers ignore by default; no published consumer pins
+  the specific tag string.
+
+### Teams: service_url via ApprovalRequest IPC frame
+
+- `ApprovalRequest.serviceUrl @7` added as an additive Cap'n
+  Proto field. Existing readers ignore unknown fields; new
+  readers default to empty string when absent. No tag-name
+  change, no consumer break. The Teams adapter parses
+  `serviceUrl` from the frame and uses it for outbound Bot
+  Connector POSTs, removing the prior per-conversation
+  `ServiceUrlCache` and its populate-on-inbound code path. A
+  single warning-logged fallback to the public-cloud default
+  remains at the read site for the absent-field case so the
+  adapter does not panic on malformed frames; the warning names
+  that sovereign-cloud deployments will not route correctly to
+  the fallback. Four prior TODO comments pointing at this work
+  are removed.
+
+### Dependencies
+
+- Bump `serde_json` 1.0.149 -> 1.0.150 (patch).
+- Bump `reqwest` 0.13.3 -> 0.13.4 (patch).
+- Bump `toml` 0.9.12 -> 1.1.0 (major; API used by wirken is
+  stable across the crossing).
+- Bump `github/codeql-action` 4.35.4 -> 4.36.0.
+- Bump `EmbarkStudios/cargo-deny-action` 2.0.18 -> 2.0.19.
+- `rusqlite` 0.40 was attempted and reverted to 0.39: the
+  transitive `libsqlite3-sys` 0.38 uses the unstable
+  `cfg_select!` macro and fails to compile on stable Rust. The
+  bump can re-land once stable picks up `cfg_select` or
+  rusqlite ships a non-`cfg_select` libsqlite3-sys. See #149.
+
 ## [1.7.3] - 2026-05-26
 
 ### Lyrik dispatch gates
