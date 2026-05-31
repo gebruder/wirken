@@ -189,7 +189,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "rand 0.9.4",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "secrecy 0.10.3",
  "serde",
  "serde_json",
@@ -3889,9 +3889,9 @@ dependencies = [
 
 [[package]]
 name = "reqwest"
-version = "0.13.3"
+version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
  "base64",
  "bytes",
@@ -5051,7 +5051,7 @@ dependencies = [
  "p384",
  "pem",
  "regex",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rsa",
  "rustls 0.23.40",
  "serde",
@@ -6590,7 +6590,7 @@ dependencies = [
  "base64",
  "capnp",
  "chrono",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "ring",
  "serde",
  "serde_json",
@@ -6608,7 +6608,7 @@ name = "wirken-adapter-imessage"
 version = "1.7.3"
 dependencies = [
  "capnp",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -6627,7 +6627,7 @@ dependencies = [
  "anyhow",
  "capnp",
  "chrono",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "tempfile",
@@ -6684,7 +6684,7 @@ dependencies = [
  "base64",
  "capnp",
  "chrono",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "ring",
  "serde",
  "serde_json",
@@ -6724,7 +6724,7 @@ dependencies = [
  "capnp",
  "chrono",
  "hmac 0.12.1",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6754,7 +6754,7 @@ dependencies = [
  "hmac 0.12.1",
  "lru",
  "rand 0.10.1",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6785,7 +6785,7 @@ dependencies = [
  "ed25519-dalek",
  "hmac 0.12.1",
  "rand 0.10.1",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6811,7 +6811,7 @@ dependencies = [
  "ed25519-dalek",
  "libc",
  "openssl",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rusqlite",
  "rustls 0.23.40",
  "serde",
@@ -6854,7 +6854,7 @@ dependencies = [
  "ed25519-dalek",
  "governor",
  "rand 0.10.1",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6898,7 +6898,7 @@ dependencies = [
  "oauth2",
  "open",
  "rand 0.10.1",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6963,7 +6963,7 @@ dependencies = [
  "feed-rs",
  "futures-util",
  "hdbscan",
- "reqwest 0.13.3",
+ "reqwest 0.13.4",
  "rusqlite",
  "secrecy 0.10.3",
  "serde",
