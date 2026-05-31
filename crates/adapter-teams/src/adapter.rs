@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use wirken_adapter_core::approval::{self, ApprovalPayload, Decision};
 use wirken_ipc::wirken_capnp::frame;
@@ -17,29 +16,36 @@ use crate::auth::{JwksCache, extract_bearer_token};
 use crate::convert::{self, Activity};
 use crate::error::TeamsError;
 
-/// Per-conversation cache of `service_url`. Bot Connector requires
-/// the originating regional service URL for any outbound activity;
-/// each conversation is anchored to a region at creation. We learn
-/// it from inbound activities and look it up on outbound.
-///
-/// TODO #119-followup: this is a slice-local fix; the correct
-/// destination is for the gateway's `ApprovalRequest` IPC frame to
-/// carry `service_url` directly (the gateway has it at frame-mint
-/// time from the originating inbound activity, no staleness window).
-/// Adapter cache holes (conversations that have had zero inbound
-/// activity before an approval request) fall back to the hardcoded
-/// default below, which happens to work for the public-cloud
-/// production case but is not universally correct (sovereign clouds,
-/// regional pinning). See umbrella #119 for the IPC frame extension.
-type ServiceUrlCache = Arc<RwLock<HashMap<String, String>>>;
+/// Public-cloud Bot Connector default. Used at the single warning-
+/// logged fallback site in [`effective_service_url`] when an
+/// `ApprovalRequest` frame arrives without `serviceUrl` populated.
+/// In normal operation the gateway sets `serviceUrl` from the
+/// originating inbound activity's regional URL; this default is the
+/// safety net for malformed or pre-update frames, not the production
+/// path. Sovereign-cloud deployments require the gateway-supplied
+/// value; the warning makes the fallback visible to operators.
+const FALLBACK_SERVICE_URL: &str = "https://smba.trafficmanager.net";
 
-/// Public-cloud Bot Connector default. Falls back to this URL when
-/// the service_url cache has no entry for a conversation.
-///
-/// TODO #119-followup: replace with `service_url` threaded through
-/// the `ApprovalRequest` IPC frame so the adapter does not depend on
-/// having previously seen an inbound activity in the conversation.
-const DEFAULT_SERVICE_URL: &str = "https://smba.trafficmanager.net";
+/// Resolve the effective `service_url` for an outbound approval
+/// request. Returns the frame-supplied value when non-empty; falls
+/// back to [`FALLBACK_SERVICE_URL`] with a warning log when the
+/// gateway did not populate the field. Extracted so the
+/// fallback-on-empty behaviour is unit-testable without exercising
+/// the full outbound HTTP path.
+pub(crate) fn effective_service_url(frame_value: &str, request_id: &str) -> String {
+    if frame_value.is_empty() {
+        tracing::warn!(
+            request_id = %request_id,
+            fallback = FALLBACK_SERVICE_URL,
+            "teams approval: ApprovalRequest frame missing serviceUrl; falling back to \
+             public-cloud default. The gateway approval gate should populate this field; \
+             sovereign-cloud deployments will not route correctly to the fallback URL."
+        );
+        FALLBACK_SERVICE_URL.to_string()
+    } else {
+        frame_value.to_string()
+    }
+}
 
 /// MS Teams adapter: bridges Bot Framework REST API <-> Wirken gateway IPC.
 /// Receives activities via HTTP webhook, sends replies via Bot Framework REST API.
@@ -99,22 +105,13 @@ impl TeamsAdapter {
         let writer = Arc::new(Mutex::new(writer));
         let http = reqwest::Client::new();
         let jwks = Arc::new(JwksCache::new(http.clone()));
-        let service_url_cache: ServiceUrlCache = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn outbound handler (gateway -> Teams via Bot Framework REST API)
         let outbound_writer = writer.clone();
         let outbound_app_id = self.app_id.clone();
         let outbound_password = self.app_password.clone();
-        let outbound_service_urls = service_url_cache.clone();
         let _outbound_handle = tokio::spawn(async move {
-            handle_outbound(
-                reader,
-                outbound_app_id,
-                outbound_password,
-                outbound_writer,
-                outbound_service_urls,
-            )
-            .await;
+            handle_outbound(reader, outbound_app_id, outbound_password, outbound_writer).await;
         });
 
         // Spawn heartbeat
@@ -137,10 +134,9 @@ impl TeamsAdapter {
             let w = writer.clone();
             let bid = bot_id.clone();
             let j = jwks.clone();
-            let svc_urls = service_url_cache.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_webhook_request(&mut stream, &bid, &j, w, svc_urls).await {
+                if let Err(e) = handle_webhook_request(&mut stream, &bid, &j, w).await {
                     tracing::error!("Webhook request error: {e}");
                 }
             });
@@ -161,7 +157,6 @@ pub(crate) async fn handle_webhook_request(
     bot_id: &str,
     jwks: &JwksCache,
     writer: Arc<Mutex<IpcFrameWriter>>,
-    service_url_cache: ServiceUrlCache,
 ) -> Result<(), TeamsError> {
     let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await?;
@@ -210,21 +205,6 @@ pub(crate) async fn handle_webhook_request(
 
     // Respond 200 immediately (Bot Framework expects fast response)
     let _ = respond(stream, "200 OK").await;
-
-    // Cache the conversation's service_url so subsequent outbound
-    // activities know which Bot Connector regional endpoint to use.
-    // TODO #119-followup: replace this cache with `service_url`
-    // threaded through the `ApprovalRequest` IPC frame so outbound
-    // does not depend on having seen an inbound first.
-    if let (Some(conv), Some(svc_url)) = (
-        activity.conversation.as_ref().and_then(|c| c.id.as_deref()),
-        activity.service_url.as_deref(),
-    ) && !conv.is_empty()
-        && !svc_url.is_empty()
-    {
-        let mut cache = service_url_cache.write().await;
-        cache.insert(conv.to_string(), svc_url.to_string());
-    }
 
     // Approval-button presses arrive as `message` activities with a
     // populated `value` field carrying the Action.Submit `data`
@@ -310,13 +290,12 @@ async fn forward_approval_decision(activity: &Activity, writer: Arc<Mutex<IpcFra
     }
 }
 
-/// Handle outbound messages from gateway — POST to Bot Framework REST API.
+/// Handle outbound messages from gateway, POST to Bot Framework REST API.
 async fn handle_outbound(
     mut reader: IpcFrameReader,
     app_id: String,
     app_password: String,
     writer: Arc<Mutex<IpcFrameWriter>>,
-    service_url_cache: ServiceUrlCache,
 ) {
     let http = reqwest::Client::new();
     // Cache for service URL -> access token
@@ -461,24 +440,12 @@ async fn handle_outbound(
                     }
                 }
                 let token = access_token.as_ref().unwrap();
-                let svc_url = lookup_service_url(&service_url_cache, &fields.target_channel_id)
-                    .await
-                    .unwrap_or_else(|| DEFAULT_SERVICE_URL.to_string());
+                let svc_url = effective_service_url(&fields.service_url, &fields.request_id);
                 send_approval_request(&http, token, &svc_url, &fields, &writer).await;
             }
             FrameAction::Skip => {}
         }
     }
-}
-
-/// Look up the cached `service_url` for a conversation. None when
-/// the adapter has not yet seen an inbound activity in this
-/// conversation; the caller falls back to [`DEFAULT_SERVICE_URL`].
-///
-/// TODO #119-followup: this lookup goes away once `service_url` is
-/// threaded through the gateway's `ApprovalRequest` IPC frame.
-async fn lookup_service_url(cache: &ServiceUrlCache, conversation_id: &str) -> Option<String> {
-    cache.read().await.get(conversation_id).cloned()
 }
 
 async fn emit_approval_failure(

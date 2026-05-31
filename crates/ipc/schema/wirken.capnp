@@ -287,6 +287,21 @@ struct ApprovalRequest {
   # original Int64 because Signal and other non-Telegram surfaces
   # do not have numeric conversation ids.
   targetConversationId @6 :Text;
+  # Channel-specific routing endpoint, populated by the gateway when
+  # it has the value for the target conversation. Used today by the
+  # Teams adapter: Bot Connector requires the originating regional
+  # service URL (e.g. `https://smba.trafficmanager.net` for public
+  # cloud, sovereign-cloud URLs elsewhere) for any outbound
+  # activity, and each conversation is anchored to a region at
+  # creation. The gateway learns it from inbound activity metadata
+  # and writes it back here so the adapter does not have to
+  # maintain its own per-conversation cache or fall back on a
+  # hardcoded public-cloud default. Other channels (Telegram,
+  # Signal, …) leave this empty; their REST endpoints are
+  # account-global, not per-conversation. Default empty (Text
+  # default in Cap'n Proto); consumers that do not read this field
+  # are unaffected.
+  serviceUrl @7 :Text;
 }
 
 struct ApprovalDecisionKind {

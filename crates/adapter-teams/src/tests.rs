@@ -818,6 +818,53 @@ fn approval_request_round_trips_compound_conversation_id() {
     assert_eq!(fields.triggering_agent, "default");
     assert_eq!(fields.trigger_message, "clean logs");
     assert_eq!(fields.target_channel_id, "19:meeting_abc123@thread.v2");
+    // serviceUrl was not set on the frame; parse must surface it as
+    // an empty string (the gateway-did-not-populate case).
+    assert_eq!(fields.service_url, "");
+}
+
+#[test]
+fn approval_request_round_trips_service_url() {
+    // The gateway populates serviceUrl with the originating
+    // regional Bot Connector URL for the target conversation. The
+    // adapter parses it through to ApprovalRequestFields without
+    // modification.
+    let mut msg = capnp::message::Builder::new_default();
+    {
+        let fb = msg.init_root::<frame::Builder<'_>>();
+        let mut req = fb.init_approval_request();
+        req.set_request_id("abc");
+        req.set_tool_name("shell");
+        req.set_action_key("shell:rm");
+        req.set_requested_tier("tier3");
+        req.set_triggering_agent("default");
+        req.set_trigger_message("clean logs");
+        req.set_target_conversation_id("19:meeting_abc123@thread.v2");
+        req.set_service_url("https://smba.eu.trafficmanager.net");
+    }
+    let reader = serialize_and_read(&msg);
+    let fields = convert::parse_approval_request(&reader).unwrap();
+    assert_eq!(fields.service_url, "https://smba.eu.trafficmanager.net");
+    // Other fields unchanged.
+    assert_eq!(fields.request_id, "abc");
+    assert_eq!(fields.target_channel_id, "19:meeting_abc123@thread.v2");
+}
+
+#[test]
+fn effective_service_url_uses_frame_value_when_populated() {
+    let svc =
+        crate::adapter::effective_service_url("https://smba.gov.trafficmanager.us", "req-001");
+    assert_eq!(svc, "https://smba.gov.trafficmanager.us");
+}
+
+#[test]
+fn effective_service_url_falls_back_when_empty() {
+    // The frame-value-empty case is the "gateway did not populate
+    // the field" path. The function returns the hardcoded
+    // public-cloud default; the warning emit is a side effect not
+    // asserted here (it lands in tracing).
+    let svc = crate::adapter::effective_service_url("", "req-002");
+    assert_eq!(svc, "https://smba.trafficmanager.net");
 }
 
 #[test]

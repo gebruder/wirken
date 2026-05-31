@@ -357,6 +357,13 @@ pub struct ApprovalRequestFields {
     pub triggering_agent: String,
     pub trigger_message: String,
     pub target_channel_id: String,
+    /// Bot Connector regional `service_url` populated by the gateway
+    /// when it has the value for the target conversation. Empty when
+    /// the gateway did not populate it (e.g. legacy approval gates
+    /// that have not yet been updated to set the field); the adapter
+    /// falls back to a single hardcoded public-cloud default with a
+    /// warning log in that case.
+    pub service_url: String,
 }
 
 pub fn parse_approval_request(
@@ -406,6 +413,15 @@ pub fn parse_approval_request(
                     "teams target_conversation_id must be a non-empty conversation id".to_string(),
                 ));
             }
+            // serviceUrl is optional; Cap'n Proto Text fields return
+            // "" when absent. Empty string here is the "gateway did
+            // not populate the field" case; the adapter handles
+            // fallback with a warning log at send time.
+            let service_url = r
+                .get_service_url()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("service_url not utf8: {e}")))?
+                .to_string();
             Ok(ApprovalRequestFields {
                 request_id,
                 tool_name,
@@ -414,6 +430,7 @@ pub fn parse_approval_request(
                 triggering_agent,
                 trigger_message,
                 target_channel_id,
+                service_url,
             })
         }
         _ => Err(capnp::Error::failed(
