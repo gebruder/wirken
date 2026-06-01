@@ -38,15 +38,37 @@ pub enum Action {
     WebSearch,
 
     // Tier 2 — first-use approval
-    ShellExec { pattern: String },
-    ExternalFileAccess { path: String },
+    ShellExec {
+        pattern: String,
+    },
+    ExternalFileAccess {
+        path: String,
+    },
     CrossConversationMessage,
 
     // Tier 3 — always prompt
     DestructiveFileOp,
-    NetworkRequest { domain: String },
+    NetworkRequest {
+        domain: String,
+    },
     CredentialAccess,
     CronCreate,
+    /// An MCP-proxied tool call. Named by the whole prefixed
+    /// `mcp_{server}_{tool}` string the proxy generates; the server
+    /// segment is not parsed out because operator-chosen server names
+    /// can contain underscores, so the prefix is not unambiguously
+    /// splittable. Always Tier 3: MCP children run at the wirken UID
+    /// with no process sandbox, so every call is gated.
+    McpToolCall {
+        tool: String,
+    },
+    /// A tool name matching no built-in, MCP, or known Wasm-skill
+    /// classification. Default-denied at Tier 3 so an unregistered
+    /// tool cannot run ungated. Constructed by the runtime tier gate
+    /// for the residual case, never by `tool_to_action`.
+    UnknownTool {
+        tool: String,
+    },
 }
 
 impl std::fmt::Display for Action {
@@ -65,6 +87,8 @@ impl std::fmt::Display for Action {
             Action::NetworkRequest { .. } => "network_request",
             Action::CredentialAccess => "credential_access",
             Action::CronCreate => "cron_create",
+            Action::McpToolCall { .. } => "mcp_tool_call",
+            Action::UnknownTool { .. } => "unknown_tool",
         };
         f.write_str(label)
     }
@@ -154,7 +178,9 @@ impl Action {
             Action::DestructiveFileOp
             | Action::NetworkRequest { .. }
             | Action::CredentialAccess
-            | Action::CronCreate => PermissionTier::Tier3,
+            | Action::CronCreate
+            | Action::McpToolCall { .. }
+            | Action::UnknownTool { .. } => PermissionTier::Tier3,
         }
     }
 
@@ -170,6 +196,8 @@ impl Action {
             Action::ShellExec { pattern } => format!("shell:{}", canonical_exec_prefix(pattern)),
             Action::ExternalFileAccess { path } => format!("file:{path}"),
             Action::CrossConversationMessage => "cross-conversation".to_string(),
+            Action::McpToolCall { tool } => format!("mcp:{tool}"),
+            Action::UnknownTool { tool } => format!("tool:{tool}"),
             other => format!("{other:?}"),
         }
     }
@@ -1130,6 +1158,8 @@ mod tier_tests {
                 Action::NetworkRequest { .. } => "network_request",
                 Action::CredentialAccess => "credential_access",
                 Action::CronCreate => "cron_create",
+                Action::McpToolCall { .. } => "mcp_tool_call",
+                Action::UnknownTool { .. } => "unknown_tool",
             }
         }
         // Smoke a representative variant so the function isn't

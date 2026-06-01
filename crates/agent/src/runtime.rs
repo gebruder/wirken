@@ -2159,6 +2159,19 @@ impl Agent {
         count
     }
 
+    /// True when `name` matches a loaded Wasm skill, by its
+    /// `wasm_`-prefixed tool name or its bare skill name (mirrors the
+    /// dispatch routing in `execute_tool`). Wasm skills are not
+    /// tier-classified: the Wasm sandbox and the per-skill profile
+    /// gate govern them, so the tier gate exempts them from the
+    /// residual default-deny.
+    fn is_known_wasm_skill(&self, name: &str) -> bool {
+        let bare = name.strip_prefix("wasm_").unwrap_or(name);
+        self.wasm_skills
+            .iter()
+            .any(|s| s.name == bare || s.name == name)
+    }
+
     /// Execute a tool call, trying built-in tools, then MCP, then Wasm skills.
     /// Permission checks are applied when a PermissionStore is configured.
     pub(crate) async fn execute_tool(
@@ -2369,11 +2382,25 @@ impl Agent {
             }
         }
 
-        // Permission check before execution
+        // Permission check before execution.
         if let Some(ref perms) = self.permissions {
             let args: serde_json::Value =
                 serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
-            if let Some(action) = tool_to_action(name, &args) {
+            // Resolve the action to gate on. Built-in, MCP (`mcp_`),
+            // and exec names are classified by `tool_to_action`. A
+            // `None` return is either a known Wasm skill, which the
+            // Wasm sandbox and the per-skill profile gate already
+            // govern, or a genuinely unregistered tool, which is
+            // default-denied (Tier 3, always-prompt) so it cannot run
+            // ungated.
+            let action = match tool_to_action(name, &args) {
+                Some(action) => Some(action),
+                None if self.is_known_wasm_skill(name) => None,
+                None => Some(wirken_gateway::permissions::Action::UnknownTool {
+                    tool: name.to_string(),
+                }),
+            };
+            if let Some(action) = action {
                 // Item 6 slice 1: in headless child mode the
                 // auto_deny_above_tier clamp short-circuits before
                 // the regular permission store. Children never

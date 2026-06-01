@@ -1336,25 +1336,91 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         "exec" => {
             // Normalize via the same extractor the dispatcher uses so
             // tier classification never disagrees with execution about
-            // the command shape. A malformed payload yields an empty
-            // pattern and falls through to Tier 2; the dispatcher then
-            // rejects the call before it runs.
+            // the command shape. A malformed or empty payload yields an
+            // empty pattern, which is not on the allowlist and resolves
+            // to Tier 3.
             let cmd = extract_exec_command(args).unwrap_or_default();
             if SHELL_METACHARS.iter().any(|m| cmd.contains(m)) {
                 return Some(Action::ShellExec {
                     pattern: PIPELINE_SENTINEL.to_string(),
                 });
             }
-            let pattern = cmd.split_whitespace().next().unwrap_or("").to_string();
-            Some(Action::ShellExec { pattern })
+            // Classify on the resolved target, not the lexical
+            // basename. A path-bearing first token (`/workspace/ls`,
+            // `./ls`) is canonicalized so a symlink whose basename is
+            // an allowlisted verb but whose target is not lands on
+            // Tier 3. A bare token (`ls`, no separator) keeps its
+            // lexical basename: its real resolution is the runtime PATH
+            // lookup at exec time, which this classifier cannot
+            // reproduce across the sandbox boundary, and the allowlist
+            // is written for bare verbs. Resolution failure (broken
+            // symlink, missing path) fails closed to the Tier 3
+            // sentinel.
+            let first = cmd.split_whitespace().next().unwrap_or("");
+            Some(Action::ShellExec {
+                pattern: resolve_exec_pattern(first),
+            })
         }
         "read_file" | "list_files" => Some(Action::WorkspaceFileAccess),
         "write_file" => Some(Action::WorkspaceFileAccess),
         "web_search" => Some(Action::WebSearch),
+        // Read-only query against the bound zirkel database. Tier 1,
+        // the same read tier as workspace files: the tool opens the DB
+        // read-only and is unavailable when no DB path is bound.
+        "sqlite_query" => Some(Action::WorkspaceFileAccess),
         "generate_image" => Some(Action::NetworkRequest {
             domain: "api.openai.com".to_string(),
         }),
+        // MCP tools arrive as `mcp_{server}_{tool}` (the proxy applies
+        // the prefix; see crates/mcp-proxy/src/mcp_client.rs). Classify
+        // on the whole prefixed name so the tier gate and dispatch
+        // (runtime.rs, `name.starts_with("mcp_")`) agree. Always Tier 3.
+        name if name.starts_with("mcp_") => Some(Action::McpToolCall {
+            tool: name.to_string(),
+        }),
+        // Everything else returns None. Two cases reach the runtime
+        // tier gate from here: a known Wasm skill (`wasm_{skill}`),
+        // which the Wasm sandbox and the per-skill profile gate govern
+        // and which the gate exempts from the residual deny; and a
+        // genuinely unregistered name, which the gate default-denies.
+        //
+        // No built-in agent tool produces DestructiveFileOp,
+        // CredentialAccess, CronCreate, ExternalFileAccess,
+        // CrossConversationMessage, or ChannelConverse: destructive and
+        // external-file operations are not distinct agent tools
+        // (workspace writes are Tier 1, cap-std confined), credential
+        // access is mediated by the vault / MCP proxy rather than an
+        // agent tool, cron is created through the CLI, and the agent's
+        // channel reply is the normal response path, not a gated tool.
+        // Those variants stay defined for the tier model and approval
+        // keys rather than as silent unreachable arms here.
         _ => None,
+    }
+}
+
+/// Resolve an `exec` first token to the basename used for tier
+/// classification. A token containing a path separator is canonicalized
+/// to its real target (following symlinks) so the tier is decided by
+/// what actually runs, not by a lexically allowlisted basename pointing
+/// elsewhere. Resolution failure fails closed by returning the Tier 3
+/// pipeline sentinel. A bare token (no separator) is returned unchanged
+/// for lexical basename matching; resolution is host-side, so the
+/// path-bearing case is the one that matters for host execution.
+fn resolve_exec_pattern(first: &str) -> String {
+    if first.is_empty() {
+        return String::new();
+    }
+    let is_path = first.contains('/') || first.contains(std::path::MAIN_SEPARATOR);
+    if !is_path {
+        return first.to_string();
+    }
+    match std::fs::canonicalize(first) {
+        Ok(real) => real
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| PIPELINE_SENTINEL.to_string()),
+        Err(_) => PIPELINE_SENTINEL.to_string(),
     }
 }
 

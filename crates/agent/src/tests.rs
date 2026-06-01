@@ -2930,6 +2930,41 @@ mod subagent {
             result.output
         );
     }
+
+    #[tokio::test]
+    async fn unknown_tool_is_default_denied_not_ungated() {
+        // A tool name matching no built-in, MCP, or Wasm-skill
+        // classification must be gated, not run ungated. The residual
+        // arm in the runtime tier gate builds an `UnknownTool` (Tier 3)
+        // and routes it through the permission store, so an unapproved
+        // unknown tool returns a permission-denial rather than reaching
+        // dispatch.
+        let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
+        agent.set_permissions(store);
+
+        let result = agent
+            .execute_tool("totally_unregistered_tool_xyz", "{}")
+            .await;
+
+        match result {
+            Err(crate::error::AgentError::PermissionDeniedCtx(ctx)) => {
+                assert_eq!(ctx.tool_name, "totally_unregistered_tool_xyz");
+                assert_eq!(
+                    ctx.action,
+                    wirken_gateway::permissions::Action::UnknownTool {
+                        tool: "totally_unregistered_tool_xyz".into(),
+                    },
+                    "residual must gate as UnknownTool"
+                );
+                assert_eq!(
+                    ctx.requested_tier,
+                    wirken_gateway::permissions::PermissionTier::Tier3,
+                    "unknown tool must default-deny at Tier 3"
+                );
+            }
+            other => panic!("unknown tool must be default-denied, got {other:?}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3807,8 +3842,96 @@ fn tool_to_action_generate_image() {
 fn tool_to_action_unknown_returns_none() {
     use crate::tool::tool_to_action;
 
+    // A name that merely contains `mcp` but does not carry the
+    // `mcp_` prefix is not an MCP tool; it returns None at the
+    // classifier and is default-denied by the runtime tier gate.
     let args = serde_json::json!({});
     assert!(tool_to_action("some_mcp_tool", &args).is_none());
+}
+
+#[test]
+fn tool_to_action_mcp_prefixed_is_tier3_with_mcp_key() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let args = serde_json::json!({});
+    let action = tool_to_action("mcp_foo_bar", &args).unwrap();
+    match &action {
+        Action::McpToolCall { tool } => assert_eq!(tool, "mcp_foo_bar"),
+        other => panic!("expected McpToolCall, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+    assert_eq!(action.approval_key(), "mcp:mcp_foo_bar");
+}
+
+#[test]
+fn tool_to_action_wasm_prefixed_not_caught_by_mcp_arm() {
+    // A wasm_-prefixed name must not be classified by the mcp_ arm. It
+    // returns None at the classifier; the Wasm sandbox and the
+    // per-skill profile gate govern it, and the runtime tier gate
+    // exempts known Wasm skills from the residual default-deny.
+    use crate::tool::tool_to_action;
+
+    let args = serde_json::json!({});
+    assert!(tool_to_action("wasm_summarize", &args).is_none());
+}
+
+#[test]
+fn tool_to_action_sqlite_query_is_tier1() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let args = serde_json::json!({"query": "kept_recent", "days": 7});
+    let action = tool_to_action("sqlite_query", &args).unwrap();
+    assert!(matches!(action, Action::WorkspaceFileAccess));
+    assert_eq!(action.tier(), PermissionTier::Tier1);
+}
+
+#[cfg(unix)]
+#[test]
+fn tool_to_action_exec_classifies_on_symlink_target_not_basename() {
+    // SymJack: a path whose basename is an allowlisted verb but whose
+    // symlink target is not must classify on the resolved target.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("payload");
+    std::fs::write(&target, b"#!/bin/sh\n").unwrap();
+    let link = dir.path().join("ls");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let args = serde_json::json!({ "command": link.to_str().unwrap() });
+    let action = tool_to_action("exec", &args).unwrap();
+    match &action {
+        Action::ShellExec { pattern } => assert_eq!(
+            pattern, "payload",
+            "must classify on the resolved target basename, not the lexical `ls`"
+        ),
+        other => panic!("expected ShellExec, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+}
+
+#[cfg(unix)]
+#[test]
+fn tool_to_action_exec_broken_symlink_fails_closed() {
+    // A first token that cannot be resolved (broken symlink) fails
+    // closed to the Tier 3 sentinel rather than granting a low tier.
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let dir = tempfile::tempdir().unwrap();
+    let link = dir.path().join("ls");
+    std::os::unix::fs::symlink(dir.path().join("does-not-exist"), &link).unwrap();
+
+    let args = serde_json::json!({ "command": link.to_str().unwrap() });
+    let action = tool_to_action("exec", &args).unwrap();
+    match &action {
+        Action::ShellExec { pattern } => assert_eq!(pattern, ":pipeline:"),
+        other => panic!("expected ShellExec, got {other:?}"),
+    }
+    assert_eq!(action.tier(), PermissionTier::Tier3);
 }
 
 // ---------------------------------------------------------------------------
