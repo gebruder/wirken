@@ -10,6 +10,50 @@ tagged.
 
 ## Unreleased
 
+## [1.7.5] - 2026-06-02
+
+### Permission tier classifier hardening
+
+- MCP-proxied tools (`mcp_*`) are now classified at Tier 3 (always
+  prompt). Previously an MCP tool call reached no tier gate and ran
+  ungated; operators upgrading from 1.7.4 will see MCP tool calls
+  prompt for approval.
+- A tool name matching no classifier arm and no loaded Wasm skill now
+  default-denies at Tier 3 instead of running unchecked.
+- `exec` tier classification resolves a path-bearing first token to
+  its real target (following symlinks) before basename matching, so a
+  symlink whose basename is an allowlisted verb but whose target is
+  not lands on Tier 3. Resolution failure fails closed. Bare command
+  tokens keep their lexical basename. `sqlite_query` is classified
+  Tier 1 (read-only).
+
+### Audit
+
+- Rejected adapter handshakes emit an `adapter.handshake_rejected`
+  event carrying the failure reason (`unknown_adapter`,
+  `invalid_signature`, and the other handshake errors) and the
+  claimed adapter id. The event carries no signature, nonce, or key
+  material; a failed audit write does not change handshake teardown.
+
+### Fixed
+
+- CLI approval timeout parsing split into a pure core; its tests no
+  longer mutate process-global env state (removes a parallel-run
+  flake).
+
+### Docs
+
+- `security-properties.md` adds the 2026 OWASP Top 10 for Agentic
+  Applications (ASI01-ASI10) mapping alongside the existing agentic
+  threats and NIST AI RMF mappings.
+- Sandbox fallback wording corrected across `security-properties.md`,
+  `enforcement-model.md`, and `README.md`: when the configured sandbox
+  is unavailable, `exec` is refused (fail-closed) for exec-only and
+  gvisor; only `mode: off` runs on the host.
+- `enterprise.md` sandbox default corrected to `ExecOnly`.
+- SIEM default-forward variant list synced to the twelve forwarded
+  variants in `security-properties.md` and `siem-forwarder.md`.
+
 ## [1.7.4] - 2026-05-31
 
 ### Citation gate: per-class structural sub-gates (closes #143)
