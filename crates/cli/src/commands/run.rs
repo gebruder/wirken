@@ -1796,6 +1796,75 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     Ok(())
 }
 
+/// Build the audit event for a rejected adapter handshake. Records the
+/// failure reason and the claimed adapter id only; the id is `None`
+/// when the handshake failed before any id was read (recorded as
+/// absent, never fabricated). No signature, nonce, or key material is
+/// referenced because the inputs carry none.
+fn handshake_rejection_event(
+    err: &wirken_ipc::HandshakeError,
+    claimed_id: Option<&str>,
+) -> AuditEvent {
+    let reason = match err {
+        wirken_ipc::HandshakeError::UnknownAdapter(_) => "unknown_adapter",
+        wirken_ipc::HandshakeError::InvalidSignature => "invalid_signature",
+        wirken_ipc::HandshakeError::Protocol(_) => "protocol_error",
+        wirken_ipc::HandshakeError::Timeout => "timeout",
+        _ => "rejected",
+    };
+    AuditEvent::new(
+        ActorKind::Service,
+        "gateway",
+        "adapter.handshake_rejected",
+        claimed_id.unwrap_or("<unknown>"),
+    )
+    .with_detail(serde_json::json!({
+        "reason": reason,
+        "claimed_adapter_id": claimed_id,
+    }))
+}
+
+/// Gateway side of the adapter handshake, audited on rejection. The
+/// claimed adapter id is captured inside the verifier so a rejection
+/// can be attributed for both failure reasons; `InvalidSignature` does
+/// not carry the id in the error type, and a malformed frame may fail
+/// before any id is read, so the id is recorded as known-or-absent. On
+/// failure an `adapter.handshake_rejected` event is emitted before the
+/// error is returned, so the caller's teardown is unchanged.
+async fn gateway_handshake_audited<R, W>(
+    reader: &mut wirken_ipc::FrameReader<R>,
+    writer: &mut wirken_ipc::FrameWriter<W>,
+    known: std::collections::HashMap<String, [u8; 32]>,
+    audit: &AuditWriter,
+) -> std::result::Result<(String, [u8; 32]), wirken_ipc::HandshakeError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let claimed_id: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let claimed_id_capture = claimed_id.clone();
+
+    let result = perform_gateway_handshake(reader, writer, move |id, pk| {
+        *claimed_id_capture.lock().unwrap() = Some(id.to_string());
+        match known.get(id) {
+            None => Err(wirken_ipc::HandshakeError::UnknownAdapter(id.to_string())),
+            Some(expected) if expected == pk => Ok(()),
+            Some(_) => Err(wirken_ipc::HandshakeError::InvalidSignature),
+        }
+    })
+    .await;
+
+    if let Err(ref e) = result {
+        let claimed = claimed_id.lock().unwrap().clone();
+        let _ = audit
+            .log(handshake_rejection_event(e, claimed.as_deref()))
+            .await;
+    }
+
+    result
+}
+
 /// Handle a single adapter connection: handshake, then message loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_adapter_connection(
@@ -1822,14 +1891,7 @@ async fn handle_adapter_connection(
             .collect()
     };
 
-    let (adapter_id, pub_key) =
-        perform_gateway_handshake(&mut reader, &mut writer, move |id, pk| {
-            match known.get(id) {
-                None => Err(wirken_ipc::HandshakeError::UnknownAdapter(id.to_string())),
-                Some(expected) if expected == pk => Ok(()),
-                Some(_) => Err(wirken_ipc::HandshakeError::InvalidSignature),
-            }
-        })
+    let (adapter_id, pub_key) = gateway_handshake_audited(&mut reader, &mut writer, known, &audit)
         .await
         .context("Adapter handshake failed")?;
 
@@ -3194,6 +3256,110 @@ mod inventory_tests {
         let trimmed = trim_command_for_inventory(&cmd);
         assert!(trimmed.starts_with("..."));
         assert!(trimmed.chars().count() <= MCP_INVENTORY_WIDTH);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod handshake_audit_tests {
+    use super::{gateway_handshake_audited, handshake_rejection_event};
+    use std::collections::HashMap;
+    use wirken_audit::{AuditEvent, AuditLog, AuditQuery, AuditWriter};
+    use wirken_ipc::{AdapterIdentity, perform_adapter_handshake, send_rejection, split_stream};
+
+    /// Drive one rejected handshake end to end (real adapter signer,
+    /// real gateway verifier, real audit writer) and return the
+    /// recorded `adapter.handshake_rejected` event, if any.
+    async fn run_rejected_handshake(
+        known: HashMap<String, [u8; 32]>,
+        adapter_identity: AdapterIdentity,
+    ) -> Option<AuditEvent> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = tmp.path().join("audit.db");
+        let (writer, handle) = AuditWriter::new(&db).unwrap();
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (mut cr, mut cw) = split_stream(client);
+        let (mut sr, mut sw) = split_stream(server);
+
+        let adapter = tokio::spawn(async move {
+            // Best-effort: the adapter receives a rejection or EOF.
+            let _ = perform_adapter_handshake(&mut cr, &mut cw, &adapter_identity).await;
+        });
+
+        let result = gateway_handshake_audited(&mut sr, &mut sw, known, &writer).await;
+        assert!(result.is_err(), "handshake must be rejected");
+
+        // Unblock the adapter so it does not hang waiting for a result.
+        let _ = send_rejection(&mut sw, "rejected").await;
+        let _ = adapter.await;
+
+        // Close the writer to flush, then read the chain back.
+        drop(writer);
+        handle.await.unwrap();
+        let log = AuditLog::open(&db).unwrap();
+        log.query(&AuditQuery::default())
+            .unwrap()
+            .into_iter()
+            .find(|e| e.event.action == "adapter.handshake_rejected")
+            .map(|e| e.event)
+    }
+
+    #[tokio::test]
+    async fn unknown_adapter_handshake_is_audited() {
+        let ev = run_rejected_handshake(HashMap::new(), AdapterIdentity::generate("ghost"))
+            .await
+            .expect("rejected handshake must emit adapter.handshake_rejected");
+        assert_eq!(ev.detail["reason"].as_str(), Some("unknown_adapter"));
+        assert_eq!(ev.detail["claimed_adapter_id"].as_str(), Some("ghost"));
+    }
+
+    #[tokio::test]
+    async fn invalid_signature_handshake_is_audited() {
+        // Register `telegram` under one key, then present a different
+        // key for the same id: the verifier's pubkey-mismatch branch
+        // yields InvalidSignature with the id still in scope.
+        let registered = AdapterIdentity::generate("telegram").public_key_bytes();
+        let mut known = HashMap::new();
+        known.insert("telegram".to_string(), registered);
+
+        let ev = run_rejected_handshake(known, AdapterIdentity::generate("telegram"))
+            .await
+            .expect("rejected handshake must emit adapter.handshake_rejected");
+        assert_eq!(ev.detail["reason"].as_str(), Some("invalid_signature"));
+        assert_eq!(ev.detail["claimed_adapter_id"].as_str(), Some("telegram"));
+    }
+
+    #[tokio::test]
+    async fn rejected_handshake_event_has_no_secret_material() {
+        let ev = run_rejected_handshake(HashMap::new(), AdapterIdentity::generate("ghost"))
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(
+            !json.contains("signature"),
+            "event must not carry signature bytes: {json}"
+        );
+        assert!(
+            !json.contains("nonce"),
+            "event must not carry nonce bytes: {json}"
+        );
+        assert!(
+            !json.contains("public_key") && !json.contains("pubkey"),
+            "event must not carry key material: {json}"
+        );
+    }
+
+    #[test]
+    fn rejection_event_records_absent_id_as_null() {
+        // A failure before any id is read records the id as absent,
+        // not fabricated.
+        let ev = handshake_rejection_event(
+            &wirken_ipc::HandshakeError::Protocol("bad frame".into()),
+            None,
+        );
+        assert_eq!(ev.action, "adapter.handshake_rejected");
+        assert_eq!(ev.detail["reason"].as_str(), Some("protocol_error"));
+        assert!(ev.detail["claimed_adapter_id"].is_null());
     }
 }
 
