@@ -335,9 +335,10 @@ impl ToolRegistry {
                 if crate::sandbox::detect_runtime().await.is_none() {
                     tracing::warn!(
                         "Sandbox mode {:?} is set but Docker is not reachable. \
-                         Install Docker and start the daemon, or set \
-                         `\"mode\":\"off\"` in sandbox.json. Falling back to \
-                         host execution for the lifetime of this agent.",
+                         exec is refused (fail-closed) for the lifetime of this \
+                         agent. Install Docker and start the daemon, then restart; \
+                         or set `\"mode\":\"off\"` in sandbox.json to run exec on \
+                         the host.",
                         self.sandbox_config.mode,
                     );
                     return None;
@@ -351,10 +352,10 @@ impl ToolRegistry {
                 {
                     tracing::warn!(
                         "Sandbox mode gvisor is set but the `runsc` runtime is \
-                         not registered with Docker. Install gVisor and add \
-                         `runsc` to Docker's runtimes, or set \
-                         `\"mode\":\"exec-only\"` in sandbox.json. Falling \
-                         back to host execution for the lifetime of this agent."
+                         not registered with Docker. exec is refused (fail-closed) \
+                         for the lifetime of this agent. Install gVisor and add \
+                         `runsc` to Docker's runtimes, then restart; or set \
+                         `\"mode\":\"exec-only\"` in sandbox.json."
                     );
                     return None;
                 }
@@ -370,8 +371,10 @@ impl ToolRegistry {
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Sandbox unavailable: {e} — falling back to host execution \
-                             for the lifetime of this agent"
+                            "Sandbox unavailable: {e}. exec is refused (fail-closed) \
+                             for the lifetime of this agent. Fix the sandbox runtime \
+                             (Docker / gVisor) and restart, or set `\"mode\":\"off\"` \
+                             in sandbox.json to run exec on the host."
                         );
                         None
                     }
