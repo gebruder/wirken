@@ -117,12 +117,24 @@ pub struct PendingSummary {
 pub const DEFAULT_CLI_TIMEOUT_SECS: u64 = 300;
 
 pub fn resolve_cli_timeout() -> Duration {
-    match std::env::var("WIRKEN_CLI_APPROVAL_TIMEOUT_S") {
-        Ok(s) => match s.trim().parse::<u64>() {
+    parse_cli_timeout(
+        std::env::var("WIRKEN_CLI_APPROVAL_TIMEOUT_S")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse/fallback core for [`resolve_cli_timeout`]. The env read
+/// happens at the boundary above; this applies the rule: a positive
+/// integer overrides the default; absent, empty, non-numeric, or zero
+/// falls back to [`DEFAULT_CLI_TIMEOUT_SECS`].
+fn parse_cli_timeout(raw: Option<&str>) -> Duration {
+    match raw {
+        Some(s) => match s.trim().parse::<u64>() {
             Ok(secs) if secs > 0 => Duration::from_secs(secs),
             _ => Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS),
         },
-        Err(_) => Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS),
+        None => Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS),
     }
 }
 
@@ -387,29 +399,31 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cli_timeout_uses_env_when_set() {
-        // SAFETY: cargo test parallelizes; this test sets a unique
-        // env var, reads it via the helper once, and removes. No
-        // other test reads this variable.
-        unsafe {
-            std::env::set_var("WIRKEN_CLI_APPROVAL_TIMEOUT_S", "42");
-        }
-        let d = resolve_cli_timeout();
-        unsafe {
-            std::env::remove_var("WIRKEN_CLI_APPROVAL_TIMEOUT_S");
-        }
-        assert_eq!(d, Duration::from_secs(42));
+    fn parse_cli_timeout_uses_positive_value() {
+        assert_eq!(parse_cli_timeout(Some("42")), Duration::from_secs(42));
     }
 
     #[test]
-    fn resolve_cli_timeout_falls_back_on_malformed() {
-        unsafe {
-            std::env::set_var("WIRKEN_CLI_APPROVAL_TIMEOUT_S", "not-a-number");
-        }
-        let d = resolve_cli_timeout();
-        unsafe {
-            std::env::remove_var("WIRKEN_CLI_APPROVAL_TIMEOUT_S");
-        }
-        assert_eq!(d, Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS));
+    fn parse_cli_timeout_falls_back_on_malformed() {
+        assert_eq!(
+            parse_cli_timeout(Some("not-a-number")),
+            Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_cli_timeout_falls_back_on_absent() {
+        assert_eq!(
+            parse_cli_timeout(None),
+            Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn parse_cli_timeout_falls_back_on_zero() {
+        assert_eq!(
+            parse_cli_timeout(Some("0")),
+            Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS)
+        );
     }
 }
