@@ -72,11 +72,11 @@ For organizations using a shared API key, the `api_key_name` field in the org co
 
 The Docker sandbox code path supports three modes, selected by `SandboxMode` in the agent runtime:
 
-- `ExecOnly`: Docker containers with default `runc` runtime. Ephemeral, no network, 512MB memory, 256 PID limit, non-root user.
+- `ExecOnly` (the default as of 0.7.5): Docker containers with default `runc` runtime. Ephemeral, no network, 512MB memory, 256 PID limit, non-root user.
 - `GVisor`: Docker containers with `runsc` runtime. Same resource constraints as `ExecOnly`, with kernel attack surface reduction: syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Requires gVisor installed on the host.
-- `Off`: Direct host execution (default).
+- `Off`: Direct host execution at the wirken UID. The explicit opt-out, not the default; the gateway warns at startup when it engages.
 
-Today, the runtime constructs `SandboxConfig` via `Default::default()`, which yields `Off`. The `permissions.sandbox_mode` field in the org config is parsed into `OrgPermissions.sandbox_mode` but is not currently read by the runtime. Selecting a non-default sandbox mode requires a code change in the agent crate or a follow-up that wires the config value into `SandboxConfig`. Tracked in `BACKLOG.md`.
+The runtime's `SandboxConfig::default()` is `ExecOnly` as of 0.7.5. `wirken run` loads `sandbox.json` from the data directory at startup via `load_sandbox_config`, and `apply_org_config` writes that file from the org config's `permissions.sandbox_mode`, so an org policy selecting `off`, `exec-only`, or `gvisor` takes effect on the next gateway start.
 
 ## Deployment options
 
