@@ -44,7 +44,7 @@ Source: `crates/audit/src/siem_typed.rs:375-405` (`TypedTransport::for_config` s
 
 The default forwardable variant set covers the audit events most useful for detection without leaking PII or token-accounting noise:
 
-**Default forward:** `AssistantToolCalls`, `ToolResult`, `HttpFetch`, `PermissionDenied`, `SkillPermissionDenied`, `SubagentSpawned`, `SubagentResult`, `ChainHead`.
+**Default forward:** `AssistantToolCalls`, `ToolResult`, `HttpFetch`, `PermissionDenied`, `SkillPermissionDenied`, `SubagentSpawned`, `SubagentResult`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`, `EgressHookDispatched`, `ToolOutputRedacted`.
 
 **Default exclude (opt-in via `typed_include_variants`):** `UserMessage`, `AssistantMessage` (carry message bodies, PII), `LlmRequest`, `LlmResponse` (token accounting), `SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`, `AuditLegacy` (already on the legacy pipe), and the Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`, `CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`, `PerspectiveExpansion`, `PerspectiveSkipped`).
 
