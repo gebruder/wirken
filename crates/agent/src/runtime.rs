@@ -2221,8 +2221,12 @@ impl Agent {
         // `permissions.tools.allow` filters every tool call. The LLM is
         // shown only the allowed tools (see `snapshot_tool_defs`), but
         // we re-check at dispatch in case the LLM ignores the surface.
-        // `EffectiveProfile::Legacy` short-circuits — agents with no
-        // skills attached, or with any Legacy skill, retain full surface.
+        // `EffectiveProfile::Legacy` short-circuits to full surface and
+        // is reachable only when zero skills are attached
+        // (`effective_for_skills`): every loaded skill carries a resolved
+        // profile, and a missing `permissions:` block resolves to
+        // least-privilege rather than Legacy, so any non-empty attach
+        // produces `Resolved`.
         match self.effective_permissions.gate_tool(name) {
             crate::skill_perms::GateDecision::Allow => {}
             crate::skill_perms::GateDecision::DeniedByPhase { phase_name, axis } => {
