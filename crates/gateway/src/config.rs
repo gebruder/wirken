@@ -108,7 +108,16 @@ impl GatewayConfig {
     }
 }
 
-fn default_data_dir() -> PathBuf {
+/// The single source of truth for the operator data directory.
+///
+/// `GatewayConfig::default` uses this, and so does the skill-load
+/// signature gate when it resolves the operator-set registry root.
+/// Both must agree on where operator state lives: the gate and the
+/// running gateway never look in different directories, because they
+/// call this same function. `GatewayConfig` is only ever constructed
+/// via `default()`, so for the process that loads skills `data_dir`
+/// and this function cannot diverge.
+pub fn default_data_dir() -> PathBuf {
     dirs_home().join(".wirken")
 }
 

@@ -450,6 +450,16 @@ enum SkillCommands {
         /// Path to skill directory
         dir: String,
     },
+    /// Install an operator registry root public key to anchor skill
+    /// identity. Once set, the loader requires every skill's signer to
+    /// be delegated by this root (strict): self-signed-only bundles no
+    /// longer load. The matching root private key never ships and
+    /// signs delegations offline. Without a root set, loading keeps the
+    /// self-signed floor unchanged.
+    TrustRoot {
+        /// Hex-encoded 32-byte Ed25519 root public key.
+        pubkey: String,
+    },
     /// Verify a skill's signature
     Verify {
         /// Path to skill directory
@@ -1077,6 +1087,7 @@ async fn main() -> Result<()> {
             SkillCommands::Install { name } => commands::skills::install(&name).await,
             SkillCommands::List => commands::skills::list().await,
             SkillCommands::Sign { dir } => commands::skills::sign(&dir).await,
+            SkillCommands::TrustRoot { pubkey } => commands::skills::trust_root(&pubkey).await,
             SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
             SkillCommands::Migrate { path, dry_run } => {
                 commands::skills::migrate(path.as_deref(), dry_run).await

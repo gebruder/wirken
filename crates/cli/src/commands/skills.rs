@@ -194,6 +194,25 @@ pub async fn list() -> Result<()> {
     Ok(())
 }
 
+/// Install an operator-set registry root public key, opting this
+/// install into strict identity anchoring. The matching private key
+/// never ships and signs delegations offline.
+pub async fn trust_root(pubkey_hex: &str) -> Result<()> {
+    let cfg = config();
+    cfg.ensure_dirs().ok();
+    skill_registry::save_registry_root(&cfg.data_dir, pubkey_hex)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let path = skill_registry::registry_root_path(&cfg.data_dir);
+    println!("  Registry root installed: {}", path.display());
+    println!("  Skill loading now requires delegation by this root (strict mode);");
+    println!("  self-signed-only bundles will no longer load.");
+    println!();
+    println!("  Re-sign bundled and local skills as delegates of this root, using");
+    println!("  the root private key in your offline signing environment:");
+    println!("    wirken skills sign --delegate --root-key <offline-root-secret> <dir>");
+    Ok(())
+}
+
 pub async fn sign(dir: &str) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
     if !skill_dir.join("SKILL.md").exists() {

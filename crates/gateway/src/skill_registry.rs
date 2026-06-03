@@ -49,6 +49,99 @@ pub fn bundled_registry_pubkey() -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(&bytes).ok()
 }
 
+/// File name, under the operator data dir, of the operator-set
+/// registry root public key. This is runtime operator state, distinct
+/// from the compile-time [`BUNDLED_REGISTRY_PUBKEY_HEX`] placeholder:
+/// an administrator installs it (`wirken skills trust-root`) to opt
+/// into identity anchoring. The file holds the hex-encoded 32-byte
+/// Ed25519 root public key. The matching root *private* key never
+/// ships with wirken and never lands on this machine; it signs
+/// signer-key delegations offline (see `docs/signing.md`).
+pub const REGISTRY_ROOT_FILE: &str = "registry-root.pub";
+
+/// Path to the operator-set registry root key file under `data_dir`.
+pub fn registry_root_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join(REGISTRY_ROOT_FILE)
+}
+
+/// Parse a hex-encoded 32-byte Ed25519 public key. `None` on any
+/// length / hex / point-decode failure.
+fn parse_pubkey_hex(hex: &str) -> Option<VerifyingKey> {
+    let trimmed = hex.trim();
+    if trimmed.len() != 64 {
+        return None;
+    }
+    let bytes = hex_decode(trimmed).ok()?;
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    VerifyingKey::from_bytes(&arr).ok()
+}
+
+/// Install an operator-set registry root public key under `data_dir`.
+/// `pubkey_hex` must be a 64-char hex (32-byte) Ed25519 public key;
+/// anything else is rejected so a malformed anchor never lands on
+/// disk.
+///
+/// The file is integrity-sensitive, not secret: it is written
+/// owner-write / world-read (0644). The permission intent is that a
+/// non-owner process cannot replace the anchor the loader trusts,
+/// while any reader may verify against it. This is deliberately *not*
+/// the 0600 credential model — the public key is meant to be readable.
+pub fn save_registry_root(data_dir: &Path, pubkey_hex: &str) -> Result<(), GatewayError> {
+    let trimmed = pubkey_hex.trim();
+    if parse_pubkey_hex(trimmed).is_none() {
+        return Err(GatewayError::Config(
+            "registry root must be a 64-char hex (32-byte) Ed25519 public key".into(),
+        ));
+    }
+    let path = registry_root_path(data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| GatewayError::Config(format!("create {}: {e}", parent.display())))?;
+    }
+    std::fs::write(&path, format!("{trimmed}\n"))
+        .map_err(|e| GatewayError::Config(format!("write {}: {e}", path.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|e| GatewayError::Config(format!("chmod {}: {e}", path.display())))?;
+    }
+    Ok(())
+}
+
+/// Resolve the operator-set registry root, if one is installed under
+/// `data_dir`.
+///
+/// - `Ok(None)`: no root file present. The operator has not opted into
+///   identity anchoring; the load path keeps its self-signed floor.
+/// - `Ok(Some(key))`: a well-formed root key is present.
+/// - `Err(..)`: the file is present but unreadable or does not parse
+///   as a key. The load gate treats this as fail-closed (a
+///   configured-but-unusable anchor refuses skills rather than
+///   silently downgrading to the floor), so a corrupted or truncated
+///   anchor cannot disable strict mode unnoticed.
+pub fn load_registry_root(data_dir: &Path) -> Result<Option<VerifyingKey>, GatewayError> {
+    let path = registry_root_path(data_dir);
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(GatewayError::Config(format!(
+                "registry root {} is present but unreadable: {e}",
+                path.display()
+            )));
+        }
+    };
+    match parse_pubkey_hex(&raw) {
+        Some(key) => Ok(Some(key)),
+        None => Err(GatewayError::Config(format!(
+            "registry root {} is present but does not parse as a 32-byte Ed25519 \
+             public key; refusing to load skills with an unusable anchor",
+            path.display()
+        ))),
+    }
+}
+
 /// A skill entry in the registry index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillEntry {
