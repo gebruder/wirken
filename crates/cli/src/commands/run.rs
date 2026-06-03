@@ -1002,8 +1002,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(64);
-    let org_tool_policy =
-        wirken_gateway::org::load_tool_policy(&cfg.data_dir).map(std::sync::Arc::new);
+    let org_tool_policy = wirken_gateway::org::load_tool_policy(&cfg.data_dir)
+        .map_err(anyhow::Error::msg)?
+        .map(std::sync::Arc::new);
     if let Some(ref policy) = org_tool_policy {
         let allowed = if policy.allowed_tools.is_empty() {
             "any".to_string()

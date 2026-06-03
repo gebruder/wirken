@@ -494,26 +494,36 @@ pub fn apply_org_config(
     Ok(applied)
 }
 
-/// Read `tool_policy.json` from the gateway data directory and
-/// return it as an [`OrgPermissions`] carrying only the allow/deny
-/// lists (sandbox_mode is None — sandbox is already loaded separately).
-/// Returns `None` if the file is absent or unreadable; malformed
-/// JSON is logged and treated as absent (fail-open on policy load is
-/// intentional: a corrupted policy file should not brick the
-/// gateway, but the operator sees a warning).
-pub fn load_tool_policy(data_dir: &Path) -> Option<OrgPermissions> {
+/// Read `tool_policy.json` from the gateway data directory and return
+/// it as an [`OrgPermissions`] carrying only the allow/deny lists
+/// (sandbox_mode is None; sandbox is loaded separately).
+///
+/// Absent and present-but-malformed are distinct cases. `Ok(None)` is
+/// the no-file case: no org-imposed tool restrictions. A file that is
+/// present but does not read or parse is fail-closed, returning `Err`
+/// rather than dropping the allow/deny intent: a restriction layer
+/// whose intent is unknown must not silently relax into fewer
+/// restrictions. The caller refuses to start on `Err`.
+pub fn load_tool_policy(data_dir: &Path) -> Result<Option<OrgPermissions>, String> {
     let path = data_dir.join("tool_policy.json");
-    let body = std::fs::read_to_string(&path).ok()?;
-    match serde_json::from_str::<OrgPermissions>(&body) {
-        Ok(perms) => Some(perms),
+    let body = match std::fs::read_to_string(&path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
-            tracing::warn!(
-                "tool_policy.json at {} is malformed: {e}; \
-                 continuing with no org tool policy",
+            return Err(format!(
+                "tool_policy.json at {} is present but unreadable: {e}; refusing to \
+                 start rather than dropping the org tool policy",
                 path.display()
-            );
-            None
+            ));
         }
+    };
+    match serde_json::from_str::<OrgPermissions>(&body) {
+        Ok(perms) => Ok(Some(perms)),
+        Err(e) => Err(format!(
+            "tool_policy.json at {} is malformed: {e}; refusing to start rather than \
+             dropping the org tool policy (fix or remove the file)",
+            path.display()
+        )),
     }
 }
 
@@ -775,7 +785,9 @@ mod tests {
         };
         let applied = apply_org_config(tmp.path(), &org, true).unwrap();
         assert!(applied.contains(&"tool_policy".to_string()));
-        let loaded = load_tool_policy(tmp.path()).unwrap();
+        let loaded = load_tool_policy(tmp.path())
+            .unwrap()
+            .expect("tool policy present");
         assert_eq!(loaded.allowed_tools, vec!["read_file", "web_search"]);
         assert_eq!(loaded.blocked_tools, vec!["exec"]);
     }
@@ -824,15 +836,19 @@ mod tests {
 
     #[test]
     fn load_tool_policy_returns_none_for_missing_file() {
+        // Absent file: no org-imposed restrictions. Unchanged.
         let tmp = TempDir::new().unwrap();
-        assert!(load_tool_policy(tmp.path()).is_none());
+        assert!(load_tool_policy(tmp.path()).unwrap().is_none());
     }
 
     #[test]
-    fn load_tool_policy_returns_none_for_malformed_json() {
+    fn load_tool_policy_errors_on_malformed_json() {
+        // Present-but-malformed: the restriction intent is unknown and
+        // must not evaporate into fewer restrictions. Fail closed.
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("tool_policy.json"), "{ not json").unwrap();
-        assert!(load_tool_policy(tmp.path()).is_none());
+        let err = load_tool_policy(tmp.path()).unwrap_err();
+        assert!(err.contains("malformed"), "got {err}");
     }
 
     #[test]
