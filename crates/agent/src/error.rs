@@ -43,6 +43,16 @@ pub enum AgentError {
     #[error("skill load error: {0}")]
     SkillLoad(String),
 
+    /// A configured registry root (`<data_dir>/registry-root.pub`) is
+    /// present but unusable (unreadable or not a valid Ed25519 public
+    /// key). Distinct from `SkillLoad` so the loader can surface a
+    /// corrupt strict anchor loudly: absent means the intended
+    /// self-signed floor, but unparseable means a misconfigured strict
+    /// anchor that just refused every skill, and an operator who
+    /// fat-fingered `wirken skills trust-root` must see the difference.
+    #[error("registry root unusable: {0}")]
+    RegistryRootUnusable(String),
+
     #[error(
         "skill {name} contains an envelope-collision substring in {field} \
          and would forge the BEGIN/END UNTRUSTED SKILL boundary"

@@ -94,6 +94,17 @@ impl SkillLoader {
 
             match Self::load_file(&skill_file) {
                 Ok(skill) => skills.push(skill),
+                // A configured-but-unusable registry root is not a
+                // per-skill problem: it fails every skill identically and
+                // means the operator's strict anchor is corrupt, not that
+                // the floor is failing. Surface it once at error level and
+                // stop, distinct from the debug+aggregate path below, so a
+                // fat-fingered `trust-root` reads as "root is corrupt"
+                // rather than "N skills failed to load".
+                Err(e @ AgentError::RegistryRootUnusable(_)) => {
+                    tracing::error!("{e}");
+                    return Err(e);
+                }
                 Err(e) => {
                     // Per-skill load failures are usually operator-state
                     // (stale frontmatter from a previous migration window,
@@ -501,10 +512,13 @@ fn verify_skill_signature(skill_dir: &Path, skill_md_path: &Path) -> Result<(), 
     let operator_root =
         wirken_gateway::skill_registry::load_registry_root(&data_dir).map_err(|e| {
             // Fail-closed: a configured-but-unusable anchor refuses to
-            // load rather than downgrading to the self-signed floor.
-            AgentError::SkillLoad(format!(
-                "refusing to load {} (fail-closed): registry root is configured but \
-                 unusable: {e}",
+            // load rather than downgrading to the self-signed floor. The
+            // distinct `RegistryRootUnusable` variant lets `load_dir`
+            // surface this loudly: an absent root is the intended floor,
+            // but an unparseable one is a misconfigured strict anchor
+            // that must not read as a generic per-skill failure.
+            AgentError::RegistryRootUnusable(format!(
+                "{e}; refusing to load {} (fail-closed)",
                 skill_md_path.display()
             ))
         })?;
