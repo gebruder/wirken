@@ -431,6 +431,50 @@ pub fn verify_skill_with_expected_key_and_delegation(
     }
 }
 
+/// Verify a skill bundle under an operator-configured registry root,
+/// requiring a valid signer-key delegation by that root. Reads
+/// `SKILL.sig`, `SKILL.pub`, and `SKILL.deleg` from the bundle
+/// directory and defers the cryptographic checks to
+/// [`verify_skill_with_expected_key_and_delegation`] with the on-disk
+/// `SKILL.pub` as the expected signer key.
+///
+/// - `Unsigned`: `SKILL.sig` / `SKILL.pub` are absent. The strict load
+///   path treats this as a refusal; there is no unsigned bypass once a
+///   root is configured.
+/// - `Invalid`: the signature, the signer key, or the delegation does
+///   not verify under `root`. A self-signed-only bundle (no
+///   `SKILL.deleg`) lands here, because a configured root requires the
+///   signer key to be delegated.
+/// - `Valid`: the signer is delegated by `root` and the bundle
+///   signature verifies under the signer key.
+pub fn verify_skill_delegated(
+    skill_dir: &Path,
+    root: &VerifyingKey,
+) -> Result<VerifyResult, GatewayError> {
+    let sig_path = skill_dir.join("SKILL.sig");
+    let key_path = skill_dir.join("SKILL.pub");
+    if !sig_path.exists() || !key_path.exists() {
+        return Ok(VerifyResult::Unsigned);
+    }
+    let sig_hex = std::fs::read_to_string(&sig_path)
+        .map_err(|e| GatewayError::Config(format!("read sig: {e}")))?;
+    let key_hex = std::fs::read_to_string(&key_path)
+        .map_err(|e| GatewayError::Config(format!("read pub key: {e}")))?;
+    let deleg_path = skill_dir.join("SKILL.deleg");
+    let deleg_hex = match std::fs::read_to_string(&deleg_path) {
+        Ok(s) => Some(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(GatewayError::Config(format!("read delegation: {e}"))),
+    };
+    verify_skill_with_expected_key_and_delegation(
+        skill_dir,
+        sig_hex.trim(),
+        key_hex.trim(),
+        deleg_hex.as_deref().map(str::trim),
+        Some(root),
+    )
+}
+
 /// Result of signature verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyResult {

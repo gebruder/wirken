@@ -472,50 +472,208 @@ fn envelope_collision_check(
     Ok(())
 }
 
-/// Verify the skill bundle's signature at load. Uses
-/// [`wirken_gateway::skill_registry::verify_skill_self_signed`]; the
-/// self-signed check proves the bundle is internally consistent
-/// (`SKILL.md` hashes to what `SKILL.sig` covers under `SKILL.pub`),
-/// which is what catches post-install tampering by a process other
-/// than the operator.
+/// Verify the skill bundle's signature at load.
 ///
-/// `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` lets a bundle without sig + pub
-/// files load anyway with a `tracing::warn!` audit line; this
-/// matches the install-time bypass semantics so an operator running
-/// a dev workflow does not need a different env var per surface.
-/// A bundle whose signature is present but does not verify is always
-/// a hard fail; the bypass is for missing files, not for bad ones.
+/// Branches on whether the operator has installed a registry root
+/// (`<data_dir>/registry-root.pub`, see
+/// [`wirken_gateway::skill_registry::load_registry_root`]). The data
+/// dir is resolved from
+/// [`wirken_gateway::config::default_data_dir`] — the single source the
+/// gateway's `GatewayConfig` also uses, so the gate and the running
+/// gateway never look in different directories. A root file that is
+/// present but unparseable is fail-closed: the skill refuses to load
+/// rather than silently dropping to the self-signed floor, so a
+/// corrupted anchor cannot disable strict mode unnoticed.
+///
+/// - No root configured: self-signed verification (the floor). The
+///   self-signed check proves the bundle is internally consistent
+///   (`SKILL.md` hashes to what `SKILL.sig` covers under `SKILL.pub`),
+///   catching post-install tampering. `WIRKEN_ALLOW_UNSIGNED_SKILLS=1`
+///   lets a bundle without sig + pub load with a `tracing::warn!`; a
+///   present-but-bad signature is always a hard fail.
+/// - Root configured (strict): the signer must be delegated by the
+///   root. A self-signed-only bundle (no `SKILL.deleg`) and an unsigned
+///   bundle are both rejected; the unsigned bypass does not apply once
+///   a root is set, because the operator has opted into requiring
+///   identity.
 fn verify_skill_signature(skill_dir: &Path, skill_md_path: &Path) -> Result<(), AgentError> {
-    use wirken_gateway::skill_registry::{VerifyResult, verify_skill_self_signed};
+    let data_dir = wirken_gateway::config::default_data_dir();
+    let operator_root =
+        wirken_gateway::skill_registry::load_registry_root(&data_dir).map_err(|e| {
+            // Fail-closed: a configured-but-unusable anchor refuses to
+            // load rather than downgrading to the self-signed floor.
+            AgentError::SkillLoad(format!(
+                "refusing to load {} (fail-closed): registry root is configured but \
+                 unusable: {e}",
+                skill_md_path.display()
+            ))
+        })?;
+    verify_skill_signature_with_root(skill_dir, skill_md_path, operator_root.as_ref())
+}
 
-    let result = verify_skill_self_signed(skill_dir).map_err(|e| {
-        AgentError::SkillLoad(format!(
-            "signature verification at {} failed: {e}",
-            skill_md_path.display()
-        ))
-    })?;
-    match result {
-        VerifyResult::Valid { .. } => Ok(()),
-        VerifyResult::Invalid => Err(AgentError::SkillLoad(format!(
-            "signature verification at {} failed: SKILL.sig does not match SKILL.md \
-             under SKILL.pub. If the bundle was modified after install, restore from \
-             the source or re-sign before loading.",
-            skill_md_path.display()
-        ))),
-        VerifyResult::Unsigned => {
-            if wirken_gateway::org::parse_boolean_escape(ALLOW_UNSIGNED_ENV) {
-                tracing::warn!(
-                    path = %skill_md_path.display(),
-                    "{ALLOW_UNSIGNED_ENV}=1: loading unsigned skill; bundle provenance is unverified"
-                );
-                Ok(())
-            } else {
-                Err(AgentError::SkillLoad(format!(
-                    "skill at {} is unsigned (no SKILL.sig / SKILL.pub). Sign with \
-                     `wirken skills sign <dir>` or set {ALLOW_UNSIGNED_ENV}=1 to opt in.",
+/// Branch logic for [`verify_skill_signature`], split out so the
+/// root-present and root-absent paths can be exercised directly without
+/// touching ambient operator state. `operator_root` is `Some` when a
+/// registry root is configured (strict), `None` otherwise (floor).
+fn verify_skill_signature_with_root(
+    skill_dir: &Path,
+    skill_md_path: &Path,
+    operator_root: Option<&ed25519_dalek::VerifyingKey>,
+) -> Result<(), AgentError> {
+    use wirken_gateway::skill_registry::{
+        VerifyResult, verify_skill_delegated, verify_skill_self_signed,
+    };
+
+    match operator_root {
+        // Strict: a configured root requires every signer to be
+        // delegated by it. Default-deny on Invalid and Unsigned; no
+        // unsigned bypass on this path.
+        Some(root) => {
+            let result = verify_skill_delegated(skill_dir, root).map_err(|e| {
+                AgentError::SkillLoad(format!(
+                    "delegation verification at {} failed: {e}",
                     skill_md_path.display()
-                )))
+                ))
+            })?;
+            match result {
+                VerifyResult::Valid { .. } => Ok(()),
+                VerifyResult::Invalid => Err(AgentError::SkillLoad(format!(
+                    "signature verification at {} failed: the bundle's signer is not \
+                     delegated by the configured registry root (or the signature does \
+                     not verify). A self-signed-only bundle does not load once a root \
+                     is configured; re-sign it as a delegate of the root.",
+                    skill_md_path.display()
+                ))),
+                VerifyResult::Unsigned => Err(AgentError::SkillLoad(format!(
+                    "skill at {} is unsigned (no SKILL.sig / SKILL.pub). A configured \
+                     registry root requires a delegated signature; the \
+                     {ALLOW_UNSIGNED_ENV} bypass does not apply when a root is set.",
+                    skill_md_path.display()
+                ))),
             }
         }
+        // Floor: self-signed verification, unchanged.
+        None => {
+            let result = verify_skill_self_signed(skill_dir).map_err(|e| {
+                AgentError::SkillLoad(format!(
+                    "signature verification at {} failed: {e}",
+                    skill_md_path.display()
+                ))
+            })?;
+            match result {
+                VerifyResult::Valid { .. } => Ok(()),
+                VerifyResult::Invalid => Err(AgentError::SkillLoad(format!(
+                    "signature verification at {} failed: SKILL.sig does not match SKILL.md \
+                     under SKILL.pub. If the bundle was modified after install, restore from \
+                     the source or re-sign before loading.",
+                    skill_md_path.display()
+                ))),
+                VerifyResult::Unsigned => {
+                    if wirken_gateway::org::parse_boolean_escape(ALLOW_UNSIGNED_ENV) {
+                        tracing::warn!(
+                            path = %skill_md_path.display(),
+                            "{ALLOW_UNSIGNED_ENV}=1: loading unsigned skill; bundle provenance is unverified"
+                        );
+                        Ok(())
+                    } else {
+                        Err(AgentError::SkillLoad(format!(
+                            "skill at {} is unsigned (no SKILL.sig / SKILL.pub). Sign with \
+                             `wirken skills sign <dir>` or set {ALLOW_UNSIGNED_ENV}=1 to opt in.",
+                            skill_md_path.display()
+                        )))
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod root_branch_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use wirken_gateway::skill_registry::{hex_encode_public, sign_skill};
+
+    fn rand_key() -> SigningKey {
+        let mut secret = [0u8; 32];
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut secret);
+        SigningKey::from_bytes(&secret)
+    }
+
+    fn write_min_skill(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: x\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+    }
+
+    fn write_delegation(dir: &Path, signer: &SigningKey, root: &SigningKey) {
+        let deleg = root.sign(&signer.verifying_key().to_bytes());
+        std::fs::write(
+            dir.join("SKILL.deleg"),
+            hex_encode_public(&deleg.to_bytes()),
+        )
+        .unwrap();
+    }
+
+    /// No operator root: the self-signed floor accepts a self-signed
+    /// bundle, exactly as before this branch existed.
+    #[test]
+    fn no_root_accepts_self_signed_floor() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        write_min_skill(&dir);
+        sign_skill(&dir, &rand_key()).unwrap();
+        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), None)
+            .expect("floor accepts self-signed");
+    }
+
+    /// Root configured (STRICT): a self-signed-only bundle with no
+    /// delegation is rejected. Default-deny preserved.
+    #[test]
+    fn configured_root_rejects_self_signed_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        write_min_skill(&dir);
+        sign_skill(&dir, &rand_key()).unwrap();
+        let root = rand_key();
+        let err = verify_skill_signature_with_root(
+            &dir,
+            &dir.join("SKILL.md"),
+            Some(&root.verifying_key()),
+        )
+        .expect_err("strict rejects self-signed-only");
+        assert!(format!("{err}").contains("delegated"), "got {err}");
+    }
+
+    /// Root configured: a signer delegated by that root loads.
+    #[test]
+    fn configured_root_accepts_delegated_signer() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        write_min_skill(&dir);
+        let signer = rand_key();
+        sign_skill(&dir, &signer).unwrap();
+        let root = rand_key();
+        write_delegation(&dir, &signer, &root);
+        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), Some(&root.verifying_key()))
+            .expect("strict accepts a signer delegated by the root");
+    }
+
+    /// Root configured: a delegation by a different root is rejected.
+    #[test]
+    fn configured_root_rejects_delegation_by_other_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("s");
+        write_min_skill(&dir);
+        let signer = rand_key();
+        sign_skill(&dir, &signer).unwrap();
+        let root = rand_key();
+        let other_root = rand_key();
+        write_delegation(&dir, &signer, &other_root);
+        verify_skill_signature_with_root(&dir, &dir.join("SKILL.md"), Some(&root.verifying_key()))
+            .expect_err("strict rejects a delegation signed by a different root");
     }
 }
