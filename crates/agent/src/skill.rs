@@ -128,6 +128,15 @@ impl SkillLoader {
 
     /// Load a single SKILL.md file.
     pub fn load_file(path: &Path) -> Result<Skill, AgentError> {
+        // Signature gate runs first, on the raw on-disk bytes. Nothing
+        // below this point parses frontmatter, expands path templating,
+        // or probes required binaries until the bundle's signature has
+        // verified, so unverified content never reaches a parser, a
+        // templating step, or a subprocess spawn. Default-deny on
+        // Invalid / Unsigned is unchanged (see `verify_skill_signature`).
+        let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
+        verify_skill_signature(skill_root, path)?;
+
         let content = std::fs::read_to_string(path)
             .map_err(|e| AgentError::SkillLoad(format!("read {}: {e}", path.display())))?;
 
@@ -194,7 +203,6 @@ impl SkillLoader {
         validate_name(&name, path)?;
         validate_description(&description, path)?;
 
-        let skill_root = path.parent().unwrap_or_else(|| Path::new("."));
         let home = std::env::var("HOME").ok().map(PathBuf::from);
         // A1: missing `permissions:` block is no longer a load error.
         // It falls back to `PermissionProfile::default()`, which is
@@ -214,8 +222,6 @@ impl SkillLoader {
         // Default-true (Wirken's posture: auto-invocation requires
         // explicit opt-in). #79.
         let disable_model_invocation = frontmatter.disable_model_invocation.unwrap_or(true);
-
-        verify_skill_signature(skill_root, path)?;
 
         Ok(Skill {
             name,
