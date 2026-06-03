@@ -33,10 +33,6 @@
 //!         "sandbox_mode": "exec-only",
 //!         "allowed_tools": ["exec", "read_file", "write_file", "list_files", "web_search"],
 //!         "blocked_tools": ["generate_image"]
-//!     },
-//!     "skills": {
-//!         "auto_install": ["github", "git", "web-fetch"],
-//!         "blocked": []
 //!     }
 //! }
 //! ```
@@ -234,7 +230,13 @@ pub fn write_with_secret_perms(path: &Path, contents: &[u8]) -> std::io::Result<
 }
 
 /// Organization config pulled from a central endpoint.
+///
+/// `deny_unknown_fields` rejects any key the binary does not implement
+/// (for example a `skills` block) as a parse error, so a restriction the
+/// gateway cannot enforce surfaces as a config error instead of being
+/// silently dropped.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct OrgConfig {
     /// LLM provider configuration (provider, model, base_url).
     #[serde(default)]
@@ -256,10 +258,6 @@ pub struct OrgConfig {
     /// Permission policy.
     #[serde(default)]
     pub permissions: Option<OrgPermissions>,
-
-    /// Skill policy.
-    #[serde(default)]
-    pub skills: Option<OrgSkillPolicy>,
 
     /// RFC 3339 timestamp when this config bundle was signed. Lives
     /// inside the signed body so a same-UID attacker who replaces the
@@ -293,18 +291,6 @@ pub struct OrgPermissions {
     /// Tools explicitly blocked.
     #[serde(default)]
     pub blocked_tools: Vec<String>,
-}
-
-/// Organization-level skill policy.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct OrgSkillPolicy {
-    /// Skills to install automatically during setup.
-    #[serde(default)]
-    pub auto_install: Vec<String>,
-
-    /// Skills that are blocked from installation.
-    #[serde(default)]
-    pub blocked: Vec<String>,
 }
 
 /// Fetch org config from a URL and verify it against the operator-pinned
@@ -762,6 +748,18 @@ mod tests {
         let applied = apply_org_config(tmp.path(), &org, true).unwrap();
         assert!(!applied.contains(&"sandbox".to_string()));
         assert!(!tmp.path().join("sandbox.json").exists());
+    }
+
+    #[test]
+    fn org_config_rejects_unimplemented_skills_key() {
+        // `deny_unknown_fields`: a key the gateway does not implement is
+        // a parse error, not a silently dropped field. A `skills` block
+        // must surface as a config error rather than appear to apply, so
+        // an operator cannot believe a skill restriction is in force when
+        // none is enforced.
+        let body = r#"{"skills":{"auto_install":["github"],"blocked":[]}}"#;
+        let err = serde_json::from_str::<OrgConfig>(body).unwrap_err();
+        assert!(err.to_string().contains("skills"), "got {err}");
     }
 
     #[test]

@@ -46,15 +46,11 @@ On every `wirken run`, the org config refreshes automatically.
     },
     "permissions": {
         "sandbox_mode": "exec-only"
-    },
-    "skills": {
-        "auto_install": ["github", "git", "web-fetch"],
-        "blocked": []
     }
 }
 ```
 
-All fields are optional. Only provided fields are applied. The `provider`, `api_key_name`, `siem`, `mcp`, `skills`, and `permissions` fields are wired through. `permissions.sandbox_mode` drives `sandbox.json`; `permissions.allowed_tools` and `permissions.blocked_tools` drive `tool_policy.json`, which `wirken run` loads and enforces in the agent's tool dispatcher ahead of the tier permission check. See [Permissions and identity](permissions-and-identity.md) for enforcement details.
+All fields are optional. Only provided fields are applied. The `provider`, `api_key_name`, `siem`, `mcp`, and `permissions` fields are wired through. `permissions.sandbox_mode` drives `sandbox.json`; `permissions.allowed_tools` and `permissions.blocked_tools` drive `tool_policy.json`, which `wirken run` loads and enforces in the agent's tool dispatcher ahead of the tier permission check. See [Permissions and identity](permissions-and-identity.md) for enforcement details.
 
 ## SIEM integration
 
