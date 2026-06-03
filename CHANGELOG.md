@@ -10,6 +10,37 @@ tagged.
 
 ## Unreleased
 
+## [1.8.0] - 2026-06-03
+
+### Skill identity anchoring (opt-in)
+
+- `wirken skills trust-root <pubkey-hex>` installs an operator registry
+  root at `<data_dir>/registry-root.pub`. With a root set, the load
+  gate requires every skill's signer to be delegated by it: self-signed
+  and unsigned bundles no longer load. Without a root, loading keeps the
+  self-signed floor unchanged. The root private key never ships and
+  signs delegations offline.
+- `wirken skills sign --root-key <offline-seed> <dir>` writes a
+  delegated bundle (`SKILL.deleg`) verifiable under a configured root.
+  `install_bundled_skills_delegated` does the same for bundled skills;
+  with no root, install self-signs as before.
+- A registry-root file present but unparseable is fail-closed and
+  surfaces as `RegistryRootUnusable` at error level, distinct from an
+  absent root, which is the intended floor.
+
+### Permission tier classifier
+
+- WASM-skill tool calls (`wasm_*`) are now classified Tier 3 (always
+  prompt) via a dedicated `WasmSkillCall` action. Previously they
+  reached no tier gate. The per-skill allowlist and the WASM sandbox
+  remain as additional constraints.
+
+### Skill load hardening
+
+- The skill signature gate runs before any frontmatter parse, path
+  templating, or binary probe, so unverified bytes never reach a
+  parser, a templating step, or a subprocess.
+
 ## [1.7.5] - 2026-06-02
 
 ### Permission tier classifier hardening

@@ -75,7 +75,7 @@ Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Appl
 `wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken v1.7.5
+  wirken v1.8.0
   ──────
 
   Provider: ollama/llama3.2
@@ -221,7 +221,7 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Wirken 1.7.x is the current series. 1.7 gets fixes and features; 1.6 gets security fixes only. 1.5 and earlier are unsupported.
+Wirken 1.8.x is the current series. 1.8 gets fixes and features; 1.7 gets security fixes only. 1.6 and earlier are unsupported.
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.
