@@ -213,7 +213,7 @@ pub async fn trust_root(pubkey_hex: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn sign(dir: &str) -> Result<()> {
+pub async fn sign(dir: &str, root_key: Option<&str>) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
     if !skill_dir.join("SKILL.md").exists() {
         anyhow::bail!("No SKILL.md found in '{dir}'");
@@ -262,9 +262,32 @@ pub async fn sign(dir: &str) -> Result<()> {
         SigningKey::from_bytes(&arr)
     };
 
-    let sig = skill_registry::sign_skill(skill_dir, &signing_key)?;
     let pub_hex = skill_registry::hex_encode_public(&signing_key.verifying_key().to_bytes());
 
+    // Delegated sign: the operator supplies the offline root private
+    // seed; we bind the signer key to that root by writing SKILL.deleg.
+    // Used only for installs that opted into a registry root. Without
+    // `--root-key`, self-signing is unchanged (the floor).
+    if let Some(root_path) = root_key {
+        let root_hex = std::fs::read_to_string(root_path)
+            .with_context(|| format!("read root key {root_path}"))?;
+        let root_bytes = skill_registry::hex_decode_public(root_hex.trim())?;
+        if root_bytes.len() != 32 {
+            anyhow::bail!("root key must be a 32-byte Ed25519 seed (64 hex chars)");
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&root_bytes);
+        let root_signing = SigningKey::from_bytes(&arr);
+        skill_registry::delegate_sign_skill(skill_dir, &signing_key, &root_signing)?;
+        let root_pub = skill_registry::hex_encode_public(&root_signing.verifying_key().to_bytes());
+        println!("  Signed (delegated): {}/SKILL.md", dir);
+        println!("  Signer public key: {pub_hex}");
+        println!("  Delegated by root: {root_pub}");
+        println!("  Wrote SKILL.sig, SKILL.pub, SKILL.deleg");
+        return Ok(());
+    }
+
+    let sig = skill_registry::sign_skill(skill_dir, &signing_key)?;
     println!("  Signed: {}/SKILL.md", dir);
     println!("  Signature: {}...{}", &sig[..16], &sig[sig.len() - 16..]);
     println!("  Public key: {pub_hex}");

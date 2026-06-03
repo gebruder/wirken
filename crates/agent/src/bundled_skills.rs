@@ -122,6 +122,51 @@ pub fn install_bundled_skills(skills_dir: &Path) -> std::io::Result<usize> {
     Ok(installed)
 }
 
+/// Install bundled skills to a directory, delegate-signing each under
+/// an operator registry root instead of self-signing. Used only when
+/// an operator has opted into identity anchoring and supplies the root
+/// private key in their offline signing environment; with no root the
+/// plain [`install_bundled_skills`] self-signed floor applies and is
+/// unchanged.
+///
+/// Each freshly written skill gets a fresh, immediately-discarded
+/// signer keypair whose public key is delegated by `root_key` (see
+/// [`wirken_gateway::skill_registry::delegate_sign_skill`]), so the
+/// bundle verifies under the configured root at load. Skills that
+/// already exist on disk are left untouched, the same as the
+/// self-signed installer, so an operator's edits are never masked.
+pub fn install_bundled_skills_delegated(
+    skills_dir: &Path,
+    root_key: &ed25519_dalek::SigningKey,
+) -> std::io::Result<usize> {
+    let mut installed = 0;
+
+    for skill in SKILLS {
+        let dir = skills_dir.join(skill.name);
+        let path = dir.join("SKILL.md");
+
+        if path.exists() {
+            continue;
+        }
+
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, skill.content)?;
+
+        let (secret_hex, _public_hex) = wirken_gateway::skill_registry::generate_signing_keypair();
+        let secret_bytes = wirken_gateway::skill_registry::hex_decode_public(&secret_hex)
+            .map_err(std::io::Error::other)?;
+        let mut secret_arr = [0u8; 32];
+        secret_arr.copy_from_slice(&secret_bytes);
+        let signer = ed25519_dalek::SigningKey::from_bytes(&secret_arr);
+        wirken_gateway::skill_registry::delegate_sign_skill(&dir, &signer, root_key)
+            .map_err(std::io::Error::other)?;
+
+        installed += 1;
+    }
+
+    Ok(installed)
+}
+
 /// Number of bundled skills.
 pub fn bundled_count() -> usize {
     SKILLS.len()

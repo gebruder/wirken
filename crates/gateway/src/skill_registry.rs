@@ -328,6 +328,32 @@ pub fn verify_skill_self_signed(skill_dir: &Path) -> Result<VerifyResult, Gatewa
     }
 }
 
+/// Sign a skill bundle and delegate its signer key under a registry
+/// root, for installs that have opted into identity anchoring.
+///
+/// Writes the same `SKILL.sig` / `SKILL.pub` as [`sign_skill`] (the
+/// signer key signs the composite bundle hash), then writes
+/// `SKILL.deleg`: the root's Ed25519 signature over the signer's raw
+/// 32-byte public key. The bundle then verifies under
+/// [`verify_skill_delegated`] against `root_key.verifying_key()`.
+///
+/// `root_key` is the operator's offline root private key, supplied at
+/// sign time in their signing environment. It never ships with wirken
+/// and is not written anywhere by this function.
+pub fn delegate_sign_skill(
+    skill_dir: &Path,
+    signer_key: &SigningKey,
+    root_key: &SigningKey,
+) -> Result<(), GatewayError> {
+    sign_skill(skill_dir, signer_key)?;
+    let signer_pub = signer_key.verifying_key();
+    let delegation = root_key.sign(&signer_pub.to_bytes());
+    let deleg_hex = hex_encode(&delegation.to_bytes());
+    std::fs::write(skill_dir.join("SKILL.deleg"), &deleg_hex)
+        .map_err(|e| GatewayError::Config(format!("write delegation: {e}")))?;
+    Ok(())
+}
+
 /// Generate a new Ed25519 keypair for skill signing.
 /// Returns (secret_key_hex, public_key_hex).
 pub fn generate_signing_keypair() -> (String, String) {
@@ -709,6 +735,35 @@ mod tests {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delegate_sign_round_trips_under_matching_root() {
+        // delegate_sign_skill must produce SKILL.sig/SKILL.pub/SKILL.deleg
+        // that verify_skill_delegated accepts under the matching root and
+        // rejects under any other root. Locks the helper's message bytes
+        // against the verifier (the load-gate branch tests build their own
+        // delegation and would not catch a wrong-bytes regression here).
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), "---\nname: d\n---\nbody").unwrap();
+
+        let signer = random_signing_key();
+        let root = random_signing_key();
+        delegate_sign_skill(&dir, &signer, &root).unwrap();
+        assert!(dir.join("SKILL.deleg").exists());
+
+        match verify_skill_delegated(&dir, &root.verifying_key()).unwrap() {
+            VerifyResult::Valid { .. } => {}
+            other => panic!("expected Valid under matching root, got {other:?}"),
+        }
+        let other = random_signing_key();
+        assert_eq!(
+            verify_skill_delegated(&dir, &other.verifying_key()).unwrap(),
+            VerifyResult::Invalid,
+            "a delegation by a different root must not verify"
+        );
     }
 
     #[test]

@@ -449,6 +449,14 @@ enum SkillCommands {
     Sign {
         /// Path to skill directory
         dir: String,
+        /// Delegate the signature under an operator registry root.
+        /// Path to the root Ed25519 private seed (hex). Used only for
+        /// installs that have opted into a root via `skills trust-root`;
+        /// the root key stays in your offline signing environment and is
+        /// never written back. Writes `SKILL.deleg` alongside the
+        /// signature so the bundle verifies under the configured root.
+        #[arg(long)]
+        root_key: Option<String>,
     },
     /// Install an operator registry root public key to anchor skill
     /// identity. Once set, the loader requires every skill's signer to
@@ -1086,7 +1094,9 @@ async fn main() -> Result<()> {
             SkillCommands::Search { query } => commands::skills::search(&query).await,
             SkillCommands::Install { name } => commands::skills::install(&name).await,
             SkillCommands::List => commands::skills::list().await,
-            SkillCommands::Sign { dir } => commands::skills::sign(&dir).await,
+            SkillCommands::Sign { dir, root_key } => {
+                commands::skills::sign(&dir, root_key.as_deref()).await
+            }
             SkillCommands::TrustRoot { pubkey } => commands::skills::trust_root(&pubkey).await,
             SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
             SkillCommands::Migrate { path, dry_run } => {
