@@ -2161,10 +2161,11 @@ impl Agent {
 
     /// True when `name` matches a loaded Wasm skill, by its
     /// `wasm_`-prefixed tool name or its bare skill name (mirrors the
-    /// dispatch routing in `execute_tool`). Wasm skills are not
-    /// tier-classified: the Wasm sandbox and the per-skill profile
-    /// gate govern them, so the tier gate exempts them from the
-    /// residual default-deny.
+    /// dispatch routing in `execute_tool`). A match routes the call to
+    /// the dedicated `Action::WasmSkillCall` (Tier 3) at the dispatch
+    /// gate, so Wasm skills are tier-classified and default-deny like
+    /// any other call; the Wasm sandbox and the per-skill profile gate
+    /// apply as additional constraints on top.
     fn is_known_wasm_skill(&self, name: &str) -> bool {
         let bare = name.strip_prefix("wasm_").unwrap_or(name);
         self.wasm_skills
@@ -2388,14 +2389,20 @@ impl Agent {
                 serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
             // Resolve the action to gate on. Built-in, MCP (`mcp_`),
             // and exec names are classified by `tool_to_action`. A
-            // `None` return is either a known Wasm skill, which the
-            // Wasm sandbox and the per-skill profile gate already
-            // govern, or a genuinely unregistered tool, which is
-            // default-denied (Tier 3, always-prompt) so it cannot run
-            // ungated.
+            // `None` return is either a known Wasm skill, which is
+            // gated by a dedicated `WasmSkillCall` action (Tier 3,
+            // always-prompt) on top of the Wasm sandbox and the
+            // per-skill profile gate, or a genuinely unregistered
+            // tool, which is default-denied via `UnknownTool` (also
+            // Tier 3) so it cannot run ungated. Both reach the tier
+            // gate; neither skips approval.
             let action = match tool_to_action(name, &args) {
                 Some(action) => Some(action),
-                None if self.is_known_wasm_skill(name) => None,
+                None if self.is_known_wasm_skill(name) => {
+                    Some(wirken_gateway::permissions::Action::WasmSkillCall {
+                        skill: name.to_string(),
+                    })
+                }
                 None => Some(wirken_gateway::permissions::Action::UnknownTool {
                     tool: name.to_string(),
                 }),

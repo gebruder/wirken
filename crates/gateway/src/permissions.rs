@@ -69,6 +69,18 @@ pub enum Action {
     UnknownTool {
         tool: String,
     },
+    /// A tool call dispatching to a loaded Wasm skill (`wasm_{skill}`).
+    /// Always Tier 3: the Wasm sandbox and the per-skill permission
+    /// profile bound what the call can reach, but neither asks the
+    /// operator, so the tier gate makes every Wasm dispatch default-deny
+    /// like any other unclassified call. The sandbox and profile remain
+    /// additional constraints layered on top, not replacements.
+    /// Constructed by the runtime tier gate for known Wasm skills;
+    /// `tool_to_action` returns `None` for `wasm_`-prefixed names so they
+    /// are not confused with the `mcp_` arm.
+    WasmSkillCall {
+        skill: String,
+    },
 }
 
 impl std::fmt::Display for Action {
@@ -89,6 +101,7 @@ impl std::fmt::Display for Action {
             Action::CronCreate => "cron_create",
             Action::McpToolCall { .. } => "mcp_tool_call",
             Action::UnknownTool { .. } => "unknown_tool",
+            Action::WasmSkillCall { .. } => "wasm_skill_call",
         };
         f.write_str(label)
     }
@@ -180,7 +193,8 @@ impl Action {
             | Action::CredentialAccess
             | Action::CronCreate
             | Action::McpToolCall { .. }
-            | Action::UnknownTool { .. } => PermissionTier::Tier3,
+            | Action::UnknownTool { .. }
+            | Action::WasmSkillCall { .. } => PermissionTier::Tier3,
         }
     }
 
@@ -198,6 +212,7 @@ impl Action {
             Action::CrossConversationMessage => "cross-conversation".to_string(),
             Action::McpToolCall { tool } => format!("mcp:{tool}"),
             Action::UnknownTool { tool } => format!("tool:{tool}"),
+            Action::WasmSkillCall { skill } => format!("wasm:{skill}"),
             other => format!("{other:?}"),
         }
     }
@@ -1160,6 +1175,7 @@ mod tier_tests {
                 Action::CronCreate => "cron_create",
                 Action::McpToolCall { .. } => "mcp_tool_call",
                 Action::UnknownTool { .. } => "unknown_tool",
+                Action::WasmSkillCall { .. } => "wasm_skill_call",
             }
         }
         // Smoke a representative variant so the function isn't
