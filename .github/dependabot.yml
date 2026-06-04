@@ -4,6 +4,14 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # rusqlite 0.40+ pulls libsqlite3-sys 0.38, whose build.rs uses
+      # cfg_select! (nightly-only) and breaks `cargo build` on stable
+      # with E0658. See issue #149. Reverted twice (09dafd9, 04e5665).
+      # Remove this ignore to re-attempt once cfg_select stabilizes on
+      # stable or libsqlite3-sys backs it out.
+      - dependency-name: "rusqlite"
+        versions: [">= 0.40"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
