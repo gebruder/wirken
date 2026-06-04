@@ -10,6 +10,34 @@ tagged.
 
 ## Unreleased
 
+## [1.8.1] - 2026-06-04
+
+### SIEM forwarder
+
+- The typed-event forwarder sweeps all sessions in one indexed query
+  per poll instead of one query per session, so poll cost no longer
+  scales with total session count (#105).
+- Poll cadence is configurable via `typed_poll_interval_ms` in
+  `siem.json` (default 50ms, clamped up to a 10ms floor) (#106).
+
+### Org config
+
+- Org config rejects unknown fields and carries no skill policy; org
+  tool policy fails closed on an unreadable or malformed file.
+
+### Release integrity
+
+- Adds SLSA Build L3 build provenance to the release pipeline: the
+  workflow attaches a standalone `wirken.intoto.jsonl` attestation
+  beside the signed `checksums.sha256`, verifiable with `slsa-verifier`
+  (#24).
+
+### Dependencies
+
+- uuid 1.23.1 to 1.23.2, capnp 0.25.4 to 0.25.5. rusqlite held at 0.39:
+  0.40 pulls libsqlite3-sys 0.38, whose build script needs nightly
+  (#149).
+
 ## [1.8.0] - 2026-06-03
 
 ### Skill identity anchoring (opt-in)
