@@ -33,12 +33,10 @@ ssh-keygen -lf "$REPO"/KEYS   # must match the fingerprint in SECURITY.md
 
 ## Version scheme
 
-Semver on `0.X.Y`:
+Semver on `X.Y.Z`, currently in the `1.x` series:
 
-- Bump `Y` for bug fixes and docs.
-- Bump `X` for features, new adapters, breaking config changes.
-- `1.0` when type-level channel separation is threaded through the
-  production message path.
+- Bump `Z` (patch) for bug fixes and docs.
+- Bump `Y` (minor) for features, new adapters, breaking config changes.
 
 Every workspace crate shares `workspace.package.version` in the root
 `Cargo.toml`. The git tag is `v<version>`.
@@ -118,7 +116,7 @@ Run top to bottom. Replace `0.7.4` with the target version.
    git push origin v0.7.4
    ```
 
-5. **Watch the release build.** Produces four binaries, `checksums.sha256`,
+5. **Watch the release build.** Produces five binaries, `checksums.sha256`,
    and creates a **draft** release.
    ```bash
    gh run watch -R gebruder/wirken
@@ -130,7 +128,7 @@ Run top to bottom. Replace `0.7.4` with the target version.
    ```bash
    mkdir -p /tmp/wirken-release && cd /tmp/wirken-release
    gh release download v0.7.4 -R gebruder/wirken --pattern checksums.sha256
-   cat checksums.sha256   # sanity: four lines, one per binary
+   cat checksums.sha256   # sanity: five lines, one per binary
    ```
 
 7. **Sign.** You will be prompted for the passphrase.
@@ -156,11 +154,18 @@ Run top to bottom. Replace `0.7.4` with the target version.
    gh release upload v0.7.4 checksums.sha256.sig -R gebruder/wirken
    ```
 
-10. **Confirm all assets are attached.** You should see the four
-    binaries, `checksums.sha256`, and `checksums.sha256.sig`.
+10. **Confirm all assets are attached.** You should see the five
+    binaries, `checksums.sha256`, `checksums.sha256.sig`, and
+    `wirken.intoto.jsonl` (the SLSA provenance; generated automatically
+    by the `provenance` workflow job, not signed with the offline key).
     ```bash
     gh release view v0.7.4 -R gebruder/wirken
     ```
+    The provenance attaches on its own once the build matrix completes;
+    no maintainer action is needed for it. If it is missing, the
+    `provenance` job failed — the draft is still publishable from the
+    binaries + signed checksums, and the provenance can be regenerated
+    by re-running that job. See [release-signing.md](release-signing.md#build-provenance-slsa).
 
 11. **Publish.** Flip from draft to published.
     ```bash

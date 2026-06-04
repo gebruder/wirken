@@ -17,7 +17,7 @@ Report security vulnerabilities via one of:
 
 Do not open a public issue for security vulnerabilities.
 
-You should receive an initial response within 72 hours. If the vulnerability is accepted, a fix will be released as a patch version (e.g., 0.3.1) and the advisory will be published after the fix is available.
+You should receive an initial response within 72 hours. If the vulnerability is accepted, a fix will be released as a patch version (e.g., 1.8.1) and the advisory will be published after the fix is available.
 
 ## Release signing
 
@@ -30,6 +30,8 @@ Current active key:
 - Fingerprint: `SHA256:tzlfNHy4G1KIsmAR+cM3MGwVndheh2ak/usA6rw7SuE`
 - Issued: 2026-04-18
 - Signed file: `checksums.sha256` for every published release (verify with `ssh-keygen -Y verify`)
+
+In addition to the offline signature, releases tagged after build provenance landed publish `wirken.intoto.jsonl`, a SLSA Build L3 provenance attestation signed through the GitHub OIDC-rooted Sigstore chain. It is a second, independent trust root (build origin, recorded in a public transparency log) beside the offline maintainer key, and both are standalone release assets. Verify it with `slsa-verifier`; see [docs/release-signing.md](docs/release-signing.md#build-provenance-slsa).
 
 ## Scope
 

@@ -80,6 +80,43 @@ Cross-check the fingerprint in the first line of output against the
 one recorded in [SECURITY.md](../SECURITY.md) and in the `KEYS`
 comments at the pinned commit. They must match.
 
+## Build provenance (SLSA)
+
+A second, independent trust root sits beside the offline signature.
+Releases tagged after build provenance landed publish
+`wirken.intoto.jsonl`, a SLSA Build L3
+provenance attestation signed through the GitHub OIDC-rooted Sigstore
+chain and recorded in a public transparency log. Where the ed25519
+signature answers "the maintainer vouches for these bytes", the
+provenance answers "this exact workflow, on this commit, in this
+runner, produced them". The two compose; neither replaces the other,
+and both are standalone release assets you can mirror independently of
+the attestations API.
+
+Verify it with [`slsa-verifier`](https://github.com/slsa-framework/slsa-verifier)
+(a single binary; deliberately not a dependency of `install.sh`):
+
+```bash
+# Provenance ships from the first release tagged after this workflow
+# landed; earlier releases carry only the ed25519 signature above. Set
+# TAG to a provenance-bearing release — the curl for wirken.intoto.jsonl
+# 404s on any release cut before that.
+TAG=<provenance-bearing release tag>
+BINARY=wirken-x86_64-unknown-linux-musl
+
+curl -fsSLO "https://github.com/gebruder/wirken/releases/download/$TAG/$BINARY"
+curl -fsSLO "https://github.com/gebruder/wirken/releases/download/$TAG/wirken.intoto.jsonl"
+
+slsa-verifier verify-artifact "$BINARY" \
+    --provenance-path wirken.intoto.jsonl \
+    --source-uri github.com/gebruder/wirken \
+    --source-tag "$TAG"
+```
+
+A `PASSED: SLSA verification passed` line confirms the binary was built
+by the pinned release workflow at `$TAG`. This is additive to the
+ssh-keygen check above; run both for the strongest story.
+
 ## Escape hatch
 
 The installer respects `WIRKEN_ALLOW_UNVERIFIED=1` for disaster

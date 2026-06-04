@@ -150,6 +150,11 @@ jobs:
     permissions:
       # Needed by softprops/action-gh-release to create the draft.
       contents: write
+    outputs:
+      # base64 of checksums.sha256, consumed by the `provenance` job as
+      # the SLSA subjects to attest. Covers exactly the published
+      # binaries (the checksum file is computed over `wirken-*`).
+      hashes: ${{ steps.hashes.outputs.hashes }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
@@ -184,6 +189,13 @@ jobs:
           cd ..
           ls -la release/
 
+      - name: Export subjects for SLSA provenance
+        id: hashes
+        # The provenance job attests these exact sha256 subjects. The
+        # checksum file is the same one the maintainer signs offline, so
+        # the two trust roots cover identical bytes.
+        run: echo "hashes=$(base64 -w0 release/checksums.sha256)" >> "$GITHUB_OUTPUT"
+
       # Release is created as a draft. The maintainer downloads
       # checksums.sha256 from the draft, signs it offline with the
       # Ed25519 release signing key (see docs/release-signing.md), and
@@ -213,3 +225,36 @@ jobs:
             See `docs/release-signing.md` for the full procedure.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # SLSA Build L3 provenance over the published binaries. Produces a
+  # standalone `wirken.intoto.jsonl` attestation, signed via the GitHub
+  # OIDC-rooted Sigstore chain, attached to the draft release next to
+  # `checksums.sha256` and `checksums.sha256.sig`. This is a second,
+  # independent trust root (build-origin via a transparency log) beside
+  # the offline-maintainer ed25519 signature; the two compose and
+  # neither substitutes for the other. Verify with `slsa-verifier`
+  # (see docs/release-signing.md).
+  #
+  # This reusable workflow is pinned by release TAG, not by commit SHA:
+  # the generator verifies that it was itself invoked at a semantic tag
+  # to anchor its own provenance, so a SHA ref is rejected. This is a
+  # deliberate, documented exception to this repo's SHA-pin policy, not
+  # an oversight; the scorecard Pinned-Dependencies check may flag it.
+  provenance:
+    name: Provenance
+    needs: [release]
+    if: github.event_name == 'push'
+    permissions:
+      id-token: write # OIDC token for Sigstore signing
+      contents: write # attach the attestation to the release
+      actions: read # read workflow run metadata for the provenance
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      provenance-name: wirken.intoto.jsonl
+      upload-assets: true
+      upload-tag-name: ${{ github.ref_name }}
+      # Keep the release a draft: the maintainer still attaches the
+      # offline signature and publishes by hand. String type per the
+      # generator's input schema.
+      draft-release: "true"
