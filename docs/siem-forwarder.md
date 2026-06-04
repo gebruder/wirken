@@ -14,7 +14,7 @@ Source: `crates/audit/src/writer.rs:426-577` (flush loop), `crates/audit/src/sie
 
 ### Typed pipe
 
-A polling worker reads `session_events` via `SqliteSessionLog::get_since` at a fixed cadence and forwards new rows to the typed transport. Opt-in: spawned only when at least one of the following is set in `siem.json`:
+A polling worker forwards new `session_events` rows to the typed transport. Each pass is a single indexed sweep (`SqliteSessionLog::get_events_after`) for rows past a global `session_events.id` cursor, across all sessions, so poll cost does not scale with session count. Opt-in: spawned only when at least one of the following is set in `siem.json`:
 
 - `typed_forwarding_enabled: true` (explicit opt-in to the default forwardable-variant set).
 - `typed_include_variants` (operator-provided allowlist).
@@ -23,9 +23,11 @@ A polling worker reads `session_events` via `SqliteSessionLog::get_since` at a f
 
 `typed_forwarding_enabled: false` is an explicit off switch that overrides every other typed field; the worker is not spawned even when those are set. Use this to test the legacy-only path against a `siem.json` that already has the typed fields populated.
 
+Cadence is `typed_poll_interval_ms` (default 50 ms, matching the legacy writer flush; a configured value is clamped up to a 10 ms floor to prevent a busy-spin). It is a tuning knob, not an opt-in trigger: setting it alone does not spawn the worker.
+
 The worker never writes to `session_events`, so the audit hash chain is unaffected regardless of forwarder activity.
 
-Source: `crates/audit/src/siem_typed.rs:250-310` (worker `spawn` + `run_one_pass`), `crates/audit/src/siem.rs:57-103` (`SiemConfig.typed_forwarding_enabled`, `typed_forwarding_opted_in`).
+Source: `crates/audit/src/siem_typed.rs` (`spawn`, `run_one_pass`, `get_events_after` sweep, `resolve_poll_interval`), `crates/audit/src/siem.rs` (`SiemConfig`, `typed_forwarding_opted_in`).
 
 ## Hybrid transport path
 
@@ -75,16 +77,9 @@ Source: `crates/audit/src/siem.rs:353-397` (legacy webhook + HMAC), `crates/audi
 
 There are no retries. A forward failure logs a `tracing::warn!` and drops the batch; the next flush carries new events forward. Operators own retry at the receiver (Splunk HEC indexer-acknowledgement, Datadog backlog, etc.).
 
-The typed pipe's cursor advances per session **only** after a successful POST: if the typed transport returns `Err`, the cursor for that session does not move and the next polling pass re-reads the same rows. This is the polling pipe's analogue of receiver-side ack and gives bounded duplicate delivery during transient failure rather than silent loss.
+The typed pipe holds a single global cursor over `session_events.id` and advances it **only** after a successful POST: if the typed transport returns `Err`, the cursor does not move and the next polling pass re-reads every new row since it. Because a pass batches rows across sessions, that replay spans sessions. This is the polling pipe's analogue of receiver-side ack and gives bounded duplicate delivery during transient failure rather than silent loss.
 
-Source: `crates/audit/src/siem_typed.rs:310-340` (`run_one_pass` cursor advance gated on `forward` success).
-
-## Tuning gaps
-
-Two issues track typed-forwarder operational concerns:
-
-- [gebruder/wirken#105](https://github.com/gebruder/wirken/issues/105): `TypedEventForwarder` polling cost scales linearly with session count. A high-session-count deployment pays an `O(sessions)` SQL scan every `TYPED_POLL_INTERVAL`; the right fix is per-session cursoring outside the worker's in-memory `HashMap`.
-- [gebruder/wirken#106](https://github.com/gebruder/wirken/issues/106): `TYPED_POLL_INTERVAL` is hardcoded to 50 ms. A high-latency target with tight ingest SLAs may want to slow the loop; a low-latency target with bursty traffic may want faster ticks.
+Source: `crates/audit/src/siem_typed.rs` (`run_one_pass` cursor advance gated on `forward` success).
 
 ## Source references
 

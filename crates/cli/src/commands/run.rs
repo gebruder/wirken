@@ -3535,6 +3535,7 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
     let typed_forwarding_enabled = json
         .get("typed_forwarding_enabled")
         .and_then(|v| v.as_bool());
+    let typed_poll_interval_ms = json.get("typed_poll_interval_ms").and_then(|v| v.as_u64());
 
     println!("  SIEM: forwarding to {target_str} at {endpoint}");
 
@@ -3549,6 +3550,7 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
         typed_include_variants,
         typed_exclude_variants,
         typed_forwarding_enabled,
+        typed_poll_interval_ms,
     })
 }
 

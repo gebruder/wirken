@@ -72,6 +72,13 @@ pub struct SiemConfig {
     ///   unset = no typed pipe (back-compatible with 1.3.0
     ///   `siem.json` shapes).
     pub typed_forwarding_enabled: Option<bool>,
+    /// Poll interval, in milliseconds, for the typed-event forwarder
+    /// worker. `None` uses the default [`crate::TYPED_POLL_INTERVAL`]
+    /// (50ms), which matches the legacy writer flush cadence so a SOC
+    /// team sees consistent latency across both pipes. A configured
+    /// value is clamped up to a small floor to avoid a busy-spin; see
+    /// [`crate::siem_typed::resolve_poll_interval`].
+    pub typed_poll_interval_ms: Option<u64>,
 }
 
 impl SiemConfig {

@@ -737,6 +737,7 @@ fn fixture_config(target: SiemTarget, hmac_secret: Option<&str>) -> SiemConfig {
         typed_include_variants: None,
         typed_exclude_variants: None,
         typed_forwarding_enabled: None,
+        typed_poll_interval_ms: None,
     }
 }
 

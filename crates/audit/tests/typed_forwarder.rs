@@ -42,6 +42,7 @@ fn base_config(target: SiemTarget) -> SiemConfig {
         typed_include_variants: None,
         typed_exclude_variants: None,
         typed_forwarding_enabled: None,
+        typed_poll_interval_ms: None,
     }
 }
 

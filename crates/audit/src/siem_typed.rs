@@ -37,6 +37,21 @@ use crate::siem::{SiemConfig, SiemTarget};
 /// pipes.
 pub const TYPED_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Floor for an operator-configured poll interval. A `0` or
+/// near-zero `typed_poll_interval_ms` is clamped up to this so a
+/// misconfiguration cannot busy-spin the poll loop.
+const POLL_INTERVAL_FLOOR_MS: u64 = 10;
+
+/// Resolve the forwarder poll interval from config (#106). `None`
+/// uses [`TYPED_POLL_INTERVAL`] (the 50ms default). A configured value
+/// is clamped up to [`POLL_INTERVAL_FLOOR_MS`].
+pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
+    match config.typed_poll_interval_ms {
+        None => TYPED_POLL_INTERVAL,
+        Some(ms) => Duration::from_millis(ms.max(POLL_INTERVAL_FLOOR_MS)),
+    }
+}
+
 /// Decide whether a freshly read row should be forwarded under the
 /// caller's typed-event configuration.
 ///
@@ -286,7 +301,7 @@ impl TypedEventForwarder {
             // so a fresh worker re-reads from the start and relies on
             // SIEM dedup, the same restart-replay contract as before.
             let mut cursor: i64 = 0;
-            let mut tick = interval(TYPED_POLL_INTERVAL);
+            let mut tick = interval(resolve_poll_interval(&config));
             loop {
                 tokio::select! {
                     _ = &mut rx => break,
@@ -456,6 +471,7 @@ mod tests {
             typed_include_variants: None,
             typed_exclude_variants: None,
             typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
         }
     }
 
@@ -580,6 +596,22 @@ mod tests {
             detail: serde_json::Value::Null,
         };
         assert!(!should_forward(&legacy, &cfg));
+    }
+
+    #[test]
+    fn resolve_poll_interval_defaults_and_clamps() {
+        let mut cfg = config_default();
+        // None -> the 50ms default.
+        assert_eq!(resolve_poll_interval(&cfg), TYPED_POLL_INTERVAL);
+        // A sane configured value is honored as-is.
+        cfg.typed_poll_interval_ms = Some(250);
+        assert_eq!(resolve_poll_interval(&cfg), Duration::from_millis(250));
+        // 0 is clamped up off the busy-spin floor.
+        cfg.typed_poll_interval_ms = Some(0);
+        assert_eq!(
+            resolve_poll_interval(&cfg),
+            Duration::from_millis(POLL_INTERVAL_FLOOR_MS)
+        );
     }
 
     #[test]
