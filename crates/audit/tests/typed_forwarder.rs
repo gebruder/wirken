@@ -17,7 +17,6 @@
 //! sink-level assertions are about *what* the worker hands to the
 //! transport, not how the transport phrases an HTTPS POST.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{TimeZone, Utc};
@@ -315,7 +314,7 @@ async fn d2_worker_delivers_in_seq_order_exactly_once() {
 
     let sink = Arc::new(StubSink::default());
     let cfg = base_config(SiemTarget::Webhook);
-    let mut cursor: HashMap<SessionId, u64> = HashMap::new();
+    let mut cursor: i64 = 0;
 
     siem_typed::run_one_pass(&log, sink.as_ref(), &cfg, &mut cursor)
         .await
@@ -340,6 +339,60 @@ async fn d2_worker_delivers_in_seq_order_exactly_once() {
 }
 
 #[tokio::test]
+async fn one_pass_sweeps_all_sessions_in_a_single_batch() {
+    // #105: the forwarder issues one global query over session_events.id
+    // per pass, so events from multiple sessions arrive in a single
+    // batch. The previous per-session implementation produced one
+    // `forward` call per session (and one `get_since` query per
+    // session, the cost that scaled with session count). A single batch
+    // here is the observable proof of the O(1)-queries sweep.
+    let tmp = TempDir::new().unwrap();
+    let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+
+    let a = log.handle_for(SessionId::new("sess-A"));
+    let b = log.handle_for(SessionId::new("sess-B"));
+    // Interleave forwardable appends across two sessions.
+    log.append(&a, TrustLevel::System, fixture_tool_calls())
+        .unwrap();
+    log.append(&b, TrustLevel::System, fixture_tool_calls())
+        .unwrap();
+    log.append(&a, TrustLevel::Tool, fixture_tool_result())
+        .unwrap();
+    log.append(&b, TrustLevel::Tool, fixture_tool_result())
+        .unwrap();
+
+    let sink = Arc::new(StubSink::default());
+    let cfg = base_config(SiemTarget::Webhook);
+    let mut cursor: i64 = 0;
+
+    siem_typed::run_one_pass(&log, sink.as_ref(), &cfg, &mut cursor)
+        .await
+        .unwrap();
+
+    {
+        let received = sink.received.lock().unwrap();
+        assert_eq!(
+            received.len(),
+            1,
+            "one batch spanning both sessions, not one batch per session"
+        );
+        let total: usize = received.iter().map(|b| b.len()).sum();
+        assert_eq!(total, 4, "all four forwardable rows across both sessions");
+    }
+    assert!(cursor > 0, "cursor advanced to the highest global id read");
+
+    // Second pass: no new rows across either session.
+    siem_typed::run_one_pass(&log, sink.as_ref(), &cfg, &mut cursor)
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.received.lock().unwrap().len(),
+        1,
+        "no replay once the global cursor has advanced"
+    );
+}
+
+#[tokio::test]
 async fn d2_worker_retries_on_sink_error_without_advancing_cursor() {
     let tmp = TempDir::new().unwrap();
     let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
@@ -353,15 +406,15 @@ async fn d2_worker_retries_on_sink_error_without_advancing_cursor() {
     let sink = Arc::new(StubSink::default());
     *sink.fail_first.lock().unwrap() = 1;
     let cfg = base_config(SiemTarget::Webhook);
-    let mut cursor: HashMap<SessionId, u64> = HashMap::new();
+    let mut cursor: i64 = 0;
 
     // First pass: sink errors. Worker must propagate Err and not
     // advance the cursor.
     let r = siem_typed::run_one_pass(&log, sink.as_ref(), &cfg, &mut cursor).await;
     assert!(r.is_err(), "sink error must propagate");
     assert!(
-        cursor.values().all(|&v| v == 0),
-        "cursor must not advance on error, got {cursor:?}"
+        cursor == 0,
+        "cursor must not advance on error, got {cursor}"
     );
 
     // Second pass: sink succeeds. Same rows are re-delivered.
@@ -386,7 +439,7 @@ async fn d2_worker_respects_exclude_list() {
     let sink = Arc::new(StubSink::default());
     let mut cfg = base_config(SiemTarget::Webhook);
     cfg.typed_exclude_variants = Some(vec!["tool_result".into()]);
-    let mut cursor: HashMap<SessionId, u64> = HashMap::new();
+    let mut cursor: i64 = 0;
 
     siem_typed::run_one_pass(&log, sink.as_ref(), &cfg, &mut cursor)
         .await
@@ -530,7 +583,7 @@ async fn c2_polling_pass_does_not_mutate_session_events() {
 
     let sink = Arc::new(StubSink::default());
     let cfg = base_config(SiemTarget::Webhook);
-    let mut cursor: HashMap<SessionId, u64> = HashMap::new();
+    let mut cursor: i64 = 0;
     siem_typed::run_one_pass(&log, sink.as_ref(), &cfg, &mut cursor)
         .await
         .unwrap();

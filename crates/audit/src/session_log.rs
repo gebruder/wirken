@@ -2065,6 +2065,33 @@ impl SqliteSessionLog {
         Ok(out)
     }
 
+    /// Forwarder sweep: all stored events whose global `id` is greater
+    /// than `after_id`, ordered by `id`, capped at `limit` rows. One
+    /// indexed range scan over the `session_events` primary key, across
+    /// every session, returning only genuinely-new rows. Replaces the
+    /// per-session `get_since` fan-out in the typed forwarder so poll
+    /// cost no longer scales with total session count (#105). `limit`
+    /// bounds the per-tick batch so a large backlog (e.g. a forwarder
+    /// restart reading from id 0) drains over successive ticks instead
+    /// of loading every historical row at once.
+    pub fn get_events_after(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<StoredSessionEvent>, AuditError> {
+        let conn = self.conn.lock().expect("session log mutex");
+        let raw = collect_rows(
+            &conn,
+            "SELECT id, session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash
+             FROM session_events
+             WHERE id > ?1
+             ORDER BY id ASC
+             LIMIT ?2",
+            params![after_id, limit],
+        )?;
+        raw.into_iter().map(parse_row).collect()
+    }
+
     /// Item 6 slice 2: list child session IDs whose session_id
     /// starts with `{parent_id}#sub-`. Returns distinct session IDs
     /// in ascending order. Used by `wirken sessions list --parent`.

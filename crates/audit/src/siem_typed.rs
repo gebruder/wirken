@@ -21,16 +21,14 @@
 //! source-of-truth; a forwarder restart that re-reads from cursor
 //! zero replays cleanly because the chain is append-only.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tokio::time::interval;
 
-use crate::session_log::{
-    SessionEvent, SessionId, SessionLog, SqliteSessionLog, StoredSessionEvent,
-};
+use crate::session_log::{SessionEvent, SqliteSessionLog, StoredSessionEvent};
 use crate::siem::{SiemConfig, SiemTarget};
 
 /// How often the typed forwarder polls `session_events` for new
@@ -282,7 +280,12 @@ impl TypedEventForwarder {
     pub fn spawn(log: Arc<SqliteSessionLog>, sink: Arc<dyn TypedSink>, config: SiemConfig) -> Self {
         let (tx, mut rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
-            let mut cursor: HashMap<SessionId, u64> = HashMap::new();
+            // Single global cursor over the `session_events.id` primary
+            // key, not a per-session map: one indexed query per tick
+            // regardless of how many sessions exist (#105). Starts at 0,
+            // so a fresh worker re-reads from the start and relies on
+            // SIEM dedup, the same restart-replay contract as before.
+            let mut cursor: i64 = 0;
             let mut tick = interval(TYPED_POLL_INTERVAL);
             loop {
                 tokio::select! {
@@ -314,57 +317,65 @@ impl TypedEventForwarder {
     }
 }
 
+/// Maximum rows pulled per polling pass. Bounds the batch handed to
+/// the sink and the memory held per tick; a backlog larger than this
+/// (a forwarder restart reading from `id` 0, or a burst) drains over
+/// successive ticks rather than in one query. Chosen well above a
+/// steady-state tick's row count so normal operation always clears in
+/// a single pass.
+const POLL_BATCH_LIMIT: i64 = 1000;
+
 /// One polling pass. Pulled out for direct test invocation so the
-/// end-to-end test does not need to race a spawned worker. Walks
-/// every session present in the log, calls `get_since(cursor)` per
-/// session, filters via [`should_forward`], hands the batch to
-/// `sink`, and on success advances the cursor by row count.
+/// end-to-end test does not need to race a spawned worker.
 ///
-/// On sink error the cursor is not advanced. The next pass replays
-/// the same rows; SIEM destinations idempotent on event identity
-/// (most are; HEC dedups by ack id, Sentinel by `_ResourceId` +
-/// timestamp, Datadog by `id`) will deduplicate. For a destination
-/// that does not dedup, replay produces double-counts on transient
-/// failure; that is the documented trade-off of "no advance on
-/// failure".
+/// Issues a single [`SqliteSessionLog::get_events_after`] query for
+/// rows past the global `id` cursor, across all sessions, filters via
+/// [`should_forward`], hands the batch to `sink`, and on success
+/// advances the cursor to the highest `id` read. This is O(1) queries
+/// per tick rather than one-per-session (#105); the cursor is the
+/// monotonic `session_events.id`, not a per-session seq.
+///
+/// On sink error the cursor is not advanced. The next pass replays the
+/// same rows; SIEM destinations idempotent on event identity (most
+/// are; HEC dedups by ack id, Sentinel by `_ResourceId` + timestamp,
+/// Datadog by `id`) will deduplicate. For a destination that does not
+/// dedup, replay produces double-counts on transient failure; that is
+/// the documented trade-off of "no advance on failure". Because the
+/// batch now spans sessions, a failed pass replays every new row since
+/// the cursor, not one session's rows; the dedup contract is the same.
 pub async fn run_one_pass(
     log: &Arc<SqliteSessionLog>,
     sink: &dyn TypedSink,
     config: &SiemConfig,
-    cursor: &mut HashMap<SessionId, u64>,
+    cursor: &mut i64,
 ) -> Result<(), String> {
-    let sessions = log
-        .list_session_ids()
-        .map_err(|e| format!("list_session_ids: {e}"))?;
-
-    for session_id_str in sessions {
-        let id = SessionId::new(session_id_str.clone());
-        let handle = log.handle_for(id.clone());
-        let start = cursor.get(&id).copied().unwrap_or(0);
-        let rows = log
-            .get_since(&handle, start)
-            .map_err(|e| format!("get_since session={session_id_str} start={start}: {e}"))?;
-        if rows.is_empty() {
-            continue;
-        }
-        let new_high = rows.last().map(|r| r.seq + 1).unwrap_or(start);
-        let forwardable: Vec<StoredSessionEvent> = rows
-            .into_iter()
-            .filter(|r| should_forward(&r.event, config))
-            .collect();
-
-        if !forwardable.is_empty() {
-            sink.forward(&forwardable).await.map_err(|e| {
-                tracing::warn!(
-                    session = %session_id_str,
-                    error = %e,
-                    "typed-event forward failed; cursor not advanced"
-                );
-                e
-            })?;
-        }
-        cursor.insert(id, new_high);
+    let rows = log
+        .get_events_after(*cursor, POLL_BATCH_LIMIT)
+        .map_err(|e| format!("get_events_after start={cursor}: {e}"))?;
+    if rows.is_empty() {
+        return Ok(());
     }
+
+    // Highest id read, including rows filtered out below: advancing
+    // past them is correct, they have been seen and are not
+    // forwardable. Rows arrive ordered by id, so the last is the max.
+    let new_high = rows.last().map(|r| r.id).unwrap_or(*cursor);
+    let forwardable: Vec<StoredSessionEvent> = rows
+        .into_iter()
+        .filter(|r| should_forward(&r.event, config))
+        .collect();
+
+    if !forwardable.is_empty() {
+        sink.forward(&forwardable).await.map_err(|e| {
+            tracing::warn!(
+                error = %e,
+                up_to_id = new_high,
+                "typed-event forward failed; cursor not advanced"
+            );
+            e
+        })?;
+    }
+    *cursor = new_high;
     Ok(())
 }
 
@@ -429,7 +440,9 @@ impl<'a> TypedTransport<'a> {
 mod tests {
     use super::*;
     use crate::event::ActorKind;
-    use crate::session_log::{HashHex, HexBytes, SessionEvent, SubagentStatus, ToolCallRecord};
+    use crate::session_log::{
+        HashHex, HexBytes, SessionEvent, SessionId, SubagentStatus, ToolCallRecord,
+    };
 
     fn config_default() -> SiemConfig {
         SiemConfig {
