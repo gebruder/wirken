@@ -425,6 +425,37 @@ mod age_file {
     /// its context so a credential ciphertext cannot be substituted.
     const KEYCHAIN_AAD: &str = "wirken/keychain/device-key";
 
+    /// Write `bytes` to `path` with owner-only (0o600) perms applied at
+    /// create time, so the file never briefly exists at the process
+    /// umask (the create-then-chmod window). Mirrors the secret-file
+    /// write posture in `gateway/org.rs`: the mode is set by `open()`,
+    /// and an explicit `set_permissions` converges any pre-existing
+    /// looser file back to 0o600. On non-unix the bytes are written
+    /// without a 0o600-equivalent ACL; callers warn.
+    fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            // O_CREAT does not re-apply our mode to a pre-existing file;
+            // converge a rotated-over key/salt that was somehow looser.
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(path, bytes)?;
+        }
+        Ok(())
+    }
+
     /// Age-file keychain that stores the device key encrypted with a
     /// passphrase-derived key in a local file.
     pub struct AgeFileKeychain {
@@ -493,19 +524,11 @@ mod age_file {
             // versa) because the AEAD tag would not match.
             let encrypted = encrypt(KEYCHAIN_AAD, key, &wrapping_key)?;
 
-            // Write salt and encrypted key
-            fs::write(self.salt_file_path(), salt)?;
-
-            // Set restrictive permissions before writing the key file
+            // Write salt and encrypted key with owner-only perms applied
+            // atomically at create time (no create-then-chmod window).
             let key_path = self.key_file_path();
-            fs::write(&key_path, &encrypted)?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
-                fs::set_permissions(self.salt_file_path(), fs::Permissions::from_mode(0o600))?;
-            }
+            write_owner_only(&self.salt_file_path(), &salt)?;
+            write_owner_only(&key_path, &encrypted)?;
 
             #[cfg(not(unix))]
             {
@@ -569,14 +592,8 @@ mod age_file {
 
             let key_path = self.aux_key_file(name);
             let salt_path = self.aux_salt_file(name);
-            fs::write(&salt_path, salt)?;
-            fs::write(&key_path, &encrypted)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
-                fs::set_permissions(&salt_path, fs::Permissions::from_mode(0o600))?;
-            }
+            write_owner_only(&salt_path, &salt)?;
+            write_owner_only(&key_path, &encrypted)?;
             #[cfg(not(unix))]
             {
                 tracing::warn!(
@@ -631,6 +648,45 @@ mod age_file {
             out.push(byte);
         }
         Ok(out)
+    }
+
+    #[cfg(all(test, unix))]
+    mod perms_tests {
+        use super::*;
+        use crate::keychain::Keychain;
+        use std::os::unix::fs::PermissionsExt;
+
+        fn mode_of(path: &std::path::Path) -> u32 {
+            fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+
+        #[test]
+        fn device_key_and_salt_land_0o600() {
+            let dir = tempfile::tempdir().unwrap();
+            let kc = AgeFileKeychain::new(dir.path().join("keychain"), "correct horse".into());
+            kc.store_device_key(&VaultSecret::new("a".repeat(64)))
+                .unwrap();
+            assert_eq!(mode_of(&kc.key_file_path()), 0o600, "device key file");
+            assert_eq!(mode_of(&kc.salt_file_path()), 0o600, "salt file");
+        }
+
+        #[test]
+        fn rotating_over_a_loose_file_converges_to_0o600() {
+            let dir = tempfile::tempdir().unwrap();
+            let kc = AgeFileKeychain::new(dir.path().join("keychain"), "correct horse".into());
+            kc.store_device_key(&VaultSecret::new("a".repeat(64)))
+                .unwrap();
+            // Simulate a key file left world-readable by an earlier run,
+            // then rotate the key over it.
+            fs::set_permissions(kc.key_file_path(), fs::Permissions::from_mode(0o644)).unwrap();
+            kc.store_device_key(&VaultSecret::new("b".repeat(64)))
+                .unwrap();
+            assert_eq!(
+                mode_of(&kc.key_file_path()),
+                0o600,
+                "rotated key file must converge back to 0o600"
+            );
+        }
     }
 }
 

@@ -100,12 +100,34 @@ impl GatewayConfig {
         self.data_dir.join("sockets")
     }
 
-    /// Ensure all required directories exist.
+    /// Ensure all required directories exist with owner-only perms.
+    ///
+    /// The data dir holds the vault, audit DB, signing keys, and the
+    /// IPC sockets. Each sensitive file is individually chmod'd 0o600,
+    /// but the directory itself is the cheap outer containment layer:
+    /// at 0o700 no other local user can traverse into `sockets/` (which
+    /// would otherwise expose the bind-then-chmod window on each socket)
+    /// or read a file that some future path forgot to lock down. We
+    /// chmod even when the dir already exists so a loose 0o755 left by
+    /// an earlier run, or by `create_dir_all` under a permissive umask,
+    /// converges back to 0o700 — the same posture `org.rs` applies to
+    /// secret files.
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.data_dir)?;
-        std::fs::create_dir_all(self.socket_dir())?;
+        create_dir_owner_only(&self.data_dir)?;
+        create_dir_owner_only(&self.socket_dir())?;
         Ok(())
     }
+}
+
+/// Create `path` (and parents) and, on unix, pin it to mode 0o700.
+fn create_dir_owner_only(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// The single source of truth for the operator data directory.
@@ -126,4 +148,50 @@ fn dirs_home() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn ensure_dirs_lands_0o700_on_data_dir_and_socket_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = GatewayConfig {
+            data_dir: tmp.path().join("data"),
+            ..GatewayConfig::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        assert_eq!(mode_of(&cfg.data_dir), 0o700, "data_dir must be owner-only");
+        assert_eq!(
+            mode_of(&cfg.socket_dir()),
+            0o700,
+            "socket_dir must be owner-only"
+        );
+    }
+
+    #[test]
+    fn ensure_dirs_converges_existing_loose_dir_back_to_0o700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        // Simulate a dir left world-traversable by an earlier run or a
+        // permissive umask.
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cfg = GatewayConfig {
+            data_dir,
+            ..GatewayConfig::default()
+        };
+        cfg.ensure_dirs().unwrap();
+        assert_eq!(
+            mode_of(&cfg.data_dir),
+            0o700,
+            "loose 0o755 data_dir must converge to 0o700"
+        );
+    }
 }
