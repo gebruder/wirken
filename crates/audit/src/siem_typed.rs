@@ -150,6 +150,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::ThemeNamed { .. } => "theme_named",
         SessionEvent::InterestsEdited { .. } => "interests_edited",
         SessionEvent::Compaction { .. } => "compaction",
+        SessionEvent::ExternalToolOutput { .. } => "external_tool_output",
         SessionEvent::Attestation { .. } => "attestation",
         SessionEvent::ChainHead { .. } => "chain_head",
         SessionEvent::SystemPromptSet { .. } => "system_prompt_set",

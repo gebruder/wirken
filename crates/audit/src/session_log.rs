@@ -165,6 +165,18 @@ pub enum TrustLevel {
     User,
     /// Output from a verified internal tool.
     Tool,
+    /// Output produced by an external tool the operator installs on
+    /// their own machine (the Lyrik Semgrep-seed pass, #136, is the
+    /// first producer). Distinct from `Tool`, which is verified-
+    /// internal: an external analyzer's output is operator-controlled
+    /// but attacker-influenceable (a poisoned ruleset can emit
+    /// injection text in a finding message), so the elevation into
+    /// model context is recorded explicitly rather than labeled
+    /// `Tool`. No ordering is implied relative to the other variants;
+    /// nothing reads a `TrustLevel` ordering today. The model later
+    /// reads the individual external-tool artifacts via `read_file`,
+    /// logged at `Tool`; closing that read-side dual-labeling is #47.
+    ExternalTool,
     /// Output that originated from a model call (compaction
     /// summaries, free-text fallbacks). Treat as untrusted — must
     /// be scanned before replay into a prompt.
@@ -885,6 +897,37 @@ pub enum SessionEvent {
         /// `None` semantics as `provider`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+    },
+    /// External-tool output ingested into a run as model-visible
+    /// context, recorded at `TrustLevel::ExternalTool`. First and only
+    /// producer today: the Lyrik Semgrep-seed pass (#136), whose parsed
+    /// seed set enters the assessment turns. `items` carries the
+    /// ingested content verbatim (parallel to `Compaction::extracts`)
+    /// so the evidence row is self-contained proof of exactly what
+    /// external bytes entered, not merely a hash. The model later reads
+    /// the individual seed files via `read_file`, logged at `Tool`;
+    /// that read-side dual-labeling is deliberately partial (#47 owns
+    /// the read side).
+    ExternalToolOutput {
+        /// External tool that produced the output (e.g. `semgrep`).
+        tool: String,
+        /// Run that ingested it (the Lyrik run id).
+        run_id: String,
+        /// Count of ingested items (seed count). Redundant with
+        /// `items` length but cheap for SIEM consumers that do not
+        /// parse the payload.
+        item_count: u32,
+        /// The ingested items as structured JSON (the parsed seed set).
+        /// Self-contained content, parallel to `Compaction::extracts`.
+        items: serde_json::Value,
+        /// Provenance of the producer when it has one: the bundled
+        /// ruleset sha for Semgrep. `None` for producers without a
+        /// pinned ruleset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ruleset_sha: Option<String>,
+        /// Agent (run) that ingested the output.
+        #[serde(default)]
+        agent_id: String,
     },
     /// Periodic chain-head signature (item 8). Self-contained proof
     /// that the chain up to `chain_head_seq` is intact.
@@ -2475,7 +2518,19 @@ fn parse_row(row: RawRow) -> Result<StoredSessionEvent, AuditError> {
             seq: seq as u64,
             reason: e.to_string(),
         })?;
-    let trust = trust_from_str(&trust_str)?;
+    // An unknown trust string is a schema-evolution event (a newer
+    // binary wrote a variant this one does not know), not a SIEM-config
+    // error. Reclassify it as SchemaDrift, carrying the same
+    // session_id/seq context as an unparseable payload, so the
+    // drift-tolerant reader degrades to a drift record instead of
+    // aborting the read. The three `.collect()` read paths still
+    // short-circuit on the Err, so they stay fail-closed; no unknown
+    // string is ever silently mapped to a known TrustLevel.
+    let trust = trust_from_str(&trust_str).map_err(|e| AuditError::SchemaDrift {
+        session_id: session_id.clone(),
+        seq: seq as u64,
+        reason: e.to_string(),
+    })?;
     let ts = DateTime::parse_from_rfc3339(&ts_str)
         .map_err(|e| AuditError::SiemConfig(format!("invalid timestamp in session_events: {e}")))?
         .with_timezone(&Utc);
@@ -2622,6 +2677,7 @@ fn trust_to_str(t: TrustLevel) -> &'static str {
         TrustLevel::System => "system",
         TrustLevel::User => "user",
         TrustLevel::Tool => "tool",
+        TrustLevel::ExternalTool => "external_tool",
         TrustLevel::Compaction => "compaction",
     }
 }
@@ -2631,6 +2687,7 @@ fn trust_from_str(s: &str) -> Result<TrustLevel, AuditError> {
         "system" => Ok(TrustLevel::System),
         "user" => Ok(TrustLevel::User),
         "tool" => Ok(TrustLevel::Tool),
+        "external_tool" => Ok(TrustLevel::ExternalTool),
         "compaction" => Ok(TrustLevel::Compaction),
         other => Err(AuditError::SiemConfig(format!(
             "unknown trust level in session_events: {other}"

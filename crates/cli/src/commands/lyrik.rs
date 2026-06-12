@@ -423,6 +423,36 @@ async fn dispatch_via_agent_runtime(
 
     let agent_id = format!("lyrik-{}", run_id.replace('/', "-"));
 
+    // Record the Semgrep-seed set as external-tool output entering the
+    // run, at ExternalTool trust, so the elevation of operator-installed
+    // analyzer output into the assessment turns is represented in the
+    // evidence log rather than only implied by the seed files the model
+    // later reads (those reads log at Tool trust; #47 owns that read
+    // side). One event per run on the run-level session; both dispatch
+    // paths below consume the same seed set. It is the first append to a
+    // fresh session, so it auto-emits the SessionStart chain head.
+    if !seeds.is_empty() {
+        let handle = session_log.handle_for(wirken_audit::SessionId::new(agent_id.clone()));
+        let items = serde_json::to_value(&seeds).unwrap_or(serde_json::Value::Null);
+        if let Err(e) = session_log.append(
+            &handle,
+            wirken_audit::TrustLevel::ExternalTool,
+            wirken_audit::SessionEvent::ExternalToolOutput {
+                tool: "semgrep".to_string(),
+                run_id: run_id.to_string(),
+                item_count: seeds.len() as u32,
+                items,
+                ruleset_sha: Some(lyrik_semgrep::ruleset_sha_hex()),
+                agent_id: agent_id.clone(),
+            },
+        ) {
+            tracing::warn!(
+                error = %e,
+                "failed to record external-tool seed ingestion in session log"
+            );
+        }
+    }
+
     // Workspace for the agent IS the target. The agent reads source
     // files from there and writes findings.json back into the target's
     // `.lyrik/state/runs/<run-id>/` per the Lyrik skill instructions.

@@ -78,7 +78,7 @@ pub fn parse_scanner_config(config: &serde_json::Value) -> Result<ScannerConfig>
 /// model via the seed files and back through the post-turn
 /// annotation pass that sets `detection_source` on findings whose
 /// `(file, line)` matches a seed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Seed {
     pub seed_id: String,
     pub rule_id: String,

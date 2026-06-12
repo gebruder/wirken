@@ -575,7 +575,8 @@ fn extract_identity_for_sentinel(
         | SessionEvent::LlmRequest { agent_id, .. }
         | SessionEvent::LlmResponse { agent_id, .. }
         | SessionEvent::SystemPromptSet { agent_id, .. }
-        | SessionEvent::Compaction { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        | SessionEvent::Compaction { agent_id, .. }
+        | SessionEvent::ExternalToolOutput { agent_id, .. } => (None, None, Some(agent_id.clone())),
         _ => (None, None, None),
     }
 }
@@ -608,6 +609,12 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         }
         SessionEvent::SubagentResult { status, .. } => format!("subagent_result status={status:?}"),
         SessionEvent::ChainHead { reason, .. } => format!("chain_head reason={reason:?}"),
+        SessionEvent::ExternalToolOutput {
+            tool,
+            item_count,
+            run_id,
+            ..
+        } => format!("external_tool_output tool={tool} items={item_count} run={run_id}"),
         other => format!("{:?}", other).chars().take(80).collect(),
     }
 }
@@ -618,6 +625,7 @@ fn trust_label(t: crate::session_log::TrustLevel) -> &'static str {
         TrustLevel::System => "system",
         TrustLevel::User => "user",
         TrustLevel::Tool => "tool",
+        TrustLevel::ExternalTool => "external_tool",
         TrustLevel::Compaction => "compaction",
     }
 }

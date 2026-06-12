@@ -614,6 +614,89 @@ mod session {
         (log, h)
     }
 
+    fn external_tool_output(tool: &str, run: &str, n: u32) -> SessionEvent {
+        SessionEvent::ExternalToolOutput {
+            tool: tool.into(),
+            run_id: run.into(),
+            item_count: n,
+            items: serde_json::json!([
+                {"seed_id": "s1", "rule_id": "r1", "file": "a.rs", "line": 10, "message": "m"}
+            ]),
+            ruleset_sha: Some("deadbeef".into()),
+            agent_id: "lyrik-run-1".into(),
+        }
+    }
+
+    #[test]
+    fn external_tool_output_round_trips_at_external_tool_trust() {
+        // Exercises trust_to_str on write and trust_from_str on read for
+        // the new ExternalTool variant, plus ExternalToolOutput serde.
+        let (log, h) = fresh();
+        log.append(
+            &h,
+            TrustLevel::ExternalTool,
+            external_tool_output("semgrep", "run-1", 1),
+        )
+        .unwrap();
+        let rows = log.get_range(&h, 0..100).unwrap();
+        let row = rows
+            .iter()
+            .find(|r| matches!(r.event, SessionEvent::ExternalToolOutput { .. }))
+            .expect("ExternalToolOutput row present");
+        assert_eq!(row.trust, TrustLevel::ExternalTool);
+        match &row.event {
+            SessionEvent::ExternalToolOutput {
+                tool,
+                run_id,
+                item_count,
+                ruleset_sha,
+                agent_id,
+                ..
+            } => {
+                assert_eq!(tool, "semgrep");
+                assert_eq!(run_id, "run-1");
+                assert_eq!(*item_count, 1);
+                assert_eq!(ruleset_sha.as_deref(), Some("deadbeef"));
+                assert_eq!(agent_id, "lyrik-run-1");
+            }
+            _ => unreachable!("matched above"),
+        }
+    }
+
+    #[test]
+    fn unknown_trust_string_degrades_to_drift_not_abort() {
+        // A newer binary writing a trust variant this one does not know
+        // must surface as a SchemaDrift record, not abort the read or be
+        // silently mapped to a known TrustLevel.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("s.db");
+        let log = SqliteSessionLog::open(&db).unwrap();
+        let h = log.handle_for(SessionId::new("sess-drift"));
+        log.append(&h, TrustLevel::User, user_msg("hi")).unwrap();
+
+        // Raw-insert a row with a valid payload but an unknown trust
+        // string, so the drift is attributable to the trust path and not
+        // to payload parsing.
+        let payload = serde_json::to_string(&user_msg("drift-row")).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO session_events
+                 (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
+             VALUES ('sess-drift', 999, ?1, 'totally_unknown', ?2, '', '', 'h')",
+            rusqlite::params![Utc::now().to_rfc3339(), payload],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = log
+            .verify_signatures(&h)
+            .expect("unknown trust degrades, does not abort the read");
+        assert!(
+            result.schema_drift_records.iter().any(|d| d.seq == 999),
+            "unknown trust string must surface as a drift record"
+        );
+    }
+
     #[test]
     fn empty_session_reports_no_index_no_rows() {
         let (log, h) = fresh();
