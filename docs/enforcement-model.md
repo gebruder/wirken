@@ -28,7 +28,7 @@ Channel markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`
 - A function accepting `SessionHandle<Telegram>` cannot be called with `SessionHandle<Discord>`.
 - Cross-channel routing mistakes in code that uses `SessionHandle<C>` are caught at compile time.
 
-**Status of the production message path:** The `SessionHandle<C: Channel>` API and its negative-test scaffolding (regression-tested in `crates/ipc/src/tests.rs:20-30`) exist at the type-system level but are not yet threaded through the production gateway routing path. Production frames carry a `String`-typed channel discriminator on the `AuthenticatedChannel` value resolved at handshake time, and cross-channel mismatch is rejected at runtime via the `adapter.channel_mismatch` audit event rather than at compile time. The phantom-type rollout that retires the `String` discriminator is tracked as I-W-1 in the audit deferred list.
+**Status of the production message path:** The `SessionHandle<C: Channel>` API and its negative-test scaffolding (regression-tested in `crates/ipc/src/tests.rs:20-30`) exist at the type-system level but are not yet threaded through the production gateway routing path. Production frames carry a `String`-typed channel discriminator on the `AuthenticatedChannel` value resolved at handshake time, and cross-channel mismatch is rejected at runtime via the `adapter.channel_mismatch` audit event rather than at compile time. Threading the phantom-typed handle through production routing to retire the `String` discriminator is not implemented.
 
 **What this does NOT cover:** The runtime decision of which agent handles which channel. That is a routing policy (see Runtime section).
 

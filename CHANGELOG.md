@@ -26,6 +26,21 @@ tagged.
   Without `--require-signed`, verification stays report-only and
   unchanged.
 
+### Documentation
+
+- Repointed stale source-line anchors in the `sandbox-properties.md`
+  hardening, no-silent-fallback, seccomp, and gVisor-detection sections
+  to the current `sandbox.rs` / `tool.rs` lines.
+- Corrected the audit-export note in `deploying-for-teams.md`:
+  `wirken audit log --format json` and `wirken audit verify --format
+  json` exist; only a JSONL streaming flag is absent.
+- Removed a dangling deferred-item reference in `enforcement-model.md`
+  and stated the production-routing status as plain current behaviour.
+- `SECURITY.md` gains a Cryptography section: Ed25519 signatures
+  verified with `verify_strict`, XChaCha20-Poly1305 vault encryption,
+  inbound RSA-PKCS1 webhook-JWT verification, and that post-quantum
+  algorithms are not supported.
+
 ## [1.8.1] - 2026-06-04
 
 ### SIEM forwarder

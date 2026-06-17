@@ -26,7 +26,7 @@ the secure default with a warning, never the bypass
 
 ## No silent fallback
 
-[`crates/agent/src/tool.rs:328-346`](../crates/agent/src/tool.rs):
+[`crates/agent/src/tool.rs:455-463`](../crates/agent/src/tool.rs):
 
 ```rust
 if let Some(sandbox) = self.sandbox().await {
@@ -47,7 +47,7 @@ on the host. Operators who want host execution must opt in by writing
 
 ## Container hardening (applies to ExecOnly and GVisor)
 
-[`crates/agent/src/sandbox.rs:287-319`](../crates/agent/src/sandbox.rs)
+[`crates/agent/src/sandbox.rs:449-481`](../crates/agent/src/sandbox.rs)
 constructs the `HostConfig` for every sandboxed exec:
 
 | Property | Value | Source line |
@@ -84,7 +84,7 @@ profile blocks ~44 syscalls including:
 The full list is the Docker daemon's responsibility, not Wirken's. Setting
 `security_opt: ["seccomp=default"]` is rejected by the Docker API as an
 invalid token; the absence of a seccomp `SecurityOpt` is what activates the
-default profile ([`sandbox.rs:280-283`](../crates/agent/src/sandbox.rs)).
+default profile ([`sandbox.rs:473-476`](../crates/agent/src/sandbox.rs)).
 
 ## gVisor delta (`SandboxMode::GVisor`)
 
@@ -112,7 +112,7 @@ Practical consequences:
 
 Wirken does not require gVisor; `ExecOnly` is the default. `GVisor` is the
 opt-in for operators who want kernel attack surface reduction. Detection
-([`sandbox.rs:343-356`](../crates/agent/src/sandbox.rs)) is automatic;
+([`sandbox.rs:507-519`](../crates/agent/src/sandbox.rs)) is automatic;
 the wizard refuses to enable `GVisor` mode if `runsc` is not registered as
 a Docker runtime.
 

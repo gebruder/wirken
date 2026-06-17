@@ -94,7 +94,7 @@ A compliance officer reconstructing an incident from the local audit.db proceeds
 3. Read the `actor` column for the platform sender id (Slack `user_id`, Teams Bot Framework id, Matrix MXID) and the `session` column for the conversation ID.
 4. `wirken sessions verify <agent_id>/<channel>/<conversation_id>` to replay the full typed session transcript with chain integrity and LLM input hashes.
 
-For cross-incident investigation across many sessions, the SIEM side carries the same actor/action/target/channel/session fields in structured form, which is the only batched query path today. See **What Wirken does not do today** on CLI audit export.
+For cross-incident investigation across many sessions, the SIEM side carries the same actor/action/target/channel/session fields in structured form, which is the only streaming export path today (`wirken audit log --format json` is a one-shot query, not a stream). See **What Wirken does not do today** on JSONL audit export.
 
 ## Concrete example: team of 12, self-hosted Qwen 2.5 72B
 
@@ -191,7 +191,7 @@ These are hard boundaries. If a team requirement lands on one of them, either de
 - **One platform workspace per adapter process.** One Slack workspace per `slack` adapter, one Teams tenant per `teams` adapter, one Matrix homeserver per `matrix` adapter. A second workspace requires a second registered channel with a distinct name.
 - **No OAuth refresh or scope rotation in the adapters.** Tokens are loaded at startup as opaque bearers. If a token is revoked out-of-band, the adapter will fail on next call. Teams clears its cached access token on HTTP 401 and re-acquires from the app_id and app_password, but if the app_password itself has been rotated the adapter will loop on 401 until restarted with the new value. Slack and Matrix have no explicit revocation-detection branch.
 - **No automatic credential rotation.** `rotation_due_at` metadata is tracked. Nothing fires on it. Rotation is operator-initiated.
-- **No CLI audit export.** `wirken audit log` prints a text table; no `--format=json` or `--format=jsonl` flag exists. For batched, structured egress, configure SIEM forwarding. If offline regulator-facing export is required, either query `audit.db` directly via SQLite or wait for a dedicated export command.
+- **No JSONL streaming audit export.** `wirken audit log --format json` emits a one-shot JSON document (and `wirken audit verify --format json` the verify result), but there is no `--format=jsonl` streaming flag. For batched, structured egress, configure SIEM forwarding. If offline regulator-facing export is required, query `audit.db` directly via SQLite or use the JSON output.
 - **The audit chain is per-session, not global.** Do not describe it as "one chain for the whole deployment." Each session has its own chain; `wirken audit verify` reports aggregate integrity by walking every session chain.
 - **No role-based access control.** No admin users, no groups, no named roles.
 - **No platform-to-principal identity mapping.** `U04ABCD9` in Slack and `@user:matrix.example.com` are stored as actor strings. Wirken has no notion that they are the same human.

@@ -33,6 +33,25 @@ Current active key:
 
 In addition to the offline signature, releases tagged after build provenance landed publish `wirken.intoto.jsonl`, a SLSA Build L3 provenance attestation signed through the GitHub OIDC-rooted Sigstore chain. It is a second, independent trust root (build origin, recorded in a public transparency log) beside the offline maintainer key, and both are standalone release assets. Verify it with `slsa-verifier`; see [docs/release-signing.md](docs/release-signing.md#build-provenance-slsa).
 
+## Cryptography
+
+Wirken's own signatures are Ed25519, verified with `verify_strict`
+(non-canonical scalars and small-order R points rejected): the IPC and
+hook handshakes, session attestation, the audit chain head, skill
+bundles, the org-config trust anchor, and MCP entries. Symmetric
+encryption for the credential vault is XChaCha20-Poly1305 with Argon2id
+key derivation.
+
+Inbound webhook authentication for Google Chat and Microsoft Teams
+verifies the platform-issued JWT with RSA-PKCS1 (RS256) via `ring`,
+because those providers sign with RSA. This is third-party token
+verification, not a Wirken-issued signature.
+
+Post-quantum signature and key-encapsulation algorithms are not
+supported. There is no ML-KEM / ML-DSA path and no algorithm-agility
+layer; the signature algorithm is Ed25519 across every Wirken-issued
+signature surface.
+
 ## Scope
 
 The following are in scope for security reports:
