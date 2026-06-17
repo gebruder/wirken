@@ -26,7 +26,7 @@ cron = { workspace = true }
 reqwest = { workspace = true }
 base64 = "0.22"
 async-trait = { workspace = true }
-capnp = "0.25"
+capnp = "0.26"
 
 [dev-dependencies]
 tempfile = { workspace = true }

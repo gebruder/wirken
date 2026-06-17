@@ -527,9 +527,18 @@ dependencies = [
 
 [[package]]
 name = "capnp"
-version = "0.25.5"
+version = "0.25.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cfd2485d4b36ac9c5aa6572d7d35daa63a5b34f517627d6c34d068e616e4a73"
+checksum = "4777a3bc19b8f8e5fb2d0196c6b5dfcbbcc8b2fe08ae57f873f2f35f15cfc210"
+dependencies = [
+ "embedded-io 0.7.1",
+]
+
+[[package]]
+name = "capnp"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71338171543626713e427635f7de390328d9e85828a816a0c88d959032b34a2f"
 dependencies = [
  "embedded-io 0.7.1",
 ]
@@ -540,7 +549,7 @@ version = "0.25.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fca02be865c8c5a78bfc24b9819006ab6b59bef238467203928e26459557af93"
 dependencies = [
- "capnp",
+ "capnp 0.25.6",
 ]
 
 [[package]]
@@ -6584,7 +6593,7 @@ name = "wirken-adapter-discord"
 version = "1.8.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "serde",
  "serde_json",
@@ -6603,7 +6612,7 @@ name = "wirken-adapter-google-chat"
 version = "1.8.1"
 dependencies = [
  "base64",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "reqwest 0.13.4",
  "ring",
@@ -6622,7 +6631,7 @@ dependencies = [
 name = "wirken-adapter-imessage"
 version = "1.8.1"
 dependencies = [
- "capnp",
+ "capnp 0.26.0",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -6640,7 +6649,7 @@ name = "wirken-adapter-matrix"
 version = "1.8.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "reqwest 0.13.4",
  "serde",
@@ -6658,7 +6667,7 @@ dependencies = [
 name = "wirken-adapter-signal"
 version = "1.8.1"
 dependencies = [
- "capnp",
+ "capnp 0.26.0",
  "lru",
  "serde",
  "serde_json",
@@ -6676,7 +6685,7 @@ name = "wirken-adapter-slack"
 version = "1.8.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "serde",
  "serde_json",
@@ -6697,7 +6706,7 @@ version = "1.8.1"
 dependencies = [
  "anyhow",
  "base64",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "reqwest 0.13.4",
  "ring",
@@ -6717,7 +6726,7 @@ name = "wirken-adapter-telegram"
 version = "1.8.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "serde",
  "serde_json",
@@ -6736,7 +6745,7 @@ name = "wirken-adapter-whatsapp"
 version = "1.8.1"
 dependencies = [
  "anyhow",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "hmac 0.12.1",
  "reqwest 0.13.4",
@@ -6762,7 +6771,7 @@ dependencies = [
  "base64",
  "bollard",
  "cap-std",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "ed25519-dalek",
  "futures-util",
@@ -6818,7 +6827,7 @@ version = "1.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "clap",
  "console",
@@ -6863,7 +6872,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
- "capnp",
+ "capnp 0.26.0",
  "chrono",
  "cron",
  "ed25519-dalek",
@@ -6889,7 +6898,7 @@ name = "wirken-ipc"
 version = "1.8.1"
 dependencies = [
  "async-trait",
- "capnp",
+ "capnp 0.26.0",
  "capnpc",
  "ed25519-dalek",
  "rand 0.10.1",

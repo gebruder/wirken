@@ -61,7 +61,7 @@ security-framework = "3.7"
 secret-service = "5.1"
 
 # IPC
-capnp = "0.25"
+capnp = "0.26"
 
 # Sandbox. Pinned >=45 per RUSTSEC-2026-0149 (wasmtime-wasi
 # path_open(TRUNCATE) bypasses FilePerms::WRITE; fixed in 44.0.2 /
