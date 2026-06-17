@@ -10,6 +10,8 @@ tagged.
 
 ## Unreleased
 
+## [1.9.0] - 2026-06-18
+
 ### Audit integrity
 
 - Audit chain-head signature verification uses
