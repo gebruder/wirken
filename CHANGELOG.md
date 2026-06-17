@@ -10,6 +10,14 @@ tagged.
 
 ## Unreleased
 
+### Documentation
+
+- `audit-cli.md` now states that the default `--require-signed` anchor
+  (`<data_dir>/audit/audit-signing.pub`) guards only against an
+  accidental signing-key mismatch, not a same-UID attacker who can
+  rewrite both `audit.db` and the public key; tamper resistance requires
+  an anchor held out of band.
+
 ## [1.9.0] - 2026-06-18
 
 ### Audit integrity
