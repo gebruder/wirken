@@ -45,6 +45,11 @@ tagged.
   is not yet on the production message path, where the live control is
   the runtime `AuthenticatedChannel` match.
 
+### Security
+
+- Raised the wasmtime floor to 45.0.2 to clear RUSTSEC-2026-0182, a
+  WASIp1 `fd_renumber` leak in `wasmtime-wasi`.
+
 ## [1.8.1] - 2026-06-04
 
 ### SIEM forwarder

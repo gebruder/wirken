@@ -65,8 +65,9 @@ capnp = "0.25"
 
 # Sandbox. Pinned >=45 per RUSTSEC-2026-0149 (wasmtime-wasi
 # path_open(TRUNCATE) bypasses FilePerms::WRITE; fixed in 44.0.2 /
-# 45.0.0).
-wasmtime = "45.0.0"
+# 45.0.0). Floor raised to 45.0.2 per RUSTSEC-2026-0182 (WASIp1
+# fd_renumber leak; fixed in 45.0.2).
+wasmtime = "45.0.2"
 bollard = "0.21"
 
 # CLI
