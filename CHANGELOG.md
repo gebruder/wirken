@@ -40,6 +40,10 @@ tagged.
   verified with `verify_strict`, XChaCha20-Poly1305 vault encryption,
   inbound RSA-PKCS1 webhook-JWT verification, and that post-quantum
   algorithms are not supported.
+- The compile-time channel-isolation rows in `security-properties.md`
+  (AG05 and MAP 5.1) now note that the `SessionHandle<C: Channel>` API
+  is not yet on the production message path, where the live control is
+  the runtime `AuthenticatedChannel` match.
 
 ## [1.8.1] - 2026-06-04
 
