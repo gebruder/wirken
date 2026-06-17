@@ -248,6 +248,19 @@ enum AuditCommands {
         /// flag.
         #[arg(long)]
         require_signed: bool,
+        /// Operator-pinned audit-signing trust anchor. Repeatable, so
+        /// a rotated key set can list every accepted key. Each value
+        /// is a 64-character hex Ed25519 public key, or a path to a
+        /// file containing one (e.g. the local
+        /// `<data_dir>/audit/audit-signing.pub`). Under
+        /// `--require-signed`, a chain-head signed by a key that is
+        /// not in this set is rejected, so a gateway that minted a
+        /// fresh key cannot pass off a fabricated chain. When no
+        /// `--anchor` is given, the local `audit-signing.pub` is used
+        /// as the default anchor when present. Ignored without
+        /// `--require-signed`.
+        #[arg(long = "anchor", value_name = "HEX_OR_PATH")]
+        anchors: Vec<String>,
     },
     /// Verify session attestation signatures across every session
     VerifyAttestations,
@@ -984,7 +997,8 @@ async fn main() -> Result<()> {
             AuditCommands::Verify {
                 format,
                 require_signed,
-            } => commands::audit::verify(&format, require_signed).await,
+                anchors,
+            } => commands::audit::verify(&format, require_signed, &anchors).await,
             AuditCommands::VerifyAttestations => commands::audit::verify_attestations().await,
             AuditCommands::Acknowledge { all } => commands::audit::acknowledge(all).await,
         },

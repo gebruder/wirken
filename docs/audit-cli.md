@@ -39,26 +39,28 @@ Verify the hash-chained integrity of every per-session log, plus the Ed25519 sig
 Flags:
 
 - `--format human|json` choose output format (default `human`).
-- `--require-signed` hard-fail on any session that has zero signed `ChainHead` rows. Without this flag, transition-era sessions recorded before chain-head signing was wired in are reported in counts and the verify exits zero. Invalid signatures are always a hard fail regardless of this flag.
+- `--require-signed` hard-fail on any session that has zero signed `ChainHead` rows. Without this flag, transition-era sessions recorded before chain-head signing was wired in are reported in counts and the verify exits zero. Invalid signatures are always a hard fail regardless of this flag. Under this flag the verifier also enforces an operator trust anchor (see `--anchor`).
+- `--anchor <hex-or-path>` operator-pinned audit-signing public key, repeatable so a rotated key set can list every accepted key. Each value is a 64-character hex Ed25519 public key, or a path to a file containing one (e.g. the local `<data_dir>/audit/audit-signing.pub`). Under `--require-signed`, a chain-head whose embedded `signing_key_id` is not in the anchor set is rejected, so a gateway that minted a fresh key cannot pass off a fabricated chain that otherwise verifies. When no `--anchor` is given, the local `audit-signing.pub` is used as the default anchor when present; if neither a flag nor the local file is available, `--require-signed` fails closed. Ignored without `--require-signed`.
 
 Exit codes:
 
-- `0`: the chain is intact and (under `--require-signed`) every session carries at least one signed head.
-- `1`: at least one of these fired: a per-session hash chain is broken, a `ChainHead` signature did not verify, or `--require-signed` is set and a session has no signed heads. The output identifies which case fired and the session and seq involved.
+- `0`: the chain is intact and (under `--require-signed`) every session carries at least one signed head whose signing key is in the operator anchor set.
+- `1`: at least one of these fired: a per-session hash chain is broken, a `ChainHead` signature did not verify, `--require-signed` is set and a session has no signed heads, or `--require-signed` is set and a chain-head is signed by a key not in the anchor set (the error names the un-anchored key id). The output identifies which case fired and the session and seq involved.
 
 Verifier behaviour:
 
 - `Broken` (chain hash mismatch) is always a hard fail.
 - `SignatureInvalid` is always a hard fail. Reasons include: claimed `current_chain_hash` does not match the stored chain hash at `sequence_range_end`; claimed `prev_chain_hash` does not match the stored hash at `sequence_range_start - 1`; the embedded `signing_key_id` is malformed; the Ed25519 signature did not verify; the embedded `schema_version` differs from the verifier's.
 - `MissingChainHead` is reachable only under `--require-signed`; without the flag the same session contributes to the `sessions_with_no_signed_heads` counter and the verify exits zero.
+- An un-anchored chain-head key is reachable only under `--require-signed`. The chain hashes and signature verified, but the signing key is not in the operator anchor set, so the verify hard-fails and names the unexpected key id. This is what stops a compromised gateway from minting a fresh key and signing a clean-verifying fabricated chain.
 
 Scripted usage:
 
 ```sh
-wirken audit verify --require-signed && publish-results.sh
+wirken audit verify --require-signed --anchor /etc/wirken/audit-signing.pub && publish-results.sh
 ```
 
-If `verify` exits non-zero, the chain failed (or the operator-pinned signed-head requirement was not met) and the script will not publish.
+If `verify` exits non-zero, the chain failed: a hash chain was broken, a signature did not verify, a session had no signed head, or a chain-head was signed by a key outside the operator anchor set. The script will not publish.
 
 ## JSON schema
 

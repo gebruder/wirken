@@ -10,6 +10,22 @@ tagged.
 
 ## Unreleased
 
+### Audit integrity
+
+- Audit chain-head signature verification uses
+  `ed25519_dalek::verify_strict`, rejecting non-canonical scalars and
+  small-order / mixed-order R points, in line with every other Ed25519
+  verification in the workspace.
+- `wirken audit verify --require-signed` enforces an operator trust
+  anchor: a chain-head whose embedded signing key is not in the anchor
+  set is rejected, so a gateway that minted a fresh key cannot pass off
+  a fabricated chain that otherwise verifies. Anchors come from the
+  repeatable `--anchor <hex-or-path>` flag (a 64-char hex key or a file
+  containing one), which supports rotated key sets, and default to the
+  local `<data_dir>/audit/audit-signing.pub` when no flag is given.
+  Without `--require-signed`, verification stays report-only and
+  unchanged.
+
 ## [1.8.1] - 2026-06-04
 
 ### SIEM forwarder

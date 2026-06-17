@@ -39,7 +39,8 @@ pub use siem::{
 };
 pub use siem_typed::{TYPED_POLL_INTERVAL, TypedEventForwarder, TypedSink, TypedTransport};
 pub use signing::{
-    AuditSigningKey, CHAIN_HEAD_DOMAIN, CHAIN_HEAD_SCHEMA_VERSION, audit_signing_dir,
+    AuditSigningKey, CHAIN_HEAD_DOMAIN, CHAIN_HEAD_SCHEMA_VERSION, audit_public_key_path,
+    audit_signing_dir,
 };
 pub use user_resolver::{DeterministicUserResolver, UserId, UserResolver};
 pub use writer::AuditWriter;

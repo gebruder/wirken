@@ -1828,7 +1828,7 @@ impl SqliteSessionLog {
         &self,
         handle: &SessionHandle<OwnSession>,
     ) -> Result<SessionSignatureVerifyResult, AuditError> {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        use ed25519_dalek::{Signature, VerifyingKey};
         let (rows, schema_drift_records) = self.session_rows(handle)?;
         // `session_total_events` counts parsed rows; unparseable rows
         // are surfaced separately in `schema_drift_records` so the
@@ -1973,7 +1973,11 @@ impl SqliteSessionLog {
                 &current_chain_hash.0,
                 *schema_version,
             );
-            if verifying_key.verify(&payload, &sig).is_err() {
+            // verify_strict (not the legacy verify) rejects non-canonical
+            // scalars and small-order / mixed-order R points so a malleable
+            // signature variant cannot be substituted for a valid one. This
+            // matches every other Ed25519 verification in the workspace.
+            if verifying_key.verify_strict(&payload, &sig).is_err() {
                 result.first_invalid = Some(InvalidSignatureDetail {
                     seq: row.seq,
                     signing_key_id: signing_key_id.0.clone(),

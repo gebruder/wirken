@@ -25,6 +25,7 @@
 //! [`AuditWriter`]: crate::AuditWriter
 //! [`SessionEvent::AuditLegacy`]: crate::SessionEvent::AuditLegacy
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -158,6 +159,33 @@ pub enum VerifyResult {
     },
     /// No session events present.
     Empty,
+}
+
+impl VerifyResult {
+    /// Given the operator-anchored signing key ids (hex-encoded
+    /// Ed25519 public keys), return the chain-head signing key ids
+    /// observed in this result that are **not** in the anchor set,
+    /// sorted ascending.
+    ///
+    /// Only the `Ok` variant carries verified chain-head keys; every
+    /// other variant returns an empty vector (it has already failed
+    /// for an earlier reason). `wirken audit verify --require-signed`
+    /// uses this to reject a chain whose chain-head signing key is not
+    /// operator-pinned, so a gateway that mints a fresh key cannot
+    /// sign a clean-verifying fabricated chain and have it pass.
+    pub fn unanchored_signing_keys(&self, anchors: &BTreeSet<String>) -> Vec<String> {
+        match self {
+            VerifyResult::Ok {
+                signing_key_ids_seen,
+                ..
+            } => signing_key_ids_seen
+                .iter()
+                .filter(|id| !anchors.contains(*id))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Façade over [`SqliteSessionLog`] that preserves the legacy

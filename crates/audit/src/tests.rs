@@ -2087,6 +2087,147 @@ mod chain_head_signing {
         }
     }
 
+    /// Regression for T1.1 / P9: the chain-head verifier must use
+    /// `verify_strict`, not the legacy `verify`, so a non-canonical
+    /// signature variant is rejected at the chain head. Mirrors the
+    /// agent identity verifier's malleability regression: force the
+    /// high byte of the signature's `s` scalar (byte 63) past the group
+    /// order. The row's leaf/chain hashes are recomputed so chain
+    /// integrity still passes and the verifier reaches the signature
+    /// pass.
+    #[test]
+    fn non_canonical_chain_head_signature_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let inner = log.session_log();
+        let handle = inner.handle_for(SessionId::new("malleable"));
+        inner
+            .append(&handle, TrustLevel::User, user_msg("first"))
+            .unwrap();
+
+        let conn = inner.raw_conn_for_test().lock().unwrap();
+        let (id, payload, prev_hash): (i64, String, String) = conn
+            .query_row(
+                "SELECT id, payload, prev_hash FROM session_events
+                 WHERE session_id = 'malleable' AND seq = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let mut payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let sig_hex = payload_json["signature"].as_str().unwrap().to_string();
+        // Force byte 63 (the high byte of the s scalar) to 0xff so s is
+        // non-canonical. The hex is little-endian last byte = last 2 chars.
+        let mangled_hex = format!("{}ff", &sig_hex[..sig_hex.len() - 2]);
+        payload_json["signature"] = serde_json::Value::String(mangled_hex);
+        let new_payload = serde_json::to_string(&payload_json).unwrap();
+        let new_leaf = sha256_hex(new_payload.as_bytes());
+        let new_chain = chain_hash(&prev_hash, &new_leaf);
+        conn.execute(
+            "UPDATE session_events
+             SET payload = ?1, leaf_hash = ?2, hash = ?3
+             WHERE id = ?4",
+            params![new_payload, new_leaf, new_chain, id],
+        )
+        .unwrap();
+        drop(conn);
+
+        match log.verify().unwrap() {
+            VerifyResult::SignatureInvalid { reason, .. } => {
+                assert!(
+                    reason.contains("ed25519"),
+                    "reason should cite the signature check, got: {reason}"
+                );
+            }
+            other => panic!("expected SignatureInvalid for non-canonical sig, got {other:?}"),
+        }
+    }
+
+    /// T1.2 / P3: under `--require-signed` the verifier rejects a
+    /// chain-head whose signing key is not in the operator anchor set.
+    /// (a) the chain's own key, when anchored, is accepted; (b) a chain
+    /// whose signing key is not in the anchor set (e.g. one a
+    /// compromised gateway freshly minted) is rejected, naming the
+    /// un-anchored key id.
+    #[test]
+    fn require_signed_anchor_accepts_pinned_rejects_unanchored() {
+        use std::collections::BTreeSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let inner = log.session_log();
+        let h = inner.handle_for(SessionId::new("anchored"));
+        inner
+            .append(&h, TrustLevel::User, user_msg("hello"))
+            .unwrap();
+
+        let result = log.verify_require_signed().unwrap();
+
+        // (a) chain key is anchored -> nothing un-anchored.
+        let pinned: BTreeSet<String> = [signer.key_id_hex()].into_iter().collect();
+        assert!(
+            result.unanchored_signing_keys(&pinned).is_empty(),
+            "chain signed by the anchored key must be accepted"
+        );
+
+        // (b) anchor only a different key -> the chain's key is rejected
+        // and reported by id.
+        let unrelated = Arc::new(AuditSigningKey::generate());
+        let only_unrelated: BTreeSet<String> = [unrelated.key_id_hex()].into_iter().collect();
+        assert_eq!(
+            result.unanchored_signing_keys(&only_unrelated),
+            vec![signer.key_id_hex()]
+        );
+    }
+
+    /// T1.2 / P3: a rotated key set is supported. Two anchored keys are
+    /// both accepted under `--require-signed`; dropping one from the
+    /// anchor set rejects the chain head it signed.
+    #[test]
+    fn require_signed_anchor_accepts_rotated_key_set() {
+        use std::collections::BTreeSet;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer_a = Arc::new(AuditSigningKey::generate());
+        let signer_b = Arc::new(AuditSigningKey::generate());
+        {
+            let log = AuditLog::open_with_signer(&db_path, signer_a.clone()).unwrap();
+            let inner = log.session_log();
+            let h = inner.handle_for(SessionId::new("rot-A"));
+            inner.append(&h, TrustLevel::User, user_msg("a-1")).unwrap();
+        }
+        {
+            let log = AuditLog::open_with_signer(&db_path, signer_b.clone()).unwrap();
+            let inner = log.session_log();
+            let h = inner.handle_for(SessionId::new("rot-B"));
+            inner.append(&h, TrustLevel::User, user_msg("b-1")).unwrap();
+        }
+        let log = AuditLog::open_with_signer(&db_path, signer_a.clone()).unwrap();
+        let result = log.verify_require_signed().unwrap();
+
+        // Both keys anchored (rotation) -> accepted.
+        let both: BTreeSet<String> = [signer_a.key_id_hex(), signer_b.key_id_hex()]
+            .into_iter()
+            .collect();
+        assert!(result.unanchored_signing_keys(&both).is_empty());
+
+        // Drop B -> B's head is reported un-anchored.
+        let only_a: BTreeSet<String> = [signer_a.key_id_hex()].into_iter().collect();
+        assert_eq!(
+            result.unanchored_signing_keys(&only_a),
+            vec![signer_b.key_id_hex()]
+        );
+    }
+
     /// Cadence path 1: append-count trigger fires before any
     /// wall-clock elapsed. The SessionStart head at iter 0 resets
     /// the counter to 0, so iters 1..=1000 are what bump the

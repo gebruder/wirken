@@ -1,8 +1,11 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::json;
 
-use wirken_audit::{AlarmLog, AuditLog, AuditQuery, VerifyResult};
+use wirken_audit::{AlarmLog, AuditLog, AuditQuery, VerifyResult, audit_public_key_path};
 
 use super::config;
 
@@ -194,7 +197,7 @@ pub async fn acknowledge(all: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn verify(format: &str, require_signed: bool) -> Result<()> {
+pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> Result<()> {
     let cfg = config();
     let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;
     let result = if require_signed {
@@ -203,11 +206,83 @@ pub async fn verify(format: &str, require_signed: bool) -> Result<()> {
         audit.verify()?
     };
 
+    // Under --require-signed, enforce an operator-pinned trust anchor.
+    // The chain-head signature only proves a holder of *some* key signed
+    // the recorded hashes; without an anchor a compromised gateway can
+    // mint a fresh key, sign a fabricated chain, and pass verification.
+    // Anchoring rejects any chain-head whose embedded signing key is not
+    // operator-supplied. Without --require-signed the verifier stays
+    // report-only and the anchor set is never consulted, so prior
+    // behaviour is preserved exactly.
+    if require_signed {
+        let anchor_set = resolve_anchors(anchors, &cfg.data_dir)?;
+        if anchor_set.is_empty() {
+            anyhow::bail!(
+                "--require-signed needs an audit-signing trust anchor, but none was \
+                 found: pass --anchor <hex-or-path>, or run where {} exists",
+                audit_public_key_path(&cfg.data_dir).display()
+            );
+        }
+        let unanchored = result.unanchored_signing_keys(&anchor_set);
+        if !unanchored.is_empty() {
+            anyhow::bail!(
+                "audit chain-head signed by un-anchored key id(s): {}. Not in the \
+                 operator anchor set; the chain may have been signed by a key this \
+                 gateway minted rather than the pinned key.",
+                unanchored.join(", ")
+            );
+        }
+    }
+
     match format {
         "json" => print_verify_json(&result, require_signed),
         "human" | "" => print_verify_human(&result, require_signed),
         other => anyhow::bail!("--format must be 'human' or 'json', got '{other}'"),
     }
+}
+
+/// Resolve the operator anchor set for `--require-signed`. Each
+/// `--anchor` value is either a 64-character hex Ed25519 public key or
+/// a path to a file containing one (the local `audit-signing.pub`
+/// form). When no `--anchor` is given, the local
+/// `<data_dir>/audit/audit-signing.pub` is used as the default anchor
+/// when present, so a chain signed by the local key verifies without
+/// extra flags. Returns an empty set only when no flag is given and the
+/// default public-key file is absent; the caller fails closed on that.
+fn resolve_anchors(anchors: &[String], data_dir: &Path) -> Result<BTreeSet<String>> {
+    let mut set = BTreeSet::new();
+    if anchors.is_empty() {
+        let default_pub = audit_public_key_path(data_dir);
+        if default_pub.is_file() {
+            let hex = std::fs::read_to_string(&default_pub)
+                .with_context(|| format!("read default anchor {}", default_pub.display()))?;
+            set.insert(
+                parse_anchor_key(&hex)
+                    .with_context(|| format!("parse default anchor {}", default_pub.display()))?,
+            );
+        }
+        return Ok(set);
+    }
+    for value in anchors {
+        let raw = if Path::new(value).is_file() {
+            std::fs::read_to_string(value).with_context(|| format!("read anchor file {value}"))?
+        } else {
+            value.clone()
+        };
+        set.insert(parse_anchor_key(&raw).with_context(|| format!("parse anchor '{value}'"))?);
+    }
+    Ok(set)
+}
+
+/// Validate an Ed25519 public-key hex string and normalise it to
+/// lowercase so it matches the `signing_key_id` form embedded in chain
+/// heads (`AuditSigningKey::key_id_hex`).
+fn parse_anchor_key(raw: &str) -> Result<String> {
+    let key = raw.trim();
+    if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("anchor must be a 64-character hex Ed25519 public key");
+    }
+    Ok(key.to_ascii_lowercase())
 }
 
 // ---------------------------------------------------------------------------
@@ -593,5 +668,55 @@ mod tests {
         assert!(json.get("agent").is_none());
         assert!(json.get("channel").is_none());
         assert!(json.get("id").is_none());
+    }
+
+    #[test]
+    fn parse_anchor_key_accepts_64_hex_and_lowercases() {
+        assert_eq!(parse_anchor_key(&"AB".repeat(32)).unwrap(), "ab".repeat(32));
+        // Tolerates surrounding whitespace, as a .pub file carries a
+        // trailing newline.
+        let padded = format!("  {}\n", "cd".repeat(32));
+        assert_eq!(parse_anchor_key(&padded).unwrap(), "cd".repeat(32));
+    }
+
+    #[test]
+    fn parse_anchor_key_rejects_malformed() {
+        assert!(parse_anchor_key("").is_err());
+        assert!(parse_anchor_key(&"ab".repeat(31)).is_err(), "too short");
+        assert!(parse_anchor_key(&"zz".repeat(32)).is_err(), "non-hex");
+    }
+
+    #[test]
+    fn resolve_anchors_reads_literal_hex_and_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hex = "12".repeat(32);
+        let file_key = "34".repeat(32);
+        let pub_path = tmp.path().join("anchor.pub");
+        // Mimic audit-signing.pub: hex with a trailing newline.
+        std::fs::write(&pub_path, format!("{file_key}\n")).unwrap();
+
+        let anchors = vec![hex.clone(), pub_path.to_string_lossy().into_owned()];
+        let set = resolve_anchors(&anchors, tmp.path()).unwrap();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&hex));
+        assert!(set.contains(&file_key));
+    }
+
+    #[test]
+    fn resolve_anchors_defaults_to_local_pub_when_no_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pub_path = audit_public_key_path(tmp.path());
+        std::fs::create_dir_all(pub_path.parent().unwrap()).unwrap();
+        let key = "56".repeat(32);
+        std::fs::write(&pub_path, key.clone()).unwrap();
+
+        let set = resolve_anchors(&[], tmp.path()).unwrap();
+        assert_eq!(set, [key].into_iter().collect());
+    }
+
+    #[test]
+    fn resolve_anchors_empty_without_flag_or_local_pub() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolve_anchors(&[], tmp.path()).unwrap().is_empty());
     }
 }
