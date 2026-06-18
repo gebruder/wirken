@@ -23,7 +23,7 @@ Variants are serde-tagged with `kind = "<snake_case>"` so wire consumers can dis
 | `subagent_result` | `SubagentResult` | `agent_id`, `child_agent_id` | Child returned (`Ok` / `Error` / `RoundsExceeded` / `DepthExceeded` / `Timeout`). |
 | `compaction` | `Compaction` | `agent_id`, `provider`, `model` | Context engine trimmed the conversation before an LLM call. |
 | `system_prompt_set` | `SystemPromptSet` | `agent_id` | New effective system prompt for the session. |
-| `attestation` | `Attestation` | `agent_id`, `signature` | Per-agent Ed25519 signature over the chain head. |
+| `attestation` | `Attestation` | `signer_pubkey`, `signature` | Per-agent Ed25519 signature over the chain head. |
 | `chain_head` | `ChainHead` | `signing_pubkey` | Signed chain-head record bracketing session start/end and cadence checkpoints. |
 | `rewind` | `Rewind` | `agent_id`, `reason` | Rewind sentinel emitted before truncating the most recent N events. |
 | `audit_legacy` | `AuditLegacy` | `actor_kind`, `actor_id`, `action`, `target` | Wrapper for gateway-emitted flat-tuple events that don't fit a typed variant: `gateway.start`, `audit.chain_broken`, adapter `connect` / `disconnect`, MCP proxy registration, etc. |
@@ -40,7 +40,7 @@ Every row carries three hashes:
 
 Construction is per-session: a fresh `session_id` starts with empty `prev_hash`, and each subsequent append's `prev_hash` is the prior row's `hash`. Two sessions on the same database never share chain state.
 
-Source: `chain_hex()` at `crates/audit/src/session_log.rs:2032-2037`.
+Source: `chain_hex()` at `crates/audit/src/session_log.rs:2653-2658`.
 
 ## Chain-head signing
 
@@ -65,7 +65,7 @@ Source: `build_signed_message()` at `crates/audit/src/signing.rs:189-208`. Domai
 
 When the continuous verifier inside `AuditWriter`'s flush loop detects a chain break, two records get written. The out-of-chain alarm comes first and is the load-bearing record; the in-chain `audit.chain_broken` row is best-effort.
 
-- **Alarm log.** `AlarmLog::append` writes one JSON record per line to `<data_dir>/audit-alarms.log` (mode 0o600 on Unix, append-only). The structure is `AlarmRecord` at `crates/audit/src/alarm_log.rs:40-100`. The append boundary is at `crates/audit/src/alarm_log.rs:139`. Operators read alarms via `wirken doctor`.
+- **Alarm log.** `AlarmLog::append` writes one JSON record per line to `<data_dir>/audit-alarms.log` (mode 0o600 on Unix, append-only). The structure is `AlarmRecord` at `crates/audit/src/alarm_log.rs:78-106`. The append boundary is at `crates/audit/src/alarm_log.rs:177`. Operators read alarms via `wirken doctor`.
 
 - **In-chain row.** The verify pass emits `AuditLegacy { action: "audit.chain_broken", ... }` through the `AuditWriter`'s mpsc channel. The flush loop drains the channel, writes the row to SQLite, and SIEM-forwards it on the next flush. Receivers see chain-tamper events alongside the rest of the legacy stream.
 
@@ -76,7 +76,7 @@ The dispatch is best-effort because the rest of the chain is already compromised
 ## Source references
 
 - Variants and serde shape: `crates/audit/src/session_log.rs:263-720`.
-- Hash chain: `crates/audit/src/session_log.rs:2032-2037` (`chain_hex`).
+- Hash chain: `crates/audit/src/session_log.rs:2653-2658` (`chain_hex`).
 - Chain-head signing: `crates/audit/src/signing.rs:38-208` (domain separator, schema version, key load, message build).
-- Alarm log: `crates/audit/src/alarm_log.rs:40-139` (record, log, append).
+- Alarm log: `crates/audit/src/alarm_log.rs:78-205` (record, log, append).
 - Halt-boundary gap: [gebruder/wirken#107](https://github.com/gebruder/wirken/issues/107).

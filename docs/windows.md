@@ -10,8 +10,8 @@ Wirken targets a researcher / single-user-workstation profile on Windows. The Li
 - **Vault uses an age-encrypted file.** Keys are stored in `%APPDATA%\wirken\keychain\` and unlocked with a passphrase. Native Credential Manager / DPAPI integration is on the roadmap; the age-file backend is portable across machines if you keep the passphrase.
 - **`wirken zirkel push` (the orchestrator-push API) is Linux/macOS only.** The push socket is a same-user JSON-line trust boundary that has no analog on Windows; the rest of zirkel works.
 - **The Signal adapter is Linux/macOS only.** It connects to `signal-cli`'s unix-domain socket, which doesn't exist on Windows. The other channel adapters (Telegram, Discord, Slack, Teams, Matrix, WhatsApp, Google Chat) work.
-- **`wirken service` (systemd/launchd installer) is not available.** Run wirken manually, or schedule it via Task Scheduler.
-- **`wirken cron` (preset cron) is not available.** Use Task Scheduler.
+- **Service install is Unix-only.** `wirken setup --install-service` installs the systemd (Linux) or launchd (macOS) unit; there is no Windows equivalent. Run wirken manually, or schedule it via Task Scheduler.
+- **`wirken cron` works on all platforms.** The `wirken cron` subcommand and its in-process scheduler (under `wirken run`) are not platform-gated. Task Scheduler remains an alternative on Windows if you prefer to run jobs outside the gateway process.
 
 These are not bugs to file; they are deliberate scope cuts. The Linux/macOS docs describe the full surface.
 

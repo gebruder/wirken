@@ -50,7 +50,7 @@ wirken channel list
 wirken channel remove <CHANNEL>
 ```
 
-The `add` command prompts for the channel's primary token (and Slack's app token). Channels that need additional fields — Teams app ID, Matrix homeserver/username, Signal phone, BlueBubbles password, WhatsApp phone-number-id/verify-token/app-secret — are wired up by `wirken setup`'s per-channel sub-flows. WhatsApp's setup flow is on the roadmap; see [WhatsApp channel docs](channels/whatsapp.md) for the vault entries it expects in the meantime.
+The `add` command prompts for the channel's primary token (and Slack's app token). Channels that need additional fields (Teams app ID, Matrix homeserver/username, Signal phone, BlueBubbles password, WhatsApp phone-number-id/verify-token/app-secret) are wired up by `wirken setup`'s per-channel sub-flows. WhatsApp's setup flow is interactive and collects the four Cloud API credentials (access token, phone number ID, verify token, app secret); see [WhatsApp channel docs](channels/whatsapp.md) for the vault entries it writes.
 
 > **Signal is Linux/macOS only.** The Signal adapter requires a Unix-domain socket to a local `signal-cli` daemon and is excluded at compile time on the Windows build. See [docs/channels/signal.md](channels/signal.md) and [docs/windows.md](windows.md).
 

@@ -99,16 +99,17 @@ Session ids in JSON output are objects, not bare strings:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "wirken_version": "0.9.1",
   "events": [
     {
       "id": 47,
       "ts": "2026-04-29T12:34:56+00:00",
-      "actor": "gateway",
+      "actor_kind": "service",
+      "actor_id": "gateway",
       "action": "orchestrator.push.refused",
       "target": "orchestrator",
-      "channel": "",
+      "channel": null,
       "session": { "full": "" },
       "detail": {
         "reason": "principal_mismatch",

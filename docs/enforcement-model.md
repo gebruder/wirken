@@ -107,7 +107,7 @@ These properties are enforced by configuration, runtime checks, and operational 
 Skills are loaded from the filesystem at gateway startup:
 - `SkillLoader::load_dir()` scans `~/.wirken/skills/` and per-agent skill directories.
 - `Agent::load_skills()` rebuilds the system prompt with available skills.
-- Wasm skills are compiled from `.wasm` files via `wasmtime` 43.0.
+- Wasm skills are compiled from `.wasm` files via `wasmtime` 45.0.2.
 
 **Live update:** Add or remove SKILL.md files from the skills directory. The agent picks up changes on next `load_skills()` call (currently requires gateway restart; no filesystem watcher yet).
 
@@ -193,7 +193,7 @@ Operators register external hook processes via `wirken hooks register <id> <pubk
 
 Each non-skipped outcome emits one `EgressHookDispatched` row carrying the operator-readable `EgressDecision` (Allow / Replace / Refuse / Timeout). When the final working bytes differ from the original, a paired `ToolOutputRedacted` row records `original_sha256`, `original_size`, `redacted_sha256`, `redacted_size`, and the attribution fields (`hook_id`, `agent_id`, `adapter_id`, `sender_id`). **The original output bytes are not on the chain by design**: an egress hook's purpose is preventing those bytes from spreading; recording them defeats the redaction. The original sha256 is the only on-chain reference, sufficient for an auditor with a candidate plaintext to verify the redaction was applied to the bytes they expect.
 
-**Chain invariant.** `ToolResult.output` carries the post-mediation bytes verbatim. The conversation that produced the next `LlmRequest`'s `messages_hash` was built from those same bytes, so `wirken session verify` reconstitutes an identical conversation by calling `add_tool_result(stored_output_bytes)` and the hash matches. Deterministic-tool re-execution divergence checks (`read_file`, `list_files`) skip rows that have a `ToolOutputRedacted` paired row at a higher seq for the same `call_id`: the redaction is operator policy, not wirken behavior, and re-execution would compare freshly-produced source bytes against operator-redacted bytes.
+**Chain invariant.** `ToolResult.output` carries the post-mediation bytes verbatim. The conversation that produced the next `LlmRequest`'s `messages_hash` was built from those same bytes, so `wirken sessions verify` reconstitutes an identical conversation by calling `add_tool_result(stored_output_bytes)` and the hash matches. Deterministic-tool re-execution divergence checks (`read_file`, `list_files`) skip rows that have a `ToolOutputRedacted` paired row at a higher seq for the same `call_id`: the redaction is operator policy, not wirken behavior, and re-execution would compare freshly-produced source bytes against operator-redacted bytes.
 
 **Timeout posture.** Both dispatchers fail-closed by default. `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` flips the timeout path to fail-open with a `tracing::warn!`; the audit row records the timeout regardless so a reviewer can distinguish "hook timed out" from "hook ran clean".
 

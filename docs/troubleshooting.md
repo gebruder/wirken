@@ -95,7 +95,7 @@ The credential is past its `rotation_due_at` date but still functional. Rotate i
 If you're using the age-encrypted file keychain (headless systems) and forget the passphrase, you'll need to re-enter all credentials:
 
 ```bash
-rm ~/.wirken/vault.db ~/.wirken/age-key.enc ~/.wirken/age-salt
+rm ~/.wirken/vault.db ~/.wirken/keychain/device-key.age ~/.wirken/keychain/device-key.salt
 wirken setup
 ```
 

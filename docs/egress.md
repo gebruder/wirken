@@ -12,7 +12,7 @@ The skill-set `egress.domains` allowlist is a defense-in-depth control on a spec
 
 Each call resolves the request host against the agent's effective `egress.domains` allowset (the union of every loaded skill's `egress.domains` declaration). Hosts not in the allowset are denied pre-flight, before any TCP connection and without consuming the rate-limit budget. Wildcard `"*"` is supported on the allowset; `"*.example.com"` style suffix patterns are also supported.
 
-Source: `crates/agent/src/egress.rs:80-110` (host-based check), `crates/agent/src/skill_perms.rs:380-410` (allowset resolution).
+Source: `crates/agent/src/egress.rs:246-282` (host-based check), `crates/agent/src/skill_perms.rs:831-889` (allowset resolution).
 
 ## What `egress.domains` does not cover
 
@@ -46,6 +46,6 @@ The same gap appears in [security-properties.md](security-properties.md) under A
 
 ## Source references
 
-- `EgressClient` scope and host check: `crates/agent/src/egress.rs:19-110`.
-- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:380-410`.
+- `EgressClient` scope and host check: `crates/agent/src/egress.rs:154-282`.
+- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:831-889`.
 - Threat-model row: [security-properties.md](security-properties.md), row `AG02` (Code execution).

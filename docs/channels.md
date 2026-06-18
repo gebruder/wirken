@@ -19,4 +19,4 @@ wirken channel list       # show all registered channels
 wirken channel remove slack  # remove a channel and its credentials
 ```
 
-Removing a channel deletes its adapter registration and Ed25519 keypair. Credentials remain in the vault and can be removed separately with `wirken credentials`.
+Removing a channel deletes its adapter registration, its Ed25519 keypair, and its vault credentials.

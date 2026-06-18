@@ -13,7 +13,7 @@ Zirkel's `sources.toml` enumerates each source the operator wants polled. Every 
 | Method                          | Auth                          | Example sources                                  |
 |---------------------------------|-------------------------------|--------------------------------------------------|
 | `rss`, `atom-api`               | None                          | FTC, CFPB, EDPB, ICO, CNIL, arXiv, SSRN          |
-| `json-federal-register`         | None                          | federalregister.gov                              |
+| `json-federal-register`         | None                          | www.federalregister.gov                          |
 | `json-congress-bill`            | api.data.gov key (X-Api-Key)  | api.congress.gov                                 |
 | `json-govinfo-bills`            | api.data.gov key (X-Api-Key)  | api.govinfo.gov                                  |
 

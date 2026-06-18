@@ -26,7 +26,7 @@ the secure default with a warning, never the bypass
 
 ## No silent fallback
 
-[`crates/agent/src/tool.rs:455-463`](../crates/agent/src/tool.rs):
+[`crates/agent/src/tool.rs:445-463`](../crates/agent/src/tool.rs):
 
 ```rust
 if let Some(sandbox) = self.sandbox().await {
@@ -52,18 +52,18 @@ constructs the `HostConfig` for every sandboxed exec:
 
 | Property | Value | Source line |
 |---|---|---|
-| `cap_drop` | `ALL` | `:309` — every Linux capability stripped. No `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, etc. |
-| `cap_add` | `[]` | `:310` — no capabilities re-added. |
-| `security_opt` | `no-new-privileges:true` | `:311-313` — `setuid`/`setgid` binaries cannot elevate. |
-| `readonly_rootfs` | `true` | `:315` — container `/` is read-only. |
-| `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `:293-296` — the only writable filesystem outside `/workspace`. |
-| `network_mode` | `none` (configurable) | `:288-292, 300` — default is no network namespace; outbound DNS/HTTP fail. |
-| `binds` | `<workspace>:/workspace:rw` | `:299` — only the agent workspace is mounted, RW. |
-| `memory` | 512 MB | `:18, 301` — `MEMORY_LIMIT` constant. |
-| `pids_limit` | 256 | `:19, 302` — `PIDS_LIMIT` constant; fork-bomb cap. |
-| `user` | `1000:1000` | `:121` — non-root UID/GID inside the container. |
-| `auto_remove` | `false` | `:307` — explicit `kill_and_remove` after log collection so output is never lost to a teardown race. |
-| timeout | 300 s | `:88, 148` — wall-clock cap; container is killed and removed on timeout. |
+| `cap_drop` | `ALL` | `:471` - every Linux capability stripped. No `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, etc. |
+| `cap_add` | `[]` | `:472` - no capabilities re-added. |
+| `security_opt` | `no-new-privileges:true` | `:473-476` - `setuid`/`setgid` binaries cannot elevate. |
+| `readonly_rootfs` | `true` | `:477` - container `/` is read-only. |
+| `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `:455-459, 478` - the only writable filesystem outside `/workspace`. |
+| `network_mode` | `none` (configurable) | `:450-454, 462` - default is no network namespace; outbound DNS/HTTP fail. |
+| `binds` | `<workspace>:/workspace:rw` | `:461` - only the agent workspace is mounted, RW. |
+| `memory` | 512 MB | `:18, 463` - `MEMORY_LIMIT` constant. |
+| `pids_limit` | 256 | `:19, 464` - `PIDS_LIMIT` constant; fork-bomb cap. |
+| `user` | `1000:1000` | `:283` - non-root UID/GID inside the container. |
+| `auto_remove` | `false` | `:469` - explicit `kill_and_remove` after log collection so output is never lost to a teardown race. |
+| timeout | 300 s | `:249, 310` - wall-clock cap; container is killed and removed on timeout. |
 
 `security_opt` does NOT explicitly set seccomp. Per Docker semantics
 ([upstream](https://docs.docker.com/engine/security/seccomp/)), when no

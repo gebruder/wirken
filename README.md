@@ -65,7 +65,7 @@ Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Appl
     wirken channel add <channel>      Add another messaging channel
     wirken credentials add <name>     Add or rotate a key
     wirken doctor                     Verify the install
-    wirken session list               See active conversations
+    wirken sessions list              See active conversations
 
   WebChat: http://localhost:18790
 
@@ -145,7 +145,7 @@ Agents can delegate bounded subtasks to child agents via `spawn_subagent`. The o
 
 ## Security properties
 
-- **Session attestation.** Per-agent Ed25519 identity signs the per-session hash chain after every turn. `wirken session verify` replays the log offline and re-checks message hashes, deterministic tool results, and chain integrity. Tampered sessions break the chain.
+- **Session attestation.** Per-agent Ed25519 identity signs the per-session hash chain after every turn. `wirken sessions verify` replays the log offline and re-checks message hashes, deterministic tool results, and chain integrity. Tampered sessions break the chain.
 - **Reproducible replay.** Every LLM call is recorded as a typed session event with a SHA-256 hash of the exact messages and tools sent. The verifier recomputes these hashes from the log and flags any divergence.
 - **Per-channel process isolation.** Each channel adapter runs in its own OS process with a distinct ed25519 identity. Type-level channel separation (`SessionHandle<Telegram>` vs `SessionHandle<Discord>`) exists in the IPC crate and is regression-tested but not yet used in the production message path.
 - **Out-of-process credential isolation.** MCP credentials (bearer tokens, OAuth2 client secrets) live in a separate proxy process. The agent process never sees them. The vault is XChaCha20-Poly1305, keyed from the OS keychain; `secrecy` + `zeroize` make logging a secret a compile error.
@@ -169,7 +169,7 @@ Full OWASP and NIST AI RMF mappings: [docs/security-properties.md](docs/security
 Wirken gives organizations the controls they need to deploy AI agents without bypassing existing security, compliance, and audit requirements.
 
 - **Full attribution.** Every inbound message records the platform sender id, channel, session, and agent. Permission decisions are scoped per agent, not per user. Typed session events record what action ran, when, and on which target.
-- **Tamper-evident audit trail.** All actions logged as typed session events before execution. Per-session SHA-256 hash chain detects modification or deletion. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the log offline and re-checks hashes. SIEM forwarding sends events to Datadog, Splunk HEC, Microsoft Sentinel, or any webhook in real time. A separate OpenTelemetry projection ships GenAI semconv spans over OTLP/HTTP+JSON to any OTLP-compatible backend; Microsoft documents a direct OTLP contract for non-SDK Agent 365 integration, which this projection implements. The per-release verification gate is described in [`docs/integrations/agent365.md`](docs/integrations/agent365.md).
+- **Tamper-evident audit trail.** All actions logged as typed session events before execution. Per-session SHA-256 hash chain detects modification or deletion. Per-agent Ed25519 attestation signs the chain head after every turn. `wirken sessions verify` replays the log offline and re-checks hashes. SIEM forwarding sends events to Datadog, Splunk HEC, Microsoft Sentinel, or any webhook in real time. A separate OpenTelemetry projection ships GenAI semconv spans over OTLP/HTTP+JSON to any OTLP-compatible backend; Microsoft documents a direct OTLP contract for non-SDK Agent 365 integration, which this projection implements. The per-release verification gate is described in [`docs/integrations/agent365.md`](docs/integrations/agent365.md).
 - **Crash recovery.** Agents are stateless between turns. The harness replays the session log on wake. Incomplete tool rounds are detected and surfaced as failures rather than silently re-executed.
 - **Graduated permissions.** Three-tier model. Workspace file access and web search are always allowed. Shell exec and external file access require first-use approval. Destructive operations, credential access, and network requests always require explicit approval. Approvals expire after 30 days. Skill installs are gated by registry-anchored signature verification, not by the tier system; the gate runs at `wirken skills install` time and again at every `SkillLoader::load_file` call, with `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` as the documented opt-out.
 - **Capability-attenuated multi-agent.** Parent agents delegate to children via `spawn_subagent` under operator-configured ceilings (tool allowlist, max permission tier, max rounds, max runtime). Children run headless with isolated session logs. Hard depth cap of 4.
@@ -221,7 +221,7 @@ The architecture is documented in [docs/architecture.md](docs/architecture.md).
 
 ## Status
 
-Wirken 1.8.x is the current series. 1.8 gets fixes and features; 1.7 gets security fixes only. 1.6 and earlier are unsupported.
+Wirken 1.9.x is the current series. 1.9 gets fixes and features; 1.8 gets security fixes only. 1.7 and earlier are unsupported.
 
 - **9 channel adapters** under `crates/adapter-*`: Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, iMessage.
 - **8 LLM providers** in `crates/agent/src/llm.rs`: Ollama, Anthropic, OpenAI, Google Gemini, AWS Bedrock, Tinfoil, Privatemode, plus a `custom` provider for any OpenAI-compatible endpoint.

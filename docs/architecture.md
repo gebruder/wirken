@@ -172,7 +172,7 @@ Append-only structured audit log.
 - SQLite WAL-mode database at `~/.wirken/audit.db` via `rusqlite` 0.39 (bundled).
 - Every agent turn writes typed session events (UserMessage, AssistantMessage, AssistantToolCalls, ToolResult, LlmRequest, LlmResponse, PermissionDenied, SystemPromptSet, Compaction, Attestation, SubagentSpawned, SubagentResult) to a `session_events` table before each action executes.
 - Each session has its own per-session SHA-256 hash chain: every row carries a leaf hash, a previous hash, and a chain hash. Tampering with any row breaks the chain for that session.
-- Per-agent Ed25519 attestation signs the chain head after every turn. `wirken session verify` replays the session offline and re-checks message hashes, deterministic tool results, and chain integrity.
+- Per-agent Ed25519 attestation signs the chain head after every turn. `wirken sessions verify` replays the session offline and re-checks message hashes, deterministic tool results, and chain integrity.
 - The legacy `audit_events` table from pre-0.7 is automatically migrated to a SQL view over `session_events` on first open. SIEM consumers see both old and new events through this view.
 - Retention: 90 days default, configurable. Pruning preserves the hash chain by keeping a checkpoint hash.
 
@@ -225,7 +225,7 @@ Wirken reads the `name`, `description`, and `requires.bins` fields. The emoji an
 
 The agent's `exec` tool can run in a Docker container instead of directly on the host (`crates/agent/src/sandbox.rs`). This is the mechanism that confines skills which shell out to commands like `git`, `curl`, or `jq`.
 
-- Runtime: Docker via `bollard` 0.20. The OCI runtime is the default `runc`, or `runsc` (gVisor) when `permissions.sandbox_mode = "gvisor"` is set in the org config.
+- Runtime: Docker via `bollard` 0.21. The OCI runtime is the default `runc`, or `runsc` (gVisor) when `permissions.sandbox_mode = "gvisor"` is set in the org config.
 - Default image: `debian:bookworm-slim`. The workspace is bind-mounted read-write at `/workspace`; nothing else from the host is mounted.
 - Container runs as UID 1000:1000 with `auto_remove`, a 512 MB memory limit, a 256-PID limit, and a configurable command timeout (default 300 s).
 - **Network:** Off by default (`network_mode = "none"`). A single boolean (`SandboxConfig.network`) toggles it on; there is no per-skill or per-call network policy.
@@ -237,7 +237,7 @@ The agent's `exec` tool can run in a Docker container instead of directly on the
 
 For skills compiled to WebAssembly. A Wasm skill is a directory containing a `SKILL.md` (frontmatter with name/description/parameters) and a `skill.wasm` module.
 
-- Runtime: `wasmtime` 43.0 with WASI preview 1 (`crates/agent/src/wasm_sandbox.rs`).
+- Runtime: `wasmtime` 45.0.2 with WASI preview 1 (`crates/agent/src/wasm_sandbox.rs`).
 - **CPU limiting:** Fuel metering via `Store::set_fuel()`. Default budget: 500 million fuel units. Skills that exhaust fuel are terminated.
 - **Memory:** Stdout buffer capped at 64 MB; stderr at 4 KB.
 - **Filesystem:** No preopened directories — the module has no filesystem access.
@@ -278,6 +278,8 @@ The agent's `LlmClient` (`crates/agent/src/llm.rs`) calls providers directly ove
 - Anthropic (API key, x-api-key header)
 - Google Gemini (API key via `x-goog-api-key` header, generateContent API)
 - AWS Bedrock (SigV4 signed requests, Converse API)
+- Tinfoil (confidential inference in an AMD SEV-SNP enclave via the tinfoil-rs SDK; per-session hardware attestation + Sigstore provenance + TLS pinning)
+- Privatemode (confidential inference, OpenAI-compatible via a local proxy)
 - Ollama (local, no key needed)
 - Any OpenAI-compatible endpoint (custom URL + key)
 
@@ -322,11 +324,11 @@ No loopback exemption. Rate limiting applies uniformly.
 
 | Protocol | Zero-copy | Schema evolution | Traversal limits | Rust maturity |
 |----------|-----------|-----------------|-------------------|---------------|
-| Cap'n Proto | Yes | Yes (additive fields) | Yes (built-in) | `capnp` 0.25, 10M downloads |
+| Cap'n Proto | Yes | Yes (additive fields) | Yes (built-in) | `capnp` 0.26, 10M downloads |
 | MessagePack | No (deserialization copies) | Weak (field ordering) | No | `rmp-serde` mature |
 | FlatBuffers | Yes | Yes | No built-in | `flatbuffers` less mature |
 
-**Decision: Cap'n Proto** via `capnp` 0.25.
+**Decision: Cap'n Proto** via `capnp` 0.26.
 
 Reasons:
 1. **Zero-copy deserialization.** Reader types traverse binary data in-place without allocation. For high-frequency IPC (streaming LLM tokens), this eliminates per-message allocation entirely.
@@ -343,7 +345,7 @@ The `.capnp` schema files become the canonical IPC contract. Adapters and the ga
 **Two commands to a running gateway.**
 
 ```bash
-curl -fsSL https://wirken.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
 wirken setup
 ```
 
@@ -378,7 +380,7 @@ The install script downloads a precompiled binary for the user's platform (Linux
 
 | Component | Crate | Version | Why |
 |-----------|-------|---------|-----|
-| Async runtime | `tokio` | 1.50 | De facto standard. Full-featured (timers, IO, process, signal). |
+| Async runtime | `tokio` | 1.52 | De facto standard. Full-featured (timers, IO, process, signal). |
 | HTTP client | `reqwest` | 0.13 | Built on hyper. UDS support. SSE via `reqwest-eventsource`. |
 | SSE streaming | `reqwest-eventsource` | 0.6 | Async SSE event iterator over reqwest responses. |
 | SQLite | `rusqlite` | 0.39 | `bundled` feature compiles SQLite from source. No system dependency. |
@@ -391,16 +393,16 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Ed25519 signatures | `ed25519-dalek` | 2.2 | Pure Rust. Audited by Quarkslab. |
 | Password hashing | `argon2` | 0.5 | Argon2id for age-file passphrase derivation. |
 | SHA-256 | `sha2` | 0.10 | Hash chain for audit log. |
-| IPC serialization | `capnp` | 0.25 | Zero-copy, traversal limits, schema evolution. |
-| Wasm sandbox | `wasmtime` | 43.0 | WASI preview 2. Fuel metering. Resource limits. |
-| Container API | `bollard` | 0.20 | Async Docker/gVisor integration for native-binary skills. |
+| IPC serialization | `capnp` | 0.26 | Zero-copy, traversal limits, schema evolution. |
+| Wasm sandbox | `wasmtime` | 45.0.2 | WASI preview 1. Fuel metering. Resource limits. |
+| Container API | `bollard` | 0.21 | Async Docker/gVisor integration for native-binary skills. |
 | CLI parser | `clap` | 4.6 | Derive + builder APIs. |
 | Interactive prompts | `dialoguer` | 0.12 | Setup wizard (Select, Input, Password, Confirm). |
 | Rate limiting | `governor` | 0.10 | GCRA, lock-free atomics, zero-alloc hot path. |
 | Structured logging | `tracing` | 0.1 | Span-based, async-aware. Subscribers via `tracing-subscriber` 0.3. |
 | Telegram Bot API | `teloxide` | 0.17 | Full Bot API v9.1. Long polling + webhooks. Media support. |
 | Discord Bot API | `serenity` | 0.12 | Gateway + REST. Guilds, DMs, threads, slash commands. |
-| Slack API | `slack-morphism` | 2.19 | Socket Mode + Events API. Block Kit typed models. |
+| Slack API | `slack-morphism` | 2.22 | Socket Mode + Events API. Block Kit typed models. |
 | Serialization | `serde` / `serde_json` | 1.x | JSON for config, skill manifest, LLM payloads. |
 
 **TLS via `rustls`.** Outbound HTTPS uses `rustls` (pulled in by `reqwest` with the `rustls` feature). OpenSSL is also present in the build as a transitive dependency of some channel SDKs, configured with the `vendored` feature so it compiles from source — no system OpenSSL headers are needed at build time and no dynamic linking against the host OpenSSL.

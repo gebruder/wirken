@@ -51,7 +51,7 @@ The file is snapshotted on every run for reproducibility. The interests that pro
 
 ### Sources are public and named
 
-Zirkel fetches from a fixed allowlist declared in `presets/zirkel/sources.toml`. The shipped set covers:
+Zirkel fetches from a fixed allowlist declared in `preset/zirkel/sources.toml`. The shipped set covers:
 
 **Papers**: SSRN, arXiv (cs.CY and cs.CR).
 
@@ -126,4 +126,4 @@ For the architectural commitment on browser scraping, see [`docs/zirkel.md`](zir
 ## See also
 
 - [`docs/zirkel.md`](zirkel.md): setup, configuration, the no-headless-browser commitment.
-- [`presets/zirkel/`](../preset/zirkel/): the preset itself, including `sources.toml` and per-skill SKILL.md frontmatter.
+- [`preset/zirkel/`](../preset/zirkel/): the preset itself, including `sources.toml` and per-skill SKILL.md frontmatter.

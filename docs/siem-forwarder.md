@@ -10,7 +10,7 @@ The webhook target documented here is one of two subscription surfaces for exter
 
 The `AuditWriter`'s flush loop batches `AuditEvent` rows every 50 ms or every 100 events and forwards each batch to the configured target. Always on when any endpoint is configured in `siem.json`. Carries gateway-level events (`gateway.start`, adapter handshake records, MCP proxy registration, permission denials, `audit.chain_broken`, etc.).
 
-Source: `crates/audit/src/writer.rs:426-577` (flush loop), `crates/audit/src/siem.rs:147-231` (per-target forward).
+Source: `crates/audit/src/writer.rs:588-704` (flush loop), `crates/audit/src/siem.rs:178-261` (per-target forward).
 
 ### Typed pipe
 
@@ -40,7 +40,7 @@ Source: `crates/audit/src/siem_typed.rs` (`spawn`, `run_one_pass`, `get_events_a
 
 The Sentinel split is a Sentinel DCR constraint, not a wirken design choice: the legacy stream's DCR pins specific columns and rejects rows that don't match. The typed pipe needs its own stream with its own column schema.
 
-Source: `crates/audit/src/siem_typed.rs:375-405` (`TypedTransport::for_config` selecting Shared vs SentinelSeparate).
+Source: `crates/audit/src/siem_typed.rs:437-452` (`TypedTransport::for_config` selecting Shared vs SentinelSeparate).
 
 ## Variant include/exclude policy
 
@@ -52,16 +52,16 @@ The default forwardable variant set covers the audit events most useful for dete
 
 `typed_include_variants` wins over `typed_exclude_variants` when both are set; the include list is treated as the canonical allowset and the exclude list is ignored.
 
-Source: `crates/audit/src/siem_typed.rs:71-97` (`should_forward`).
+Source: `crates/audit/src/siem_typed.rs:89-119` (`should_forward`).
 
 ## Per-target envelope shapes
 
 | Target | Legacy builder | Typed builder | Wire shape |
 |--------|----------------|---------------|------------|
-| Datadog | `build_datadog_payload` (`crates/audit/src/siem.rs:260-290`) | `build_datadog_typed_payload` (`crates/audit/src/siem.rs:427-441`) | JSON array of log entries with `ddsource: "wirken"`, `ddtags: "service:..,env:..,kind:.."` |
-| Splunk HEC | `build_splunk_body` (`crates/audit/src/siem.rs:292-317`) | `build_splunk_typed_body` (`crates/audit/src/siem.rs:441-465`) | NDJSON; legacy `sourcetype: "wirken:audit"`, typed `sourcetype: "wirken:session"` |
-| Sentinel | `build_sentinel_payload` (`crates/audit/src/siem.rs:319-353`) | `build_sentinel_typed_payload` (`crates/audit/src/siem.rs:467-493`) | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`AgentId`/`AdapterId`/`SenderId`/`Event` |
-| Webhook | `build_webhook_request` (`crates/audit/src/siem.rs:353-397`) | `build_webhook_typed_request` (`crates/audit/src/siem.rs:496-525`) | JSON array of flat objects; typed wrapper adds `session_id`, `seq`, `kind`, `trust` |
+| Datadog | `build_datadog_payload` (`crates/audit/src/siem.rs:267-295`) | `build_datadog_typed_payload` (`crates/audit/src/siem.rs:434-442`) | JSON array of log entries with `ddsource: "wirken"`, `ddtags: "service:..,env:..,kind:.."` |
+| Splunk HEC | `build_splunk_body` (`crates/audit/src/siem.rs:299-321`) | `build_splunk_typed_body` (`crates/audit/src/siem.rs:448-469`) | NDJSON; legacy `sourcetype: "wirken:audit"`, typed `sourcetype: "wirken:session"` |
+| Sentinel | `build_sentinel_payload` (`crates/audit/src/siem.rs:326-348`) | `build_sentinel_typed_payload` (`crates/audit/src/siem.rs:474-496`) | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`AgentId`/`AdapterId`/`SenderId`/`Event` |
+| Webhook | `build_webhook_request` (`crates/audit/src/siem.rs:360-392`) | `build_webhook_typed_request` (`crates/audit/src/siem.rs:503-534`) | JSON array of flat objects; typed wrapper adds `session_id`, `seq`, `kind`, `trust` |
 
 ## HMAC
 
@@ -71,7 +71,7 @@ Receivers verify by recomputing `HMAC-SHA-256(hmac_secret, raw_request_body)` an
 
 A shared `hmac_secret` produces distinct signatures on the legacy and typed pipes because the body shapes differ. Operators verifying both pipes must run the recompute per pipe.
 
-Source: `crates/audit/src/siem.rs:353-397` (legacy webhook + HMAC), `crates/audit/src/siem.rs:496-525` (typed webhook + HMAC), `crates/audit/src/siem.rs:574-588` (`compute_webhook_signature`).
+Source: `crates/audit/src/siem.rs:360-392` (legacy webhook + HMAC), `crates/audit/src/siem.rs:503-534` (typed webhook + HMAC), `crates/audit/src/siem.rs:637-647` (`compute_webhook_signature`).
 
 ## Retries
 
@@ -83,9 +83,9 @@ Source: `crates/audit/src/siem_typed.rs` (`run_one_pass` cursor advance gated on
 
 ## Source references
 
-- Two-pipe topology: `crates/audit/src/writer.rs:426-577` (legacy), `crates/audit/src/siem_typed.rs:250-340` (typed).
-- Variant policy: `crates/audit/src/siem_typed.rs:71-97`.
-- Per-target builders: `crates/audit/src/siem.rs:260-525`.
-- HMAC: `crates/audit/src/siem.rs:574-588` (`compute_webhook_signature`).
-- Spawn-guard: `crates/audit/src/siem.rs:75-103` (`SiemConfig::typed_forwarding_opted_in`).
+- Two-pipe topology: `crates/audit/src/writer.rs:588-704` (legacy), `crates/audit/src/siem_typed.rs:284-334` (typed).
+- Variant policy: `crates/audit/src/siem_typed.rs:89-119`.
+- Per-target builders: `crates/audit/src/siem.rs:267-534`.
+- HMAC: `crates/audit/src/siem.rs:637-647` (`compute_webhook_signature`).
+- Spawn-guard: `crates/audit/src/siem.rs:97-105` (`SiemConfig::typed_forwarding_opted_in`).
 - Operational issues: [gebruder/wirken#105](https://github.com/gebruder/wirken/issues/105), [gebruder/wirken#106](https://github.com/gebruder/wirken/issues/106).

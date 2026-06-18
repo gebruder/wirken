@@ -38,7 +38,7 @@ Prefix environment variable values with `vault:` to resolve them from the encryp
 }
 ```
 
-The vault entry referenced by `vault:github-token` must already exist. Vault entries are populated by `wirken setup` (provider API key) and `wirken channel add` (per-channel tokens); a generic `credentials add` command for arbitrary MCP secrets is on the roadmap. In the meantime, an MCP server that needs its own credential can read it from a regular environment variable in the `env` block instead.
+The vault entry referenced by `vault:github-token` must already exist. Vault entries are populated by `wirken setup` (provider API key), `wirken channel add` (per-channel tokens), and `wirken credentials add NAME`, which stores an arbitrary secret under `NAME` for reference as `vault:NAME` in `mcp.json`. An MCP server can also read a credential from a regular environment variable in the `env` block instead.
 
 ## How it works
 
@@ -137,10 +137,10 @@ This is not a sandbox. There is no `cap_drop`, seccomp filter, namespace, gVisor
 
 ## Supported transports
 
-- **stdio** — spawn process, communicate via stdin/stdout. Default for local MCP servers.
-- **HTTP** — connect to a remote MCP server over HTTP/HTTPS. Supports three auth modes:
-  - `NoAuth` — no authentication header.
-  - `BearerAuth` — static bearer token from the vault.
-  - `OAuth2Auth` — client credentials flow via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.
+- **stdio**: spawn process, communicate via stdin/stdout. Default for local MCP servers.
+- **HTTP**: connect to a remote MCP server over HTTP/HTTPS. Supports three auth modes:
+  - `NoAuth`: no authentication header.
+  - `BearerAuth`: static bearer token from the vault.
+  - `OAuth2Auth`: authorization code flow with PKCE via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.
 
 The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth2 client secrets) are held in the proxy process and never exposed to the agent.

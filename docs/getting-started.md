@@ -35,7 +35,7 @@ wirken setup
 This walks you through:
 
 1. **Pick a provider.** OpenAI, Anthropic, Gemini, Bedrock, Tinfoil, Privatemode, Ollama, or a custom endpoint. Your API key is encrypted immediately.
-2. **Pick your channels.** Telegram, Discord, Slack, Teams, or Matrix. Each bot token is encrypted into the vault.
+2. **Pick your channels.** Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage, or WhatsApp. Each bot token is encrypted into the vault.
 3. **Service install.** Optionally install as a systemd/launchd service so wirken starts on login.
 
 16 bundled skills (weather, github, git, tmux, docker, etc.) are installed automatically.

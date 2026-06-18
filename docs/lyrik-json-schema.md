@@ -19,8 +19,8 @@ producer emits, nothing more.
   (`schema-v1.2`, `schema-v2.0`) and a new spec document.
 - `$id` is canonical identity. It resolves to a fetchable copy of
   the schema once the `schema-v1.1` tag is cut. `wirken lyrik
-  validate` embeds the schema bytes and never fetches `$id` over
-  the network; the URL is for external JSON Schema validators.
+  validate --path <path>` embeds the schema bytes and never fetches
+  `$id` over the network; the URL is for external JSON Schema validators.
 
 ## What changed from 1.0
 
@@ -159,7 +159,7 @@ exact stable_id miss happens.
 
 ## Validation
 
-`wirken lyrik validate <path>` reads the file at `path`, parses it
+`wirken lyrik validate --path <path>` reads the file at `path`, parses it
 as JSON, and validates every rule in this document. Exits 0 on
 conformance; exits 1 with a list of structured errors otherwise.
 The validator embeds the canonical schema; no network fetch.

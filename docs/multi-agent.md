@@ -131,6 +131,6 @@ The ceiling controls:
 
 Children run headless — no interactive permission approvals, isolated session logs, and a hard depth cap of 4 to prevent nesting cycles. The parent's LLM sees only a JSON result envelope containing the child's final response and status.
 
-Ceilings are configured in `AgentConfig.allowed_subagents` (stored as JSON in the `agents` table). CLI support for editing ceilings is planned; for now, configure via the library API or directly in the sqlite column.
+Ceilings are configured in `AgentConfig.allowed_subagents` (stored as JSON in the `agents` table). `wirken agents allow-subagent <parent> <child>` sets a ceiling with `--tools`, `--max-tier`, `--max-rounds`, and `--max-runtime` flags; `wirken agents deny-subagent <parent> <child>` removes a child from a parent's allowed set.
 
-Each child runs under its own session id (`{parent_session_id}#sub-{n}`) so `wirken session verify` can audit the parent and child independently.
+Each child runs under its own session id (`{parent_session_id}#sub-{n}`) so `wirken sessions verify` can audit the parent and child independently.

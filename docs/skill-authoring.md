@@ -11,7 +11,7 @@ my-skill/
 ├── SKILL.md     (required)
 ├── SKILL.sig    (recommended; required for signed installs)
 ├── SKILL.pub    (recommended; pairs with SKILL.sig)
-└── skill.wasm   (optional; pulled in via metadata.wirken.requires.wasm)
+└── skill.wasm   (optional; loaded by its fixed filename when present, no frontmatter key)
 ```
 
 `SKILL.md` is YAML frontmatter followed by Markdown body. The body is what the LLM reads as the skill's instructions; the frontmatter is what the loader reads to validate identity and capability.
@@ -27,13 +27,13 @@ When present, must agree with the parent directory basename. When omitted, the d
 - Length 1 to 64 characters.
 - No uppercase, underscores, dots, slashes, or non-ASCII (one token on every filesystem and in every shell).
 
-Source: `crates/agent/src/skill.rs:375-400` (`validate_name`).
+Source: `crates/agent/src/skill.rs:392-417` (`validate_name`).
 
 ### `description` (required)
 
 Required, non-empty, at most 1024 characters. Counted by Unicode scalar, not bytes.
 
-Source: `crates/agent/src/skill.rs:404-418` (`validate_description`).
+Source: `crates/agent/src/skill.rs:421-435` (`validate_description`).
 
 ### `permissions` (optional)
 
@@ -59,7 +59,7 @@ Every `SkillLoader::load_file` call invokes `verify_skill_signature` against the
 - **Unsigned bundle.** No `SKILL.sig` / `SKILL.pub` pair: load refused unless `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` is set. With the bypass, the loader emits a warn-on-stderr message identifying the bundle and proceeds. An audit row records the bypass.
 - **Bundle with invalid signature.** `SKILL.sig` present but does not verify against the bundle's current contents: load refused. The `WIRKEN_ALLOW_UNSIGNED_SKILLS` bypass does not cover this case; an invalid signature is always a hard fail.
 
-Source: `crates/agent/src/skill.rs:218` (verify call), `crates/agent/src/skill.rs:469-503` (`verify_skill_signature`).
+Source: `crates/agent/src/skill.rs:149` (verify call), `crates/agent/src/skill.rs:510-526` (`verify_skill_signature`).
 
 ## Composite signature scope
 
@@ -72,18 +72,18 @@ Composite hash layout:
 
 The null-byte separator is a content-boundary marker: a trailing null in `SKILL.md` cannot be confused with a preceding empty wasm. Adding a `skill.wasm` post-sign or removing one post-sign both shift the composite and produce `VerifyResult::Invalid` on the next load.
 
-Source: `crates/gateway/src/skill_registry.rs:109-140` (`hash_skill_bundle`).
+Source: `crates/gateway/src/skill_registry.rs:218-233` (`hash_skill_bundle`).
 
 ## Frontmatter envelope check
 
 The loader refuses any skill whose name, description, or body contains the literal tokens `BEGIN UNTRUSTED SKILL` or `END UNTRUSTED SKILL`. These mark the trust boundary in the system prompt that wraps third-party skills; allowing a skill to carry them would let a hostile author emit a closing envelope marker at the boundary heading. The per-build nonce already defeats literal-marker collisions in the rendered prompt, but the load-time refusal is the simpler story than scrubbing inside `build_prompt`.
 
-Source: `crates/agent/src/skill.rs:159-173`, `crates/agent/src/skill.rs:427-`.
+Source: `crates/agent/src/skill.rs:179-193`, `crates/agent/src/skill.rs:444-484`.
 
 ## Source references
 
-- Loader: `crates/agent/src/skill.rs:125-503`.
-- Frontmatter validation: `crates/agent/src/skill.rs:375-418`.
+- Loader: `crates/agent/src/skill.rs:125-526`.
+- Frontmatter validation: `crates/agent/src/skill.rs:392-435`.
 - Permission profile: `crates/agent/src/skill_perms.rs:1-100`.
-- Composite signature: `crates/gateway/src/skill_registry.rs:101-172`.
+- Composite signature: `crates/gateway/src/skill_registry.rs:218-329`.
 - Signing surfaces overview: [signing.md](signing.md).

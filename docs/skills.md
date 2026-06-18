@@ -30,7 +30,7 @@ The frontmatter fields:
 - `name`: Skill name (falls back to directory name)
 - `description`: One-line description
 - `disable-model-invocation`: Boolean. Defaults to `true`. See "Auto-invocation vs explicit invocation" below.
-- `metadata.wirken.requires.bins`: Required binaries. The skill is marked unavailable if any are missing. `metadata.openclaw.requires.bins` is accepted as a deprecated alias.
+- `metadata.wirken.requires.bins`: Required binaries. The skill is marked unavailable if any are missing. `metadata.openclaw.*` is ignored; an OpenClaw-authored skill needs `wirken skills migrate` to rewrite the key to `metadata.wirken.requires.bins`.
 
 Wirken ships with 16 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
 

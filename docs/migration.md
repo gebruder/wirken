@@ -10,7 +10,7 @@ OpenClaw's bundled skills are `SKILL.md` files — structured markdown with YAML
 cp -r ~/.openclaw/skills/* ~/.wirken/skills/
 ```
 
-Wirken reads the `name`, `description`, and `metadata.wirken.requires.bins` fields from the frontmatter. `metadata.openclaw.requires.bins` is accepted as a deprecated alias so OpenClaw-authored skills continue to load unmodified. The markdown body is injected verbatim into the agent's system prompt. Skills that require host binaries (e.g., `curl`, `gh`, `tmux`) work if those binaries are installed.
+Wirken reads the `name`, `description`, and `metadata.wirken.requires.bins` fields from the frontmatter. `metadata.openclaw.*` is ignored; an OpenClaw-authored skill needs `wirken skills migrate` to rewrite the key to `metadata.wirken.requires.bins`. The markdown body is injected verbatim into the agent's system prompt. Skills that require host binaries (e.g., `curl`, `gh`, `tmux`) work if those binaries are installed.
 
 No compilation step. No conversion. The files are identical.
 

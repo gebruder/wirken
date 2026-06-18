@@ -9,7 +9,7 @@ Wirken's audit chain is exposed to out-of-process consumers (a local SIEM forwar
 | Transport | Cap'n Proto over Unix domain socket (Linux/macOS) or named pipe (Windows) | HTTPS POST out from wirken |
 | Authentication | Ed25519 challenge-response, hook process holds keypair | Optional HMAC-SHA-256 over the request body |
 | Direction | Pull (consumer drives cursor) | Push (wirken polls `session_events`, posts batches) |
-| Replay control | Consumer-driven `sinceSeq` cursor | Per-session cursor in the wirken-side worker |
+| Replay control | Consumer-driven `sinceSeq` cursor | Single global cursor over `session_events.id` in the wirken-side worker, one indexed range query per poll across all sessions |
 | Co-location | Must run at the same UID as the gateway | Can run anywhere reachable from the gateway |
 | Payload shape | JSON-serialized `SessionEvent` inside a Cap'n Proto wrapper | JSON envelope built per target (`docs/siem-forwarder.md`) |
 
@@ -104,7 +104,7 @@ The webhook pipe (below) carries a curated default-forwarded subset defined in `
 
 The legacy and typed pipes both post HTTPS batches to an operator-configured endpoint. Full wire shape, HMAC details, target-specific envelopes, and the include / exclude variant policy are documented in `docs/siem-forwarder.md`.
 
-The typed pipe polls `SessionLog::get_since` per session and ships batches; cursor advances only on a successful POST so transient transport failures replay rather than drop. HMAC, when configured, is computed over the exact serialized request body via `crates/audit/src/siem.rs::compute_webhook_signature`.
+The typed pipe holds a single global cursor over `session_events.id` and issues one indexed range query per poll across all sessions (`get_events_after`), then ships batches; the cursor advances only on a successful POST so transient transport failures replay rather than drop. HMAC, when configured, is computed over the exact serialized request body via `crates/audit/src/siem.rs::compute_webhook_signature`.
 
 The webhook surface is the right pick when the consumer is a cloud SIEM or an off-host pipeline. It is not the right pick when the consumer is a local sidecar at the same UID as the gateway; the observe-hook surface has stronger authentication and tighter cursor semantics for that case.
 
@@ -112,7 +112,7 @@ The webhook surface is the right pick when the consumer is a cloud SIEM or an of
 
 The Ed25519 handshake binds the consumer's key to the `hookId` it claims, so an off-host attacker who has not registered a key cannot impersonate a hook. The HMAC pipe binds the message body to a shared secret, so an off-host attacker who has not stolen the secret cannot forge a delivery.
 
-Neither surface defends against a same-UID attacker. The hook process's secret key is a file on disk at the wirken UID; the HMAC secret lives in `siem.json` at the same UID. A same-UID attacker who can read those can produce indistinguishable subscription clients. The chain itself is tamper-evident via the per-session hash chain and the signed `ChainHead` rows; consumers that want to detect mid-stream tampering verify the chain offline with `wirken session verify`, not on the wire.
+Neither surface defends against a same-UID attacker. The hook process's secret key is a file on disk at the wirken UID; the HMAC secret lives in `siem.json` at the same UID. A same-UID attacker who can read those can produce indistinguishable subscription clients. The chain itself is tamper-evident via the per-session hash chain and the signed `ChainHead` rows; consumers that want to detect mid-stream tampering verify the chain offline with `wirken sessions verify`, not on the wire.
 
 ## Building a consumer
 

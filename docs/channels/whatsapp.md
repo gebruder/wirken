@@ -9,4 +9,4 @@ The WhatsApp adapter targets the [Meta Cloud API](https://developers.facebook.co
 
 The adapter listens on `127.0.0.1:3979` (override with `WIRKEN_WHATSAPP_PORT`) for inbound webhook POSTs from Meta and posts replies through the Cloud API.
 
-Note: the interactive `wirken setup` wizard and `wirken channel add whatsapp` only prompt for `whatsapp-token` today. The remaining vault entries above must be populated separately, or wait for the WhatsApp setup flow to land.
+Both the interactive `wirken setup` wizard and `wirken channel add whatsapp` collect all four Cloud API credentials (access token, phone-number-id, verify-token, app-secret) and store them in the vault.

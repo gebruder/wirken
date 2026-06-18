@@ -101,7 +101,7 @@ These are surfaces Microsoft owns and wirken does not replicate:
 
 ## Audit chain stays primary
 
-Wirken's hash-chained session log is the local source of truth and the offline-verifiable artifact. The OTel projection is additive to that chain, not a replacement. `wirken session verify` continues to verify the hash chain and Ed25519 attestation offline, independent of any cloud governance plane.
+Wirken's hash-chained session log is the local source of truth and the offline-verifiable artifact. The OTel projection is additive to that chain, not a replacement. `wirken sessions verify` continues to verify the hash chain and Ed25519 attestation offline, independent of any cloud governance plane.
 
 A consumer that wants the full event stream with cryptographic integrity verifies it against the chain. A consumer that wants OTel-shaped projection for cross-signal correlation in Defender or another OTel-aware backend reads the OTel stream. Both come from the same source events.
 
