@@ -196,6 +196,10 @@ enum ChannelCommands {
         /// Reads WIRKEN_WHATSAPP_APP_SECRET if not supplied.
         #[arg(long)]
         app_secret: Option<String>,
+        /// Google Chat: Cloud project number used as the inbound webhook JWT
+        /// audience. Reads WIRKEN_GOOGLE_CHAT_PROJECT_NUMBER if not supplied.
+        #[arg(long)]
+        project_number: Option<String>,
     },
     /// List configured channels
     List,
@@ -963,6 +967,7 @@ async fn main() -> Result<()> {
                 phone_number_id,
                 verify_token,
                 app_secret,
+                project_number,
             } => {
                 commands::channel::add(
                     &channel,
@@ -971,6 +976,7 @@ async fn main() -> Result<()> {
                         phone_number_id,
                         verify_token,
                         app_secret,
+                        project_number,
                     },
                 )
                 .await

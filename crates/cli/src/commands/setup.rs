@@ -919,9 +919,19 @@ async fn setup_google_chat_channel(
 
     let token = super::read_secret("  Service account bearer token: ")?;
 
+    println!("  The Cloud project number is the audience every inbound webhook");
+    println!("  JWT must match; the adapter will not start without it.");
+    let project_number = super::channel::collect_google_chat_project_number(None)?;
+
     register_channel("google-chat", &token, cfg, data).await?;
 
-    println!("  google-chat: token encrypted.");
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = wirken_vault::probe_keychain(data, move || pp);
+    let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    super::channel::store_google_chat_project_number(&store, &project_number)?;
+
+    println!("  google-chat: token and project number encrypted.");
     Ok(())
 }
 

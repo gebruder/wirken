@@ -39,6 +39,7 @@ pub struct AddFlags {
     pub phone_number_id: Option<String>,
     pub verify_token: Option<String>,
     pub app_secret: Option<String>,
+    pub project_number: Option<String>,
 }
 
 pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
@@ -49,6 +50,7 @@ pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
         "whatsapp" => add_whatsapp(&cfg, &data, flags).await,
         "slack" => add_slack(&cfg, &data, flags).await,
         "signal" => add_signal(&cfg, &data).await,
+        "google-chat" => add_google_chat(&cfg, &data, flags).await,
         _ => add_simple(channel, &cfg, &data, flags).await,
     }
 }
@@ -191,6 +193,38 @@ async fn add_simple(
     register_channel(channel, &token, cfg, data).await?;
     println!("  Channel '{channel}' added.");
     println!("  Start the adapter with: wirken adapter {channel}");
+    Ok(())
+}
+
+/// Google Chat needs two vault entries before the adapter will run:
+/// the service-account bearer token (outbound REST) and the Cloud
+/// project number (the audience every inbound webhook JWT is checked
+/// against). The adapter hard-fails at construction when the project
+/// number is absent, so collect and persist both here instead of
+/// registering a channel that cannot start. Mirrors the WhatsApp
+/// multi-field path.
+async fn add_google_chat(
+    cfg: &GatewayConfig,
+    data: &std::path::Path,
+    flags: AddFlags,
+) -> Result<()> {
+    let token = resolve_token("google-chat", flags.token.as_deref(), true)?;
+    let project_number = collect_google_chat_project_number(flags.project_number)?;
+
+    register_channel("google-chat", &token, cfg, data).await?;
+
+    // register_channel opened the vault with the cached passphrase;
+    // re-open the same way so the project-number write re-derives the
+    // identical wrapping key (see register_channel's comment).
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    store_google_chat_project_number(&store, &project_number)?;
+
+    println!("  google-chat: project number encrypted.");
+    println!("  Channel 'google-chat' added.");
+    println!("  Start the adapter with: wirken adapter google-chat");
     Ok(())
 }
 
@@ -357,6 +391,42 @@ pub fn store_whatsapp_creds(store: &CredentialStore, creds: &WhatsAppCreds) -> R
             None,
         )
         .context("Failed to store WhatsApp app secret")?;
+    Ok(())
+}
+
+/// Resolve the Google Chat Cloud project number from flag, env var
+/// (`WIRKEN_GOOGLE_CHAT_PROJECT_NUMBER`), or interactive prompt. This
+/// is the audience claim every inbound webhook JWT must carry; the
+/// adapter refuses to start without it (see
+/// `crates/adapter-google-chat/src/auth.rs`). Shared by `wirken
+/// channel add google-chat` and the setup wizard so both produce the
+/// same vault state.
+pub fn collect_google_chat_project_number(flag: Option<String>) -> Result<String> {
+    resolve_with_validation(
+        "Google Chat Cloud project number (inbound JWT audience)",
+        flag,
+        "WIRKEN_GOOGLE_CHAT_PROJECT_NUMBER",
+        false,
+        validate_project_number,
+    )
+}
+
+/// Write the Google Chat project number to the vault under the exact
+/// key the adapter retrieves at startup in
+/// `crates/cli/src/commands/adapter.rs`.
+pub fn store_google_chat_project_number(
+    store: &CredentialStore,
+    project_number: &str,
+) -> Result<()> {
+    store
+        .store(
+            "google-chat-project-number",
+            "google-chat",
+            &VaultSecret::new(project_number.to_string()),
+            None,
+            None,
+        )
+        .context("Failed to store Google Chat project number")?;
     Ok(())
 }
 
@@ -539,6 +609,25 @@ pub fn validate_app_secret(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Google Cloud project number: a non-empty decimal integer. The
+/// inbound webhook JWT's `aud` claim is compared against it as an
+/// exact string, so a transposed or mistyped digit silently drops
+/// every inbound message rather than erroring. Reject non-numeric
+/// input at entry. Note this is the project *number* (all digits),
+/// not the project *ID* (which may contain letters and hyphens).
+pub fn validate_project_number(s: &str) -> Result<()> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("project number cannot be empty");
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_digit()) {
+        anyhow::bail!(
+            "project number must be numeric (the Google Cloud project number, not the project ID)"
+        );
+    }
+    Ok(())
+}
+
 pub async fn list() -> Result<()> {
     let cfg = config();
     let registry = AdapterRegistry::open(&cfg.adapters_db_path())
@@ -690,6 +779,7 @@ mod tests {
             phone_number_id: Some("123456789012345".into()),
             verify_token: Some("my_verify_token".into()),
             app_secret: Some("00000000000000000000000000000000".into()),
+            project_number: None,
         }
     }
 
@@ -759,5 +849,52 @@ mod tests {
         assert_eq!(token.expose(), "fake_token_value");
         let (phone, _) = store.retrieve("whatsapp-phone-number-id").unwrap();
         assert_eq!(phone.expose(), "123456789012345");
+    }
+
+    // -- Google Chat --------------------------------------------------
+
+    #[test]
+    fn project_number_accepts_numeric() {
+        assert!(validate_project_number("1234567890").is_ok());
+        assert!(validate_project_number("  1234567890  ").is_ok());
+    }
+
+    #[test]
+    fn project_number_rejects_empty_and_non_numeric() {
+        assert!(validate_project_number("").is_err());
+        assert!(validate_project_number("   ").is_err());
+        assert!(validate_project_number("123-456").is_err());
+        // The project ID form (letters/hyphens) is the common mix-up.
+        assert!(validate_project_number("my-project-123").is_err());
+    }
+
+    #[test]
+    fn collect_google_chat_project_number_from_flag_succeeds() {
+        let n = collect_google_chat_project_number(Some("1234567890".into()))
+            .expect("flag should validate");
+        assert_eq!(n, "1234567890");
+    }
+
+    #[test]
+    fn google_chat_setup_persists_project_number_vault_key() {
+        // Regression: the adapter hard-fails at startup without
+        // `google-chat-project-number` in the vault. Lock the key the
+        // collect+store path writes so neither `channel add` nor the
+        // setup wizard can drop it again.
+        use tempfile::TempDir;
+        use wirken_vault::{AgeFileKeychain, CredentialStore};
+
+        let tmp = TempDir::new().unwrap();
+        let vault_path = tmp.path().join("vault.db");
+        let keychain = AgeFileKeychain::new(tmp.path().join("keychain"), "test-passphrase".into());
+        let store = CredentialStore::open(&vault_path, &keychain).expect("open credential store");
+
+        let n = collect_google_chat_project_number(Some("1234567890".into())).expect("validate");
+        store_google_chat_project_number(&store, &n).expect("store round-trip");
+
+        let (secret, _) = store
+            .retrieve("google-chat-project-number")
+            .expect("adapter startup key must be present");
+        assert_eq!(secret.expose(), "1234567890");
     }
 }
