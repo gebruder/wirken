@@ -67,7 +67,7 @@ capnp = "0.26"
 # path_open(TRUNCATE) bypasses FilePerms::WRITE; fixed in 44.0.2 /
 # 45.0.0). Floor raised to 45.0.2 per RUSTSEC-2026-0182 (WASIp1
 # fd_renumber leak; fixed in 45.0.2).
-wasmtime = "45.0.2"
+wasmtime = "46.0.0"
 bollard = "0.21"
 
 # CLI
