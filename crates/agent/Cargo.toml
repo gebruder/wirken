@@ -30,7 +30,7 @@ url = "2"
 base64 = "0.22"
 bollard = { workspace = true }
 wasmtime = { workspace = true }
-wasmtime-wasi = "45.0.0"
+wasmtime-wasi = "46.0.0"
 futures-util = "0.3"
 async-trait = { workspace = true }
 capnp = { workspace = true }
