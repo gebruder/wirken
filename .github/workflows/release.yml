@@ -248,6 +248,9 @@ jobs:
       id-token: write # OIDC token for Sigstore signing
       contents: write # attach the attestation to the release
       actions: read # read workflow run metadata for the provenance
+    # Referenced by version tag, not a commit SHA, on purpose: the SLSA
+    # generator resolves its own ref to produce provenance and rejects a
+    # hash reference. Do not "pin" this to a SHA.
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: ${{ needs.release.outputs.hashes }}
