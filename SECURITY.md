@@ -2,11 +2,14 @@
 
 ## Supported Versions
 
-| Version | Supported            |
-| ------- | -------------------- |
-| 1.9.x   | Yes                  |
-| 1.8.x   | Security fixes only  |
-| < 1.8   | No                   |
+Only the latest release is supported. Security fixes ship forward in the
+next release; there are no backports to earlier versions. Upgrade to the
+latest release to receive them.
+
+| Version | Supported |
+| ------- | --------- |
+| 1.9.x   | Yes       |
+| < 1.9   | No        |
 
 ## Reporting a Vulnerability
 
@@ -17,7 +20,7 @@ Report security vulnerabilities via one of:
 
 Do not open a public issue for security vulnerabilities.
 
-You should receive an initial response within 72 hours. If the vulnerability is accepted, a fix will be released as a patch version (e.g., 1.8.1) and the advisory will be published after the fix is available.
+You should receive an initial response within 72 hours. If the vulnerability is accepted, a fix will be released in the next version (e.g., 1.9.1) and the advisory will be published after the fix is available.
 
 ## Release signing
 

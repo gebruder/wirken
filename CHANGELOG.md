@@ -8,10 +8,36 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
-## Unreleased
+## [1.9.1] - 2026-06-30
+
+### Security
+
+- `wasmtime` and `wasmtime-wasi` to 46.0.1 for RUSTSEC-2026-0188: WASI
+  hard-link and rename operations bypassed `FilePerms` on the
+  destination path.
+- `anyhow` to 1.0.103 for RUSTSEC-2026-0190: `Error::downcast_mut`
+  unsoundness on a `.context()`-wrapped error.
+
+### Fixed
+
+- Google Chat setup persists the project number. The adapter requires a
+  non-empty `app_project_number` at construction, but neither `channel
+  add google-chat` nor the setup wizard wrote it, so the documented
+  setup produced a channel that could not boot. Both paths now collect
+  it (`--project-number` flag, `WIRKEN_GOOGLE_CHAT_PROJECT_NUMBER`, or
+  prompt) and store it under `google-chat-project-number`.
+
+### Dependencies
+
+- `cron` 0.17.0, `rustls` 0.23.41, `actions/checkout` 7, `actions/cache`
+  6.0.0, `softprops/action-gh-release` 3.0.1.
 
 ### Documentation
 
+- `SECURITY.md` supported-versions policy now states that only the
+  latest release is supported and that security fixes ship forward
+  rather than being backported, replacing a table that claimed a 1.8.x
+  security-fix branch the project does not maintain.
 - `audit-cli.md` now states that the default `--require-signed` anchor
   (`<data_dir>/audit/audit-signing.pub`) guards only against an
   accidental signing-key mismatch, not a same-UID attacker who can
