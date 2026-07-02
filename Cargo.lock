@@ -5033,7 +5033,7 @@ dependencies = [
 [[package]]
 name = "tinfoil"
 version = "0.1.0"
-source = "git+https://github.com/tinfoilsh/tinfoil-rs?tag=v0.1.0#af8187691940315039eb2cd450e75d22c3588403"
+source = "git+https://github.com/tinfoilsh/tinfoil-rs?tag=v0.1.1#f7fe74e3bcee615bc1b1a66030e54d1fff61f726"
 dependencies = [
  "async-openai",
  "async-stream",
