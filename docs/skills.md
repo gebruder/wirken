@@ -34,6 +34,8 @@ The frontmatter fields:
 
 Wirken ships with 16 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
 
+The skills directory is always under `$HOME/.wirken` (from `HOME`, or `USERPROFILE` on Windows), not `WIRKEN_DATA_DIR`. The gateway exports `WIRKEN_DATA_DIR` to the child processes it spawns (MCP proxy, channel adapters) but does not read it for its own data directory, so skill discovery follows `HOME`. Relocating skill discovery means changing `HOME`.
+
 ### Auto-invocation vs explicit invocation
 
 Skills are explicit-invocation by default. The agent does not auto-fire a skill from a generic prompt that matches its description; the operator (or the skill's wrapper, like the Lyrik runner) invokes it by name with a slash prefix.
@@ -191,8 +193,13 @@ The first `sign` generates a signing keypair at `~/.wirken/signing-key.hex`. The
 
 ## Skill compatibility
 
-Wirken reads the same `SKILL.md` frontmatter format as OpenClaw. Most OpenClaw skills work without modification:
+Wirken reads the same `SKILL.md` frontmatter format as OpenClaw, so the files copy over directly:
 
 ```bash
 cp -r ~/.openclaw/skills/* ~/.wirken/skills/
 ```
+
+A copied skill is not loadable as-is; two steps follow the copy:
+
+- **Sign it, or opt into unsigned.** The load-time signature gate refuses unsigned bundles by default. Sign each with `wirken skills sign <dir>`, or set `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` to load unsigned. See [signing.md](signing.md#skill-signing).
+- **Migrate the frontmatter.** Run `wirken skills migrate` to rewrite `metadata.openclaw.*` to `metadata.wirken.*` and add a default (deny-all) `permissions` block. Without a wirken `permissions` block a skill loads but has no capability. See [skill-authoring.md](skill-authoring.md#metadataopenclaw-dropped-in-140).
