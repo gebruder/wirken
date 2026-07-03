@@ -503,6 +503,31 @@ async fn credential_host_binding_refuses_mismatched_host() {
     ));
 }
 
+// ---- 13. host checked at injection == host dialed ------------------------
+
+#[test]
+fn parsed_host_is_stable_across_reparse() {
+    // The resolver checks `url.host_str()`; `EgressClient::request` and
+    // the reqwest client re-parse `url.as_str()`. The tool relies on
+    // that re-parse yielding the same host, so the host checked at
+    // injection is the host dialed. Assert the round-trip invariant
+    // directly, including normalization (case, IDN, subdomain, port).
+    for raw in [
+        "https://Allowed.Example/path?q=1",
+        "https://xn--e1afmkfd.example/",
+        "https://sub.allowed.example:8443/x",
+        "https://records.example.org/api/search",
+    ] {
+        let u = url::Url::parse(raw).unwrap();
+        let reparsed = url::Url::parse(u.as_str()).unwrap();
+        assert_eq!(
+            u.host_str(),
+            reparsed.host_str(),
+            "host must be stable across re-parse for {raw}"
+        );
+    }
+}
+
 // ---- profile helpers -----------------------------------------------------
 
 fn perms(yaml: &str) -> PhasedEffective {
