@@ -252,6 +252,14 @@ Stated in the same plain terms as the egress boundary comment
   gateway process to set the header. A compromised gateway process can
   read it; that is the same trust boundary as the vault itself, not a
   boundary this tool adds.
+- **Operator egress proxy.** The request client honors `HTTPS_PROXY` /
+  `HTTP_PROXY`, so where an operator forces egress through a proxy the
+  credential-bearing request traverses it. This is intended: enterprises
+  legitimately route egress through proxies. The credential stays
+  TLS-protected end-to-end to the bound host, the allowlist and host
+  binding are still enforced on the target host, and a proxy could read
+  the credential only with an operator-trusted MITM certificate, which
+  is the operator's own trust decision, not a boundary this tool adds.
 - **Request-body content.** A model-supplied POST body to a declared
   search path is sent as-is; the tool does not inspect it for
   exfiltration. The `post_paths` declaration trusts the endpoint.
