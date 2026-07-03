@@ -50,3 +50,6 @@ mod tests;
 
 #[cfg(test)]
 mod http_tool_tests;
+
+#[cfg(test)]
+mod example_skill_e2e_tests;
