@@ -214,8 +214,13 @@ pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> R
     // operator-supplied. Without --require-signed the verifier stays
     // report-only and the anchor set is never consulted, so prior
     // behaviour is preserved exactly.
+    // Anchor provenance drives a loud warning so verifying against a
+    // co-resident (same-data-dir) anchor is never a silent default: that
+    // anchor is swappable by the same-UID attacker who can rewrite the
+    // chain, so such a run is not tamper-evident against that attacker.
+    let mut anchor_note: Option<String> = None;
     if require_signed {
-        let anchor_set = resolve_anchors(anchors, &cfg.data_dir)?;
+        let (anchor_set, coresident_default) = resolve_anchors(anchors, &cfg.data_dir)?;
         if anchor_set.is_empty() {
             anyhow::bail!(
                 "--require-signed needs an audit-signing trust anchor, but none was \
@@ -232,11 +237,32 @@ pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> R
                 unanchored.join(", ")
             );
         }
+        if coresident_default {
+            anchor_note = Some(format!(
+                "verified against the co-resident default anchor {}. A same-UID attacker \
+                 can rewrite the chain and swap this key together and still pass, so this \
+                 run is NOT tamper-evident against that attacker. Pass an out-of-band \
+                 --anchor (a hex value or a file outside the data dir) for real assurance.",
+                audit_public_key_path(&cfg.data_dir).display()
+            ));
+        }
+    } else {
+        anchor_note = Some(
+            "report-only: the hash chain and self-attested chain-head signatures were \
+             checked, but no operator trust anchor was consulted, so a same-UID rewrite \
+             is not detected. Pass --require-signed with an out-of-band --anchor for \
+             tamper-evident verification."
+                .to_string(),
+        );
+    }
+
+    if let Some(note) = &anchor_note {
+        eprintln!("  warning (audit anchor): {note}");
     }
 
     match format {
-        "json" => print_verify_json(&result, require_signed),
-        "human" | "" => print_verify_human(&result, require_signed),
+        "json" => print_verify_json(&result, require_signed, anchor_note.as_deref()),
+        "human" | "" => print_verify_human(&result, require_signed, anchor_note.as_deref()),
         other => anyhow::bail!("--format must be 'human' or 'json', got '{other}'"),
     }
 }
@@ -247,9 +273,16 @@ pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> R
 /// form). When no `--anchor` is given, the local
 /// `<data_dir>/audit/audit-signing.pub` is used as the default anchor
 /// when present, so a chain signed by the local key verifies without
-/// extra flags. Returns an empty set only when no flag is given and the
-/// default public-key file is absent; the caller fails closed on that.
-fn resolve_anchors(anchors: &[String], data_dir: &Path) -> Result<BTreeSet<String>> {
+/// extra flags.
+///
+/// The second return value is `true` when the set came from that
+/// co-resident default rather than an out-of-band `--anchor`. That
+/// anchor lives beside `audit.db`, so a same-UID attacker can swap it
+/// together with the chain and still pass; the caller surfaces a loud
+/// warning so this is not a silent default. Returns an empty set only
+/// when no flag is given and the default public-key file is absent; the
+/// caller fails closed on that.
+fn resolve_anchors(anchors: &[String], data_dir: &Path) -> Result<(BTreeSet<String>, bool)> {
     let mut set = BTreeSet::new();
     if anchors.is_empty() {
         let default_pub = audit_public_key_path(data_dir);
@@ -260,8 +293,9 @@ fn resolve_anchors(anchors: &[String], data_dir: &Path) -> Result<BTreeSet<Strin
                 parse_anchor_key(&hex)
                     .with_context(|| format!("parse default anchor {}", default_pub.display()))?,
             );
+            return Ok((set, true));
         }
-        return Ok(set);
+        return Ok((set, false));
     }
     for value in anchors {
         let raw = if Path::new(value).is_file() {
@@ -271,7 +305,7 @@ fn resolve_anchors(anchors: &[String], data_dir: &Path) -> Result<BTreeSet<Strin
         };
         set.insert(parse_anchor_key(&raw).with_context(|| format!("parse anchor '{value}'"))?);
     }
-    Ok(set)
+    Ok((set, false))
 }
 
 /// Validate an Ed25519 public-key hex string and normalise it to
@@ -337,7 +371,14 @@ fn print_log_human(
     Ok(())
 }
 
-fn print_verify_human(result: &VerifyResult, require_signed: bool) -> Result<()> {
+fn print_verify_human(
+    result: &VerifyResult,
+    require_signed: bool,
+    anchor_note: Option<&str>,
+) -> Result<()> {
+    if let Some(note) = anchor_note {
+        println!("  WARNING (audit anchor): {note}");
+    }
     match result {
         VerifyResult::Ok {
             rows_verified,
@@ -496,8 +537,12 @@ fn print_log_json(
     Ok(())
 }
 
-fn print_verify_json(result: &VerifyResult, require_signed: bool) -> Result<()> {
-    let body = match result {
+fn print_verify_json(
+    result: &VerifyResult,
+    require_signed: bool,
+    anchor_note: Option<&str>,
+) -> Result<()> {
+    let mut body = match result {
         VerifyResult::Ok {
             rows_verified,
             sessions_total,
@@ -583,6 +628,9 @@ fn print_verify_json(result: &VerifyResult, require_signed: bool) -> Result<()> 
             "require_signed": require_signed,
         }),
     };
+    if let Some(note) = anchor_note {
+        body["anchor_warning"] = serde_json::Value::String(note.to_string());
+    }
     println!("{}", serde_json::to_string_pretty(&body)?);
     if matches!(
         result,
@@ -696,10 +744,14 @@ mod tests {
         std::fs::write(&pub_path, format!("{file_key}\n")).unwrap();
 
         let anchors = vec![hex.clone(), pub_path.to_string_lossy().into_owned()];
-        let set = resolve_anchors(&anchors, tmp.path()).unwrap();
+        let (set, coresident) = resolve_anchors(&anchors, tmp.path()).unwrap();
         assert_eq!(set.len(), 2);
         assert!(set.contains(&hex));
         assert!(set.contains(&file_key));
+        assert!(
+            !coresident,
+            "explicit --anchor is out of band, not co-resident"
+        );
     }
 
     #[test]
@@ -710,13 +762,19 @@ mod tests {
         let key = "56".repeat(32);
         std::fs::write(&pub_path, key.clone()).unwrap();
 
-        let set = resolve_anchors(&[], tmp.path()).unwrap();
+        let (set, coresident) = resolve_anchors(&[], tmp.path()).unwrap();
         assert_eq!(set, [key].into_iter().collect());
+        assert!(
+            coresident,
+            "local-pub fallback is the co-resident default and must be flagged loud"
+        );
     }
 
     #[test]
     fn resolve_anchors_empty_without_flag_or_local_pub() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(resolve_anchors(&[], tmp.path()).unwrap().is_empty());
+        let (set, coresident) = resolve_anchors(&[], tmp.path()).unwrap();
+        assert!(set.is_empty());
+        assert!(!coresident);
     }
 }
