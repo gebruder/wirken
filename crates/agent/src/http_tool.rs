@@ -156,33 +156,11 @@ pub async fn execute(
         .unwrap_or(DEFAULT_TIMEOUT_MS)
         .clamp(1, MAX_TIMEOUT_MS);
 
-    // Resolve the credential host-side. The secret lives only in this
-    // `ResolvedSecret` and the header line built from it; it is never
-    // stored on a struct, returned, logged, or audited.
-    let resolved = match &credential {
-        Some(name) => {
-            let r = resolver.ok_or_else(|| {
-                AgentError::Tool(
-                    "no credential resolver configured; this wirken build cannot resolve \
-                     vault credentials for http_request"
-                        .into(),
-                )
-            })?;
-            // The credential's own host binding is enforced here against
-            // the request host, independent of the skill's egress
-            // allowlist, so a skill cannot widen where the secret goes.
-            match r.resolve(name, url.host_str().unwrap_or_default()) {
-                Ok(secret) => Some(secret),
-                Err(e) => return Ok(fail(format!("credential '{name}': {e}"))),
-            }
-        }
-        None => None,
-    };
-
-    // Build through EgressClient: egress allowlist check + rate reserve
-    // + no-redirect client. A non-allowlisted host returns EgressDenied,
-    // which the runtime records as SkillPermissionDenied (a refusal, not
-    // a prompt).
+    // Build through EgressClient FIRST: the egress allowlist check runs
+    // before the credential is resolved, so an egress-denied host never
+    // touches the vault (no decrypt, no last_used_at bump). A
+    // non-allowlisted host returns EgressDenied, which the runtime
+    // records as SkillPermissionDenied (a refusal, not a prompt).
     let mut builder = http
         .request(method.clone(), url.as_str())
         .await
@@ -197,12 +175,30 @@ pub async fn execute(
     {
         builder = builder.body(b.to_string());
     }
-    // Inject the vault credential as the sole auth header, last.
-    if let Some(secret) = &resolved {
-        builder = builder.header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", secret.expose()),
-        );
+
+    // Resolve the credential host-side, only now that egress has passed.
+    // The secret lives only in this `ResolvedSecret` and the header built
+    // from it; it is never stored, returned, logged, or audited. The
+    // credential's own host binding is enforced against the request host,
+    // independent of the skill's egress allowlist, so a skill cannot
+    // widen where the secret goes. Injected last, as the sole auth header.
+    if let Some(name) = &credential {
+        let r = resolver.ok_or_else(|| {
+            AgentError::Tool(
+                "no credential resolver configured; this wirken build cannot resolve \
+                 vault credentials for http_request"
+                    .into(),
+            )
+        })?;
+        match r.resolve(name, url.host_str().unwrap_or_default()) {
+            Ok(secret) => {
+                builder = builder.header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", secret.expose()),
+                );
+            }
+            Err(e) => return Ok(fail(format!("credential '{name}': {e}"))),
+        }
     }
 
     let resp = match builder.send().await {

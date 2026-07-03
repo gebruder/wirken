@@ -260,6 +260,13 @@ Stated in the same plain terms as the egress boundary comment
   binding are still enforced on the target host, and a proxy could read
   the credential only with an operator-trusted MITM certificate, which
   is the operator's own trust decision, not a boundary this tool adds.
+- **Zero-skill (Legacy) mode.** An agent with no skills attached runs in
+  Legacy mode, where the tool surface is unrestricted (the same posture
+  that already gives it unrestricted `exec`). There, `http_request` can
+  GET any host with no egress allowlist. It still cannot attach a
+  credential or POST, since both require a skill declaration. This is the
+  documented Legacy full-surface posture, not a new escalation; any
+  skill-bound agent is egress-restricted as described above.
 - **Request-body content.** A model-supplied POST body to a declared
   search path is sent as-is; the tool does not inspect it for
   exfiltration. The `post_paths` declaration trusts the endpoint.
@@ -279,6 +286,12 @@ Stated in the same plain terms as the egress boundary comment
 - Credential-host matching is exact per host; there is no `*.` wildcard
   for credential bindings (the egress allowlist has one, but a credential
   binding does not, by choice).
+- Credential-host bindings are stored and matched as ASCII/punycode. A
+  `--host` given in unicode (`café.example`) is stored unnormalized and
+  never matches the request host's punycode form (`xn--caf-dma.example`),
+  so it is silently unusable. This fails closed (no security impact) but
+  is a footgun; normalizing `--host` to lowercase punycode at store time
+  is a pending fix (adds a `url` dependency to the CLI).
 - Production CLI wiring is in place: the gateway opens the vault at
   startup and attaches a `VaultCredentialResolver` to the agent factory,
   so every waked agent resolves host-bound credentials. If the vault is
