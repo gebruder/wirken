@@ -72,6 +72,11 @@ wirken skills search weather
 wirken skills install weather
 ```
 
+> Skills that call the `http_request` tool declare the `credentials.allow`
+> and `http.post_paths` permission fields, which **require Wirken 1.10 or
+> later**. An older binary refuses to load such a skill (fail-closed), and
+> the failure reads as a parse rejection, so upgrade first if you see one.
+
 ## Check everything is working
 
 ```bash

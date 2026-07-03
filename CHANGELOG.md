@@ -8,6 +8,70 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.10.0] - 2026-07-03
+
+### Added
+
+- `http_request` built-in tool. Egress-mediated outbound HTTPS with
+  vault-held credentials injected host-side as `Authorization: Bearer`,
+  never visible to the model or placed in a model-composed body.
+  Read-oriented: `GET`/`HEAD` plus explicitly declared POST paths; other
+  verbs are refused. Design note:
+  [docs/design/http-request-tool.md](docs/design/http-request-tool.md).
+- Two skill permission fields: `credentials.allow` (which vault
+  credentials a skill may name) and `http.post_paths` (the exact POST
+  endpoints it may call). The permissions block is `deny_unknown_fields`,
+  so a skill declaring either field requires Wirken 1.10 or later; an
+  older binary refuses to load it. The refusal is fail-closed but reads
+  as a parse rejection, so skill install docs should state the version.
+- Credential-host binding. `wirken credential add --host <host>` binds a
+  vault credential to permitted hosts. `http_request` refuses to send it
+  to any other host, and a skill's frontmatter cannot widen the binding.
+- `SessionEvent::HttpRequest` audit event. Every completed `http_request`
+  records method, host, path, status, and the credential name (never its
+  value) in the session hash chain. SIEM parsers reading the audit stream
+  see a new event type.
+- `tdx-assets` example skill (`skills/examples/tdx-assets/`): a read-only
+  TeamDynamix staff, device, and location lookup built on `http_request`,
+  with reference.md, INSTALL.md, and ACCEPTANCE.md, plus end-to-end
+  enforcement coverage.
+
+### Changed
+
+- Credential vault migration (one-time, fail-closed). The credential
+  schema gains `allowed_hosts`. Pre-existing credentials migrate with an
+  empty host set, which leaves them unbound and therefore unusable by
+  `http_request` until re-added with `wirken credential add --host`. This
+  is deliberate: an unbound credential denies rather than travelling to
+  an unvetted host. The migration is idempotent and fails closed.
+- `wirken audit verify` warns when the signing anchor is the co-resident
+  default, or a named anchor file inside the data directory. A co-resident
+  anchor is not tamper-evident against an attacker with data-directory
+  write access; pass an out-of-band `--anchor`. See
+  [docs/audit-cli.md](docs/audit-cli.md).
+- Skill documentation corrected against the code: removed a false
+  unsigned-bypass audit-row claim and a `cp -r` signature-gate omission,
+  and refreshed stale source anchors.
+
+### Security
+
+- The `http_request` credential path went through two independent audits
+  (a build-time properties audit and a cold-pass re-audit) and carries
+  adversarial credential-audit tests. What it enforces: the secret only
+  ever travels as a host-injected Bearer header, bound to permitted hosts,
+  never in a model-composed body, and every completed call is recorded in
+  the tamper-evident session chain. What it does not cover, documented as
+  limitations in the design note: DNS rebinding, a server echoing the
+  token, port scoping, request-body content, and an operator-configured
+  egress proxy.
+- `cmov` to 0.5.4 for GHSA-3rjw-m598-pq24 / CVE-2026-50185 (aarch64
+  constant-time conditional move).
+- `quick-xml` DoS advisories RUSTSEC-2026-0194/0195 ignored with a dated
+  backstop pending the upstream feed-rs update (transitive; not on an
+  attacker-reachable parsing path).
+- Dependency bumps: tinfoil 0.1.1, open 5.3.6, uuid 1.23.4, and
+  actions/cache 6.1.0.
+
 ## [1.9.1] - 2026-06-30
 
 ### Security

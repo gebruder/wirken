@@ -1,5 +1,11 @@
 # Installing tdx-assets
 
+**Requires Wirken 1.10 or later.** The skill declares `credentials.allow`
+and `http.post_paths`, permission fields added in 1.10. An older binary
+refuses to load it (fail-closed), and the error reads as a parse
+rejection rather than a version mismatch, so check your version first:
+`wirken --version`.
+
 For whoever installs this skill. Steps 1-5 are one-time; step 6 (token
 refresh) is recurring until issue
 [gebruder/wirken#178](https://github.com/gebruder/wirken/issues/178) lands.
