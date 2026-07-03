@@ -30,6 +30,37 @@ use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
 
+/// Host-side `http_request` credential resolver backed by the vault.
+/// The `CredentialStore` (rusqlite, `!Sync`) is wrapped in a `Mutex` so
+/// the resolver is `Send + Sync`. `resolve` returns only a
+/// `ResolvedSecret`; the plaintext never crosses back into logs, tool
+/// results, or model context.
+struct VaultCredentialResolver {
+    store: std::sync::Mutex<CredentialStore>,
+}
+
+impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
+    fn resolve(
+        &self,
+        name: &str,
+    ) -> Result<wirken_agent::http_tool::ResolvedSecret, wirken_agent::http_tool::CredentialError>
+    {
+        use wirken_agent::http_tool::{CredentialError, ResolvedSecret};
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| CredentialError::Backend("vault mutex poisoned".into()))?;
+        match store.retrieve(name) {
+            Ok((secret, _)) => Ok(ResolvedSecret::new(secret.expose().to_string())),
+            Err(wirken_vault::VaultError::NotFound(_)) => {
+                Err(CredentialError::NotFound(name.to_string()))
+            }
+            // VaultError never carries the secret value, only names/kinds.
+            Err(e) => Err(CredentialError::Backend(e.to_string())),
+        }
+    }
+}
+
 /// Run the gateway daemon.
 pub async fn run(port: Option<u16>) -> Result<()> {
     let cfg = config();
@@ -1092,6 +1123,25 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let egress_dispatcher =
         Arc::new(wirken_gateway::egress_dispatcher::EgressDispatcher::default());
     factory.attach_egress_dispatcher(egress_dispatcher.clone());
+
+    // --- http_request credential resolver ---
+    //
+    // Open the vault as a long-lived resolver so the `http_request`
+    // tool can attach an operator-provisioned credential host-side.
+    // Non-interactive keychain probe: if the vault is unavailable the
+    // tool refuses credentialed calls rather than blocking startup.
+    match CredentialStore::open(
+        &cfg.vault_db_path(),
+        probe_keychain(&cfg.data_dir, String::new).as_ref(),
+    ) {
+        Ok(store) => factory.attach_credential_resolver(Arc::new(VaultCredentialResolver {
+            store: std::sync::Mutex::new(store),
+        })),
+        Err(e) => tracing::warn!(
+            vault = %cfg.vault_db_path().display(),
+            "http_request credential resolver disabled (vault unavailable): {e}"
+        ),
+    }
 
     // --- Pending-approval queue + CLI approval gate ---
     //

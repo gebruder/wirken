@@ -475,6 +475,26 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// A completed `http_request` built-in tool call. Records the
+    /// request line and the credential SLOT NAME only, never the secret
+    /// value; the resolved `Authorization` header is redacted from every
+    /// serialization path (`credential` follows the `LlmRequest`
+    /// `credential_id` convention). `status` is the HTTP response code.
+    /// A request refused before send is recorded by
+    /// `SkillPermissionDenied` instead, so this row means "the request
+    /// went out".
+    HttpRequest {
+        method: String,
+        host: String,
+        path: String,
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        agent_id: String,
+    },
     /// LLM request metadata. Full request body is reconstructible
     /// from prior session events; this carries hashes for the
     /// reproducible-replay verifier (item 10).

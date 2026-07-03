@@ -132,6 +132,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::AssistantMessage { .. } => "assistant_message",
         SessionEvent::AssistantToolCalls { .. } => "assistant_tool_calls",
         SessionEvent::ToolResult { .. } => "tool_result",
+        SessionEvent::HttpRequest { .. } => "http_request",
         SessionEvent::LlmRequest { .. } => "llm_request",
         SessionEvent::LlmResponse { .. } => "llm_response",
         SessionEvent::PermissionDenied { .. } => "permission_denied",

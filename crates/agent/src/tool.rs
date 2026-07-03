@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use crate::error::AgentError;
 use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode};
@@ -98,6 +98,15 @@ pub struct ToolRegistry {
     /// a clear error rather than silently failing). Set via
     /// [`Self::set_zirkel_db_path`].
     zirkel_db_path: Option<PathBuf>,
+    /// Host-side resolver for `http_request` credentials, injected by
+    /// the CLI where the vault is opened. `None` means naming a
+    /// `credential` returns a clear refusal. Interior-mutable, set once,
+    /// mirroring [`Self::set_egress_enforcement`].
+    credential_resolver: RwLock<Option<Arc<dyn crate::http_tool::CredentialResolver>>>,
+    /// Audit sink for the `http_request` row, built from the agent's own
+    /// session log at attach time. `None` disables the extra row (the
+    /// generic ToolResult row still lands).
+    http_audit: RwLock<Option<crate::http_tool::HttpAuditCtx>>,
 }
 
 impl ToolRegistry {
@@ -286,6 +295,50 @@ impl ToolRegistry {
             },
         );
 
+        tools.insert(
+            "http_request".into(),
+            ToolDef {
+                name: "http_request".into(),
+                description: "Make a scoped outbound HTTPS request to an allowlisted host, \
+                              optionally attaching a vault credential by name. The credential \
+                              value is resolved host-side and never visible to you. GET and HEAD \
+                              are always allowed; POST only to an endpoint the skill declared as \
+                              a search path. Returns status, headers, and body."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "enum": ["GET", "HEAD", "POST"],
+                            "description": "HTTP method. POST is limited to declared search paths."
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "Absolute https:// URL. The host must be on the skill's egress allowlist."
+                        },
+                        "headers": {
+                            "type": "object",
+                            "description": "Optional request headers. Authorization is refused; use 'credential'."
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional request body, sent for POST only."
+                        },
+                        "credential": {
+                            "type": "string",
+                            "description": "Optional name of a vault slot declared in the skill's permissions.credentials.allow. Injected as a Bearer token host-side."
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "description": "Optional request timeout in ms (default 30000, max 60000)."
+                        }
+                    },
+                    "required": ["method", "url"]
+                }),
+            },
+        );
+
         let sandbox_config = config.sandbox.clone();
 
         Ok(Self {
@@ -297,7 +350,25 @@ impl ToolRegistry {
             sandbox: tokio::sync::OnceCell::new(),
             sandbox_config,
             zirkel_db_path: None,
+            credential_resolver: RwLock::new(None),
+            http_audit: RwLock::new(None),
         })
+    }
+
+    /// Inject the host-side credential resolver used by `http_request`.
+    /// Called by the CLI after opening the vault. Set-once semantics.
+    pub fn set_credential_resolver(&self, resolver: Arc<dyn crate::http_tool::CredentialResolver>) {
+        if let Ok(mut g) = self.credential_resolver.write() {
+            *g = Some(resolver);
+        }
+    }
+
+    /// Push the audit context for the `http_request` row. Called by the
+    /// agent at `attach_skills` time with its own session log/handle/id.
+    pub fn set_http_audit(&self, ctx: crate::http_tool::HttpAuditCtx) {
+        if let Ok(mut g) = self.http_audit.write() {
+            *g = Some(ctx);
+        }
     }
 
     /// Configure the path the `sqlite_query` librarian tool opens.
@@ -432,6 +503,7 @@ impl ToolRegistry {
             "write_file" => self.write_file(&args).await,
             "list_files" => self.list_files(&args).await,
             "web_search" => self.web_search(&args).await,
+            "http_request" => self.http_request(&args).await,
             "sqlite_query" => self.sqlite_query(&args).await,
             "generate_image" => self.generate_image(&args).await,
             _ => Err(AgentError::ToolNotFound(name.to_string())),
@@ -696,6 +768,18 @@ impl ToolRegistry {
             output,
             success: true,
         })
+    }
+
+    /// The `http_request` built-in tool. Thin wrapper: reads the
+    /// injected resolver + audit context and delegates to
+    /// [`crate::http_tool::execute`], which owns URL validation,
+    /// credential injection, redaction, response cap, and the audit row.
+    /// Credential/method/POST-path scoping is gated upstream in
+    /// `runtime.rs` before this runs.
+    async fn http_request(&self, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
+        let resolver = self.credential_resolver.read().ok().and_then(|g| g.clone());
+        let audit = self.http_audit.read().ok().and_then(|g| g.clone());
+        crate::http_tool::execute(&self.http, resolver.as_ref(), audit.as_ref(), args).await
     }
 
     /// Run a named query against the zirkel kept-items database.
@@ -1364,6 +1448,11 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         "read_file" | "list_files" => Some(Action::WorkspaceFileAccess),
         "write_file" => Some(Action::WorkspaceFileAccess),
         "web_search" => Some(Action::WebSearch),
+        // Tier 1: the interactive approval flow adds no prompt. The
+        // authorization is the skill's permissions block (tools.allow,
+        // credentials.allow, http.post_paths, egress.domains), enforced
+        // as hard refusals at the gate and by EgressClient, not a prompt.
+        "http_request" => Some(Action::HttpRequest),
         // Read-only query against the bound zirkel database. Tier 1,
         // the same read tier as workspace files: the tool opens the DB
         // read-only and is unavailable when no DB path is bound.

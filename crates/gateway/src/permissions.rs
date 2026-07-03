@@ -36,6 +36,13 @@ pub enum Action {
     WorkspaceFileAccess,
     ChannelConverse,
     WebSearch,
+    /// The `http_request` built-in tool. Tier 1 means the interactive
+    /// approval flow adds no prompt; authorization is not a prompt but
+    /// the skill's permissions block (`tools.allow`, `credentials.allow`,
+    /// `http.post_paths`, `egress.domains`), enforced as hard refusals
+    /// at the gate and by `EgressClient`. A non-allowlisted request is
+    /// refused, never escalated to a prompt.
+    HttpRequest,
 
     // Tier 2 — first-use approval
     ShellExec {
@@ -92,6 +99,7 @@ impl std::fmt::Display for Action {
             Action::WorkspaceFileAccess => "workspace_file_access",
             Action::ChannelConverse => "channel_converse",
             Action::WebSearch => "web_search",
+            Action::HttpRequest => "http_request",
             Action::ShellExec { .. } => "shell_exec",
             Action::ExternalFileAccess { .. } => "external_file_access",
             Action::CrossConversationMessage => "cross_conversation_message",
@@ -163,9 +171,10 @@ impl Action {
     /// Determine which tier this action belongs to.
     pub fn tier(&self) -> PermissionTier {
         match self {
-            Action::WorkspaceFileAccess | Action::ChannelConverse | Action::WebSearch => {
-                PermissionTier::Tier1
-            }
+            Action::WorkspaceFileAccess
+            | Action::ChannelConverse
+            | Action::WebSearch
+            | Action::HttpRequest => PermissionTier::Tier1,
 
             // Shell exec: Tier 2 only for inspection verbs on the
             // curated allowlist (read/identity/path math, no exec
@@ -1166,6 +1175,7 @@ mod tier_tests {
                 Action::WorkspaceFileAccess => "workspace_file_access",
                 Action::ChannelConverse => "channel_converse",
                 Action::WebSearch => "web_search",
+                Action::HttpRequest => "http_request",
                 Action::ShellExec { .. } => "shell_exec",
                 Action::ExternalFileAccess { .. } => "external_file_access",
                 Action::CrossConversationMessage => "cross_conversation_message",

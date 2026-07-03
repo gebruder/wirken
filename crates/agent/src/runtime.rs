@@ -670,6 +670,14 @@ impl Agent {
         });
     }
 
+    /// Inject the host-side credential resolver for `http_request`.
+    /// Called by the CLI where the vault is opened. If never called, an
+    /// `http_request` naming a `credential` returns a clear refusal
+    /// rather than proceeding unauthenticated.
+    pub fn set_credential_resolver(&self, resolver: Arc<dyn crate::http_tool::CredentialResolver>) {
+        self.tools.set_credential_resolver(resolver);
+    }
+
     /// Attach skill collections. Used by
     /// [`crate::factory::AgentFactory`] to inject per-agent skills
     /// loaded once at startup, then rebuild the system prompt to
@@ -736,6 +744,14 @@ impl Agent {
         // effective egress allow-set (#76 Phase 2.2).
         self.tools
             .set_egress_enforcement(crate::egress::EgressEnforcement::from_profile(&effective));
+        // Push the http_request audit context so a completed request
+        // lands a `SessionEvent::HttpRequest` row (credential NAME only)
+        // on this agent's session chain.
+        self.tools.set_http_audit(crate::http_tool::HttpAuditCtx {
+            log: self.session_log.clone(),
+            handle: self.session_handle.clone(),
+            agent_id: self.id.clone(),
+        });
         // Re-attach clears any active phase overlay: attach_skills can
         // unload the skill that set it, and a dangling overlay outside
         // its skill's lifetime would be a security regression. Skills
@@ -2265,6 +2281,31 @@ impl Agent {
                     success: false,
                 });
             }
+        }
+
+        // http_request-specific gates, evaluated after gate_tool admits
+        // the tool name: credential scope is refused HERE at the gate
+        // layer alongside tools.allow, plus the write-verb refusal and
+        // the POST search-path carve-out. Every failure is a refusal
+        // recorded as SkillPermissionDenied, never a prompt.
+        if name == "http_request"
+            && let Some((axis, message)) =
+                crate::http_tool::gate(&self.effective_permissions, arguments)
+        {
+            self.log_event(
+                TrustLevel::System,
+                SessionEvent::SkillPermissionDenied {
+                    axis: axis.to_string(),
+                    requested: "http_request".to_string(),
+                    agent_id: self.id.clone(),
+                    trigger: self.current_trigger.clone(),
+                    denied_reason: SkillDeniedReason::Profile,
+                },
+            )?;
+            return Ok(crate::tool::ToolResult {
+                output: message,
+                success: false,
+            });
         }
 
         // Filesystem gate (#76 Phase 2.3): inner tighter check on top of

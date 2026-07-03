@@ -9,6 +9,7 @@ pub mod conversation;
 pub mod egress;
 pub mod error;
 pub mod factory;
+pub mod http_tool;
 pub mod identity;
 pub mod inbound_interceptor;
 pub mod keycloak_identity;
@@ -46,3 +47,6 @@ pub use skill::SkillLoader;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod http_tool_tests;

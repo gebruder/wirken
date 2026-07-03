@@ -19,9 +19,11 @@
 //! ## What `EgressClient` covers — and what it does not
 //!
 //! `EgressClient` mediates only the agent built-in tools that go
-//! through it: `web_search` and `generate_image`. The following
-//! outbound paths bypass `EgressClient` and do **not** consult the
-//! skill-set egress allowlist:
+//! through it: `web_search`, `generate_image`, and `http_request`
+//! (the last via [`EgressClient::request`], which additionally
+//! disables redirect following and applies a per-request timeout).
+//! The following outbound paths bypass `EgressClient` and do **not**
+//! consult the skill-set egress allowlist:
 //!
 //! - **`exec` shell sink.** When `sandbox.json` is `mode: off`, the
 //!   host shell runs `curl`, `wget`, `nc`, etc. directly. Egress is
@@ -166,6 +168,11 @@ pub struct EgressClient {
     inner: RateLimitedClient,
     enforcement: Arc<RwLock<EgressEnforcement>>,
     overlay_deny: Arc<RwLock<Option<PhaseEgressDeny>>>,
+    /// Dedicated client for `http_request` (via [`Self::request`]):
+    /// redirect following disabled and a 10s connect timeout. The
+    /// `web_search` / `generate_image` `get`/`post` paths keep the
+    /// default redirect-following `inner` client unchanged.
+    request_client: reqwest::Client,
 }
 
 impl EgressClient {
@@ -180,11 +187,39 @@ impl EgressClient {
     /// daily-fetch orchestrator (Zirkel's `wirken zirkel run`) so each
     /// source's per-day cap is honored at the transport layer.
     pub fn with_rate_limit(config: RateLimitConfig) -> Self {
+        // No-redirect client for `http_request`: a 3xx is returned to
+        // the agent as-is rather than followed, so the injected auth
+        // header is never re-sent to a redirect target.
+        let request_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("build no-redirect reqwest client");
         Self {
             inner: RateLimitedClient::new(reqwest::Client::new(), config),
             enforcement: Arc::new(RwLock::new(EgressEnforcement::Unrestricted)),
             overlay_deny: Arc::new(RwLock::new(None)),
+            request_client,
         }
+    }
+
+    /// Egress-checked, rate-reserved request builder for `http_request`.
+    /// Runs the same host allowlist check as [`Self::get`]/[`Self::post`],
+    /// reserves a rate-limit slot, then builds on the no-redirect
+    /// `request_client` for an arbitrary method. The caller sets headers
+    /// / body / per-request timeout on the returned builder and calls
+    /// `.send()`.
+    pub async fn request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+    ) -> Result<RequestBuilder, HttpAccessDenied> {
+        self.check_egress(url).map_err(HttpAccessDenied::Egress)?;
+        self.inner
+            .check_and_reserve(url)
+            .await
+            .map_err(HttpAccessDenied::RateLimit)?;
+        Ok(self.request_client.request(method, url))
     }
 
     /// Replace the enforcement policy. Called by the agent at
