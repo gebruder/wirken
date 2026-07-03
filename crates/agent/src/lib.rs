@@ -50,3 +50,6 @@ mod tests;
 
 #[cfg(test)]
 mod http_tool_tests;
+
+#[cfg(test)]
+mod tdx_assets_verify_tests;
