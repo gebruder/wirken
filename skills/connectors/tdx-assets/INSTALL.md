@@ -1,10 +1,6 @@
 # Installing tdx-assets
 
-**Requires Wirken 1.10 or later.** The skill declares `credentials.allow`
-and `http.post_paths`, permission fields added in 1.10. An older binary
-refuses to load it (fail-closed), and the error reads as a parse
-rejection rather than a version mismatch, so check your version first:
-`wirken --version`.
+**Requires Wirken 1.10 or later.** Check with `wirken --version`.
 
 For whoever installs this skill. Steps 1-5 are one-time; step 6 (token
 refresh) is recurring until issue
@@ -25,10 +21,7 @@ wirken skills sign ~/.wirken/skills/tdx-assets/
 ```
 
 The alternative, `WIRKEN_ALLOW_UNSIGNED_SKILLS=1`, loads the skill
-without a signature. Prefer signing: an unsigned skill is only as
-trustworthy as the directory it sits in, and a signature makes any
-later edit to `SKILL.md` fail the load-time check instead of silently
-taking effect. Use the env var only for a throwaway test.
+without a signature. Prefer signing: it makes any later edit to SKILL.md fail the load-time check instead of silently taking effect. Use the env var only for a throwaway test.
 
 ## 3. Point the skill at your tenant
 
@@ -117,13 +110,13 @@ jsmith@example.edu in TeamDynamix."
   unless its path is the one declared search endpoint. Read-only therefore
   rests on two things: the tool refusing write verbs, and the TDX GET
   endpoints being side-effect-free. It does **not** rest on path
-  restriction for GET — a `GET` to any path on the bound host is allowed
+  restriction for GET: a `GET` to any path on the bound host is allowed
   and carries the credential; the skill confines itself to the read
   endpoints by instruction, and the egress allowlist confines every
   request to your TDX host.
 - **Every completed call audited.** A completed request lands a
   `http_request` row in the session hash chain (method, host, path,
-  status, credential name — never the token value). A call refused before
+  status, credential name, never the token value). A call refused before
   it goes out, or one that fails in flight, is captured by the generic
   tool-result row instead, so the chain is never blind. The chain
   verifies with `wirken audit verify`.

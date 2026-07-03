@@ -5,7 +5,7 @@ OpenAPI 3.0 contract at
 `https://solutions.teamdynamix.com/TDWebApi/swagger/v1/openapi.json`
 (the product-level contract document; every tenant serves the same shape
 at its own hostname). **Verify every field name against your own tenant's
-`/TDWebApi/swagger/v1/openapi.json` before first production use** — the
+`/TDWebApi/swagger/v1/openapi.json` before first production use**: the
 check is a same-file diff against your tenant URL. Fields that are
 tenant-configured (custom attributes) are marked **[tenant]**.
 
@@ -32,9 +32,9 @@ Login endpoints (used by the operator out of band, not by the skill):
 The skill resolves people with **`GET /api/people/lookup`** (a GET, so it
 needs no `post_paths` entry). Query parameters:
 
-- `searchText` (string) — the search string (spec: "the searching text
+- `searchText` (string): the search string (spec: "the searching text
   to use"; matches name / username / email in practice).
-- `maxResults` (integer, 1-100, default 50) — the skill sets `10` to
+- `maxResults` (integer, 1-100, default 50): the skill sets `10` to
   detect ambiguity.
 
 Response: **array of `User`** (plain array, `maxResults` bounded). It
@@ -43,7 +43,7 @@ properties** `Applications`, `Attributes`, `GroupIDs`, `OrgApplications`,
 `Permissions` (per the endpoint's own spec description). Fields the skill
 reads:
 
-- `UID` (string, GUID) — the person's unique id; passed to asset search.
+- `UID` (string, GUID): the person's unique id; passed to asset search.
 - `FullName`, `FirstName`, `LastName`.
 - `PrimaryEmail`, `AlternateEmail`.
 - `UserName`, `ExternalID`, `AlternateID`, `ReferenceID`.
@@ -62,17 +62,17 @@ require adding its path to the skill's `post_paths`. Rate limit 60/60s.
 
 ## Asset search
 
-`POST /api/{appId}/assets/search` — `{appId}` is the numeric id of the
+`POST /api/{appId}/assets/search`: `{appId}` is the numeric id of the
 tenant's Asset/CI application; the installer substitutes it (`APPID` in
 the skill's `post_paths`).
 
 Request body: `AssetSearch`. Relevant fields (all optional):
 
-- `SearchText` (string) — LIKE match.
-- `SerialLike` (string) — serial-number LIKE match.
-- `OwningCustomerIDs` (array of string UID) — the skill sets `["<UID>"]`
+- `SearchText` (string): LIKE match.
+- `SerialLike` (string): serial-number LIKE match.
+- `OwningCustomerIDs` (array of string UID): the skill sets `["<UID>"]`
   to find assets **owned** by the resolved person.
-- `MaxResults` (integer) — result cap; the skill sets `100`.
+- `MaxResults` (integer): result cap; the skill sets `100`.
 - Other narrowing fields: `StatusIDs` (array int), `LocationIDs`
   (array int), `RoomID` (int), `ProductModelIDs` (array int),
   `ManufacturerIDs` (array int), `UsingCustomerIDs` (array string, assets
@@ -94,8 +94,8 @@ reads:
 - `ID`, `Name`, `SerialNumber`, `Tag`, `ExternalID`.
 - `ProductModelName` (`ProductModelID`), `ManufacturerName`.
 - `LocationName`, `LocationRoomName` (`LocationID`, `LocationRoomID`).
-- `OwningCustomerName` (`OwningCustomerID`) — set when a person owns it.
-- `OwningDepartmentName` (`OwningDepartmentID`) — set when a department owns it.
+- `OwningCustomerName` (`OwningCustomerID`): set when a person owns it.
+- `OwningDepartmentName` (`OwningDepartmentID`): set when a department owns it.
 - `StatusName` (`StatusID`).
 
 Rate limit: 60 requests per 60 seconds per IP.
@@ -113,7 +113,7 @@ step 3), because these endpoints are rate-limited.
 
 The `Asset` schema has **no** inventory / audit / last-seen date field.
 Its date fields are `AcquisitionDate`, `CreatedDate`, `ModifiedDate`,
-`ExpectedReplacementDate` — none is an inventory date. If your tenant
+`ExpectedReplacementDate`: none is an inventory date. If your tenant
 records a "last inventory" date, it lives in `Attributes[]` as a custom
 attribute, and since **search omits `Attributes`** it can only be read
 through the asset-detail GET above. Identify its attribute `Name` during
@@ -121,18 +121,18 @@ acceptance and configure the skill to read it. If there is none, the
 skill writes "not available". Do not hunt for a base field; there isn't
 one.
 
-## Custom attributes (`CustomAttribute`) — [tenant]
+## Custom attributes (`CustomAttribute`): [tenant]
 
 Both `User.Attributes` and `Asset.Attributes` are arrays of
 `CustomAttribute`, populated **only when a person or asset is loaded
-individually** — search and lookup responses omit them. Fields: `ID`
+individually**: search and lookup responses omit them. Fields: `ID`
 (int), `Name` (string), `Value` (string,
 the raw/id value), `ValueText` (string, the display value),
 `DataType`, `FieldType`, `Choices`, `ChoicesText`, `Order`, `SectionID`,
 `SectionName`. Match on `Name`; prefer `ValueText` for display. Which
 attributes exist is entirely tenant-defined.
 
-## Permissions the bearer token needs — [tenant]
+## Permissions the bearer token needs: [tenant]
 
 The endpoints are permission-gated per the account behind the token, not
 by a fixed rule in the spec:

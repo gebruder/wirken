@@ -31,7 +31,7 @@ tagged.
   records method, host, path, status, and the credential name (never its
   value) in the session hash chain. SIEM parsers reading the audit stream
   see a new event type.
-- `tdx-assets` example skill (`skills/examples/tdx-assets/`): a read-only
+- `tdx-assets` example skill (`skills/connectors/tdx-assets/`): a read-only
   TeamDynamix staff, device, and location lookup built on `http_request`,
   with reference.md, INSTALL.md, and ACCEPTANCE.md, plus end-to-end
   enforcement coverage.

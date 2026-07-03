@@ -75,7 +75,7 @@ cannot re-authenticate from inside this skill.
 3. **Fetch inventory detail only when it is in play, and cap it.** The
    "Last inventory date" column comes from a tenant custom attribute in
    `Attributes[]`, which asset search omits. Fetch it per asset **only
-   when** the inventory column is actually needed — the operator
+   when** the inventory column is actually needed: the operator
    configured the attribute (see INSTALL.md) or the user asked for
    inventory dates. When it is needed, for each asset up to a cap of
    **25 detail fetches per run**, call `http_request`:
@@ -109,9 +109,9 @@ cannot re-authenticate from inside this skill.
      columns blank and a note "no assets found".
 
 5. **Then two sections below the table:**
-   - **Needs confirmation** — ambiguous people, with their candidates,
+   - **Needs confirmation**: ambiguous people, with their candidates,
      for the operator to disambiguate. Do not pick for them.
-   - **Could not resolve** — input identifiers with no match, listed
+   - **Could not resolve**: input identifiers with no match, listed
      verbatim so nothing is lost.
 
 ## Errors and limits

@@ -1,6 +1,6 @@
 //! End-to-end coverage for the `http_request` built-in tool, driven
 //! through the one real example skill that exercises its full surface
-//! (`skills/examples/tdx-assets/`). Runs the *real* committed SKILL.md
+//! (`skills/connectors/tdx-assets/`). Runs the *real* committed SKILL.md
 //! through the merged enforcement: load + sign, slash recognition,
 //! system-prompt gating, the POST-path / credential gate, credential-host
 //! binding, egress allowlist, host-side bearer injection with redaction,
@@ -31,7 +31,7 @@ use crate::tool::ToolResult;
 
 const SKILL_MD: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../skills/examples/tdx-assets/SKILL.md"
+    "/../../skills/connectors/tdx-assets/SKILL.md"
 );
 const TOKEN: &str = "eyJ.FAKE-TDX-BEARER.DO-NOT-LEAK";
 

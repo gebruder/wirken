@@ -288,7 +288,7 @@ Stated in the same plain terms as the egress boundary comment
   design), so a credential that is a short-lived token must be minted and
   refreshed out of band by the operator. For TeamDynamix, whose tokens
   expire 24 hours after issue, this means a **daily manual refresh** of
-  the stored token (see `skills/examples/tdx-assets/INSTALL.md`). The
+  the stored token (see `skills/connectors/tdx-assets/INSTALL.md`). The
   credential-exchange resolver in
   [gebruder/wirken#178](https://github.com/gebruder/wirken/issues/178)
   would perform and renew the exchange host-side and lift this.
