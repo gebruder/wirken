@@ -325,6 +325,105 @@ fn store_and_retrieve_credential() {
 }
 
 #[test]
+fn host_binding_round_trips_and_enforces() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+    let secret = VaultSecret::new("tok".into());
+
+    store
+        .store_with_hosts(
+            "tdx",
+            "http",
+            &secret,
+            None,
+            None,
+            &["tenant.teamdynamix.com".to_string()],
+        )
+        .unwrap();
+    let (_s, meta) = store.retrieve("tdx").unwrap();
+    assert_eq!(
+        meta.allowed_hosts,
+        vec!["tenant.teamdynamix.com".to_string()]
+    );
+    assert!(meta.permits_host("tenant.teamdynamix.com"));
+    assert!(meta.permits_host("TENANT.TeamDynamix.com")); // case-insensitive
+    assert!(!meta.permits_host("attacker.example"));
+
+    // A credential stored via the unbound `store` permits no host, so
+    // `http_request` refuses it (deny by default).
+    store.store("plain", "openai", &secret, None, None).unwrap();
+    let (_s2, m2) = store.retrieve("plain").unwrap();
+    assert!(m2.allowed_hosts.is_empty());
+    assert!(!m2.permits_host("anything.example"));
+}
+
+#[test]
+fn pre_migration_credential_reads_as_unbound() {
+    // Adversarial: a credential row that predates the allowed_hosts
+    // column. Build the old schema, insert an encrypted row, then open
+    // the store (which runs the migration). The migrated row has NULL
+    // allowed_hosts, so it reads back unbound and permits no host —
+    // fail-closed for http_request across the upgrade.
+    let tmp = TempDir::new().unwrap();
+    let db = tmp.path().join("vault.db");
+    let key = generate_key();
+    {
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE credentials (
+                 name TEXT PRIMARY KEY,
+                 channel TEXT NOT NULL,
+                 encrypted_value BLOB NOT NULL,
+                 created_at TEXT NOT NULL,
+                 expires_at TEXT,
+                 last_used_at TEXT,
+                 rotation_due_at TEXT
+             );",
+        )
+        .unwrap();
+        let secret = VaultSecret::new("legacy-token".into());
+        let enc = encrypt("legacy", &secret, &key).unwrap();
+        conn.execute(
+            "INSERT INTO credentials (name, channel, encrypted_value, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["legacy", "openai", enc, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+    let store = CredentialStore::open_with_key(&db, key).unwrap();
+    let (secret, meta) = store.retrieve("legacy").unwrap();
+    assert_eq!(secret.expose(), "legacy-token");
+    assert!(
+        meta.allowed_hosts.is_empty(),
+        "pre-migration row must read as unbound"
+    );
+    assert!(!meta.permits_host("anything.example"));
+}
+
+#[test]
+fn unbound_rewrite_clears_binding_and_fails_closed() {
+    // Adversarial (downgrade): a pre-binding binary re-stores a
+    // credential via the 7-column `store` path, leaving allowed_hosts
+    // NULL. The binding is lost, but the result is deny-by-default, not
+    // a usable unbound credential — a re-upgraded http_request refuses.
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+    let secret = VaultSecret::new("t".into());
+    store
+        .store_with_hosts("c", "http", &secret, None, None, &["h.example".to_string()])
+        .unwrap();
+    assert!(store.retrieve("c").unwrap().1.permits_host("h.example"));
+
+    store.store("c", "http", &secret, None, None).unwrap(); // old-style write
+    let meta = store.retrieve("c").unwrap().1;
+    assert!(meta.allowed_hosts.is_empty());
+    assert!(
+        !meta.permits_host("h.example"),
+        "a cleared binding must fail closed, not resurrect as usable"
+    );
+}
+
+#[test]
 fn retrieve_updates_last_used_at() {
     let tmp = TempDir::new().unwrap();
     let store = test_store(&tmp);

@@ -749,6 +749,12 @@ enum CredentialCommands {
         /// stripped. Mutually exclusive with --stdin.
         #[arg(long, conflicts_with = "stdin")]
         value_file: Option<std::path::PathBuf>,
+        /// Bind this credential to a host the `http_request` tool may
+        /// send it to (repeatable). A credential with no `--host` is
+        /// unusable by `http_request` (deny by default), and the
+        /// binding cannot be widened by a skill's permissions block.
+        #[arg(long = "host")]
+        host: Vec<String>,
     },
     /// Rotate a credential
     Rotate {
@@ -1048,11 +1054,13 @@ async fn main() -> Result<()> {
                 channel,
                 stdin,
                 value_file,
+                host,
             } => {
                 commands::credential::add(
                     &name,
                     channel.as_deref(),
                     commands::credential::ValueSource::from_flags(stdin, value_file),
+                    &host,
                 )
                 .await
             }

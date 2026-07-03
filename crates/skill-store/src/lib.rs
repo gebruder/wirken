@@ -188,6 +188,7 @@ mod tests {
                 read_paths: BTreeSet::new(),
             },
             inference: InferencePolicy::default(),
+            ..Default::default()
         }
     }
 

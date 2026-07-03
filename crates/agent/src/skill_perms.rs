@@ -42,6 +42,11 @@ pub struct PermissionProfile {
     pub egress: EgressPolicy,
     pub filesystem: FilesystemPolicy,
     pub inference: InferencePolicy,
+    /// Vault slots the skill may name from `http_request`. Deny-by-
+    /// default: an empty set means no slot may be referenced.
+    pub credentials: CredentialsPolicy,
+    /// `http_request` POST carve-out: the endpoints POST may target.
+    pub http: HttpPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +112,48 @@ pub struct InferencePolicy {
     pub default: Option<String>,
 }
 
+/// Resolved credential-scope policy: the vault slots `http_request`
+/// may name. Mirrors [`ToolPolicy`]; plain name match, no wildcard-
+/// host semantics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialsPolicy {
+    pub allow: AllowSet,
+}
+
+/// Resolved `http_request` HTTP policy. `post_paths` is the set of
+/// absolute `https://` endpoints POST may target, stored as declared
+/// and matched host+path (query ignored) at the gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HttpPolicy {
+    pub post_paths: BTreeSet<String>,
+}
+
+impl HttpPolicy {
+    /// True if `url`'s host+path (query and fragment ignored) matches a
+    /// declared POST endpoint. Case-folds the host; the path compares
+    /// byte-exact.
+    pub fn allows_post(&self, url: &url::Url) -> bool {
+        let Some(target) = normalize_host_path(url) else {
+            return false;
+        };
+        self.post_paths.iter().any(|decl| {
+            url::Url::parse(decl)
+                .ok()
+                .as_ref()
+                .and_then(normalize_host_path)
+                .is_some_and(|d| d == target)
+        })
+    }
+}
+
+/// `scheme://host/path` with the host lowercased and query/fragment
+/// dropped, or `None` if the URL has no host. Scheme is retained so a
+/// declared `https://` entry never matches an `http://` request.
+fn normalize_host_path(url: &url::Url) -> Option<String> {
+    let host = url.host_str()?.to_ascii_lowercase();
+    Some(format!("{}://{}{}", url.scheme(), host, url.path()))
+}
+
 /// On-disk YAML shape under the `permissions:` key.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +166,10 @@ pub struct PermissionsBlock {
     pub filesystem: Option<FilesystemRaw>,
     #[serde(default)]
     pub inference: Option<InferenceRaw>,
+    #[serde(default)]
+    pub credentials: Option<CredentialsRaw>,
+    #[serde(default)]
+    pub http: Option<HttpRaw>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -159,6 +210,20 @@ pub struct InferenceRaw {
     pub default: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialsRaw {
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HttpRaw {
+    #[serde(default)]
+    pub post_paths: Vec<String>,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PermissionsError {
     #[error("invalid YAML in permissions block: {0}")]
@@ -179,6 +244,8 @@ pub enum PermissionsError {
     DefaultNotInAllow(String),
     #[error("egress.mode is 'deny' but domains is non-empty")]
     DenyWithDomains,
+    #[error("http.post_paths entry '{0}' must be an absolute https:// URL")]
+    InvalidPostPath(String),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -269,11 +336,36 @@ pub fn resolve_block(
         None => InferencePolicy::default(),
     };
 
+    let credentials = match block.credentials {
+        Some(c) => CredentialsPolicy {
+            allow: resolve_allow(&c.allow, "credentials")?,
+        },
+        None => CredentialsPolicy::default(),
+    };
+
+    let http = match block.http {
+        Some(h) => {
+            let mut post_paths = BTreeSet::new();
+            for entry in &h.post_paths {
+                let url = url::Url::parse(entry)
+                    .map_err(|_| PermissionsError::InvalidPostPath(entry.clone()))?;
+                if url.scheme() != "https" || url.host_str().is_none() {
+                    return Err(PermissionsError::InvalidPostPath(entry.clone()));
+                }
+                post_paths.insert(entry.clone());
+            }
+            HttpPolicy { post_paths }
+        }
+        None => HttpPolicy::default(),
+    };
+
     Ok(PermissionProfile {
         tools,
         egress,
         filesystem,
         inference,
+        credentials,
+        http,
     })
 }
 
@@ -376,6 +468,11 @@ fn validate_host(s: &str) -> Result<(), PermissionsError> {
 /// attached. Post-migration-window the loader hard-fails on a missing
 /// `permissions:` block, so every loaded skill carries a profile and
 /// any non-empty attach produces `Resolved`.
+// `Resolved` carries the whole `PermissionProfile` inline. Boxing it to
+// satisfy `large_enum_variant` would add an allocation to the common
+// path (every attached agent is `Resolved`) purely to shrink the rare
+// zero-skill `Legacy` case, so the payload stays inline by choice.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EffectiveProfile {
     /// Full surface, no checks. Reached only when zero skills are attached.
@@ -407,6 +504,26 @@ impl EffectiveProfile {
         match self {
             EffectiveProfile::Legacy => true,
             EffectiveProfile::Resolved(p) => p.inference.allow.allows(name),
+        }
+    }
+
+    /// Whether the skill set declared the given vault slot in
+    /// `credentials.allow`. `Legacy` (no skills) admits none: a
+    /// zero-skill agent has no credential grant, so `http_request`
+    /// cannot name a slot without an explicit skill declaration.
+    pub fn allows_credential(&self, name: &str) -> bool {
+        match self {
+            EffectiveProfile::Legacy => false,
+            EffectiveProfile::Resolved(p) => p.credentials.allow.allows(name),
+        }
+    }
+
+    /// Whether a POST to `url` is permitted by the declared
+    /// `http.post_paths`. `Legacy` admits none.
+    pub fn allows_post_path(&self, url: &url::Url) -> bool {
+        match self {
+            EffectiveProfile::Legacy => false,
+            EffectiveProfile::Resolved(p) => p.http.allows_post(url),
         }
     }
 
@@ -707,6 +824,22 @@ impl PhasedEffective {
         }
     }
 
+    /// Gate a credential-slot reference by name (the `http_request`
+    /// `credential` field). Phase overlays carry no credential axis;
+    /// the base profile's `credentials.allow` is authoritative.
+    pub fn gate_credential(&self, name: &str) -> GateDecision {
+        if self.base.allows_credential(name) {
+            GateDecision::Allow
+        } else {
+            GateDecision::DeniedByProfile
+        }
+    }
+
+    /// Whether a POST to `url` is allowed by `http.post_paths`.
+    pub fn allows_post_path(&self, url: &url::Url) -> bool {
+        self.base.allows_post_path(url)
+    }
+
     /// Gate an egress destination host.
     pub fn gate_host(&self, host: &str) -> GateDecision {
         if let Some(overlay) = &self.overlay
@@ -836,6 +969,8 @@ pub fn merge(profiles: &[PermissionProfile]) -> Result<PermissionProfile, MergeE
     let mut read_paths = BTreeSet::new();
     let mut inference_allow = AllowSet::Set(BTreeSet::new());
     let mut inference_defaults = BTreeSet::new();
+    let mut credentials_allow = AllowSet::Set(BTreeSet::new());
+    let mut post_paths = BTreeSet::new();
 
     for p in profiles {
         tools = union_allow(tools, p.tools.allow.clone());
@@ -849,6 +984,8 @@ pub fn merge(profiles: &[PermissionProfile]) -> Result<PermissionProfile, MergeE
         if let Some(ref d) = p.inference.default {
             inference_defaults.insert(d.clone());
         }
+        credentials_allow = union_allow(credentials_allow, p.credentials.allow.clone());
+        post_paths.extend(p.http.post_paths.iter().cloned());
     }
 
     let inference_default = match inference_defaults.len() {
@@ -875,6 +1012,10 @@ pub fn merge(profiles: &[PermissionProfile]) -> Result<PermissionProfile, MergeE
             allow: inference_allow,
             default: inference_default,
         },
+        credentials: CredentialsPolicy {
+            allow: credentials_allow,
+        },
+        http: HttpPolicy { post_paths },
     })
 }
 

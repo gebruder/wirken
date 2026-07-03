@@ -223,6 +223,12 @@ pub struct AgentFactory {
     /// Interior-mutable for the same reason as `veto_dispatcher`.
     egress_dispatcher:
         std::sync::RwLock<Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher>>,
+    /// Host-side credential resolver for the `http_request` tool,
+    /// injected into every waked Agent. `None` (the default) means a
+    /// build with no vault wiring: an `http_request` naming a credential
+    /// refuses rather than proceeding. The CLI runs
+    /// `attach_credential_resolver` after opening the vault.
+    credential_resolver: std::sync::RwLock<Option<Arc<dyn crate::http_tool::CredentialResolver>>>,
     /// Default approval gate injected into every waked Agent.
     /// `None` preserves the pre-out-of-band behavior — `NeedsApproval`
     /// short-circuits with a terminal deny. The daemon-mode `wirken
@@ -316,6 +322,7 @@ impl AgentFactory {
             egress_dispatcher: std::sync::RwLock::new(Arc::new(
                 wirken_gateway::egress_dispatcher::NoopEgressDispatcher,
             )),
+            credential_resolver: std::sync::RwLock::new(None),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
             signal_approval_gate: std::sync::RwLock::new(None),
@@ -423,6 +430,16 @@ impl AgentFactory {
         &self,
     ) -> Arc<dyn wirken_gateway::egress_dispatcher::EgressHookDispatcher> {
         self.egress_dispatcher.read().unwrap().clone()
+    }
+
+    /// Install the host-side credential resolver used by `http_request`.
+    /// Applied to every subsequently-waked Agent. Same interior-mutable
+    /// life cycle as [`Self::attach_egress_dispatcher`].
+    pub fn attach_credential_resolver(
+        &self,
+        resolver: Arc<dyn crate::http_tool::CredentialResolver>,
+    ) {
+        *self.credential_resolver.write().unwrap() = Some(resolver);
     }
 
     /// A `Weak<Self>` reference to this factory. Used internally by
@@ -543,6 +560,9 @@ impl AgentFactory {
         }
         agent.set_veto_dispatcher(self.current_veto_dispatcher());
         agent.set_egress_dispatcher(self.current_egress_dispatcher());
+        if let Some(resolver) = self.credential_resolver.read().unwrap().clone() {
+            agent.set_credential_resolver(resolver);
+        }
         if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);
         }

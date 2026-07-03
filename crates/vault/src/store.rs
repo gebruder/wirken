@@ -17,12 +17,28 @@ pub struct CredentialMetadata {
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub rotation_due_at: Option<DateTime<Utc>>,
+    /// Hosts this credential may be sent to by the `http_request` tool.
+    /// Empty means unbound: `http_request` refuses to use it (deny by
+    /// default), so a credential can only travel to hosts the operator
+    /// pinned at creation, never to a host a skill's own permissions
+    /// block widens to.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 impl CredentialMetadata {
     /// Check if this credential has expired.
     pub fn is_expired(&self) -> bool {
         self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
+    }
+
+    /// Whether this credential may be sent to `host`. Exact,
+    /// case-insensitive host match; an unbound credential (empty
+    /// `allowed_hosts`) permits nothing.
+    pub fn permits_host(&self, host: &str) -> bool {
+        self.allowed_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(host))
     }
 
     /// Check if this credential is due for rotation.
@@ -82,9 +98,11 @@ impl CredentialStore {
                  created_at TEXT NOT NULL,
                  expires_at TEXT,
                  last_used_at TEXT,
-                 rotation_due_at TEXT
+                 rotation_due_at TEXT,
+                 allowed_hosts TEXT
              );",
         )?;
+        migrate_allowed_hosts(&conn)?;
 
         Ok(Self { conn, device_key })
     }
@@ -106,14 +124,19 @@ impl CredentialStore {
                  created_at TEXT NOT NULL,
                  expires_at TEXT,
                  last_used_at TEXT,
-                 rotation_due_at TEXT
+                 rotation_due_at TEXT,
+                 allowed_hosts TEXT
              );",
         )?;
+        migrate_allowed_hosts(&conn)?;
 
         Ok(Self { conn, device_key })
     }
 
-    /// Store a credential. Encrypts the secret value before writing.
+    /// Store a credential with no host binding. Encrypts the secret
+    /// before writing. A credential stored this way is unusable by
+    /// `http_request` (deny by default); use [`Self::store_with_hosts`]
+    /// to bind it to the hosts it may be sent to.
     pub fn store(
         &self,
         name: &str,
@@ -122,13 +145,34 @@ impl CredentialStore {
         expires_at: Option<DateTime<Utc>>,
         rotation_due_at: Option<DateTime<Utc>>,
     ) -> Result<(), VaultError> {
+        self.store_with_hosts(name, channel, secret, expires_at, rotation_due_at, &[])
+    }
+
+    /// Store a credential, binding it to the hosts `http_request` may
+    /// send it to. An empty `allowed_hosts` leaves it unbound. The
+    /// binding is enforced host-side at injection time and cannot be
+    /// widened by a skill's own permissions block.
+    pub fn store_with_hosts(
+        &self,
+        name: &str,
+        channel: &str,
+        secret: &VaultSecret,
+        expires_at: Option<DateTime<Utc>>,
+        rotation_due_at: Option<DateTime<Utc>>,
+        allowed_hosts: &[String],
+    ) -> Result<(), VaultError> {
         let encrypted = encrypt(name, secret, &self.device_key)?;
         let now = Utc::now().to_rfc3339();
+        let hosts_json = if allowed_hosts.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(allowed_hosts)?)
+        };
 
         self.conn.execute(
             "INSERT OR REPLACE INTO credentials
-             (name, channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+             (name, channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?7)",
             params![
                 name,
                 channel,
@@ -136,6 +180,7 @@ impl CredentialStore {
                 now,
                 expires_at.map(|t| t.to_rfc3339()),
                 rotation_due_at.map(|t| t.to_rfc3339()),
+                hosts_json,
             ],
         )?;
 
@@ -147,7 +192,7 @@ impl CredentialStore {
     /// Returns VaultError::Expired if the credential has expired.
     pub fn retrieve(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError> {
         let mut stmt = self.conn.prepare(
-            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at
+            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts
              FROM credentials WHERE name = ?1",
         )?;
 
@@ -160,6 +205,7 @@ impl CredentialStore {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
@@ -171,6 +217,7 @@ impl CredentialStore {
             expires_at_str,
             last_used_at_str,
             rotation_due_at_str,
+            allowed_hosts_json,
         ) = row;
 
         let meta = CredentialMetadata {
@@ -186,6 +233,7 @@ impl CredentialStore {
                 .as_deref()
                 .map(parse_datetime)
                 .transpose()?,
+            allowed_hosts: parse_hosts(&allowed_hosts_json)?,
         };
 
         if meta.is_expired() {
@@ -213,7 +261,7 @@ impl CredentialStore {
     /// operators rely on for rotation decisions.
     pub fn peek(&self, name: &str) -> Result<(VaultSecret, CredentialMetadata), VaultError> {
         let mut stmt = self.conn.prepare(
-            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at
+            "SELECT channel, encrypted_value, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts
              FROM credentials WHERE name = ?1",
         )?;
 
@@ -226,6 +274,7 @@ impl CredentialStore {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })
             .map_err(|_| VaultError::NotFound(name.to_string()))?;
@@ -237,6 +286,7 @@ impl CredentialStore {
             expires_at_str,
             last_used_at_str,
             rotation_due_at_str,
+            allowed_hosts_json,
         ) = row;
 
         let meta = CredentialMetadata {
@@ -252,6 +302,7 @@ impl CredentialStore {
                 .as_deref()
                 .map(parse_datetime)
                 .transpose()?,
+            allowed_hosts: parse_hosts(&allowed_hosts_json)?,
         };
 
         if meta.is_expired() {
@@ -288,7 +339,7 @@ impl CredentialStore {
     /// List all credential metadata (without decrypting values).
     pub fn list(&self) -> Result<Vec<CredentialMetadata>, VaultError> {
         let mut stmt = self.conn.prepare(
-            "SELECT name, channel, created_at, expires_at, last_used_at, rotation_due_at
+            "SELECT name, channel, created_at, expires_at, last_used_at, rotation_due_at, allowed_hosts
              FROM credentials ORDER BY name",
         )?;
 
@@ -300,6 +351,7 @@ impl CredentialStore {
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
                 row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?;
 
@@ -312,6 +364,7 @@ impl CredentialStore {
                 expires_at_str,
                 last_used_at_str,
                 rotation_due_at_str,
+                allowed_hosts_json,
             ) = row?;
             result.push(CredentialMetadata {
                 name,
@@ -326,6 +379,7 @@ impl CredentialStore {
                 rotation_due_at: rotation_due_at_str
                     .as_deref()
                     .and_then(|s| parse_datetime(s).ok()),
+                allowed_hosts: parse_hosts(&allowed_hosts_json).unwrap_or_default(),
             });
         }
 
@@ -402,6 +456,32 @@ fn parse_datetime(s: &str) -> Result<DateTime<Utc>, VaultError> {
                 e.to_string(),
             )))
         })
+}
+
+/// Backfill the `allowed_hosts` column onto a `credentials` table
+/// created before host-binding. New databases already carry it from
+/// CREATE TABLE, so this is a no-op for them. Idempotent: it checks
+/// `pragma_table_info` before the `ALTER TABLE`.
+fn migrate_allowed_hosts(conn: &Connection) -> Result<(), VaultError> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('credentials') WHERE name = 'allowed_hosts'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        conn.execute_batch("ALTER TABLE credentials ADD COLUMN allowed_hosts TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Parse the stored `allowed_hosts` JSON array. `NULL` / empty means an
+/// unbound credential (no hosts).
+fn parse_hosts(raw: &Option<String>) -> Result<Vec<String>, VaultError> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(s) if s.is_empty() => Ok(Vec::new()),
+        Some(s) => Ok(serde_json::from_str(s)?),
+    }
 }
 
 /// Build a sibling path by appending `suffix` to `path`'s file name.
