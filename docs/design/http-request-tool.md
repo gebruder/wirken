@@ -7,10 +7,11 @@ a **Limitation**, not a feature.
 
 `http_request` is a built-in agent tool that lets a skill make a scoped
 outbound HTTPS request and attach a vault-held credential the model
-never sees. It exists so a read-only integration skill (the motivating
-case: a TeamDynamix staff/device/location lookup) can call a REST API
-with an operator-provisioned token without the token ever entering
-model context, tool output, logs, or the audit payload.
+never sees. It exists so a read-only integration skill can call a REST
+API with an operator-provisioned token, without the token ever entering
+model context, tool output, logs, or the audit payload. The motivating
+case is a staff or asset lookup against an internal system such as
+TeamDynamix.
 
 It is deliberately narrower than `curl`-under-`exec`: it is egress-
 allowlist-mediated (unlike the shell sink, see `egress.rs:19-41`), it
@@ -71,6 +72,32 @@ result telling it to use the `credential` field. Only the vault-resolved
 credential ever sets that header; a model attempt to set it fails loudly
 and does not win.
 
+## Credential-host binding (the control that makes this safe)
+
+This is the load-bearing control, and without it the tool would be
+unsafe. Absent binding, authorization would be the skill's own
+frontmatter: a phished skill update pairing `credentials.allow:
+[tdx-api]` with `egress.domains: [attacker.example]` would exfiltrate
+the Bearer token at Tier 1, no prompt. So a credential is bound to
+permitted hosts **in the vault, by the operator**, and the binding is
+enforced host-side at injection:
+
+```bash
+wirken credential add records-api --host records.example.org
+```
+
+`http_request` resolves the credential through the `CredentialResolver`,
+which checks the request's host against the credential's stored
+`allowed_hosts` (exact, case-insensitive) before returning the secret.
+A request to any other host is refused and the secret is never injected,
+**regardless of what the skill's `egress.domains` allows**. Deny by
+default: a credential with no `--host` binding is unusable by
+`http_request` at all. The effective destination set is the
+intersection of the operator's credential binding and the skill's egress
+allowlist; a skill can only ever narrow it, never widen it. Enforced in
+`CredentialMetadata::permits_host` (`crates/vault/src/store.rs`) and the
+`VaultCredentialResolver` (`crates/cli/src/commands/run.rs`).
+
 ## Credential scoping (new permissions block)
 
 `PermissionsBlock` (`crates/agent/src/skill_perms.rs`) gains a
@@ -97,15 +124,15 @@ request's `(host, path)` matches an entry the skill declared in
 ```yaml
 permissions:
   http:
-    post_paths: ["https://tenant.teamdynamix.com/TDWebApi/api/assets/search"]
+    post_paths: ["https://records.example.org/api/assets/search"]
 ```
 
 Each entry is an absolute `https://` URL; the match is host + path
 exact, query string ignored. This is enforced at the gate layer
 (`check_http_request_or_deny` in `runtime.rs`), so a POST to any
 undeclared path on an allowlisted host is refused, not merely
-un-routed. TDX searches are POSTs; this is the only write-shaped verb
-the tool permits and only to a pre-declared search endpoint.
+un-routed. Some REST APIs expose search as a POST; this is the only
+write-shaped verb the tool permits, and only to a pre-declared endpoint.
 
 ## Egress
 
@@ -138,7 +165,9 @@ component** (`url::Url::host_str`), never the raw string. Concretely:
   is the only wildcard path and is opt-in).
 - **Port-agnostic.** The match is on host only; allowlisting a host
   authorizes it on any port over https (`allowed.example:8443` matches
-  `allowed.example`). Port-scoping is a **Limitation**, not supported.
+  `allowed.example`). So a different service on another port of the same
+  host is in scope, for both the egress allowlist and the credential
+  binding. Port-scoping is not supported (see Limitations).
 
 ## Redirects
 
@@ -171,6 +200,14 @@ authorization is per skill, per host. This is the "allowlisted read-
 only requests must not prompt per call" requirement: an allowlisted GET
 runs with no prompt; a non-allowlisted request is refused, not prompted.
 
+This is a deliberate trade: authorization moved from human-in-the-loop
+(a Tier-3 prompt on every call) to install-time policy. Install-time
+policy trusts the operator's signed skill and, for where a secret may
+travel, the operator's credential-host binding rather than the skill
+author. Bypassing the pre-existing Tier-3 `CredentialAccess` action was
+required to meet the no-prompt goal; the credential-host binding is what
+replaces the prompt as the control on secret destination.
+
 ## Response handling
 
 - **Body cap:** 1 MiB (`HTTP_TOOL_BODY_CAP`). On overflow the body is
@@ -197,7 +234,8 @@ the completed-request row.
 
 ## What this tool does NOT protect against
 
-In the honest register of `egress.rs:19-41`:
+Stated in the same plain terms as the egress boundary comment
+(`egress.rs:19-41`):
 
 - **DNS rebinding / internal-IP resolution.** The allowlist is
   name-based. An allowlisted hostname that resolves to `169.254.169.254`
@@ -219,15 +257,22 @@ In the honest register of `egress.rs:19-41`:
   exfiltration. The `post_paths` declaration trusts the endpoint.
 - **Port scoping.** Allowlisting a host authorizes all ports on it over
   https (Limitation above).
+- **An over-broad or later-hostile binding.** The credential-host
+  binding is only as good as the operator's host list. Binding a
+  credential to a host that is too broad, or that later becomes hostile,
+  still sends the secret there. The binding stops a skill from widening
+  the destination; it does not second-guess the operator's own choice.
 
 ## Limitations (not yet enforced as features)
 
 - Auth scheme is fixed to `Authorization: Bearer <secret>`. Custom
   header names / schemes (`X-Api-Key`, basic auth) are not supported.
 - Port-scoped and resolved-IP allowlisting are not supported (above).
-- Production CLI wiring: the tool requires a `CredentialResolver`
-  injected host-side. The injection seam exists on `ToolRegistry`; the
-  branch wires it where the gateway already opens the vault. Any agent
-  path that has not been given a resolver returns a "no credential
-  resolver configured" refusal when a `credential` is named, rather
-  than silently proceeding.
+- Credential-host matching is exact per host; there is no `*.` wildcard
+  for credential bindings (the egress allowlist has one, but a credential
+  binding does not, by choice).
+- Production CLI wiring is in place: the gateway opens the vault at
+  startup and attaches a `VaultCredentialResolver` to the agent factory,
+  so every waked agent resolves host-bound credentials. If the vault is
+  unavailable the resolver is absent and a credentialed `http_request`
+  refuses rather than proceeds.

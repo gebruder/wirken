@@ -131,6 +131,11 @@ pub async fn show(name: &str) -> Result<()> {
     if let Some(rot) = meta.rotation_due_at {
         println!("    rotation due:   {}", rot.format("%Y-%m-%d %H:%M:%S"));
     }
+    if meta.allowed_hosts.is_empty() {
+        println!("    http hosts:     (none — not usable by http_request)");
+    } else {
+        println!("    http hosts:     {}", meta.allowed_hosts.join(", "));
+    }
 
     if meta.channel == OAUTH_CHANNEL {
         let public = load_oauth_public(&store, name)
@@ -290,7 +295,12 @@ impl ValueSource {
     }
 }
 
-pub async fn add(name: &str, channel: Option<&str>, source: ValueSource) -> Result<()> {
+pub async fn add(
+    name: &str,
+    channel: Option<&str>,
+    source: ValueSource,
+    allowed_hosts: &[String],
+) -> Result<()> {
     let cfg = config();
 
     let value = read_credential_value(name, source)?;
@@ -310,10 +320,24 @@ pub async fn add(name: &str, channel: Option<&str>, source: ValueSource) -> Resu
 
     let secret = VaultSecret::new(value);
     store
-        .store(name, channel.unwrap_or(""), &secret, None, None)
+        .store_with_hosts(
+            name,
+            channel.unwrap_or(""),
+            &secret,
+            None,
+            None,
+            allowed_hosts,
+        )
         .context(format!("Failed to store '{name}'"))?;
 
-    println!("  Credential '{name}' stored.");
+    if allowed_hosts.is_empty() {
+        println!("  Credential '{name}' stored (no host binding; not usable by http_request).");
+    } else {
+        println!(
+            "  Credential '{name}' stored, bound to: {}",
+            allowed_hosts.join(", ")
+        );
+    }
     Ok(())
 }
 

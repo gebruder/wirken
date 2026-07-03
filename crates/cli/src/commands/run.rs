@@ -43,6 +43,7 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
     fn resolve(
         &self,
         name: &str,
+        host: &str,
     ) -> Result<wirken_agent::http_tool::ResolvedSecret, wirken_agent::http_tool::CredentialError>
     {
         use wirken_agent::http_tool::{CredentialError, ResolvedSecret};
@@ -50,6 +51,24 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
             .store
             .lock()
             .map_err(|_| CredentialError::Backend("vault mutex poisoned".into()))?;
+
+        // Check the credential's host binding via `peek` first, so a
+        // refused attempt does not bump `last_used_at`. The binding is
+        // operator-set vault metadata; a skill cannot widen it.
+        let meta = match store.peek(name) {
+            Ok((_, meta)) => meta,
+            Err(wirken_vault::VaultError::NotFound(_)) => {
+                return Err(CredentialError::NotFound(name.to_string()));
+            }
+            Err(e) => return Err(CredentialError::Backend(e.to_string())),
+        };
+        if !meta.permits_host(host) {
+            return Err(CredentialError::HostNotPermitted {
+                name: name.to_string(),
+                host: host.to_string(),
+            });
+        }
+
         match store.retrieve(name) {
             Ok((secret, _)) => Ok(ResolvedSecret::new(secret.expose().to_string())),
             Err(wirken_vault::VaultError::NotFound(_)) => {

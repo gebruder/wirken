@@ -30,19 +30,32 @@ const SECRET: &str = "s3cr3t-token-DO-NOT-LEAK-9f2c";
 
 // ---- fakes / helpers -----------------------------------------------------
 
-struct FakeResolver;
+/// Fake resolver for slot "tdx", bound to `bound_host`. Enforces the
+/// host binding exactly as the vault-backed resolver does, so the tests
+/// exercise the tool's refusal path when a skill's target host does not
+/// match the credential's binding.
+struct FakeResolver {
+    bound_host: String,
+}
 impl CredentialResolver for FakeResolver {
-    fn resolve(&self, name: &str) -> Result<ResolvedSecret, CredentialError> {
-        if name == "tdx" {
-            Ok(ResolvedSecret::new(SECRET.to_string()))
-        } else {
-            Err(CredentialError::NotFound(name.to_string()))
+    fn resolve(&self, name: &str, host: &str) -> Result<ResolvedSecret, CredentialError> {
+        if name != "tdx" {
+            return Err(CredentialError::NotFound(name.to_string()));
         }
+        if !host.eq_ignore_ascii_case(&self.bound_host) {
+            return Err(CredentialError::HostNotPermitted {
+                name: name.to_string(),
+                host: host.to_string(),
+            });
+        }
+        Ok(ResolvedSecret::new(SECRET.to_string()))
     }
 }
 
 fn resolver() -> Arc<dyn CredentialResolver> {
-    Arc::new(FakeResolver)
+    Arc::new(FakeResolver {
+        bound_host: "localhost".to_string(),
+    })
 }
 
 /// EgressClient allowlisting exactly the given hosts.
@@ -455,6 +468,39 @@ async fn http_request_event_lands_and_chain_verifies() {
         SessionVerifyResult::Ok { .. } => {}
         other => panic!("chain must verify after HttpRequest row: {other:?}"),
     }
+}
+
+// ---- 12. credential host binding cannot be widened by the skill ----------
+
+#[tokio::test]
+async fn credential_host_binding_refuses_mismatched_host() {
+    // The phishing shape: a skill egress-allowlists the target host and
+    // names a credential it declared, but the credential is bound (in
+    // the vault, by the operator) to a different host. Injection is
+    // refused, so the secret never reaches the wire even though the
+    // skill's own permissions would have allowed it.
+    let (base, mut rx) = serve_once(build_response("200 OK", &[], "ok")).await;
+    let bound_elsewhere: Arc<dyn CredentialResolver> = Arc::new(FakeResolver {
+        bound_host: "tenant.teamdynamix.com".to_string(),
+    });
+    let args = serde_json::json!({
+        "method": "GET", "url": format!("{base}/"), "credential": "tdx"
+    });
+    let r = http_tool::execute(&egress(&["localhost"]), Some(&bound_elsewhere), None, &args)
+        .await
+        .unwrap();
+    assert!(!r.success, "mismatched host binding must refuse");
+    assert!(
+        r.output.contains("not bound to host"),
+        "output: {}",
+        r.output
+    );
+    assert!(!r.output.contains(SECRET));
+    // Nothing went out: the secret never reached the wire.
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
 }
 
 // ---- profile helpers -----------------------------------------------------

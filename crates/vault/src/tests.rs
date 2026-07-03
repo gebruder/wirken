@@ -325,6 +325,39 @@ fn store_and_retrieve_credential() {
 }
 
 #[test]
+fn host_binding_round_trips_and_enforces() {
+    let tmp = TempDir::new().unwrap();
+    let store = test_store(&tmp);
+    let secret = VaultSecret::new("tok".into());
+
+    store
+        .store_with_hosts(
+            "tdx",
+            "http",
+            &secret,
+            None,
+            None,
+            &["tenant.teamdynamix.com".to_string()],
+        )
+        .unwrap();
+    let (_s, meta) = store.retrieve("tdx").unwrap();
+    assert_eq!(
+        meta.allowed_hosts,
+        vec!["tenant.teamdynamix.com".to_string()]
+    );
+    assert!(meta.permits_host("tenant.teamdynamix.com"));
+    assert!(meta.permits_host("TENANT.TeamDynamix.com")); // case-insensitive
+    assert!(!meta.permits_host("attacker.example"));
+
+    // A credential stored via the unbound `store` permits no host, so
+    // `http_request` refuses it (deny by default).
+    store.store("plain", "openai", &secret, None, None).unwrap();
+    let (_s2, m2) = store.retrieve("plain").unwrap();
+    assert!(m2.allowed_hosts.is_empty());
+    assert!(!m2.permits_host("anything.example"));
+}
+
+#[test]
 fn retrieve_updates_last_used_at() {
     let tmp = TempDir::new().unwrap();
     let store = test_store(&tmp);

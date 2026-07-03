@@ -49,21 +49,38 @@ impl ResolvedSecret {
 /// tool registry so the agent crate does not depend on the vault crate.
 /// The CLI implements this over `wirken_vault::CredentialStore`; tests
 /// inject a fake.
+///
+/// `host` is the request's target host. The resolver MUST enforce the
+/// credential's own host binding against it and refuse
+/// (`HostNotPermitted`) when the credential is not bound to that host.
+/// This is the load-bearing control: the binding lives in vault metadata
+/// set by the operator, so a skill's own permissions block can never
+/// widen where a secret may travel.
 pub trait CredentialResolver: Send + Sync {
-    fn resolve(&self, name: &str) -> Result<ResolvedSecret, CredentialError>;
+    fn resolve(&self, name: &str, host: &str) -> Result<ResolvedSecret, CredentialError>;
 }
 
 #[derive(Debug)]
 pub enum CredentialError {
     NotFound(String),
+    /// The credential exists but is not bound to the request's host.
+    HostNotPermitted {
+        name: String,
+        host: String,
+    },
     Backend(String),
 }
 
 impl std::fmt::Display for CredentialError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            // Names, never values.
+            // Names and hosts, never secret values.
             CredentialError::NotFound(name) => write!(f, "vault slot '{name}' not found"),
+            CredentialError::HostNotPermitted { name, host } => write!(
+                f,
+                "vault slot '{name}' is not bound to host '{host}' \
+                 (bind it with `wirken credential add --host {host}`)"
+            ),
             CredentialError::Backend(msg) => write!(f, "vault error: {msg}"),
         }
     }
@@ -151,7 +168,10 @@ pub async fn execute(
                         .into(),
                 )
             })?;
-            match r.resolve(name) {
+            // The credential's own host binding is enforced here against
+            // the request host, independent of the skill's egress
+            // allowlist, so a skill cannot widen where the secret goes.
+            match r.resolve(name, url.host_str().unwrap_or_default()) {
                 Ok(secret) => Some(secret),
                 Err(e) => return Ok(fail(format!("credential '{name}': {e}"))),
             }
