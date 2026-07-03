@@ -27,22 +27,19 @@ Login endpoints (used by the operator out of band, not by the skill):
 - `POST /api/auth` ← `LoginParameters { UserName, Password }` → token string.
 - `POST /api/auth/loginadmin` ← `AdminTokenParameters { BEID, WebServicesKey }` → token string.
 
-## People search
+## People resolution
 
-`POST /api/people/search`
+The skill resolves people with **`GET /api/people/lookup`** (a GET, so it
+needs no `post_paths` entry). Query parameters:
 
-Request body: `UserSearch`. Relevant fields (all optional):
+- `searchText` (string) — LIKE match across name / username / email.
+- `maxResults` (integer) — the skill sets `10` to detect ambiguity.
 
-- `SearchText` (string) — LIKE match across name / username / email.
-- `IsActive` (boolean) — the skill sets `true` to prefer current staff.
-- `MaxResults` (integer) — result cap; the skill sets `10` to detect ambiguity.
-- Other narrowing fields available: `UserName`, `PrimaryEmail` is **not**
-  a search field (search by `SearchText`), `ExternalID`, `AlternateID`,
-  `IsEmployee`, `IsConfidential`, `PhoneNumber`, `AccountIDs` (array int),
-  `ReferenceIDs` (array int), `SecurityRoleID`, `AppName`.
-
-Response: **array of `User`** (a plain JSON array, not a paged wrapper;
-`MaxResults` bounds it). Fields the skill reads:
+Response: **array of `User`** (plain array, `maxResults` bounded). It
+returns the identity fields the skill needs and **omits collection
+properties** `Applications`, `Attributes`, `GroupIDs`, `OrgApplications`,
+`Permissions` (per the endpoint's own spec description). Fields the skill
+reads:
 
 - `UID` (string, GUID) — the person's unique id; passed to asset search.
 - `FullName`, `FirstName`, `LastName`.
@@ -50,7 +47,16 @@ Response: **array of `User`** (a plain JSON array, not a paged wrapper;
 - `UserName`, `ExternalID`, `AlternateID`, `ReferenceID`.
 - `IsActive`, `IsEmployee`.
 - `LocationName`, `LocationRoomName` (the person's default location).
-- `Attributes` (array of `CustomAttribute`) — **[tenant]**.
+
+`PrimaryEmail` is not a search parameter; match on `searchText`. Rate
+limit: 75 requests per 10 seconds per IP.
+
+**Alternative:** `POST /api/people/search` (`UserSearch` body) supports
+richer server-side filters (`SearchText`, `IsActive`, `IsEmployee`,
+`SecurityRoleID`, `AccountIDs`/`ReferenceIDs` arrays, `ExternalID`,
+`AlternateID`, `PhoneNumber`, `AppName`) and returns the same `User[]`
+with the same collection omissions. It is a POST, so preferring it would
+require adding its path to the skill's `post_paths`. Rate limit 60/60s.
 
 ## Asset search
 
@@ -78,8 +84,10 @@ Note on "assigned": this skill searches `OwningCustomerIDs` (owner). If
 your tenant tracks device custody separately, `UsingCustomerIDs` (the
 current user) may be what you want; that is a per-tenant choice.
 
-Response: **array of `Asset`** (plain array, `MaxResults` bounded).
-Fields the skill reads:
+Response: **array of `Asset`** (plain array, `MaxResults` bounded). Asset
+search **omits `Attachments` and `Attributes`** from results (per the
+endpoint's own spec description); base fields only. Fields the skill
+reads:
 
 - `ID`, `Name`, `SerialNumber`, `Tag`, `ExternalID`.
 - `ProductModelName` (`ProductModelID`), `ManufacturerName`.
@@ -87,7 +95,17 @@ Fields the skill reads:
 - `OwningCustomerName` (`OwningCustomerID`) — set when a person owns it.
 - `OwningDepartmentName` (`OwningDepartmentID`) — set when a department owns it.
 - `StatusName` (`StatusID`).
-- `Attributes` (array of `CustomAttribute`) — **[tenant]**.
+
+Rate limit: 60 requests per 60 seconds per IP.
+
+## Asset detail (for custom attributes)
+
+`GET /api/{appId}/assets/{id}` returns a single **full `Asset`**,
+including the `Attributes` array that search omits. It is the only way to
+read a custom attribute (e.g. last inventory date) for an asset, and it
+is a GET so it needs no `post_paths` entry. The skill fetches detail only
+when the inventory column is in play, capped at **25 per run** (SKILL.md
+step 3), because these endpoints are rate-limited.
 
 ### No base "last inventory date" field
 
@@ -95,14 +113,18 @@ The `Asset` schema has **no** inventory / audit / last-seen date field.
 Its date fields are `AcquisitionDate`, `CreatedDate`, `ModifiedDate`,
 `ExpectedReplacementDate` — none is an inventory date. If your tenant
 records a "last inventory" date, it lives in `Attributes[]` as a custom
-attribute; identify its attribute `Name` during acceptance and configure
-the skill to read it. If there is none, the skill writes "not
-available". Do not hunt for a base field; there isn't one.
+attribute, and since **search omits `Attributes`** it can only be read
+through the asset-detail GET above. Identify its attribute `Name` during
+acceptance and configure the skill to read it. If there is none, the
+skill writes "not available". Do not hunt for a base field; there isn't
+one.
 
 ## Custom attributes (`CustomAttribute`) — [tenant]
 
 Both `User.Attributes` and `Asset.Attributes` are arrays of
-`CustomAttribute`. Fields: `ID` (int), `Name` (string), `Value` (string,
+`CustomAttribute`, populated **only when a person or asset is loaded
+individually** — search and lookup responses omit them. Fields: `ID`
+(int), `Name` (string), `Value` (string,
 the raw/id value), `ValueText` (string, the display value),
 `DataType`, `FieldType`, `Choices`, `ChoicesText`, `Order`, `SectionID`,
 `SectionName`. Match on `Name`; prefer `ValueText` for display. Which
@@ -113,9 +135,10 @@ attributes exist is entirely tenant-defined.
 The endpoints are permission-gated per the account behind the token, not
 by a fixed rule in the spec:
 
-- People search needs a token whose account can read the People/directory.
-- Asset search needs a token whose account can access the Asset
-  application (`{appId}`).
+- People lookup and search need a token whose account can read the
+  People/directory (`TDPeople` permission).
+- Asset search and asset detail need a token whose account can access the
+  Asset application (`{appId}`).
 
 An **admin** token (`/api/auth/loginadmin` with `BEID` + `WebServicesKey`)
 is a service account with broad read access and is the reliable choice

@@ -26,16 +26,21 @@ taking effect. Use the env var only for a throwaway test.
 
 ## 3. Point the skill at your tenant
 
-Edit `~/.wirken/skills/tdx-assets/SKILL.md`:
+Edit `~/.wirken/skills/tdx-assets/SKILL.md` (and the same hostname where
+it appears in the body URLs):
 
-- Replace `your-tenant.teamdynamix.com` (in `egress.domains` **and** both
-  `http.post_paths`) with your TDX hostname. Use `/SBTDWebApi/` instead
-  of `/TDWebApi/` if this is a sandbox instance.
-- Replace `APPID` in the asset-search `post_paths` entry with the numeric
-  id of your Asset application (TDX Admin → Applications).
+- Replace `your-tenant.teamdynamix.com` (in `egress.domains` and the one
+  `http.post_paths` entry, and in the body's request URLs) with your TDX
+  hostname. Use `/SBTDWebApi/` instead of `/TDWebApi/` if this is a
+  sandbox instance.
+- Replace `APPID` in the asset-search `post_paths` entry (and the body's
+  asset URLs) with the numeric id of your Asset application (TDX Admin →
+  Applications).
 
-These two values are the only things the tool matches against, so they
-must be exact. Re-sign after editing (step 2).
+The egress hostname and the one asset-search POST path are what the tool
+matches against, so they must be exact. People lookup and asset detail
+are GETs (no path declaration); the egress allowlist still confines them
+to your host. Re-sign after editing (step 2).
 
 ## 4. Mint a TDX bearer token
 
@@ -98,14 +103,24 @@ jsmith@example.edu in TeamDynamix."
   is only ever sent to the host you bound it to; a request to any other
   host is refused before anything leaves the process, and the skill's
   own permissions cannot widen that.
-- **Egress allowlisted.** The skill can reach only the hostname in its
-  `egress.domains`.
-- **Read-only plus two declared POST paths.** Only `GET`/`HEAD` and the
-  two search endpoints in `http.post_paths` are allowed; any other path
-  or verb (create/update/delete) is refused at the gate.
-- **Every call audited.** Each request lands a `http_request` row in the
-  session hash chain (method, host, path, status, credential name — never
-  the token value); the chain verifies with `wirken audit verify`.
+- **Egress allowlisted.** The tool can reach only the hostname in the
+  skill's `egress.domains`. (This bounds `http_request` traffic; the
+  separate LLM inference channel is not egress-restricted, by design.)
+- **Read-only.** The tool refuses every write verb (`PUT`/`PATCH`/`DELETE`
+  and any method other than `GET`/`HEAD`/`POST`), and POST is refused
+  unless its path is the one declared search endpoint. Read-only therefore
+  rests on two things: the tool refusing write verbs, and the TDX GET
+  endpoints being side-effect-free. It does **not** rest on path
+  restriction for GET — a `GET` to any path on the bound host is allowed
+  and carries the credential; the skill confines itself to the read
+  endpoints by instruction, and the egress allowlist confines every
+  request to your TDX host.
+- **Every completed call audited.** A completed request lands a
+  `http_request` row in the session hash chain (method, host, path,
+  status, credential name — never the token value). A call refused before
+  it goes out, or one that fails in flight, is captured by the generic
+  tool-result row instead, so the chain is never blind. The chain
+  verifies with `wirken audit verify`.
 
 ## What is NOT enforced (limitations, from the design note)
 

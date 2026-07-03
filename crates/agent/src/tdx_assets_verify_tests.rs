@@ -69,20 +69,16 @@ fn skill_loads_signs_and_permissions_parse() {
             .allows("your-tenant.teamdynamix.com"),
         "egress allowlists the tenant placeholder host"
     );
-    assert_eq!(s.permissions.http.post_paths.len(), 2);
+    // Only the asset-search POST is declared; people resolution
+    // (people/lookup) and asset detail (assets/{id}) are GETs, which need
+    // no post_paths entry.
+    assert_eq!(s.permissions.http.post_paths.len(), 1);
     assert!(
         s.permissions
             .http
             .post_paths
             .iter()
-            .any(|p| p.ends_with("/TDWebApi/api/people/search"))
-    );
-    assert!(
-        s.permissions
-            .http
-            .post_paths
-            .iter()
-            .any(|p| p.ends_with("/assets/search"))
+            .all(|p| p.ends_with("/assets/search"))
     );
 }
 
@@ -137,7 +133,7 @@ fn gate_allows_declared_search_refuses_others_and_undeclared_credential() {
         .http
         .post_paths
         .iter()
-        .find(|p| p.ends_with("/people/search"))
+        .find(|p| p.ends_with("/assets/search"))
         .unwrap()
         .clone();
 
@@ -167,6 +163,20 @@ fn gate_allows_declared_search_refuses_others_and_undeclared_credential() {
             .0,
         "credentials"
     );
+
+    // GET is not path-restricted: the people/lookup and asset-detail read
+    // paths pass the gate with no post_paths entry. This is what makes the
+    // detail-fetch legal within the declared permissions.
+    for url in [
+        "https://your-tenant.teamdynamix.com/TDWebApi/api/people/lookup?searchText=x&maxResults=10",
+        "https://your-tenant.teamdynamix.com/TDWebApi/api/APPID/assets/42",
+    ] {
+        let g = serde_json::json!({"method":"GET","url":url,"credential":"tdx-api"}).to_string();
+        assert!(
+            http_tool::gate(&perms, &g).is_none(),
+            "GET read path passes the gate: {url}"
+        );
+    }
 }
 
 // ---- mock TDX server + bearer flow --------------------------------------
@@ -227,16 +237,16 @@ fn out(r: &ToolResult) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn people_search_injects_bearer_host_side_and_hides_token() {
+async fn people_lookup_injects_bearer_host_side_and_hides_token() {
     let users = r#"[{"UID":"11111111-1111-1111-1111-111111111111","FullName":"Jane Doe","PrimaryEmail":"jane@x.edu","IsActive":true,"LocationName":"HQ"}]"#;
     let (base, rx) = serve_once(http_response("200 OK", users)).await;
     let resolver: Arc<dyn CredentialResolver> = Arc::new(BearerResolver {
         host: "localhost".into(),
     });
+    // The resolution path is a GET to people/lookup (no post_paths entry).
     let args = serde_json::json!({
-        "method":"POST", "url": format!("{base}/TDWebApi/api/people/search"),
-        "headers": {"Content-Type":"application/json"},
-        "body": r#"{"SearchText":"Jane Doe","IsActive":true,"MaxResults":10}"#,
+        "method":"GET",
+        "url": format!("{base}/TDWebApi/api/people/lookup?searchText=Jane%20Doe&maxResults=10"),
         "credential":"tdx-api"
     });
     let r = http_tool::execute(&egress(&["localhost"]), Some(&resolver), None, &args)
@@ -257,7 +267,7 @@ async fn people_search_injects_bearer_host_side_and_hides_token() {
             .contains(&format!("authorization: bearer {TOKEN}").to_lowercase()),
         "bearer token on the wire:\n{req}"
     );
-    assert!(req.starts_with("POST /TDWebApi/api/people/search"));
+    assert!(req.starts_with("GET /TDWebApi/api/people/lookup"));
 }
 
 async fn run_people_call(status: &str, body: &str) -> ToolResult {
@@ -266,8 +276,9 @@ async fn run_people_call(status: &str, body: &str) -> ToolResult {
         host: "localhost".into(),
     });
     let args = serde_json::json!({
-        "method":"POST","url":format!("{base}/TDWebApi/api/people/search"),
-        "body":"{}","credential":"tdx-api"
+        "method":"GET",
+        "url":format!("{base}/TDWebApi/api/people/lookup?searchText=x&maxResults=10"),
+        "credential":"tdx-api"
     });
     http_tool::execute(&egress(&["localhost"]), Some(&resolver), None, &args)
         .await
@@ -320,6 +331,34 @@ async fn tool_surfaces_each_scenario_shape_to_the_agent() {
             .unwrap()
             .contains("\"Attributes\":[]")
     );
+}
+
+#[tokio::test]
+async fn asset_detail_get_returns_attributes_over_the_tool() {
+    // Asset search omits Attributes; the detail GET returns them. Prove the
+    // tool executes GET /assets/{id} and returns the Attributes array where
+    // the tenant's inventory-date custom attribute lives, bearer injected,
+    // token not leaked.
+    let asset = r#"{"ID":42,"Name":"Laptop","Attributes":[{"ID":9,"Name":"Last Inventory","ValueText":"2026-06-01"}]}"#;
+    let (base, _rx) = serve_once(http_response("200 OK", asset)).await;
+    let resolver: Arc<dyn CredentialResolver> = Arc::new(BearerResolver {
+        host: "localhost".into(),
+    });
+    let args = serde_json::json!({
+        "method":"GET",
+        "url": format!("{base}/TDWebApi/api/APPID/assets/42"),
+        "credential":"tdx-api"
+    });
+    let r = http_tool::execute(&egress(&["localhost"]), Some(&resolver), None, &args)
+        .await
+        .unwrap();
+    assert!(r.success, "{}", r.output);
+    let body = out(&r)["body"].as_str().unwrap().to_string();
+    assert!(
+        body.contains("Last Inventory") && body.contains("2026-06-01"),
+        "detail GET returns the Attributes array: {body}"
+    );
+    assert!(!r.output.contains(TOKEN));
 }
 
 #[tokio::test]
