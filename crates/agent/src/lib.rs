@@ -52,4 +52,4 @@ mod tests;
 mod http_tool_tests;
 
 #[cfg(test)]
-mod tdx_assets_verify_tests;
+mod example_skill_e2e_tests;

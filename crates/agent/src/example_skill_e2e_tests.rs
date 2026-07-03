@@ -1,15 +1,17 @@
-//! Local verification for the `tdx-assets` example skill
+//! End-to-end coverage for the `http_request` built-in tool, driven
+//! through the one real example skill that exercises its full surface
 //! (`skills/examples/tdx-assets/`). Runs the *real* committed SKILL.md
-//! through the merged http_request enforcement: load + sign, slash
-//! recognition, system-prompt gating, the POST-path / credential gate,
-//! credential-host binding, egress allowlist, and a mock TDX auth-less
-//! bearer flow. The agent's *behavioral* handling (surface ambiguous,
-//! stop on 401, back off on 429) is not code-enforced and is an
-//! acceptance check against a real tenant; here we verify the tool
-//! surfaces each shape and never leaks the token.
+//! through the merged enforcement: load + sign, slash recognition,
+//! system-prompt gating, the POST-path / credential gate, credential-host
+//! binding, egress allowlist, host-side bearer injection with redaction,
+//! and the read (GET) paths that need no path declaration. TeamDynamix is
+//! the fixture, not the subject: these tests pin the tool's enforcement
+//! against drift, so an in-repo example is not a claim nothing exercises.
 //!
-//! On the tdx-skill branch only (a skill-specific verification artifact),
-//! not for merge to main.
+//! The skill body's *behavioral* handling (surface ambiguous, stop on
+//! 401, back off on 429) is agent behavior, not code-enforced; here we
+//! verify the tool surfaces each shape and never leaks the token, and
+//! `ACCEPTANCE.md` carries the live-tenant checks.
 
 use std::path::Path;
 use std::sync::Arc;
