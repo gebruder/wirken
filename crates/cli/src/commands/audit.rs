@@ -239,10 +239,11 @@ pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> R
         }
         if coresident_default {
             anchor_note = Some(format!(
-                "verified against the co-resident default anchor {}. A same-UID attacker \
-                 can rewrite the chain and swap this key together and still pass, so this \
-                 run is NOT tamper-evident against that attacker. Pass an out-of-band \
-                 --anchor (a hex value or a file outside the data dir) for real assurance.",
+                "the audit trust anchor set includes the co-resident key {} (reached by \
+                 default or by naming that file/key explicitly). A same-UID attacker can \
+                 rewrite the chain and swap this key together and still pass, so this run \
+                 is NOT tamper-evident against that attacker. Use an out-of-band --anchor \
+                 (a key held outside the data dir) for real assurance.",
                 audit_public_key_path(&cfg.data_dir).display()
             ));
         }
@@ -283,29 +284,43 @@ pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> R
 /// when no flag is given and the default public-key file is absent; the
 /// caller fails closed on that.
 fn resolve_anchors(anchors: &[String], data_dir: &Path) -> Result<(BTreeSet<String>, bool)> {
+    // The co-resident default anchor's key, if the local pub file exists.
+    // Any anchor equal to this key is swappable by a same-UID attacker,
+    // whether it is reached via the no-flag default, an explicit --anchor
+    // pointing at the file, or the same key passed as hex. Comparing by
+    // key bytes flags all three, so the loud warning is not escapable by
+    // naming the co-resident file explicitly.
+    let default_pub = audit_public_key_path(data_dir);
+    let coresident_key = if default_pub.is_file() {
+        let hex = std::fs::read_to_string(&default_pub)
+            .with_context(|| format!("read default anchor {}", default_pub.display()))?;
+        Some(
+            parse_anchor_key(&hex)
+                .with_context(|| format!("parse default anchor {}", default_pub.display()))?,
+        )
+    } else {
+        None
+    };
+
     let mut set = BTreeSet::new();
     if anchors.is_empty() {
-        let default_pub = audit_public_key_path(data_dir);
-        if default_pub.is_file() {
-            let hex = std::fs::read_to_string(&default_pub)
-                .with_context(|| format!("read default anchor {}", default_pub.display()))?;
-            set.insert(
-                parse_anchor_key(&hex)
-                    .with_context(|| format!("parse default anchor {}", default_pub.display()))?,
-            );
-            return Ok((set, true));
+        if let Some(k) = &coresident_key {
+            set.insert(k.clone());
         }
-        return Ok((set, false));
+    } else {
+        for value in anchors {
+            let raw = if Path::new(value).is_file() {
+                std::fs::read_to_string(value)
+                    .with_context(|| format!("read anchor file {value}"))?
+            } else {
+                value.clone()
+            };
+            set.insert(parse_anchor_key(&raw).with_context(|| format!("parse anchor '{value}'"))?);
+        }
     }
-    for value in anchors {
-        let raw = if Path::new(value).is_file() {
-            std::fs::read_to_string(value).with_context(|| format!("read anchor file {value}"))?
-        } else {
-            value.clone()
-        };
-        set.insert(parse_anchor_key(&raw).with_context(|| format!("parse anchor '{value}'"))?);
-    }
-    Ok((set, false))
+
+    let coresident = coresident_key.as_ref().is_some_and(|k| set.contains(k));
+    Ok((set, coresident))
 }
 
 /// Validate an Ed25519 public-key hex string and normalise it to
@@ -776,5 +791,37 @@ mod tests {
         let (set, coresident) = resolve_anchors(&[], tmp.path()).unwrap();
         assert!(set.is_empty());
         assert!(!coresident);
+    }
+
+    #[test]
+    fn resolve_anchors_flags_explicit_coresident_anchor() {
+        // Regression: an explicit --anchor that resolves to the
+        // co-resident key must still be flagged, so naming the local file
+        // (or its hex) does not escape the tamperable-anchor warning.
+        let tmp = tempfile::tempdir().unwrap();
+        let pub_path = audit_public_key_path(tmp.path());
+        std::fs::create_dir_all(pub_path.parent().unwrap()).unwrap();
+        let key = "ab".repeat(32);
+        std::fs::write(&pub_path, &key).unwrap();
+
+        // --anchor <co-resident file path>
+        let (set, coresident) =
+            resolve_anchors(&[pub_path.to_string_lossy().into_owned()], tmp.path()).unwrap();
+        assert!(
+            coresident,
+            "explicit --anchor at the co-resident file must warn"
+        );
+        assert_eq!(set.len(), 1);
+
+        // --anchor <co-resident key hex>
+        let (_s2, coresident2) = resolve_anchors(std::slice::from_ref(&key), tmp.path()).unwrap();
+        assert!(
+            coresident2,
+            "explicit --anchor with the co-resident key hex must warn"
+        );
+
+        // A genuinely out-of-band key is not flagged.
+        let (_s3, coresident3) = resolve_anchors(&["cd".repeat(32)], tmp.path()).unwrap();
+        assert!(!coresident3);
     }
 }
