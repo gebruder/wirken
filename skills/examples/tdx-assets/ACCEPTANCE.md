@@ -26,7 +26,8 @@ host/binding) already pass; see the verification output in the report.
   none (the skill then writes "not available"). Configure the skill body
   with the attribute `Name`.
 - [ ] **Token permissions.** Confirm the account behind `tdx-api` can
-  read People (`TDPeople`) and the Asset application.
+  read People and the Asset application (the people-search POST
+  alternative additionally lists `TDPeople`).
 
 ## Behavior (real tenant + agent)
 

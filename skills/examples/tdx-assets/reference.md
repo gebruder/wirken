@@ -32,8 +32,10 @@ Login endpoints (used by the operator out of band, not by the skill):
 The skill resolves people with **`GET /api/people/lookup`** (a GET, so it
 needs no `post_paths` entry). Query parameters:
 
-- `searchText` (string) — LIKE match across name / username / email.
-- `maxResults` (integer) — the skill sets `10` to detect ambiguity.
+- `searchText` (string) — the search string (spec: "the searching text
+  to use"; matches name / username / email in practice).
+- `maxResults` (integer, 1-100, default 50) — the skill sets `10` to
+  detect ambiguity.
 
 Response: **array of `User`** (plain array, `maxResults` bounded). It
 returns the identity fields the skill needs and **omits collection
@@ -135,8 +137,9 @@ attributes exist is entirely tenant-defined.
 The endpoints are permission-gated per the account behind the token, not
 by a fixed rule in the spec:
 
-- People lookup and search need a token whose account can read the
-  People/directory (`TDPeople` permission).
+- People lookup and search need a token whose account can read the People
+  directory; the spec lists a `TDPeople` permission on the search POST
+  (lookup lists only "authorization required").
 - Asset search and asset detail need a token whose account can access the
   Asset application (`{appId}`).
 

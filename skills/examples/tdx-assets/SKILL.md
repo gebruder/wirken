@@ -49,9 +49,9 @@ cannot re-authenticate from inside this skill.
 
    The response is a JSON array of `User` objects. `people/lookup`
    returns the identity fields you need (`UID`, `FullName`,
-   `PrimaryEmail`, `LocationName`, `IsActive`) and omits only collection
-   properties this skill does not use. Prefer entries with
-   `IsActive: true`. Then:
+   `PrimaryEmail`, `LocationName`, `IsActive`); it omits collection
+   properties (`Attributes` among them) that this skill does not use.
+   Prefer entries with `IsActive: true`. Then:
    - **Exactly one active match** → resolved. Keep `UID`, `FullName`,
      `PrimaryEmail`.
    - **More than one plausible match** → **ambiguous**. Do not auto-pick.
