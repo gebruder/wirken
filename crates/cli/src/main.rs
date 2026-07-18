@@ -63,6 +63,10 @@ enum Commands {
     #[command(subcommand)]
     Credentials(CredentialCommands),
 
+    /// Vault maintenance
+    #[command(subcommand)]
+    Vault(VaultCommands),
+
     /// Manage MCP integrations (OAuth bootstrap, …)
     #[command(subcommand)]
     Mcp(McpCommands),
@@ -727,6 +731,14 @@ enum CronCommands {
 }
 
 #[derive(Subcommand)]
+enum VaultCommands {
+    /// Destroy the device key and all stored credentials, starting over.
+    /// Used after a forgotten passphrase, where the vault refuses to
+    /// overwrite the keychain it cannot unwrap. Requires typing `reset`.
+    Reset,
+}
+
+#[derive(Subcommand)]
 enum CredentialCommands {
     /// List stored credentials (metadata only — no secrets shown)
     List,
@@ -1073,6 +1085,9 @@ async fn main() -> Result<()> {
                 no_scopes,
                 all_scopes,
             } => commands::credential::rescope(&name, scope, no_scopes, all_scopes).await,
+        },
+        Commands::Vault(cmd) => match cmd {
+            VaultCommands::Reset => commands::vault::reset(),
         },
         Commands::Approvers(cmd) => match cmd {
             ApproverCommands::Add {

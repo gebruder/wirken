@@ -758,3 +758,103 @@ fn open_lands_0o600_on_db_and_wal_and_shm_after_first_transaction() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// vault reset tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vault_reset_removes_vault_state_and_leaves_other_files() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path();
+    let db_path = data_dir.join("vault.db");
+    let keychain_dir = data_dir.join("keychain");
+
+    // Seal a device key and store one credential.
+    {
+        let kc = AgeFileKeychain::new(&keychain_dir, "seal-passphrase".into());
+        let store = CredentialStore::open(&db_path, &kc).unwrap();
+        store
+            .store(
+                "slack-token",
+                "slack",
+                &VaultSecret::new("xoxb-x".into()),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    // An unrelated file in the data dir must survive the reset (the audit
+    // chain DB is the real thing this stands in for).
+    let audit = data_dir.join("audit.db");
+    std::fs::write(&audit, b"audit chain").unwrap();
+    assert!(keychain_dir.is_dir());
+    assert!(db_path.exists());
+
+    let removed = crate::store::reset(data_dir, &db_path).unwrap();
+
+    // The keychain directory and every credential DB file are gone.
+    assert!(!keychain_dir.exists());
+    assert!(!db_path.exists());
+    assert!(removed.contains(&keychain_dir));
+    assert!(removed.contains(&db_path));
+    // Nothing outside the vault's own files was touched.
+    assert!(audit.exists());
+    assert_eq!(std::fs::read(&audit).unwrap(), b"audit chain");
+    assert!(!removed.contains(&audit));
+}
+
+#[test]
+fn vault_reset_then_open_creates_fresh_empty_store() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path();
+    let db_path = data_dir.join("vault.db");
+    let keychain_dir = data_dir.join("keychain");
+
+    {
+        let kc = AgeFileKeychain::new(&keychain_dir, "seal-passphrase".into());
+        let store = CredentialStore::open(&db_path, &kc).unwrap();
+        store
+            .store(
+                "slack-token",
+                "slack",
+                &VaultSecret::new("xoxb-x".into()),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    crate::store::reset(data_dir, &db_path).unwrap();
+
+    // A subsequent open auto-creates via KeychainNotInitialized and the
+    // store is empty. A new passphrase is fine — the old key is gone.
+    let kc = AgeFileKeychain::new(&keychain_dir, "new-passphrase".into());
+    let store = CredentialStore::open(&db_path, &kc).unwrap();
+    assert!(store.list().unwrap().is_empty());
+}
+
+#[test]
+fn vault_reset_plan_counts_rows_without_the_device_key() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path();
+    let db_path = data_dir.join("vault.db");
+    let keychain_dir = data_dir.join("keychain");
+
+    {
+        let kc = AgeFileKeychain::new(&keychain_dir, "seal-passphrase".into());
+        let store = CredentialStore::open(&db_path, &kc).unwrap();
+        store
+            .store("a", "slack", &VaultSecret::new("x".into()), None, None)
+            .unwrap();
+        store
+            .store("b", "teams", &VaultSecret::new("y".into()), None, None)
+            .unwrap();
+    }
+
+    // reset_plan reports the row count from metadata alone — no keychain
+    // is passed in, so no device key or decryption is involved.
+    let plan = crate::store::reset_plan(data_dir, &db_path);
+    assert_eq!(plan.credential_rows, Some(2));
+    assert!(plan.keychain_dir.is_some());
+    assert!(plan.db_files.iter().any(|p| p == &db_path));
+}

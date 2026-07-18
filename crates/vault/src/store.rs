@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::crypto::{decrypt, encrypt, generate_key};
 use crate::error::VaultError;
@@ -72,7 +72,9 @@ impl CredentialStore {
             Err(VaultError::Decryption(_)) => {
                 return Err(VaultError::Keychain(
                     "device key unwrap failed (wrong vault passphrase). \
-                     Refusing to overwrite the existing keychain file."
+                     Refusing to overwrite the existing keychain file. \
+                     Run `wirken vault reset` to start over (destroys all \
+                     stored credentials)."
                         .into(),
                 ));
             }
@@ -485,6 +487,86 @@ fn parse_hosts(raw: &Option<String>) -> Result<Vec<String>, VaultError> {
 }
 
 /// Build a sibling path by appending `suffix` to `path`'s file name.
+/// The on-disk state a [`reset`] will destroy, computed before any
+/// deletion so the operator can be shown exactly what is at stake and
+/// asked to confirm first. Only paths that currently exist are recorded.
+pub struct ResetPlan {
+    /// The keychain directory (`<data_dir>/keychain`) holding the device
+    /// key, its salt, and every aux key — including the alarm-log HMAC
+    /// key. `None` when it does not exist.
+    pub keychain_dir: Option<PathBuf>,
+    /// The credential DB SQLite files (`vault.db`, `-wal`, `-shm`) that
+    /// currently exist.
+    pub db_files: Vec<PathBuf>,
+    /// Best-effort count of stored credential rows, or `None` when the
+    /// DB is absent or unreadable. Metadata only: `COUNT(*)` never reads
+    /// `encrypted_value`, so no device key or decryption is required.
+    pub credential_rows: Option<i64>,
+}
+
+/// Enumerate the existing vault artifacts a `vault reset` would remove.
+/// The audit chain DB is deliberately excluded.
+pub fn reset_plan(data_dir: &Path, db_path: &Path) -> ResetPlan {
+    let keychain_dir = {
+        let d = data_dir.join("keychain");
+        d.is_dir().then_some(d)
+    };
+    let db_files = db_file_set(db_path)
+        .into_iter()
+        .filter(|p| p.exists())
+        .collect();
+    ResetPlan {
+        keychain_dir,
+        db_files,
+        credential_rows: credential_row_count(db_path),
+    }
+}
+
+/// Best-effort `COUNT(*)` of stored credentials for the pre-reset
+/// summary. Opens the DB read-only and touches only row metadata, never
+/// `encrypted_value`, so no device key is needed. `None` on any error
+/// (missing DB, no `credentials` table, IO).
+fn credential_row_count(db_path: &Path) -> Option<i64> {
+    if !db_path.exists() {
+        return None;
+    }
+    let conn =
+        Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row("SELECT COUNT(*) FROM credentials", [], |r| r.get(0))
+        .ok()
+}
+
+/// The three SQLite files backing the credential DB.
+fn db_file_set(db_path: &Path) -> [PathBuf; 3] {
+    [
+        db_path.to_path_buf(),
+        with_suffix(db_path, "-wal"),
+        with_suffix(db_path, "-shm"),
+    ]
+}
+
+/// Destroy every existing vault artifact: the keychain directory (device
+/// key, salt, all aux keys including the alarm-log HMAC key) and the
+/// credential DB files (`vault.db`, `-wal`, `-shm`). Returns the paths
+/// actually removed. The audit chain DB is never touched. Afterwards the
+/// next [`CredentialStore::open`] takes the `KeychainNotInitialized`
+/// branch and creates a fresh empty store.
+pub fn reset(data_dir: &Path, db_path: &Path) -> Result<Vec<PathBuf>, VaultError> {
+    let mut removed = Vec::new();
+    let keychain_dir = data_dir.join("keychain");
+    if keychain_dir.is_dir() {
+        std::fs::remove_dir_all(&keychain_dir)?;
+        removed.push(keychain_dir);
+    }
+    for p in db_file_set(db_path) {
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+            removed.push(p);
+        }
+    }
+    Ok(removed)
+}
+
 fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);

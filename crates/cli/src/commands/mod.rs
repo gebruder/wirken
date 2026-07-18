@@ -28,6 +28,7 @@ pub mod setup;
 pub mod skills;
 pub mod stdin_approval;
 pub mod ui;
+pub mod vault;
 pub mod webchat;
 pub mod zirkel;
 pub mod zirkel_calibrate;
