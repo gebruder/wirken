@@ -412,6 +412,19 @@ pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether the age-file keychain under `data_dir` has no sealed device
+/// key yet, so the next passphrase entry seals a fresh key rather than
+/// unlocking an existing one. A fresh seal derives the wrapping key from
+/// whatever is typed and never round-trips it, so a first-seal typo
+/// locks the vault permanently with no feedback; that entry is confirmed
+/// (see `cached_vault_passphrase`). Both files present means an existing
+/// key that is only unlocked, where a wrong passphrase surfaces as a
+/// failed unwrap.
+pub(crate) fn keychain_needs_seal(data_dir: &Path) -> bool {
+    let dir = data_dir.join("keychain");
+    !dir.join("device-key.age").exists() || !dir.join("device-key.salt").exists()
+}
+
 /// Return the vault passphrase for the current process, prompting once
 /// and caching in `WIRKEN_VAULT_PASSPHRASE` for subsequent calls.
 ///
@@ -436,16 +449,24 @@ pub fn cached_vault_passphrase() -> anyhow::Result<String> {
     {
         return Ok(p);
     }
-    let p = dialoguer::Password::new()
-        .with_prompt("  Vault passphrase")
-        .interact()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "could not prompt for vault passphrase ({e}); run \
+    // A fresh seal locks the vault under whatever is typed with no way
+    // to notice a typo, so confirm the entry when sealing. Unlock of an
+    // existing key stays single-entry: a wrong passphrase fails the
+    // unwrap immediately.
+    let mut prompt = dialoguer::Password::new().with_prompt("  Vault passphrase");
+    if keychain_needs_seal(&config().data_dir) {
+        prompt = prompt.with_confirmation(
+            "  Confirm vault passphrase",
+            "  Passphrases do not match; try again",
+        );
+    }
+    let p = prompt.interact().map_err(|e| {
+        anyhow::anyhow!(
+            "could not prompt for vault passphrase ({e}); run \
                  interactively at a TTY, or supply WIRKEN_VAULT_PASSPHRASE \
                  in the environment"
-            )
-        })?;
+        )
+    })?;
     // Setup runs single-threaded before any adapter or agent spawn, so
     // there are no concurrent readers of the process environment here.
     unsafe {
@@ -519,6 +540,25 @@ mod tests {
         unsafe {
             std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
         }
+    }
+
+    /// seal-time confirmation: the prompt mode is fresh-seal (confirm)
+    /// until both age-file keychain artifacts exist, then unlock (single
+    /// entry). A partial state (one file) still counts as a fresh seal.
+    #[test]
+    fn keychain_needs_seal_until_both_key_files_exist() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        // No keychain dir yet: fresh seal.
+        assert!(keychain_needs_seal(data_dir));
+        let kc = data_dir.join("keychain");
+        std::fs::create_dir_all(&kc).unwrap();
+        std::fs::write(kc.join("device-key.salt"), b"salt").unwrap();
+        // Salt only, no sealed key: still a fresh seal.
+        assert!(keychain_needs_seal(data_dir));
+        std::fs::write(kc.join("device-key.age"), b"sealed").unwrap();
+        // Both present: existing key, unlock only.
+        assert!(!keychain_needs_seal(data_dir));
     }
 
     #[test]
