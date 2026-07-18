@@ -817,7 +817,7 @@ async fn run_theme_pass(
     // API entry the cluster module exposes.)
     let _check = group_by_cluster(&labels, &rows);
 
-    for (_cluster_label, members) in by_cluster.iter() {
+    for members in by_cluster.values() {
         let cluster_members: Vec<ClusterMember> = members.iter().map(|(_, m)| m.clone()).collect();
         match name_theme(llm, api_key, &cluster_members).await {
             Ok(theme) => {

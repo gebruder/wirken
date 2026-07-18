@@ -46,10 +46,9 @@ pub fn parse(message: &str) -> Option<KeepSkipCmd> {
     let lower = trimmed.to_ascii_lowercase();
     let (verb, rest) = if let Some(r) = lower.strip_prefix("keep") {
         (Verb::Keep, r)
-    } else if let Some(r) = lower.strip_prefix("skip") {
-        (Verb::Skip, r)
     } else {
-        return None;
+        let r = lower.strip_prefix("skip")?;
+        (Verb::Skip, r)
     };
     // Verb must be followed by whitespace (or end of message — bare
     // `keep` is not a command).
