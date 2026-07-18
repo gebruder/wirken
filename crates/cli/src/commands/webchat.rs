@@ -28,7 +28,17 @@ const HTML: &str = r#"<!DOCTYPE html>
 <title>wirken</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: grid; grid-template-columns: 260px 1fr; overflow: hidden; }
+  #sidebar { border-right: 1px solid #21262d; display: flex; flex-direction: column; min-height: 0; }
+  #sidebar-header { padding: 16px 16px 10px; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #8b949e; }
+  #session-list { flex: 1; overflow-y: auto; }
+  .session-row { padding: 10px 16px; border-top: 1px solid #161b22; cursor: pointer; border-left: 2px solid transparent; }
+  .session-row:hover { background: #161b22; }
+  .session-row.active { background: #161b22; border-left-color: #58a6ff; }
+  .session-row .ch { font-size: 13px; font-weight: 600; color: #c9d1d9; word-break: break-word; }
+  .session-row .meta { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  #session-empty { padding: 12px 16px; font-size: 12px; color: #8b949e; }
+  #main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   #header { padding: 16px 24px; border-bottom: 1px solid #21262d; font-size: 14px; color: #8b949e; }
   #header strong { color: #c9d1d9; }
   #messages { flex: 1; overflow-y: auto; padding: 16px 24px; }
@@ -59,16 +69,25 @@ const HTML: &str = r#"<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div id="header"><strong>wirken</strong> &mdash; webchat</div>
-<div id="messages"></div>
-<div id="input-area">
-  <input id="input" type="text" placeholder="Send a message..." autofocus>
-  <button id="send">Send</button>
+<div id="sidebar">
+  <div id="sidebar-header">Sessions</div>
+  <div id="session-list"></div>
+</div>
+<div id="main">
+  <div id="header"><strong>wirken</strong> &mdash; webchat</div>
+  <div id="messages"></div>
+  <div id="input-area">
+    <input id="input" type="text" placeholder="Send a message..." autofocus>
+    <button id="send">Send</button>
+  </div>
 </div>
 <script>
 const messages = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const sessionList = document.getElementById('session-list');
+const WEBCHAT_CHANNEL = 'webchat';
+let activeSessionId = null;
 
 function addMsg(role, text, isError) {
   const div = document.createElement('div');
@@ -265,10 +284,65 @@ async function send() {
   }
   sendBtn.disabled = false;
   input.focus();
+  loadSessions();
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+async function loadSessions() {
+  let rows;
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) return;
+    rows = await res.json();
+  } catch (e) { return; }
+  // Most recent first, then pin the current webchat session to the top.
+  rows.sort((a, b) => (b.last_activity || '').localeCompare(a.last_activity || ''));
+  rows.sort((a, b) => (b.channel === WEBCHAT_CHANNEL) - (a.channel === WEBCHAT_CHANNEL));
+  sessionList.innerHTML = '';
+  if (rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.id = 'session-empty';
+    empty.textContent = 'No active sessions';
+    sessionList.appendChild(empty);
+    return;
+  }
+  for (const row of rows) {
+    const div = document.createElement('div');
+    div.className = 'session-row' + (row.log_id === activeSessionId ? ' active' : '');
+    const ch = document.createElement('div');
+    ch.className = 'ch';
+    ch.textContent = row.channel;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = row.message_count + ' msg · ' + fmtTime(row.last_activity);
+    div.appendChild(ch);
+    div.appendChild(meta);
+    div.addEventListener('click', () => loadTranscript(row.log_id));
+    sessionList.appendChild(div);
+  }
+}
+
+async function loadTranscript(id) {
+  activeSessionId = id;
+  let turns;
+  try {
+    const res = await fetch('/api/sessions/' + encodeURIComponent(id));
+    if (!res.ok) return;
+    turns = await res.json();
+  } catch (e) { return; }
+  messages.innerHTML = '';
+  for (const t of turns) addMsg(t.role, t.content);
+  loadSessions();
 }
 
 sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+loadSessions();
 </script>
 </body>
 </html>"#;
@@ -317,6 +391,33 @@ pub async fn serve(
                     HTML
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
+            } else if let Some(session_id) = parse_session_path(first_line) {
+                // GET /api/sessions/{id} — transcript for one session,
+                // rendered into the messages pane. Returns operator data,
+                // so it runs the shared API preflight (Origin + Host).
+                if let Some(resp) = api_preflight(&request, port) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let body = match super::session::session_transcript(&cfg, &session_id) {
+                    Ok(turns) => serde_json::to_string(&turns).unwrap_or_else(|_| "[]".into()),
+                    Err(_) => "[]".to_string(),
+                };
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
+            } else if first_line.starts_with("GET /api/sessions ") {
+                // GET /api/sessions — active-session list backing the
+                // sidebar. Same preflight; same operator-data posture.
+                if let Some(resp) = api_preflight(&request, port) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let body = match super::session::active_session_rows(&cfg, None) {
+                    Ok(rows) => serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
+                    Err(_) => "[]".to_string(),
+                };
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("POST /api/chat") {
                 // Rate-limit before any other work. A spinning client
                 // (runaway browser tab, naive CSRF, scripted abuse)
@@ -348,38 +449,9 @@ pub async fn serve(
                 // shell pipelines). When that mode is active the
                 // gateway logs a warning at startup; the `Origin`
                 // header is still validated when present.
-                let origin = request
-                    .lines()
-                    .find_map(|l| {
-                        l.strip_prefix("Origin: ")
-                            .or_else(|| l.strip_prefix("origin: "))
-                    })
-                    .map(|s| s.trim().to_string());
-                let allow_missing_origin =
-                    wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN");
-                match origin.as_deref() {
-                    Some(o) if is_webchat_origin(o, port) => {}
-                    Some(_) => {
-                        let resp = r#"{"error":"forbidden origin"}"#;
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                    None if allow_missing_origin => {}
-                    None => {
-                        let resp = r#"{"error":"missing origin header"}"#;
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
+                if let Some(resp) = api_preflight(&request, port) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
                 }
 
                 // Extract JSON body
@@ -561,39 +633,10 @@ pub async fn serve(
                 // pushes an ApprovalDecisionAck event onto the SSE
                 // stream so the browser closes the approval UI.
 
-                // Origin gate first; same allowlist as /api/chat.
-                let origin = request
-                    .lines()
-                    .find_map(|l| {
-                        l.strip_prefix("Origin: ")
-                            .or_else(|| l.strip_prefix("origin: "))
-                    })
-                    .map(|s| s.trim().to_string());
-                let allow_missing_origin =
-                    wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN");
-                match origin.as_deref() {
-                    Some(o) if is_webchat_origin(o, port) => {}
-                    Some(_) => {
-                        let resp = r#"{"error":"forbidden origin"}"#;
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                    None if allow_missing_origin => {}
-                    None => {
-                        let resp = r#"{"error":"missing origin header"}"#;
-                        let response = format!(
-                            "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
+                // Same CSRF + DNS-rebinding preflight as /api/chat.
+                if let Some(resp) = api_preflight(&request, port) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
                 }
 
                 let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
@@ -707,9 +750,148 @@ fn is_webchat_origin(origin: &str, port: u16) -> bool {
     accepted.iter().any(|a| a == origin)
 }
 
+/// Whether a `Host:` value names the WebChat loopback surface. Accepted:
+/// `127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>` for the bound
+/// port. String equality against the three forms; no parsing, no DNS.
+/// A DNS-rebinding page that resolves its own hostname to 127.0.0.1
+/// still carries that hostname in `Host:`, so it fails this check.
+fn is_webchat_host(host: &str, port: u16) -> bool {
+    let accepted = [
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ];
+    accepted.iter().any(|a| a == host)
+}
+
+/// Case-insensitive lookup of a single request header value. The request
+/// line has no colon, so it is skipped; header values that contain a
+/// colon (like `Host: 127.0.0.1:18790`) keep everything after the first.
+fn header_value(request: &str, name_lower: &str) -> Option<String> {
+    request.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        if k.trim().eq_ignore_ascii_case(name_lower) {
+            Some(v.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Shared preflight for the JSON API routes (`/api/chat`,
+/// `/api/approvals/*`, `/api/sessions`, `/api/sessions/*`). Enforces the
+/// Origin CSRF check and a Host-header check against loopback names to
+/// close DNS-rebinding reads. `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` opts
+/// non-browser scripts out of the Origin requirement; the Host check has
+/// no such escape because HTTP/1.1 requires the header and every
+/// legitimate loopback client sends it. Returns `Some(response)` to send
+/// back and stop, or `None` to proceed. `GET /` is not routed here.
+fn api_preflight(request: &str, port: u16) -> Option<String> {
+    let origin = header_value(request, "origin");
+    let allow_missing_origin =
+        wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN");
+    match origin.as_deref() {
+        Some(o) if is_webchat_origin(o, port) => {}
+        Some(_) => return Some(json_forbidden("forbidden origin")),
+        None if allow_missing_origin => {}
+        None => return Some(json_forbidden("missing origin header")),
+    }
+
+    match header_value(request, "host").as_deref() {
+        Some(h) if is_webchat_host(h, port) => {}
+        Some(_) => return Some(json_forbidden("forbidden host")),
+        None => return Some(json_forbidden("missing host header")),
+    }
+
+    None
+}
+
+/// A 200 response carrying a JSON body.
+fn json_ok(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+/// A 403 response carrying `{"error":"<msg>"}`. `msg` is a fixed literal
+/// at every call site, so no escaping is needed.
+fn json_forbidden(msg: &str) -> String {
+    let body = format!(r#"{{"error":"{msg}"}}"#);
+    format!(
+        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+/// Parse `GET /api/sessions/{id}` and return the composite session id
+/// (`{agent}/{channel}/{conversation}`). The page URL-encodes the id
+/// with `encodeURIComponent`, so its `/` separators arrive as `%2F`;
+/// this decodes them back. Returns None for the bare `GET /api/sessions`
+/// list route, an empty id, a malformed `%`-escape, or any id with an
+/// empty or `..` path segment (traversal) or a control byte.
+fn parse_session_path(first_line: &str) -> Option<String> {
+    let rest = first_line.strip_prefix("GET /api/sessions/")?;
+    // Split on the first space so an empty path (`/api/sessions/ `)
+    // yields an empty token rather than skipping to the HTTP version.
+    let raw = rest.split(' ').next()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let decoded = percent_decode(raw)?;
+    // The composite id is exactly `<agent>/<channel>/<conversation>`:
+    // non-empty segments only. Reject empty segments (leading, trailing,
+    // or doubled slash), `..` traversal, and control bytes.
+    if decoded.is_empty() {
+        return None;
+    }
+    if decoded.split('/').any(|seg| seg.is_empty() || seg == "..") {
+        return None;
+    }
+    if decoded.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Minimal percent-decoder for the `%XX` sequences `encodeURIComponent`
+/// produces. Returns None on a malformed escape or non-UTF-8 result.
+/// `+` is left as a literal `+` (this is a path segment, not a query
+/// string).
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = hex_val(*bytes.get(i + 1)?)?;
+            let lo = hex_val(*bytes.get(i + 2)?)?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_webchat_origin, parse_approval_path};
+    use super::{
+        is_webchat_host, is_webchat_origin, parse_approval_path, parse_session_path, percent_decode,
+    };
 
     #[test]
     fn approval_path_parses_request_id() {
@@ -781,5 +963,79 @@ mod tests {
             "http://attacker.com/?127.0.0.1:18790",
             18790
         ));
+    }
+
+    #[test]
+    fn session_path_parses_and_decodes_composite_id() {
+        // The page URL-encodes the composite id, so the `/` separators
+        // arrive as `%2F` and the parser decodes them back.
+        let line = "GET /api/sessions/default%2Fwebchat%2Fwebchat-default HTTP/1.1";
+        assert_eq!(
+            parse_session_path(line).as_deref(),
+            Some("default/webchat/webchat-default")
+        );
+    }
+
+    #[test]
+    fn session_path_rejects_list_route_and_non_get() {
+        // The bare list route has no id and must not match the {id} form.
+        assert!(parse_session_path("GET /api/sessions HTTP/1.1").is_none());
+        assert!(parse_session_path("POST /api/sessions/abc HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn session_path_rejects_empty_id() {
+        assert!(parse_session_path("GET /api/sessions/ HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn session_path_rejects_trailing_and_empty_segments() {
+        // Trailing slash -> empty final segment.
+        assert!(parse_session_path("GET /api/sessions/default%2Fwebchat%2F HTTP/1.1").is_none());
+        // Doubled slash -> empty middle segment.
+        assert!(parse_session_path("GET /api/sessions/a%2F%2Fb HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn session_path_rejects_traversal() {
+        assert!(parse_session_path("GET /api/sessions/..%2F..%2Fetc HTTP/1.1").is_none());
+        assert!(parse_session_path("GET /api/sessions/a%2F..%2Fb HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn session_path_rejects_malformed_percent_escape() {
+        assert!(parse_session_path("GET /api/sessions/a%2 HTTP/1.1").is_none());
+        assert!(parse_session_path("GET /api/sessions/a%zz HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn percent_decode_handles_plain_and_encoded() {
+        assert_eq!(percent_decode("plain").as_deref(), Some("plain"));
+        assert_eq!(percent_decode("a%2Fb").as_deref(), Some("a/b"));
+        assert_eq!(
+            percent_decode("space%20here").as_deref(),
+            Some("space here")
+        );
+        // A literal `+` is not a space in a path segment.
+        assert_eq!(percent_decode("a+b").as_deref(), Some("a+b"));
+        assert!(percent_decode("bad%").is_none());
+        assert!(percent_decode("bad%2").is_none());
+        assert!(percent_decode("bad%gg").is_none());
+    }
+
+    #[test]
+    fn webchat_host_accepts_loopback_at_bound_port() {
+        assert!(is_webchat_host("127.0.0.1:18790", 18790));
+        assert!(is_webchat_host("localhost:18790", 18790));
+        assert!(is_webchat_host("[::1]:18790", 18790));
+    }
+
+    #[test]
+    fn webchat_host_rejects_rebinding_and_mismatch() {
+        // DNS-rebinding: the page's own hostname resolved to loopback.
+        assert!(!is_webchat_host("evil.com:18790", 18790));
+        assert!(!is_webchat_host("127.0.0.1:9999", 18790));
+        // No bare host without the bound port.
+        assert!(!is_webchat_host("127.0.0.1", 18790));
     }
 }

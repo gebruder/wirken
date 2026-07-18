@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use wirken_audit::SessionLog;
 use wirken_gateway::permissions::{
@@ -48,6 +49,119 @@ fn resolve_to_composite_log_id(
     ))
 }
 
+/// One active session as structured data, shared by the
+/// `wirken sessions list` printer and the webchat `GET /api/sessions`
+/// endpoint. `log_id` is the composite `{agent}/{channel}/{conversation}`
+/// that the session log keys on; `store_id` is the hex primary key in
+/// the sessions DB.
+#[derive(Serialize)]
+pub struct SessionRow {
+    pub store_id: String,
+    pub log_id: String,
+    pub channel: String,
+    pub message_count: i64,
+    pub last_activity: chrono::DateTime<chrono::Utc>,
+}
+
+/// Gather active sessions (optionally filtered by channel) as structured
+/// rows. The channel-to-agent binding resolution and the composite
+/// log-id assembly live here once; both `list` and the webchat sessions
+/// endpoint call this rather than duplicating the query.
+pub fn active_session_rows(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    channel: Option<&str>,
+) -> Result<Vec<SessionRow>> {
+    let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
+        .context("Failed to open session store")?;
+
+    let sessions = store
+        .list_active(channel)
+        .context("Failed to list sessions")?;
+
+    // Resolve channel -> agent bindings so we can build the composite
+    // session-log id (`<agent>/<channel>/<conversation>`) that the
+    // session log keys on. The store's hex id is only a primary key
+    // inside the sessions DB.
+    let binding_map =
+        match wirken_gateway::agent_config::AgentConfigStore::open(&cfg.agent_config_db_path()) {
+            Ok(agent_store) => {
+                let mut map = std::collections::HashMap::new();
+                if let Ok(agents) = agent_store.list() {
+                    for agent in agents {
+                        for ch in agent.channels {
+                            map.insert(ch, agent.id.clone());
+                        }
+                    }
+                }
+                map
+            }
+            Err(_) => std::collections::HashMap::new(),
+        };
+
+    Ok(sessions
+        .into_iter()
+        .map(|session| {
+            let agent_id = binding_map
+                .get(&session.channel)
+                .cloned()
+                .unwrap_or_else(|| "default".to_string());
+            SessionRow {
+                log_id: format!(
+                    "{}/{}/{}",
+                    agent_id, session.channel, session.conversation_id
+                ),
+                store_id: session.id,
+                channel: session.channel,
+                message_count: session.message_count,
+                last_activity: session.last_activity,
+            }
+        })
+        .collect())
+}
+
+/// A single displayable turn from a session transcript: a user or
+/// assistant message. Tool calls, tool results, LLM request/response
+/// accounting, and every other event kind are not displayable turns and
+/// are skipped by [`session_transcript`].
+#[derive(Serialize)]
+pub struct TranscriptTurn {
+    pub role: &'static str,
+    pub content: String,
+}
+
+/// Read the displayable transcript for a composite session-log id
+/// (`{agent}/{channel}/{conversation}`) through the same session-log
+/// lookup path `wirken sessions verify` uses. Only user and assistant
+/// messages are returned, in sequence order; every other event kind is
+/// skipped rather than stringified.
+pub fn session_transcript(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    composite_id: &str,
+) -> Result<Vec<TranscriptTurn>> {
+    use wirken_audit::{SessionEvent, SessionId, SqliteSessionLog};
+
+    let log = SqliteSessionLog::open(&cfg.audit_db_path()).context("Failed to open session log")?;
+    let handle = log.handle_for(SessionId::new(composite_id.to_string()));
+    let events = log
+        .get_since(&handle, 0)
+        .context("Failed to read session events")?;
+
+    Ok(events
+        .into_iter()
+        .filter_map(|ev| match ev.event {
+            SessionEvent::UserMessage { content, .. } => Some(TranscriptTurn {
+                role: "user",
+                content,
+            }),
+            SessionEvent::AssistantMessage { content, .. } => Some(TranscriptTurn {
+                role: "assistant",
+                content,
+            }),
+            _ => None,
+        })
+        .collect())
+}
+
 pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()> {
     let cfg = config();
 
@@ -78,40 +192,17 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
         return Ok(());
     }
 
-    let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
-        .context("Failed to open session store")?;
+    let rows = active_session_rows(&cfg, channel.as_deref())?;
 
-    let sessions = store
-        .list_active(channel.as_deref())
-        .context("Failed to list sessions")?;
-
-    if sessions.is_empty() {
+    if rows.is_empty() {
         println!("  No active sessions.");
         return Ok(());
     }
 
-    // Resolve channel -> agent bindings so we can print the composite
-    // session-log id (`<agent>/<channel>/<conversation>`) that
-    // `wirken sessions verify` actually accepts. The store's hex id is
-    // only a primary key inside the sessions DB; the audit/session-log
-    // DB keys rows by composite. Printing both removes the "ID from
-    // list does not work with verify" paper cut.
-    let binding_map =
-        match wirken_gateway::agent_config::AgentConfigStore::open(&cfg.agent_config_db_path()) {
-            Ok(agent_store) => {
-                let mut map = std::collections::HashMap::new();
-                if let Ok(agents) = agent_store.list() {
-                    for agent in agents {
-                        for ch in agent.channels {
-                            map.insert(ch, agent.id.clone());
-                        }
-                    }
-                }
-                map
-            }
-            Err(_) => std::collections::HashMap::new(),
-        };
-
+    // The composite LOG ID (`<agent>/<channel>/<conversation>`) is what
+    // `wirken sessions verify` accepts; the STORE ID is the hex primary
+    // key `wirken sessions close` takes. Printing both removes the "ID
+    // from list does not work with verify" paper cut.
     println!(
         "  {:16}  {:40}  {:12}  {:>6}  {:20}",
         "STORE ID", "LOG ID", "CHANNEL", "MSGS", "LAST ACTIVITY"
@@ -125,28 +216,20 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
         "─".repeat(20)
     );
 
-    for session in &sessions {
-        let agent_id = binding_map
-            .get(&session.channel)
-            .cloned()
-            .unwrap_or_else(|| "default".to_string());
-        let log_id = format!(
-            "{}/{}/{}",
-            agent_id, session.channel, session.conversation_id
-        );
-        let short_id: String = session.id.chars().take(16).collect();
+    for row in &rows {
+        let short_id: String = row.store_id.chars().take(16).collect();
         println!(
             "  {:16}  {:40}  {:12}  {:>6}  {:20}",
             short_id,
-            truncate_for_display(&log_id, 40),
-            session.channel,
-            session.message_count,
-            session.last_activity.format("%Y-%m-%d %H:%M:%S"),
+            truncate_for_display(&row.log_id, 40),
+            row.channel,
+            row.message_count,
+            row.last_activity.format("%Y-%m-%d %H:%M:%S"),
         );
     }
 
     println!();
-    println!("  {} active sessions.", sessions.len());
+    println!("  {} active sessions.", rows.len());
     println!("  Use STORE ID for `wirken sessions close`, LOG ID for `wirken sessions verify`.");
     Ok(())
 }
