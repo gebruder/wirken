@@ -94,6 +94,45 @@ Install as a system service so wirken starts on login:
 wirken setup --install-service
 ```
 
+## Uninstall
+
+Removing the data directory is irreversible and destroys the signed, hash-chained audit log along with it. If any retention or compliance need applies, export the audit chain **before** you delete anything:
+
+```bash
+wirken audit log --format json > wirken-audit-export.json   # one-shot JSON snapshot
+cp ~/.wirken/audit.db wirken-audit-backup.db                 # or copy the raw hash-chained DB
+```
+
+Then uninstall in order. The service and cron steps call the `wirken` binary, so run them before removing it:
+
+```bash
+# 1. Stop and remove the system service. Removes the systemd user unit
+#    ~/.config/systemd/user/wirken.service on Linux, or the launchd agent
+#    ~/Library/LaunchAgents/app.ottenheimer.wirken.plist on macOS.
+wirken setup --uninstall-service
+
+# 2. Remove any scheduled preset cron entries (leaves your own cron lines
+#    intact). Repeat per installed preset, e.g. zirkel:
+wirken preset unschedule zirkel
+
+# 3. Remove the binary.
+rm "${WIRKEN_INSTALL_DIR:-$HOME/.local/bin}/wirken"
+
+# 4. Remove the data directory. Deletes the credential vault, the age-file
+#    device key, and the audit chain. Irreversible.
+rm -rf ~/.wirken
+```
+
+Residue the steps above do not touch:
+
+- **Shell profile**: if you exported `WIRKEN_VAULT_PASSPHRASE` in `~/.bashrc`, `~/.zshrc`, or a similar file, delete that line.
+- **OS keychain**: the default release build keeps the vault device key in the age-file keychain under `~/.wirken/keychain/`, which step 4 removes. Only a build with the `keychain-macos` or `keychain-linux` feature stores it in the OS keychain instead. In that case remove it by hand. On macOS, the generic-password items under service `dev.wirken.vault` (account `device-key`, plus one aux entry per auxiliary key, for example `alarm-log-hmac`). On Linux, the Secret Service items with attribute `application=wirken` (the device key is labeled `wirken-device-key`).
+- **Platform-side registrations**: local deletion does not touch state you created at each messaging platform. Remove or revoke it there:
+  - **iMessage (BlueBubbles)**: the adapter registers a callback webhook on your BlueBubbles server (`POST <bluebubbles_url>/api/v1/server/webhooks`). Delete it in the BlueBubbles server's webhook settings.
+  - **Bots, apps, and tokens** you created stay live until you remove them at the platform: the Slack app and its bot/app tokens (Slack admin), the Telegram bot token (BotFather; the adapter long-polls, so there is no webhook to clear), the WhatsApp Cloud API app and its configured webhook URL (Meta App Dashboard), the Discord bot application (Discord Developer Portal), the Teams bot registration (Azure), the Matrix bot account (its homeserver), the Signal linked device (unlink it on the phone), and the Google Chat app. Rotating these credentials is prudent regardless, since they were held in the vault.
+
+Windows uses different paths and a smaller feature set (no service installer or cron presets); see [docs/windows.md](docs/windows.md).
+
 ## Architecture
 
 ```mermaid
