@@ -8,6 +8,58 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.11.0] - 2026-07-19
+
+### Added
+
+- `wirken vault reset`. Destroys the device key and every stored
+  credential so the vault can be rebuilt after a forgotten passphrase,
+  where `CredentialStore::open` refuses to overwrite the keychain it
+  cannot unwrap. Prints exactly what will be removed (the keychain
+  directory, the credential DB files, and a metadata-only count of
+  stored credential rows) and requires the operator to type `reset`;
+  there is no `--force` bypass. The audit chain is not touched.
+- Webchat active-sessions sidebar. The WebChat UI gains a left sidebar
+  listing active sessions (channel, message count, last activity),
+  sorted by last activity with the current webchat session pinned to
+  the top. Backed by two read-only endpoints, `GET /api/sessions` and
+  `GET /api/sessions/{id}` (one session's user and assistant turns).
+  Both carry the same Origin CSRF check as the existing POST routes
+  plus a Host-header check that closes DNS-rebinding reads, factored
+  into a shared request preflight; `GET /` stays unguarded.
+
+### Changed
+
+- Seal-time vault passphrase confirmation. When a passphrase will seal a
+  fresh age-file device key, the prompt now asks for it twice and
+  re-prompts on mismatch. Unlocking an existing key stays single-entry.
+  A first-seal typo would otherwise derive a valid wrapping key and lock
+  the vault permanently with no feedback.
+
+### Security
+
+- `feed-rs` 1.11 bumps to 2.4.0, pulling `quick-xml` 0.41 and fixing
+  RUSTSEC-2026-0194 (quadratic duplicate-attribute-name denial of
+  service) and RUSTSEC-2026-0195 (unbounded namespace-declaration
+  memory exhaustion) reachable through Zirkel RSS/Atom parsing. The
+  corresponding `deny.toml` advisory ignores are removed now that an
+  in-range fix exists.
+- `serde_with` 3.21.0 fixes a `KeyValueMap` serialization panic on empty
+  sequence or map entries (GHSA-7gcf-g7xr-8hxj). `crossbeam-epoch`
+  0.9.20 fixes RUSTSEC-2026-0204 (invalid pointer dereference in the
+  `fmt::Pointer` impl for `Atomic`/`Shared`); `spin` moves to the
+  un-yanked 0.9.9.
+
+### Documentation
+
+- README gains an Uninstall section: export the audit chain first,
+  ordered removal steps (service, binary, data directory), and residue
+  the steps do not touch (scheduled preset cron entries,
+  `WIRKEN_VAULT_PASSPHRASE` in a shell profile, OS-keychain entries on
+  feature builds that use them, and platform-side registrations such as
+  the BlueBubbles webhook and the bots and tokens created at each
+  messaging platform).
+
 ## [1.10.0] - 2026-07-03
 
 ### Added
