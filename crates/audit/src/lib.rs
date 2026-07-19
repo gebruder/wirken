@@ -25,8 +25,8 @@ pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use otel_exporter::{FederatedIdentity, OtelConfig, OtelError, StaticFederatedIdentity};
 pub use otel_projector::{OtelProjector, Span, SpanId, SpanKind, SpanStatus, TraceId};
 pub use session_log::{
-    ApprovalScopeKind, ApprovalSource, ChainHeadReason, DenialSource, EgressDecision, HashHex,
-    HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, OwnSession,
+    ApprovalScopeKind, ApprovalSource, BudgetAction, ChainHeadReason, DenialSource, EgressDecision,
+    HashHex, HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, OwnSession,
     PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, SchemaDriftRecord, SessionEvent,
     SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,
     SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord, TrustLevel,

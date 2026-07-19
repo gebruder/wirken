@@ -83,6 +83,42 @@ sum:wirken.llm.cost_usd_micros{*} by {agent_id}.rollup(sum, 86400) / 1000000
 
 The `/ 1000000` converts USD micros to USD.
 
+## Enforcement
+
+Metering answers "what did each agent spend"; enforcement caps it. A per-agent budget sets a ceiling over a fixed calendar window and, on breach, alerts or blocks the next call. Enforcement is off by default and never activates on upgrade; alert is the recommended starting posture.
+
+### Modes
+
+- **off** (the default): no enforcement.
+- **alert**: when the window's spend reaches the ceiling, emit a `budget_exceeded` audit event once per window and let the call proceed.
+- **block**: when the window's spend reaches the ceiling, emit a `budget_exceeded` event and refuse the call. The refusal returns a plain channel message (that the agent has reached its spending limit for the window), not a silent failure. The check runs before the `LlmRequest` is written, so a block never leaves an orphaned request on the chain: every `LlmRequest` has a paired `LlmResponse` or a call error, never a budget block between them.
+
+Spend is read from `total_cost_usd_micros` (the same precomputed field the metering queries use) and accumulated in a durable per-agent ledger (`budget.db`) keyed by the base agent id, so it aggregates across an agent's channels and conversations and survives a gateway restart.
+
+### Configuration
+
+Budgets live in `budget.json` in the data directory: a global `default` applied to every agent, plus per-agent overrides keyed by agent id.
+
+```json
+{
+    "default": { "mode": "alert", "ceiling_usd_micros": 5000000, "window": "day" },
+    "agents": {
+        "work": { "mode": "block", "ceiling_usd_micros": 10000000, "window": "day" },
+        "scratch": { "mode": "off", "ceiling_usd_micros": 0, "window": "day" }
+    }
+}
+```
+
+`window` is `hour`, `day` (the default), or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000). A per-agent entry overrides the default, and an explicit per-agent `"mode": "off"` opts a single agent out even when a global default is set. An absent `budget.json` means no enforcement.
+
+### Fail-closed and the uncosted-provider gap
+
+In block mode, a ledger error (the spend ledger cannot be read) fails closed: the call is refused and a `budget_exceeded` event is written. In alert mode a ledger error is logged and the call proceeds, because alert's contract is non-blocking.
+
+At gateway start the posture is the same. If `budget.db` cannot be opened while any block-mode budget is configured, the gateway refuses to start, so a wedged ledger file cannot silently convert block into off. If only alert-mode budgets are configured, startup continues but emits a `budget.control_offline` audit event (on the audit chain, so a SIEM or dashboard sees the control is down), not just a stderr warning. A present-but-malformed `budget.json` is a hard startup error for the same reason.
+
+A call whose (provider, model) pair is absent from the pricing table records no cost, so it does not advance the ledger. This is a blind spot: block mode plus a costless provider is no protection. The first uncosted call in a session with an active budget logs a warning so an operator sees the control is pass-through for that provider. Keep the pricing table current for the models you meter.
+
 ## Boundary
 
 Wirken meters the LLM traffic it routes through Wirken. It does not meter a vendor's software-as-a-service (SaaS) seat usage, a subscription plan, or spend from calls made outside Wirken. `total_cost_usd_micros` is derived from the baked pricing table (`crates/audit/src/pricing.toml`), so it is an estimate at those rates, not a reconciled invoice. Treat it as an operator-side view of routed-through-Wirken spend, useful for attribution and anomaly detection, not as a billing record.
@@ -90,5 +126,5 @@ Wirken meters the LLM traffic it routes through Wirken. It does not meter a vend
 ## Related
 
 - Pinning the model that cost is metered against is operator config, not a chat setting. See [Model governance](enforcement-model.md#model-governance); model pinning and these cost rows are one control pair.
-- The per-agent cost-anomaly detection built on these fields ships in the wirken-siem repo as detection 9.
+- The per-agent cost-anomaly detection built on these fields ships in the wirken-siem repo as detection 9; the per-agent budget-breach detection ships as detection 10.
 - Variant forward and exclude policy: [SIEM forwarder](siem-forwarder.md).

@@ -2,6 +2,8 @@
 
 Wirken's audit surface is a per-session, hash-chained SQLite table of typed `SessionEvent` rows. Every row is appended before the action it records runs, every row's payload is SHA-256-hashed, and every row's chain hash is `SHA-256(prev || leaf)` in ASCII hex.
 
+The audit schema version is the workspace version: the audit crate inherits it (`version.workspace = true`), so a change to this schema bumps the workspace, and therefore the binary, version. The two are intentionally coupled, which is why wirken-siem tracks the audit schema by that same number.
+
 ## Event surface
 
 Audit events come in two shapes: typed `SessionEvent` variants for actions the agent runtime drives, and the `AuditLegacy` wrapper for the flat-tuple events the gateway and subsystems emit (`gateway.start`, `audit.chain_broken`, adapter handshake records, etc.).
@@ -14,8 +16,9 @@ Variants are serde-tagged with `kind = "<snake_case>"` so wire consumers can dis
 | `assistant_message` | `AssistantMessage` | `agent_id` | Final assistant text for a turn. |
 | `assistant_tool_calls` | `AssistantToolCalls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter/sender carry the originating channel for SIEM correlation without joining to the sibling `UserMessage`. |
 | `tool_result` | `ToolResult` | `agent_id`, `adapter_id`, `sender_id` | Result of a tool call. Same identity contract as `AssistantToolCalls`. |
-| `llm_request` | `LlmRequest` | `agent_id`, `credential_id` | Pre-LLM-call row carrying tool/messages hashes for replay. `credential_id` is the vault entry name the api_key was resolved from; never the raw secret. |
-| `llm_response` | `LlmResponse` | `agent_id`, `credential_id` | Post-LLM-call row carrying token usage, latency, and per-call cost (`input_cost_usd_micros`, `output_cost_usd_micros`, `total_cost_usd_micros`). |
+| `llm_request` | `LlmRequest` | `agent_id`, `credential_id`, `sender_id` | Pre-LLM-call row carrying tool/messages hashes for replay. `credential_id` is the vault entry name the api_key was resolved from; never the raw secret. `sender_id` is the platform-side human the call is on behalf of; `None` for operator-originated (CLI/cron/subagent) sessions. |
+| `llm_response` | `LlmResponse` | `agent_id`, `credential_id`, `sender_id` | Post-LLM-call row carrying token usage, latency, and per-call cost (`input_cost_usd_micros`, `output_cost_usd_micros`, `total_cost_usd_micros`). `sender_id` mirrors the paired `LlmRequest`. |
+| `budget_exceeded` | `BudgetExceeded` | `agent_id`, `credential_id` | Per-agent spend ceiling reached for the current window. Emitted by the pre-LLM-call budget gate before any `LlmRequest`; `action` is `alerted` (call proceeded) or `blocked` (call refused). Carries `window_spend_usd_micros`, `ceiling_usd_micros`, `window`. |
 | `http_fetch` | `HttpFetch` | `agent_id`, `skill_name` | Egress through the agent's `EgressClient`. Records host, URL, outcome, bytes, HTTP status. |
 | `permission_denied` | `PermissionDenied` | `agent_id` | Runtime tier or org-policy denial. Carries `tool`, `action_key`, `denial_source` (`Tier` or `OrgPolicy`), and `tier` when the source is `Tier`. |
 | `skill_permission_denied` | `SkillPermissionDenied` | `agent_id` | Per-skill effective profile denied an axis (egress / filesystem / inference / tool). |

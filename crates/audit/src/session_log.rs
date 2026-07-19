@@ -226,6 +226,21 @@ pub enum DenialSource {
     OrgPolicy,
 }
 
+/// Outcome recorded on a [`SessionEvent::BudgetExceeded`] row: whether
+/// the breach only alerted (the call proceeded) or blocked (the call
+/// was refused before it went out). SIEM consumers group on this to
+/// separate a soft signal from an enforced stop.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetAction {
+    /// Alert mode: the window ceiling was crossed and this event was
+    /// emitted, but the LLM call still went out.
+    Alerted,
+    /// Block mode: the window ceiling was reached and the LLM call was
+    /// refused before any `LlmRequest` was written.
+    Blocked,
+}
+
 /// Which surface mediated an operator's approve / deny decision.
 /// `ApprovalScopeKind` answers "how long does this grant last"
 /// (Persisted vs Session); [`ApprovalSource`] answers "which UI did
@@ -519,6 +534,16 @@ pub enum SessionEvent {
         agent_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         credential_id: Option<String>,
+        /// Platform-side human sender the call is made on behalf of,
+        /// when the turn was driven by a channel-originated message.
+        /// Threaded from the same inbound identity the sibling
+        /// `UserMessage` and `ToolResult` rows carry, so the human
+        /// principal stays attributable across the LLM call boundary.
+        /// `None` for operator-originated sessions (CLI, cron, subagent
+        /// recursion); an `Option`, never an empty string. Defaulted on
+        /// deserialize so pre-1.12.0 rows read cleanly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     /// LLM response metadata.
     ///
@@ -580,6 +605,33 @@ pub enum SessionEvent {
         /// arithmetic. `None` if either operand is `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         total_cost_usd_micros: Option<u64>,
+        /// See [`Self::LlmRequest::sender_id`]. Populated on emit from
+        /// the same inbound identity so a `LlmRequest` and its paired
+        /// `LlmResponse` always agree on the human principal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
+    /// A per-agent spend ceiling was reached for the current budget
+    /// window. Emitted by the runtime's pre-LLM-call budget gate,
+    /// before any `LlmRequest` for the gated call, so the pairing
+    /// invariant holds: every `LlmRequest` has a paired `LlmResponse`
+    /// or a call error, never a budget block between them. `action`
+    /// distinguishes an alert (the call proceeded) from a block (the
+    /// call was refused). `window_spend_usd_micros` is the agent's
+    /// accumulated spend in the window at gate time;
+    /// `ceiling_usd_micros` is the configured limit; `window` is the
+    /// window unit label (`hour` / `day` / `week`). Cost is in USD
+    /// micros (1 USD = 1_000_000), the same unit as the
+    /// `*_cost_usd_micros` fields on `LlmResponse`.
+    BudgetExceeded {
+        #[serde(default)]
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential_id: Option<String>,
+        window_spend_usd_micros: u64,
+        ceiling_usd_micros: u64,
+        window: String,
+        action: BudgetAction,
     },
     /// Permission denial recorded by the harness. `action_key` is
     /// the canonical key under which an operator can grant approval

@@ -1186,6 +1186,54 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         ),
     }
 
+    // --- Budget enforcement ---
+    //
+    // Load the budget config first so the store-open failure handling
+    // knows whether a block-mode budget is configured. A present-but-
+    // malformed budget.json is a hard startup error (fail closed): an
+    // operator must not be able to typo a block ceiling into silence.
+    let budget_config = wirken_gateway::budget::load_budget_config(&cfg.budget_config_path())
+        .context("load budget.json")?;
+    match wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path()) {
+        Ok(store) => {
+            factory.attach_budget(Arc::new(std::sync::Mutex::new(store)), budget_config);
+        }
+        Err(e) if budget_config.has_block_mode() => {
+            // Fail closed: a block-mode budget is configured but its
+            // ledger cannot be opened. Refuse to start so a wedged
+            // budget.db never silently converts block into off.
+            anyhow::bail!(
+                "budget.db could not be opened but a block-mode budget is configured in \
+                 budget.json; refusing to start so enforcement is never silently disabled: {e}"
+            );
+        }
+        Err(e) => {
+            // Alert-only (or inactive) config. Record the control going
+            // offline on the audit chain, not just stderr, so a SIEM or
+            // dashboard sees that enforcement is down, then continue.
+            if budget_config.has_active() {
+                let _ = audit
+                    .log(
+                        AuditEvent::new(
+                            ActorKind::Service,
+                            "gateway",
+                            "budget.control_offline",
+                            "budget.db",
+                        )
+                        .with_detail(serde_json::json!({
+                            "reason": "budget_db_open_failed",
+                            "error": e.to_string(),
+                        })),
+                    )
+                    .await;
+            }
+            tracing::warn!(
+                budget_db = %cfg.budget_db_path().display(),
+                "budget enforcement disabled (spend store unavailable): {e}"
+            );
+        }
+    }
+
     // --- Pending-approval queue + CLI approval gate ---
     //
     // Out-of-band approval for daemon-mode agents. The queue holds

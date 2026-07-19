@@ -1,6 +1,7 @@
 pub mod adapter_registry;
 pub mod agent_config;
 pub mod approver_registry;
+pub mod budget;
 pub mod config;
 pub mod cron;
 pub mod egress_dispatcher;

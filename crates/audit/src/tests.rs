@@ -1046,6 +1046,7 @@ mod session {
                     messages_hash: crate::session_log::HashHex("cafebabe".repeat(8)),
                     agent_id: "test-agent".into(),
                     credential_id: None,
+                    sender_id: None,
                 },
             ),
             (
@@ -1063,6 +1064,7 @@ mod session {
                     input_cost_usd_micros: None,
                     output_cost_usd_micros: None,
                     total_cost_usd_micros: None,
+                    sender_id: None,
                 },
             ),
             (
@@ -1437,6 +1439,7 @@ mod session {
                 input_cost_usd_micros: None,
                 output_cost_usd_micros: None,
                 total_cost_usd_micros: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1504,6 +1507,7 @@ mod session {
                 input_cost_usd_micros: Some(15_000),
                 output_cost_usd_micros: Some(37_500),
                 total_cost_usd_micros: Some(52_500),
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1566,6 +1570,7 @@ mod session {
             input_cost_usd_micros: None,
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
+            sender_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(
@@ -1617,6 +1622,7 @@ mod session {
                 input_cost_usd_micros: Some(1),
                 output_cost_usd_micros: Some(1),
                 total_cost_usd_micros: Some(2),
+                sender_id: None,
             },
         )
         .unwrap();
@@ -1646,6 +1652,7 @@ mod session {
             input_cost_usd_micros: None,
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
+            sender_id: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(

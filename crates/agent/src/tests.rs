@@ -5264,6 +5264,7 @@ mod verify {
                 messages_hash,
                 agent_id: "test-agent".into(),
                 credential_id: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -5287,6 +5288,7 @@ mod verify {
                 input_cost_usd_micros: None,
                 output_cost_usd_micros: None,
                 total_cost_usd_micros: None,
+                sender_id: None,
             },
         )
         .unwrap();
@@ -6015,6 +6017,7 @@ mod per_channel_llm_override {
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "test-agent".into(),
                     credential_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -6070,6 +6073,7 @@ mod per_channel_llm_override {
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "test-agent".into(),
                     credential_id: None,
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -6161,6 +6165,7 @@ mod per_channel_llm_override {
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "a1".into(),
                     credential_id: a.api_key_credential_for_test().map(String::from),
+                    sender_id: None,
                 },
             )
             .unwrap();
@@ -7669,5 +7674,342 @@ mod openai_compat_stub {
         let usage = usage.expect("trailing usage chunk must reach the consumer");
         assert_eq!(usage.input_tokens, 13);
         assert_eq!(usage.output_tokens, 7);
+    }
+}
+
+#[cfg(test)]
+mod budget_enforcement {
+    use crate::InboundContext;
+    use crate::llm::{LlmConfig, LlmResponse};
+    use crate::llm_stream::StreamEvent;
+    use crate::runtime::Agent;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+    use wirken_audit::{BudgetAction, SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+    use wirken_gateway::budget::{
+        AgentBudget, BudgetMode, BudgetStore, BudgetWindow, now_unix_secs,
+    };
+
+    fn budget(mode: BudgetMode, ceiling: u64) -> AgentBudget {
+        AgentBudget {
+            mode,
+            ceiling_usd_micros: ceiling,
+            window: BudgetWindow::Day,
+        }
+    }
+
+    fn day_window_start() -> i64 {
+        BudgetWindow::Day.window_start(now_unix_secs())
+    }
+
+    fn agent_with_budget(
+        id: &str,
+        b: AgentBudget,
+        store: Arc<Mutex<BudgetStore>>,
+    ) -> (Agent, Arc<dyn SessionLog>) {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut agent = Agent::new(
+            id.into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log.clone(),
+        )
+        .unwrap();
+        agent.set_budget(Some(b), Some(store));
+        (agent, log)
+    }
+
+    fn events(log: &Arc<dyn SessionLog>, id: &str) -> Vec<SessionEvent> {
+        let h = log.handle_for(SessionId::new(id.to_string()));
+        log.get_since(&h, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
+    }
+
+    // Synthetic non-compliant agent: an over-budget agent must be
+    // blocked, the block must land in the audit chain, and no orphaned
+    // LlmRequest may precede it.
+    #[tokio::test]
+    async fn over_budget_agent_is_blocked_and_recorded() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_spend("bud", day_window_start(), 1_000)
+            .unwrap();
+        let (mut agent, log) = agent_with_budget("bud", budget(BudgetMode::Block, 100), store);
+
+        let result = agent
+            .process_inbound(
+                "hello",
+                "in-1".into(),
+                InboundContext {
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            )
+            .await
+            .expect("a block returns a normal ProcessResult, not an error");
+
+        // The channel sees a clear message, not a silent dead turn.
+        assert!(
+            result.response.contains("spending limit"),
+            "got: {}",
+            result.response
+        );
+
+        let evs = events(&log, "bud");
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequest { .. })),
+            "a block must not write an orphaned LlmRequest"
+        );
+        let recorded = evs.iter().find_map(|e| match e {
+            SessionEvent::BudgetExceeded {
+                action,
+                ceiling_usd_micros,
+                ..
+            } => Some((*action, *ceiling_usd_micros)),
+            _ => None,
+        });
+        assert_eq!(recorded, Some((BudgetAction::Blocked, 100)));
+    }
+
+    #[tokio::test]
+    async fn alert_mode_does_not_block_and_fires_once_per_window() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_spend("bud", day_window_start(), 1_000)
+            .unwrap();
+        let (agent, log) = agent_with_budget("bud", budget(BudgetMode::Alert, 100), store);
+
+        assert!(
+            agent.test_check_budget().unwrap().is_none(),
+            "alert mode must never block"
+        );
+
+        let evs = events(&log, "bud");
+        assert!(
+            evs.iter().any(|e| matches!(
+                e,
+                SessionEvent::BudgetExceeded {
+                    action: BudgetAction::Alerted,
+                    ..
+                }
+            )),
+            "alert mode emits BudgetExceeded{{Alerted}}"
+        );
+        assert!(
+            !evs.iter().any(|e| matches!(
+                e,
+                SessionEvent::BudgetExceeded {
+                    action: BudgetAction::Blocked,
+                    ..
+                }
+            )),
+            "alert mode never blocks"
+        );
+
+        // A second gate check in the same window does not re-alert.
+        assert!(agent.test_check_budget().unwrap().is_none());
+        let alerts = events(&log, "bud")
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SessionEvent::BudgetExceeded {
+                        action: BudgetAction::Alerted,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(alerts, 1, "alert fires once per window");
+    }
+
+    #[tokio::test]
+    async fn under_budget_proceeds_without_event() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_spend("bud", day_window_start(), 50)
+            .unwrap();
+        let (agent, log) = agent_with_budget("bud", budget(BudgetMode::Block, 100), store);
+        assert!(agent.test_check_budget().unwrap().is_none());
+        assert!(
+            events(&log, "bud").is_empty(),
+            "no event while under the ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn charge_advances_ledger_and_null_cost_is_pass_through() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let (mut agent, _log) =
+            agent_with_budget("bud", budget(BudgetMode::Block, 1_000_000), store.clone());
+        let ws = day_window_start();
+
+        agent.test_charge_budget(Some(500));
+        agent.test_charge_budget(Some(250));
+        assert_eq!(store.lock().unwrap().window_spend("bud", ws).unwrap(), 750);
+
+        // An uncosted call charges nothing and warns once per session.
+        assert!(!agent.test_budget_uncosted_warned());
+        agent.test_charge_budget(None);
+        assert_eq!(
+            store.lock().unwrap().window_spend("bud", ws).unwrap(),
+            750,
+            "a null total must not advance the ledger"
+        );
+        assert!(agent.test_budget_uncosted_warned());
+        agent.test_charge_budget(None);
+        assert!(agent.test_budget_uncosted_warned());
+    }
+
+    #[tokio::test]
+    async fn block_fails_closed_when_ledger_unreadable() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        let (agent, log) =
+            agent_with_budget("bud", budget(BudgetMode::Block, 1_000_000), store.clone());
+
+        // Poison the store mutex so the gate cannot read the ledger.
+        let poison = store.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = poison.lock().unwrap();
+            panic!("intentionally poison the budget store mutex");
+        })
+        .join();
+
+        assert!(
+            agent.test_check_budget().unwrap().is_some(),
+            "block mode fails closed when the ledger is unreadable"
+        );
+        assert!(
+            events(&log, "bud").iter().any(|e| matches!(
+                e,
+                SessionEvent::BudgetExceeded {
+                    action: BudgetAction::Blocked,
+                    ..
+                }
+            )),
+            "a fail-closed block is recorded like any other block"
+        );
+    }
+
+    // The synthetic-outcome standard applies to the streaming path too:
+    // an over-budget agent is blocked, the block message reaches the
+    // stream sink (streaming is the default UX), and no orphaned
+    // LlmRequest precedes it.
+    #[tokio::test]
+    async fn streaming_over_budget_agent_is_blocked_on_the_sink() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_spend("bud", day_window_start(), 1_000)
+            .unwrap();
+        let (mut agent, log) = agent_with_budget("bud", budget(BudgetMode::Block, 100), store);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let result = agent
+            .process_message_stream("hello", "in-1".into(), tx)
+            .await
+            .expect("a streaming block returns a normal ProcessResult, not an error");
+
+        assert!(
+            result.response.contains("spending limit"),
+            "got: {}",
+            result.response
+        );
+
+        // The block message reached the stream sink as the final text.
+        let mut streamed_final = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::Done(LlmResponse::Text(t)) = ev {
+                streamed_final = t;
+            }
+        }
+        assert!(
+            streamed_final.contains("spending limit"),
+            "the block message must reach the stream sink; got: {streamed_final:?}"
+        );
+
+        let evs = events(&log, "bud");
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, SessionEvent::LlmRequest { .. })),
+            "a streaming block must not write an orphaned LlmRequest"
+        );
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            SessionEvent::BudgetExceeded {
+                action: BudgetAction::Blocked,
+                ..
+            }
+        )));
+    }
+}
+
+#[cfg(test)]
+mod obo_identity {
+    use crate::InboundContext;
+    use crate::llm::LlmConfig;
+    use crate::runtime::Agent;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    // Part A: the runtime threads the inbound human sender through the
+    // LLM call boundary. LlmRequest is emitted before the provider
+    // call, so pointing the LLM at a dead port proves the threading
+    // end to end without a live model.
+    #[tokio::test]
+    async fn sender_id_is_threaded_onto_llm_request() {
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let mut cfg = LlmConfig::ollama("test");
+        cfg.base_url = "http://127.0.0.1:1/v1".into();
+        let mut agent = Agent::new(
+            "work".into(),
+            tmp.path().to_path_buf(),
+            cfg,
+            None,
+            None,
+            log.clone(),
+        )
+        .unwrap();
+
+        // The provider call fails on the dead port, but LlmRequest is
+        // written first, carrying the inbound identity.
+        let _ = agent
+            .process_inbound(
+                "hi",
+                "in-1".into(),
+                InboundContext {
+                    adapter_id: Some("slack".into()),
+                    sender_id: Some("U123".into()),
+                },
+            )
+            .await;
+
+        let h = log.handle_for(SessionId::new("work".to_string()));
+        let rows = log.get_since(&h, 0).unwrap();
+        let req_sender = rows.iter().find_map(|r| match &r.event {
+            SessionEvent::LlmRequest { sender_id, .. } => Some(sender_id.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            req_sender,
+            Some(Some("U123".to_string())),
+            "the runtime must thread the inbound sender_id onto LlmRequest"
+        );
     }
 }

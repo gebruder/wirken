@@ -73,6 +73,18 @@ impl GatewayConfig {
         self.data_dir.join("agent_config.db")
     }
 
+    /// Durable per-agent budget spend ledger.
+    pub fn budget_db_path(&self) -> PathBuf {
+        self.data_dir.join("budget.db")
+    }
+
+    /// Budget configuration: a global default plus per-agent
+    /// overrides. Absent means no budgets are configured (enforcement
+    /// off).
+    pub fn budget_config_path(&self) -> PathBuf {
+        self.data_dir.join("budget.json")
+    }
+
     /// Per-agent workspace directory.
     pub fn agent_workspace(&self, agent_id: &str) -> PathBuf {
         self.data_dir

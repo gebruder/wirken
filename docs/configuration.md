@@ -15,6 +15,8 @@ All configuration lives in `~/.wirken/`. There are no hidden config files or env
 | `adapters.db` | Registered channel adapters and Ed25519 keys | `wirken channel add` |
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |
 | `siem.json` | SIEM forwarding config (optional) | Manual or org config |
+| `budget.json` | Per-agent spend budgets: global default + per-agent overrides (optional) | Manual |
+| `budget.db` | Durable per-agent spend ledger | `wirken run` |
 | `mcp.json` | MCP server config (optional) | Manual or org config |
 | `org.url` | Organization config endpoint (optional) | `wirken setup --org` |
 | `skills/` | Installed skills (SKILL.md + optional skill.wasm) | `wirken skills install` or setup |
@@ -99,6 +101,23 @@ Sentinel ingestion uses the Logs Ingestion API over a Data Collection Rule. The 
     "environment": "production"
 }
 ```
+
+## budget.json
+
+Per-agent spend budgets. A global `default` applies to every agent; per-agent entries override it. Enforcement is off unless a budget sets an active mode. See [Cost monitoring](cost-monitoring.md#enforcement) for the full behavior, including fail-closed and the uncosted-provider gap.
+
+```json
+{
+    "default": { "mode": "alert", "ceiling_usd_micros": 5000000, "window": "day" },
+    "agents": {
+        "work": { "mode": "block", "ceiling_usd_micros": 10000000, "window": "day" }
+    }
+}
+```
+
+`mode` is `off` (the default), `alert`, or `block`; `window` is `hour`, `day`, or `week`; `ceiling_usd_micros` is USD micros (1 USD = 1,000,000).
+
+Both surfaces live in this one file: a global `default` and per-agent overrides under `agents`. Resolution order for an agent is: its per-agent entry if present, else the global `default`, else off. A per-agent entry fully replaces the default for that agent (the two are not merged), and an explicit per-agent `"mode": "off"` opts the agent out even when a global default is set. If an agent is not capped, check its per-agent entry first, then the default here. Behavior beyond configuration (fail-closed, the uncosted-provider gap, startup handling) is in [Cost monitoring](cost-monitoring.md#enforcement).
 
 ## mcp.json
 

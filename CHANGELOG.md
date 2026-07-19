@@ -8,6 +8,40 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.12.0] - 2026-07-19
+
+### Added
+
+- Per-agent spend budgets. A `budget.json` sets a USD-micros ceiling
+  over a fixed calendar window (`hour` / `day` / `week`) with an `off`
+  / `alert` / `block` mode, as a global default plus per-agent
+  overrides. Block refuses the call before the `LlmRequest` is written
+  and returns a visible channel message; alert emits once per window
+  and lets the call proceed. Spend accrues in a durable per-agent
+  ledger (`budget.db`) keyed by the base agent id. Off by default;
+  enforcement never activates on upgrade. Block fails closed on a
+  ledger read error; a call whose (provider, model) pair is absent
+  from the pricing table records no cost, does not advance the ledger,
+  and warns once per session. See
+  [docs/cost-monitoring.md](docs/cost-monitoring.md).
+- `SessionEvent::BudgetExceeded` typed audit variant (`agent_id`,
+  `credential_id`, `window_spend_usd_micros`, `ceiling_usd_micros`,
+  `window`, `action`), emitted before any `LlmRequest` for a gated
+  call. Forwarded to SIEM by default; consumed by wirken-siem
+  detection 10.
+- `sender_id` on the `LlmRequest` and `LlmResponse` audit variants: the
+  platform-side human a call is made on behalf of, threaded from the
+  same inbound identity the `UserMessage` and `ToolResult` rows carry,
+  so the human principal stays attributable across the LLM call
+  boundary (which previously showed only `agent_id` and
+  `credential_id`). `None` for operator-originated sessions (CLI, cron,
+  subagent recursion); an `Option`, never an empty string. Defaulted on
+  deserialize so pre-1.12.0 rows read cleanly. Part A of the
+  on-behalf-of identity work in `docs/design/obo-identity.md`; Part B
+  (RFC 8693 token exchange against an external security token service)
+  remains a design proposal pending an STS choice, with no code or
+  feature flag shipped.
+
 ## [1.11.1] - 2026-07-19
 
 ### Fixed

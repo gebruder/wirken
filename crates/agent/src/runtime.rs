@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
 use wirken_audit::{
-    OwnSession, PhaseExitReason, SessionEvent, SessionHandle, SessionId, SessionLog,
+    BudgetAction, OwnSession, PhaseExitReason, SessionEvent, SessionHandle, SessionId, SessionLog,
     SkillDeniedReason, ToolCallRecord, TrustLevel,
 };
 
@@ -18,10 +18,18 @@ use crate::skill::{Skill, SkillLoader};
 use crate::tool::{ToolConfig, ToolRegistry, tool_to_action};
 use crate::wasm_sandbox::WasmSkill;
 use wirken_gateway::agent_config::SubagentCeiling;
+use wirken_gateway::budget::{AgentBudget, BudgetMode, BudgetStore, BudgetWindow, now_unix_secs};
 use wirken_gateway::permissions::{PermissionCheck, PermissionStore, PermissionTier};
 
 /// Maximum tool call rounds per turn to prevent infinite loops.
 const MAX_TOOL_ROUNDS: usize = 20;
+
+/// Channel-visible message returned when a block-mode budget refuses a
+/// call. Kept generic (no dollar figures) so it is safe to surface to
+/// any allowlisted contact; the numeric detail rides the
+/// `BudgetExceeded` audit row for the operator.
+const BUDGET_BLOCK_MESSAGE: &str = "This agent has reached its configured spending limit for the current window and cannot make \
+     further model calls until the window resets.";
 
 /// Which side of the filesystem axis a built-in tool call exercises.
 /// Used by [`Agent::fs_axis_for_call`] and the dispatch gate (#76 Phase
@@ -219,6 +227,20 @@ pub struct Agent {
     /// interactive prompt. Children run headless. `None` means
     /// no extra clamp beyond the regular [`PermissionStore`].
     auto_deny_above_tier: Option<PermissionTier>,
+    /// Effective per-agent spend budget for this session, resolved
+    /// (per-agent override > global default > off) by the gateway at
+    /// construction. `None` means no enforcement.
+    budget: Option<AgentBudget>,
+    /// Shared budget store (per-agent budget config + spend ledger).
+    /// The pre-call gate reads it; the post-response charge writes it.
+    /// `None` for agents constructed without a store (tests,
+    /// standalone runs).
+    budget_ledger: Option<Arc<std::sync::Mutex<BudgetStore>>>,
+    /// Once-per-session guard for the uncosted-provider warning: set
+    /// after the first LLM response whose provider emitted no cost
+    /// while a budget is active, so the operator sees the control is
+    /// pass-through for that provider without a per-call log flood.
+    budget_uncosted_warned: bool,
     /// Item 6 slice 1: when `Some`, only tool definitions whose
     /// names appear in this set are exposed to the LLM, and any
     /// tool call whose name is not in the set is denied. Used by
@@ -364,6 +386,9 @@ impl Agent {
             allowed_subagents: BTreeMap::new(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
+            budget: None,
+            budget_ledger: None,
+            budget_uncosted_warned: false,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::PhasedEffective::default(),
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
@@ -452,6 +477,9 @@ impl Agent {
             allowed_subagents: BTreeMap::new(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
+            budget: None,
+            budget_ledger: None,
+            budget_uncosted_warned: false,
             restrict_tools: None,
             effective_permissions: crate::skill_perms::PhasedEffective::default(),
             interceptors: vec![Arc::new(crate::slash::SlashInterceptor)],
@@ -890,6 +918,191 @@ impl Agent {
         }
     }
 
+    /// Base agent id used to key the budget ledger. The gateway's
+    /// session id is `{agent}/{channel}/{conversation}`, so keying on
+    /// the first segment aggregates spend per agent across all its
+    /// channels and conversations (a true per-agent ceiling), rather
+    /// than per conversation. A session id with no `/` (standalone or
+    /// sentinel) keys by itself.
+    fn budget_key(&self) -> &str {
+        self.id.split('/').next().unwrap_or(self.id.as_str())
+    }
+
+    /// Ledger-unavailable outcome (lock poisoned or read failed):
+    /// fail closed under block mode (emit `BudgetExceeded { Blocked }`
+    /// and refuse), proceed under alert mode (alert cannot block
+    /// without violating its non-blocking contract).
+    fn budget_unavailable(
+        &self,
+        budget: AgentBudget,
+        window: BudgetWindow,
+        reason: &str,
+    ) -> Result<Option<String>, AgentError> {
+        match budget.mode {
+            BudgetMode::Block => {
+                tracing::error!(
+                    "agent {} budget ledger unavailable ({reason}); failing closed",
+                    self.id
+                );
+                self.emit_budget_exceeded(
+                    0,
+                    budget.ceiling_usd_micros,
+                    window.label(),
+                    BudgetAction::Blocked,
+                )?;
+                Ok(Some(BUDGET_BLOCK_MESSAGE.to_string()))
+            }
+            _ => {
+                tracing::error!(
+                    "agent {} budget ledger unavailable ({reason}); alert mode, proceeding",
+                    self.id
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Pre-LLM-call budget gate. Runs BEFORE the `LlmRequest` emit so
+    /// a blocked attempt never writes an orphaned `LlmRequest`: the
+    /// pairing invariant is that every `LlmRequest` has a paired
+    /// `LlmResponse` (or a call error), never a budget block between
+    /// them. Returns `Some(message)` when the call must be blocked
+    /// (block mode at/over ceiling, or a ledger error under block mode
+    /// = fail closed); `None` to proceed. Emits `BudgetExceeded` as a
+    /// side effect: on every block, and once per window in alert mode.
+    fn check_budget(&self) -> Result<Option<String>, AgentError> {
+        let Some(budget) = self.budget else {
+            return Ok(None);
+        };
+        if !budget.is_active() {
+            return Ok(None);
+        }
+        let Some(store) = self.budget_ledger.clone() else {
+            return Ok(None);
+        };
+        let window = budget.window;
+        let window_start = window.window_start(now_unix_secs());
+
+        let guard = match store.lock() {
+            Ok(g) => g,
+            Err(_) => return self.budget_unavailable(budget, window, "store lock poisoned"),
+        };
+        let spend = match guard.window_spend(self.budget_key(), window_start) {
+            Ok(s) => s,
+            Err(e) => {
+                drop(guard);
+                return self.budget_unavailable(
+                    budget,
+                    window,
+                    &format!("ledger read failed: {e}"),
+                );
+            }
+        };
+
+        if spend < budget.ceiling_usd_micros {
+            return Ok(None);
+        }
+
+        // At or over the ceiling.
+        match budget.mode {
+            BudgetMode::Block => {
+                drop(guard);
+                self.emit_budget_exceeded(
+                    spend,
+                    budget.ceiling_usd_micros,
+                    window.label(),
+                    BudgetAction::Blocked,
+                )?;
+                Ok(Some(BUDGET_BLOCK_MESSAGE.to_string()))
+            }
+            BudgetMode::Alert => {
+                // Emit once per window; the flag lives in the ledger
+                // so a restart does not re-alert.
+                let first = guard
+                    .try_mark_alerted(self.budget_key(), window_start)
+                    .unwrap_or(true);
+                drop(guard);
+                if first {
+                    self.emit_budget_exceeded(
+                        spend,
+                        budget.ceiling_usd_micros,
+                        window.label(),
+                        BudgetAction::Alerted,
+                    )?;
+                }
+                Ok(None)
+            }
+            BudgetMode::Off => Ok(None),
+        }
+    }
+
+    /// Append a `BudgetExceeded` audit row. Trust level `System`, same
+    /// as permission-denial rows.
+    fn emit_budget_exceeded(
+        &self,
+        window_spend_usd_micros: u64,
+        ceiling_usd_micros: u64,
+        window: &str,
+        action: BudgetAction,
+    ) -> Result<(), AgentError> {
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::BudgetExceeded {
+                agent_id: self.id.clone(),
+                credential_id: self.api_key_credential.clone(),
+                window_spend_usd_micros,
+                ceiling_usd_micros,
+                window: window.to_string(),
+                action,
+            },
+        )
+    }
+
+    /// Post-LLM-response budget charge. Adds the call's cost to the
+    /// ledger for the current window when a budget is active. An
+    /// uncosted call (provider/model absent from the pricing table,
+    /// `None` total) charges nothing; the first such call in a session
+    /// with an active budget logs one warning so the operator sees the
+    /// control is pass-through for that provider.
+    fn charge_budget(&mut self, total_cost_usd_micros: Option<u64>) {
+        let Some(budget) = self.budget else {
+            return;
+        };
+        if !budget.is_active() {
+            return;
+        }
+        let Some(store) = self.budget_ledger.clone() else {
+            return;
+        };
+        match total_cost_usd_micros {
+            Some(micros) => {
+                let window_start = budget.window.window_start(now_unix_secs());
+                match store.lock() {
+                    Ok(guard) => {
+                        if let Err(e) = guard.add_spend(self.budget_key(), window_start, micros) {
+                            tracing::error!("agent {} budget ledger write failed: {e}", self.id);
+                        }
+                    }
+                    Err(_) => {
+                        tracing::error!("agent {} budget ledger mutex poisoned on charge", self.id);
+                    }
+                }
+            }
+            None => {
+                if !self.budget_uncosted_warned {
+                    self.budget_uncosted_warned = true;
+                    tracing::warn!(
+                        "agent {} has an active budget ({:?}) but the provider/model emitted no \
+                         cost; budget enforcement is pass-through for uncosted calls this session. \
+                         Block mode plus a costless provider is no protection.",
+                        self.id,
+                        budget.mode,
+                    );
+                }
+            }
+        }
+    }
+
     /// Install a phase deny overlay for the remainder of the current
     /// turn. Returns [`crate::skill_perms::PhaseError::AlreadyActive`]
     /// when an overlay is already active; the caller (slice 3's
@@ -1007,6 +1220,20 @@ impl Agent {
     /// call.
     pub(crate) fn attach_subagent_ceilings(&mut self, ceilings: BTreeMap<String, SubagentCeiling>) {
         self.allowed_subagents = ceilings;
+    }
+
+    /// Install the resolved budget and the shared budget store for
+    /// this agent's session. Called by the gateway at construction
+    /// after resolving per-agent override against the global default.
+    /// Agents without a budget (tests, standalone) leave both `None`,
+    /// which makes the pre-call gate a no-op.
+    pub fn set_budget(
+        &mut self,
+        budget: Option<AgentBudget>,
+        store: Option<Arc<std::sync::Mutex<BudgetStore>>>,
+    ) {
+        self.budget = budget;
+        self.budget_ledger = store;
     }
 
     /// Item 6 slice 1 — set this child Agent's nesting depth and
@@ -1343,6 +1570,25 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn session_log_for_test(&self) -> &Arc<dyn SessionLog> {
         &self.session_log
+    }
+
+    /// Drive the pre-call budget gate directly. Test-only.
+    #[cfg(test)]
+    pub(crate) fn test_check_budget(&self) -> Result<Option<String>, AgentError> {
+        self.check_budget()
+    }
+
+    /// Drive the post-response budget charge directly. Test-only.
+    #[cfg(test)]
+    pub(crate) fn test_charge_budget(&mut self, total_cost_usd_micros: Option<u64>) {
+        self.charge_budget(total_cost_usd_micros)
+    }
+
+    /// Whether the once-per-session uncosted-provider warning has
+    /// fired. Test-only.
+    #[cfg(test)]
+    pub(crate) fn test_budget_uncosted_warned(&self) -> bool {
+        self.budget_uncosted_warned
     }
 
     /// Crash-recovery dedup. If the most recent `UserMessage` in
@@ -1684,6 +1930,15 @@ impl Agent {
             let request_id = format!("req-{}", uuid::Uuid::new_v4());
             let messages_hash = compute_messages_hash(self.conversation.messages());
             let tools_hash = compute_tools_hash(&tool_defs);
+            // Pre-call budget gate: runs before the LlmRequest emit so
+            // a block writes only BudgetExceeded, never an orphaned
+            // LlmRequest.
+            if let Some(block_msg) = self.check_budget()? {
+                return Ok(ProcessResult {
+                    response: block_msg,
+                    denials,
+                });
+            }
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmRequest {
@@ -1694,6 +1949,7 @@ impl Agent {
                     messages_hash,
                     agent_id: self.id.clone(),
                     credential_id: self.api_key_credential.clone(),
+                    sender_id: self.current_inbound.sender_id.clone(),
                 },
             )?;
 
@@ -1732,8 +1988,10 @@ impl Agent {
                     input_cost_usd_micros,
                     output_cost_usd_micros,
                     total_cost_usd_micros,
+                    sender_id: self.current_inbound.sender_id.clone(),
                 },
             )?;
+            self.charge_budget(total_cost_usd_micros);
 
             match response {
                 LlmResponse::Text(text) => {
@@ -2004,6 +2262,19 @@ impl Agent {
             let request_id = format!("req-{}", uuid::Uuid::new_v4());
             let messages_hash = compute_messages_hash(self.conversation.messages());
             let tools_hash = compute_tools_hash(&tool_defs);
+            // Pre-call budget gate: runs before the LlmRequest emit so
+            // a block writes only BudgetExceeded, never an orphaned
+            // LlmRequest. Surface the block message on the stream too
+            // so a streaming client sees it as the turn's final text.
+            if let Some(block_msg) = self.check_budget()? {
+                let _ = tx
+                    .send(StreamEvent::Done(LlmResponse::Text(block_msg.clone())))
+                    .await;
+                return Ok(ProcessResult {
+                    response: block_msg,
+                    denials,
+                });
+            }
             self.log_event(
                 TrustLevel::System,
                 SessionEvent::LlmRequest {
@@ -2014,6 +2285,7 @@ impl Agent {
                     messages_hash,
                     agent_id: self.id.clone(),
                     credential_id: self.api_key_credential.clone(),
+                    sender_id: self.current_inbound.sender_id.clone(),
                 },
             )?;
 
@@ -2069,8 +2341,10 @@ impl Agent {
                     input_cost_usd_micros,
                     output_cost_usd_micros,
                     total_cost_usd_micros,
+                    sender_id: self.current_inbound.sender_id.clone(),
                 },
             )?;
+            self.charge_budget(total_cost_usd_micros);
 
             match response {
                 LlmResponse::Text(text) => {

@@ -258,6 +258,7 @@ fn llm_request_with_credential_id_round_trips() {
         messages_hash: HashHex("bb".repeat(32)),
         agent_id: "default".into(),
         credential_id: Some("anthropic-api-key".into()),
+        sender_id: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(
@@ -286,6 +287,7 @@ fn llm_request_with_credential_id_none_omits_field_on_wire() {
         messages_hash: HashHex("11".repeat(32)),
         agent_id: "default".into(),
         credential_id: None,
+        sender_id: None,
     };
     let json = serde_json::to_string(&ev).unwrap();
     assert!(
@@ -317,6 +319,7 @@ fn llm_response_with_credential_id_round_trips() {
         input_cost_usd_micros: None,
         output_cost_usd_micros: None,
         total_cost_usd_micros: None,
+        sender_id: None,
     };
     let json = serde_json::to_string(&original).unwrap();
     assert!(json.contains("\"credential_id\":\"anthropic-api-key\""));
@@ -586,6 +589,7 @@ fn snapshot_llm_response_renames_tokens_and_carries_agent_id() {
         input_cost_usd_micros: None,
         output_cost_usd_micros: None,
         total_cost_usd_micros: None,
+        sender_id: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["input_tokens", "output_tokens", "agent_id"]);

@@ -569,13 +569,22 @@ fn extract_identity_for_sentinel(
             Some(agent_id.clone()),
         ),
         SessionEvent::HttpFetch { agent_id, .. } => (None, None, agent_id.clone()),
+        SessionEvent::LlmRequest {
+            agent_id,
+            sender_id,
+            ..
+        }
+        | SessionEvent::LlmResponse {
+            agent_id,
+            sender_id,
+            ..
+        } => (None, sender_id.clone(), Some(agent_id.clone())),
         SessionEvent::PermissionDenied { agent_id, .. }
         | SessionEvent::SkillPermissionDenied { agent_id, .. }
         | SessionEvent::AssistantMessage { agent_id, .. }
-        | SessionEvent::LlmRequest { agent_id, .. }
-        | SessionEvent::LlmResponse { agent_id, .. }
         | SessionEvent::SystemPromptSet { agent_id, .. }
         | SessionEvent::Compaction { agent_id, .. }
+        | SessionEvent::BudgetExceeded { agent_id, .. }
         | SessionEvent::ExternalToolOutput { agent_id, .. } => (None, None, Some(agent_id.clone())),
         _ => (None, None, None),
     }
@@ -604,6 +613,14 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             denial_source,
             ..
         } => format!("permission_denied tool={tool} source={denial_source:?}"),
+        SessionEvent::BudgetExceeded {
+            action,
+            window_spend_usd_micros,
+            ceiling_usd_micros,
+            ..
+        } => format!(
+            "budget_exceeded action={action:?} spend={window_spend_usd_micros} ceiling={ceiling_usd_micros}"
+        ),
         SessionEvent::SubagentSpawned { child_agent_id, .. } => {
             format!("subagent_spawned child={child_agent_id}")
         }

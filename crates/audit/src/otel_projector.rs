@@ -1218,6 +1218,7 @@ mod tests {
             messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
             agent_id: "default".to_string(),
             credential_id: None,
+            sender_id: None,
         }
     }
 
@@ -1235,6 +1236,7 @@ mod tests {
             input_cost_usd_micros: None,
             output_cost_usd_micros: None,
             total_cost_usd_micros: None,
+            sender_id: None,
         }
     }
 
@@ -2576,6 +2578,7 @@ mod tests {
                 messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
                 agent_id: "researcher".to_string(),
                 credential_id: None,
+                sender_id: None,
             },
             &parent,
             at(1),
@@ -2610,6 +2613,7 @@ mod tests {
                 messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
                 agent_id: "researcher".to_string(),
                 credential_id: None,
+                sender_id: None,
             },
             &parent,
             at(1),
@@ -2652,6 +2656,7 @@ mod tests {
                 messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
                 agent_id: "researcher".to_string(),
                 credential_id: None,
+                sender_id: None,
             },
             &parent,
             at(1),
@@ -2710,6 +2715,7 @@ mod tests {
                 messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
                 agent_id: "researcher".to_string(),
                 credential_id: None,
+                sender_id: None,
             },
             &parent,
             at(1),
@@ -2816,6 +2822,7 @@ mod tests {
                 messages_hash: crate::session_log::HashHex::from_bytes(&[0u8; 32]),
                 agent_id: "researcher".to_string(),
                 credential_id: None,
+                sender_id: None,
             },
             &parent,
             at(1),

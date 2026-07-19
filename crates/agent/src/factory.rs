@@ -44,6 +44,7 @@ use lru::LruCache;
 use tokio::sync::Mutex as AsyncMutex;
 use wirken_audit::{ApprovalScopeKind, SessionEvent, SessionId, SessionLog};
 use wirken_gateway::agent_config::SubagentCeiling;
+use wirken_gateway::budget::{BudgetConfig, BudgetStore};
 use wirken_gateway::org::OrgPermissions;
 use wirken_gateway::permissions::{
     PermissionStore, SESSION_CLEAR_REASON_ENDED, emit_session_scoped_approvals_cleared,
@@ -200,6 +201,15 @@ impl CacheMode {
 }
 
 /// The agent factory.
+/// Budget enforcement resources shared across every waked Agent: the
+/// durable spend store and the global-default budget. Injected by the
+/// CLI via [`AgentFactory::attach_budget`]; absent when no budget
+/// wiring is configured (the gate stays a no-op).
+struct BudgetWiring {
+    store: Arc<StdMutex<BudgetStore>>,
+    config: BudgetConfig,
+}
+
 pub struct AgentFactory {
     static_configs: HashMap<String, AgentStaticConfig>,
     session_log: Arc<dyn SessionLog>,
@@ -259,6 +269,11 @@ pub struct AgentFactory {
     /// is loopback-only and bound to the gateway's owner so no
     /// per-user allowlist exists yet (login is a separate slice).
     sse_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
+    /// Budget enforcement wiring (spend store + global default),
+    /// shared across every waked Agent. `None` until the CLI calls
+    /// [`Self::attach_budget`]; absent means the budget gate is a
+    /// no-op.
+    budget_wiring: std::sync::RwLock<Option<BudgetWiring>>,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -327,6 +342,7 @@ impl AgentFactory {
             telegram_approval_gate: std::sync::RwLock::new(None),
             signal_approval_gate: std::sync::RwLock::new(None),
             sse_approval_gate: std::sync::RwLock::new(None),
+            budget_wiring: std::sync::RwLock::new(None),
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
@@ -440,6 +456,13 @@ impl AgentFactory {
         resolver: Arc<dyn crate::http_tool::CredentialResolver>,
     ) {
         *self.credential_resolver.write().unwrap() = Some(resolver);
+    }
+
+    /// Install the budget enforcement wiring (spend store + budget
+    /// config) shared across every waked Agent. Called once by the CLI
+    /// after opening `budget.db` and loading `budget.json`.
+    pub fn attach_budget(&self, store: Arc<StdMutex<BudgetStore>>, config: BudgetConfig) {
+        *self.budget_wiring.write().unwrap() = Some(BudgetWiring { store, config });
     }
 
     /// A `Weak<Self>` reference to this factory. Used internally by
@@ -562,6 +585,12 @@ impl AgentFactory {
         agent.set_egress_dispatcher(self.current_egress_dispatcher());
         if let Some(resolver) = self.credential_resolver.read().unwrap().clone() {
             agent.set_credential_resolver(resolver);
+        }
+        if let Some(bw) = self.budget_wiring.read().unwrap().as_ref() {
+            // Per-agent override (keyed by the base agent id) beats the
+            // global default; an explicit per-agent off opts out.
+            let effective = bw.config.resolve(agent_id);
+            agent.set_budget(effective, Some(bw.store.clone()));
         }
         if let Some(gate) = self.approval_gate_for(session_id) {
             agent.set_approval_gate(gate);

@@ -70,6 +70,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 /// - `EgressHookDispatched`, `ToolOutputRedacted`: post-execution
 ///   egress-hook outcomes and redaction events. Plaintext is never
 ///   on the row; both carry sha256 hashes only.
+/// - `BudgetExceeded`: per-agent spend-ceiling breach (alert or
+///   block). An enforcement signal; carries no message body.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -106,6 +108,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::McpEntryRefused { .. }
             | SessionEvent::EgressHookDispatched { .. }
             | SessionEvent::ToolOutputRedacted { .. }
+            | SessionEvent::BudgetExceeded { .. }
     );
     if !in_default {
         return false;
@@ -135,6 +138,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::HttpRequest { .. } => "http_request",
         SessionEvent::LlmRequest { .. } => "llm_request",
         SessionEvent::LlmResponse { .. } => "llm_response",
+        SessionEvent::BudgetExceeded { .. } => "budget_exceeded",
         SessionEvent::PermissionDenied { .. } => "permission_denied",
         SessionEvent::PermissionApproved { .. } => "permission_approved",
         SessionEvent::SessionScopedApprovalsCleared { .. } => "session_scoped_approvals_cleared",
@@ -520,6 +524,100 @@ mod tests {
     }
 
     #[test]
+    fn budget_exceeded_is_default_forwarded() {
+        let cfg = config_default();
+        let ev = SessionEvent::BudgetExceeded {
+            agent_id: "work".into(),
+            credential_id: Some("work-openai-key".into()),
+            window_spend_usd_micros: 12_000,
+            ceiling_usd_micros: 10_000,
+            window: "day".into(),
+            action: crate::session_log::BudgetAction::Blocked,
+        };
+        assert!(should_forward(&ev, &cfg));
+        assert_eq!(variant_kind_for(&ev), "budget_exceeded");
+    }
+
+    #[test]
+    fn budget_exceeded_round_trips() {
+        let ev = SessionEvent::BudgetExceeded {
+            agent_id: "work".into(),
+            credential_id: None,
+            window_spend_usd_micros: 5,
+            ceiling_usd_micros: 4,
+            window: "hour".into(),
+            action: crate::session_log::BudgetAction::Alerted,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"kind\":\"budget_exceeded\""));
+        assert!(json.contains("\"action\":\"alerted\""));
+        // credential_id is None, so it is omitted from the wire.
+        assert!(!json.contains("credential_id"));
+        let back: SessionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ev);
+    }
+
+    #[test]
+    fn sender_id_round_trips_on_llm_and_tool_rows() {
+        // Channel-originated: sender_id is present on the LLM boundary
+        // rows and the tool row, and survives a round trip.
+        let req = SessionEvent::LlmRequest {
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            request_id: "r1".into(),
+            tools_hash: HashHex("aa".repeat(32)),
+            messages_hash: HashHex("bb".repeat(32)),
+            agent_id: "work".into(),
+            credential_id: Some("work-openai-key".into()),
+            sender_id: Some("U123".into()),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"sender_id\":\"U123\""));
+        assert_eq!(serde_json::from_str::<SessionEvent>(&json).unwrap(), req);
+
+        let tr = SessionEvent::ToolResult {
+            call_id: "c1".into(),
+            tool_name: "exec".into(),
+            output: "ok".into(),
+            success: true,
+            agent_id: "work".into(),
+            adapter_id: Some("slack".into()),
+            sender_id: Some("U123".into()),
+        };
+        assert_eq!(
+            serde_json::from_str::<SessionEvent>(&serde_json::to_string(&tr).unwrap()).unwrap(),
+            tr
+        );
+
+        // Operator-originated: sender_id is None, omitted from the wire
+        // (an Option, never an empty string), and round-trips as None.
+        let resp = SessionEvent::LlmResponse {
+            request_id: "r1".into(),
+            finish_reason: "stop".into(),
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            latency_ms: 5,
+            agent_id: "work".into(),
+            credential_id: None,
+            input_cost_usd_micros: None,
+            output_cost_usd_micros: None,
+            total_cost_usd_micros: None,
+            sender_id: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(
+            !json.contains("sender_id"),
+            "a None sender_id is omitted, not serialized as an empty string"
+        );
+        match serde_json::from_str::<SessionEvent>(&json).unwrap() {
+            SessionEvent::LlmResponse { sender_id, .. } => assert_eq!(sender_id, None),
+            other => panic!("expected LlmResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn default_excludes_pii_carrying_variants() {
         let cfg = config_default();
         let user = SessionEvent::UserMessage {
@@ -542,6 +640,7 @@ mod tests {
             messages_hash: HashHex("bb".repeat(32)),
             agent_id: "default".into(),
             credential_id: None,
+            sender_id: None,
         };
         assert!(!should_forward(&req, &cfg));
     }
