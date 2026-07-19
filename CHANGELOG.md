@@ -8,6 +8,27 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.11.1] - 2026-07-19
+
+### Fixed
+
+- Age-file keychain probes on `wirken run` now reuse the operator's
+  passphrase instead of an empty string. The alarm-log HMAC key, the
+  `http_request` credential resolver, and the WhatsApp adapter preflight
+  each opened the keychain with `String::new`, so on a host with no OS
+  keychain the device-key unwrap failed even with the correct passphrase
+  entered: the alarm log ran unsigned and the `http_request` resolver
+  refused every credentialed call. All probes reuse the passphrase
+  prompted once at startup; OS-keychain backends were never affected.
+- Webchat `GET /api/sessions` and `GET /api/sessions/{id}` no longer
+  require an `Origin` header. Browsers omit `Origin` on same-origin GET,
+  so both routes returned 403: the session sidebar rendered empty and a
+  refresh dropped the conversation. The Origin CSRF check now applies
+  only to the state-changing POST routes; the GET reads validate an
+  `Origin` only when one is present and rely on the Host check for
+  DNS-rebinding defense. The UI restores the webchat conversation on
+  load.
+
 ## [1.11.0] - 2026-07-19
 
 ### Added
