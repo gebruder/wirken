@@ -15,7 +15,7 @@ Variants are serde-tagged with `kind = "<snake_case>"` so wire consumers can dis
 | `assistant_tool_calls` | `AssistantToolCalls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter/sender carry the originating channel for SIEM correlation without joining to the sibling `UserMessage`. |
 | `tool_result` | `ToolResult` | `agent_id`, `adapter_id`, `sender_id` | Result of a tool call. Same identity contract as `AssistantToolCalls`. |
 | `llm_request` | `LlmRequest` | `agent_id`, `credential_id` | Pre-LLM-call row carrying tool/messages hashes for replay. `credential_id` is the vault entry name the api_key was resolved from; never the raw secret. |
-| `llm_response` | `LlmResponse` | `agent_id`, `credential_id` | Post-LLM-call row carrying token usage and latency. |
+| `llm_response` | `LlmResponse` | `agent_id`, `credential_id` | Post-LLM-call row carrying token usage, latency, and per-call cost (`input_cost_usd_micros`, `output_cost_usd_micros`, `total_cost_usd_micros`). |
 | `http_fetch` | `HttpFetch` | `agent_id`, `skill_name` | Egress through the agent's `EgressClient`. Records host, URL, outcome, bytes, HTTP status. |
 | `permission_denied` | `PermissionDenied` | `agent_id` | Runtime tier or org-policy denial. Carries `tool`, `action_key`, `denial_source` (`Tier` or `OrgPolicy`), and `tier` when the source is `Tier`. |
 | `skill_permission_denied` | `SkillPermissionDenied` | `agent_id` | Per-skill effective profile denied an axis (egress / filesystem / inference / tool). |

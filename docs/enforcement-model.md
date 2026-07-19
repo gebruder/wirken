@@ -145,6 +145,20 @@ wirken permissions revoke shell:curl --agent default  # immediate effect
 
 **Live update:** Provider changes require gateway restart. The `LlmClient` is constructed once per agent at startup and holds an `reqwest::Client` with HTTPS enforcement.
 
+### Model governance
+
+The model an agent runs is operator configuration, not a chat setting. There is no user-facing model selector: an end user talking to an agent over any channel cannot choose or change the model, and no chat command switches it. The global default is pinned in `provider.json` (`provider`, `model`, `base_url`); a per-agent override is pinned in the agent's `LlmConfig` in `AgentConfigStore` (SQLite), which takes precedence when a record exists and otherwise falls back to `provider.json` (`crates/cli/src/commands/session.rs:360-378`). Because both are admin-side config files applied at gateway start, pinning a model version is an operator control: changing the model means editing `provider.json` or the agent's config and restarting, which is auditable rather than user-driven.
+
+```json
+{
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-20250514",
+    "base_url": "https://api.anthropic.com"
+}
+```
+
+Model pinning pairs with cost metering: the pinned (provider, model) is what per-call cost is priced against, and what per-agent spend and the cost-anomaly detection attribute to. See [Cost monitoring](cost-monitoring.md).
+
 ### Rate Limits
 
 **Crate:** `wirken-gateway` | **File:** `crates/gateway/src/rate_limit.rs`
