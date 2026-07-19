@@ -87,6 +87,11 @@ const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const sessionList = document.getElementById('session-list');
 const WEBCHAT_CHANNEL = 'webchat';
+// The single canonical webchat conversation. POST /api/chat always
+// wakes agent "default" on channel "webchat" with conversation
+// "webchat-default", so its session-log id is fixed and can be
+// restored on page load.
+const WEBCHAT_LOG_ID = 'default/webchat/webchat-default';
 let activeSessionId = null;
 
 function addMsg(role, text, isError) {
@@ -342,7 +347,10 @@ async function loadTranscript(id) {
 
 sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
-loadSessions();
+// Restore the canonical webchat conversation on load so a browser
+// refresh keeps the visible history instead of dropping it.
+// loadTranscript's tail call also populates the sidebar.
+loadTranscript(WEBCHAT_LOG_ID);
 </script>
 </body>
 </html>"#;
@@ -393,9 +401,11 @@ pub async fn serve(
                 let _ = stream.write_all(response.as_bytes()).await;
             } else if let Some(session_id) = parse_session_path(first_line) {
                 // GET /api/sessions/{id} — transcript for one session,
-                // rendered into the messages pane. Returns operator data,
-                // so it runs the shared API preflight (Origin + Host).
-                if let Some(resp) = api_preflight(&request, port) {
+                // rendered into the messages pane. Safe read: the Host
+                // check closes DNS-rebinding, and Origin is validated
+                // only when the browser sends one (it omits it on a
+                // same-origin GET).
+                if let Some(resp) = api_preflight(&request, port, false) {
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
                 }
@@ -407,8 +417,9 @@ pub async fn serve(
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/sessions ") {
                 // GET /api/sessions — active-session list backing the
-                // sidebar. Same preflight; same operator-data posture.
-                if let Some(resp) = api_preflight(&request, port) {
+                // sidebar. Safe read, same Host-only posture as the
+                // transcript route above.
+                if let Some(resp) = api_preflight(&request, port, false) {
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
                 }
@@ -449,7 +460,7 @@ pub async fn serve(
                 // shell pipelines). When that mode is active the
                 // gateway logs a warning at startup; the `Origin`
                 // header is still validated when present.
-                if let Some(resp) = api_preflight(&request, port) {
+                if let Some(resp) = api_preflight(&request, port, true) {
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
                 }
@@ -634,7 +645,7 @@ pub async fn serve(
                 // stream so the browser closes the approval UI.
 
                 // Same CSRF + DNS-rebinding preflight as /api/chat.
-                if let Some(resp) = api_preflight(&request, port) {
+                if let Some(resp) = api_preflight(&request, port, true) {
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
                 }
@@ -779,21 +790,30 @@ fn header_value(request: &str, name_lower: &str) -> Option<String> {
 }
 
 /// Shared preflight for the JSON API routes (`/api/chat`,
-/// `/api/approvals/*`, `/api/sessions`, `/api/sessions/*`). Enforces the
-/// Origin CSRF check and a Host-header check against loopback names to
-/// close DNS-rebinding reads. `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` opts
-/// non-browser scripts out of the Origin requirement; the Host check has
-/// no such escape because HTTP/1.1 requires the header and every
-/// legitimate loopback client sends it. Returns `Some(response)` to send
-/// back and stop, or `None` to proceed. `GET /` is not routed here.
-fn api_preflight(request: &str, port: u16) -> Option<String> {
-    let origin = header_value(request, "origin");
+/// `/api/approvals/*`, `/api/sessions`, `/api/sessions/*`). Always
+/// enforces a Host-header check against loopback names, which is what
+/// closes DNS-rebinding reads: a rebound request carries the attacker's
+/// hostname in `Host`, not a loopback name, so it is rejected here.
+///
+/// `require_origin` gates the CSRF Origin check. State-changing routes
+/// (`POST /api/chat`, `POST /api/approvals/*`) pass `true`: browsers
+/// always send `Origin` on those, and a missing one is rejected unless
+/// `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN` opts non-browser scripts out. Safe
+/// reads (`GET /api/sessions[/{id}]`) pass `false`: browsers omit
+/// `Origin` on a same-origin GET, so demanding it there 403s the very
+/// page that serves the UI — which is why the session sidebar came up
+/// empty. A present Origin is validated either way, so a cross-origin
+/// caller that does send one is still rejected regardless of method.
+///
+/// Returns `Some(response)` to send back and stop, or `None` to
+/// proceed. `GET /` is not routed here.
+fn api_preflight(request: &str, port: u16, require_origin: bool) -> Option<String> {
     let allow_missing_origin =
         wirken_gateway::org::parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN");
-    match origin.as_deref() {
+    match header_value(request, "origin").as_deref() {
         Some(o) if is_webchat_origin(o, port) => {}
         Some(_) => return Some(json_forbidden("forbidden origin")),
-        None if allow_missing_origin => {}
+        None if !require_origin || allow_missing_origin => {}
         None => return Some(json_forbidden("missing origin header")),
     }
 
@@ -890,7 +910,8 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_webchat_host, is_webchat_origin, parse_approval_path, parse_session_path, percent_decode,
+        api_preflight, is_webchat_host, is_webchat_origin, parse_approval_path, parse_session_path,
+        percent_decode,
     };
 
     #[test]
@@ -1037,5 +1058,49 @@ mod tests {
         assert!(!is_webchat_host("127.0.0.1:9999", 18790));
         // No bare host without the bound port.
         assert!(!is_webchat_host("127.0.0.1", 18790));
+    }
+
+    #[test]
+    fn preflight_get_without_origin_passes() {
+        // Browsers omit Origin on a same-origin GET. A safe read
+        // (require_origin = false) with a loopback Host must proceed,
+        // otherwise the session sidebar and transcript routes 403 the
+        // very page that serves the UI — the sidebar-empty bug.
+        let req = "GET /api/sessions HTTP/1.1\r\nHost: localhost:18790\r\n\r\n";
+        assert!(api_preflight(req, 18790, false).is_none());
+    }
+
+    #[test]
+    fn preflight_get_with_foreign_origin_is_rejected() {
+        // A present Origin is validated even on a safe read, so a
+        // cross-origin caller that does send one is still rejected.
+        let req = "GET /api/sessions HTTP/1.1\r\nHost: localhost:18790\r\nOrigin: http://evil.com\r\n\r\n";
+        let resp = api_preflight(req, 18790, false).expect("foreign origin rejected");
+        assert!(resp.contains("forbidden origin"));
+    }
+
+    #[test]
+    fn preflight_get_with_rebound_host_is_rejected() {
+        // DNS-rebinding read: no Origin (same-origin GET on the
+        // attacker page) but the attacker's hostname rides in Host.
+        // The Host check closes this, not the Origin check.
+        let req = "GET /api/sessions HTTP/1.1\r\nHost: evil.com:18790\r\n\r\n";
+        let resp = api_preflight(req, 18790, false).expect("rebound host rejected");
+        assert!(resp.contains("forbidden host"));
+    }
+
+    #[test]
+    fn preflight_post_without_origin_is_rejected() {
+        // State-changing routes (require_origin = true) still demand an
+        // Origin; browsers always send one on POST.
+        let req = "POST /api/chat HTTP/1.1\r\nHost: localhost:18790\r\n\r\n";
+        let resp = api_preflight(req, 18790, true).expect("missing origin rejected");
+        assert!(resp.contains("missing origin"));
+    }
+
+    #[test]
+    fn preflight_post_with_valid_origin_and_host_passes() {
+        let req = "POST /api/chat HTTP/1.1\r\nHost: localhost:18790\r\nOrigin: http://localhost:18790\r\n\r\n";
+        assert!(api_preflight(req, 18790, true).is_none());
     }
 }
