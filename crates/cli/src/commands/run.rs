@@ -80,6 +80,32 @@ impl wirken_agent::http_tool::CredentialResolver for VaultCredentialResolver {
     }
 }
 
+/// Prompt once for the vault passphrase, caching it for the rest of
+/// this boot.
+///
+/// Passed as the `probe_keychain` supplier. On OS-keychain backends
+/// (macOS Keychain, Linux Secret Service) `probe_keychain` reads the
+/// device key directly and never calls this, so no prompt appears and
+/// `cache` stays `None`. On the age-file backend the first probe that
+/// needs the device key prompts once; later probes reuse the cache.
+///
+/// Every keychain probe in `run` must go through this. An empty
+/// supplier (`String::new`) cannot unwrap a device key wrapped under a
+/// real passphrase on the age-file backend, so any subsystem that
+/// probed with one silently degraded — the alarm log to unsigned mode,
+/// the `http_request` resolver to refusing credentialed calls.
+fn prompt_vault_passphrase(cache: &mut Option<String>) -> String {
+    if let Some(existing) = cache {
+        return existing.clone();
+    }
+    let pp = dialoguer::Password::new()
+        .with_prompt("  Vault passphrase")
+        .interact()
+        .unwrap_or_default();
+    *cache = Some(pp.clone());
+    pp
+}
+
 /// Run the gateway daemon.
 pub async fn run(port: Option<u16>) -> Result<()> {
     let cfg = config();
@@ -137,8 +163,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // warn so an operator can confirm the trust posture. Doctor
     // surfaces unsigned alarm records as `NoKey` instead of
     // `Verified`.
+    // Vault passphrase, prompted once and cached across every keychain
+    // probe in this boot (alarm-log key, provider key, adapters,
+    // http_request resolver). `None` until the first age-file probe
+    // needs it; on OS-keychain backends it stays `None` and no prompt
+    // appears. See `prompt_vault_passphrase`.
+    let mut vault_passphrase: Option<String> = None;
+
     let alarm_log_key = {
-        let kc = probe_keychain(&cfg.data_dir, String::new);
+        let kc = probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        });
         match wirken_vault::load_or_create_alarm_log_key(kc.as_ref()) {
             Ok(k) => Some(k),
             Err(e) => {
@@ -330,7 +365,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
 
     // --- Load API key from vault ---
-    let mut vault_passphrase = String::new();
     // Slot name the api_key was resolved from. Stamped on every
     // `LlmRequest`/`LlmResponse` for SIEM correlation. `None` for
     // ollama (no vault lookup) and for the failure paths below where
@@ -338,12 +372,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let mut api_key_credential: Option<String> = None;
     let api_key = if provider != "ollama" {
         let keychain = probe_keychain(&cfg.data_dir, || {
-            let pp = dialoguer::Password::new()
-                .with_prompt("  Vault passphrase")
-                .interact()
-                .unwrap_or_default();
-            vault_passphrase = pp.clone();
-            pp
+            prompt_vault_passphrase(&mut vault_passphrase)
         });
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
@@ -382,7 +411,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     };
 
     // Prompt for vault passphrase if adapters are registered but we haven't prompted yet
-    if vault_passphrase.is_empty() {
+    if vault_passphrase.is_none() {
         let has_adapters = {
             let reg_path = cfg.adapters_db_path();
             reg_path.exists()
@@ -392,12 +421,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         };
         if has_adapters {
             let _ = probe_keychain(&cfg.data_dir, || {
-                let pp = dialoguer::Password::new()
-                    .with_prompt("  Vault passphrase")
-                    .interact()
-                    .unwrap_or_default();
-                vault_passphrase = pp.clone();
-                pp
+                prompt_vault_passphrase(&mut vault_passphrase)
             });
         }
     }
@@ -512,12 +536,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             .context("Failed to open agent config store")?;
 
         let keychain = probe_keychain(&cfg.data_dir, || {
-            let pp = dialoguer::Password::new()
-                .with_prompt("  Vault passphrase")
-                .interact()
-                .unwrap_or_default();
-            vault_passphrase = pp.clone();
-            pp
+            prompt_vault_passphrase(&mut vault_passphrase)
         });
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
 
@@ -656,7 +675,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             &provider_json,
             &cfg.data_dir,
             &cfg.vault_db_path(),
-            &vault_passphrase,
+            vault_passphrase.as_deref().unwrap_or(""),
         )?;
 
         let mut llm_config = LlmConfig::from_provider(provider, base_url, model);
@@ -840,7 +859,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // multiple required fields; extend this list as other channels
     // grow mandatory secondary credentials.
     {
-        let keychain = probe_keychain(&cfg.data_dir, String::new);
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        });
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok();
         for adapter_entry in registry.lock().await.list() {
             if adapter_entry.channel == "whatsapp"
@@ -879,7 +900,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let sock = socket_path.clone();
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
-        let vp = vault_passphrase.clone();
+        let vp = vault_passphrase.clone().unwrap_or_default();
 
         let handle = tokio::spawn(async move {
             // Small delay to let the listener start
@@ -968,7 +989,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let mcp_proxy_handle = {
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
-        let vp = vault_passphrase.clone();
+        let vp = vault_passphrase.clone().unwrap_or_default();
         let socket = mcp_proxy_socket.clone();
         tokio::spawn(async move {
             tracing::info!("Spawning MCP proxy");
@@ -1151,7 +1172,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // tool refuses credentialed calls rather than blocking startup.
     match CredentialStore::open(
         &cfg.vault_db_path(),
-        probe_keychain(&cfg.data_dir, String::new).as_ref(),
+        probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        })
+        .as_ref(),
     ) {
         Ok(store) => factory.attach_credential_resolver(Arc::new(VaultCredentialResolver {
             store: std::sync::Mutex::new(store),
