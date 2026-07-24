@@ -39,11 +39,11 @@ pub fn encrypt(
 
     let mut nonce_bytes = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce_bytes);
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    let nonce = XNonce::from(nonce_bytes);
 
     let ciphertext = cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext.expose().as_bytes(),
                 aad: name.as_bytes(),
@@ -85,12 +85,13 @@ pub fn decrypt(name: &str, encrypted: &[u8], key: &VaultSecret) -> Result<VaultS
     let cipher = XChaCha20Poly1305::new_from_slice(&key_bytes)
         .map_err(|e| VaultError::Decryption(e.to_string()))?;
 
-    let nonce = XNonce::from_slice(&encrypted[..NONCE_SIZE]);
+    let nonce = XNonce::try_from(&encrypted[..NONCE_SIZE])
+        .map_err(|e| VaultError::Decryption(e.to_string()))?;
     let ciphertext = &encrypted[NONCE_SIZE..];
 
     let plaintext_bytes = cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad: name.as_bytes(),
