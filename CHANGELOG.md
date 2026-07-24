@@ -8,6 +8,35 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.13.0] - 2026-07-24
+
+### Added
+
+- Infomaniak inference provider, selectable in `wirken setup`. An
+  OpenAI-compatible, Swiss-hosted endpoint reached over the existing
+  OpenAI request path, including token streaming. The account-specific
+  `product_id` is folded into the base URL
+  (`https://api.infomaniak.com/2/ai/{product_id}/openai/v1`), so only
+  the bearer token is stored in the vault, under `infomaniak-api-key`.
+  Gives access to the Swiss Apertus models and the other open-weight
+  models Infomaniak serves.
+
+### Dependencies
+
+- `chacha20poly1305` 0.10 to 0.11. Nonce construction moves off the
+  deprecated `Array::from_slice` to `From`/`TryFrom`; the algorithm,
+  24-byte nonce, AAD name-binding, and `nonce || ciphertext` layout are
+  unchanged, so vault ciphertext written by earlier releases still
+  decrypts.
+- `slack-morphism` 2.22 to 2.23. Block-button style is now the
+  `SlackBlockButtonStyle` enum rather than a string.
+- `quinn-proto` 0.11.14 to 0.11.16, resolving GHSA-4w2j-m93h-cj5j (a
+  high-severity assembler-gap denial of service). Not reachable in the
+  wirken build, which does not enable reqwest's `http3` feature; taken
+  to clear the advisory surface.
+- `serde` 1.0.229, `clap` 4.6.4, `open` 5.4.0, `actions/checkout`
+  7.0.1, `github/codeql-action` 4.37.3.
+
 ## [1.12.0] - 2026-07-19
 
 ### Added
