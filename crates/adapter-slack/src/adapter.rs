@@ -513,12 +513,12 @@ async fn send_approval_request<C: SlackClientHttpConnector + Send + Sync>(
         SlackActionId(allow_id),
         SlackBlockPlainTextOnly::from("Approve"),
     )
-    .with_style("primary".to_string());
+    .with_style(SlackBlockButtonStyle::Primary);
     let deny_btn = SlackBlockButtonElement::new(
         SlackActionId(deny_id),
         SlackBlockPlainTextOnly::from("Deny"),
     )
-    .with_style("danger".to_string());
+    .with_style(SlackBlockButtonStyle::Danger);
     let actions = SlackActionsBlock::new(vec![
         SlackActionBlockElement::Button(approve_btn),
         SlackActionBlockElement::Button(deny_btn),
