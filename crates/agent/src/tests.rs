@@ -7675,6 +7675,100 @@ mod openai_compat_stub {
         assert_eq!(usage.input_tokens, 13);
         assert_eq!(usage.output_tokens, 7);
     }
+
+    // Infomaniak rides the OpenAI-compat path with an account-specific
+    // base_url (the product_id is a path segment, folded in at setup
+    // like Bedrock's region). This pins two things the setup slice
+    // depends on: (1) provider="infomaniak" streams through
+    // stream_openai rather than the non-streaming fallback - the stub
+    // serves SSE, which the fallback's complete_openai would fail to
+    // parse as JSON, so a clean streamed result is proof of the arm;
+    // (2) the bearer token is sent, verbatim, to the product_id URL.
+    #[tokio::test]
+    async fn infomaniak_streams_with_bearer_to_product_id_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            // Capture the request head so the auth header and request
+            // path can be asserted after the round trip.
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+
+            let body = "\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Grüezi\"}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            request
+        });
+
+        // Base URL carries the account-specific product_id segment, as
+        // setup.rs builds it from the operator's product_id.
+        let config = LlmConfig {
+            provider: "infomaniak".into(),
+            model: "apertus".into(),
+            base_url: format!("http://{addr}/2/ai/103281/openai/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: false,
+            context_window: 32_000,
+        };
+        let client = LlmClient::new(config).unwrap();
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: "ping".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+
+        let result = client
+            .complete_stream(&messages, &[], Some("test-token"), tx)
+            .await;
+        let request = stub.await.unwrap();
+
+        let (response, _usage) = result.expect("stream must complete");
+
+        // The request reached the product_id path with bearer auth.
+        assert!(
+            request.contains("POST /2/ai/103281/openai/v1/chat/completions"),
+            "expected product_id chat-completions path, got request head: {request}"
+        );
+        assert!(
+            request.contains("authorization: Bearer test-token")
+                || request.contains("Authorization: Bearer test-token"),
+            "expected bearer auth header, got request head: {request}"
+        );
+
+        // SSE parsed cleanly, so the router took the streaming arm.
+        let mut deltas = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::TextDelta(t) = ev {
+                deltas.push(t);
+            }
+        }
+        assert_eq!(deltas.join(""), "Grüezi");
+        match response {
+            LlmResponse::Text(t) => assert_eq!(t, "Grüezi"),
+            other => panic!("expected Text response, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

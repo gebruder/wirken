@@ -109,6 +109,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             "AWS Bedrock",
             "Tinfoil (confidential)",
             "Privatemode (confidential)",
+            "Infomaniak (Swiss)",
             "Custom endpoint",
         ];
         let provider_idx = Select::new()
@@ -420,6 +421,88 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 ("openai".to_string(), model, base_url, false)
             }
             8 => {
+                // Infomaniak AI (Swiss-hosted, OpenAI-compatible).
+                // The account-specific product_id is a path segment,
+                // not a secret, so it folds into the base_url the way
+                // Bedrock's region does; only the bearer token reaches
+                // the vault. The OpenAI-compat `_` arm in llm.rs
+                // handles the request shape, so no new dispatch arm is
+                // needed - just the streaming arm in llm_stream.rs.
+                println!(
+                    "  Infomaniak serves open-weight models (incl. Swiss Apertus) from Switzerland,"
+                );
+                println!("  behind an OpenAI-compatible API. Create a token with the `ai-tools`");
+                println!(
+                    "  scope at https://manager.infomaniak.com; find your product_id via GET /1/ai."
+                );
+
+                // Retry loop mirrors the NIM arm: product_id + token,
+                // try the model listing, and on any failure let the
+                // operator retry or type a model id against the URL +
+                // token they just entered, so a wrong product_id isn't
+                // surfaced as the same message as a bad token.
+                let (base_url, api_key, models, manual_model) = loop {
+                    let product_id: String =
+                        Input::new().with_prompt("  Product ID").interact_text()?;
+                    let api_key = super::read_secret("  API token: ")?;
+                    let base_url =
+                        format!("https://api.infomaniak.com/2/ai/{product_id}/openai/v1");
+
+                    let summary =
+                        match super::list_openai_compatible_models(&base_url, &api_key).await {
+                            Ok(models) if models.is_empty() => {
+                                "endpoint reachable but /models returned no entries".to_string()
+                            }
+                            Ok(models) => break (base_url, api_key, models, None),
+                            Err(e) => e.to_string(),
+                        };
+
+                    println!("  {summary}");
+                    let retry = Confirm::new()
+                        .with_prompt("  Re-enter product ID and token")
+                        .default(true)
+                        .interact()?;
+                    if retry {
+                        continue;
+                    }
+                    let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
+                    break (base_url, api_key, Vec::new(), Some(model));
+                };
+
+                let default_model = models
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "apertus".to_string());
+                let model = if let Some(manual) = manual_model {
+                    // Manual-fallback path still encrypts the token so
+                    // the vault is consistent with the model-picker
+                    // path; the empty models vec forces the free-text
+                    // prompt, whose return we discard for the id the
+                    // operator already typed.
+                    let _ = store_key_and_pick_model(
+                        api_key.clone(),
+                        "infomaniak",
+                        &base_url,
+                        &manual,
+                        Vec::new(),
+                        &cfg,
+                        &data,
+                    )?;
+                    manual
+                } else {
+                    store_key_and_pick_model(
+                        api_key,
+                        "infomaniak",
+                        &base_url,
+                        &default_model,
+                        models,
+                        &cfg,
+                        &data,
+                    )?
+                };
+                ("infomaniak".to_string(), model, base_url, false)
+            }
+            9 => {
                 // Custom
                 let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
                 let has_key = Confirm::new()

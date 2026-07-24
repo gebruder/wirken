@@ -38,7 +38,7 @@ impl LlmClient {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         match self.config().provider.as_str() {
-            "openai" | "ollama" | "custom" => {
+            "openai" | "ollama" | "custom" | "infomaniak" => {
                 self.stream_openai(messages, tools, api_key, &tx).await
             }
             "anthropic" => self.stream_anthropic(messages, tools, api_key, &tx).await,
