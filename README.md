@@ -27,6 +27,7 @@ Wirken sits between your people and the agent. A message comes in on a channel, 
 - A supported OS: Linux (x86_64 or aarch64), macOS (Intel or Apple Silicon), or Windows 11 (x86_64).
 - At least one model to talk to. Wirken connects to any of:
   - **Ollama** (any local model it serves)
+  - Any **OpenAI-compatible** endpoint
   - **OpenAI**
   - **Anthropic**
   - **Google Gemini**
@@ -35,7 +36,6 @@ Wirken sits between your people and the agent. A message comes in on a channel, 
   - **Tinfoil** (TEE, encrypted processing)
   - **Privatemode** (TEE, encrypted processing)
   - **Infomaniak** (Swiss-hosted, including Apertus)
-  - Any **OpenAI-compatible** endpoint
 - Docker, if you want shell commands sandboxed (the default). Without it the agent simply cannot run shell commands; nothing else is affected.
 
 Download the latest release binary:
