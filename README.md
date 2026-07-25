@@ -4,7 +4,7 @@
 
 <img src="docs/img/wirken-switchboard.webp" alt="Wirken: the switchboard for the agent era" width="240" align="right">
 
-Wirken is the switchboard for the agent era: shared infrastructure that lets a whole team put AI agents to work through the tools they already use. Your people message it on Telegram, Slack, Microsoft Teams, Discord, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools on their behalf. Each channel gets its own line.
+Wirken is the enterprise gateway for autonomous agents: the switchboard between your team's messaging channels and the AI agents working on their behalf. Your people message it on Telegram, Slack, Microsoft Teams, Discord, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools for them. Each channel gets its own line.
 
 Wirken is built for the security team that has to answer for what those agents do. It assumes any agent can be turned against you: credentials never reach the model, each channel is isolated with its own identity, every action is attributed to the person who triggered it, and nothing runs unlogged. The signed, hash-chained audit log forwards to your SIEM, and every agent runs under least-privilege limits you set.
 
