@@ -25,7 +25,17 @@ Wirken sits between your people and the agent. A message comes in on a channel, 
 ### Prerequisites
 
 - A supported OS: Linux (x86_64 or aarch64), macOS (Intel or Apple Silicon), or Windows 11 (x86_64).
-- At least one model to talk to: a local runtime like Ollama, or an API key for a hosted provider.
+- At least one model to talk to. Wirken connects to any of:
+  - **Ollama** (any local model it serves)
+  - **OpenAI**
+  - **Anthropic**
+  - **Google Gemini**
+  - **AWS Bedrock**
+  - **NVIDIA NIM** (local or cloud)
+  - **Tinfoil** (confidential enclave)
+  - **Privatemode** (confidential enclave)
+  - **Infomaniak** (Swiss-hosted, including Apertus)
+  - Any **OpenAI-compatible** endpoint
 - Docker, if you want shell commands sandboxed (the default). Without it the agent simply cannot run shell commands; nothing else is affected.
 
 Download the latest release binary:
