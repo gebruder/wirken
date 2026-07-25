@@ -2,15 +2,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![CI](https://github.com/gebruder/wirken/actions/workflows/ci.yml/badge.svg)](https://github.com/gebruder/wirken/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/gebruder/wirken)](https://github.com/gebruder/wirken/releases)
 
-<p align="center">
-  <img src="docs/img/wirken-switchboard.webp" alt="Wirken: the switchboard for the agent era" width="420">
-</p>
+<img src="docs/img/wirken-switchboard.webp" alt="Wirken: the switchboard for the agent era" width="240" align="right">
 
-Wirken is the switchboard for the agent era. Message it on Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools on your behalf. Each channel gets its own line. Every call is logged before it connects.
+Wirken is the switchboard for the agent era: shared infrastructure that lets a whole team put AI agents to work through the tools they already use. Your people message it on Telegram, Slack, Microsoft Teams, Discord, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools on their behalf. Each channel gets its own line.
 
-Wirken assumes that agent can be turned against you. Credentials never reach the model, each channel is isolated in its own process with its own identity, and no tool call, LLM request, or response runs unlogged.
+Wirken is built for the security team that has to answer for what those agents do. It assumes any agent can be turned against you: credentials never reach the model, each channel is isolated with its own identity, every action is attributed to the person who triggered it, and nothing runs unlogged. The signed, hash-chained audit log forwards to your SIEM, and every agent runs under least-privilege limits you set.
 
-Wirken ships as a single static Rust binary and works with Ollama, Anthropic, OpenAI, Gemini, Bedrock, or any OpenAI-compatible endpoint. When the inference itself must stay private, it also drives the Tinfoil and Privatemode confidential enclaves and Infomaniak's Swiss-hosted models, including the open Apertus family. MIT licensed.
+It ships as a single static Rust binary, so it runs wherever your controls require: a locked-down workstation, a server inside your network, or an air-gapped host. Point it at whatever models fit the same policy: local weights through Ollama, the Tinfoil or Privatemode confidential enclaves, Infomaniak's Swiss-hosted models including the open Apertus family, a commercial API such as OpenAI, Anthropic, Gemini, or Bedrock, or any OpenAI-compatible endpoint of your own. Local machine or remote, local model or hosted, the data boundary is yours to draw. MIT licensed.
 
 Each channel runs in its own adapter process with a distinct Ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk HEC, Microsoft Sentinel, or a webhook when SIEM is configured. A separate OpenTelemetry projection ships GenAI semantic-convention spans over OTLP/HTTP+JSON to any OTLP-compatible backend; Microsoft documents a direct OTLP contract for non-SDK Agent 365 integration, which this projection implements (see [`docs/integrations/agent365.md`](docs/integrations/agent365.md) for the wire shape and the per-release verification gate). Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
 
