@@ -8,7 +8,9 @@
 
 Wirken is the switchboard for the agent era. Message it on Telegram, Discord, Slack, Microsoft Teams, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools on your behalf. Each channel gets its own line. Every call is logged before it connects.
 
-Wirken ships as a single static Rust binary and works with Ollama, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil, Privatemode, or any OpenAI-compatible endpoint. MIT licensed.
+Wirken assumes that agent can be turned against you. Credentials never reach the model, each channel is isolated in its own process with its own identity, and no tool call, LLM request, or response runs unlogged.
+
+Wirken ships as a single static Rust binary and works with Ollama, Anthropic, OpenAI, Gemini, Bedrock, or any OpenAI-compatible endpoint. When the inference itself must stay private, it also drives the Tinfoil and Privatemode confidential enclaves and Infomaniak's Swiss-hosted models, including the open Apertus family. MIT licensed.
 
 Each channel runs in its own adapter process with a distinct Ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk HEC, Microsoft Sentinel, or a webhook when SIEM is configured. A separate OpenTelemetry projection ships GenAI semantic-convention spans over OTLP/HTTP+JSON to any OTLP-compatible backend; Microsoft documents a direct OTLP contract for non-SDK Agent 365 integration, which this projection implements (see [`docs/integrations/agent365.md`](docs/integrations/agent365.md) for the wire shape and the per-release verification gate). Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
 
