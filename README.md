@@ -4,15 +4,29 @@
 
 <img src="docs/img/wirken-switchboard.webp" alt="Wirken: the switchboard for the agent era" width="240" align="right">
 
-Wirken is the enterprise gateway for autonomous agents: the switchboard between your team's messaging channels and the AI agents working on their behalf. Your people message it on Telegram, Slack, Microsoft Teams, Discord, Matrix, WhatsApp, Signal, Google Chat, or iMessage, and the agent on the other end reads files, calls APIs, and runs tools for them. Each channel gets its own line.
+Wirken is the enterprise gateway for autonomous agents: the switchboard between your team's messaging channels and the AI agents working on their behalf. Your people reach it from a browser or the chat platforms they already use, like Slack and Teams, and the agent on the other end reads files, calls APIs, and runs tools for them. Each channel gets its own line.
 
-Wirken is built for the security team that has to answer for what those agents do. It assumes any agent can be turned against you: credentials never reach the model, each channel is isolated with its own identity, every action is attributed to the person who triggered it, and nothing runs unlogged. The signed, hash-chained audit log forwards to your SIEM, and every agent runs under least-privilege limits you set.
+Wirken is built for the security team that has to answer for what those agents do. It assumes any agent can be turned against you, and boxes in what a compromised one can reach.
 
-It ships as a single static Rust binary, so it runs wherever your controls require: a locked-down workstation, a server inside your network, or an air-gapped host. Point it at whatever models fit the same policy: local weights through Ollama, the Tinfoil or Privatemode confidential enclaves, Infomaniak's Swiss-hosted models including the open Apertus family, a commercial API such as OpenAI, Anthropic, Gemini, or Bedrock, or any OpenAI-compatible endpoint of your own. Local machine or remote, local model or hosted, the data boundary is yours to draw. MIT licensed.
+It ships as a single static Rust binary, so it runs wherever your controls require: a locked-down workstation, a server inside your network, or an air-gapped host. Its model connection is provider-agnostic: frontier APIs like OpenAI, Anthropic, and Gemini, local weights through Ollama, confidential enclaves, or Infomaniak's Swiss-hosted Apertus, all interchangeable. Each agent runs the model you assign it, capped by a per-agent spend budget with usage reporting. Frontier or local, on your hardware or a remote host, the data boundary is yours to draw. MIT licensed.
 
-Each channel runs in its own adapter process with a distinct Ed25519 IPC identity and its own vault-scoped token set. Credentials sit in an XChaCha20-Poly1305 vault keyed from the OS keychain, with per-credential expiry and manual rotation tracked in the store. Every agent action, tool call, LLM request, and response is written to a per-session SHA-256 hash-chained audit log. The log forwards to Datadog, Splunk HEC, Microsoft Sentinel, or a webhook when SIEM is configured. A separate OpenTelemetry projection ships GenAI semantic-convention spans over OTLP/HTTP+JSON to any OTLP-compatible backend; Microsoft documents a direct OTLP contract for non-SDK Agent 365 integration, which this projection implements (see [`docs/integrations/agent365.md`](docs/integrations/agent365.md) for the wire shape and the per-release verification gate). Permissions follow a three-tier model scoped per agent. Parent agents that spawn children declare per-child ceilings: tool allowlist, maximum permission tier, max rounds, max runtime.
+## How it works
+
+Wirken sits between your people and the agent. A message comes in on a channel, Wirken wakes an agent to handle it, and every file it reads, API it calls, and tool it runs passes through Wirken's controls first.
+
+- **The agent is untrusted.** Wirken assumes any agent can be turned against you, whether by a prompt-injection payload hidden in a file or web page or by drift over a long session. The guarantees below do not depend on the model behaving.
+- **Credentials never reach the model.** Tokens and keys stay in an encrypted vault. Wirken supplies them at the edge when it talks to a channel or an MCP tool; the agent and the LLM never see them.
+- **Every action is logged before it runs, and attributed.** Each step is written to a signed, hash-chained audit log as a typed event, tagged with the person who triggered it, before it executes. The log streams to your SIEM.
+- **Least privilege by default.** Each agent runs under a three-tier permission model, and any sub-agent it spawns is boxed by limits you set: which tools, which tier, how many rounds, how long.
+- **Shell commands run in a sandbox.** Anything the agent executes runs in an ephemeral, network-less container, with gVisor as an option. If the sandbox is unavailable, execution is refused rather than run on the host.
 
 ## Install and run
+
+### Prerequisites
+
+- A supported OS: Linux (x86_64 or aarch64), macOS (Intel or Apple Silicon), or Windows 11 (x86_64).
+- At least one model to talk to: a local runtime like Ollama, or an API key for a hosted provider.
+- Docker, if you want shell commands sandboxed (the default). Without it the agent simply cannot run shell commands; nothing else is affected.
 
 Download the latest release binary:
 
@@ -94,6 +108,13 @@ Install as a system service so wirken starts on login:
 wirken setup --install-service
 ```
 
+## Running modes
+
+- **Interactive.** `wirken run` starts the gateway in the foreground, spawns the channel adapters, and serves WebChat. Ctrl+C stops it.
+- **Browser.** That same `wirken run` serves WebChat at `http://localhost:18790`, bound to localhost, so your team can use Wirken without installing a chat app.
+- **As a service.** `wirken setup --install-service` installs a systemd user unit on Linux or a launchd agent on macOS, so the gateway starts on login and runs headless. `wirken setup --uninstall-service` removes it.
+- **Scheduled.** Preset agents run on a cron schedule with no human in the loop, under the same permission and audit controls, via `wirken preset schedule <name>` (and `unschedule`). Service and scheduled modes are Linux and macOS only.
+
 ## Uninstall
 
 Removing the data directory is irreversible and destroys the signed, hash-chained audit log along with it. If any retention or compliance need applies, export the audit chain **before** you delete anything:
@@ -134,6 +155,8 @@ Residue the steps above do not touch:
 Windows uses different paths and a smaller feature set (no service installer or cron presets); see [docs/windows.md](docs/windows.md).
 
 ## Architecture
+
+Each channel runs as its own isolated process. The gateway is the only component that holds credentials and writes the audit log. The agent is stateless: it is woken for each message and rebuilt from its session log.
 
 ```mermaid
 graph TD
@@ -176,7 +199,7 @@ Channel isolation operates at two levels. The active mechanism is process-level:
 
 The MCP proxy also runs out-of-process over a Unix domain socket, with the vault handle isolated in the proxy. MCP servers connect via stdio, HTTP, or OAuth2, and the agent process never sees MCP credentials.
 
-Two distinct boundaries protect MCP credentials. **Process isolation** is per-MCP-server-config: every server entry in `mcp.json` spawns its own subprocess at the wirken UID, with its own stdin/stdout pipe and its own environment, and the agent process never holds plaintext bearer tokens or OAuth2 client secrets — those live behind the proxy's vault handle. **Vault ACLs** are per-credential-name: the credential store keys every entry by name (e.g. `slack-token`, `github-pat`), and a connector that asks for a credential it was not configured for receives a `NotFound` rather than a value from another connector's slot. The two are independent. A compromised MCP child cannot read another child's credentials because process isolation keeps every child to its own configured token set; a compromised credential name cannot be retrieved by an unrelated component because the vault store gates by name. Neither alone is sufficient, and the combination is what gives the MCP path its credential-scoping property.
+Two distinct boundaries protect MCP credentials. **Process isolation** is per-MCP-server-config: every server entry in `mcp.json` spawns its own subprocess at the wirken UID, with its own stdin/stdout pipe and its own environment, and the agent process never holds plaintext bearer tokens or OAuth2 client secrets; those live behind the proxy's vault handle. **Vault ACLs** are per-credential-name: the credential store keys every entry by name (e.g. `slack-token`, `github-pat`), and a connector that asks for a credential it was not configured for receives a `NotFound` rather than a value from another connector's slot. The two are independent. A compromised MCP child cannot read another child's credentials because process isolation keeps every child to its own configured token set; a compromised credential name cannot be retrieved by an unrelated component because the vault store gates by name. Neither alone is sufficient, and the combination is what gives the MCP path its credential-scoping property.
 
 Agents are stateless between turns. The `AgentFactory` wakes an agent for each inbound message by replaying its session log. Conversations are durably logged as typed session events (user messages, assistant messages, tool calls, tool results, LLM request/response metadata) in an append-only, per-session hash-chained table. If the agent crashes mid-turn, the harness detects incomplete tool rounds on wake and surfaces them as failures rather than silently re-executing side effects. A context engine trims conversations under each model's token budget before every LLM call, preferring to drop old tool results before touching user or assistant text.
 
@@ -220,6 +243,17 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - **Encrypted credentials.** XChaCha20-Poly1305 vault keyed from the OS keychain. Per-credential expiry and rotation. No plaintext export. MCP credentials are isolated in a separate proxy process.
 - **Centralized policy.** `wirken setup --org https://wirken.corp.example.com` pulls provider, SIEM, MCP, and permission config from a company endpoint. Developers get grab-and-go setup. IT manages one config. Policy refreshes on every `wirken run`.
 
+## Known limitations
+
+Wirken contains the blast radius of a compromised agent; it does not make compromise impossible. The honest edges:
+
+- **Egress is not fully contained.** The skill-set `egress.domains` allowlist covers the built-in `web_search` and `generate_image` tools only. It does not constrain the `exec` shell (curl and wget run as the host shell), MCP server children, or the LLM client. Hard egress control needs a network namespace, a restricted-egress container, or OS firewall rules. See [docs/egress.md](docs/egress.md).
+- **The sandbox can be turned off.** With `sandbox.json` set to `mode: off`, `exec` runs at the Wirken UID with no container, and the host shell can then read or rewrite trust files under the data directory. The gateway warns at startup when this is set.
+- **Audit tamper-evidence assumes an out-of-band anchor.** The hash chain and signature detect modification, but a same-UID attacker who rewrites both the log and the local public key is only caught if you verify against a key kept off the machine. See [docs/security-properties.md](docs/security-properties.md).
+- **Injection detection flags, it does not block.** Suspicious inbound messages are marked in the audit log and forwarded to your SIEM, but they are not stopped. The permission tiers and the sandbox are what limit what an injected agent can actually do.
+- **Type-level channel isolation is not in the hot path yet.** Channel separation is enforced at the process level today. The compile-time `SessionHandle<Channel>` API exists and is tested, but is not yet threaded through the production message path.
+- **Escape hatches exist.** A handful of environment flags relax defaults (unsigned org config or skills, WebChat origin checks, audit-verify cadence). Each is documented and warns when engaged.
+
 ## Documentation
 
 - [Getting started](docs/getting-started.md)
@@ -230,7 +264,7 @@ Wirken gives organizations the controls they need to deploy AI agents without by
 - [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage)
 - [Multi-agent setup](docs/multi-agent.md)
 - [Skills guide](docs/skills.md) (markdown skills, Wasm skills, registry)
-- [Lyrik overview](docs/lyrik-overview.md) (security-assessment skill — what it is and why)
+- [Lyrik overview](docs/lyrik-overview.md) (security-assessment skill, what it is and why)
 - [MCP setup](docs/mcp.md)
 - [Security properties](docs/security-properties.md) (OWASP and NIST AI RMF mappings)
 - [Enterprise deployment](docs/enterprise.md) (org config, SIEM, sandbox)
