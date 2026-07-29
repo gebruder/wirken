@@ -69,7 +69,7 @@ capnp = "0.26"
 # fd_renumber leak; fixed in 45.0.2). Floor raised to 46.0.1 per
 # RUSTSEC-2026-0188 (hard-link/rename FilePerms bypass for the
 # destination; fixed in 46.0.1).
-wasmtime = "46.0.1"
+wasmtime = "47.0.2"
 bollard = "0.21"
 
 # CLI
