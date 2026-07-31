@@ -68,8 +68,12 @@ capnp = "0.26"
 # 45.0.0). Floor raised to 45.0.2 per RUSTSEC-2026-0182 (WASIp1
 # fd_renumber leak; fixed in 45.0.2). Floor raised to 46.0.1 per
 # RUSTSEC-2026-0188 (hard-link/rename FilePerms bypass for the
-# destination; fixed in 46.0.1).
-wasmtime = "46.0.1"
+# destination; fixed in 46.0.1). Floor raised to 47.0.3 per
+# RUSTSEC-2026-0222 (stores mix up type indices between engines) and
+# RUSTSEC-2026-0223 (preemption/traps during bulk operations break
+# internal VM state); both fixed in 46.0.2 and 47.0.3, so 47.0.2 is
+# inside the vulnerable range and must be skipped.
+wasmtime = "47.0.3"
 bollard = "0.21"
 
 # CLI
