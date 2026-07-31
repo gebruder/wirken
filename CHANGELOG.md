@@ -8,6 +8,24 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [Unreleased]
+
+### Added
+
+- Per-channel sandbox egress on `AgentConfig::channel_egress`, with
+  modes `none` (default), `allowlist`, and `open`. In the two granting
+  modes the `exec` container joins a per-exec internal Docker network
+  with no default route and ICC off, and reaches the network only
+  through a wirken-owned CONNECT proxy: `CONNECT` on 443 and plain
+  HTTP on 80, domain match only, IP literals refused, resolution done
+  by the proxy with non-global addresses dropped. Refusals emit
+  `SessionEvent::SandboxEgressDenied` with structural attribution.
+  `none` keeps the existing `--network none` container.
+
+  Requires a runtime whose bridge gateway is a host interface (rootful
+  Docker); rootless runtimes fail closed with an error naming the
+  cause. See `docs/egress.md`.
+
 ## [1.13.0] - 2026-07-24
 
 ### Added

@@ -107,6 +107,11 @@ pub struct ToolRegistry {
     /// session log at attach time. `None` disables the extra row (the
     /// generic ToolResult row still lands).
     http_audit: RwLock<Option<crate::http_tool::HttpAuditCtx>>,
+    /// Egress policy and attribution for sandboxed `exec`, resolved
+    /// from the bound channel's `AgentConfig` entry. `None` is the
+    /// deny-everything posture: the container runs with no
+    /// networking, which is also what an unconfigured channel gets.
+    sandbox_egress: RwLock<Option<crate::sandbox_egress::SandboxEgressContext>>,
 }
 
 impl ToolRegistry {
@@ -352,6 +357,7 @@ impl ToolRegistry {
             zirkel_db_path: None,
             credential_resolver: RwLock::new(None),
             http_audit: RwLock::new(None),
+            sandbox_egress: RwLock::new(None),
         })
     }
 
@@ -367,6 +373,16 @@ impl ToolRegistry {
     /// agent at `attach_skills` time with its own session log/handle/id.
     pub fn set_http_audit(&self, ctx: crate::http_tool::HttpAuditCtx) {
         if let Ok(mut g) = self.http_audit.write() {
+            *g = Some(ctx);
+        }
+    }
+
+    /// Install the sandbox egress policy and the attribution its
+    /// denials are recorded under. Called by the agent once the
+    /// bound channel is known. Leaving it unset denies all sandbox
+    /// egress, so a wiring gap fails closed.
+    pub fn set_sandbox_egress(&self, ctx: crate::sandbox_egress::SandboxEgressContext) {
+        if let Ok(mut g) = self.sandbox_egress.write() {
             *g = Some(ctx);
         }
     }
@@ -515,7 +531,10 @@ impl ToolRegistry {
 
         // Use sandbox if available (provisioned lazily on first call)
         if let Some(sandbox) = self.sandbox().await {
-            return sandbox.exec(&command, &self.workspace).await;
+            let egress = self.sandbox_egress.read().ok().and_then(|g| g.clone());
+            return sandbox
+                .exec(&command, &self.workspace, egress.as_ref())
+                .await;
         }
 
         // No sandbox. Host execution is only permitted when the

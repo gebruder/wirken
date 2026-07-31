@@ -540,6 +540,7 @@ pub async fn serve(
                         let inbound_ctx = wirken_agent::InboundContext {
                             adapter_id: Some("webchat".to_string()),
                             sender_id: Some("webchat-user".to_string()),
+                            channel: Some("webchat".to_string()),
                         };
                         let stream_future =
                             ag.process_message_stream_with(&message, inbound_id, tx, inbound_ctx);

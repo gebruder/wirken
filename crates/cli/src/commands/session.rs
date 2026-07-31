@@ -432,6 +432,9 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             // rather than loading provider.json to keep verify
             // independent of the runtime sandbox selection.
             sandbox: Default::default(),
+            // Inert for the same reason as `sandbox`: verify never
+            // replays shell exec, so there is no egress to police.
+            channel_egress: Default::default(),
             extra_interceptors: vec![],
             zirkel_db_path: None,
         },

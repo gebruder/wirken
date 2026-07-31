@@ -142,6 +142,10 @@ pub async fn add() -> Result<()> {
         allowed_subagents: Default::default(),
         tools_enabled: None,
         preset: None,
+        // No sandbox egress for any channel. Operators grant it
+        // explicitly per channel; a newly registered agent starts
+        // with none.
+        channel_egress: Default::default(),
     };
 
     agent_store

@@ -83,6 +83,7 @@ pub async fn create(
         allowed_subagents,
         tools_enabled: None,
         preset: preset.map(String::from),
+        channel_egress: Default::default(),
     };
 
     store
@@ -483,6 +484,7 @@ mod tests {
             allowed_subagents: Default::default(),
             tools_enabled: None,
             preset: None,
+            channel_egress: Default::default(),
         }
     }
 

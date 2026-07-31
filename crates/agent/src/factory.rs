@@ -157,6 +157,12 @@ pub struct AgentStaticConfig {
     /// `provider.json` (or per-agent config in a future pass). The
     /// factory clones this into every waked Agent's `ToolRegistry`.
     pub sandbox: crate::sandbox::SandboxConfig,
+    /// Per-channel sandbox egress policy from the agent's
+    /// `AgentConfig`. Empty means no channel has egress, which is
+    /// the deny posture. The factory clones this into every waked
+    /// Agent, which re-resolves it per turn against the channel that
+    /// turn arrived on.
+    pub channel_egress: BTreeMap<String, wirken_gateway::agent_config::ChannelEgress>,
     /// Additional [`InboundInterceptor`]s registered on every waked
     /// Agent for this agent_id, in registration order, after the
     /// built-in slash interceptor. The Arc is shared across wakes —
@@ -608,6 +614,7 @@ impl AgentFactory {
         // the gateway config store.
         agent.attach_factory(self.weak());
         agent.attach_subagent_ceilings(cfg.allowed_subagents.clone());
+        agent.set_channel_egress(cfg.channel_egress.clone());
         for interceptor in &cfg.extra_interceptors {
             agent.attach_interceptor(interceptor.clone());
         }

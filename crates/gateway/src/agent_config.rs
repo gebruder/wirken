@@ -31,6 +31,29 @@ pub struct SubagentCeiling {
     pub max_runtime_secs: u64,
 }
 
+/// Operator-configured egress posture for one channel's sandboxed
+/// `exec`, stored per channel on [`AgentConfig::channel_egress`].
+///
+/// This is inert data here. The gateway crate cannot depend on the
+/// agent crate (the dependency runs the other way), so
+/// `wirken_agent::sandbox_egress::SandboxEgressPolicy::from_config`
+/// turns these strings into the enforced policy. Keeping the stored
+/// shape stringly-typed also means an unrecognized mode written by a
+/// newer build reads back here without a deserialize failure, and is
+/// resolved to the deny posture at enforcement time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ChannelEgress {
+    /// `none` (default), `allowlist`, or `open`. Any other value is
+    /// treated as `none` when resolved.
+    #[serde(default)]
+    pub mode: String,
+    /// Domain patterns for `allowlist` mode. `*` and `*.example.com`
+    /// are honoured, matching skill-side `egress.domains` semantics.
+    /// Ignored in `none` and `open` modes.
+    #[serde(default)]
+    pub domains: Vec<String>,
+}
+
 /// Persistent configuration for a registered agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -73,6 +96,13 @@ pub struct AgentConfig {
     /// rather than at row read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    /// Per-channel sandbox egress policy, keyed by channel name. A
+    /// channel with no entry gets no egress: the sandboxed `exec`
+    /// container runs with no networking at all. Egress is granted
+    /// per channel rather than per agent because the channel is the
+    /// trust boundary an operator reasons about.
+    #[serde(default)]
+    pub channel_egress: BTreeMap<String, ChannelEgress>,
 }
 
 /// Persistent registry of agent configurations.
@@ -132,6 +162,17 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
+        // Per-channel sandbox egress. Default `'{}'` so every row
+        // written before this column existed reads back as "no
+        // channel has egress", which is the deny posture.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agents ADD COLUMN channel_egress TEXT NOT NULL DEFAULT '{}'",
+            [],
+        ) && !e.to_string().contains("duplicate column")
+        {
+            return Err(e.into());
+        }
+
         Ok(Self { conn })
     }
 
@@ -142,9 +183,11 @@ impl AgentConfigStore {
         let tools_enabled_str = config
             .tools_enabled
             .map(|b| if b { "true" } else { "false" });
+        let channel_egress_json = serde_json::to_string(&config.channel_egress)
+            .map_err(|e| GatewayError::Config(format!("serialize channel_egress: {e}")))?;
         self.conn.execute(
-            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO agents (id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 config.id,
                 config.name,
@@ -155,6 +198,7 @@ impl AgentConfigStore {
                 allowed_subagents_json,
                 tools_enabled_str,
                 config.preset,
+                channel_egress_json,
             ],
         )?;
 
@@ -213,7 +257,7 @@ impl AgentConfigStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset
+                "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress
                  FROM agents WHERE id = ?1",
                 params![agent_id],
                 |row| {
@@ -227,6 +271,7 @@ impl AgentConfigStore {
                         row.get::<_, String>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, String>(9)?,
                     ))
                 },
             )
@@ -235,6 +280,7 @@ impl AgentConfigStore {
         let channels = self.get_channels(agent_id)?;
         let allowed_subagents = parse_allowed_subagents(&row.6)?;
         let tools_enabled = parse_tools_enabled(row.7.as_deref());
+        let channel_egress = parse_channel_egress(&row.9, agent_id);
 
         Ok(AgentConfig {
             id: row.0,
@@ -247,13 +293,14 @@ impl AgentConfigStore {
             allowed_subagents,
             tools_enabled,
             preset: row.8,
+            channel_egress,
         })
     }
 
     /// List all agent configs.
     pub fn list(&self) -> Result<Vec<AgentConfig>, GatewayError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset
+            "SELECT id, name, provider, model, base_url, api_key_credential, allowed_subagents, tools_enabled, preset, channel_egress
              FROM agents ORDER BY id",
         )?;
 
@@ -268,6 +315,7 @@ impl AgentConfigStore {
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
             ))
         })?;
 
@@ -283,10 +331,12 @@ impl AgentConfigStore {
                 allowed_subagents_json,
                 tools_enabled_raw,
                 preset,
+                channel_egress_json,
             ) = row?;
             let channels = self.get_channels(&id)?;
             let allowed_subagents = parse_allowed_subagents(&allowed_subagents_json)?;
             let tools_enabled = parse_tools_enabled(tools_enabled_raw.as_deref());
+            let channel_egress = parse_channel_egress(&channel_egress_json, &id);
             agents.push(AgentConfig {
                 id,
                 name,
@@ -298,10 +348,31 @@ impl AgentConfigStore {
                 allowed_subagents,
                 tools_enabled,
                 preset,
+                channel_egress,
             });
         }
 
         Ok(agents)
+    }
+
+    /// Replace the per-channel egress policy for an existing agent.
+    pub fn set_channel_egress(
+        &self,
+        agent_id: &str,
+        channel_egress: &BTreeMap<String, ChannelEgress>,
+    ) -> Result<(), GatewayError> {
+        let json = serde_json::to_string(channel_egress)
+            .map_err(|e| GatewayError::Config(format!("serialize channel_egress: {e}")))?;
+        let changes = self.conn.execute(
+            "UPDATE agents SET channel_egress = ?1 WHERE id = ?2",
+            params![json, agent_id],
+        )?;
+        if changes == 0 {
+            return Err(GatewayError::Config(format!(
+                "agent '{agent_id}' not found"
+            )));
+        }
+        Ok(())
     }
 
     /// Replace the `allowed_subagents` ceilings for an existing
@@ -428,6 +499,32 @@ fn parse_tools_enabled(raw: Option<&str>) -> Option<bool> {
 
 /// Decode the `allowed_subagents` column. Empty / NULL / `'{}'` all
 /// map to an empty map without error.
+/// Decode the stored per-channel egress map.
+///
+/// Unlike [`parse_allowed_subagents`], a malformed blob here does
+/// not abort the read: it resolves to an empty map, which is the
+/// deny-everything posture. Refusing to load the agent would be the
+/// stricter-looking choice but the wrong one, because the failure
+/// mode this protects against is a policy blob that no longer parses
+/// silently granting the reach it used to describe. An empty map
+/// grants nothing, and the warning names the agent so an operator
+/// can repair it.
+fn parse_channel_egress(raw: &str, agent_id: &str) -> BTreeMap<String, ChannelEgress> {
+    if raw.is_empty() {
+        return BTreeMap::new();
+    }
+    match serde_json::from_str(raw) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(
+                "agent '{agent_id}' has a malformed channel_egress blob ({e}); \
+                 denying all sandbox egress for this agent until it is fixed"
+            );
+            BTreeMap::new()
+        }
+    }
+}
+
 fn parse_allowed_subagents(raw: &str) -> Result<BTreeMap<String, SubagentCeiling>, GatewayError> {
     if raw.is_empty() {
         return Ok(BTreeMap::new());
@@ -457,6 +554,7 @@ mod tests {
             allowed_subagents: Default::default(),
             tools_enabled: None,
             preset: None,
+            channel_egress: Default::default(),
         };
 
         store.register(&config).unwrap();
@@ -485,6 +583,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
 
@@ -500,6 +599,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
 
@@ -526,6 +626,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
 
@@ -551,6 +652,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
         store
@@ -565,6 +667,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
 
@@ -596,6 +699,7 @@ mod tests {
                     allowed_subagents: Default::default(),
                     tools_enabled: None,
                     preset: None,
+                    channel_egress: Default::default(),
                 })
                 .unwrap();
         }
@@ -633,6 +737,7 @@ mod tests {
             allowed_subagents: ceilings,
             tools_enabled: None,
             preset: None,
+            channel_egress: Default::default(),
         };
         store.register(&cfg).unwrap();
 
@@ -664,6 +769,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
         let got = store.get("legacy").unwrap();
@@ -687,6 +793,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
 
@@ -701,6 +808,7 @@ mod tests {
             allowed_subagents: Default::default(),
             tools_enabled: Some(true),
             preset: Some("researcher".into()),
+            channel_egress: Default::default(),
         };
         store.update(&updated).unwrap();
 
@@ -727,6 +835,7 @@ mod tests {
             allowed_subagents: Default::default(),
             tools_enabled: None,
             preset: None,
+            channel_egress: Default::default(),
         };
         let err = store.update(&cfg).unwrap_err();
         assert!(
@@ -751,6 +860,7 @@ mod tests {
             allowed_subagents: Default::default(),
             tools_enabled: None,
             preset: Some("starter".into()),
+            channel_egress: Default::default(),
         };
         store.register(&cfg).unwrap();
         assert_eq!(store.get("bob").unwrap().preset.as_deref(), Some("starter"));
@@ -776,6 +886,7 @@ mod tests {
                 allowed_subagents: Default::default(),
                 tools_enabled: None,
                 preset: None,
+                channel_egress: Default::default(),
             })
             .unwrap();
         let mut ceilings = BTreeMap::new();
@@ -792,5 +903,170 @@ mod tests {
         let got = store.get("boss").unwrap();
         assert_eq!(got.allowed_subagents.len(), 1);
         assert!(got.allowed_subagents.contains_key("child"));
+    }
+
+    fn base_config(id: &str) -> AgentConfig {
+        AgentConfig {
+            id: id.into(),
+            name: id.into(),
+            provider: "openai".into(),
+            model: "gpt-4".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key_credential: "openai_key".into(),
+            channels: vec!["slack".into()],
+            allowed_subagents: Default::default(),
+            tools_enabled: None,
+            preset: None,
+            channel_egress: Default::default(),
+        }
+    }
+
+    #[test]
+    fn channel_egress_defaults_to_empty_which_is_deny() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        store.register(&base_config("a1")).unwrap();
+
+        let got = store.get("a1").unwrap();
+        assert!(
+            got.channel_egress.is_empty(),
+            "a freshly registered agent must grant no channel egress"
+        );
+    }
+
+    #[test]
+    fn channel_egress_round_trips_per_channel() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        let mut config = base_config("a2");
+        config.channel_egress.insert(
+            "slack".into(),
+            ChannelEgress {
+                mode: "allowlist".into(),
+                domains: vec!["api.example.com".into(), "*.internal.example".into()],
+            },
+        );
+        store.register(&config).unwrap();
+
+        let got = store.get("a2").unwrap();
+        let slack = got.channel_egress.get("slack").expect("slack entry");
+        assert_eq!(slack.mode, "allowlist");
+        assert_eq!(
+            slack.domains,
+            vec![
+                "api.example.com".to_string(),
+                "*.internal.example".to_string()
+            ]
+        );
+        // A channel that was never configured stays absent, which the
+        // agent side resolves to the deny posture.
+        assert!(!got.channel_egress.contains_key("signal"));
+    }
+
+    #[test]
+    fn set_channel_egress_replaces_the_stored_policy() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        store.register(&base_config("a3")).unwrap();
+
+        let mut policy = BTreeMap::new();
+        policy.insert(
+            "slack".into(),
+            ChannelEgress {
+                mode: "open".into(),
+                domains: vec![],
+            },
+        );
+        store.set_channel_egress("a3", &policy).unwrap();
+        assert_eq!(store.get("a3").unwrap().channel_egress, policy);
+
+        store.set_channel_egress("a3", &BTreeMap::new()).unwrap();
+        assert!(store.get("a3").unwrap().channel_egress.is_empty());
+    }
+
+    #[test]
+    fn set_channel_egress_on_missing_agent_errors() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        assert!(store.set_channel_egress("ghost", &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn malformed_channel_egress_blob_denies_rather_than_granting() {
+        // A policy blob that no longer parses must not read back as
+        // the reach it used to describe. Empty map is the deny
+        // posture; the read itself still succeeds so the rest of the
+        // agent config stays usable.
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agents.db");
+        let store = AgentConfigStore::open(&db).unwrap();
+        let mut config = base_config("a4");
+        config.channel_egress.insert(
+            "slack".into(),
+            ChannelEgress {
+                mode: "open".into(),
+                domains: vec![],
+            },
+        );
+        store.register(&config).unwrap();
+        drop(store);
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE agents SET channel_egress = ?1 WHERE id = ?2",
+            params!["{not valid json", "a4"],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = AgentConfigStore::open(&db).unwrap();
+        let got = store.get("a4").unwrap();
+        assert!(
+            got.channel_egress.is_empty(),
+            "malformed egress policy must resolve to no egress"
+        );
+        assert_eq!(got.id, "a4", "the rest of the row must still load");
+    }
+
+    #[test]
+    fn rows_written_before_the_column_existed_read_back_as_deny() {
+        // Simulates the pre-migration row shape: the ALTER TABLE
+        // default must land the deny posture, not a NULL that fails
+        // the read.
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("agents.db");
+        let store = AgentConfigStore::open(&db).unwrap();
+        store.register(&base_config("a5")).unwrap();
+        drop(store);
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE agents SET channel_egress = '{}' WHERE id = 'a5'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = AgentConfigStore::open(&db).unwrap();
+        assert!(store.get("a5").unwrap().channel_egress.is_empty());
+    }
+
+    #[test]
+    fn list_carries_channel_egress() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+        let mut config = base_config("a6");
+        config.channel_egress.insert(
+            "signal".into(),
+            ChannelEgress {
+                mode: "allowlist".into(),
+                domains: vec!["one.example".into()],
+            },
+        );
+        store.register(&config).unwrap();
+
+        let listed = store.list().unwrap();
+        let got = listed.iter().find(|a| a.id == "a6").expect("a6 listed");
+        assert_eq!(got.channel_egress.get("signal").unwrap().mode, "allowlist");
     }
 }

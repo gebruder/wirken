@@ -160,6 +160,7 @@ mod tests {
             allowed_subagents: Default::default(),
             tools_enabled: None,
             preset: None,
+            channel_egress: Default::default(),
         }
     }
 

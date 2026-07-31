@@ -6,12 +6,14 @@ use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
 use bollard::models::HostConfig;
+use bollard::models::NetworkCreateRequest;
 use bollard::query_parameters::{
     CreateContainerOptions, LogsOptions, RemoveContainerOptions, WaitContainerOptions,
 };
 use futures_util::StreamExt;
 
 use crate::error::AgentError;
+use crate::sandbox_egress::{SandboxEgressContext, SandboxEgressProxy};
 use crate::tool::ToolResult;
 
 const DEFAULT_IMAGE: &str = "debian:bookworm-slim";
@@ -259,6 +261,14 @@ pub struct DockerSandbox {
     config: SandboxConfig,
 }
 
+/// The per-exec egress plumbing: the internal network the container
+/// joins and the proxy that is its only reachable endpoint. Held for
+/// the duration of one `exec` and torn down with it.
+struct EgressSetup {
+    network_name: String,
+    proxy: SandboxEgressProxy,
+}
+
 impl DockerSandbox {
     /// Connect to the Docker daemon.
     pub fn new(config: SandboxConfig) -> Result<Self, AgentError> {
@@ -269,22 +279,79 @@ impl DockerSandbox {
 
     /// Execute a command inside an ephemeral container.
     /// The workspace is bind-mounted at /workspace.
-    pub async fn exec(&self, command: &str, workspace: &Path) -> Result<ToolResult, AgentError> {
+    ///
+    /// `egress` carries the channel's egress policy plus the
+    /// attribution this exec's denials are recorded under. `None`,
+    /// or a policy whose mode is `none`, runs the container with no
+    /// networking at all: the proxy path is entered only when the
+    /// operator configured reach for this channel.
+    pub async fn exec(
+        &self,
+        command: &str,
+        workspace: &Path,
+        egress: Option<&SandboxEgressContext>,
+    ) -> Result<ToolResult, AgentError> {
         let workspace_str = workspace
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf())
             .to_string_lossy()
             .to_string();
 
+        // Provision the internal network and this exec's proxy
+        // before the container exists, so the container is never
+        // startable without the enforcement point already up. Both
+        // are torn down on every exit path below.
+        let egress_setup = match egress.filter(|c| c.policy.mode.needs_proxy()) {
+            Some(ctx) => Some(self.provision_egress(ctx).await?),
+            None => None,
+        };
+        let network_name = egress_setup.as_ref().map(|s| s.network_name.as_str());
+        let env = egress_setup.as_ref().map(|s| {
+            let url = s.proxy.proxy_url();
+            vec![
+                format!("HTTP_PROXY={url}"),
+                format!("HTTPS_PROXY={url}"),
+                format!("http_proxy={url}"),
+                format!("https_proxy={url}"),
+                // An inherited NO_PROXY would carve holes in the
+                // allowlist for whatever it names; pin it empty.
+                "NO_PROXY=".to_string(),
+                "no_proxy=".to_string(),
+            ]
+        });
+
         let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
             cmd: Some(vec!["sh".into(), "-c".into(), command.into()]),
             working_dir: Some("/workspace".into()),
             user: Some("1000:1000".into()),
-            host_config: Some(build_host_config(&self.config, &workspace_str)),
+            env,
+            host_config: Some(build_host_config(
+                &self.config,
+                &workspace_str,
+                network_name,
+            )),
             ..Default::default()
         };
 
+        let result = self.run_container(container_config).await;
+
+        // Tear down unconditionally. The proxy dies with its handle;
+        // the network needs an explicit removal, and leaking one per
+        // exec would exhaust Docker's address pool.
+        if let Some(setup) = egress_setup {
+            self.teardown_egress(setup).await;
+        }
+        result
+    }
+
+    /// Create, run, and reap one container. Split from [`Self::exec`]
+    /// so every early return there still passes through the egress
+    /// teardown.
+    async fn run_container(
+        &self,
+        container_config: ContainerCreateBody,
+    ) -> Result<ToolResult, AgentError> {
         let container_name = format!("wirken-sandbox-{}", short_id());
 
         let create_opts = CreateContainerOptions {
@@ -401,6 +468,127 @@ impl DockerSandbox {
         })
     }
 
+    /// Create this exec's internal network and start its proxy.
+    ///
+    /// Every failure here is an error, never a downgrade to an
+    /// unproxied container: an operator who configured egress for a
+    /// channel must not silently get either wide-open networking or
+    /// a silently network-less sandbox because network creation
+    /// failed.
+    async fn provision_egress(
+        &self,
+        ctx: &SandboxEgressContext,
+    ) -> Result<EgressSetup, AgentError> {
+        let network_name = format!("wirken-egress-{}", short_id());
+
+        let mut options = std::collections::HashMap::new();
+        // Close inter-container reach. Each exec gets its own
+        // network so there is normally no sibling to reach, but a
+        // network is a namespace an operator or a future code path
+        // could attach something else to; ICC off makes the
+        // isolation a property of the network rather than of the
+        // current call pattern.
+        options.insert(
+            "com.docker.network.bridge.enable_icc".to_string(),
+            "false".to_string(),
+        );
+        // No NAT for this bridge. `Internal` already withholds the
+        // route; dropping masquerade means a rule added elsewhere
+        // cannot turn the bridge into a working exit on its own.
+        options.insert(
+            "com.docker.network.bridge.enable_ip_masquerade".to_string(),
+            "false".to_string(),
+        );
+
+        self.client
+            .create_network(NetworkCreateRequest {
+                name: network_name.clone(),
+                driver: Some("bridge".to_string()),
+                internal: Some(true),
+                attachable: Some(false),
+                enable_ipv6: Some(false),
+                options: Some(options),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| AgentError::Sandbox(format!("create egress network: {e}")))?;
+
+        let gateway = match self.network_gateway(&network_name).await {
+            Ok(gw) => gw,
+            Err(e) => {
+                let _ = self.client.remove_network(&network_name).await;
+                return Err(e);
+            }
+        };
+
+        let proxy = match SandboxEgressProxy::bind(gateway, ctx.clone()).await {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = self.client.remove_network(&network_name).await;
+                // The usual cause is a rootless container runtime
+                // (rootless Podman), where the bridge lives in a
+                // separate network namespace and its gateway address
+                // is not a host interface, so a host-side listener
+                // cannot claim it. Named explicitly because the bare
+                // OS error ("cannot assign requested address") does
+                // not point anywhere useful.
+                return Err(AgentError::Sandbox(format!(
+                    "bind egress proxy on {gateway}: {e}. Sandbox egress modes \
+                     'allowlist' and 'open' need a container runtime whose bridge \
+                     gateway is a host interface (rootful Docker). Under a rootless \
+                     runtime, set the channel's egress mode to 'none'."
+                )));
+            }
+        };
+
+        tracing::info!(
+            "sandbox egress proxy listening on {} for network {network_name} (mode={})",
+            proxy.addr(),
+            ctx.policy.mode.as_str(),
+        );
+        Ok(EgressSetup {
+            network_name,
+            proxy,
+        })
+    }
+
+    /// Read the gateway address Docker assigned to the network's
+    /// bridge. This is the only address the container can reach, and
+    /// therefore where the proxy must listen.
+    async fn network_gateway(&self, network_name: &str) -> Result<std::net::IpAddr, AgentError> {
+        let inspect = self
+            .client
+            .inspect_network(network_name, None)
+            .await
+            .map_err(|e| AgentError::Sandbox(format!("inspect egress network: {e}")))?;
+        inspect
+            .ipam
+            .and_then(|ipam| ipam.config)
+            .and_then(|configs| {
+                configs
+                    .into_iter()
+                    .find_map(|c| c.gateway.and_then(|g| g.parse::<std::net::IpAddr>().ok()))
+            })
+            .ok_or_else(|| {
+                AgentError::Sandbox(format!(
+                    "egress network {network_name} reported no usable gateway address"
+                ))
+            })
+    }
+
+    /// Drop the proxy and remove the network. Best-effort: the
+    /// container is already gone by this point, so a failure here
+    /// leaks a Docker object rather than leaving reach open.
+    async fn teardown_egress(&self, setup: EgressSetup) {
+        drop(setup.proxy);
+        if let Err(e) = self.client.remove_network(&setup.network_name).await {
+            tracing::warn!(
+                "could not remove egress network {}: {e}",
+                setup.network_name
+            );
+        }
+    }
+
     async fn kill_and_remove(&self, id: &str) {
         let _ = self.client.kill_container(id, None).await;
         let _ = self
@@ -446,12 +634,30 @@ impl DockerSandbox {
 /// * `readonly_rootfs`: make the container's `/` read-only. The
 ///   workspace bind-mount stays RW, and a tmpfs at `/tmp` gives the
 ///   shell somewhere to scratch.
-pub(crate) fn build_host_config(config: &SandboxConfig, workspace_str: &str) -> HostConfig {
-    let network_mode = if config.network {
-        None
-    } else {
-        Some("none".to_string())
+/// * `egress_network`: when `Some`, the container joins that Docker
+///   network instead of running with no networking. The network is
+///   created `Internal` with inter-container communication off, so
+///   the only address it can reach is the gateway where this exec's
+///   egress proxy listens. DNS is pinned to an address with nothing
+///   behind it: the container must not resolve names itself, because
+///   the proxy resolves them after the allowlist decision.
+pub(crate) fn build_host_config(
+    config: &SandboxConfig,
+    workspace_str: &str,
+    egress_network: Option<&str>,
+) -> HostConfig {
+    // Egress-network mode wins over the legacy `network` bool: the
+    // proxy path is the bounded one, and letting `network: true`
+    // widen it back to unrestricted host networking would defeat the
+    // allowlist the operator configured.
+    let network_mode = match (egress_network, config.network) {
+        (Some(name), _) => Some(name.to_string()),
+        (None, true) => None,
+        (None, false) => Some("none".to_string()),
     };
+    // Only meaningful on the egress-network path; harmless otherwise
+    // since `--network none` has no resolver to point anywhere.
+    let dns = egress_network.map(|_| vec!["127.0.0.1".to_string()]);
     let tmpfs_mounts: std::collections::HashMap<String, String> = {
         let mut m = std::collections::HashMap::new();
         m.insert("/tmp".into(), "size=64m,mode=1777".into());
@@ -460,6 +666,7 @@ pub(crate) fn build_host_config(config: &SandboxConfig, workspace_str: &str) -> 
     HostConfig {
         binds: Some(vec![format!("{workspace_str}:/workspace:rw")]),
         network_mode,
+        dns,
         memory: Some(MEMORY_LIMIT),
         pids_limit: Some(PIDS_LIMIT),
         // With auto_remove=true the container is torn down the

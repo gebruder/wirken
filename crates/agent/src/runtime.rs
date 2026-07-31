@@ -119,6 +119,11 @@ pub struct InboundContext {
     /// Platform-side sender identity (Slack uid, Telegram user id,
     /// `webchat-user`, …).
     pub sender_id: Option<String>,
+    /// Routing channel this turn arrived on, the same key the router
+    /// resolves against and that `AgentConfig::channel_egress` is
+    /// keyed by. `None` for turns with no channel (CLI `ask`, cron),
+    /// which resolves to the deny egress posture.
+    pub channel: Option<String>,
 }
 
 /// Result of processing a message, containing the response and any
@@ -218,6 +223,10 @@ pub struct Agent {
     /// the harness omits `spawn_subagent` from the LLM's tool list
     /// entirely so the LLM never tries to call it.
     allowed_subagents: BTreeMap<String, SubagentCeiling>,
+    /// Per-channel sandbox egress policy from this agent's
+    /// `AgentConfig`. Empty means no channel has egress, which is
+    /// the deny posture for every turn.
+    channel_egress: BTreeMap<String, wirken_gateway::agent_config::ChannelEgress>,
     /// Item 6 slice 1: spawn-call depth, set on a freshly woken
     /// child by the parent's spawn intercept (parent depth + 1).
     /// 0 for the top-level agent. Capped at [`MAX_SUBAGENT_DEPTH`].
@@ -384,6 +393,7 @@ impl Agent {
             last_attestation: None,
             factory: None,
             allowed_subagents: BTreeMap::new(),
+            channel_egress: BTreeMap::new(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
             budget: None,
@@ -475,6 +485,7 @@ impl Agent {
             last_attestation: None,
             factory: None,
             allowed_subagents: BTreeMap::new(),
+            channel_egress: BTreeMap::new(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
             budget: None,
@@ -789,6 +800,42 @@ impl Agent {
         self.wasm_skills = wasm_skills;
         self.rebuild_system_prompt();
         Ok(())
+    }
+
+    /// Install this agent's per-channel sandbox egress config.
+    /// Called by the factory at wake time from `AgentStaticConfig`.
+    pub fn set_channel_egress(
+        &mut self,
+        channel_egress: BTreeMap<String, wirken_gateway::agent_config::ChannelEgress>,
+    ) {
+        self.channel_egress = channel_egress;
+        self.install_sandbox_egress();
+    }
+
+    /// Resolve the current turn's channel against the configured
+    /// per-channel policy and push it, with attribution, to the tool
+    /// registry. The attribution is taken from the turn's inbound
+    /// context rather than from anything the sandboxed process can
+    /// influence.
+    fn install_sandbox_egress(&self) {
+        let policy = crate::sandbox_egress::SandboxEgressPolicy::for_channel(
+            self.current_inbound.channel.as_deref(),
+            &self.channel_egress,
+        );
+        self.tools
+            .set_sandbox_egress(crate::sandbox_egress::SandboxEgressContext {
+                policy,
+                attribution: crate::sandbox_egress::SandboxEgressAttribution {
+                    agent_id: self.id.clone(),
+                    channel: self.current_inbound.channel.clone(),
+                    adapter_id: self.current_inbound.adapter_id.clone(),
+                    sender_id: self.current_inbound.sender_id.clone(),
+                },
+                audit: Some(crate::sandbox_egress::SandboxEgressAudit {
+                    log: self.session_log.clone(),
+                    handle: self.session_handle.clone(),
+                }),
+            });
     }
 
     /// Map a tool call to a (filesystem axis, absolutized requested path)
@@ -1769,6 +1816,13 @@ impl Agent {
         // carry the same `adapter_id` / `sender_id` as the sibling
         // `UserMessage` row.
         self.current_inbound = inbound.clone();
+
+        // Resolve this turn's sandbox egress from the channel it
+        // arrived on, and install it with the attribution any denial
+        // will be recorded under. Done per turn because the policy is
+        // per channel and one agent can serve several. A turn with no
+        // channel resolves to the deny posture.
+        self.install_sandbox_egress();
 
         // agent-runtime-error-recovery: reset the per-turn
         // tool-validation counter so a tool that hit its retry cap on

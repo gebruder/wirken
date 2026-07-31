@@ -580,7 +580,11 @@ fn expand_workspace_set(set: BTreeSet<PathBuf>, workspace: &Path) -> BTreeSet<Pa
         .collect()
 }
 
-fn host_in_set(host: &str, domains: &AllowSet) -> bool {
+/// Match `host` against a domain allowset, honouring the `*`
+/// wildcard and `*.example.com` suffix patterns. Shared with the
+/// sandbox egress proxy (`crate::sandbox_egress`) so skill-side and
+/// sandbox-side allowlists resolve a host identically.
+pub fn host_in_set(host: &str, domains: &AllowSet) -> bool {
     match domains {
         AllowSet::Wildcard => true,
         AllowSet::Set(set) => set.iter().any(|pat| host_matches(host, pat)),

@@ -1231,6 +1231,77 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// The sandbox egress proxy refused an outbound request from a
+    /// sandboxed `exec` container. Emitted once per refused request,
+    /// before any connection to `host` is attempted.
+    ///
+    /// `agent_id` and the adapter/sender pair are structural: they
+    /// come from the per-sandbox listener this request arrived on,
+    /// which is bound to one `exec` call for one agent on one
+    /// channel. Nothing on this row is derived from request content,
+    /// so a sandboxed process cannot forge its own attribution.
+    ///
+    /// `host` is the CONNECT target or absolute-form request host as
+    /// the proxy parsed it, recorded so an operator can see what the
+    /// allowlist turned away. It is attacker-influenced text; treat
+    /// it as data, not as a trusted identifier.
+    SandboxEgressDenied {
+        host: String,
+        port: u16,
+        reason: SandboxEgressDenyReason,
+        /// Egress mode in force for this sandbox, so a denial is
+        /// readable without joining against the agent config that
+        /// was live at the time.
+        mode: SandboxEgressModeLabel,
+        agent_id: String,
+        /// Channel the `exec` call was serving, from the listener
+        /// binding rather than the request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
+}
+
+/// Why the sandbox egress proxy refused a request. A closed set so
+/// SIEM consumers group on it without parsing free-form text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxEgressDenyReason {
+    /// Egress mode is `none`: the sandbox has no allowlist at all.
+    ModeNone,
+    /// Host is well-formed but not on the channel's allowlist.
+    NotAllowed,
+    /// Request target was an IP literal. Sandbox egress is
+    /// domain-match only, so an IP literal can never be allowlisted.
+    IpLiteral,
+    /// Port is not 443 for CONNECT or 80 for plain HTTP.
+    PortNotAllowed,
+    /// Method is neither CONNECT nor a plain-HTTP verb with an
+    /// absolute-form request target.
+    MethodNotAllowed,
+    /// Request head was unparseable, oversized, or truncated.
+    Malformed,
+    /// Host is on the allowlist but did not resolve.
+    ResolutionFailed,
+}
+
+/// Egress mode recorded on a [`SessionEvent::SandboxEgressDenied`]
+/// row. Mirrors the agent-side mode enum so audit consumers do not
+/// depend on the agent crate to deserialize.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxEgressModeLabel {
+    /// No egress. The default.
+    #[default]
+    None,
+    /// Operator-configured domain allowlist.
+    Allowlist,
+    /// Any host reachable, subject only to the port and IP-literal
+    /// rules. Explicit operator configuration only.
+    Open,
 }
 
 /// What kind of hook a [`SessionEvent::HookRegistered`] row

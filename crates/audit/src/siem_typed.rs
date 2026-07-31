@@ -72,6 +72,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   on the row; both carry sha256 hashes only.
 /// - `BudgetExceeded`: per-agent spend-ceiling breach (alert or
 ///   block). An enforcement signal; carries no message body.
+/// - `SandboxEgressDenied`: sandbox egress proxy refusals. An
+///   enforcement signal; carries a host and a closed-set reason.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -109,6 +111,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::EgressHookDispatched { .. }
             | SessionEvent::ToolOutputRedacted { .. }
             | SessionEvent::BudgetExceeded { .. }
+            | SessionEvent::SandboxEgressDenied { .. }
     );
     if !in_default {
         return false;
@@ -169,6 +172,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",
         SessionEvent::McpEntryRefused { .. } => "mcp_entry_refused",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
+        SessionEvent::SandboxEgressDenied { .. } => "sandbox_egress_denied",
         SessionEvent::ToolOutputRedacted { .. } => "tool_output_redacted",
     }
 }

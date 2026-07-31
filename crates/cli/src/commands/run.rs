@@ -657,6 +657,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     identity,
                     allowed_subagents: agent_cfg.allowed_subagents.clone(),
                     sandbox: super::load_sandbox_config(&cfg.data_dir),
+                    channel_egress: agent_cfg.channel_egress.clone(),
                     extra_interceptors: vec![],
                     zirkel_db_path: None,
                 },
@@ -748,6 +749,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 identity: default_identity,
                 allowed_subagents: Default::default(),
                 sandbox: super::load_sandbox_config(&cfg.data_dir),
+                // The implicit "default" agent has no registered
+                // AgentConfig row to carry a policy, so it gets none:
+                // sandboxed exec runs with no networking. Granting
+                // egress requires registering an agent and
+                // configuring the channel.
+                channel_egress: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
             },
@@ -3050,6 +3057,10 @@ async fn message_loop(
                 let inbound_ctx = wirken_agent::InboundContext {
                     adapter_id: Some(adapter_id.to_string()),
                     sender_id: Some(sender_id.clone()),
+                    // Routing channel, not the adapter id: this is
+                    // the key `AgentConfig::channel_egress` and the
+                    // router are both keyed by.
+                    channel: Some(channel.clone()),
                 };
                 let (response, denials) = match factory.wake(&resolved_agent, &session_id) {
                     Ok(agent_mutex) => {

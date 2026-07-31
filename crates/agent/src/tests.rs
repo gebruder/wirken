@@ -1955,6 +1955,7 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -2309,6 +2310,7 @@ mod wake {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 64);
@@ -2375,6 +2377,7 @@ mod subagent {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         configs.insert(
@@ -2394,6 +2397,7 @@ mod subagent {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         (AgentFactory::new(configs, log, None), tmp)
@@ -3366,7 +3370,7 @@ fn host_config_drops_all_caps() {
     use crate::sandbox::{SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace");
+    let hc = build_host_config(&cfg, "/host/workspace", None);
     assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
     let empty: &[String] = &[];
     assert_eq!(hc.cap_add.as_deref(), Some(empty));
@@ -3377,7 +3381,7 @@ fn host_config_sets_no_new_privileges_and_seccomp() {
     use crate::sandbox::{SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace");
+    let hc = build_host_config(&cfg, "/host/workspace", None);
     let opts = hc.security_opt.expect("security_opt must be set");
     assert!(
         opts.iter().any(|o| o == "no-new-privileges:true"),
@@ -3397,7 +3401,7 @@ fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
     use crate::sandbox::{SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace");
+    let hc = build_host_config(&cfg, "/host/workspace", None);
     assert_eq!(hc.readonly_rootfs, Some(true));
     let tmpfs = hc.tmpfs.expect("tmpfs must be set");
     let opts = tmpfs.get("/tmp").expect("/tmp must be a tmpfs mount");
@@ -3409,13 +3413,70 @@ fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
 }
 
 #[test]
+fn host_config_without_egress_network_has_no_networking() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    // The default posture: no egress configured for the channel, so
+    // the container gets no network namespace connectivity at all.
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace", None);
+    assert_eq!(hc.network_mode.as_deref(), Some("none"));
+    assert!(
+        hc.dns.is_none(),
+        "no resolver needs pinning when there is no network"
+    );
+}
+
+#[test]
+fn host_config_joins_the_egress_network_and_pins_dns() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace", Some("wirken-egress-abc123"));
+    assert_eq!(hc.network_mode.as_deref(), Some("wirken-egress-abc123"));
+    // The container must not resolve names itself; the proxy
+    // resolves after the allowlist decision.
+    assert_eq!(hc.dns.as_deref(), Some(&["127.0.0.1".to_string()][..]));
+}
+
+#[test]
+fn egress_network_wins_over_the_legacy_network_flag() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    // `network: true` predates per-channel egress and means
+    // unrestricted host networking. Once a channel has a policed
+    // egress network, that flag must not widen it back open.
+    let cfg = SandboxConfig {
+        network: true,
+        ..SandboxConfig::default()
+    };
+    let hc = build_host_config(&cfg, "/host/workspace", Some("wirken-egress-abc123"));
+    assert_eq!(hc.network_mode.as_deref(), Some("wirken-egress-abc123"));
+}
+
+#[test]
+fn egress_network_keeps_the_rest_of_the_hardening() {
+    use crate::sandbox::{SandboxConfig, build_host_config};
+
+    // Granting bounded egress must not relax any other control.
+    let cfg = SandboxConfig::default();
+    let hc = build_host_config(&cfg, "/host/workspace", Some("wirken-egress-abc123"));
+    assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
+    assert_eq!(hc.readonly_rootfs, Some(true));
+    assert_eq!(hc.memory, Some(512 * 1024 * 1024));
+    assert_eq!(hc.pids_limit, Some(256));
+    let opts = hc.security_opt.expect("security_opt must be set");
+    assert!(opts.iter().any(|o| o == "no-new-privileges:true"));
+}
+
+#[test]
 fn host_config_preserves_workspace_and_resource_caps() {
     use crate::sandbox::{SandboxConfig, build_host_config};
 
     // The pre-existing restrictions must still be in place after
     // adding cap_drop / seccomp / readonly_rootfs / tmpfs.
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace");
+    let hc = build_host_config(&cfg, "/host/workspace", None);
     assert_eq!(
         hc.binds.as_deref(),
         Some(&["/host/workspace:/workspace:rw".to_string()][..])
@@ -3436,7 +3497,7 @@ fn host_config_gvisor_adds_runsc_runtime_without_loosening_hardening() {
         mode: SandboxMode::GVisor,
         ..Default::default()
     };
-    let hc = build_host_config(&cfg, "/host/workspace");
+    let hc = build_host_config(&cfg, "/host/workspace", None);
     assert_eq!(hc.runtime.as_deref(), Some("runsc"));
     assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
     assert_eq!(hc.readonly_rootfs, Some(true));
@@ -3484,6 +3545,7 @@ async fn sandbox_blocks_write_to_rootfs_but_allows_workspace_and_tmp() {
              echo hi > /workspace/ok.txt && echo ws_ok=1 || echo ws_ok=0 ; \
              echo hi > /tmp/ok.txt && echo tmp_ok=1 || echo tmp_ok=0",
             tmp.path(),
+            None,
         )
         .await
         .expect("exec");
@@ -3541,6 +3603,7 @@ async fn sandbox_blocks_chown_via_cap_drop() {
         .exec(
             "chown 0:0 /workspace/victim.txt 2>&1 || echo CHOWN_FAILED",
             tmp.path(),
+            None,
         )
         .await
         .expect("exec");
@@ -3587,6 +3650,7 @@ async fn sandbox_blocks_setuid_via_no_new_privileges() {
         .exec(
             "ls -l /usr/bin/passwd; /usr/bin/passwd 2>&1 || echo PASSWD_RC=$?",
             tmp.path(),
+            None,
         )
         .await
         .expect("exec");
@@ -5837,6 +5901,7 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 4);
@@ -5979,6 +6044,7 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         let factory =
@@ -6130,6 +6196,7 @@ mod per_channel_llm_override {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         let factory =
@@ -6247,6 +6314,7 @@ mod org_tool_policy {
                 sandbox: Default::default(),
                 extra_interceptors: vec![],
                 zirkel_db_path: None,
+                channel_egress: Default::default(),
             },
         );
         let factory =
@@ -7845,6 +7913,7 @@ mod budget_enforcement {
                 InboundContext {
                     adapter_id: None,
                     sender_id: None,
+                    channel: None,
                 },
             )
             .await
@@ -8090,6 +8159,7 @@ mod obo_identity {
                 InboundContext {
                     adapter_id: Some("slack".into()),
                     sender_id: Some("U123".into()),
+                    channel: Some("slack".into()),
                 },
             )
             .await;

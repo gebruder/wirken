@@ -569,6 +569,16 @@ fn extract_identity_for_sentinel(
             Some(agent_id.clone()),
         ),
         SessionEvent::HttpFetch { agent_id, .. } => (None, None, agent_id.clone()),
+        SessionEvent::SandboxEgressDenied {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
         SessionEvent::LlmRequest {
             agent_id,
             sender_id,
@@ -607,6 +617,11 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         } => format!("tool_result name={tool_name} success={success} agent={agent_id}"),
         SessionEvent::HttpFetch { host, outcome, .. } => {
             format!("http_fetch host={host} outcome={outcome:?}")
+        }
+        SessionEvent::SandboxEgressDenied {
+            host, port, reason, ..
+        } => {
+            format!("sandbox_egress_denied host={host} port={port} reason={reason:?}")
         }
         SessionEvent::PermissionDenied {
             tool,
