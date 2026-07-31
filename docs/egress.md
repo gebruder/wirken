@@ -4,15 +4,16 @@ The skill-set `egress.domains` allowlist is a defense-in-depth control on a spec
 
 ## What `egress.domains` covers
 
-`EgressClient` mediates outbound HTTP for three built-in agent paths:
+`EgressClient` mediates outbound HTTP for four built-in agent paths:
 
 - `web_search`: the agent's web-search tool.
 - `generate_image`: the agent's image-generation tool.
+- `http_request`: the agent's general HTTP tool. The runtime applies the skill-side `tools.allow`, `credentials.allow`, and `http.post_paths` gates first (`crates/agent/src/runtime.rs:2565`, `crates/agent/src/http_tool.rs::gate`); requests that clear those still go out through `EgressClient`, so the host allowset applies on top.
 - The Zirkel daily-fetch transport: `wirken zirkel run` uses an `EgressClient` constructed with an explicit `RateLimitConfig` so per-source daily budgets apply.
 
 Each call resolves the request host against the agent's effective `egress.domains` allowset (the union of every loaded skill's `egress.domains` declaration). Hosts not in the allowset are denied pre-flight, before any TCP connection and without consuming the rate-limit budget. Wildcard `"*"` is supported on the allowset; `"*.example.com"` style suffix patterns are also supported.
 
-Source: `crates/agent/src/egress.rs:246-282` (host-based check), `crates/agent/src/skill_perms.rs:831-889` (allowset resolution).
+Source: `crates/agent/src/egress.rs:281-317` (host-based check), `crates/agent/src/skill_perms.rs:964-1010` (allowset resolution).
 
 ## What `egress.domains` does not cover
 
@@ -46,6 +47,6 @@ The same gap appears in [security-properties.md](security-properties.md) under A
 
 ## Source references
 
-- `EgressClient` scope and host check: `crates/agent/src/egress.rs:154-282`.
-- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:831-889`.
+- `EgressClient` scope and host check: `crates/agent/src/egress.rs:167-318`.
+- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:964-1010`, matching at `crates/agent/src/skill_perms.rs:583-599`.
 - Threat-model row: [security-properties.md](security-properties.md), row `AG02` (Code execution).
