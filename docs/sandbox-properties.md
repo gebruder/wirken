@@ -12,7 +12,7 @@ adapters (one OS process per channel) and IPC boundary properties live in
 ## Modes
 
 `SandboxMode` is the operator-facing knob. Three values, one default
-([`crates/agent/src/sandbox.rs:22-41`](../crates/agent/src/sandbox.rs)):
+([`crates/agent/src/sandbox.rs:25-43`](../crates/agent/src/sandbox.rs)):
 
 | Mode | Default | Runtime | Meaning |
 |---|---|---|---|
@@ -22,15 +22,18 @@ adapters (one OS process per channel) and IPC boundary properties live in
 
 Unknown mode strings fall back to `ExecOnly`, not `Off` — a config typo gets
 the secure default with a warning, never the bypass
-([`sandbox.rs:48-62`](../crates/agent/src/sandbox.rs)).
+([`sandbox.rs:50-64`](../crates/agent/src/sandbox.rs)).
 
 ## No silent fallback
 
-[`crates/agent/src/tool.rs:445-463`](../crates/agent/src/tool.rs):
+[`crates/agent/src/tool.rs:533-553`](../crates/agent/src/tool.rs):
 
 ```rust
 if let Some(sandbox) = self.sandbox().await {
-    return sandbox.exec(&command, &self.workspace).await;
+    let egress = self.sandbox_egress.read().ok().and_then(|g| g.clone());
+    return sandbox
+        .exec(&command, &self.workspace, egress.as_ref())
+        .await;
 }
 if self.sandbox_config.mode != SandboxMode::Off {
     return Err(AgentError::Sandbox(format!(
@@ -47,23 +50,34 @@ on the host. Operators who want host execution must opt in by writing
 
 ## Container hardening (applies to ExecOnly and GVisor)
 
-[`crates/agent/src/sandbox.rs:449-481`](../crates/agent/src/sandbox.rs)
+[`crates/agent/src/sandbox.rs:644-687`](../crates/agent/src/sandbox.rs)
 constructs the `HostConfig` for every sandboxed exec:
 
 | Property | Value | Source line |
 |---|---|---|
-| `cap_drop` | `ALL` | `:471` - every Linux capability stripped. No `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, etc. |
-| `cap_add` | `[]` | `:472` - no capabilities re-added. |
-| `security_opt` | `no-new-privileges:true` | `:473-476` - `setuid`/`setgid` binaries cannot elevate. |
-| `readonly_rootfs` | `true` | `:477` - container `/` is read-only. |
-| `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `:455-459, 478` - the only writable filesystem outside `/workspace`. |
-| `network_mode` | `none` (configurable) | `:450-454, 462` - default is no network namespace; outbound DNS/HTTP fail. |
-| `binds` | `<workspace>:/workspace:rw` | `:461` - only the agent workspace is mounted, RW. |
-| `memory` | 512 MB | `:18, 463` - `MEMORY_LIMIT` constant. |
-| `pids_limit` | 256 | `:19, 464` - `PIDS_LIMIT` constant; fork-bomb cap. |
-| `user` | `1000:1000` | `:283` - non-root UID/GID inside the container. |
-| `auto_remove` | `false` | `:469` - explicit `kill_and_remove` after log collection so output is never lost to a teardown race. |
-| timeout | 300 s | `:249, 310` - wall-clock cap; container is killed and removed on timeout. |
+| `cap_drop` | `ALL` | `:678` - every Linux capability stripped. No `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, etc. |
+| `cap_add` | `[]` | `:679` - no capabilities re-added. |
+| `security_opt` | `no-new-privileges:true` | `:680-683` - `setuid`/`setgid` binaries cannot elevate. |
+| `readonly_rootfs` | `true` | `:684` - container `/` is read-only. |
+| `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `:661-665, 685` - the only writable filesystem outside `/workspace`. |
+| `network_mode` | `none` (configurable) | `:653-659, 668` - default is no network namespace; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
+| `dns` | unset, or `127.0.0.1` on the egress path | `:660, 669` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |
+| `binds` | `<workspace>:/workspace:rw` | `:667` - only the agent workspace is mounted, RW. |
+| `memory` | 512 MB | `:20, 670` - `MEMORY_LIMIT` constant. |
+| `pids_limit` | 256 | `:21, 671` - `PIDS_LIMIT` constant; fork-bomb cap. |
+| `user` | `1000:1000` | `:327` - non-root UID/GID inside the container. |
+| `auto_remove` | `false` | `:676` - explicit `kill_and_remove` after log collection so output is never lost to a teardown race. |
+| timeout | 300 s | `:251, 377` - wall-clock cap; container is killed and removed on timeout. |
+
+### Sandbox egress
+
+`network_mode: none` is the default and applies whenever the channel serving
+the turn has no egress policy. When a channel is configured for `allowlist` or
+`open` egress, the container instead joins a per-exec internal Docker network
+with no default route and reaches the network only through a wirken-owned
+CONNECT proxy. The other rows in the table above are unchanged on that path.
+See [egress.md](egress.md) for the modes, properties, runtime requirement, and
+the known CONNECT/SNI limit.
 
 `security_opt` does NOT explicitly set seccomp. Per Docker semantics
 ([upstream](https://docs.docker.com/engine/security/seccomp/)), when no
@@ -84,12 +98,12 @@ profile blocks ~44 syscalls including:
 The full list is the Docker daemon's responsibility, not Wirken's. Setting
 `security_opt: ["seccomp=default"]` is rejected by the Docker API as an
 invalid token; the absence of a seccomp `SecurityOpt` is what activates the
-default profile ([`sandbox.rs:473-476`](../crates/agent/src/sandbox.rs)).
+default profile ([`sandbox.rs:680-683`](../crates/agent/src/sandbox.rs)).
 
 ## gVisor delta (`SandboxMode::GVisor`)
 
 When mode is `GVisor`, `runtime_name()` returns `Some("runsc")`
-([`sandbox.rs:65-70`](../crates/agent/src/sandbox.rs)) and Docker
+([`sandbox.rs:67-72`](../crates/agent/src/sandbox.rs)) and Docker
 launches the container under gVisor instead of `runc`.
 
 gVisor changes the threat model. Under `runc`, the guest's syscalls reach
@@ -112,7 +126,7 @@ Practical consequences:
 
 Wirken does not require gVisor; `ExecOnly` is the default. `GVisor` is the
 opt-in for operators who want kernel attack surface reduction. Detection
-([`sandbox.rs:507-519`](../crates/agent/src/sandbox.rs)) is automatic;
+([`sandbox.rs:714-726`](../crates/agent/src/sandbox.rs)) is automatic;
 the wizard refuses to enable `GVisor` mode if `runsc` is not registered as
 a Docker runtime.
 
@@ -163,7 +177,10 @@ Honest about the gaps:
 - **DNS rebinding from a network-enabled sandbox.** If the operator sets
   `network: true` on the sandbox config, the container gets the host's
   network namespace and inherits whatever DNS it can resolve. Default is
-  `network_mode: none`.
+  `network_mode: none`. This applies to the `network: true` flag only: on
+  the sandbox-egress path the proxy resolves names itself and drops answers
+  outside global unicast, so an allowlisted name cannot be rebound onto
+  loopback, private space, or the link-local metadata address.
 
 ## Verification
 
@@ -182,6 +199,7 @@ wirken run &
 # NOT a successful mount.
 
 # 3. ExecOnly: the container has no network
+# (Holds when the serving channel has no egress policy, which is the default.)
 # Send: "run `curl -m 5 https://example.com`"
 # Expected: curl fails with "Could not resolve host" — DNS is not reachable
 # from `network_mode: none`.
