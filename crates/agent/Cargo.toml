@@ -30,7 +30,10 @@ url = "2"
 base64 = "0.22"
 bollard = { workspace = true }
 wasmtime = { workspace = true }
-wasmtime-wasi = "46.0.1"
+# Must move in lockstep with the workspace `wasmtime` pin; the two
+# crates share an API surface and a mismatched pair does not compile.
+# See the security-floor note in the workspace Cargo.toml.
+wasmtime-wasi = "47.0.3"
 futures-util = "0.3"
 async-trait = { workspace = true }
 capnp = { workspace = true }
