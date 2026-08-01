@@ -450,6 +450,22 @@ enum AgentCommands {
         #[arg(long)]
         tools_enabled: Option<String>,
     },
+    /// Grant or revoke sandbox egress for one of an agent's channels
+    SetEgress {
+        /// Agent ID
+        id: String,
+        /// Channel to configure (must already be bound to the agent)
+        #[arg(long)]
+        channel: String,
+        /// none (no egress, the default), allowlist, or open
+        #[arg(long)]
+        mode: String,
+        /// Comma-separated domains for allowlist mode, e.g.
+        /// "api.example.com,*.internal.example". Wildcards match the
+        /// same way skill-side egress.domains does.
+        #[arg(long)]
+        domains: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1252,6 +1268,12 @@ async fn main() -> Result<()> {
             AgentCommands::Set { id, tools_enabled } => {
                 commands::agents::set(&id, tools_enabled.as_deref()).await
             }
+            AgentCommands::SetEgress {
+                id,
+                channel,
+                mode,
+                domains,
+            } => commands::agents::set_egress(&id, &channel, &mode, domains.as_deref()).await,
         },
         Commands::Cron(cmd) => match cmd {
             CronCommands::List { agent } => commands::cron::list(agent.as_deref()).await,

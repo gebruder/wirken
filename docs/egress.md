@@ -55,6 +55,25 @@ Sandboxed `exec` has its own egress axis, configured per channel on the agent's 
 
 Source: `crates/agent/src/sandbox_egress.rs`, `crates/gateway/src/agent_config.rs::ChannelEgress`.
 
+### Configuring
+
+```bash
+# Grant one channel a domain allowlist.
+wirken agents set-egress work --channel slack \
+  --mode allowlist --domains "api.example.com,*.internal.example"
+
+# Any domain, still bounded to 443/80 and still refusing IP literals.
+wirken agents set-egress work --channel slack --mode open
+
+# Revoke: back to no networking at all.
+wirken agents set-egress work --channel slack --mode none
+
+# Granted channels appear under their agent.
+wirken agents list
+```
+
+The channel must already be bound to the agent; egress on an unbound channel would never take effect, so that is refused rather than stored. Unknown modes, IP literals, entries carrying a scheme, port, path, or credentials, `--domains` without `allowlist`, `allowlist` without `--domains`, and mixing `*` with specific hosts are all rejected at config time. This is deliberately stricter than the runtime resolver, which fails closed silently: silence is right in the hot path and wrong at a prompt.
+
 ### Topology
 
 In `allowlist` and `open` modes the container joins a per-exec Docker network created `Internal` with `com.docker.network.bridge.enable_icc=false` and IP masquerade off. That network has no default route, so the only address the container can reach is the bridge gateway, where this exec's proxy listens. Inter-container reach is closed by the ICC option, and each exec gets its own network besides. A process that ignores `HTTP_PROXY` and opens a raw socket does not bypass the allowlist; it has nowhere to route.

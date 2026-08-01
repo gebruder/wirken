@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use dialoguer::{Input, Password, Select};
 
-use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, SubagentCeiling};
+use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, ChannelEgress, SubagentCeiling};
 use wirken_gateway::permissions::PermissionTier;
 use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
@@ -113,7 +113,7 @@ pub async fn add() -> Result<()> {
         .collect();
 
     let channels = if available_channels.is_empty() {
-        println!("  No channels configured. Add channels later with `wirken agent bind`.");
+        println!("  No channels configured. Add channels later with `wirken agents bind`.");
         vec![]
     } else {
         let selections = dialoguer::MultiSelect::new()
@@ -161,7 +161,7 @@ pub async fn add() -> Result<()> {
     println!("  Model: {model}");
     println!("  Workspace: {}", cfg.agent_workspace(&id).display());
     if channels.is_empty() {
-        println!("  Channels: none (bind with `wirken agent bind {id} <channel>`)");
+        println!("  Channels: none (bind with `wirken agents bind {id} <channel>`)");
     } else {
         let display: Vec<&str> = channels
             .iter()
@@ -179,7 +179,7 @@ pub async fn list() -> Result<()> {
 
     let path = cfg.agent_config_db_path();
     if !path.exists() {
-        println!("  No agents configured. Run `wirken agent add` or `wirken setup`.");
+        println!("  No agents configured. Run `wirken agents add` or `wirken setup`.");
         return Ok(());
     }
 
@@ -214,6 +214,20 @@ pub async fn list() -> Result<()> {
             format!("{}/{}", agent.provider, agent.model),
             channels,
         );
+        // Only channels with a granted egress policy are listed. A
+        // channel with no entry has no sandbox egress, which is the
+        // default and not worth a line each.
+        for (chan, egress) in &agent.channel_egress {
+            if egress.mode == "none" {
+                continue;
+            }
+            let scope = if egress.domains.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", egress.domains.join(", "))
+            };
+            println!("  {:12}  └─ egress {chan}: {}{scope}", "", egress.mode);
+        }
     }
     println!();
 
@@ -366,4 +380,168 @@ pub async fn set(id: &str, tools_enabled: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Grant or revoke sandbox egress for one of an agent's channels.
+///
+/// Validation is strict here on purpose. The runtime resolver fails
+/// closed on anything it does not recognize, which is the right
+/// behaviour in the hot path but the wrong behaviour at config time:
+/// an operator who mistypes a mode should get an error, not a silently
+/// denied channel that looks configured.
+pub async fn set_egress(id: &str, channel: &str, mode: &str, domains: Option<&str>) -> Result<()> {
+    let cfg = config();
+    let store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+
+    let agent = store.get(id).context(format!("Agent '{id}' not found"))?;
+
+    if !agent.channels.iter().any(|c| c == channel) {
+        anyhow::bail!(
+            "channel '{channel}' is not bound to agent '{id}' (bound: {}). \
+             Bind it first with `wirken agents bind {id} {channel}`, or fix the \
+             channel name; egress on an unbound channel would never take effect",
+            if agent.channels.is_empty() {
+                "none".to_string()
+            } else {
+                agent.channels.join(", ")
+            },
+        );
+    }
+
+    let mode = match mode {
+        "none" | "allowlist" | "open" => mode,
+        other => anyhow::bail!("invalid --mode '{other}'; expected none, allowlist, or open"),
+    };
+
+    let parsed: Vec<String> = domains
+        .map(|d| {
+            d.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if mode != "allowlist" && !parsed.is_empty() {
+        anyhow::bail!(
+            "--domains is only meaningful with --mode allowlist; mode '{mode}' ignores it"
+        );
+    }
+    if mode == "allowlist" && parsed.is_empty() {
+        anyhow::bail!(
+            "--mode allowlist needs --domains; an empty allowlist denies everything, \
+             which is what --mode none already says more clearly"
+        );
+    }
+    for d in &parsed {
+        validate_egress_domain(d)?;
+    }
+    if parsed.iter().any(|d| d == "*") && parsed.len() > 1 {
+        anyhow::bail!("--domains cannot mix the '*' wildcard with specific hosts");
+    }
+
+    let mut channel_egress = agent.channel_egress.clone();
+    channel_egress.insert(
+        channel.to_string(),
+        ChannelEgress {
+            mode: mode.to_string(),
+            domains: parsed.clone(),
+        },
+    );
+    store
+        .set_channel_egress(id, &channel_egress)
+        .context("Failed to update channel egress")?;
+
+    match mode {
+        "none" => println!("  Agent '{id}' channel '{channel}': no sandbox egress."),
+        "open" => println!(
+            "  Agent '{id}' channel '{channel}': egress OPEN (any domain, \
+             443/80 only, IP literals refused)."
+        ),
+        _ => println!(
+            "  Agent '{id}' channel '{channel}': egress allowlist [{}].",
+            parsed.join(", ")
+        ),
+    }
+    if mode != "none" {
+        println!(
+            "  Requires rootful Docker; under a rootless runtime exec is refused \
+             rather than run unproxied."
+        );
+    }
+
+    Ok(())
+}
+
+/// Reject anything that cannot work as a sandbox egress allowlist
+/// entry. Mirrors the skill-side host rules (no scheme, path,
+/// credentials, port, or whitespace) and adds the sandbox-specific
+/// one: an IP literal is refused by the proxy before the allowlist is
+/// consulted, so allowlisting one is always a silent no-op.
+fn validate_egress_domain(s: &str) -> Result<()> {
+    if s.is_empty() {
+        anyhow::bail!("invalid domain: empty entry");
+    }
+    if s.contains("://") || s.contains('/') || s.contains('@') || s.contains(':') || s.contains(' ')
+    {
+        anyhow::bail!(
+            "invalid domain '{s}': expected a bare host like example.com or \
+             *.example.com, with no scheme, path, port, or credentials"
+        );
+    }
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '*')
+    {
+        anyhow::bail!("invalid domain '{s}': only letters, digits, '-', '.', and '*' are allowed");
+    }
+    if wirken_agent::sandbox_egress::is_ip_literal(s) {
+        anyhow::bail!(
+            "invalid domain '{s}': sandbox egress matches on domains only, and the \
+             proxy refuses IP-literal targets before consulting the allowlist, so \
+             this entry could never match"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_egress_domain;
+
+    #[test]
+    fn plain_and_wildcard_hosts_accepted() {
+        for d in ["example.com", "api.example.com", "*.example.com", "*"] {
+            assert!(validate_egress_domain(d).is_ok(), "{d} should be accepted");
+        }
+    }
+
+    #[test]
+    fn ip_literals_rejected_because_the_proxy_never_matches_them() {
+        // The proxy refuses IP-literal targets before consulting the
+        // allowlist, so accepting one here would store an entry that
+        // can never match.
+        for d in ["169.254.169.254", "127.0.0.1", "93.184.216.34"] {
+            assert!(validate_egress_domain(d).is_err(), "{d} should be rejected");
+        }
+    }
+
+    #[test]
+    fn schemes_ports_paths_and_credentials_rejected() {
+        for d in [
+            "https://example.com",
+            "example.com:8443",
+            "example.com/path",
+            "user@example.com",
+            "exa mple.com",
+        ] {
+            assert!(validate_egress_domain(d).is_err(), "{d} should be rejected");
+        }
+    }
+
+    #[test]
+    fn empty_domain_rejected() {
+        assert!(validate_egress_domain("").is_err());
+    }
 }
