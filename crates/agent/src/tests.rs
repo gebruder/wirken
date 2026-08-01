@@ -8177,3 +8177,347 @@ mod obo_identity {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Sandbox egress integration tests (gebruder/wirken#202).
+//
+// These drive the real enforcement path: a per-exec internal Docker
+// network, a live CONNECT proxy bound to its gateway, and a container
+// whose only route is that proxy. Each asserts a refusal, because the
+// happy path proves nothing about containment.
+//
+// Every test carries a positive control. `debian:bookworm-slim` ships
+// neither curl nor wget, so a naive "assert the command failed" test
+// passes when the binary is simply absent — proving nothing while
+// looking green. The proxy tests therefore run on a curl-bearing image
+// and assert the client actually ran (exit 127 is failed, not passed),
+// and the raw-socket test asserts bash reached the connect attempt.
+//
+// Requires rootful Docker (the proxy binds the bridge gateway, which is
+// not a host interface under a rootless runtime) plus the
+// `curlimages/curl` and `debian:bookworm-slim` images. Skips cleanly
+// otherwise.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod sandbox_egress_live {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{
+        SandboxEgressDenyReason, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
+    };
+
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
+    use crate::sandbox_egress::{
+        SandboxEgressAttribution, SandboxEgressAudit, SandboxEgressContext, SandboxEgressMode,
+        SandboxEgressPolicy,
+    };
+    use crate::skill_perms::AllowSet;
+
+    const CURL_IMAGE: &str = "curlimages/curl:latest";
+    const BASH_IMAGE: &str = "debian:bookworm-slim";
+
+    struct Harness {
+        sandbox: DockerSandbox,
+        ctx: SandboxEgressContext,
+        log: Arc<dyn SessionLog>,
+        handle: wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+        tmp: TempDir,
+    }
+
+    async fn harness(policy: SandboxEgressPolicy, image: &str) -> Option<Harness> {
+        if detect_runtime().await.is_none() {
+            eprintln!("skipping: Docker is not available on this host");
+            return None;
+        }
+        if !detect_image(image).await {
+            eprintln!("skipping: {image} is not pulled on this host");
+            return None;
+        }
+        let tmp = TempDir::new().unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+        let handle = log.handle_for(SessionId::new("egress-live".to_string()));
+        let sandbox = match DockerSandbox::new(SandboxConfig {
+            mode: SandboxMode::ExecOnly,
+            image: image.to_string(),
+            ..Default::default()
+        }) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skipping: {e}");
+                return None;
+            }
+        };
+        let ctx = SandboxEgressContext {
+            policy,
+            attribution: SandboxEgressAttribution {
+                agent_id: "work".into(),
+                channel: Some("slack".into()),
+                adapter_id: Some("slack".into()),
+                sender_id: Some("U123".into()),
+            },
+            audit: Some(SandboxEgressAudit {
+                log: log.clone(),
+                handle: handle.clone(),
+            }),
+        };
+        Some(Harness {
+            sandbox,
+            ctx,
+            log,
+            handle,
+            tmp,
+        })
+    }
+
+    fn allowlist(hosts: &[&str]) -> SandboxEgressPolicy {
+        SandboxEgressPolicy::allowlist(AllowSet::Set(
+            hosts.iter().map(|h| h.to_string()).collect::<BTreeSet<_>>(),
+        ))
+    }
+
+    fn denials(h: &Harness) -> Vec<SessionEvent> {
+        h.log
+            .get_since(&h.handle, 0)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event)
+            .filter(|e| matches!(e, SessionEvent::SandboxEgressDenied { .. }))
+            .collect()
+    }
+
+    fn reasons(h: &Harness) -> Vec<SandboxEgressDenyReason> {
+        denials(h)
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::SandboxEgressDenied { reason, .. } => Some(reason),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Positive control: the client binary existed and ran. Exit 127 is
+    /// "command not found", which must never be mistaken for a blocked
+    /// connection.
+    fn assert_client_ran(output: &str) {
+        assert!(
+            output.contains("ran=1"),
+            "positive control failed: the client never ran, so this test proves \
+             nothing about containment. Output: {output}"
+        );
+        assert!(
+            !output.contains("rc=127"),
+            "client binary not found (rc=127); a missing binary is not containment. \
+             Output: {output}"
+        );
+    }
+
+    /// #202 acceptance: a process that ignores the proxy env vars must
+    /// fail to route. Uses a raw bash /dev/tcp socket, so the proxy env
+    /// is not consulted at all.
+    #[tokio::test]
+    #[ignore = "needs rootful Docker AND a host firewall that permits \
+     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
+    async fn direct_connection_bypassing_proxy_env_cannot_route() {
+        let Some(h) = harness(allowlist(&["example.com"]), BASH_IMAGE).await else {
+            return;
+        };
+        // 93.184.216.34 is example.com. Connecting by literal address
+        // skips DNS, so this isolates routing from resolution.
+        let r = h
+            .sandbox
+            .exec(
+                "command -v bash >/dev/null && echo ran=1; \
+                 timeout 8 bash -c 'exec 3<>/dev/tcp/93.184.216.34/443' 2>&1; \
+                 echo rc=$?",
+                h.tmp.path(),
+                Some(&h.ctx),
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(
+            !r.output.contains("rc=0"),
+            "a raw socket ignoring the proxy must not route, got: {}",
+            r.output
+        );
+        // Nothing reached the proxy, so there is no denial to record.
+        // The containment here is the absent route, not a refusal.
+        assert!(
+            denials(&h).is_empty(),
+            "a bypass attempt never reaches the proxy, got {:?}",
+            reasons(&h)
+        );
+    }
+
+    /// #202 acceptance: IP-literal CONNECT refused before the allowlist
+    /// is consulted.
+    #[tokio::test]
+    #[ignore = "needs rootful Docker AND a host firewall that permits \
+     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
+    async fn ip_literal_connect_is_refused() {
+        let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(
+                "command -v curl >/dev/null && echo ran=1; \
+                 curl -s -m 8 https://93.184.216.34/ >/dev/null 2>&1; echo rc=$?",
+                h.tmp.path(),
+                Some(&h.ctx),
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(!r.output.contains("rc=0"), "got: {}", r.output);
+        assert!(
+            reasons(&h).contains(&SandboxEgressDenyReason::IpLiteral),
+            "expected an ip_literal denial, got {:?}",
+            reasons(&h)
+        );
+    }
+
+    /// #202 acceptance: CONNECT to a non-443 port refused even for an
+    /// allowlisted host.
+    #[tokio::test]
+    #[ignore = "needs rootful Docker AND a host firewall that permits \
+     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
+    async fn connect_to_non_443_port_is_refused_even_when_allowlisted() {
+        let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(
+                "command -v curl >/dev/null && echo ran=1; \
+                 curl -s -m 8 https://example.com:8443/ >/dev/null 2>&1; echo rc=$?",
+                h.tmp.path(),
+                Some(&h.ctx),
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(!r.output.contains("rc=0"), "got: {}", r.output);
+        assert!(
+            reasons(&h).contains(&SandboxEgressDenyReason::PortNotAllowed),
+            "expected a port_not_allowed denial, got {:?}",
+            reasons(&h)
+        );
+    }
+
+    /// #202 acceptance: an unlisted host is refused, and the denial row
+    /// carries attribution taken from the listener binding rather than
+    /// from anything the sandboxed process could influence.
+    #[tokio::test]
+    #[ignore = "needs rootful Docker AND a host firewall that permits \
+     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
+    async fn unlisted_host_is_refused_with_structural_attribution() {
+        let Some(h) = harness(allowlist(&["allowed.example"]), CURL_IMAGE).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(
+                "command -v curl >/dev/null && echo ran=1; \
+                 curl -s -m 8 https://denied.example/ >/dev/null 2>&1; echo rc=$?",
+                h.tmp.path(),
+                Some(&h.ctx),
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(!r.output.contains("rc=0"), "got: {}", r.output);
+
+        let rows = denials(&h);
+        assert!(!rows.is_empty(), "expected a denial row");
+        match &rows[0] {
+            SessionEvent::SandboxEgressDenied {
+                host,
+                port,
+                reason,
+                mode,
+                agent_id,
+                channel,
+                adapter_id,
+                sender_id,
+            } => {
+                assert_eq!(host, "denied.example");
+                assert_eq!(*port, 443);
+                assert_eq!(*reason, SandboxEgressDenyReason::NotAllowed);
+                assert_eq!(*mode, wirken_audit::SandboxEgressModeLabel::Allowlist);
+                assert_eq!(agent_id, "work");
+                assert_eq!(channel.as_deref(), Some("slack"));
+                assert_eq!(adapter_id.as_deref(), Some("slack"));
+                assert_eq!(sender_id.as_deref(), Some("U123"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// #202 acceptance: mode `open` is recorded on the denial row, and
+    /// open still bounds the port.
+    #[tokio::test]
+    #[ignore = "needs rootful Docker AND a host firewall that permits \
+     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
+    async fn open_mode_records_its_mode_on_denials() {
+        let policy = SandboxEgressPolicy {
+            mode: SandboxEgressMode::Open,
+            domains: AllowSet::Wildcard,
+        };
+        let Some(h) = harness(policy, CURL_IMAGE).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(
+                "command -v curl >/dev/null && echo ran=1; \
+                 curl -s -m 8 https://example.com:8443/ >/dev/null 2>&1; echo rc=$?",
+                h.tmp.path(),
+                Some(&h.ctx),
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(!r.output.contains("rc=0"), "got: {}", r.output);
+
+        let rows = denials(&h);
+        assert!(!rows.is_empty(), "expected a denial row under open mode");
+        match &rows[0] {
+            SessionEvent::SandboxEgressDenied { mode, reason, .. } => {
+                assert_eq!(*mode, wirken_audit::SandboxEgressModeLabel::Open);
+                assert_eq!(*reason, SandboxEgressDenyReason::PortNotAllowed);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// With no egress context the container gets no networking at all,
+    /// the default posture for every unconfigured channel.
+    #[tokio::test]
+    #[ignore = "needs rootful Docker AND a host firewall that permits \
+     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
+    async fn no_egress_context_means_no_networking() {
+        let Some(h) = harness(SandboxEgressPolicy::denied(), CURL_IMAGE).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(
+                "command -v curl >/dev/null && echo ran=1; \
+                 curl -s -m 8 https://example.com/ >/dev/null 2>&1; echo rc=$?",
+                h.tmp.path(),
+                None,
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(!r.output.contains("rc=0"), "got: {}", r.output);
+        assert!(
+            denials(&h).is_empty(),
+            "no proxy runs in this mode, so there is nothing to deny"
+        );
+    }
+}
