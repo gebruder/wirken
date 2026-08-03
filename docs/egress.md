@@ -81,7 +81,25 @@ In `allowlist` and `open` modes the exec runs alongside a per-exec **sidecar pro
 - an `Internal` bridge with no route off the host, which the sandbox joins and nothing else;
 - an ordinary bridge that only the sidecar joins, which is the sole path outward.
 
+The isolation invariant on the internal network is that it is `Internal`, created per exec, and has exactly two members: the sandbox and its own sidecar. There is no third party to reach, and the network is destroyed when the exec ends. Inter-container communication is deliberately left enabled on it, because the sandbox reaching its sidecar is the one flow the network exists to carry.
+
 The sandbox's only reachable peer is the sidecar, and the sidecar is the only thing that can reach the internet. A process that ignores `HTTP_PROXY` and opens a raw socket does not bypass the allowlist; it has nowhere to route.
+
+```mermaid
+graph LR
+    subgraph internal["per-exec internal network (exactly two members, no route off the host)"]
+        Sandbox["exec sandbox<br/>uid 1000, no resolver"]
+        Sidecar["egress sidecar<br/>holds no policy"]
+    end
+
+    Gateway["wirken gateway<br/>(host process)"]
+    Internet["Internet"]
+
+    Sandbox -->|"HTTP_PROXY: CONNECT :443 / plain HTTP :80"| Sidecar
+    Sidecar -->|"per-exec Unix socket:<br/>policy, DNS, audit"| Gateway
+    Sidecar -->|"per-exec egress network:<br/>allowed, already-resolved addresses"| Internet
+    Sandbox -.->|"no route"| Internet
+```
 
 The sidecar holds no policy. For each request it asks the gateway over a per-exec Unix socket bind-mounted into it, and receives either already-resolved addresses or a refusal. Policy, DNS resolution, the global-unicast filter, and the audit row all stay in the gateway process, so a compromised sidecar can misreport what it wants but cannot widen what it gets, and cannot forge attribution.
 

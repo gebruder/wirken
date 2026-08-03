@@ -107,7 +107,7 @@ These properties are enforced by configuration, runtime checks, and operational 
 Skills are loaded from the filesystem at gateway startup:
 - `SkillLoader::load_dir()` scans `~/.wirken/skills/` and per-agent skill directories.
 - `Agent::load_skills()` rebuilds the system prompt with available skills.
-- Wasm skills are compiled from `.wasm` files via `wasmtime` 45.0.2.
+- Wasm skills are compiled from `.wasm` files via `wasmtime`; the pinned version lives in the workspace `Cargo.toml`.
 
 **Live update:** Add or remove SKILL.md files from the skills directory. The agent picks up changes on next `load_skills()` call (currently requires gateway restart; no filesystem watcher yet).
 
@@ -217,7 +217,11 @@ Each non-skipped outcome emits one `EgressHookDispatched` row carrying the opera
 
 **Crate:** `wirken-agent` | **File:** `crates/agent/src/sandbox.rs`
 
-`SandboxMode` (`Off`, `ExecOnly`, `GVisor`) and `SandboxConfig` (image, timeout, network, memory/PID limits) are set at agent construction. `SandboxConfig::default()` is `ExecOnly` as of 0.7.5; the operator can override to `Off` or `GVisor` via `sandbox.json` in the data dir, which the CLI writes during `wirken setup` (with an upgrade prompt if `runsc` is registered) and which `apply_org_config` populates from `OrgPermissions.sandbox_mode`. `GVisor` mode uses the `runsc` OCI runtime via Docker, providing kernel attack surface reduction: agent code syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Container hardening is identical across `ExecOnly` and `GVisor`: `cap_drop=ALL`, `no-new-privileges`, default seccomp, read-only rootfs with a 64 MB tmpfs at `/tmp`, 512 MB memory, 256 PIDs, no network, non-root user (1000:1000), workspace bind-mounted RW at `/workspace`.
+`SandboxMode` (`Off`, `ExecOnly`, `GVisor`) and `SandboxConfig` (image, timeout, network, memory/PID limits) are set at agent construction. `SandboxConfig::default()` is `ExecOnly` as of 0.7.5; the operator can override to `Off` or `GVisor` via `sandbox.json` in the data dir, which the CLI writes during `wirken setup` (with an upgrade prompt if `runsc` is registered) and which `apply_org_config` populates from `OrgPermissions.sandbox_mode`. `GVisor` mode uses the `runsc` OCI runtime via Docker, providing kernel attack surface reduction: agent code syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Container hardening is identical across `ExecOnly` and `GVisor`: `cap_drop=ALL`, `no-new-privileges`, default seccomp, read-only rootfs with a 64 MB tmpfs at `/tmp`, 512 MB memory, 256 PIDs, non-root user (1000:1000), workspace bind-mounted RW at `/workspace`, and no network by default.
+
+**Sandbox egress.** A channel with no egress policy, which is the default, gets `--network none`. A channel configured for `allowlist` or `open` egress instead gets two per-exec networks: an `Internal` bridge the sandbox joins, and an ordinary bridge only the sidecar proxy container joins. The isolation invariant on the internal network is that it is `Internal`, per exec, and has exactly two members, the sandbox and its own sidecar; it is destroyed when the exec ends. Inter-container communication stays enabled on it because the sandbox reaching its sidecar is the only flow it carries.
+
+The sidecar holds no policy. It asks the gateway over a per-exec Unix socket and receives either already-resolved addresses or a refusal, so policy, DNS resolution, the global-unicast filter, and the `SandboxEgressDenied` audit row all stay in the gateway process. No host port is bound at any point. A sidecar that cannot start, never reports ready, or is not running when the sandbox is about to start refuses the `exec`. See [egress.md](egress.md).
 
 If Docker is not reachable when the first sandboxed tool runs, the `ToolRegistry` logs a warning naming `Docker` specifically and refuses `exec` (fail-closed) for the agent's lifetime; it does not fall back to host execution. If `gvisor` mode is configured but `runsc` is not registered with Docker, the warning names `runsc` specifically. Host execution happens only under `sandbox.json` `mode: off`, the documented opt-out. Provisioning failures are sticky for the lifetime of the registry; a fresh `wirken run` retries.
 

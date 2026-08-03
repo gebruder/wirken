@@ -228,7 +228,7 @@ The agent's `exec` tool can run in a Docker container instead of directly on the
 - Runtime: Docker via `bollard` 0.21. The OCI runtime is the default `runc`, or `runsc` (gVisor) when `permissions.sandbox_mode = "gvisor"` is set in the org config.
 - Default image: `debian:bookworm-slim`. The workspace is bind-mounted read-write at `/workspace`; nothing else from the host is mounted.
 - Container runs as UID 1000:1000 with `auto_remove`, a 512 MB memory limit, a 256-PID limit, and a configurable command timeout (default 300 s).
-- **Network:** Off by default (`network_mode = "none"`). A single boolean (`SandboxConfig.network`) toggles it on; there is no per-skill or per-call network policy.
+- **Network:** Off by default (`network_mode = "none"`). Per-channel egress policy on `AgentConfig::channel_egress` grants bounded reach: in `allowlist` or `open` mode the container joins a per-exec two-member internal network and reaches the network only through a sidecar proxy container, with policy, DNS, and audit held in the gateway behind a Unix socket. There is still no per-skill or per-call network policy; the channel is the unit. See [egress.md](egress.md).
 - **gVisor:** When `runsc` is selected, syscalls from the container are intercepted by gVisor's Sentry rather than reaching the host kernel. Other resource constraints are unchanged.
 
 `wirken doctor` reports whether Docker and gVisor are available on the host.
@@ -237,7 +237,7 @@ The agent's `exec` tool can run in a Docker container instead of directly on the
 
 For skills compiled to WebAssembly. A Wasm skill is a directory containing a `SKILL.md` (frontmatter with name/description/parameters) and a `skill.wasm` module.
 
-- Runtime: `wasmtime` 45.0.2 with WASI preview 1 (`crates/agent/src/wasm_sandbox.rs`).
+- Runtime: `wasmtime` with WASI preview 1 (`crates/agent/src/wasm_sandbox.rs`); the pinned version lives in the workspace `Cargo.toml`.
 - **CPU limiting:** Fuel metering via `Store::set_fuel()`. Default budget: 500 million fuel units. Skills that exhaust fuel are terminated.
 - **Memory:** Stdout buffer capped at 64 MB; stderr at 4 KB.
 - **Filesystem:** No preopened directories — the module has no filesystem access.
@@ -394,7 +394,7 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Password hashing | `argon2` | 0.5 | Argon2id for age-file passphrase derivation. |
 | SHA-256 | `sha2` | 0.10 | Hash chain for audit log. |
 | IPC serialization | `capnp` | 0.26 | Zero-copy, traversal limits, schema evolution. |
-| Wasm sandbox | `wasmtime` | 45.0.2 | WASI preview 1. Fuel metering. Resource limits. |
+| Wasm sandbox | `wasmtime` | see `Cargo.toml` | WASI preview 1. Fuel metering. Resource limits. |
 | Container API | `bollard` | 0.21 | Async Docker/gVisor integration for native-binary skills. |
 | CLI parser | `clap` | 4.6 | Derive + builder APIs. |
 | Interactive prompts | `dialoguer` | 0.12 | Setup wizard (Select, Input, Password, Confirm). |

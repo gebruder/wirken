@@ -72,10 +72,40 @@ constructs the `HostConfig` for every sandboxed exec:
 ### Sandbox egress
 
 `network_mode: none` is the default and applies whenever the channel serving
-the turn has no egress policy. When a channel is configured for `allowlist` or
-`open` egress, the container instead joins a per-exec internal Docker network
-with no default route and reaches the network only through a wirken-owned
-CONNECT proxy. The other rows in the table above are unchanged on that path.
+the turn has no egress policy.
+
+When a channel is configured for `allowlist` or `open` egress, two networks are
+created for that exec:
+
+| Network | Kind | Members | Purpose |
+|---|---|---|---|
+| `wirken-egress-<id>` | `Internal`, no route off the host | the sandbox and its sidecar, exactly two | carries the sandbox's requests to the sidecar |
+| `wirken-egress-out-<id>` | ordinary bridge | the sidecar only | the sole path outward |
+
+The sandbox joins the internal network only, so its one reachable peer is its
+own sidecar. The isolation invariant is that network being `Internal`, per
+exec, and two-member; both networks are removed when the exec ends.
+Inter-container communication is left enabled on the internal network because
+the sandbox reaching its sidecar is the only flow it carries.
+
+The sidecar proxy holds no policy: it asks the gateway over a per-exec Unix
+socket, so no host port is bound. The other rows in the table above are
+unchanged on this path.
+
+The sidecar runs the wirken binary itself, bind-mounted read-only, which
+requires the statically linked build. `sandbox.json` sets `sidecar_binary` to
+point at a static binary when the running gateway is not one:
+
+```json
+{
+  "mode": "exec-only",
+  "sidecar_binary": "/usr/local/bin/wirken"
+}
+```
+
+Absent, it defaults to the gateway's own executable. A configured path that
+does not exist refuses the `exec` rather than running it unproxied.
+
 See [egress.md](egress.md) for the modes, properties, runtime requirement, and
 the known CONNECT/SNI limit.
 
