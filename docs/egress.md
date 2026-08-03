@@ -100,7 +100,7 @@ The sandbox has no working resolver: DNS is pinned to an address with nothing be
 
 ### Runtime requirement
 
-Verified on rootful and rootless Docker, both on a host with a default-deny inbound firewall. If the sidecar cannot be started, does not report ready, or is not running when the sandbox is about to start, `exec` is refused rather than run unproxied.
+Verified on rootful Docker, on a host with a default-deny inbound firewall. If the sidecar cannot be started, does not report ready, or is not running when the sandbox is about to start, `exec` is refused rather than run unproxied.
 
 ### Known limit
 
