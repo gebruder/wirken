@@ -8,23 +8,73 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
-## [Unreleased]
+## [1.14.0] - 2026-08-04
 
 ### Added
 
-- Per-channel sandbox egress on `AgentConfig::channel_egress`, with
-  modes `none` (default), `allowlist`, and `open`. In the two granting
-  modes the `exec` container joins a per-exec internal Docker network
-  with no default route and ICC off, and reaches the network only
-  through a wirken-owned CONNECT proxy: `CONNECT` on 443 and plain
-  HTTP on 80, domain match only, IP literals refused, resolution done
-  by the proxy with non-global addresses dropped. Refusals emit
-  `SessionEvent::SandboxEgressDenied` with structural attribution.
-  `none` keeps the existing `--network none` container.
+- Per-channel sandbox egress, configured on `AgentConfig::channel_egress`
+  and set with `wirken agents set-egress`. Three modes: `none` (default,
+  `--network none`), `allowlist`, and `open`. In the granting modes the
+  `exec` container joins a per-exec internal network with no route off
+  the host and reaches the network only through a sidecar proxy
+  container on that same network. CONNECT on 443 and plain HTTP on 80
+  only, domain match only, IP literals refused, and resolved addresses
+  outside global unicast dropped.
 
-  Requires a runtime whose bridge gateway is a host interface (rootful
-  Docker); rootless runtimes fail closed with an error naming the
-  cause. See `docs/egress.md`.
+  The sidecar holds no policy: it asks the gateway over a per-exec Unix
+  socket and receives resolved addresses or a refusal, so policy, DNS,
+  and audit stay in the gateway and attribution cannot be forged. No
+  host port is involved, so a default-deny host firewall does not affect
+  the path. The sidecar runs the wirken binary itself, which requires
+  the statically linked build; `sandbox.json` gains `sidecar_binary` for
+  builds that are not.
+
+  Fail closed throughout: a sidecar that cannot start, never reports
+  ready, or is not running when the sandbox starts refuses the `exec`.
+
+  Verified live on rootful Docker with a default-deny inbound firewall.
+  See `docs/egress.md`.
+
+- `SessionEvent::SandboxEgressDenied`, carrying host, port, a closed-set
+  reason, the egress mode, and the agent, channel, adapter, and sender
+  the refusal belongs to. Forwarded to a typed SIEM by default.
+
+### Changed
+
+- Dependabot opens one pull request per ecosystem rather than one per
+  crate, with security updates in their own group. Sibling crates that
+  share an API surface do not compile when bumped separately, and each
+  merge of a lockfile-touching pull request invalidated the rest of the
+  queue.
+
+- The HTML tag filters describe their permitted-tag sets as allowlists.
+
+### Fixed
+
+- `docs/egress.md` counted three `EgressClient` paths; there are four.
+  `http_request` also routes through it.
+
+### Security
+
+- `wasmtime` and `wasmtime-wasi` to 47.0.3 for RUSTSEC-2026-0222 and
+  RUSTSEC-2026-0223. The previous 46.0.1 pin was inside the vulnerable
+  range for both, and 47.0.2 does not fix them.
+
+### Dependencies
+
+- `anyhow` 1.0.104, `rustls` 0.23.42, `slack-morphism` 2.24.0,
+  `ossf/scorecard-action` 2.4.4.
+
+### Deferred
+
+- Grouped cargo update (#204) carries major bumps of `curve25519-dalek`
+  and `ed25519-dalek`. Major bumps of the signing and vault crypto take
+  a soak cycle rather than riding a release.
+
+- Code-scanning alert 135 flags the SLSA reusable workflow in
+  `release.yml` as unpinned. The SLSA generator requires a semantic
+  version reference rather than a digest; pinning it by hash breaks
+  provenance verification. No action.
 
 ## [1.13.0] - 2026-07-24
 
