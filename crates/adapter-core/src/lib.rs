@@ -573,9 +573,9 @@ fn apply_inline_discord(line: &str) -> String {
 /// plus characters with strict positional rules and silently breaks
 /// on one missed character of user content. HTML mode also shares
 /// structure with the planned Matrix HTML path, so this converter is
-/// reusable with a different tag whitelist.
+/// reusable with a different tag allowlist.
 ///
-/// Tag whitelist (per Telegram Bot API):
+/// Tag allowlist (per Telegram Bot API):
 /// `<b>`, `<i>`, `<u>`, `<s>`, `<code>`, `<pre>`, `<blockquote>`,
 /// `<a href="...">`. The agent's outbound message must arrive at the
 /// adapter with `parse_mode = "HTML"` set on the send call —
@@ -743,7 +743,7 @@ impl OutboundFormatter for TelegramFormatter {
 
 /// Render markdown to Matrix's `org.matrix.custom.html` dialect.
 ///
-/// Matrix's tag whitelist is the most permissive of any channel
+/// Matrix's tag allowlist is the most permissive of any channel
 /// Wirken targets: real `<h1>`-`<h6>` headings, real `<ul>/<ol>/<li>`
 /// lists, real `<table>/<thead>/<tbody>/<tr>/<th>/<td>`, semantic
 /// `<strong>`/`<em>`/`<del>` for emphasis, `<hr>`, `<blockquote>`,
@@ -1025,7 +1025,7 @@ fn strip_numbered(line: &str) -> Option<&str> {
 
 /// Tag pairs the inline HTML tokenizer emits for each markdown
 /// marker. Different HTML dialects (Telegram, Matrix, …) want
-/// different tag names — Telegram's whitelist accepts `<b>`/`<i>`,
+/// different tag names — Telegram's allowlist accepts `<b>`/`<i>`,
 /// Matrix prefers semantic `<strong>`/`<em>`, etc. — so the dialect
 /// is parameterized rather than baked in.
 struct HtmlInlineTags {
