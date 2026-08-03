@@ -13,7 +13,7 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 
 use crate::error::AgentError;
-use crate::sandbox_egress::{SandboxEgressContext, SandboxEgressProxy};
+use crate::sandbox_egress::{SandboxEgressBroker, SandboxEgressContext};
 use crate::tool::ToolResult;
 
 const DEFAULT_IMAGE: &str = "debian:bookworm-slim";
@@ -241,6 +241,14 @@ pub struct SandboxConfig {
     /// Which interpreter the host-exec fallback uses when
     /// `SandboxMode::Off` is configured. Default `Auto`.
     pub shell: ShellMode,
+    /// Binary the egress sidecar container runs, bind-mounted into
+    /// it read-only. `None` means this process's own executable,
+    /// which is the shipping shape: wirken releases are statically
+    /// linked, so the gateway can mount itself into any image. A
+    /// dynamically linked development build cannot run in the
+    /// sandbox image, so this override exists for those builds and
+    /// for the live tests.
+    pub sidecar_binary: Option<std::path::PathBuf>,
 }
 
 impl Default for SandboxConfig {
@@ -251,6 +259,7 @@ impl Default for SandboxConfig {
             timeout_secs: 300,
             network: false,
             shell: ShellMode::Auto,
+            sidecar_binary: None,
         }
     }
 }
@@ -261,13 +270,41 @@ pub struct DockerSandbox {
     config: SandboxConfig,
 }
 
-/// The per-exec egress plumbing: the internal network the container
-/// joins and the proxy that is its only reachable endpoint. Held for
-/// the duration of one `exec` and torn down with it.
+/// The per-exec egress plumbing. Held for one `exec` and torn down
+/// with it.
+///
+/// Two networks, because the sandbox and its proxy need different
+/// reach. `internal_network` is `Internal`, so nothing on it has a
+/// route off the host; the sandbox joins only this one. The sidecar
+/// joins it too, plus `egress_network`, which is an ordinary bridge
+/// and is the only path to the internet. The sandbox therefore cannot
+/// reach anything except the sidecar, and the sidecar is the only
+/// thing that can reach out.
 struct EgressSetup {
-    network_name: String,
-    proxy: SandboxEgressProxy,
+    internal_network: String,
+    egress_network: String,
+    sidecar_id: String,
+    socket_dir: std::path::PathBuf,
+    broker: SandboxEgressBroker,
+    sidecar_ip: std::net::IpAddr,
 }
+
+impl EgressSetup {
+    /// Address the sandbox is handed as `HTTP_PROXY`: the sidecar's
+    /// address on the internal network. No host port is involved.
+    fn proxy_url(&self) -> String {
+        format!("http://{}:{}", self.sidecar_ip, SIDECAR_PORT)
+    }
+}
+
+/// Port the sidecar listens on inside the internal network. Fixed
+/// rather than ephemeral: it is a container-private port on a
+/// per-exec network, so there is nothing to collide with, and the
+/// sandbox needs to be told the address before the sidecar starts.
+const SIDECAR_PORT: u16 = 3128;
+
+/// How long to wait for the sidecar to report its listener is up.
+const SIDECAR_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl DockerSandbox {
     /// Connect to the Docker daemon.
@@ -305,9 +342,19 @@ impl DockerSandbox {
             Some(ctx) => Some(self.provision_egress(ctx).await?),
             None => None,
         };
-        let network_name = egress_setup.as_ref().map(|s| s.network_name.as_str());
+        // Fail closed one last time before the sandbox exists: if
+        // the sidecar died between reporting ready and now, refuse
+        // rather than start a sandbox whose only route is gone.
+        if let Some(setup) = egress_setup.as_ref()
+            && let Err(e) = self.assert_sidecar_running(&setup.sidecar_id).await
+        {
+            let setup = egress_setup.expect("checked above");
+            self.teardown_egress(setup).await;
+            return Err(e);
+        }
+        let network_name = egress_setup.as_ref().map(|s| s.internal_network.as_str());
         let env = egress_setup.as_ref().map(|s| {
-            let url = s.proxy.proxy_url();
+            let url = s.proxy_url();
             vec![
                 format!("HTTP_PROXY={url}"),
                 format!("HTTPS_PROXY={url}"),
@@ -468,123 +515,313 @@ impl DockerSandbox {
         })
     }
 
-    /// Create this exec's internal network and start its proxy.
+    /// Create this exec's two networks, start its sidecar proxy, and
+    /// bring up the host-side decision broker.
     ///
-    /// Every failure here is an error, never a downgrade to an
-    /// unproxied container: an operator who configured egress for a
-    /// channel must not silently get either wide-open networking or
-    /// a silently network-less sandbox because network creation
-    /// failed.
+    /// Every failure is an error, never a downgrade to an unproxied
+    /// container: an operator who configured egress must not silently
+    /// get either wide-open networking or a network-less sandbox.
     async fn provision_egress(
         &self,
         ctx: &SandboxEgressContext,
     ) -> Result<EgressSetup, AgentError> {
-        let network_name = format!("wirken-egress-{}", short_id());
+        // Resolve the sidecar binary before allocating anything.
+        // This is the one check that can fail on pure configuration,
+        // and doing it first means the fail-closed path leaves no
+        // network, socket, or container behind.
+        let sidecar_binary = self.sidecar_binary()?;
 
-        let mut options = std::collections::HashMap::new();
-        // Close inter-container reach. Each exec gets its own
-        // network so there is normally no sibling to reach, but a
-        // network is a namespace an operator or a future code path
-        // could attach something else to; ICC off makes the
-        // isolation a property of the network rather than of the
-        // current call pattern.
-        options.insert(
-            "com.docker.network.bridge.enable_icc".to_string(),
-            "false".to_string(),
-        );
-        // No NAT for this bridge. `Internal` already withholds the
-        // route; dropping masquerade means a rule added elsewhere
-        // cannot turn the bridge into a working exit on its own.
-        options.insert(
-            "com.docker.network.bridge.enable_ip_masquerade".to_string(),
-            "false".to_string(),
-        );
+        let id = short_id();
+        let internal_network = format!("wirken-egress-{id}");
+        let egress_network = format!("wirken-egress-out-{id}");
 
+        // Inter-container communication stays enabled on the internal
+        // network: the sandbox reaching its sidecar is the whole
+        // point, and that traffic is container-to-container. The
+        // isolation comes from the network being `Internal` and
+        // per-exec, so the only peer on it is this sandbox's own
+        // sidecar.
         self.client
             .create_network(NetworkCreateRequest {
-                name: network_name.clone(),
+                name: internal_network.clone(),
                 driver: Some("bridge".to_string()),
                 internal: Some(true),
                 attachable: Some(false),
                 enable_ipv6: Some(false),
-                options: Some(options),
                 ..Default::default()
             })
             .await
-            .map_err(|e| AgentError::Sandbox(format!("create egress network: {e}")))?;
+            .map_err(|e| AgentError::Sandbox(format!("create internal network: {e}")))?;
 
-        let gateway = match self.network_gateway(&network_name).await {
-            Ok(gw) => gw,
-            Err(e) => {
-                let _ = self.client.remove_network(&network_name).await;
-                return Err(e);
-            }
+        if let Err(e) = self
+            .client
+            .create_network(NetworkCreateRequest {
+                name: egress_network.clone(),
+                driver: Some("bridge".to_string()),
+                enable_ipv6: Some(false),
+                ..Default::default()
+            })
+            .await
+        {
+            let _ = self.client.remove_network(&internal_network).await;
+            return Err(AgentError::Sandbox(format!("create egress network: {e}")));
+        }
+
+        let cleanup_networks = || async {
+            let _ = self.client.remove_network(&internal_network).await;
+            let _ = self.client.remove_network(&egress_network).await;
         };
 
-        let proxy = match SandboxEgressProxy::bind(gateway, ctx.clone()).await {
-            Ok(p) => p,
+        // Per-exec directory holding the broker socket. Bind-mounted
+        // into the sidecar, so the sidecar reaches the host over the
+        // filesystem rather than the network and no host port exists.
+        let socket_dir = std::env::temp_dir().join(format!("wirken-egress-{id}"));
+        if let Err(e) = std::fs::create_dir_all(&socket_dir) {
+            cleanup_networks().await;
+            return Err(AgentError::Sandbox(format!(
+                "create egress socket dir {}: {e}",
+                socket_dir.display()
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o777));
+        }
+        let socket_path = socket_dir.join("egress.sock");
+
+        let mut broker = match SandboxEgressBroker::bind(socket_path.clone(), ctx.clone()).await {
+            Ok(b) => b,
             Err(e) => {
-                let _ = self.client.remove_network(&network_name).await;
-                // The usual cause is a rootless container runtime
-                // (rootless Podman), where the bridge lives in a
-                // separate network namespace and its gateway address
-                // is not a host interface, so a host-side listener
-                // cannot claim it. Named explicitly because the bare
-                // OS error ("cannot assign requested address") does
-                // not point anywhere useful.
+                cleanup_networks().await;
+                let _ = std::fs::remove_dir_all(&socket_dir);
                 return Err(AgentError::Sandbox(format!(
-                    "bind egress proxy on {gateway}: {e}. Sandbox egress modes \
-                     'allowlist' and 'open' need a container runtime whose bridge \
-                     gateway is a host interface (rootful Docker). Under a rootless \
-                     runtime, set the channel's egress mode to 'none'."
+                    "bind egress decision broker at {}: {e}",
+                    socket_path.display()
                 )));
             }
         };
 
+        let sidecar_name = format!("wirken-egress-sidecar-{id}");
+        let sidecar_config = ContainerCreateBody {
+            image: Some(self.config.image.clone()),
+            cmd: Some(vec![
+                "/wirken-sidecar".into(),
+                "egress-sidecar".into(),
+                "--socket".into(),
+                "/run/wirken-egress/egress.sock".into(),
+                "--listen".into(),
+                format!("0.0.0.0:{SIDECAR_PORT}"),
+            ]),
+            host_config: Some(HostConfig {
+                binds: Some(vec![
+                    format!("{}:/wirken-sidecar:ro", sidecar_binary.display()),
+                    format!("{}:/run/wirken-egress:rw", socket_dir.display()),
+                ]),
+                network_mode: Some(internal_network.clone()),
+                memory: Some(MEMORY_LIMIT),
+                pids_limit: Some(PIDS_LIMIT),
+                auto_remove: Some(false),
+                cap_drop: Some(vec!["ALL".into()]),
+                cap_add: Some(Vec::new()),
+                security_opt: Some(vec!["no-new-privileges:true".into()]),
+                readonly_rootfs: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let created = match self
+            .client
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(sidecar_name.clone()),
+                    platform: String::new(),
+                }),
+                sidecar_config,
+            )
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                cleanup_networks().await;
+                let _ = std::fs::remove_dir_all(&socket_dir);
+                return Err(AgentError::Sandbox(format!("create egress sidecar: {e}")));
+            }
+        };
+
+        // Second network for the sidecar's own outbound reach. The
+        // sandbox never joins it.
+        if let Err(e) = self
+            .client
+            .connect_network(
+                &egress_network,
+                bollard::models::NetworkConnectRequest {
+                    container: created.id.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            let _ = self.kill_and_remove(&created.id).await;
+            cleanup_networks().await;
+            let _ = std::fs::remove_dir_all(&socket_dir);
+            return Err(AgentError::Sandbox(format!(
+                "attach sidecar to egress network: {e}"
+            )));
+        }
+
+        if let Err(e) = self.client.start_container(&created.id, None).await {
+            let _ = self.kill_and_remove(&created.id).await;
+            cleanup_networks().await;
+            let _ = std::fs::remove_dir_all(&socket_dir);
+            return Err(AgentError::Sandbox(format!("start egress sidecar: {e}")));
+        }
+
+        if let Err(e) = broker.await_sidecar(SIDECAR_READY_TIMEOUT).await {
+            let logs = self.container_logs(&created.id).await;
+            let _ = self.kill_and_remove(&created.id).await;
+            cleanup_networks().await;
+            let _ = std::fs::remove_dir_all(&socket_dir);
+            return Err(AgentError::Sandbox(format!(
+                "egress sidecar never became ready: {e}. Sidecar output: {logs}"
+            )));
+        }
+
+        let sidecar_ip = match self.container_ip(&created.id, &internal_network).await {
+            Ok(ip) => ip,
+            Err(e) => {
+                let _ = self.kill_and_remove(&created.id).await;
+                cleanup_networks().await;
+                let _ = std::fs::remove_dir_all(&socket_dir);
+                return Err(e);
+            }
+        };
+
         tracing::info!(
-            "sandbox egress proxy listening on {} for network {network_name} (mode={})",
-            proxy.addr(),
+            "sandbox egress sidecar {sidecar_name} ready at {sidecar_ip}:{SIDECAR_PORT} \
+             on {internal_network} (mode={})",
             ctx.policy.mode.as_str(),
         );
+
         Ok(EgressSetup {
-            network_name,
-            proxy,
+            internal_network,
+            egress_network,
+            sidecar_id: created.id,
+            socket_dir,
+            broker,
+            sidecar_ip,
         })
     }
 
-    /// Read the gateway address Docker assigned to the network's
-    /// bridge. This is the only address the container can reach, and
-    /// therefore where the proxy must listen.
-    async fn network_gateway(&self, network_name: &str) -> Result<std::net::IpAddr, AgentError> {
-        let inspect = self
+    /// Path to the binary the sidecar container runs.
+    ///
+    /// Defaults to this process's own executable, which is the
+    /// shipping shape: wirken releases are statically linked, so the
+    /// gateway can mount itself into any image. A dynamically linked
+    /// development build cannot run in the sandbox image, so
+    /// `sandbox.json`'s `sidecar_binary` overrides the path, which is
+    /// also what lets the live tests exercise this path without a
+    /// release build.
+    fn sidecar_binary(&self) -> Result<std::path::PathBuf, AgentError> {
+        if let Some(p) = &self.config.sidecar_binary {
+            if !p.exists() {
+                return Err(AgentError::Sandbox(format!(
+                    "configured sidecar_binary {} does not exist; refusing to run \
+                     exec without an egress proxy",
+                    p.display()
+                )));
+            }
+            return Ok(p.clone());
+        }
+        std::env::current_exe().map_err(|e| {
+            AgentError::Sandbox(format!(
+                "cannot resolve own executable for the sidecar: {e}"
+            ))
+        })
+    }
+
+    /// Refuse if the sidecar is not running. Called immediately
+    /// before the sandbox is created.
+    async fn assert_sidecar_running(&self, id: &str) -> Result<(), AgentError> {
+        let running = self
             .client
-            .inspect_network(network_name, None)
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
             .await
-            .map_err(|e| AgentError::Sandbox(format!("inspect egress network: {e}")))?;
-        inspect
-            .ipam
-            .and_then(|ipam| ipam.config)
-            .and_then(|configs| {
-                configs
-                    .into_iter()
-                    .find_map(|c| c.gateway.and_then(|g| g.parse::<std::net::IpAddr>().ok()))
-            })
+            .ok()
+            .and_then(|c| c.state)
+            .and_then(|s| s.running)
+            .unwrap_or(false);
+        if running {
+            Ok(())
+        } else {
+            Err(AgentError::Sandbox(
+                "egress sidecar is not running; refusing to exec rather than run \
+                 without an egress proxy"
+                    .into(),
+            ))
+        }
+    }
+
+    /// The container's address on `network`, which is what the
+    /// sandbox is pointed at.
+    async fn container_ip(&self, id: &str, network: &str) -> Result<std::net::IpAddr, AgentError> {
+        self.client
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .ok()
+            .and_then(|c| c.network_settings)
+            .and_then(|n| n.networks)
+            .and_then(|nets| nets.get(network).and_then(|e| e.ip_address.clone()))
+            .and_then(|ip| ip.parse().ok())
             .ok_or_else(|| {
-                AgentError::Sandbox(format!(
-                    "egress network {network_name} reported no usable gateway address"
-                ))
+                AgentError::Sandbox(format!("egress sidecar reported no address on {network}"))
             })
     }
 
-    /// Drop the proxy and remove the network. Best-effort: the
-    /// container is already gone by this point, so a failure here
-    /// leaks a Docker object rather than leaving reach open.
+    /// Best-effort log capture, used to explain a sidecar that never
+    /// reported ready.
+    async fn container_logs(&self, id: &str) -> String {
+        let mut out = String::new();
+        let mut stream = self.client.logs(
+            id,
+            Some(LogsOptions {
+                stdout: true,
+                stderr: true,
+                ..Default::default()
+            }),
+        );
+        while let Some(Ok(chunk)) = stream.next().await {
+            out.push_str(&chunk.to_string());
+            if out.len() > 2_000 {
+                break;
+            }
+        }
+        out.trim().to_string()
+    }
+
+    /// Drop the broker, stop the sidecar, and remove both networks
+    /// and the socket directory. Best-effort: the sandbox is already
+    /// gone, so a failure here leaks a Docker object rather than
+    /// leaving reach open.
     async fn teardown_egress(&self, setup: EgressSetup) {
-        drop(setup.proxy);
-        if let Err(e) = self.client.remove_network(&setup.network_name).await {
+        self.kill_and_remove(&setup.sidecar_id).await;
+        drop(setup.broker);
+        for net in [&setup.internal_network, &setup.egress_network] {
+            if let Err(e) = self.client.remove_network(net).await {
+                tracing::warn!("could not remove egress network {net}: {e}");
+            }
+        }
+        if let Err(e) = std::fs::remove_dir_all(&setup.socket_dir) {
             tracing::warn!(
-                "could not remove egress network {}: {e}",
-                setup.network_name
+                "could not remove egress socket dir {}: {e}",
+                setup.socket_dir.display()
             );
         }
     }

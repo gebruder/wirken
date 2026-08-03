@@ -43,6 +43,19 @@ enum Commands {
     #[command(name = "mcp-proxy", hide = true)]
     McpProxy,
 
+    /// Run the sandbox egress proxy inside a sidecar container
+    /// (called by wirken). Holds no policy: every decision comes
+    /// from the gateway over the bind-mounted Unix socket.
+    #[command(name = "egress-sidecar", hide = true)]
+    EgressSidecar {
+        /// Path to the gateway decision socket, bind-mounted in.
+        #[arg(long)]
+        socket: std::path::PathBuf,
+        /// Address to accept sandbox connections on.
+        #[arg(long)]
+        listen: String,
+    },
+
     /// Manage messaging channels
     #[command(subcommand)]
     Channel(ChannelCommands),
@@ -994,6 +1007,13 @@ async fn main() -> Result<()> {
         Commands::Run { port } => commands::run::run(port).await,
         Commands::Adapter { channel } => commands::adapter::run(&channel).await,
         Commands::McpProxy => commands::mcp_proxy::run().await,
+        Commands::EgressSidecar { socket, listen } => {
+            let addr: std::net::SocketAddr = listen
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid --listen '{listen}': {e}"))?;
+            wirken_agent::sandbox_egress::run_sidecar(socket, addr).await?;
+            Ok(())
+        }
         Commands::Channel(cmd) => match cmd {
             ChannelCommands::Add {
                 channel,

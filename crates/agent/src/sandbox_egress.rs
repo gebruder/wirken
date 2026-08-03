@@ -365,92 +365,333 @@ impl SandboxEgressContext {
     }
 }
 
-/// A running per-exec proxy. Dropping the handle aborts the accept
-/// loop, so the listener's lifetime is exactly the `exec` call it
-/// was bound to.
-pub struct SandboxEgressProxy {
-    addr: SocketAddr,
-    task: tokio::task::JoinHandle<()>,
+/// Wire format between the sidecar and the host broker. One JSON
+/// object per line, request then reply, one exchange per connection.
+///
+/// The sidecar never decides anything. It reports the target it was
+/// asked for and receives either a set of already-resolved addresses
+/// or a refusal. Policy, DNS, the global-unicast filter, and the
+/// audit row all stay in the host process, so a compromised sidecar
+/// can lie about what it wants but cannot widen what it gets, and
+/// cannot forge the attribution on a denial row.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DecisionRequest {
+    pub host: String,
+    pub port: u16,
+    pub connect: bool,
 }
 
-impl SandboxEgressProxy {
-    /// Bind a listener on `bind_ip` (the internal network's gateway
-    /// address) and start serving. Port 0 lets the OS choose, so
-    /// concurrent `exec` calls never contend.
-    pub async fn bind(bind_ip: IpAddr, ctx: SandboxEgressContext) -> std::io::Result<Self> {
-        let listener = TcpListener::bind(SocketAddr::new(bind_ip, 0)).await?;
-        let addr = listener.local_addr()?;
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DecisionReply {
+    pub allow: bool,
+    /// Resolved, global-unicast `ip:port` candidates. Only set when
+    /// `allow`. The sidecar dials these verbatim and never resolves.
+    #[serde(default)]
+    pub addrs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SandboxEgressDenyReason>,
+}
+
+/// Greeting the sidecar sends once its listener is accepting. The
+/// host waits for it before starting the sandbox, so a sandbox is
+/// never startable against a proxy that is not yet serving.
+pub const SIDECAR_HELLO: &str = "hello";
+
+/// The host-side decision broker for one sandbox.
+///
+/// Listens on a Unix socket rather than a TCP port. A socket is a
+/// filesystem object, so nothing here is reachable over the network
+/// and a default-deny host firewall has no bearing on it. The socket
+/// is created per exec and bind-mounted into that exec's sidecar,
+/// which is what makes attribution structural: every request arriving
+/// on this socket belongs to the sandbox it was created for.
+pub struct SandboxEgressBroker {
+    socket_path: std::path::PathBuf,
+    task: tokio::task::JoinHandle<()>,
+    ready: tokio::sync::oneshot::Receiver<()>,
+}
+
+impl SandboxEgressBroker {
+    /// Bind the broker socket and start serving decisions.
+    pub async fn bind(
+        socket_path: std::path::PathBuf,
+        ctx: SandboxEgressContext,
+    ) -> std::io::Result<Self> {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = tokio::net::UnixListener::bind(&socket_path)?;
+        // The sidecar runs as a different uid inside the container;
+        // the socket has to be connectable by it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))?;
+        }
+        let (ready_tx, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
+            let mut ready_tx = Some(ready_tx);
             loop {
-                let Ok((stream, _peer)) = listener.accept().await else {
+                let Ok((stream, _)) = listener.accept().await else {
                     continue;
                 };
+                // The greeting arrives on its own connection and is
+                // the readiness signal.
                 let ctx = ctx.clone();
+                let tx = ready_tx.take();
                 tokio::spawn(async move {
-                    if let Err(e) = serve_connection(stream, ctx).await {
-                        tracing::debug!("sandbox egress connection ended: {e}");
+                    if let Err(e) = serve_decision(stream, ctx, tx).await {
+                        tracing::debug!("sandbox egress decision ended: {e}");
                     }
                 });
             }
         });
-        Ok(Self { addr, task })
+        Ok(Self {
+            socket_path,
+            task,
+            ready,
+        })
     }
 
-    /// The address to hand the container as `HTTP_PROXY`.
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
+    /// Wait for the sidecar to report its listener is accepting.
+    /// Timing out is a hard failure: the caller refuses the exec
+    /// rather than starting a sandbox whose only route may be dead.
+    pub async fn await_sidecar(&mut self, timeout: std::time::Duration) -> Result<(), String> {
+        match tokio::time::timeout(timeout, &mut self.ready).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err("broker stopped before the sidecar reported ready".into()),
+            Err(_) => Err(format!(
+                "sidecar did not report ready within {}s",
+                timeout.as_secs()
+            )),
+        }
     }
 
-    /// `http://host:port`, the proxy env-var form.
-    pub fn proxy_url(&self) -> String {
-        format!("http://{}", self.addr)
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.socket_path
     }
 }
 
-impl Drop for SandboxEgressProxy {
+impl Drop for SandboxEgressBroker {
     fn drop(&mut self) {
         self.task.abort();
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
-/// Serve one client connection: parse a single request head, apply
-/// policy, then either tunnel or forward.
-async fn serve_connection(mut stream: TcpStream, ctx: SandboxEgressContext) -> std::io::Result<()> {
+/// Serve one decision exchange, or consume the readiness greeting.
+async fn serve_decision(
+    stream: tokio::net::UnixStream,
+    ctx: SandboxEgressContext,
+    ready_tx: Option<tokio::sync::oneshot::Sender<()>>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let (rd, mut wr) = stream.into_split();
+    let mut lines = BufReader::new(rd).lines();
+    let Some(line) = lines.next_line().await? else {
+        return Ok(());
+    };
+
+    if line.trim() == SIDECAR_HELLO {
+        if let Some(tx) = ready_tx {
+            let _ = tx.send(());
+        }
+        return Ok(());
+    }
+    // A greeting we were not waiting for still must not be mistaken
+    // for a decision request.
+    let req: DecisionRequest = match serde_json::from_str(&line) {
+        Ok(r) => r,
+        Err(_) => {
+            let reply = DecisionReply {
+                allow: false,
+                addrs: Vec::new(),
+                reason: Some(SandboxEgressDenyReason::Malformed),
+            };
+            let _ = write_reply(&mut wr, &reply).await;
+            return Ok(());
+        }
+    };
+
+    let kind = if req.connect {
+        RequestKind::Connect
+    } else {
+        RequestKind::Plain
+    };
+
+    if let Err(reason) = check_target(&ctx.policy, &req.host, req.port, kind) {
+        ctx.record_denial(&req.host, req.port, reason);
+        let reply = DecisionReply {
+            allow: false,
+            addrs: Vec::new(),
+            reason: Some(reason),
+        };
+        return write_reply(&mut wr, &reply).await;
+    }
+
+    // Resolution happens here, never in the sandbox or the sidecar,
+    // and answers outside global unicast are dropped so an allowed
+    // name cannot be rebound onto loopback, private space, or the
+    // link-local metadata address.
+    let addrs = match tokio::net::lookup_host((req.host.as_str(), req.port)).await {
+        Ok(iter) => iter
+            .filter(|a| {
+                if is_global_unicast(a.ip()) {
+                    true
+                } else {
+                    tracing::warn!(
+                        "sandbox egress: dropping non-global address {} for allowed host {}",
+                        a.ip(),
+                        req.host
+                    );
+                    false
+                }
+            })
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>(),
+        Err(_) => Vec::new(),
+    };
+
+    if addrs.is_empty() {
+        ctx.record_denial(
+            &req.host,
+            req.port,
+            SandboxEgressDenyReason::ResolutionFailed,
+        );
+        let reply = DecisionReply {
+            allow: false,
+            addrs: Vec::new(),
+            reason: Some(SandboxEgressDenyReason::ResolutionFailed),
+        };
+        return write_reply(&mut wr, &reply).await;
+    }
+
+    write_reply(
+        &mut wr,
+        &DecisionReply {
+            allow: true,
+            addrs,
+            reason: None,
+        },
+    )
+    .await
+}
+
+async fn write_reply<W: tokio::io::AsyncWrite + Unpin>(
+    wr: &mut W,
+    reply: &DecisionReply,
+) -> std::io::Result<()> {
+    let mut body = serde_json::to_vec(reply).unwrap_or_default();
+    body.push(b'\n');
+    wr.write_all(&body).await
+}
+
+/// Run the sidecar forwarder. Executed inside the sidecar container
+/// by the hidden `egress-sidecar` subcommand.
+///
+/// This process holds no policy. For each connection it parses the
+/// request head, asks the host broker over the bind-mounted socket,
+/// and either refuses or dials the addresses the host returned.
+pub async fn run_sidecar(
+    socket_path: std::path::PathBuf,
+    listen: SocketAddr,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    // Announce readiness only once the listener is accepting, so the
+    // host never starts a sandbox against a proxy that is not up.
+    {
+        let mut s = tokio::net::UnixStream::connect(&socket_path).await?;
+        s.write_all(format!("{SIDECAR_HELLO}\n").as_bytes()).await?;
+        s.flush().await?;
+    }
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
+        let socket_path = socket_path.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sidecar_connection(stream, socket_path).await {
+                tracing::debug!("sidecar connection ended: {e}");
+            }
+        });
+    }
+}
+
+/// Ask the host broker for a decision on one target.
+async fn ask_broker(
+    socket_path: &std::path::Path,
+    req: &DecisionRequest,
+) -> std::io::Result<DecisionReply> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (rd, mut wr) = stream.into_split();
+    let mut body = serde_json::to_vec(req).unwrap_or_default();
+    body.push(b'\n');
+    wr.write_all(&body).await?;
+    wr.flush().await?;
+    let mut lines = BufReader::new(rd).lines();
+    let line = lines.next_line().await?.unwrap_or_default();
+    serde_json::from_str(&line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Serve one client connection inside the sidecar.
+async fn sidecar_connection(
+    mut stream: TcpStream,
+    socket_path: std::path::PathBuf,
+) -> std::io::Result<()> {
     let head = match tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream)).await {
         Ok(Ok(head)) => head,
         Ok(Err(reason)) => {
-            ctx.record_denial("<unparsed>", 0, reason);
             let _ = write_refusal(&mut stream, reason).await;
             return Ok(());
         }
-        Err(_) => {
-            ctx.record_denial("<unparsed>", 0, SandboxEgressDenyReason::Malformed);
-            return Ok(());
-        }
+        Err(_) => return Ok(()),
     };
 
     let request = match parse_request(&head.bytes[..head.head_len]) {
         Ok(r) => r,
         Err(reason) => {
-            ctx.record_denial("<unparsed>", 0, reason);
             let _ = write_refusal(&mut stream, reason).await;
             return Ok(());
         }
     };
 
-    if let Err(reason) = check_target(&ctx.policy, &request.host, request.port, request.kind) {
-        ctx.record_denial(&request.host, request.port, reason);
+    let reply = match ask_broker(
+        &socket_path,
+        &DecisionRequest {
+            host: request.host.clone(),
+            port: request.port,
+            connect: matches!(request.kind, RequestKind::Connect),
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        // The broker is the only authority. If it cannot be reached,
+        // nothing is authorized.
+        Err(e) => {
+            tracing::warn!("sidecar could not reach the decision broker: {e}");
+            let _ = write_refusal(&mut stream, SandboxEgressDenyReason::Malformed).await;
+            return Ok(());
+        }
+    };
+
+    if !reply.allow {
+        let reason = reply.reason.unwrap_or(SandboxEgressDenyReason::NotAllowed);
         let _ = write_refusal(&mut stream, reason).await;
         return Ok(());
     }
 
-    let upstream = match connect_upstream(&request.host, request.port).await {
-        Ok(s) => s,
-        Err(reason) => {
-            ctx.record_denial(&request.host, request.port, reason);
-            let _ = write_refusal(&mut stream, reason).await;
-            return Ok(());
+    let mut upstream = None;
+    for addr in &reply.addrs {
+        if let Ok(s) = TcpStream::connect(addr).await {
+            upstream = Some(s);
+            break;
         }
+    }
+    let Some(upstream) = upstream else {
+        let _ = write_refusal(&mut stream, SandboxEgressDenyReason::ResolutionFailed).await;
+        return Ok(());
     };
 
     match request.kind {
@@ -459,34 +700,6 @@ async fn serve_connection(mut stream: TcpStream, ctx: SandboxEgressContext) -> s
             forward_plain(stream, upstream, &request, &head.bytes[head.head_len..]).await
         }
     }
-}
-
-/// Resolve and connect, refusing any answer outside global unicast.
-async fn connect_upstream(host: &str, port: u16) -> Result<TcpStream, SandboxEgressDenyReason> {
-    let addrs = tokio::net::lookup_host((host, port))
-        .await
-        .map_err(|_| SandboxEgressDenyReason::ResolutionFailed)?;
-    let mut last_err = None;
-    let mut saw_candidate = false;
-    for addr in addrs {
-        if !is_global_unicast(addr.ip()) {
-            tracing::warn!(
-                "sandbox egress: dropping non-global address {} for allowlisted host {host}",
-                addr.ip(),
-            );
-            continue;
-        }
-        saw_candidate = true;
-        match TcpStream::connect(addr).await {
-            Ok(s) => return Ok(s),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    if !saw_candidate {
-        return Err(SandboxEgressDenyReason::ResolutionFailed);
-    }
-    let _ = last_err;
-    Err(SandboxEgressDenyReason::ResolutionFailed)
 }
 
 /// A buffered request head plus whatever followed it in the same

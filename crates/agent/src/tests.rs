@@ -8239,9 +8239,22 @@ mod sandbox_egress_live {
         let tmp = TempDir::new().unwrap();
         let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
         let handle = log.handle_for(SessionId::new("egress-live".to_string()));
+        // The sidecar runs this binary inside a container, so it has
+        // to be the statically linked build. A development build is
+        // dynamically linked and cannot run in the sandbox image.
+        let sidecar = musl_binary();
+        if !sidecar.exists() {
+            eprintln!(
+                "skipping: no static sidecar binary at {}; build it with \
+                 `cargo build -p wirken-cli --bin wirken --target x86_64-unknown-linux-musl`",
+                sidecar.display()
+            );
+            return None;
+        }
         let sandbox = match DockerSandbox::new(SandboxConfig {
             mode: SandboxMode::ExecOnly,
             image: image.to_string(),
+            sidecar_binary: Some(sidecar),
             ..Default::default()
         }) {
             Ok(s) => s,
@@ -8270,6 +8283,26 @@ mod sandbox_egress_live {
             handle,
             tmp,
         })
+    }
+
+    /// Where the statically linked sidecar binary is expected. The
+    /// workspace redirects CARGO_TARGET_DIR, so this follows the same
+    /// env var rather than assuming `./target`.
+    fn musl_binary() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("WIRKEN_SIDECAR_BINARY") {
+            return std::path::PathBuf::from(p);
+        }
+        // The test binary lives at <target>/debug/deps/<name>, and
+        // the workspace redirects <target> via cargo config rather
+        // than the environment, so derive it from our own path.
+        let exe = std::env::current_exe().unwrap_or_default();
+        let target_root = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default();
+        target_root.join("x86_64-unknown-linux-musl/debug/wirken")
     }
 
     fn allowlist(hosts: &[&str]) -> SandboxEgressPolicy {
@@ -8318,8 +8351,6 @@ mod sandbox_egress_live {
     /// fail to route. Uses a raw bash /dev/tcp socket, so the proxy env
     /// is not consulted at all.
     #[tokio::test]
-    #[ignore = "needs rootful Docker AND a host firewall that permits \
-     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
     async fn direct_connection_bypassing_proxy_env_cannot_route() {
         let Some(h) = harness(allowlist(&["example.com"]), BASH_IMAGE).await else {
             return;
@@ -8355,8 +8386,6 @@ mod sandbox_egress_live {
     /// #202 acceptance: IP-literal CONNECT refused before the allowlist
     /// is consulted.
     #[tokio::test]
-    #[ignore = "needs rootful Docker AND a host firewall that permits \
-     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
     async fn ip_literal_connect_is_refused() {
         let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
             return;
@@ -8383,8 +8412,6 @@ mod sandbox_egress_live {
     /// #202 acceptance: CONNECT to a non-443 port refused even for an
     /// allowlisted host.
     #[tokio::test]
-    #[ignore = "needs rootful Docker AND a host firewall that permits \
-     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
     async fn connect_to_non_443_port_is_refused_even_when_allowlisted() {
         let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
             return;
@@ -8412,8 +8439,6 @@ mod sandbox_egress_live {
     /// carries attribution taken from the listener binding rather than
     /// from anything the sandboxed process could influence.
     #[tokio::test]
-    #[ignore = "needs rootful Docker AND a host firewall that permits \
-     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
     async fn unlisted_host_is_refused_with_structural_attribution() {
         let Some(h) = harness(allowlist(&["allowed.example"]), CURL_IMAGE).await else {
             return;
@@ -8460,8 +8485,6 @@ mod sandbox_egress_live {
     /// #202 acceptance: mode `open` is recorded on the denial row, and
     /// open still bounds the port.
     #[tokio::test]
-    #[ignore = "needs rootful Docker AND a host firewall that permits \
-     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
     async fn open_mode_records_its_mode_on_denials() {
         let policy = SandboxEgressPolicy {
             mode: SandboxEgressMode::Open,
@@ -8494,11 +8517,156 @@ mod sandbox_egress_live {
         }
     }
 
+    /// Count leftover egress objects, so teardown can be asserted.
+    async fn egress_leftovers() -> (Vec<String>, Vec<String>) {
+        use bollard::Docker;
+        let d = Docker::connect_with_local_defaults().unwrap();
+        let nets = d
+            .list_networks(None::<bollard::query_parameters::ListNetworksOptions>)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|n| n.name)
+            .filter(|n| n.starts_with("wirken-egress"))
+            .collect();
+        let cs = d
+            .list_containers(Some(bollard::query_parameters::ListContainersOptions {
+                all: true,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|c| c.names)
+            .flatten()
+            .filter(|n| n.contains("wirken-egress-sidecar"))
+            .collect();
+        (nets, cs)
+    }
+
+    /// #202 acceptance, the positive half: an allowed domain resolves
+    /// on the host, connects through the sidecar, and returns real
+    /// bytes. Without this the refusal tests above would all pass on
+    /// a proxy that denies everything.
+    #[tokio::test]
+    async fn allowed_domain_connects_end_to_end() {
+        let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(
+                "command -v curl >/dev/null && echo ran=1; \
+                 code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 https://example.com/); \
+                 echo http=$code",
+                h.tmp.path(),
+                Some(&h.ctx),
+            )
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(
+            r.output.contains("http=200"),
+            "an allowlisted domain must connect end to end, got: {}",
+            r.output
+        );
+        assert!(
+            denials(&h).is_empty(),
+            "an allowed request must not record a denial, got {:?}",
+            reasons(&h)
+        );
+    }
+
+    /// #202 acceptance: tier none creates no sidecar and no network.
+    #[tokio::test]
+    async fn tier_none_creates_no_sidecar_and_no_network() {
+        let Some(h) = harness(SandboxEgressPolicy::denied(), CURL_IMAGE).await else {
+            return;
+        };
+        let (nets_before, cs_before) = egress_leftovers().await;
+        let r = h
+            .sandbox
+            .exec("echo ran=1; echo hello", h.tmp.path(), Some(&h.ctx))
+            .await
+            .expect("exec");
+        assert!(
+            r.output.contains("hello"),
+            "exec must still run: {}",
+            r.output
+        );
+        let (nets_after, cs_after) = egress_leftovers().await;
+        assert_eq!(
+            nets_before.len(),
+            nets_after.len(),
+            "tier none must not create an egress network"
+        );
+        assert_eq!(
+            cs_before.len(),
+            cs_after.len(),
+            "tier none must not create a sidecar"
+        );
+    }
+
+    /// #202 acceptance: a sidecar that cannot be started means exec is
+    /// refused, never run unproxied.
+    #[tokio::test]
+    async fn absent_sidecar_binary_refuses_exec() {
+        let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
+            return;
+        };
+        let sb = DockerSandbox::new(SandboxConfig {
+            mode: SandboxMode::ExecOnly,
+            image: CURL_IMAGE.to_string(),
+            sidecar_binary: Some("/nonexistent/wirken-sidecar".into()),
+            ..Default::default()
+        })
+        .expect("sandbox");
+        let err = sb
+            .exec("echo should-not-run", h.tmp.path(), Some(&h.ctx))
+            .await
+            .expect_err("exec must be refused when the sidecar cannot run");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sidecar"),
+            "refusal should name the sidecar, got: {msg}"
+        );
+    }
+
+    /// #202 acceptance: exit removes the sidecar, both networks, and
+    /// the socket directory.
+    #[tokio::test]
+    async fn teardown_leaves_no_orphans() {
+        let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
+            return;
+        };
+        let (nets_before, cs_before) = egress_leftovers().await;
+        let _ = h
+            .sandbox
+            .exec("echo ran=1; echo done", h.tmp.path(), Some(&h.ctx))
+            .await
+            .expect("exec");
+        let (nets_after, cs_after) = egress_leftovers().await;
+        assert_eq!(
+            nets_before, nets_after,
+            "both egress networks must be removed on exit"
+        );
+        assert_eq!(
+            cs_before, cs_after,
+            "the sidecar container must be removed on exit"
+        );
+        let stray: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("wirken-egress-"))
+            .collect();
+        assert!(stray.is_empty(), "socket dirs left behind: {stray:?}");
+    }
+
     /// With no egress context the container gets no networking at all,
     /// the default posture for every unconfigured channel.
     #[tokio::test]
-    #[ignore = "needs rootful Docker AND a host firewall that permits \
-     container->host traffic on the sandbox bridge; see gebruder/wirken#202"]
     async fn no_egress_context_means_no_networking() {
         let Some(h) = harness(SandboxEgressPolicy::denied(), CURL_IMAGE).await else {
             return;

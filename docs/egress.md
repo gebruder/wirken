@@ -76,9 +76,20 @@ The channel must already be bound to the agent; egress on an unbound channel wou
 
 ### Topology
 
-In `allowlist` and `open` modes the container joins a per-exec Docker network created `Internal` with `com.docker.network.bridge.enable_icc=false` and IP masquerade off. That network has no default route, so the only address the container can reach is the bridge gateway, where this exec's proxy listens. Inter-container reach is closed by the ICC option, and each exec gets its own network besides. A process that ignores `HTTP_PROXY` and opens a raw socket does not bypass the allowlist; it has nowhere to route.
+In `allowlist` and `open` modes the exec runs alongside a per-exec **sidecar proxy container**. Two networks are created per exec:
 
-The container has no working resolver: DNS is pinned to an address with nothing behind it, and the internal network cannot reach an external resolver in any case. The proxy resolves the hostname itself, after the allowlist decision.
+- an `Internal` bridge with no route off the host, which the sandbox joins and nothing else;
+- an ordinary bridge that only the sidecar joins, which is the sole path outward.
+
+The sandbox's only reachable peer is the sidecar, and the sidecar is the only thing that can reach the internet. A process that ignores `HTTP_PROXY` and opens a raw socket does not bypass the allowlist; it has nowhere to route.
+
+The sidecar holds no policy. For each request it asks the gateway over a per-exec Unix socket bind-mounted into it, and receives either already-resolved addresses or a refusal. Policy, DNS resolution, the global-unicast filter, and the audit row all stay in the gateway process, so a compromised sidecar can misreport what it wants but cannot widen what it gets, and cannot forge attribution.
+
+**No host port is involved anywhere.** The gateway listens on a Unix socket, which is a filesystem object, so a default-deny host firewall has no bearing on the path. This is verified on a host running ufw with default-deny inbound.
+
+The sidecar runs the wirken binary itself, bind-mounted read-only, so there is no second artifact to ship or version. That requires the gateway binary to be the statically linked build, which is how releases ship. A dynamically linked development build cannot run inside the sandbox image; `sandbox.json`'s `sidecar_binary` points at a static build for those cases.
+
+The sandbox has no working resolver: DNS is pinned to an address with nothing behind it, and it is handed the sidecar's address directly rather than a name.
 
 ### Properties
 
@@ -89,9 +100,7 @@ The container has no working resolver: DNS is pinned to an address with nothing 
 
 ### Runtime requirement
 
-`allowlist` and `open` need a container runtime whose bridge gateway is a host interface, which means rootful Docker. Under a rootless runtime the bridge sits in its own network namespace and the gateway address is not assignable on the host, so the proxy cannot bind it. That case fails closed: `exec` is refused with an error naming the cause, rather than running with unproxied networking. Rootless deployments should leave channels on `none`.
-
-Docker and Podman also spell the inter-container option differently (`com.docker.network.bridge.enable_icc=false` against Podman's `isolate`); only the Docker spelling is sent, and Podman rejects the unknown option at network-create time, which is the same fail-closed refusal.
+Verified on rootful Docker. If the sidecar cannot be started, does not report ready, or is not running when the sandbox is about to start, `exec` is refused rather than run unproxied.
 
 ### Known limit
 

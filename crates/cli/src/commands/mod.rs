@@ -93,6 +93,14 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         .get("network")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Path to the binary the egress sidecar container runs. Absent
+    // means this process's own executable, which is correct for a
+    // release build; a development build sets it explicitly.
+    let sidecar_binary = val
+        .get("sidecar_binary")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from);
     let shell_str = val.get("shell").and_then(|v| v.as_str()).unwrap_or("");
     let shell = if shell_str.is_empty() {
         ShellMode::default()
@@ -103,6 +111,7 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         mode,
         network,
         shell,
+        sidecar_binary,
         ..Default::default()
     }
 }
