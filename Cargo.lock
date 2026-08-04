@@ -478,28 +478,10 @@ version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d78e5a3368ae89b7cb68186411452b4b9fac8b41be9c19bf3f47c2d2c8e36e6b"
 dependencies = [
- "cap-primitives 4.0.2",
- "cap-std 4.0.2",
+ "cap-primitives",
+ "cap-std",
  "io-lifetimes 3.0.1",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "cap-primitives"
-version = "3.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6cf3aea8a5081171859ef57bc1606b1df6999df4f1110f8eef68b30098d1d3a"
-dependencies = [
- "ambient-authority",
- "fs-set-times",
- "io-extras 0.18.4",
- "io-lifetimes 2.0.4",
- "ipnet",
- "maybe-owned",
- "rustix",
- "rustix-linux-procfs",
- "windows-sys 0.59.0",
- "winx",
 ]
 
 [[package]]
@@ -510,7 +492,7 @@ checksum = "cdadbd7c002d3a484b35243669abdae85a0ebaded5a61117169dc3400f9a7ff0"
 dependencies = [
  "ambient-authority",
  "fs-set-times",
- "io-extras 0.19.0",
+ "io-extras",
  "io-lifetimes 3.0.1",
  "ipnet",
  "maybe-owned",
@@ -522,24 +504,12 @@ dependencies = [
 
 [[package]]
 name = "cap-std"
-version = "3.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6dc3090992a735d23219de5c204927163d922f42f575a0189b005c62d37549a"
-dependencies = [
- "cap-primitives 3.4.5",
- "io-extras 0.18.4",
- "io-lifetimes 2.0.4",
- "rustix",
-]
-
-[[package]]
-name = "cap-std"
 version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7281235d6e96d3544ca18bba9049be92f4190f8d923e3caef1b5f66cfa752608"
 dependencies = [
- "cap-primitives 4.0.2",
- "io-extras 0.19.0",
+ "cap-primitives",
+ "io-extras",
  "io-lifetimes 3.0.1",
  "rustix",
 ]
@@ -1103,7 +1073,24 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "digest 0.10.7",
- "fiat-crypto",
+ "fiat-crypto 0.2.9",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "curve25519-dalek-derive",
+ "digest 0.11.2",
+ "fiat-crypto 0.3.0",
+ "rand_core 0.10.0",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -1451,7 +1438,7 @@ dependencies = [
  "digest 0.10.7",
  "elliptic-curve",
  "rfc6979",
- "signature",
+ "signature 2.2.0",
  "spki",
 ]
 
@@ -1462,7 +1449,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8",
- "signature",
+ "signature 2.2.0",
+]
+
+[[package]]
+name = "ed25519"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
+dependencies = [
+ "signature 3.0.0",
 ]
 
 [[package]]
@@ -1471,11 +1467,25 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
- "curve25519-dalek",
- "ed25519",
- "rand_core 0.6.4",
+ "curve25519-dalek 4.1.3",
+ "ed25519 2.2.3",
  "serde",
  "sha2 0.10.9",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "ed25519-dalek"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
+dependencies = [
+ "curve25519-dalek 5.0.0",
+ "ed25519 3.0.0",
+ "rand_core 0.10.0",
+ "sha2 0.11.0",
+ "signature 3.0.0",
  "subtle",
  "zeroize",
 ]
@@ -1684,6 +1694,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
@@ -2483,16 +2499,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
  "hybrid-array",
-]
-
-[[package]]
-name = "io-extras"
-version = "0.18.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
-dependencies = [
- "io-lifetimes 2.0.4",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4001,7 +4007,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
- "signature",
+ "signature 2.2.0",
  "spki",
  "subtle",
  "zeroize",
@@ -4660,6 +4666,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+dependencies = [
+ "rand_core 0.10.0",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5091,7 +5106,7 @@ dependencies = [
  "digest 0.10.7",
  "dirs",
  "ecdsa",
- "ed25519-dalek",
+ "ed25519-dalek 2.2.0",
  "flate2",
  "futures-util",
  "hex",
@@ -5246,22 +5261,6 @@ dependencies = [
  "tokio-rustls 0.25.0",
  "tungstenite 0.21.0",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "rustls 0.23.42",
- "rustls-native-certs",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls 0.26.4",
- "tungstenite 0.29.0",
 ]
 
 [[package]]
@@ -5508,24 +5507,6 @@ dependencies = [
  "thiserror 1.0.69",
  "url",
  "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.4",
- "rustls 0.23.42",
- "rustls-pki-types",
- "sha1 0.10.6",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6174,7 +6155,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "cap-fs-ext",
- "cap-std 4.0.2",
+ "cap-std",
  "cfg-if",
  "futures",
  "io-lifetimes 3.0.1",
@@ -6623,7 +6604,7 @@ dependencies = [
 name = "wirken-adapter-google-chat"
 version = "1.14.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.0",
  "capnp",
  "chrono",
  "reqwest 0.13.4",
@@ -6705,7 +6686,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite 0.30.0",
  "tracing",
  "tracing-subscriber",
  "wirken-adapter-core",
@@ -6717,7 +6698,7 @@ name = "wirken-adapter-teams"
 version = "1.14.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.0",
  "capnp",
  "chrono",
  "reqwest 0.13.4",
@@ -6759,11 +6740,11 @@ dependencies = [
  "anyhow",
  "capnp",
  "chrono",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "subtle",
  "tempfile",
  "thiserror 2.0.18",
@@ -6780,14 +6761,14 @@ version = "1.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "bollard",
- "cap-std 3.4.5",
+ "cap-std",
  "capnp",
  "chrono",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "futures-util",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "lru",
  "rand 0.10.2",
  "reqwest 0.13.4",
@@ -6795,7 +6776,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tinfoil",
@@ -6818,14 +6799,14 @@ version = "1.14.0"
 dependencies = [
  "async-trait",
  "chrono",
- "ed25519-dalek",
- "hmac 0.12.1",
+ "ed25519-dalek 3.0.0",
+ "hmac 0.13.0",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6844,7 +6825,7 @@ dependencies = [
  "clap",
  "console",
  "dialoguer",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "libc",
  "openssl",
  "reqwest 0.13.4",
@@ -6853,7 +6834,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "tokio",
  "tracing",
@@ -6883,18 +6864,18 @@ version = "1.14.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.0",
  "capnp",
  "chrono",
  "cron",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "governor",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rusqlite",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6912,7 +6893,7 @@ dependencies = [
  "async-trait",
  "capnp",
  "capnpc",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "rand 0.10.2",
  "serde",
  "serde_json",
@@ -6930,14 +6911,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "oauth2",
  "open",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -6973,7 +6954,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -6995,7 +6976,7 @@ version = "1.14.0"
 dependencies = [
  "async-trait",
  "chrono",
- "ed25519-dalek",
+ "ed25519-dalek 3.0.0",
  "feed-rs",
  "futures-util",
  "hdbscan",
@@ -7004,7 +6985,7 @@ dependencies = [
  "secrecy 0.10.3",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

@@ -2800,7 +2800,7 @@ fn chain_hex(prev_hash: &str, leaf_hash: &str) -> String {
     hex_encode(&hasher.finalize())
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

@@ -141,7 +141,7 @@ fn hmac_signature_verification() {
     let body = r#"{"test":"data"}"#;
 
     // Compute expected signature
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
 
@@ -185,7 +185,7 @@ fn hmac_signature_non_hex_rejected() {
 
 #[test]
 fn hmac_signature_upper_case_hex_accepted() {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
 

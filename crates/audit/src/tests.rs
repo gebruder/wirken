@@ -1180,7 +1180,7 @@ mod session {
         let mut hasher = Sha256::new();
         hasher.update("".as_bytes());
         hasher.update(rows[0].leaf_hash.0.as_bytes());
-        let expected0 = format!("{:x}", hasher.finalize());
+        let expected0 = crate::session_log::hex_encode(&hasher.finalize());
         assert_eq!(rows[0].hash.0, expected0);
 
         // Second row: prev_hash is the previous chain hash.
@@ -1188,7 +1188,7 @@ mod session {
         let mut hasher = Sha256::new();
         hasher.update(rows[1].prev_hash.0.as_bytes());
         hasher.update(rows[1].leaf_hash.0.as_bytes());
-        let expected1 = format!("{:x}", hasher.finalize());
+        let expected1 = crate::session_log::hex_encode(&hasher.finalize());
         assert_eq!(rows[1].hash.0, expected1);
     }
 

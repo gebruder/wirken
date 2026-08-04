@@ -4,7 +4,7 @@
 //! over a Data Collection Rule), and generic webhook endpoints. Events
 //! are serialized as structured JSON and POSTed in batches.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::event::{ActorKind, AuditEvent};
