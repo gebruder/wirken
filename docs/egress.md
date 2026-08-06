@@ -116,6 +116,10 @@ The sandbox has no working resolver: DNS is pinned to an address with nothing be
 - **Resolved addresses are filtered.** After resolution, addresses outside global unicast are dropped: loopback, private, link-local (which covers the `169.254.169.254` metadata address), unique-local, and carrier-grade NAT. An allowlisted name whose DNS answer points inside the host's own network does not get connected to.
 - **Attribution is structural.** Each exec gets its own listener carrying the agent, channel, adapter, and sender it was bound to. No field on a denial row is parsed out of request content, so a sandboxed process cannot forge its own attribution.
 
+### Platform
+
+The decision broker listens on a Unix socket, so `allowlist` and `open` are unix-only. On other platforms `provision_egress` refuses the `exec` rather than running it unproxied, and records the refusal on the hash chain with reason `platform_unsupported`. Tier `none` is unaffected and works everywhere.
+
 ### Runtime requirement
 
 Verified on rootful Docker, on a host with a default-deny inbound firewall. If the sidecar cannot be started, does not report ready, or is not running when the sandbox is about to start, `exec` is refused rather than run unproxied.
@@ -126,7 +130,7 @@ Verified on rootful Docker, on a host with a default-deny inbound firewall. If t
 
 ### Audit
 
-Every refusal emits `SessionEvent::SandboxEgressDenied` on the agent's hash-chained session log, carrying the host, port, the mode in force, a closed-set reason (`mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`), and the structural attribution. The variant is forwarded to a typed SIEM by default. Allowed requests do not emit a row on this axis; the tool call itself is already on the chain.
+Every refusal emits `SessionEvent::SandboxEgressDenied` on the agent's hash-chained session log, carrying the host, port, the mode in force, a closed-set reason (`mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, `platform_unsupported`), and the structural attribution. The variant is forwarded to a typed SIEM by default. Allowed requests do not emit a row on this axis; the tool call itself is already on the chain.
 
 ## Cross-reference
 

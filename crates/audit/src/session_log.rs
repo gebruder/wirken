@@ -1323,6 +1323,11 @@ pub enum SandboxEgressDenyReason {
     Malformed,
     /// Host is on the allowlist but did not resolve.
     ResolutionFailed,
+    /// The platform has no transport for the decision broker, so no
+    /// egress proxy can be provisioned. The `exec` is refused rather
+    /// than run unproxied. Recorded per refused `exec`, not per
+    /// request, because nothing reaches a proxy in this case.
+    PlatformUnsupported,
 }
 
 /// Egress mode recorded on a [`SessionEvent::SandboxEgressDenied`]

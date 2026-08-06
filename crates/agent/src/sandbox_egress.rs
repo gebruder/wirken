@@ -48,11 +48,17 @@
 //! deliberately does not do.
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+#[cfg(unix)]
+use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::net::TcpListener;
+#[cfg(unix)]
+use tokio::net::TcpStream;
 
 use wirken_audit::{
     OwnSession, SandboxEgressDenyReason, SandboxEgressModeLabel, SessionEvent, SessionHandle,
@@ -62,9 +68,11 @@ use wirken_gateway::agent_config::ChannelEgress;
 
 use crate::skill_perms::{AllowSet, host_in_set};
 
+#[cfg(unix)]
 /// Cap on the request head the proxy will buffer before deciding.
 const MAX_HEAD: usize = 8 * 1024;
 
+#[cfg(unix)]
 /// How long a connection may take to deliver a complete request head.
 const HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -339,7 +347,7 @@ pub struct SandboxEgressContext {
 }
 
 impl SandboxEgressContext {
-    fn record_denial(&self, host: &str, port: u16, reason: SandboxEgressDenyReason) {
+    pub(crate) fn record_denial(&self, host: &str, port: u16, reason: SandboxEgressDenyReason) {
         tracing::warn!(
             "sandbox egress denied: host={host} port={port} reason={reason:?} \
              agent={} mode={}",
@@ -397,6 +405,7 @@ pub struct DecisionReply {
 /// never startable against a proxy that is not yet serving.
 pub const SIDECAR_HELLO: &str = "hello";
 
+#[cfg(unix)]
 /// The host-side decision broker for one sandbox.
 ///
 /// Listens on a Unix socket rather than a TCP port. A socket is a
@@ -411,6 +420,7 @@ pub struct SandboxEgressBroker {
     ready: tokio::sync::oneshot::Receiver<()>,
 }
 
+#[cfg(unix)]
 impl SandboxEgressBroker {
     /// Bind the broker socket and start serving decisions.
     pub async fn bind(
@@ -470,6 +480,7 @@ impl SandboxEgressBroker {
     }
 }
 
+#[cfg(unix)]
 impl Drop for SandboxEgressBroker {
     fn drop(&mut self) {
         self.task.abort();
@@ -477,6 +488,7 @@ impl Drop for SandboxEgressBroker {
     }
 }
 
+#[cfg(unix)]
 /// Serve one decision exchange, or consume the readiness greeting.
 async fn serve_decision(
     stream: tokio::net::UnixStream,
@@ -576,6 +588,7 @@ async fn serve_decision(
     .await
 }
 
+#[cfg(unix)]
 async fn write_reply<W: tokio::io::AsyncWrite + Unpin>(
     wr: &mut W,
     reply: &DecisionReply,
@@ -585,6 +598,7 @@ async fn write_reply<W: tokio::io::AsyncWrite + Unpin>(
     wr.write_all(&body).await
 }
 
+#[cfg(unix)]
 /// Run the sidecar forwarder. Executed inside the sidecar container
 /// by the hidden `egress-sidecar` subcommand.
 ///
@@ -616,6 +630,7 @@ pub async fn run_sidecar(
     }
 }
 
+#[cfg(unix)]
 /// Ask the host broker for a decision on one target.
 async fn ask_broker(
     socket_path: &std::path::Path,
@@ -634,6 +649,7 @@ async fn ask_broker(
     serde_json::from_str(&line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+#[cfg(unix)]
 /// Serve one client connection inside the sidecar.
 async fn sidecar_connection(
     mut stream: TcpStream,
@@ -702,6 +718,7 @@ async fn sidecar_connection(
     }
 }
 
+#[cfg(unix)]
 /// A buffered request head plus whatever followed it in the same
 /// read. The trailing bytes are the request body (or, for CONNECT,
 /// the start of the TLS handshake) and must be forwarded intact.
@@ -710,6 +727,7 @@ struct Head {
     head_len: usize,
 }
 
+#[cfg(unix)]
 async fn read_head(stream: &mut TcpStream) -> Result<Head, SandboxEgressDenyReason> {
     let mut bytes: Vec<u8> = Vec::with_capacity(1024);
     let mut chunk = [0u8; 1024];
@@ -734,11 +752,13 @@ async fn read_head(stream: &mut TcpStream) -> Result<Head, SandboxEgressDenyReas
     }
 }
 
+#[cfg(unix)]
 /// Index just past the terminating CRLFCRLF, if present.
 fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
+#[cfg(unix)]
 /// A parsed proxy request, reduced to what policy needs.
 struct ProxyRequest {
     kind: RequestKind,
@@ -748,6 +768,7 @@ struct ProxyRequest {
     rewritten_head: Vec<u8>,
 }
 
+#[cfg(unix)]
 /// Parse the request head. Only two shapes are accepted: CONNECT
 /// with an authority-form target, and a plain-HTTP verb with an
 /// absolute-form target. Origin-form targets are refused because a
@@ -841,6 +862,7 @@ fn parse_request(head: &[u8]) -> Result<ProxyRequest, SandboxEgressDenyReason> {
     })
 }
 
+#[cfg(unix)]
 /// Split an authority-form CONNECT target into host and port. The
 /// port is required: a bare host would have to default to something,
 /// and defaulting is how a port rule gets quietly widened.
@@ -868,6 +890,7 @@ fn split_authority(target: &str) -> Result<(String, u16), SandboxEgressDenyReaso
     Ok((host.to_string(), port))
 }
 
+#[cfg(unix)]
 /// Refusal sent back to the sandboxed client. Deliberately terse:
 /// the operator-facing detail is on the audit row, not in a body a
 /// sandboxed process could scrape for allowlist contents.
@@ -891,6 +914,7 @@ async fn write_refusal(
     stream.shutdown().await
 }
 
+#[cfg(unix)]
 /// CONNECT: acknowledge, then move bytes both ways without looking
 /// at them.
 async fn tunnel(
@@ -909,6 +933,7 @@ async fn tunnel(
         .map(|_| ())
 }
 
+#[cfg(unix)]
 /// Plain HTTP: send the origin-form head, then pump. Any bytes that
 /// arrived with the head are the request body and go out intact.
 async fn forward_plain(
@@ -1097,6 +1122,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn connect_parses_authority_form() {
         let head = b"CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
@@ -1106,6 +1132,7 @@ mod tests {
         assert_eq!(req.port, 443);
     }
 
+    #[cfg(unix)]
     #[test]
     fn connect_without_explicit_port_is_malformed() {
         let head = b"CONNECT api.example.com HTTP/1.1\r\n\r\n";
@@ -1115,6 +1142,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn plain_origin_form_is_refused() {
         // Origin form would force the proxy to trust the Host
@@ -1126,6 +1154,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn plain_absolute_form_parses_and_rewrites_to_origin_form() {
         let head = b"GET http://api.example.com/v1/x?q=1 HTTP/1.1\r\nHost: api.example.com\r\n\
@@ -1140,6 +1169,7 @@ mod tests {
         assert!(rewritten.ends_with("Connection: close\r\n\r\n"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn https_absolute_form_on_plain_path_is_refused() {
         let head = b"GET https://api.example.com/ HTTP/1.1\r\n\r\n";
@@ -1149,6 +1179,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn non_http_verb_is_refused() {
         let head = b"SSH api.example.com:22 HTTP/1.1\r\n\r\n";
@@ -1158,6 +1189,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn head_end_found_across_segment_boundary() {
         assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n\r\nbody"), Some(18));

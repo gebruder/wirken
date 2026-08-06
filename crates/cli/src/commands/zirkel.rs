@@ -19,7 +19,10 @@ use wirken_zirkel::binding::{
     Binding, load as load_binding_for, load_first as load_binding, record as record_binding,
     remove as remove_binding,
 };
+// Reached only from `push_digest_for_run`, which is unix-only.
+#[cfg(unix)]
 use wirken_zirkel::digest::{RenderOptions, load_run as load_digest_run, render as render_digest};
+#[cfg(unix)]
 use wirken_zirkel::digest_log::record_sent;
 use wirken_zirkel::embedding::DEFAULT_EMBEDDING_MODEL;
 use wirken_zirkel::orchestrator::{OrchestratorConfig, run as orchestrator_run};

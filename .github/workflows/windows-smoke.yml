@@ -2,7 +2,10 @@ name: Windows Smoke
 
 on:
   push:
-    branches: [main]
+    # Fix branches too: a Windows-only break has to be catchable
+    # before it reaches a tag, and the release build is otherwise the
+    # first signal.
+    branches: [main, 'fix/**']
   pull_request:
     branches: [main]
 
@@ -33,7 +36,20 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-ipc-smoke-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-workspace-check-${{ hashFiles('**/Cargo.lock') }}
+
+      # The whole workspace, not just the ipc crate. Windows-specific
+      # compile errors (a unix-only API reaching a non-unix build) live
+      # anywhere, and checking one crate leaves them to surface in the
+      # release build, which only runs on a tag.
+      #
+      # No --all-targets: this is parity with what the release build
+      # compiles, which is the class that burned v1.14.0 and v1.15.0.
+      # Test code across the adapter crates has never been compiled for
+      # Windows and does not pass yet; widening to --all-targets is
+      # tracked separately.
+      - name: Check workspace
+        run: cargo check --workspace
 
       - name: Build ipc crate
         run: cargo build -p wirken-ipc --tests

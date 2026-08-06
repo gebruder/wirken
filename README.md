@@ -24,7 +24,7 @@ Wirken sits between your people and the agent. A message comes in on a channel, 
 
 ### Prerequisites
 
-- A supported OS: Linux (x86_64 or aarch64), macOS (Intel or Apple Silicon), or Windows 11 (x86_64).
+- A supported OS: Linux (x86_64 or aarch64), macOS (Intel or Apple Silicon), or Windows 11 (x86_64). On Windows the gateway and channels run normally; sandbox egress is the exception, because its decision broker needs a Unix socket. A channel set to `allowlist` or `open` refuses `exec` there rather than running it unproxied, so Windows deployments leave sandbox egress at `none`.
 - At least one model to talk to. Wirken connects to any of:
   - **Ollama** (any local model it serves)
   - Any **OpenAI-compatible** endpoint

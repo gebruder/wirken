@@ -8,7 +8,35 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.15.1] - 2026-08-07
+
+### Fixed
+
+- The sandbox egress broker used `UnixListener` and `UnixStream`
+  without a `cfg(unix)` gate, so the workspace did not compile for
+  windows-msvc and the release build's Windows job failed. The
+  transport is now unix-only; policy resolution, deny reasons, and the
+  label schema are platform-neutral and stay shared. On other
+  platforms `provision_egress` refuses the `exec` rather than running
+  it unproxied, and records the refusal on the hash chain with the new
+  `platform_unsupported` deny reason.
+
+- Windows Smoke checked only the `wirken-ipc` crate, so a break
+  anywhere else first surfaced in the release build, which runs on a
+  tag. It now runs `cargo check --workspace`, which is parity with what
+  the release build compiles, and on fix branches as well as main.
+  Widening to `--all-targets` needs the adapter test code gated first
+  and is tracked in #213.
+
+### Changed
+
+- README states the Windows boundary: the gateway and channels run,
+  and sandbox egress is the exception.
+
 ## [1.15.0] - 2026-08-06
+
+This tag produced no release: the Windows job of the release build failed, so no artifacts were published. Fixed in 1.15.1. The tag is left in place and unmoved.
+
 
 ### Added
 
@@ -84,6 +112,9 @@ tagged.
   cycle.
 
 ## [1.14.0] - 2026-08-04
+
+This tag produced no release: the Windows job of the release build failed, so no artifacts were published. Fixed in 1.15.1. The tag is left in place and unmoved.
+
 
 ### Added
 

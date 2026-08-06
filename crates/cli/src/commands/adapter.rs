@@ -8,6 +8,7 @@ use wirken_adapter_imessage::IMessageAdapter;
 use wirken_adapter_matrix::MatrixAdapter;
 #[cfg(unix)]
 use wirken_adapter_signal::SignalAdapter;
+#[cfg(unix)]
 use wirken_adapter_signal::SignalAllowlist;
 use wirken_adapter_slack::SlackAdapter;
 use wirken_adapter_teams::TeamsAdapter;

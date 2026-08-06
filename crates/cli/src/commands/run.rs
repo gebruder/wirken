@@ -22,10 +22,17 @@ use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
+// Only `handle_orchestrator_push` uses these, and it is unix-only.
+#[cfg(unix)]
 use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
 use wirken_ipc::wirken_capnp::frame;
-use wirken_ipc::{AuthenticatedChannel, Principal, Stream, perform_gateway_handshake};
+use wirken_ipc::{AuthenticatedChannel, perform_gateway_handshake};
+// `Principal` wraps `geteuid` and `Stream` is the trait carrying
+// `peer_principal`; both are reached only from the unix
+// peer-credential accept paths.
 use wirken_ipc::{IpcFrameReader, IpcFrameWriter, split_stream};
+#[cfg(unix)]
+use wirken_ipc::{Principal, Stream};
 use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::config;
@@ -1583,6 +1590,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let hooks_accept_registry = hook_registry.clone();
     let hooks_accept_dispatcher = hook_dispatcher.clone();
     let hooks_accept_egress_dispatcher = egress_dispatcher.clone();
+    // Consumed only by the unix peer-credential branch below. Silenced
+    // for other platforms rather than underscored, so a genuinely
+    // unused binding still surfaces on unix, where it is used.
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let hooks_accept_audit = audit.clone();
     let hooks_accept_session_log = session_log.clone();
     let hooks_accept_handle = tokio::spawn(async move {

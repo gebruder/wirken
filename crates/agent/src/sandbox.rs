@@ -6,6 +6,7 @@ use bollard::Docker;
 use bollard::container::LogOutput;
 use bollard::models::ContainerCreateBody;
 use bollard::models::HostConfig;
+#[cfg(unix)]
 use bollard::models::NetworkCreateRequest;
 use bollard::query_parameters::{
     CreateContainerOptions, LogsOptions, RemoveContainerOptions, WaitContainerOptions,
@@ -13,7 +14,9 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 
 use crate::error::AgentError;
-use crate::sandbox_egress::{SandboxEgressBroker, SandboxEgressContext};
+#[cfg(unix)]
+use crate::sandbox_egress::SandboxEgressBroker;
+use crate::sandbox_egress::SandboxEgressContext;
 use crate::tool::ToolResult;
 
 const DEFAULT_IMAGE: &str = "debian:bookworm-slim";
@@ -270,6 +273,7 @@ pub struct DockerSandbox {
     config: SandboxConfig,
 }
 
+#[cfg(unix)]
 /// The per-exec egress plumbing. Held for one `exec` and torn down
 /// with it.
 ///
@@ -285,10 +289,15 @@ struct EgressSetup {
     egress_network: String,
     sidecar_id: String,
     socket_dir: std::path::PathBuf,
+    /// Unix-only: the decision broker listens on a Unix socket, and
+    /// `provision_egress` refuses before constructing this on other
+    /// platforms.
+    #[cfg(unix)]
     broker: SandboxEgressBroker,
     sidecar_ip: std::net::IpAddr,
 }
 
+#[cfg(unix)]
 impl EgressSetup {
     /// Address the sandbox is handed as `HTTP_PROXY`: the sidecar's
     /// address on the internal network. No host port is involved.
@@ -297,12 +306,14 @@ impl EgressSetup {
     }
 }
 
+#[cfg(unix)]
 /// Port the sidecar listens on inside the internal network. Fixed
 /// rather than ephemeral: it is a container-private port on a
 /// per-exec network, so there is nothing to collide with, and the
 /// sandbox needs to be told the address before the sidecar starts.
 const SIDECAR_PORT: u16 = 3128;
 
+#[cfg(unix)]
 /// How long to wait for the sidecar to report its listener is up.
 const SIDECAR_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -338,13 +349,22 @@ impl DockerSandbox {
         // before the container exists, so the container is never
         // startable without the enforcement point already up. Both
         // are torn down on every exit path below.
+        #[cfg(unix)]
         let egress_setup = match egress.filter(|c| c.policy.mode.needs_proxy()) {
             Some(ctx) => Some(self.provision_egress(ctx).await?),
             None => None,
         };
+        // Platforms without the broker transport refuse here. The
+        // refusal is recorded before it is returned; see
+        // `provision_egress`.
+        #[cfg(not(unix))]
+        if let Some(ctx) = egress.filter(|c| c.policy.mode.needs_proxy()) {
+            return Err(self.refuse_egress(ctx));
+        }
         // Fail closed one last time before the sandbox exists: if
         // the sidecar died between reporting ready and now, refuse
         // rather than start a sandbox whose only route is gone.
+        #[cfg(unix)]
         if let Some(setup) = egress_setup.as_ref()
             && let Err(e) = self.assert_sidecar_running(&setup.sidecar_id).await
         {
@@ -352,7 +372,11 @@ impl DockerSandbox {
             self.teardown_egress(setup).await;
             return Err(e);
         }
+        #[cfg(unix)]
         let network_name = egress_setup.as_ref().map(|s| s.internal_network.as_str());
+        #[cfg(not(unix))]
+        let network_name: Option<&str> = None;
+        #[cfg(unix)]
         let env = egress_setup.as_ref().map(|s| {
             let url = s.proxy_url();
             vec![
@@ -366,6 +390,8 @@ impl DockerSandbox {
                 "no_proxy=".to_string(),
             ]
         });
+        #[cfg(not(unix))]
+        let env: Option<Vec<String>> = None;
 
         let container_config = ContainerCreateBody {
             image: Some(self.config.image.clone()),
@@ -386,6 +412,7 @@ impl DockerSandbox {
         // Tear down unconditionally. The proxy dies with its handle;
         // the network needs an explicit removal, and leaking one per
         // exec would exhaust Docker's address pool.
+        #[cfg(unix)]
         if let Some(setup) = egress_setup {
             self.teardown_egress(setup).await;
         }
@@ -521,6 +548,33 @@ impl DockerSandbox {
     /// Every failure is an error, never a downgrade to an unproxied
     /// container: an operator who configured egress must not silently
     /// get either wide-open networking or a network-less sandbox.
+    #[cfg(not(unix))]
+    fn refuse_egress(&self, ctx: &SandboxEgressContext) -> AgentError {
+        // The broker carries decisions over a bind-mounted Unix
+        // socket, which has no equivalent here. Refuse rather than
+        // run the sandbox unproxied: a channel configured for egress
+        // must not silently get either wide-open networking or a
+        // silently network-less sandbox.
+        //
+        // The refusal goes on the hash chain, not just to stderr. An
+        // operator on this platform has a channel configured for
+        // egress that will never carry any, and that belongs in the
+        // audit log with the rest of the enforcement record. Recorded
+        // once per refused exec, since nothing reaches a proxy here.
+        ctx.record_denial(
+            "<no-egress-transport>",
+            0,
+            wirken_audit::SandboxEgressDenyReason::PlatformUnsupported,
+        );
+        AgentError::Sandbox(
+            "sandbox egress modes 'allowlist' and 'open' are unavailable on this platform: \
+             the decision broker needs a Unix socket. Refusing the exec rather than running \
+             it unproxied; set the channel's egress mode to 'none'"
+                .into(),
+        )
+    }
+
+    #[cfg(unix)]
     async fn provision_egress(
         &self,
         ctx: &SandboxEgressContext,
@@ -714,6 +768,7 @@ impl DockerSandbox {
         })
     }
 
+    #[cfg(unix)]
     /// Path to the binary the sidecar container runs.
     ///
     /// Defaults to this process's own executable, which is the
@@ -741,6 +796,7 @@ impl DockerSandbox {
         })
     }
 
+    #[cfg(unix)]
     /// Refuse if the sidecar is not running. Called immediately
     /// before the sandbox is created.
     async fn assert_sidecar_running(&self, id: &str) -> Result<(), AgentError> {
@@ -766,6 +822,7 @@ impl DockerSandbox {
         }
     }
 
+    #[cfg(unix)]
     /// The container's address on `network`, which is what the
     /// sandbox is pointed at.
     async fn container_ip(&self, id: &str, network: &str) -> Result<std::net::IpAddr, AgentError> {
@@ -785,6 +842,7 @@ impl DockerSandbox {
             })
     }
 
+    #[cfg(unix)]
     /// Best-effort log capture, used to explain a sidecar that never
     /// reported ready.
     async fn container_logs(&self, id: &str) -> String {
@@ -806,12 +864,14 @@ impl DockerSandbox {
         out.trim().to_string()
     }
 
+    #[cfg(unix)]
     /// Drop the broker, stop the sidecar, and remove both networks
     /// and the socket directory. Best-effort: the sandbox is already
     /// gone, so a failure here leaks a Docker object rather than
     /// leaving reach open.
     async fn teardown_egress(&self, setup: EgressSetup) {
         self.kill_and_remove(&setup.sidecar_id).await;
+        #[cfg(unix)]
         drop(setup.broker);
         for net in [&setup.internal_network, &setup.egress_network] {
             if let Err(e) = self.client.remove_network(net).await {

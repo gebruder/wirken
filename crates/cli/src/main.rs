@@ -1011,8 +1011,16 @@ async fn main() -> Result<()> {
             let addr: std::net::SocketAddr = listen
                 .parse()
                 .map_err(|e| anyhow::anyhow!("invalid --listen '{listen}': {e}"))?;
-            wirken_agent::sandbox_egress::run_sidecar(socket, addr).await?;
-            Ok(())
+            #[cfg(unix)]
+            {
+                wirken_agent::sandbox_egress::run_sidecar(socket, addr).await?;
+                Ok(())
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (socket, addr);
+                anyhow::bail!("egress-sidecar is not available on this platform")
+            }
         }
         Commands::Channel(cmd) => match cmd {
             ChannelCommands::Add {
