@@ -22,11 +22,17 @@ updates:
         patterns:
           - "*"
     ignore:
-      # rusqlite 0.40+ pulls libsqlite3-sys 0.38, whose build.rs uses
-      # cfg_select! (nightly-only) and breaks `cargo build` on stable
-      # with E0658. See issue #149. Reverted twice (09dafd9, 04e5665).
-      # Remove this ignore to re-attempt once cfg_select stabilizes on
-      # stable or libsqlite3-sys backs it out.
+      # rusqlite 0.40+ pulls libsqlite3-sys 0.38, whose build.rs calls
+      # cfg_select!. That was nightly-only when this ignore was added
+      # and broke `cargo build` on stable with E0658; reverted twice
+      # (09dafd9, 04e5665), both times after merging on green PR CI.
+      #
+      # cfg_select! is stable as of Rust 1.95.0, so the compile error is
+      # gone. The ignore stays because the bump now raises the effective
+      # MSRV to 1.95 while docs/getting-started.md promises 1.85+, and
+      # an auto-proposed bump would land that floor change unannounced.
+      # Remove it in the same commit that raises the documented floor.
+      # See issue #149.
       - dependency-name: "rusqlite"
         versions: [">= 0.40"]
   - package-ecosystem: github-actions
