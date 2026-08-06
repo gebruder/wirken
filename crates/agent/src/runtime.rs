@@ -223,6 +223,10 @@ pub struct Agent {
     /// the harness omits `spawn_subagent` from the LLM's tool list
     /// entirely so the LLM never tries to call it.
     allowed_subagents: BTreeMap<String, SubagentCeiling>,
+    /// Cross-channel memory store (#64). `None` leaves the memory
+    /// tools unconfigured, which is the posture for any agent the
+    /// gateway has not wired a store into.
+    memory_store: Option<std::sync::Arc<std::sync::Mutex<wirken_gateway::memory::MemoryStore>>>,
     /// Per-channel sandbox egress policy from this agent's
     /// `AgentConfig`. Empty means no channel has egress, which is
     /// the deny posture for every turn.
@@ -394,6 +398,7 @@ impl Agent {
             factory: None,
             allowed_subagents: BTreeMap::new(),
             channel_egress: BTreeMap::new(),
+            memory_store: None,
             subagent_depth: 0,
             auto_deny_above_tier: None,
             budget: None,
@@ -486,6 +491,7 @@ impl Agent {
             factory: None,
             allowed_subagents: BTreeMap::new(),
             channel_egress: BTreeMap::new(),
+            memory_store: None,
             subagent_depth: 0,
             auto_deny_above_tier: None,
             budget: None,
@@ -810,6 +816,54 @@ impl Agent {
     ) {
         self.channel_egress = channel_egress;
         self.install_sandbox_egress();
+    }
+
+    /// Install the cross-channel memory store. Called by the factory
+    /// at wake time.
+    pub fn set_memory_store(
+        &mut self,
+        store: std::sync::Arc<std::sync::Mutex<wirken_gateway::memory::MemoryStore>>,
+    ) {
+        self.memory_store = Some(store);
+        self.install_memory();
+    }
+
+    /// Build this turn's origin labels and hand them to the tool
+    /// registry with the store.
+    ///
+    /// Every label comes from the turn: the agent id, the channel the
+    /// turn arrived on, the adapter and sender from the inbound
+    /// context, and this session's id. None of it is reachable from
+    /// tool arguments, so a model cannot author its own provenance.
+    ///
+    /// A turn missing any of them installs nothing, which leaves the
+    /// memory tools unconfigured for that turn rather than writing a
+    /// partially labelled entry. Cron and CLI turns carry no channel
+    /// and land here.
+    fn install_memory(&self) {
+        let Some(store) = &self.memory_store else {
+            return;
+        };
+        let (Some(channel), Some(adapter_id), Some(sender_id)) = (
+            self.current_inbound.channel.clone(),
+            self.current_inbound.adapter_id.clone(),
+            self.current_inbound.sender_id.clone(),
+        ) else {
+            return;
+        };
+        let labels = wirken_gateway::memory::OriginLabels {
+            agent_id: self.id.clone(),
+            channel,
+            adapter_id,
+            sender_id,
+            origin_session_id: self.session_handle.id().to_string(),
+        };
+        self.tools.set_memory(crate::memory_tool::MemoryContext {
+            store: store.clone(),
+            labels,
+            log: self.session_log.clone(),
+            handle: self.session_handle.clone(),
+        });
     }
 
     /// Resolve the current turn's channel against the configured
@@ -1823,6 +1877,9 @@ impl Agent {
         // per channel and one agent can serve several. A turn with no
         // channel resolves to the deny posture.
         self.install_sandbox_egress();
+        // Same reasoning for memory: the origin labels are per turn,
+        // so they are rebuilt from this turn's inbound context.
+        self.install_memory();
 
         // agent-runtime-error-recovery: reset the per-turn
         // tool-validation counter so a tool that hit its retry cap on

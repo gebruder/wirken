@@ -569,6 +569,26 @@ fn extract_identity_for_sentinel(
             Some(agent_id.clone()),
         ),
         SessionEvent::HttpFetch { agent_id, .. } => (None, None, agent_id.clone()),
+        SessionEvent::MemoryEntryWritten {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            Some(adapter_id.clone()),
+            Some(sender_id.clone()),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::CrossChannelMemoryRead {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
         SessionEvent::SandboxEgressDenied {
             agent_id,
             adapter_id,
@@ -617,6 +637,17 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         } => format!("tool_result name={tool_name} success={success} agent={agent_id}"),
         SessionEvent::HttpFetch { host, outcome, .. } => {
             format!("http_fetch host={host} outcome={outcome:?}")
+        }
+        SessionEvent::CrossChannelMemoryRead {
+            from_channel,
+            to_channel,
+            entry_count,
+            ..
+        } => format!(
+            "cross_channel_memory_read from={from_channel} to={to_channel} entries={entry_count}"
+        ),
+        SessionEvent::MemoryEntryWritten { channel, .. } => {
+            format!("memory_entry_written channel={channel}")
         }
         SessionEvent::SandboxEgressDenied {
             host, port, reason, ..

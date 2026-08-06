@@ -78,6 +78,11 @@ impl GatewayConfig {
         self.data_dir.join("budget.db")
     }
 
+    /// Labelled cross-channel memory entries (#64).
+    pub fn memory_db_path(&self) -> PathBuf {
+        self.data_dir.join("memory.db")
+    }
+
     /// Budget configuration: a global default plus per-agent
     /// overrides. Absent means no budgets are configured (enforcement
     /// off).

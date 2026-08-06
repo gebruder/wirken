@@ -74,6 +74,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   block). An enforcement signal; carries no message body.
 /// - `SandboxEgressDenied`: sandbox egress proxy refusals. An
 ///   enforcement signal; carries a host and a closed-set reason.
+/// - `MemoryEntryWritten`, `CrossChannelMemoryRead`: memory
+///   provenance and trust-zone crossings. Labels and counts only; no
+///   entry content is on either row.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -112,6 +115,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::ToolOutputRedacted { .. }
             | SessionEvent::BudgetExceeded { .. }
             | SessionEvent::SandboxEgressDenied { .. }
+            | SessionEvent::MemoryEntryWritten { .. }
+            | SessionEvent::CrossChannelMemoryRead { .. }
     );
     if !in_default {
         return false;
@@ -173,6 +178,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpEntryRefused { .. } => "mcp_entry_refused",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
         SessionEvent::SandboxEgressDenied { .. } => "sandbox_egress_denied",
+        SessionEvent::MemoryEntryWritten { .. } => "memory_entry_written",
+        SessionEvent::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
         SessionEvent::ToolOutputRedacted { .. } => "tool_output_redacted",
     }
 }

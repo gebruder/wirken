@@ -88,6 +88,19 @@ pub enum Action {
     WasmSkillCall {
         skill: String,
     },
+    /// Reading an agent's memory entries that were written on a
+    /// different channel. Always Tier 3: channels are distinct trust
+    /// zones, so pulling one channel's history into another is a
+    /// boundary crossing and prompts on every use.
+    ///
+    /// Keyed by the channel being read *from*, so approving a read of
+    /// one channel's history does not approve any other. The
+    /// destination channel is not part of the key; it is the channel
+    /// the turn is already running on and is recorded on the audit
+    /// row instead.
+    CrossChannelMemoryRead {
+        from_channel: String,
+    },
 }
 
 impl std::fmt::Display for Action {
@@ -110,6 +123,7 @@ impl std::fmt::Display for Action {
             Action::McpToolCall { .. } => "mcp_tool_call",
             Action::UnknownTool { .. } => "unknown_tool",
             Action::WasmSkillCall { .. } => "wasm_skill_call",
+            Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
         };
         f.write_str(label)
     }
@@ -203,7 +217,8 @@ impl Action {
             | Action::CronCreate
             | Action::McpToolCall { .. }
             | Action::UnknownTool { .. }
-            | Action::WasmSkillCall { .. } => PermissionTier::Tier3,
+            | Action::WasmSkillCall { .. }
+            | Action::CrossChannelMemoryRead { .. } => PermissionTier::Tier3,
         }
     }
 
@@ -222,6 +237,9 @@ impl Action {
             Action::McpToolCall { tool } => format!("mcp:{tool}"),
             Action::UnknownTool { tool } => format!("tool:{tool}"),
             Action::WasmSkillCall { skill } => format!("wasm:{skill}"),
+            Action::CrossChannelMemoryRead { from_channel } => {
+                format!("cross_channel_memory:{from_channel}")
+            }
             other => format!("{other:?}"),
         }
     }
@@ -652,6 +670,17 @@ impl PermissionStore {
                 "refusing to store approval for '{action_key}': '{prefix}' is Tier 3 under the \
                  current allowlist and cannot be pre-approved. Tier 3 actions prompt on every \
                  use by design."
+            )));
+        }
+        // Same reasoning for the cross-channel memory key: the gate
+        // returns NeedsApproval for Tier 3 without consulting stored
+        // approvals, so accepting one here would leave the operator
+        // believing they had pre-approved a crossing that still
+        // prompts every time.
+        if action_key.starts_with("cross_channel_memory:") {
+            return Err(GatewayError::Config(format!(
+                "refusing to store approval for '{action_key}': reading another channel's \
+                 memory is Tier 3 and cannot be pre-approved. It prompts on every use by design."
             )));
         }
 
@@ -1186,6 +1215,7 @@ mod tier_tests {
                 Action::McpToolCall { .. } => "mcp_tool_call",
                 Action::UnknownTool { .. } => "unknown_tool",
                 Action::WasmSkillCall { .. } => "wasm_skill_call",
+                Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
             }
         }
         // Smoke a representative variant so the function isn't

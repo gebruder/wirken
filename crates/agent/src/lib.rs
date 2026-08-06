@@ -16,6 +16,7 @@ pub mod keycloak_identity;
 pub mod llm;
 pub mod llm_stream;
 pub mod mcp;
+pub mod memory_tool;
 pub mod persona;
 pub mod preset;
 pub mod rate_limit;

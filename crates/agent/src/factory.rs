@@ -224,6 +224,11 @@ pub struct AgentFactory {
     /// permission check. Shared across every waked Agent because org
     /// policy is a gateway-wide setting, not a per-agent one.
     org_permissions: Option<Arc<OrgPermissions>>,
+    /// Cross-channel memory store (#64), shared by every agent this
+    /// factory wakes. Interior-mutable and set after construction,
+    /// mirroring the other gateway-wide injections. `None` leaves the
+    /// memory tools unconfigured.
+    memory_store: std::sync::RwLock<Option<Arc<StdMutex<wirken_gateway::memory::MemoryStore>>>>,
     /// External veto-hook dispatcher. Defaults to `NoopDispatcher`
     /// so factories built without a hook layer pay no cost. The CLI
     /// runs `attach_veto_dispatcher` after constructing the factory
@@ -343,6 +348,7 @@ impl AgentFactory {
             egress_dispatcher: std::sync::RwLock::new(Arc::new(
                 wirken_gateway::egress_dispatcher::NoopEgressDispatcher,
             )),
+            memory_store: std::sync::RwLock::new(None),
             credential_resolver: std::sync::RwLock::new(None),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
@@ -428,6 +434,14 @@ impl AgentFactory {
     /// active set. Subsequent calls to [`Self::wake`] inject this
     /// dispatcher into every constructed Agent. Idempotent; the
     /// last writer wins.
+    /// Install the cross-channel memory store. Called by the CLI
+    /// after opening it, before any agent is woken.
+    pub fn attach_memory_store(&self, store: Arc<StdMutex<wirken_gateway::memory::MemoryStore>>) {
+        if let Ok(mut g) = self.memory_store.write() {
+            *g = Some(store);
+        }
+    }
+
     pub fn attach_veto_dispatcher(
         &self,
         dispatcher: Arc<dyn wirken_gateway::hook_dispatcher::VetoDispatcher>,
@@ -615,6 +629,9 @@ impl AgentFactory {
         agent.attach_factory(self.weak());
         agent.attach_subagent_ceilings(cfg.allowed_subagents.clone());
         agent.set_channel_egress(cfg.channel_egress.clone());
+        if let Some(store) = self.memory_store.read().ok().and_then(|g| g.clone()) {
+            agent.set_memory_store(store);
+        }
         for interceptor in &cfg.extra_interceptors {
             agent.attach_interceptor(interceptor.clone());
         }

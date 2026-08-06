@@ -107,6 +107,12 @@ pub struct ToolRegistry {
     /// session log at attach time. `None` disables the extra row (the
     /// generic ToolResult row still lands).
     http_audit: RwLock<Option<crate::http_tool::HttpAuditCtx>>,
+    /// Cross-channel memory (#64): the entry store plus the origin
+    /// labels this agent's writes are stamped with. `None` leaves the
+    /// three memory tools out of the LLM's tool list entirely, which
+    /// is the posture for any agent the gateway has not wired a store
+    /// into.
+    memory: RwLock<Option<crate::memory_tool::MemoryContext>>,
     /// Egress policy and attribution for sandboxed `exec`, resolved
     /// from the bound channel's `AgentConfig` entry. `None` is the
     /// deny-everything posture: the container runs with no
@@ -236,6 +242,68 @@ impl ToolRegistry {
         );
 
         tools.insert(
+            "memory_write".into(),
+            ToolDef {
+                name: "memory_write".into(),
+                description: "Record a note in this agent's memory for later recall. \
+                              The note is labelled with the current channel automatically."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "What to remember"
+                        }
+                    },
+                    "required": ["content"]
+                }),
+            },
+        );
+
+        tools.insert(
+            "memory_read".into(),
+            ToolDef {
+                name: "memory_read".into(),
+                description: "Read notes this agent recorded on the current channel.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum entries to return (default 20)"
+                        }
+                    }
+                }),
+            },
+        );
+
+        tools.insert(
+            "memory_read_channel".into(),
+            ToolDef {
+                name: "memory_read_channel".into(),
+                description: "Read notes this agent recorded on a DIFFERENT channel. \
+                              Channels are separate trust zones, so this requires \
+                              operator approval every time."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel": {
+                            "type": "string",
+                            "description": "Channel to read from, e.g. 'signal'"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum entries to return (default 20)"
+                        }
+                    },
+                    "required": ["channel"]
+                }),
+            },
+        );
+
+        tools.insert(
             "sqlite_query".into(),
             ToolDef {
                 name: "sqlite_query".into(),
@@ -358,6 +426,7 @@ impl ToolRegistry {
             credential_resolver: RwLock::new(None),
             http_audit: RwLock::new(None),
             sandbox_egress: RwLock::new(None),
+            memory: RwLock::new(None),
         })
     }
 
@@ -373,6 +442,15 @@ impl ToolRegistry {
     /// agent at `attach_skills` time with its own session log/handle/id.
     pub fn set_http_audit(&self, ctx: crate::http_tool::HttpAuditCtx) {
         if let Ok(mut g) = self.http_audit.write() {
+            *g = Some(ctx);
+        }
+    }
+
+    /// Install the cross-channel memory store and this turn's origin
+    /// labels. Called per turn, because the labels are per turn.
+    /// Leaving it unset means the memory tools are unavailable.
+    pub fn set_memory(&self, ctx: crate::memory_tool::MemoryContext) {
+        if let Ok(mut g) = self.memory.write() {
             *g = Some(ctx);
         }
     }
@@ -521,6 +599,16 @@ impl ToolRegistry {
             "web_search" => self.web_search(&args).await,
             "http_request" => self.http_request(&args).await,
             "sqlite_query" => self.sqlite_query(&args).await,
+            "memory_write" | "memory_read" | "memory_read_channel" => {
+                let ctx = self.memory.read().ok().and_then(|g| g.clone());
+                match ctx {
+                    Some(ctx) => crate::memory_tool::execute(&ctx, name, &args).await,
+                    None => Ok(ToolResult {
+                        output: "memory is not configured for this agent".into(),
+                        success: false,
+                    }),
+                }
+            }
             "generate_image" => self.generate_image(&args).await,
             _ => Err(AgentError::ToolNotFound(name.to_string())),
         }
@@ -1476,6 +1564,23 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         // the same read tier as workspace files: the tool opens the DB
         // read-only and is unavailable when no DB path is bound.
         "sqlite_query" => Some(Action::WorkspaceFileAccess),
+        // Cross-channel memory (#64). Writing, and reading this
+        // channel's own entries, stay at the workspace read/write
+        // tier: neither crosses a trust zone.
+        "memory_write" | "memory_read" => Some(Action::WorkspaceFileAccess),
+        // Reading another channel's entries is a trust-zone crossing
+        // and is Tier 3, keyed by the channel being read *from* so
+        // approving one channel's history approves no other. A
+        // missing or empty `channel` argument yields an empty key,
+        // which is not a channel any entry carries, so it denies
+        // rather than widening.
+        "memory_read_channel" => Some(Action::CrossChannelMemoryRead {
+            from_channel: args
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        }),
         "generate_image" => Some(Action::NetworkRequest {
             domain: "api.openai.com".to_string(),
         }),

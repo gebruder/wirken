@@ -1263,6 +1263,43 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// A memory entry was written, carrying the origin labels it was
+    /// stamped with at insert. Every entry has all of them; an entry
+    /// missing any label is refused at the store, so this row is a
+    /// complete provenance record rather than a best-effort one.
+    MemoryEntryWritten {
+        entry_id: String,
+        /// Routing channel the entry originated on.
+        channel: String,
+        /// Adapter identity that delivered the turn.
+        adapter_id: String,
+        /// Platform-scoped principal. A Slack uid and a Signal number
+        /// are different values for the same human; wirken has no
+        /// identity linking to join them, so this is not a person.
+        sender_id: String,
+        agent_id: String,
+        /// Full session id the entry was written under, so an auditor
+        /// can pin the entry to the hash chain that recorded it. The
+        /// other labels do not carry the conversation segment.
+        origin_session_id: String,
+    },
+    /// An agent read memory entries written on a different channel.
+    /// Emitted after the Tier 3 gate admits the call, once per read,
+    /// carrying both ends of the crossing.
+    CrossChannelMemoryRead {
+        /// Channel whose entries were read.
+        from_channel: String,
+        /// Channel the reading turn is running on.
+        to_channel: String,
+        /// How many entries were returned. Zero is a legitimate
+        /// outcome and still records the crossing was attempted.
+        entry_count: u64,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
 }
 
 /// Why the sandbox egress proxy refused a request. A closed set so

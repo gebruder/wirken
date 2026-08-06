@@ -191,6 +191,30 @@ The per-session SHA-256 hash chain gives tamper evidence for every event. The ch
 
 **External consumers:** The webhook target is one of two subscription surfaces for out-of-process consumers; the observe-hook IPC pipe carries the same `SessionEvent` payloads under an Ed25519 handshake. See [`external-consumers.md`](external-consumers.md).
 
+### Cross-channel memory
+
+**Crate:** `wirken-gateway` / `wirken-agent` | **Files:** `crates/gateway/src/memory.rs`, `crates/agent/src/memory_tool.rs`
+
+Continuity between channels is carried by labelled entries, not by replaying other channels' session logs. Replay would import history written before these labels existed, so provenance would be incomplete from the first read.
+
+Every entry carries five origin labels stamped at insert: `channel`, `adapter_id`, `sender_id`, `agent_id`, and `origin_session_id`. `MemoryStore::write` refuses an entry with any label empty and is the only insert path, and every column is `NOT NULL`. Nothing backfills. The labels are built by the runtime from the turn's inbound context and are not reachable from tool arguments, so a model cannot author its own provenance. A turn missing a channel, adapter, or sender installs no memory context at all, which leaves the tools unconfigured for that turn rather than writing a partial entry; cron and CLI turns land there.
+
+`origin_session_id` is carried because the other labels reconstruct `{agent_id}/{channel}/…` but not the conversation segment. Without it an entry narrows only to "some conversation on this channel with this agent"; with it the entry pins to the hash chain that recorded its creation.
+
+Three tools, registered in `tool_to_action` so none reaches the gate as an unregistered name:
+
+| Tool | Action | Tier |
+|---|---|---|
+| `memory_write` | `WorkspaceFileAccess` | 1 |
+| `memory_read` | `WorkspaceFileAccess` | 1 |
+| `memory_read_channel` | `CrossChannelMemoryRead { from_channel }` | 3 |
+
+Writing, and reading the current channel's own entries, cross no trust zone and stay at the workspace tier. Reading another channel's entries is a crossing and is Tier 3: it prompts on every use and cannot be pre-approved, and `approve_by_key` refuses a `cross_channel_memory:` key outright so an operator cannot come to believe otherwise. The key carries the channel being read *from*, so approving one channel's history approves no other; the destination is the channel the turn already runs on and is recorded on the audit row instead. A missing `channel` argument produces an empty key, which matches no stored channel and therefore returns nothing rather than widening.
+
+Two events land on the hash chain: `MemoryEntryWritten` carries the full label set, and `CrossChannelMemoryRead` carries both ends of the crossing plus the entry count. The crossing event is emitted even when the read returns nothing, because the crossing was still made.
+
+Reads are scoped to one agent. **Cross-channel means another channel of the same agent, never another person.** `(adapter_id, sender_id)` is a *platform-scoped* principal, not a person: a Slack uid and a Signal number are different values for the same human, and wirken has no identity linking to join them. Per-channel process isolation is untouched — continuity is mediated entirely through the gateway store, with no adapter-to-adapter path and no shared state between channel processes.
+
 ### Veto and egress hooks
 
 **Crate:** `wirken-gateway` | **Files:** `crates/gateway/src/hook_dispatcher.rs`, `crates/gateway/src/egress_dispatcher.rs`

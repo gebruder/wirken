@@ -1171,6 +1171,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         Arc::new(wirken_gateway::egress_dispatcher::EgressDispatcher::default());
     factory.attach_egress_dispatcher(egress_dispatcher.clone());
 
+    // --- cross-channel memory (#64) ---
+    // Opening the store is what makes the memory tools available at
+    // all. If it cannot be opened the gateway still starts; the tools
+    // report themselves unconfigured rather than the process failing
+    // over a feature the operator may not use.
+    match wirken_gateway::memory::MemoryStore::open(&cfg.memory_db_path()) {
+        Ok(store) => factory.attach_memory_store(Arc::new(std::sync::Mutex::new(store))),
+        Err(e) => tracing::warn!(
+            "cross-channel memory unavailable: could not open {}: {e}",
+            cfg.memory_db_path().display()
+        ),
+    }
+
     // --- http_request credential resolver ---
     //
     // Open the vault as a long-lived resolver so the `http_request`

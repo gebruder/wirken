@@ -8689,3 +8689,88 @@ mod sandbox_egress_live {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-channel memory (#64). The classifier registration is the load-
+// bearing part: an unregistered memory tool would reach the runtime gate
+// as `UnknownTool`, which default-denies but reports the wrong action and
+// gives the operator the wrong prompt. These pin the registration and the
+// tier together with the audit event variants.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn memory_tools_are_registered_in_the_classifier() {
+    use crate::tool::tool_to_action;
+
+    // None of the three may fall through to the residual `None` that
+    // the runtime turns into `UnknownTool`.
+    for (tool, args) in [
+        ("memory_write", serde_json::json!({"content": "x"})),
+        ("memory_read", serde_json::json!({})),
+        (
+            "memory_read_channel",
+            serde_json::json!({"channel": "signal"}),
+        ),
+    ] {
+        assert!(
+            tool_to_action(tool, &args).is_some(),
+            "{tool} must be registered, not left to the unregistered path"
+        );
+    }
+}
+
+#[test]
+fn cross_channel_read_is_tier3_keyed_by_source_channel() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let action = tool_to_action(
+        "memory_read_channel",
+        &serde_json::json!({"channel": "signal"}),
+    )
+    .expect("registered");
+    assert!(
+        matches!(&action, Action::CrossChannelMemoryRead { from_channel } if from_channel == "signal")
+    );
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+    // Keyed by source channel, so approving one crossing approves no
+    // other.
+    assert_eq!(action.approval_key(), "cross_channel_memory:signal");
+    let other = tool_to_action(
+        "memory_read_channel",
+        &serde_json::json!({"channel": "slack"}),
+    )
+    .expect("registered");
+    assert_ne!(action.approval_key(), other.approval_key());
+}
+
+#[test]
+fn same_channel_memory_stays_below_tier3() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::PermissionTier;
+
+    for tool in ["memory_write", "memory_read"] {
+        let action =
+            tool_to_action(tool, &serde_json::json!({"content": "x"})).expect("registered");
+        assert_ne!(
+            action.tier(),
+            PermissionTier::Tier3,
+            "{tool} does not cross a trust zone and must not prompt like one"
+        );
+    }
+}
+
+#[test]
+fn cross_channel_read_without_a_channel_argument_does_not_widen() {
+    use crate::tool::tool_to_action;
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    // A missing argument yields an empty key rather than falling
+    // through to something broader. Empty matches no stored channel,
+    // so the read returns nothing.
+    let action = tool_to_action("memory_read_channel", &serde_json::json!({})).expect("registered");
+    assert!(
+        matches!(&action, Action::CrossChannelMemoryRead { from_channel } if from_channel.is_empty())
+    );
+    assert_eq!(action.tier(), PermissionTier::Tier3);
+}
