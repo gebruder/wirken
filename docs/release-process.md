@@ -17,6 +17,7 @@ details live in [release-signing.md](release-signing.md).
   actual path.
 - OpenSSH 8.1+ (`ssh-keygen -Y` support).
 - `cargo`, `rustfmt`, `clippy`.
+- `cargo-sweep` (`cargo install cargo-sweep`), for the reclaim step below.
 - `REPO` environment variable pointing at your local `wirken` checkout:
   ```bash
   export REPO=~/code/wirken   # wherever you cloned it
@@ -47,6 +48,22 @@ Run top to bottom. Replace `0.7.4` with the target version.
 
 1. **Clean main, run pre-flight.** All must pass; fix on a branch and
    merge before tagging.
+
+   Reclaim build-cache space first. The pre-flight below compiles the
+   whole workspace twice over (`clippy --all-targets`, then `test`),
+   and a target directory shared across projects only grows: cargo
+   never removes artifacts a build no longer references.
+
+   ```bash
+   cargo sweep --installed --dry-run   # inspect, then drop --dry-run
+   cargo sweep --time 7                # optional, on top of the above
+   ```
+
+   `--installed` removes artifacts built by toolchains that are no
+   longer installed, which is the large reclaim after any `rustup
+   update` and typically dwarfs `--time`. Run it whenever the
+   toolchain has moved since the last release.
+
    ```bash
    git checkout main && git pull --ff-only && git status   # clean
    cargo fmt --check
