@@ -8,6 +8,81 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.15.0] - 2026-08-06
+
+### Added
+
+- Cross-channel memory (#64). An agent can record notes on one channel
+  and read them from another, carried by labelled entries rather than
+  by replaying other channels' session logs.
+
+  Every entry is stamped at insert with `channel`, `adapter_id`,
+  `sender_id`, `agent_id`, and `origin_session_id`. The store refuses
+  an entry with any label empty and is the only insert path. Labels are
+  built from the turn's inbound context and are not reachable from tool
+  arguments, so a model cannot author its own provenance. A turn with
+  no channel, adapter, or sender leaves the tools unconfigured rather
+  than writing a partial entry; cron and CLI turns land there.
+
+  Three tools: `memory_write` and `memory_read` stay at the workspace
+  tier, and `memory_read_channel` is Tier 3, keyed by the channel being
+  read from so approving one channel's history approves no other. It
+  prompts on every use and cannot be pre-approved.
+
+  Reads are scoped to one agent. Cross-channel means another channel of
+  the same agent, never another person: `(adapter_id, sender_id)` is a
+  platform-scoped principal, and a Slack uid and a Signal number are
+  different values for the same human with no identity linking to join
+  them. Per-channel process isolation is unchanged.
+
+  Entries live in `memory.db` in the data dir. See
+  `docs/enforcement-model.md`.
+
+- `SessionEvent::MemoryEntryWritten` and
+  `SessionEvent::CrossChannelMemoryRead`. The first carries the full
+  label set; the second carries both ends of a crossing plus the entry
+  count, and is emitted even when the read returns nothing. Both
+  forward to a typed SIEM by default. Additive variants: a tolerant
+  consumer is unaffected, a strict deserializer needs them added.
+
+### Changed
+
+- `PermissionStore::approve_by_key` refuses `cross_channel_memory:`
+  keys. It previously guarded only `shell:` keys, so a Tier 3 approval
+  could be stored while the gate ignored it.
+
+### Dependencies
+
+- `ed25519-dalek` 3.0, `sha2` 0.11, `hmac` 0.13, `base64` 0.23,
+  `cap-std` 4.0, `tokio-tungstenite` 0.30. `hmac` 0.13 moved
+  `new_from_slice` onto `KeyInit`, and `sha2` 0.11 returns an `Array`
+  that no longer implements `LowerHex`; the audit chain-hash tests now
+  call the same `hex_encode` the chain uses.
+
+### Deferred
+
+- `tinfoil` stays at v0.1.1. The 0.1.6 bump pulls `tinfoil-ehbp` from a
+  second git repository pinned to a bare commit, which `cargo deny`
+  refuses under the `sources` policy and which is a supply-chain
+  decision rather than a version bump. It also changes the error type
+  reaching `is_pinned_tls_failure`, the path that decides whether a TLS
+  pin failure is recognized; misclassifying in either direction is the
+  bug, so it needs a test driving a real pin failure through the
+  middleware type. Open as #211.
+
+- `rusqlite` 0.40 stays held. The `cfg_select!` compile error is gone as
+  of Rust 1.95, verified on 1.97.1, but the bump raises the effective
+  MSRV to 1.95 while `docs/getting-started.md` promises 1.85+. Remove
+  the ignore in the same commit that raises the documented floor.
+
+- Code-scanning alert 135 flags the SLSA reusable workflow in
+  `release.yml` as unpinned. The SLSA generator requires a semantic
+  version reference rather than a digest; pinning it by hash breaks
+  provenance verification. No action.
+
+- `github/codeql-action` bump (#208) is CI-only and takes the next
+  cycle.
+
 ## [1.14.0] - 2026-08-04
 
 ### Added
