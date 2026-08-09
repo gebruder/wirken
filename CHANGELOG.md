@@ -33,6 +33,83 @@ tagged.
 - README states the Windows boundary: the gateway and channels run,
   and sandbox egress is the exception.
 
+## [1.16.0] - 2026-08-09
+
+### Added
+
+- Sandbox egress verdicts are conditioned on what the session has read
+  (#214, a slice of #47). The tool classifier gains a confidentiality
+  dimension for read tools: workspace files, this channel's memory,
+  another channel's memory, and the zirkel corpus. Only the corpus
+  leaves egress unrestricted, being content the gateway itself fetched
+  from the public network.
+
+  A confidentiality axis, not a trust axis. The variants are unordered:
+  no lattice, no max-level reduction, and the only question asked of
+  the set is which members restrict egress.
+
+  The runtime keeps the observed set per session, added to at the same
+  dispatch site that classifies a call for the tier gate, and shares it
+  live with the egress context rather than snapshotting it. With a
+  restricting label observed, `allowlist` sends the crossing to the
+  operator and `open` refuses, as does an unreachable approval surface,
+  which is the cron and headless case.
+
+  A tool the classifier cannot place records the most restricting
+  label, so an unregistered name cannot read something sensitive and
+  leave the session looking clean.
+
+- `SessionEvent::SandboxEgressVerdict`, emitted for every sandbox
+  egress request the proxy decides, allow included, carrying the
+  confidentiality basis it was decided on. An allow row lets the chain
+  assert that a connection was permitted after a given set of reads
+  rather than recording only refusals; expect one row per proxied
+  CONNECT.
+
+- `SessionEvent::SandboxEgressUnsupported` for egress configured on a
+  platform with no decision-broker transport, which refuses the `exec`.
+
+### Fixed
+
+- The sandbox egress broker used `UnixListener` and `UnixStream`
+  without a `cfg(unix)` gate, so the workspace did not compile for
+  windows-msvc and the release build's Windows job failed. v1.14.0 and
+  v1.15.0 produced no artifacts as a result; both tags are left in
+  place and unmoved.
+
+- Windows Smoke checked only the `wirken-ipc` crate, so a break
+  anywhere else first surfaced in the release build, which runs on a
+  tag. It now runs `cargo check --workspace`, parity with what the
+  release build compiles, on fix branches as well as main. Widening to
+  `--all-targets` needs the adapter test code gated first, tracked in
+  #213.
+
+### Removed
+
+- `SessionEvent::SandboxEgressDenied`, replaced by
+  `SandboxEgressVerdict`. It existed only in the 1.14.0 and 1.15.0
+  trees, neither of which produced release artifacts, so it appears in
+  no released binary.
+
+### Dependencies
+
+- `capnp` and `capnpc` 0.27. The gateway pinned `capnp` separately at
+  0.26 instead of using the workspace entry, so the lockfile carried
+  two versions; it now takes the workspace pin.
+
+### Deferred
+
+- `tinfoil` stays at v0.1.1 (#212). The 0.1.6 bump pulls `tinfoil-ehbp`
+  from a second git repository pinned to a bare commit, which
+  `cargo deny` refuses under the `sources` policy, and changes the
+  error type reaching `is_pinned_tls_failure`, the path that decides
+  whether a TLS pin failure is recognized.
+
+- Code-scanning alert 135 flags the SLSA reusable workflow in
+  `release.yml` as unpinned. The SLSA generator requires a semantic
+  version reference rather than a digest; pinning it by hash breaks
+  provenance verification. No action.
+
 ## [1.15.0] - 2026-08-06
 
 This tag produced no release: the Windows job of the release build failed, so no artifacts were published. Fixed in 1.15.1. The tag is left in place and unmoved.
