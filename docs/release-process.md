@@ -139,6 +139,14 @@ Run top to bottom. Replace `0.7.4` with the target version.
    gh run watch -R gebruder/wirken
    ```
 
+   This job is the only one that compiles the whole workspace for
+   Windows, and it runs on a tag, so a Windows-only break used to
+   become visible only after the version was public. The Windows Smoke
+   `cargo check --workspace` step exists to convert that into a
+   branch-time failure; it looks redundant with this job precisely
+   because it is the same compile moved earlier, and removing it puts
+   the first signal back on the tag.
+
 6. **Download `checksums.sha256` from the draft.** Work in a scratch
    directory outside the repo tree (`scripts/sign-release.sh` refuses to
    run if the private key is inside the tree).
