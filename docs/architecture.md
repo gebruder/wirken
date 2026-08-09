@@ -221,6 +221,14 @@ metadata: { "wirken": { "emoji": "☔", "requires": { "bins": ["curl"] } } }
 
 Wirken reads the `name`, `description`, and `requires.bins` fields. The emoji and other metadata are optional. The markdown body is injected verbatim into the agent's system prompt when the skill is active.
 
+### Classifier failure direction
+
+The tool classifier fails closed in both of its dimensions, and this is load-bearing rather than incidental.
+
+A tool name it cannot place resolves to `UnknownTool`, which is Tier 3, so an unregistered tool cannot run ungated. The same name also records `ReadSensitivity::Workspace`, the most restricting confidentiality label, so an unregistered tool cannot read something sensitive and leave the session looking clean to the egress proxy.
+
+The second half is the one that looks wrong at a glance. Marking an unknown tool as having read the operator's workspace is deliberately pessimistic, and someone trimming it as too aggressive would be removing the property that keeps the egress verdict honest when the classifier is incomplete. Both defaults exist so that forgetting to register a tool costs friction, never silent permission.
+
 ### Category 2: Sandboxed shell execution (Docker / gVisor)
 
 The agent's `exec` tool can run in a Docker container instead of directly on the host (`crates/agent/src/sandbox.rs`). This is the mechanism that confines skills which shell out to commands like `git`, `curl`, or `jq`.
