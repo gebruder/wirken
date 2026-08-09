@@ -223,6 +223,10 @@ pub struct Agent {
     /// the harness omits `spawn_subagent` from the LLM's tool list
     /// entirely so the LLM never tries to call it.
     allowed_subagents: BTreeMap<String, SubagentCeiling>,
+    /// Confidentiality labels this session has observed (#214).
+    /// Shared with the egress context rather than copied, so the
+    /// proxy sees reads that happen after the context is installed.
+    observed_sensitivity: crate::sandbox_egress::ObservedSensitivity,
     /// Cross-channel memory store (#64). `None` leaves the memory
     /// tools unconfigured, which is the posture for any agent the
     /// gateway has not wired a store into.
@@ -399,6 +403,7 @@ impl Agent {
             allowed_subagents: BTreeMap::new(),
             channel_egress: BTreeMap::new(),
             memory_store: None,
+            observed_sensitivity: Default::default(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
             budget: None,
@@ -492,6 +497,7 @@ impl Agent {
             allowed_subagents: BTreeMap::new(),
             channel_egress: BTreeMap::new(),
             memory_store: None,
+            observed_sensitivity: Default::default(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
             budget: None,
@@ -889,6 +895,8 @@ impl Agent {
                     log: self.session_log.clone(),
                     handle: self.session_handle.clone(),
                 }),
+                observed: self.observed_sensitivity.clone(),
+                approval: self.approval_gate.clone(),
             });
     }
 
@@ -2837,6 +2845,34 @@ impl Agent {
                     tool: name.to_string(),
                 }),
             };
+            // Confidentiality observation (#214), taken at the same
+            // point the tier gate classifies the call, so one dispatch
+            // site decides both. Recorded before the gate runs: a call
+            // the operator refuses still tells us what the agent tried
+            // to read, and a refused read leaks nothing, so recording
+            // it costs nothing and forgetting it would under-report.
+            //
+            // A name the classifier cannot place at all is treated as
+            // the most restricting label. That is the fail-closed
+            // direction: an unregistered tool must not be able to read
+            // something sensitive and leave the session looking clean.
+            {
+                let observed = match crate::tool::tool_to_read_sensitivity(name) {
+                    Some(sensitivity) => Some(sensitivity),
+                    None if crate::tool::tool_to_action(name, &args).is_none()
+                        && !self.is_known_wasm_skill(name) =>
+                    {
+                        Some(crate::tool::ReadSensitivity::Workspace)
+                    }
+                    None => None,
+                };
+                if let Some(sensitivity) = observed
+                    && let Ok(mut set) = self.observed_sensitivity.write()
+                {
+                    set.insert(sensitivity);
+                }
+            }
+
             if let Some(action) = action {
                 // Item 6 slice 1: in headless child mode the
                 // auto_deny_above_tier clamp short-circuits before

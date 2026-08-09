@@ -67,6 +67,7 @@ use wirken_audit::{
 use wirken_gateway::agent_config::ChannelEgress;
 
 use crate::skill_perms::{AllowSet, host_in_set};
+use crate::tool::ReadSensitivity;
 
 #[cfg(unix)]
 /// Cap on the request head the proxy will buffer before deciding.
@@ -339,28 +340,105 @@ pub struct SandboxEgressAudit {
 
 /// Everything one listener needs to serve and account for a single
 /// `exec` call.
+/// The session's observed confidentiality labels, shared live with
+/// the runtime rather than snapshotted.
+///
+/// Snapshotting would be wrong: labels accrue as tools run during a
+/// turn, while the egress context is installed once per turn, so a
+/// copy taken at turn start would answer for reads that had not
+/// happened yet.
+pub type ObservedSensitivity = Arc<std::sync::RwLock<std::collections::HashSet<ReadSensitivity>>>;
+
 #[derive(Clone)]
 pub struct SandboxEgressContext {
     pub policy: SandboxEgressPolicy,
     pub attribution: SandboxEgressAttribution,
     pub audit: Option<SandboxEgressAudit>,
+    /// Confidentiality labels this session has observed (#214).
+    pub observed: ObservedSensitivity,
+    /// Operator approval surface. `None` means no operator is
+    /// reachable, which is the cron and headless-subagent case; a
+    /// restricting label then refuses rather than waiting for an
+    /// answer that cannot come.
+    pub approval: Option<Arc<dyn crate::approval_gate::ApprovalGate>>,
 }
 
 impl SandboxEgressContext {
-    pub(crate) fn record_denial(&self, host: &str, port: u16, reason: SandboxEgressDenyReason) {
+    /// Labels this session has observed that restrict egress, sorted
+    /// for stable audit rows. Sorting is presentation only; the set
+    /// carries no order.
+    #[cfg(unix)]
+    fn restricting_basis(&self) -> Vec<String> {
+        let Ok(seen) = self.observed.read() else {
+            // A poisoned lock means an unknown observation history.
+            // Report the most restricting basis rather than an empty
+            // one, so failure to read the set cannot read as "nothing
+            // sensitive was seen".
+            return vec![ReadSensitivity::Workspace.as_str().to_string()];
+        };
+        let mut basis: Vec<String> = seen
+            .iter()
+            .filter(|s| s.restricts_egress())
+            .map(|s| s.as_str().to_string())
+            .collect();
+        basis.sort();
+        basis
+    }
+
+    /// Record one request verdict, allow or deny, with the basis it
+    /// was decided on.
+    #[cfg(unix)]
+    pub(crate) fn record_verdict(
+        &self,
+        host: &str,
+        port: u16,
+        allowed: bool,
+        reason: Option<SandboxEgressDenyReason>,
+        escalated: bool,
+        basis: Vec<String>,
+    ) {
+        if !allowed {
+            tracing::warn!(
+                "sandbox egress denied: host={host} port={port} reason={reason:?} \
+                 agent={} mode={} basis={basis:?}",
+                self.attribution.agent_id,
+                self.policy.mode.as_str(),
+            );
+        }
+        let Some(audit) = &self.audit else {
+            return;
+        };
+        let event = SessionEvent::SandboxEgressVerdict {
+            host: host.to_string(),
+            port,
+            allowed,
+            reason,
+            mode: self.policy.mode.label(),
+            sensitivity_basis: basis,
+            escalated,
+            agent_id: self.attribution.agent_id.clone(),
+            channel: self.attribution.channel.clone(),
+            adapter_id: self.attribution.adapter_id.clone(),
+            sender_id: self.attribution.sender_id.clone(),
+        };
+        if let Err(e) = audit.log.append(&audit.handle, TrustLevel::System, event) {
+            tracing::warn!("could not record sandbox egress verdict: {e}");
+        }
+    }
+
+    /// Record that egress was configured on a platform with no broker
+    /// transport, so the `exec` was refused. Not a request verdict.
+    #[cfg(not(unix))]
+    pub(crate) fn record_unsupported(&self) {
         tracing::warn!(
-            "sandbox egress denied: host={host} port={port} reason={reason:?} \
-             agent={} mode={}",
+            "sandbox egress unsupported on this platform: agent={} mode={}",
             self.attribution.agent_id,
             self.policy.mode.as_str(),
         );
         let Some(audit) = &self.audit else {
             return;
         };
-        let event = SessionEvent::SandboxEgressDenied {
-            host: host.to_string(),
-            port,
-            reason,
+        let event = SessionEvent::SandboxEgressUnsupported {
             mode: self.policy.mode.label(),
             agent_id: self.attribution.agent_id.clone(),
             channel: self.attribution.channel.clone(),
@@ -368,9 +446,89 @@ impl SandboxEgressContext {
             sender_id: self.attribution.sender_id.clone(),
         };
         if let Err(e) = audit.log.append(&audit.handle, TrustLevel::System, event) {
-            tracing::warn!("could not record sandbox egress denial: {e}");
+            tracing::warn!("could not record sandbox egress platform refusal: {e}");
         }
     }
+
+    /// Decide a request that has already cleared [`check_target`],
+    /// conditioning on what the session has read (#214).
+    ///
+    /// No restricting label observed: allowed unchanged. Otherwise the
+    /// verdict escalates, and what escalation means depends on the
+    /// mode. `allowlist` has a set the operator authored, so the
+    /// question "may this session still use it" is one an operator can
+    /// answer, and it goes to them. `open` has no authored set to fall
+    /// back to, so there is no non-arbitrary automatic answer and the
+    /// request is refused.
+    ///
+    /// With no approval surface reachable, which is the cron and
+    /// headless-subagent case, escalation refuses. Fail-closed is the
+    /// right default for a tainted session asking for a destination
+    /// with no operator present.
+    #[cfg(unix)]
+    async fn decide_with_sensitivity(&self, host: &str, port: u16) -> EgressDecision {
+        let basis = self.restricting_basis();
+        if basis.is_empty() {
+            return EgressDecision {
+                allowed: true,
+                reason: None,
+                escalated: false,
+                basis,
+            };
+        }
+
+        if self.policy.mode == SandboxEgressMode::Open {
+            return EgressDecision {
+                allowed: false,
+                reason: Some(SandboxEgressDenyReason::SensitivityRefused),
+                escalated: true,
+                basis,
+            };
+        }
+
+        let Some(gate) = &self.approval else {
+            return EgressDecision {
+                allowed: false,
+                reason: Some(SandboxEgressDenyReason::SensitivityRefused),
+                escalated: true,
+                basis,
+            };
+        };
+
+        // The operator is asked about the destination, at the tier a
+        // network request already carries.
+        let ctx = crate::error::PermissionDenialContext {
+            tool_name: "sandbox_egress".to_string(),
+            action: wirken_gateway::permissions::Action::NetworkRequest {
+                domain: host.to_string(),
+            },
+            requested_tier: wirken_gateway::permissions::PermissionTier::Tier3,
+            agent_id: self.attribution.agent_id.clone(),
+            trigger_message: Some(format!(
+                "sandbox egress to {host}:{port} after reading {}",
+                basis.join(", ")
+            )),
+        };
+        let approved = matches!(
+            gate.request_approval(&ctx).await,
+            crate::approval_gate::ApprovalOutcome::Approved { .. }
+        );
+        EgressDecision {
+            allowed: approved,
+            reason: (!approved).then_some(SandboxEgressDenyReason::SensitivityRefused),
+            escalated: true,
+            basis,
+        }
+    }
+}
+
+/// Outcome of the confidentiality stage.
+#[cfg(unix)]
+struct EgressDecision {
+    allowed: bool,
+    reason: Option<SandboxEgressDenyReason>,
+    escalated: bool,
+    basis: Vec<String>,
 }
 
 /// Wire format between the sidecar and the host broker. One JSON
@@ -531,11 +689,41 @@ async fn serve_decision(
     };
 
     if let Err(reason) = check_target(&ctx.policy, &req.host, req.port, kind) {
-        ctx.record_denial(&req.host, req.port, reason);
+        // Structural refusal: decided before confidentiality is
+        // consulted, so the basis is recorded but did not drive it.
+        ctx.record_verdict(
+            &req.host,
+            req.port,
+            false,
+            Some(reason),
+            false,
+            ctx.restricting_basis(),
+        );
         let reply = DecisionReply {
             allow: false,
             addrs: Vec::new(),
             reason: Some(reason),
+        };
+        return write_reply(&mut wr, &reply).await;
+    }
+
+    // Confidentiality stage (#214): the channel policy admitted this
+    // destination, but what the session has already read can still
+    // change the verdict.
+    let decision = ctx.decide_with_sensitivity(&req.host, req.port).await;
+    if !decision.allowed {
+        ctx.record_verdict(
+            &req.host,
+            req.port,
+            false,
+            decision.reason,
+            decision.escalated,
+            decision.basis,
+        );
+        let reply = DecisionReply {
+            allow: false,
+            addrs: Vec::new(),
+            reason: decision.reason,
         };
         return write_reply(&mut wr, &reply).await;
     }
@@ -564,10 +752,13 @@ async fn serve_decision(
     };
 
     if addrs.is_empty() {
-        ctx.record_denial(
+        ctx.record_verdict(
             &req.host,
             req.port,
-            SandboxEgressDenyReason::ResolutionFailed,
+            false,
+            Some(SandboxEgressDenyReason::ResolutionFailed),
+            decision.escalated,
+            decision.basis.clone(),
         );
         let reply = DecisionReply {
             allow: false,
@@ -577,6 +768,17 @@ async fn serve_decision(
         return write_reply(&mut wr, &reply).await;
     }
 
+    // The allow row is the point of requirement 4: it lets the chain
+    // assert that this connection was permitted after these reads,
+    // not only that other ones were refused.
+    ctx.record_verdict(
+        &req.host,
+        req.port,
+        true,
+        None,
+        decision.escalated,
+        decision.basis,
+    );
     write_reply(
         &mut wr,
         &DecisionReply {

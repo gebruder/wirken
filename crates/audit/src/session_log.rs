@@ -1231,38 +1231,6 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
-    /// The sandbox egress proxy refused an outbound request from a
-    /// sandboxed `exec` container. Emitted once per refused request,
-    /// before any connection to `host` is attempted.
-    ///
-    /// `agent_id` and the adapter/sender pair are structural: they
-    /// come from the per-sandbox listener this request arrived on,
-    /// which is bound to one `exec` call for one agent on one
-    /// channel. Nothing on this row is derived from request content,
-    /// so a sandboxed process cannot forge its own attribution.
-    ///
-    /// `host` is the CONNECT target or absolute-form request host as
-    /// the proxy parsed it, recorded so an operator can see what the
-    /// allowlist turned away. It is attacker-influenced text; treat
-    /// it as data, not as a trusted identifier.
-    SandboxEgressDenied {
-        host: String,
-        port: u16,
-        reason: SandboxEgressDenyReason,
-        /// Egress mode in force for this sandbox, so a denial is
-        /// readable without joining against the agent config that
-        /// was live at the time.
-        mode: SandboxEgressModeLabel,
-        agent_id: String,
-        /// Channel the `exec` call was serving, from the listener
-        /// binding rather than the request.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        channel: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        adapter_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sender_id: Option<String>,
-    },
     /// A memory entry was written, carrying the origin labels it was
     /// stamped with at insert. Every entry has all of them; an entry
     /// missing any label is refused at the store, so this row is a
@@ -1300,6 +1268,62 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// One sandbox egress request verdict, allow or deny, carrying the
+    /// confidentiality basis it was decided on.
+    ///
+    /// Emitted for every request that reaches the policy stage, not
+    /// only refusals. An allow row is the point: it lets the chain
+    /// assert "this connection was permitted after these reads"
+    /// rather than recording only what was turned away.
+    ///
+    /// `agent_id` and the adapter/sender pair are structural: they
+    /// come from the per-sandbox listener the request arrived on,
+    /// which is bound to one `exec` for one agent on one channel.
+    /// Nothing here is derived from request content, so a sandboxed
+    /// process cannot forge its own attribution.
+    ///
+    /// `host` is the CONNECT target or absolute-form request host as
+    /// the proxy parsed it. It is attacker-influenced text; treat it
+    /// as data, not as a trusted identifier.
+    SandboxEgressVerdict {
+        host: String,
+        port: u16,
+        /// Whether the request was permitted.
+        allowed: bool,
+        /// Set when `allowed` is false.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<SandboxEgressDenyReason>,
+        /// Egress mode in force for this sandbox.
+        mode: SandboxEgressModeLabel,
+        /// Confidentiality labels this session had observed when the
+        /// verdict was taken, sorted for stable rows. A set, not a
+        /// ranking: no order is implied.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        sensitivity_basis: Vec<String>,
+        /// True when a restricting label changed the verdict, either
+        /// by sending it to the operator or by refusing outright.
+        escalated: bool,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
+    /// Sandbox egress was configured for a channel on a platform with
+    /// no transport for the decision broker, so the `exec` was
+    /// refused. Not a request verdict: nothing reached a proxy.
+    SandboxEgressUnsupported {
+        mode: SandboxEgressModeLabel,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
 }
 
 /// Why the sandbox egress proxy refused a request. A closed set so
@@ -1323,14 +1347,14 @@ pub enum SandboxEgressDenyReason {
     Malformed,
     /// Host is on the allowlist but did not resolve.
     ResolutionFailed,
-    /// The platform has no transport for the decision broker, so no
-    /// egress proxy can be provisioned. The `exec` is refused rather
-    /// than run unproxied. Recorded per refused `exec`, not per
-    /// request, because nothing reaches a proxy in this case.
-    PlatformUnsupported,
+    /// The session had observed a confidentiality label that restricts
+    /// egress, and the crossing was not authorized: either the mode
+    /// has no operator-authored allowlist to fall back on, or no
+    /// approval surface was reachable, or the operator declined.
+    SensitivityRefused,
 }
 
-/// Egress mode recorded on a [`SessionEvent::SandboxEgressDenied`]
+/// Egress mode recorded on a [`SessionEvent::SandboxEgressVerdict`]
 /// row. Mirrors the agent-side mode enum so audit consumers do not
 /// depend on the agent crate to deserialize.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

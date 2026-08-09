@@ -8264,6 +8264,8 @@ mod sandbox_egress_live {
             }
         };
         let ctx = SandboxEgressContext {
+            observed: Default::default(),
+            approval: None,
             policy,
             attribution: SandboxEgressAttribution {
                 agent_id: "work".into(),
@@ -8317,7 +8319,7 @@ mod sandbox_egress_live {
             .unwrap()
             .into_iter()
             .map(|e| e.event)
-            .filter(|e| matches!(e, SessionEvent::SandboxEgressDenied { .. }))
+            .filter(|e| matches!(e, SessionEvent::SandboxEgressVerdict { allowed: false, .. }))
             .collect()
     }
 
@@ -8325,7 +8327,7 @@ mod sandbox_egress_live {
         denials(h)
             .into_iter()
             .filter_map(|e| match e {
-                SessionEvent::SandboxEgressDenied { reason, .. } => Some(reason),
+                SessionEvent::SandboxEgressVerdict { reason, .. } => reason,
                 _ => None,
             })
             .collect()
@@ -8459,7 +8461,7 @@ mod sandbox_egress_live {
         let rows = denials(&h);
         assert!(!rows.is_empty(), "expected a denial row");
         match &rows[0] {
-            SessionEvent::SandboxEgressDenied {
+            SessionEvent::SandboxEgressVerdict {
                 host,
                 port,
                 reason,
@@ -8468,10 +8470,11 @@ mod sandbox_egress_live {
                 channel,
                 adapter_id,
                 sender_id,
+                ..
             } => {
                 assert_eq!(host, "denied.example");
                 assert_eq!(*port, 443);
-                assert_eq!(*reason, SandboxEgressDenyReason::NotAllowed);
+                assert_eq!(*reason, Some(SandboxEgressDenyReason::NotAllowed));
                 assert_eq!(*mode, wirken_audit::SandboxEgressModeLabel::Allowlist);
                 assert_eq!(agent_id, "work");
                 assert_eq!(channel.as_deref(), Some("slack"));
@@ -8509,9 +8512,9 @@ mod sandbox_egress_live {
         let rows = denials(&h);
         assert!(!rows.is_empty(), "expected a denial row under open mode");
         match &rows[0] {
-            SessionEvent::SandboxEgressDenied { mode, reason, .. } => {
+            SessionEvent::SandboxEgressVerdict { mode, reason, .. } => {
                 assert_eq!(*mode, wirken_audit::SandboxEgressModeLabel::Open);
-                assert_eq!(*reason, SandboxEgressDenyReason::PortNotAllowed);
+                assert_eq!(*reason, Some(SandboxEgressDenyReason::PortNotAllowed));
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -8773,4 +8776,153 @@ fn cross_channel_read_without_a_channel_argument_does_not_widen() {
         matches!(&action, Action::CrossChannelMemoryRead { from_channel } if from_channel.is_empty())
     );
     assert_eq!(action.tier(), PermissionTier::Tier3);
+}
+
+// ---------------------------------------------------------------------------
+// Named-query allowlist pin (#214).
+//
+// The read-sensitivity classifier marks `sqlite_query` as non-restricting
+// on the grounds that it can only reach the zirkel corpus. That holds
+// because `run_named_query` accepts a closed set of names and no SQL. If a
+// seventh query or a raw-SQL path lands, the classification silently
+// becomes unsound, so the coupling is pinned here rather than left to a
+// comment.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sqlite_query_accepts_exactly_the_corpus_query_names() {
+    use crate::tool::KNOWN_ZIRKEL_QUERIES;
+
+    let mut got: Vec<&str> = KNOWN_ZIRKEL_QUERIES.to_vec();
+    got.sort_unstable();
+    assert_eq!(
+        got,
+        vec![
+            "kept_by_keyword",
+            "kept_by_source",
+            "kept_by_theme",
+            "kept_in_run",
+            "kept_recent",
+            "recent_themes",
+        ],
+        "the accepted query set changed; re-check the sqlite_query read \
+         sensitivity in tool_to_read_sensitivity before widening it"
+    );
+}
+
+#[tokio::test]
+async fn sqlite_query_rejects_arbitrary_sql() {
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    let tmp = TempDir::new().unwrap();
+    let reg = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default()).unwrap();
+
+    // No zirkel db is bound in a default registry, so this asserts the
+    // shape of the refusal rather than the query path. Either way an SQL
+    // string must never be accepted as a query name.
+    for sql in [
+        "SELECT * FROM sqlite_master",
+        "ATTACH DATABASE '/tmp/x.db' AS x",
+        "kept_recent; DROP TABLE candidates",
+    ] {
+        let r = reg
+            .execute("sqlite_query", &format!(r#"{{"query":"{sql}"}}"#))
+            .await
+            .expect("tool returns a result rather than erroring");
+        assert!(
+            !r.success,
+            "arbitrary SQL must never be accepted as a query name: {sql}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provenance-conditioned egress (#214).
+//
+// Confidentiality axis only: these pin what the session has *seen*, not
+// whether what it saw was trustworthy. The set is unordered; the only
+// question asked of it is which members restrict egress.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn read_tools_carry_a_confidentiality_label() {
+    use crate::tool::{ReadSensitivity, tool_to_read_sensitivity};
+
+    assert_eq!(
+        tool_to_read_sensitivity("read_file"),
+        Some(ReadSensitivity::Workspace)
+    );
+    assert_eq!(
+        tool_to_read_sensitivity("list_files"),
+        Some(ReadSensitivity::Workspace)
+    );
+    assert_eq!(
+        tool_to_read_sensitivity("memory_read"),
+        Some(ReadSensitivity::ChannelMemory)
+    );
+    assert_eq!(
+        tool_to_read_sensitivity("memory_read_channel"),
+        Some(ReadSensitivity::CrossChannelMemory)
+    );
+    assert_eq!(
+        tool_to_read_sensitivity("sqlite_query"),
+        Some(ReadSensitivity::AggregatedExternal)
+    );
+}
+
+#[test]
+fn only_the_public_corpus_leaves_egress_unrestricted() {
+    use crate::tool::ReadSensitivity;
+
+    // The corpus is content the gateway itself fetched from the public
+    // network, so it is not a confidentiality concern on the way out.
+    assert!(!ReadSensitivity::AggregatedExternal.restricts_egress());
+    for s in [
+        ReadSensitivity::Workspace,
+        ReadSensitivity::ChannelMemory,
+        ReadSensitivity::CrossChannelMemory,
+    ] {
+        assert!(
+            s.restricts_egress(),
+            "{} is operator or trust-zone data and must restrict egress",
+            s.as_str()
+        );
+    }
+}
+
+#[test]
+fn writes_and_network_tools_carry_no_read_label() {
+    use crate::tool::tool_to_read_sensitivity;
+
+    // This slice is observation-level: it marks what was read, and does
+    // not inspect tool output. `web_search` and `http_request` fetch
+    // from the public network, the same position as the corpus.
+    for tool in ["write_file", "exec", "web_search", "http_request"] {
+        assert_eq!(tool_to_read_sensitivity(tool), None, "{tool}");
+    }
+}
+
+#[test]
+fn every_classified_read_tool_is_a_registered_tool() {
+    use crate::tool::{ToolConfig, ToolRegistry, tool_to_read_sensitivity};
+
+    // Guards the other direction from the dispatch-site fail-closed
+    // rule: a label registered for a tool that no longer exists is dead
+    // weight that will quietly stop firing.
+    let tmp = TempDir::new().unwrap();
+    let reg = ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default()).unwrap();
+    let names: Vec<String> = reg.definitions().into_iter().map(|d| d.name).collect();
+    for tool in [
+        "read_file",
+        "list_files",
+        "memory_read",
+        "memory_read_channel",
+        "sqlite_query",
+    ] {
+        assert!(
+            names.iter().any(|n| n == tool),
+            "{tool} carries a read label but is not a registered tool"
+        );
+        assert!(tool_to_read_sensitivity(tool).is_some());
+    }
 }

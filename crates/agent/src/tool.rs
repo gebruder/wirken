@@ -1091,6 +1091,25 @@ struct SearchResult {
 /// `recent_themes` query. The librarian skill body tells the LLM
 /// which key to read and to relay rows verbatim — title, source,
 /// date, url — without paraphrase.
+/// The complete set of query names `sqlite_query` accepts. Closed by
+/// construction: there is no path that takes SQL.
+///
+/// Load-bearing for the read-sensitivity classifier, which marks
+/// `sqlite_query` non-restricting because these six can only address
+/// the zirkel corpus schema and the handle is read-only. Widening this
+/// set, or adding a path that accepts SQL, invalidates that
+/// classification. `tool_to_read_sensitivity` points back here, and
+/// `sqlite_query_accepts_exactly_the_corpus_query_names` fails if the
+/// set changes.
+pub const KNOWN_ZIRKEL_QUERIES: &[&str] = &[
+    "kept_recent",
+    "kept_by_keyword",
+    "kept_by_theme",
+    "kept_by_source",
+    "kept_in_run",
+    "recent_themes",
+];
+
 fn run_named_query(
     db_path: &Path,
     query_name: &str,
@@ -1110,7 +1129,8 @@ fn run_named_query(
         "kept_in_run" => kept_in_run(&conn, params),
         "recent_themes" => recent_themes(&conn, params),
         other => Err(format!(
-            "unknown named query '{other}'. Known: kept_recent, kept_by_keyword, kept_by_theme, kept_by_source, kept_in_run, recent_themes"
+            "unknown named query '{other}'. Known: {}",
+            KNOWN_ZIRKEL_QUERIES.join(", ")
         )),
     }
 }
@@ -1522,6 +1542,83 @@ const PIPELINE_SENTINEL: &str = ":pipeline:";
 /// Map a built-in tool invocation to a permission Action for tier checking.
 /// Returns None for tools that don't map to a permission-checkable action
 /// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
+/// How confidential the data a tool reads is, for the purpose of
+/// deciding whether a session that has read it may still egress
+/// freely (#214, a slice of #47).
+///
+/// This is a **confidentiality** axis: it marks what the session has
+/// seen that should not leave. It is deliberately not a trust axis.
+/// "Did this session read something untrustworthy" is a different
+/// question, answered by the injection detector, and a trust
+/// dimension would be a second field here rather than a reuse of
+/// this one.
+///
+/// The variants are **unordered**. Declaration order carries no rank,
+/// there is no lattice, and there is no max-level reduction: session
+/// state is a set of labels, and the only question asked of it is
+/// which members return `true` from [`Self::restricts_egress`].
+/// `Ord` is deliberately not derived so no caller can read a
+/// precedence that was never designed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReadSensitivity {
+    /// Content the gateway itself fetched from the public network.
+    /// Not a confidentiality concern on the way out.
+    AggregatedExternal,
+    /// This channel's own memory entries.
+    ChannelMemory,
+    /// Another channel's memory entries: a different trust zone.
+    CrossChannelMemory,
+    /// The operator's workspace files.
+    Workspace,
+}
+
+impl ReadSensitivity {
+    /// Whether observing this source restricts the session's egress.
+    /// Only `AggregatedExternal` does not, because it is already
+    /// public by construction.
+    pub fn restricts_egress(self) -> bool {
+        !matches!(self, Self::AggregatedExternal)
+    }
+
+    /// Stable label for audit rows.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AggregatedExternal => "aggregated_external",
+            Self::ChannelMemory => "channel_memory",
+            Self::CrossChannelMemory => "cross_channel_memory",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+/// What a tool reads, if it reads anything.
+///
+/// Registered in the same place tools are classified for tiering, so
+/// one edit site decides both. A tool absent from this match reads
+/// nothing as far as the classifier knows; the dispatch site treats an
+/// *unclassifiable* tool (one `tool_to_action` also rejects) as
+/// `Workspace`, the most restricting value, so an unregistered name
+/// cannot produce an untainted read.
+///
+/// `sqlite_query` is `AggregatedExternal` because it can only reach
+/// the zirkel corpus: see [`KNOWN_ZIRKEL_QUERIES`], whose closed set
+/// this classification depends on.
+pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
+    match tool_name {
+        "read_file" | "list_files" => Some(ReadSensitivity::Workspace),
+        "sqlite_query" => Some(ReadSensitivity::AggregatedExternal),
+        "memory_read" => Some(ReadSensitivity::ChannelMemory),
+        "memory_read_channel" => Some(ReadSensitivity::CrossChannelMemory),
+        // Everything else is not a read of stored data. `web_search`
+        // and `http_request` fetch from the public network, which is
+        // the same confidentiality position as AggregatedExternal and
+        // needs no marking; `exec` output is not classified here
+        // because this slice is observation-level and does not inspect
+        // tool output.
+        _ => None,
+    }
+}
+
 pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Action> {
     match tool_name {
         "exec" => {

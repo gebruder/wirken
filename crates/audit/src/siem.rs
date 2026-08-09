@@ -589,7 +589,17 @@ fn extract_identity_for_sentinel(
             sender_id.clone(),
             Some(agent_id.clone()),
         ),
-        SessionEvent::SandboxEgressDenied {
+        SessionEvent::SandboxEgressUnsupported {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::SandboxEgressVerdict {
             agent_id,
             adapter_id,
             sender_id,
@@ -649,10 +659,19 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::MemoryEntryWritten { channel, .. } => {
             format!("memory_entry_written channel={channel}")
         }
-        SessionEvent::SandboxEgressDenied {
-            host, port, reason, ..
-        } => {
-            format!("sandbox_egress_denied host={host} port={port} reason={reason:?}")
+        SessionEvent::SandboxEgressVerdict {
+            host,
+            port,
+            allowed,
+            reason,
+            escalated,
+            ..
+        } => format!(
+            "sandbox_egress_verdict host={host} port={port} allowed={allowed} \
+             escalated={escalated} reason={reason:?}"
+        ),
+        SessionEvent::SandboxEgressUnsupported { mode, .. } => {
+            format!("sandbox_egress_unsupported mode={mode:?}")
         }
         SessionEvent::PermissionDenied {
             tool,

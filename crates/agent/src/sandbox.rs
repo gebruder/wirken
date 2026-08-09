@@ -561,11 +561,7 @@ impl DockerSandbox {
         // egress that will never carry any, and that belongs in the
         // audit log with the rest of the enforcement record. Recorded
         // once per refused exec, since nothing reaches a proxy here.
-        ctx.record_denial(
-            "<no-egress-transport>",
-            0,
-            wirken_audit::SandboxEgressDenyReason::PlatformUnsupported,
-        );
+        ctx.record_unsupported();
         AgentError::Sandbox(
             "sandbox egress modes 'allowlist' and 'open' are unavailable on this platform: \
              the decision broker needs a Unix socket. Refusing the exec rather than running \
