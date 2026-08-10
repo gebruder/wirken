@@ -1598,6 +1598,33 @@ fn llm_config_from_provider_preserves_name() {
     assert_eq!(config.base_url, "https://api.anthropic.com/v1");
 }
 
+// A provider absent from the context-window table takes the 32_000
+// fallback, which for hetzner is an eighth of what every model in its
+// catalog accepts and would compact conversations the model could hold
+// whole. The entry is the catalog minimum, not the maximum: this table
+// keys on provider, and overstating a window builds requests the model
+// cannot take, while understating one only trims early.
+#[test]
+fn llm_config_sizes_the_hetzner_context_window_to_the_catalog_minimum() {
+    let config = LlmConfig::from_provider(
+        "hetzner",
+        "https://inference.hetzner.com/api/v1",
+        "Qwen/Qwen3.6-35B-A3B-FP8",
+    );
+    assert_eq!(config.context_window, 262_144);
+
+    // The effective budget the runtime enforces after the safety
+    // factor, which is what fit() actually trims against.
+    assert_eq!(
+        crate::context::effective_budget(config.context_window),
+        209_715
+    );
+
+    // An unrecognised provider still takes the conservative fallback.
+    let unknown = LlmConfig::from_provider("nobody", "http://localhost/v1", "m");
+    assert_eq!(unknown.context_window, 32_000);
+}
+
 // ---------------------------------------------------------------------------
 // Agent runtime (unit — no live LLM)
 // ---------------------------------------------------------------------------

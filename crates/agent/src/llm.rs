@@ -179,6 +179,14 @@ impl LlmConfig {
             "bedrock" => 200_000,
             "ollama" => 32_768,
             "tinfoil" => 128_000,
+            // Hetzner's catalog spans 262,144 (Qwen3.6, Kimi-K2.7) to
+            // 512,000 (DeepSeek-V4-Flash, GLM-5.2) as of August 2026.
+            // This table keys on provider rather than model, so one
+            // number has to cover all of them, and the catalog minimum
+            // is the safe direction: understating the window only
+            // compacts earlier than necessary, while overstating builds
+            // a request the model cannot hold.
+            "hetzner" => 262_144,
             _ => 32_000,
         };
         Self {
