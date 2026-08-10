@@ -324,7 +324,7 @@ async function loadSessions() {
     ch.textContent = row.channel;
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = row.message_count + ' msg · ' + fmtTime(row.last_activity);
+    meta.textContent = row.message_count + ' msg · last ' + fmtTime(row.last_activity);
     div.appendChild(ch);
     div.appendChild(meta);
     div.addEventListener('click', () => loadTranscript(row.log_id));
