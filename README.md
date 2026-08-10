@@ -100,7 +100,7 @@ Prebuilt binaries are available for Linux (x86_64, aarch64), macOS (x86_64, Appl
 `wirken run` starts wirken. It spawns adapter processes, accepts authenticated connections, routes messages to the agent, and serves a WebChat UI at `http://localhost:18790`:
 
 ```
-  wirken v1.16.0
+  wirken v1.17.0
   ──────
 
   Provider: ollama/llama3.2

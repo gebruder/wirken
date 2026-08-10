@@ -8,7 +8,7 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
-## [Unreleased]
+## [1.17.0] - 2026-08-11
 
 ### Added
 
@@ -56,6 +56,17 @@ tagged.
 
 - The webchat sidebar session row labels its timestamp as last
   activity rather than leaving it unlabelled.
+
+### Deferred
+
+- Dependabot PR #215, a grouped bump of 13 cargo dependencies. Twelve
+  are patch or non-0.x-minor and fold cleanly; the group also carries
+  `tinfoil` 0.1.1 to 0.2.0, a 0.x-minor on the attestation path, which
+  takes a soak cycle. Deferred as a group rather than split.
+
+- Scorecard `PinnedDependenciesID` (medium) on
+  `.github/workflows/release.yml`. Open at tag time, below the
+  severity bar for blocking a release.
 
 ## [1.15.1] - 2026-08-07
 
