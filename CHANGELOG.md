@@ -8,6 +8,23 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [Unreleased]
+
+### Added
+
+- Hetzner inference provider, selectable in `wirken setup`. An
+  OpenAI-compatible endpoint at
+  `https://inference.hetzner.com/api/v1`, reached over the existing
+  OpenAI request path, including token streaming. The base URL is
+  fixed, so the bearer token is the only input, stored in the vault
+  under `hetzner-api-key`.
+
+  Inference runs on GPUs in Hetzner's own European data centers, in
+  Germany and Finland, so the jurisdiction claim is EU rather than a
+  single country. The service is experimental and has no data
+  processing agreement available yet, which fits development and
+  testing rather than production traffic carrying personal data.
+
 ## [1.15.1] - 2026-08-07
 
 ### Fixed

@@ -7837,6 +7837,97 @@ mod openai_compat_stub {
             other => panic!("expected Text response, got {other:?}"),
         }
     }
+
+    // Hetzner rides the same OpenAI-compat path with a fixed base URL,
+    // so the setup arm folds nothing into it. This pins the same two
+    // things the Infomaniak test does: (1) provider="hetzner" streams
+    // through stream_openai rather than the non-streaming fallback -
+    // the stub serves SSE, which the fallback's complete_openai would
+    // fail to parse as JSON, so a clean streamed result is proof of the
+    // arm; (2) the bearer token is sent, verbatim, to the `/api/v1`
+    // path that setup.rs writes.
+    #[tokio::test]
+    async fn hetzner_streams_with_bearer_to_api_v1_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+
+            let body = "\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Moin\"}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+            request
+        });
+
+        // Path mirrors the `/api/v1` suffix on the fixed base URL the
+        // Hetzner setup arm writes.
+        let config = LlmConfig {
+            provider: "hetzner".into(),
+            model: "test-model".into(),
+            base_url: format!("http://{addr}/api/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: false,
+            context_window: 32_000,
+        };
+        let client = LlmClient::new(config).unwrap();
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: "ping".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+
+        let result = client
+            .complete_stream(&messages, &[], Some("test-token"), tx)
+            .await;
+        let request = stub.await.unwrap();
+
+        let (response, _usage) = result.expect("stream must complete");
+
+        assert!(
+            request.contains("POST /api/v1/chat/completions"),
+            "expected /api/v1 chat-completions path, got request head: {request}"
+        );
+        assert!(
+            request.contains("authorization: Bearer test-token")
+                || request.contains("Authorization: Bearer test-token"),
+            "expected bearer auth header, got request head: {request}"
+        );
+
+        // SSE parsed cleanly, so the router took the streaming arm.
+        let mut deltas = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::TextDelta(t) = ev {
+                deltas.push(t);
+            }
+        }
+        assert_eq!(deltas.join(""), "Moin");
+        match response {
+            LlmResponse::Text(t) => assert_eq!(t, "Moin"),
+            other => panic!("expected Text response, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

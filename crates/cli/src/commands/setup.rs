@@ -110,6 +110,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             "Tinfoil (confidential)",
             "Privatemode (confidential)",
             "Infomaniak (Swiss)",
+            "Hetzner (EU)",
             "Custom endpoint",
         ];
         let provider_idx = Select::new()
@@ -503,6 +504,84 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 ("infomaniak".to_string(), model, base_url, false)
             }
             9 => {
+                // Hetzner AI inference (OpenAI-compatible, bearer
+                // token). The base URL is fixed, so there is neither an
+                // account-specific path segment to fold in the way
+                // Infomaniak's product_id is, nor an endpoint to prompt
+                // for the way NIM's is; the token is the only input.
+                // The OpenAI-compat `_` arm in llm.rs handles the
+                // request shape, so no new dispatch arm is needed -
+                // just the streaming arm in llm_stream.rs.
+                let base_url = "https://inference.hetzner.com/api/v1";
+                println!("  Hetzner serves open-weight models behind an OpenAI-compatible API,");
+                println!("  on GPUs in its own European data centers (Germany and Finland).");
+                println!("  Experimental service with no data processing agreement yet: fits");
+                println!("  development and testing rather than production traffic carrying");
+                println!("  personal data.");
+                println!("  Create a token at https://experiments.hetzner.com: log in, select the");
+                println!("  Inference app under APPS, then \"Create API Token\" at top right.");
+
+                // Retry loop mirrors the NIM and Infomaniak arms, minus
+                // the URL prompt: try the model listing, and on any
+                // failure let the operator re-enter the token or type a
+                // model id against the token they just entered, so a
+                // rejected token isn't surfaced as the same message as
+                // an endpoint that listed nothing.
+                let (api_key, models, manual_model) = loop {
+                    let api_key = super::read_secret("  API token: ")?;
+
+                    let summary =
+                        match super::list_openai_compatible_models(base_url, &api_key).await {
+                            Ok(models) if models.is_empty() => {
+                                "endpoint reachable but /models returned no entries".to_string()
+                            }
+                            Ok(models) => break (api_key, models, None),
+                            Err(e) => e.to_string(),
+                        };
+
+                    println!("  {summary}");
+                    let retry = Confirm::new()
+                        .with_prompt("  Re-enter token")
+                        .default(true)
+                        .interact()?;
+                    if retry {
+                        continue;
+                    }
+                    let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
+                    break (api_key, Vec::new(), Some(model));
+                };
+
+                let default_model = models.first().cloned().unwrap_or_default();
+                let model = if let Some(manual) = manual_model {
+                    // Manual-fallback path still encrypts the token so
+                    // the vault is consistent with the model-picker
+                    // path; the empty models vec forces the free-text
+                    // prompt, whose return we discard for the id the
+                    // operator already typed.
+                    let _ = store_key_and_pick_model(
+                        api_key.clone(),
+                        "hetzner",
+                        base_url,
+                        &manual,
+                        Vec::new(),
+                        &cfg,
+                        &data,
+                    )?;
+                    manual
+                } else {
+                    store_key_and_pick_model(
+                        api_key,
+                        "hetzner",
+                        base_url,
+                        &default_model,
+                        models,
+                        &cfg,
+                        &data,
+                    )?
+                };
+                ("hetzner".to_string(), model, base_url.to_string(), false)
+            }
+            10 => {
                 // Custom
                 let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
                 let has_key = Confirm::new()
