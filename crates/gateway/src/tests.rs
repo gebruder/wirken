@@ -189,6 +189,37 @@ fn record_message_increments_count() {
     assert_eq!(updated.message_count, 3);
 }
 
+// `get_or_create` moves `last_activity` on every call and deliberately
+// leaves `message_count` alone, so a caller that resolves the session
+// without also calling `record_message` reports a live conversation as
+// `0 msg` forever. Webchat did exactly that. Pinned here so the split
+// stays a decision rather than a surprise for the next call site.
+#[test]
+fn get_or_create_advances_activity_without_counting() {
+    let tmp = TempDir::new().unwrap();
+    let store = SessionStore::open(&tmp.path().join("sessions.db"), 86400).unwrap();
+
+    let first = store.get_or_create("webchat", "webchat-default").unwrap();
+    for _ in 0..3 {
+        store.get_or_create("webchat", "webchat-default").unwrap();
+    }
+
+    let resolved = store.get(&first.id).unwrap();
+    assert_eq!(
+        resolved.message_count, 0,
+        "get_or_create must not count messages"
+    );
+    assert!(
+        resolved.last_activity >= first.last_activity,
+        "get_or_create must advance last_activity"
+    );
+
+    // The pairing every inbound path owes the counter.
+    let session = store.get_or_create("webchat", "webchat-default").unwrap();
+    store.record_message(&session.id).unwrap();
+    assert_eq!(store.get(&first.id).unwrap().message_count, 1);
+}
+
 #[test]
 fn close_session() {
     let tmp = TempDir::new().unwrap();

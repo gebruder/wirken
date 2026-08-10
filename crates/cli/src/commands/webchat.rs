@@ -498,11 +498,28 @@ pub async fn serve(
                     )
                     .await;
 
-                // Session
-                let _ = sessions
-                    .lock()
-                    .await
-                    .get_or_create("webchat", "webchat-default");
+                // Session. `get_or_create` moves `last_activity` but
+                // leaves `message_count` alone; `record_message` is the
+                // only statement that increments it. Calling just the
+                // former, as this path used to, leaves the sidebar
+                // reading `0 msg` no matter how long the conversation
+                // runs, while every other channel counts correctly
+                // through the pair in `run.rs`. Counter failures are
+                // logged rather than propagated: a display counter is
+                // not worth failing a chat turn over.
+                {
+                    let store = sessions.lock().await;
+                    match store.get_or_create("webchat", "webchat-default") {
+                        Ok(session) => {
+                            if let Err(e) = store.record_message(&session.id) {
+                                tracing::warn!("webchat message count not recorded: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("webchat session not resolved: {e}");
+                        }
+                    }
+                }
 
                 // SSE headers — stream tokens as they arrive
                 let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
