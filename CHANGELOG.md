@@ -21,6 +21,34 @@ tagged.
   Inference runs in Hetzner's own European data centers, in Germany
   and Finland. The service is experimental.
 
+### Fixed
+
+- SSE field parsing required a space after the colon (`data: `,
+  `event: `). The space is optional per the spec, so every frame from a
+  server that omits it was skipped: no text, no usage block, no
+  `[DONE]`, and a completion that returned `LlmResponse::Empty` against
+  a 200 response. Both `llm_stream` parsers now accept either form.
+  Affects any OpenAI-compatible or Anthropic endpoint that emits the
+  space-less form; Hetzner's gateway does.
+
+- The webchat inbound path resolved its session with `get_or_create`,
+  which advances `last_activity` and leaves `message_count` at zero, so
+  the sidebar read `0 msg` for the life of the conversation. It now
+  pairs that with `record_message` as the other channels do. Counts
+  inbound messages from this release forward; there is no backfill.
+
+- `hetzner` was absent from the per-provider context-window table and
+  took the 32_000 fallback, so compaction trimmed at an eighth of what
+  the models accept. The entry is 262_144, the smallest window in the
+  provider's catalog. The table keys on provider rather than model:
+  understating a window trims early, overstating one builds a request
+  the model cannot hold.
+
+### Changed
+
+- The webchat sidebar session row labels its timestamp as last
+  activity rather than leaving it unlabelled.
+
 ## [1.15.1] - 2026-08-07
 
 ### Fixed
