@@ -186,16 +186,31 @@ impl SessionStore {
 
     /// List active sessions, optionally filtered by channel.
     pub fn list_active(&self, channel: Option<&str>) -> Result<Vec<Session>, GatewayError> {
+        // A row keeps `expired = 0` until something touches it, so the
+        // flag alone is half the liveness test and age is the other
+        // half. `get_or_create` already applies both: a session past
+        // the window is expired and replaced on the next message.
+        // Filtering here keeps the listing from reporting sessions as
+        // active that the resolver would refuse to resume. The bound is
+        // `>` against `now - expiry_secs`, matching the `>=` age check
+        // in `get_or_create` and the `<=` cutoff in `expire_inactive`.
+        //
+        // Read-only by design: the row is marked expired by
+        // `get_or_create` or `expire_inactive`, never by listing it.
+        let cutoff = (Utc::now() - Duration::seconds(self.expiry_secs as i64)).to_rfc3339();
+
         let (sql, param): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match channel {
             Some(ch) => (
                 "SELECT id, channel, conversation_id, created_at, last_activity, message_count, expired
-                 FROM sessions WHERE expired = 0 AND channel = ?1 ORDER BY last_activity DESC".to_string(),
-                vec![Box::new(ch.to_string())],
+                 FROM sessions WHERE expired = 0 AND last_activity > ?1 AND channel = ?2
+                 ORDER BY last_activity DESC".to_string(),
+                vec![Box::new(cutoff), Box::new(ch.to_string())],
             ),
             None => (
                 "SELECT id, channel, conversation_id, created_at, last_activity, message_count, expired
-                 FROM sessions WHERE expired = 0 ORDER BY last_activity DESC".to_string(),
-                vec![],
+                 FROM sessions WHERE expired = 0 AND last_activity > ?1
+                 ORDER BY last_activity DESC".to_string(),
+                vec![Box::new(cutoff)],
             ),
         };
 

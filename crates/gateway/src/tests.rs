@@ -220,6 +220,35 @@ fn get_or_create_advances_activity_without_counting() {
     assert_eq!(store.get(&first.id).unwrap().message_count, 1);
 }
 
+// `expired = 0` only means nothing has marked the row dead yet, and
+// nothing sweeps in the background: `expire_inactive` has no caller
+// outside tests. Listing therefore has to apply the age bound itself,
+// or it reports sessions as active that `get_or_create` would refuse to
+// resume.
+#[test]
+fn list_active_hides_sessions_past_the_expiry_window() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("sessions.db");
+
+    let live = SessionStore::open(&path, 86400).unwrap();
+    let session = live.get_or_create("webchat", "webchat-default").unwrap();
+    assert_eq!(live.list_active(None).unwrap().len(), 1);
+    assert_eq!(live.list_active(Some("webchat")).unwrap().len(), 1);
+    drop(live);
+
+    // Same row, zero-length window, so it is past expiry.
+    let stale = SessionStore::open(&path, 0).unwrap();
+    assert!(stale.list_active(None).unwrap().is_empty());
+    assert!(stale.list_active(Some("webchat")).unwrap().is_empty());
+
+    // Filtering does not write. The flag is still clear, so
+    // `expire_inactive` and `get_or_create` remain the only paths that
+    // set it and a later widening of the window would list it again.
+    assert!(!stale.get(&session.id).unwrap().expired);
+    assert_eq!(stale.expire_inactive().unwrap(), 1);
+    assert!(stale.get(&session.id).unwrap().expired);
+}
+
 #[test]
 fn close_session() {
     let tmp = TempDir::new().unwrap();

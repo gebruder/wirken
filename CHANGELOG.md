@@ -44,6 +44,14 @@ tagged.
   understating a window trims early, overstating one builds a request
   the model cannot hold.
 
+- `SessionStore::list_active` filtered on the `expired` flag alone. The
+  flag is set by `get_or_create` on the next message or by
+  `expire_inactive`, which has no caller, so a session idle past the
+  expiry window listed as active until something touched it. The query
+  now also bounds `last_activity` to the window, matching the age check
+  `get_or_create` applies when it decides whether to resume a session.
+  Listing stays read-only; the flag is unchanged.
+
 ### Changed
 
 - The webchat sidebar session row labels its timestamp as last
