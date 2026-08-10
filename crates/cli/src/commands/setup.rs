@@ -513,13 +513,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 // request shape, so no new dispatch arm is needed -
                 // just the streaming arm in llm_stream.rs.
                 let base_url = "https://inference.hetzner.com/api/v1";
-                println!("  Hetzner serves open-weight models behind an OpenAI-compatible API,");
-                println!("  on GPUs in its own European data centers (Germany and Finland).");
-                println!("  Experimental service with no data processing agreement yet: fits");
-                println!("  development and testing rather than production traffic carrying");
-                println!("  personal data.");
-                println!("  Create a token at https://experiments.hetzner.com: log in, select the");
-                println!("  Inference app under APPS, then \"Create API Token\" at top right.");
+                println!("  Experimental, EU-hosted (Germany and Finland).");
+                println!("  Create a token at https://experiments.hetzner.com (Inference, APPS).");
 
                 // Retry loop mirrors the NIM and Infomaniak arms, minus
                 // the URL prompt: try the model listing, and on any

@@ -18,12 +18,8 @@ tagged.
   OpenAI request path, including token streaming. The base URL is
   fixed, so the bearer token is the only input, stored in the vault
   under `hetzner-api-key`.
-
-  Inference runs on GPUs in Hetzner's own European data centers, in
-  Germany and Finland, so the jurisdiction claim is EU rather than a
-  single country. The service is experimental and has no data
-  processing agreement available yet, which fits development and
-  testing rather than production traffic carrying personal data.
+  Inference runs in Hetzner's own European data centers, in Germany
+  and Finland. The service is experimental.
 
 ## [1.15.1] - 2026-08-07
 

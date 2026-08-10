@@ -36,7 +36,7 @@ Wirken sits between your people and the agent. A message comes in on a channel, 
   - **Tinfoil** (TEE, encrypted processing)
   - **Privatemode** (TEE, encrypted processing)
   - **Infomaniak** (Swiss-hosted, including Apertus)
-  - **Hetzner** (EU-hosted, Germany and Finland; experimental, no data processing agreement yet)
+  - **Hetzner** (EU-hosted)
 - Docker, if you want shell commands sandboxed (the default). Without it the agent simply cannot run shell commands; nothing else is affected. Granting a channel sandbox egress runs a per-exec sidecar proxy container alongside the sandbox; if it cannot start, `exec` is refused rather than run unproxied.
 
 Download the latest release binary:
