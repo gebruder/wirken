@@ -16,6 +16,21 @@ use crate::tool::ToolDef;
 /// crash.
 const MAX_SSE_BUFFER_BYTES: usize = 1024 * 1024;
 
+/// Extract the value of an SSE field line, e.g. `sse_field(line, "data")`
+/// against `data: {...}` or `data:{...}`.
+///
+/// The space after the colon is optional. Per the SSE spec the value is
+/// everything after the colon with a single leading space removed if one
+/// is present, so a server is free to omit it. Matching on `"data: "`
+/// with the space baked in drops every frame from such a server, and
+/// because each unmatched line is skipped rather than raised, the
+/// failure surfaces as a completion that streams no text, reports no
+/// usage and never sees `[DONE]`, not as an error.
+pub(crate) fn sse_field<'a>(line: &'a str, field: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(field)?.strip_prefix(':')?;
+    Some(rest.strip_prefix(' ').unwrap_or(rest))
+}
+
 /// Events emitted during a streaming completion.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -139,7 +154,7 @@ impl LlmClient {
                 buffer = buffer[pos + 2..].to_string();
 
                 for line in event_block.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(data) = sse_field(line, "data") {
                         if data == "[DONE]" {
                             break 'stream;
                         }
@@ -398,7 +413,7 @@ impl LlmClient {
                 let mut event_data = String::new();
 
                 for line in event_block.lines() {
-                    if let Some(et) = line.strip_prefix("event: ") {
+                    if let Some(et) = sse_field(line, "event") {
                         event_type = match et.trim() {
                             "message_start" => "message_start",
                             "content_block_start" => "content_block_start",
@@ -408,7 +423,7 @@ impl LlmClient {
                             "message_stop" => "message_stop",
                             _ => "",
                         };
-                    } else if let Some(d) = line.strip_prefix("data: ") {
+                    } else if let Some(d) = sse_field(line, "data") {
                         event_data = d.to_string();
                     }
                 }

@@ -7928,6 +7928,114 @@ mod openai_compat_stub {
             other => panic!("expected Text response, got {other:?}"),
         }
     }
+
+    // The space after an SSE field's colon is optional: the value is
+    // everything after the colon with one leading space removed if
+    // present. Matching on the literal "data: " drops every frame from
+    // a server that omits it, and since an unmatched line is skipped
+    // rather than raised, the run streams no text, records no usage and
+    // never sees [DONE] while the wire carries a clean 200. Hetzner's
+    // HeRay gateway emits the space-less form.
+    #[test]
+    fn sse_field_treats_the_space_after_the_colon_as_optional() {
+        use crate::llm_stream::sse_field;
+
+        assert_eq!(sse_field("data: {\"a\":1}", "data"), Some("{\"a\":1}"));
+        assert_eq!(sse_field("data:{\"a\":1}", "data"), Some("{\"a\":1}"));
+        assert_eq!(sse_field("data: [DONE]", "data"), Some("[DONE]"));
+        assert_eq!(sse_field("data:[DONE]", "data"), Some("[DONE]"));
+        assert_eq!(
+            sse_field("event:message_start", "event"),
+            Some("message_start")
+        );
+
+        // Only the first space is framing; any beyond it are value.
+        assert_eq!(sse_field("data:  x", "data"), Some(" x"));
+
+        // A different field whose name merely starts with the target
+        // must not match, nor must an unrelated field.
+        assert_eq!(sse_field("database: x", "data"), None);
+        assert_eq!(sse_field("id: 1", "data"), None);
+    }
+
+    // End-to-end counterpart to the unit test above, in the frame shape
+    // HeRay actually sends: content, the trailing usage block and [DONE]
+    // all arrive space-less, and all three must land.
+    #[tokio::test]
+    async fn openai_compat_stream_parses_data_frames_without_space() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            // No space after any `data:`, matching HeRay on the wire.
+            let body = "\
+                data:{\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n\
+                data:{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hallo\"}}]}\n\n\
+                data:{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                data:{\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\n\
+                data:[DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let config = LlmConfig {
+            provider: "hetzner".into(),
+            model: "test-model".into(),
+            base_url: format!("http://{addr}/api/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: false,
+            context_window: 32_000,
+        };
+        let client = LlmClient::new(config).unwrap();
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: "ping".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+
+        let result = client
+            .complete_stream(&messages, &[], Some("test-token"), tx)
+            .await;
+        stub.await.unwrap();
+
+        let (response, usage) = result.expect("stream must complete");
+
+        let mut deltas = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let StreamEvent::TextDelta(t) = ev {
+                deltas.push(t);
+            }
+        }
+        assert_eq!(deltas.join(""), "Hallo");
+        match response {
+            LlmResponse::Text(t) => assert_eq!(t, "Hallo"),
+            other => panic!("expected Text response, got {other:?}"),
+        }
+
+        // The usage frame is space-less too, so a regression here would
+        // silently zero the cost row rather than fail loudly.
+        let usage = usage.expect("usage block must parse from a space-less frame");
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 3);
+    }
 }
 
 #[cfg(test)]
