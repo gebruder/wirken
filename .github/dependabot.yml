@@ -35,6 +35,22 @@ updates:
       # See issue #149.
       - dependency-name: "rusqlite"
         versions: [">= 0.40"]
+      # tinfoil 0.2 returns an http client whose errors are
+      # `reqwest_middleware::Error` wrapping the `reqwest::Error` that
+      # 0.1 returned directly, so `is_pinned_tls_failure` in
+      # crates/agent/src/llm.rs no longer compiles against it.
+      #
+      # That predicate decides whether to drop the cached attested
+      # `tinfoil::Client` and re-attest, so widening the signature
+      # without reaching the inner reqwest error would stop a
+      # pinned-TLS connect failure from invalidating the cache and
+      # leave a stale pinned transport in place. The adaptation needs
+      # a test proving invalidation still fires, which is not work an
+      # auto-proposed bump should carry.
+      #
+      # Remove this in the same commit that adapts the predicate.
+      - dependency-name: "tinfoil"
+        versions: [">= 0.2"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
