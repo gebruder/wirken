@@ -6839,6 +6839,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wirken-adapter-discord",
  "wirken-adapter-google-chat",

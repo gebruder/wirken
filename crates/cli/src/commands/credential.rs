@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use dialoguer::Password;
+use url::Url;
 
 use wirken_mcp_proxy::{
     OAuthCredential, load_oauth_public, lookup_provider, run_authorization_code_flow, store_oauth,
@@ -295,6 +296,14 @@ impl ValueSource {
     }
 }
 
+fn normalize_host(raw: &str) -> Result<String> {
+    let url = Url::parse(&format!("https://{raw}/"))
+        .map_err(|e| anyhow!("invalid --host '{raw}': {e}"))?;
+    url.host_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("invalid --host '{raw}': no host"))
+}
+
 pub async fn add(
     name: &str,
     channel: Option<&str>,
@@ -307,6 +316,11 @@ pub async fn add(
     if value.is_empty() {
         anyhow::bail!("empty value");
     }
+
+    let allowed_hosts = allowed_hosts
+        .iter()
+        .map(|h| normalize_host(h))
+        .collect::<Result<Vec<String>>>()?;
 
     let keychain = probe_keychain(&cfg.data_dir, || {
         Password::new()
@@ -326,7 +340,7 @@ pub async fn add(
             &secret,
             None,
             None,
-            allowed_hosts,
+            &allowed_hosts,
         )
         .context(format!("Failed to store '{name}'"))?;
 
@@ -511,5 +525,18 @@ mod tests {
 
         let (retrieved, _) = store.retrieve("my-mcp-token").expect("retrieve");
         assert_eq!(retrieved.expose(), "hunter2");
+    }
+
+    #[test]
+    fn normalize_host_lowercases_and_punycodes() {
+        assert_eq!(normalize_host("café.example").unwrap(), "xn--caf-dma.example");
+        assert_eq!(normalize_host("Example.COM").unwrap(), "example.com");
+        assert_eq!(normalize_host("api.example.com").unwrap(), "api.example.com");
+    }
+
+    #[test]
+    fn normalize_host_rejects_invalid_input() {
+        assert!(normalize_host("").is_err());
+        assert!(normalize_host("not a host!!").is_err());
     }
 }
