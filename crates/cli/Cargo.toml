@@ -29,6 +29,11 @@ wirken-adapter-imessage = { path = "../adapter-imessage" }
 capnp = { workspace = true }
 ed25519-dalek = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+# Normalizes `credential add --host` through the same parser the
+# request side uses, so a stored binding and the host `http_request`
+# matches against cannot drift. Already a transitive dep through
+# wirken-agent, listed directly here so the cli can pull it.
+url = "2"
 reqwest = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }

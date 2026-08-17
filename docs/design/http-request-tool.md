@@ -296,12 +296,14 @@ Stated in the same plain terms as the egress boundary comment
 - Credential-host matching is exact per host; there is no `*.` wildcard
   for credential bindings (the egress allowlist has one, but a credential
   binding does not, by choice).
-- Credential-host bindings are stored and matched as ASCII/punycode. A
-  `--host` given in unicode (`café.example`) is stored unnormalized and
-  never matches the request host's punycode form (`xn--caf-dma.example`),
-  so it is silently unusable. This fails closed (no security impact) but
-  is a footgun; normalizing `--host` to lowercase punycode at store time
-  is a pending fix (adds a `url` dependency to the CLI).
+- Credential-host bindings are stored and matched as ASCII/punycode.
+  `credential add` normalizes each `--host` through the same parser the
+  request side uses, so a binding typed in unicode (`café.example`) is
+  stored as `xn--caf-dma.example` and matches. Input that is more than a
+  bare host is rejected rather than rewritten: `https://api.example.com`
+  parses to the host `https`, and `api.example.com:8443` parses to
+  `api.example.com` with the port dropped, so both would bind something
+  other than what was typed.
 - Production CLI wiring is in place: the gateway opens the vault at
   startup and attaches a `VaultCredentialResolver` to the agent factory,
   so every waked agent resolves host-bound credentials. If the vault is

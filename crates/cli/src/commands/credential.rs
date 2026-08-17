@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow};
 use dialoguer::Password;
+use url::Url;
 
 use wirken_mcp_proxy::{
     OAuthCredential, load_oauth_public, lookup_provider, run_authorization_code_flow, store_oauth,
@@ -295,6 +296,66 @@ impl ValueSource {
     }
 }
 
+/// Normalize an operator-supplied `--host` into the form
+/// `CredentialMetadata::permits_host` matches against.
+///
+/// Injection reaches `permits_host` with `Url::host_str`, which is
+/// lowercase ASCII: a binding typed in unicode (`café.example`) has to
+/// be stored punycoded (`xn--caf-dma.example`) or it never matches its
+/// own request host and the credential is silently unusable. Feeding
+/// the operator's input through the same parser the request side uses
+/// is what stops the two from drifting apart again.
+///
+/// Input carrying anything more than a bare host is rejected rather
+/// than rewritten. `Url` is happy to read `https://api.example.com` as
+/// the host `https`, and `api.example.com:8443` as `api.example.com`
+/// with the port discarded; both yield a binding the operator did not
+/// type, and the second is wider than the one they did. A credential
+/// host binding is not a place to guess at intent, so anything
+/// ambiguous is an error the operator can see rather than a silent
+/// rewrite they cannot.
+fn normalize_host(raw: &str) -> Result<String> {
+    if raw.trim().is_empty() {
+        return Err(anyhow!("invalid --host: empty"));
+    }
+    // Rejected here rather than after parsing: `permits_host` matches
+    // one host exactly, with no `*.` wildcard by design, so a pattern
+    // would store as a literal that can never match anything.
+    if raw.contains('*') {
+        return Err(anyhow!(
+            "invalid --host '{raw}': credential bindings match one host exactly, \
+             with no '*.' wildcard; bind each host you want reachable"
+        ));
+    }
+
+    let url = Url::parse(&format!("https://{raw}/"))
+        .map_err(|e| anyhow!("invalid --host '{raw}': {e}"))?;
+
+    // Each of these means the parser took something the operator typed
+    // and put it somewhere other than the host.
+    if url.port().is_some() {
+        return Err(anyhow!(
+            "invalid --host '{raw}': a port is not part of the binding; \
+             bindings match the host across every port"
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(anyhow!(
+            "invalid --host '{raw}': credentials in the host are not accepted; \
+             give a bare host"
+        ));
+    }
+    if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!(
+            "invalid --host '{raw}': give a bare host, not a URL or path"
+        ));
+    }
+
+    url.host_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("invalid --host '{raw}': no host"))
+}
+
 pub async fn add(
     name: &str,
     channel: Option<&str>,
@@ -302,6 +363,13 @@ pub async fn add(
     allowed_hosts: &[String],
 ) -> Result<()> {
     let cfg = config();
+
+    // Normalized before the value is read, so a rejected binding fails
+    // before the operator is prompted for a secret.
+    let allowed_hosts = allowed_hosts
+        .iter()
+        .map(|h| normalize_host(h))
+        .collect::<Result<Vec<_>>>()?;
 
     let value = read_credential_value(name, source)?;
     if value.is_empty() {
@@ -326,7 +394,7 @@ pub async fn add(
             &secret,
             None,
             None,
-            allowed_hosts,
+            &allowed_hosts,
         )
         .context(format!("Failed to store '{name}'"))?;
 
@@ -511,5 +579,59 @@ mod tests {
 
         let (retrieved, _) = store.retrieve("my-mcp-token").expect("retrieve");
         assert_eq!(retrieved.expose(), "hunter2");
+    }
+
+    #[test]
+    fn normalize_host_matches_the_request_side_host() {
+        // The invariant the whole normalization exists for: whatever
+        // `--host` is stored as has to equal what `http_request` hands
+        // `permits_host`, which is `Url::host_str` on the request URL.
+        for (typed, requested) in [
+            ("café.example", "https://café.example/v1/things"),
+            ("Example.COM", "https://example.com/"),
+            ("XN--CAF-DMA.example", "https://xn--caf-dma.example/"),
+            ("api.example.com", "https://api.example.com/x?y=1"),
+        ] {
+            let request_host = Url::parse(requested)
+                .unwrap()
+                .host_str()
+                .unwrap()
+                .to_string();
+            assert_eq!(
+                normalize_host(typed).unwrap(),
+                request_host,
+                "stored binding for {typed} must match the request host"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_host_preserves_ip_literals() {
+        assert_eq!(normalize_host("192.168.1.1").unwrap(), "192.168.1.1");
+        assert_eq!(normalize_host("[::1]").unwrap(), "[::1]");
+    }
+
+    #[test]
+    fn normalize_host_rejects_anything_but_a_bare_host() {
+        // Each of these parses successfully as a URL host, and each
+        // would silently store a binding other than the one typed.
+        for raw in [
+            "https://api.example.com", // parses to the host `https`
+            "api.example.com:8443",    // port dropped, binding widened
+            "[::1]:8443",
+            "example.com/admin",
+            "user:pw@example.com",
+            "example.com?a=b",
+            "example.com#frag",
+            "*.example.com", // no wildcard support, would never match
+            "",
+            "   ",
+            "not a host!!",
+        ] {
+            assert!(
+                normalize_host(raw).is_err(),
+                "{raw} should be rejected, not rewritten"
+            );
+        }
     }
 }
