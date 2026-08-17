@@ -61,7 +61,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-    # Tinfoil SDK is git-only; no crates.io publication yet. Pinned to
-    # tag v0.1.0 in crates/agent/Cargo.toml.
+    # Tinfoil SDK is git-only; no crates.io publication yet. Pinned by
+    # tag in crates/agent/Cargo.toml.
     "https://github.com/tinfoilsh/tinfoil-rs",
 ]

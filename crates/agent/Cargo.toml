@@ -52,8 +52,8 @@ rusqlite = { workspace = true }
 # comparison) bundled into client construction; the returned client
 # exposes a TLS-fingerprint-pinned `reqwest::Client` via
 # `http_client()` that wirken's tinfoil dispatch uses for chat traffic.
-# Pinned to v0.1.0; no crates.io publish exists yet. AGPL-3.0 license
-# is carved out for this crate in `deny.toml`.
+# Pinned by tag below; no crates.io publish exists yet. AGPL-3.0
+# license is carved out for this crate in `deny.toml`.
 tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.1.1" }
 
 [dev-dependencies]
