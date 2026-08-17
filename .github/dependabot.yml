@@ -48,7 +48,16 @@ updates:
       # a test proving invalidation still fires, which is not work an
       # auto-proposed bump should carry.
       #
-      # Remove this in the same commit that adapts the predicate.
+      # 0.2 also pulls `tinfoil-ehbp` from
+      # github.com/tinfoilsh/encrypted-http-body-protocol at a bare rev
+      # rather than a tag, which is a second git source and is not in
+      # the `deny.toml` sources allowlist, so `cargo deny` rejects the
+      # tree. Lifting this hold therefore also means vetting that repo
+      # and adding it alongside the existing tinfoil-rs entry, not just
+      # adapting the predicate.
+      #
+      # Remove this in the same commit that adapts the predicate and
+      # allowlists the new source.
       - dependency-name: "tinfoil"
         versions: [">= 0.2"]
   - package-ecosystem: github-actions
