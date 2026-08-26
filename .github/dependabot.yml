@@ -58,8 +58,13 @@ updates:
       #
       # Remove this in the same commit that adapts the predicate and
       # allowlists the new source.
+      #
+      # No `versions:` bound below: tinfoil is a git dependency, so
+      # Dependabot carries its version as a commit SHA and a semver
+      # range never matches it. An unbounded ignore is the only form
+      # that holds here. It gives up nothing, because tinfoil has no
+      # crates.io release for a security update to target.
       - dependency-name: "tinfoil"
-        versions: [">= 0.2"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
