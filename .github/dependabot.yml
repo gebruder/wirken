@@ -62,8 +62,19 @@ updates:
       # No `versions:` bound below: tinfoil is a git dependency, so
       # Dependabot carries its version as a commit SHA and a semver
       # range never matches it. An unbounded ignore is the only form
-      # that holds here. It gives up nothing, because tinfoil has no
-      # crates.io release for a security update to target.
+      # that holds here.
+      #
+      # It is unbounded in both directions: this suppresses the 0.1.x
+      # line as well as 0.2, and upstream carries tags past the pinned
+      # one that will not be proposed while this entry stands. No
+      # security coverage is lost, since tinfoil has no crates.io
+      # release for an advisory to reference, but compatible patch
+      # releases now have to be taken deliberately rather than offered.
+      #
+      # What replaces Dependabot for this crate: watch the tags on
+      # github.com/tinfoilsh/tinfoil-rs and move the pin by hand.
+      # `deny.toml` `[sources] allow-git` is the backstop, failing the
+      # build if the tree gains a git source that is not allowlisted.
       - dependency-name: "tinfoil"
   - package-ecosystem: github-actions
     directory: /
