@@ -568,8 +568,11 @@ impl AuditWriter {
         Ok((Self { tx }, handle))
     }
 
-    /// Send an audit event to be written.
-    /// Returns immediately — the event is buffered and flushed asynchronously.
+    /// Send an audit event to be written. The event is buffered and
+    /// flushed asynchronously, but the channel is bounded at
+    /// `CHANNEL_CAPACITY`, so this awaits capacity when the flush loop
+    /// is behind rather than returning immediately. A halted writer has
+    /// dropped the receiver, which surfaces here as `ChannelClosed`.
     pub async fn log(&self, event: AuditEvent) -> Result<(), AuditError> {
         self.tx
             .send(event)
