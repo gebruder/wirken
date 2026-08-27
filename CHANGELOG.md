@@ -8,6 +8,99 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.18.0] - 2026-08-27
+
+### Added
+
+- The minimum supported Rust version is declared, in
+  `workspace.package.rust-version`, and inherited by every member crate.
+  An `MSRV` CI job builds on exactly that toolchain, reading the version
+  out of the manifest rather than repeating it, so the field and the job
+  cannot drift apart.
+
+### Changed
+
+- **The MSRV is 1.95.0.** It was previously undeclared, and
+  `docs/getting-started.md` claimed 1.85+, which nothing enforced and
+  which was wrong by nine minor versions. The floor is set by the
+  wasmtime family: 48.x uses `cfg_select!`, stabilized in 1.95. Building
+  from source below 1.95.0 fails at dependency resolution.
+
+- `getting-started.md` names the `rust-version` field and the CI job
+  instead of repeating a number, so the two cannot disagree again.
+
+- wasmtime and wasmtime-wasi to 48.0.1. Both are now declared on adjacent
+  lines in `[workspace.dependencies]` with the member inheriting. They
+  share an API surface and a mismatched pair does not compile, and they
+  were previously pinned in separate manifests.
+
+- rusqlite to 0.40.2, pulling libsqlite3-sys 0.38.2. The hold on it
+  existed because libsqlite3-sys 0.38's build script calls `cfg_select!`;
+  the floor above is where that macro stabilized. Closes #149.
+
+- `DiscordError::Serenity` holds a `Box<serenity::Error>`. The variant was
+  the largest by a wide margin and put the enum past the
+  `result_large_err` threshold. `From<serenity::Error>` is written out
+  rather than derived, so `?` at existing call sites is unchanged.
+
+### Fixed
+
+- Wasm skills returned `(no output)` on success and lost stderr on a trap.
+  `execute` read its pipes with `try_into_inner`, which yields `Some` only
+  for the last handle, and the store still owned the clone given to the
+  WASI context, so the read always produced an empty buffer. No shipped
+  skill is a Wasm skill, so this reached only user-supplied ones.
+
+- `credential add` stored `--host` verbatim while `permits_host` matches
+  against `Url::host_str`, which is lowercase ASCII. A binding typed in
+  unicode (`café.example`) never matched its own request host
+  (`xn--caf-dma.example`), leaving the credential unusable. It failed
+  closed, so nothing leaked. `add` now runs each `--host` through the
+  request-side parser, before the secret is read.
+
+### Security
+
+- h2 to 0.4.19 for RUSTSEC-2026-0258, unbounded empty DATA frames. Reached
+  transitively through hyper.
+
+- lru to 0.18.2 for RUSTSEC-2026-0253, a use-after-free when a stored
+  key's `Drop` panics during `pop()` and leaves a freed node linked in the
+  list. 0.18.0 is still affected.
+
+### Dependencies
+
+- Fourteen minor and patch bumps taken as a group: async-trait, base64,
+  bollard, cap-std, clap, futures-util, libc, open, rustls, serde_json,
+  slack-morphism, thiserror, tokio, uuid.
+
+### Deferred
+
+- tinfoil stays at v0.1.1. Both costs of moving start inside the 0.1.x
+  line rather than at 0.2: `http_client()` changes its return type at
+  v0.1.2, and v0.1.4 adds `tinfoil-ehbp` as a second git source that is
+  not in the `deny.toml` allowlist. There is no compatible patch release
+  to take. The Dependabot ignore is unbounded because a semver range
+  never matches a git dependency, whose version Dependabot carries as a
+  commit SHA.
+
+- Tool-path dual write (#227). The dispatch loop runs a tool, then appends
+  the result to the session log, and propagates an append failure to the
+  caller as a generic error, so a caller cannot tell an effect that landed
+  without evidence from one that never happened. Handling is also split:
+  propagation is the default, three paths log and continue.
+
+- Audit writer halt drain (#228). Of three halt paths, only the
+  verify-pass halt drains the channel before dropping the receiver; the
+  two persistent-write-failure halts drop in-flight events.
+
+- Scorecard `VulnerabilitiesID`, `CodeReviewID`, `BranchProtectionID`
+  (high), `PinnedDependenciesID` (medium), `CIIBestPracticesID` (low),
+  open at tag time. `VulnerabilitiesID` cites RUSTSEC-2026-0173, an
+  accepted `deny.toml` ignore, and RUSTSEC-2026-0221 against
+  `event-listener`, which is an orphan `Cargo.lock` entry absent from the
+  resolve graph on every target and therefore not shipped. Dependabot and
+  CodeQL surfaces are both clear.
+
 ## [1.17.0] - 2026-08-11
 
 ### Added
