@@ -79,12 +79,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The floor is written once, in Cargo.toml `rust-version`. Read it
+      # here rather than repeating it, so the job cannot drift from what
+      # the manifest promises. Empty means the field was renamed or
+      # dropped, which fails the job instead of silently testing nothing.
+      - id: floor
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\([0-9.]*\)".*/\1/p' Cargo.toml | head -1)
+          if [ -z "$v" ]; then
+            echo "no rust-version found in Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       # Pinned to the floor itself, not `stable`. This job exists to prove
       # the `rust-version` in Cargo.toml is real, so it has to run on that
       # exact toolchain; on `stable` it would prove nothing.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
-          toolchain: 1.94.0
+          toolchain: ${{ steps.floor.outputs.version }}
       - name: Install Cap'n Proto
         run: sudo apt-get install -y capnproto
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
