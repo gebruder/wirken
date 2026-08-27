@@ -76,7 +76,13 @@ capnp = "0.27"
 # RUSTSEC-2026-0223 (preemption/traps during bulk operations break
 # internal VM state); both fixed in 46.0.2 and 47.0.3, so 47.0.2 is
 # inside the vulnerable range and must be skipped.
+#
+# The two crates share an API surface and a mismatched pair does not
+# compile, so they are declared together here and inherited by the
+# member rather than pinned in separate files. Move both or neither;
+# a diff that touches one line and not the next is the bug.
 wasmtime = "47.0.3"
+wasmtime-wasi = "47.0.3"
 bollard = "0.21"
 
 # CLI
