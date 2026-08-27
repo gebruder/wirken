@@ -76,7 +76,7 @@ capnp = "0.27"
 # RUSTSEC-2026-0223 (preemption/traps during bulk operations break
 # internal VM state); both fixed in 46.0.2 and 47.0.3, so 47.0.2 is
 # inside the vulnerable range and must be skipped.
-wasmtime = "47.0.3"
+wasmtime = "48.0.0"
 bollard = "0.21"
 
 # CLI
