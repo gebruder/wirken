@@ -35,9 +35,13 @@ updates:
       # See issue #149.
       - dependency-name: "rusqlite"
         versions: [">= 0.40"]
-      # tinfoil 0.2 returns an http client whose errors are
-      # `reqwest_middleware::Error` wrapping the `reqwest::Error` that
-      # 0.1 returned directly, so `is_pinned_tls_failure` in
+      # Both costs below start inside the 0.1.x line, not at 0.2, so
+      # there is no compatible patch release to take here.
+      #
+      # v0.1.2: `Client::http_client()` returns `&tls::OriginBoundClient`
+      # instead of `&reqwest::Client`. `OriginBoundClient` wraps
+      # `reqwest_middleware::ClientWithMiddleware`, so its errors are
+      # `reqwest_middleware::Error` and `is_pinned_tls_failure` in
       # crates/agent/src/llm.rs no longer compiles against it.
       #
       # That predicate decides whether to drop the cached attested
@@ -48,16 +52,16 @@ updates:
       # a test proving invalidation still fires, which is not work an
       # auto-proposed bump should carry.
       #
-      # 0.2 also pulls `tinfoil-ehbp` from
+      # v0.1.4: pulls `tinfoil-ehbp` from
       # github.com/tinfoilsh/encrypted-http-body-protocol at a bare rev
-      # rather than a tag, which is a second git source and is not in
-      # the `deny.toml` sources allowlist, so `cargo deny` rejects the
-      # tree. Lifting this hold therefore also means vetting that repo
-      # and adding it alongside the existing tinfoil-rs entry, not just
-      # adapting the predicate.
+      # rather than a tag. That is a second git source and is not in the
+      # `deny.toml` sources allowlist, so `cargo deny` rejects the tree.
       #
-      # Remove this in the same commit that adapts the predicate and
-      # allowlists the new source.
+      # Resume condition, all three: adapt `is_pinned_tls_failure` to
+      # `OriginBoundClient`; vet the encrypted-http-body-protocol repo
+      # and allowlist it in `deny.toml` `[sources]` beside tinfoil-rs;
+      # review the `sev` 7 to 8 bump, which moves the crate that verifies
+      # SEV-SNP attestation. Remove this entry in that same commit.
       #
       # No `versions:` bound below: tinfoil is a git dependency, so
       # Dependabot carries its version as a commit SHA and a semver
