@@ -57,3 +57,6 @@ tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.1.1" }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# Compiles the WAT fixtures in wasm_sandbox_e2e_tests at test time so
+# the repo carries no prebuilt .wasm binary.
+wat = "1"

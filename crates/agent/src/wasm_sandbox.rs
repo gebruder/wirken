@@ -140,8 +140,13 @@ impl WasmSkill {
 
         let run_result = start.call(&mut store, ());
 
-        let out_bytes = stdout.try_into_inner().unwrap_or_default();
-        let err_bytes = stderr.try_into_inner().unwrap_or_default();
+        // `contents()`, not `try_into_inner()`. The latter is
+        // `Arc::into_inner` underneath and yields `Some` only for the last
+        // handle, but `store` still owns the clone handed to
+        // `WasiCtxBuilder`, so it always returned `None` here and every
+        // skill reported "(no output)" with stderr discarded on traps.
+        let out_bytes = stdout.contents();
+        let err_bytes = stderr.contents();
         let out_str = String::from_utf8_lossy(&out_bytes).trim().to_string();
         let err_str = String::from_utf8_lossy(&err_bytes).trim().to_string();
 

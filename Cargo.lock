@@ -6788,6 +6788,7 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
  "wirken-audit",
  "wirken-gateway",
  "wirken-ipc",
