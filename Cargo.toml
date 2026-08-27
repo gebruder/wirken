@@ -81,8 +81,8 @@ capnp = "0.27"
 # compile, so they are declared together here and inherited by the
 # member rather than pinned in separate files. Move both or neither;
 # a diff that touches one line and not the next is the bug.
-wasmtime = "47.0.3"
-wasmtime-wasi = "47.0.3"
+wasmtime = "47.0.4"
+wasmtime-wasi = "47.0.4"
 bollard = "0.21"
 
 # CLI
