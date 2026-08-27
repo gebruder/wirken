@@ -10,7 +10,9 @@ Download the binary:
 curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
 ```
 
-Or build from source (requires Rust 1.85+ and the `capnp` compiler):
+Or build from source. The minimum supported Rust version is declared as
+`rust-version` in `Cargo.toml` and verified in CI on that exact toolchain.
+You will also need the `capnp` compiler:
 
 ```bash
 # Ubuntu/Debian

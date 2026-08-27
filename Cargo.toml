@@ -26,6 +26,9 @@ members = [
 [workspace.package]
 version = "1.17.0"
 edition = "2024"
+# Floor is set by the wasmtime family, which the security pin holds at
+# >= 47.0.3. Verified by the MSRV job in ci.yml, not by hand.
+rust-version = "1.94"
 license = "MIT"
 repository = "https://github.com/gebruder/wirken"
 description = "Team-scale AI agent orchestration with per-channel process isolation, encrypted credential vault, and per-session hash-chained audit log."
