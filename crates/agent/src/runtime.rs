@@ -711,10 +711,12 @@ impl Agent {
                 agent_id = %agent_id,
                 count = names.len(),
                 tools = ?names,
-                "MCP tools bypass the wirken permission tier check. The operator has \
-                 delegated authorization for these tools to the MCP server that serves \
-                 them. If the MCP server is compromised, these tools execute without a \
-                 tier gate. Review the list above and confirm the MCP server is trusted."
+                "MCP tool calls are gated at Tier 3, but the gate checks the tool name \
+                 and does not bound the server process it dispatches to. MCP servers are \
+                 spawned as child processes at the wirken UID with no sandbox, no uid \
+                 drop, and no egress mediation, so a server can read the data directory \
+                 and open its own outbound connections without crossing a wirken gate. \
+                 Review the list above and confirm the MCP server is trusted."
             );
         });
     }
