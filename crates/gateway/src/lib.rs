@@ -10,6 +10,7 @@ pub mod hook_dispatcher;
 pub mod hook_registry;
 pub mod injection_detect;
 pub mod memory;
+pub mod migrate;
 pub mod org;
 pub mod outbound_dispatcher;
 pub mod pending_approvals;
