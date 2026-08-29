@@ -83,6 +83,11 @@ impl GatewayConfig {
         self.data_dir.join("memory.db")
     }
 
+    /// Imported assistant data-export archives.
+    pub fn imported_db_path(&self) -> PathBuf {
+        self.data_dir.join("imported.db")
+    }
+
     /// Budget configuration: a global default plus per-agent
     /// overrides. Absent means no budgets are configured (enforcement
     /// off).
