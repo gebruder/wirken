@@ -677,20 +677,6 @@ impl Agent {
         Ok(count)
     }
 
-    /// Attach a shared MCP client. Used by [`crate::factory::AgentFactory`]
-    /// to inject the per-agent long-lived proxy connection into a
-    /// freshly waked Agent. Concurrent waked Agents for the same
-    /// agent_id share the same Arc and serialize through its Mutex.
-    ///
-    /// MCP-served tools skip the permission tier check (see
-    /// `tool_to_action` in tool.rs — it returns `None` for any name
-    /// outside the built-in set, and `execute_tool` routes to the
-    /// MCP client without gating). This is by design: the operator
-    /// trusts the MCP servers they configured. To make that trust
-    /// decision visible, spawn a task that lists the cached MCP
-    /// tools and logs them on attach. Operators see this line on
-    /// every `wirken run` and can review which names run
-    /// unprivileged.
     /// Configure the path the `sqlite_query` librarian tool opens.
     /// Called by the factory at wake time when the agent's static
     /// config names a zirkel-bound database. The librarian skill's
@@ -700,6 +686,18 @@ impl Agent {
         self.tools.set_zirkel_db_path(path);
     }
 
+    /// Attach a shared MCP client. Used by [`crate::factory::AgentFactory`]
+    /// to inject the per-agent long-lived proxy connection into a
+    /// freshly waked Agent. Concurrent waked Agents for the same
+    /// agent_id share the same Arc and serialize through its Mutex.
+    ///
+    /// MCP-served tools are permission-gated like any other tool.
+    /// `tool_to_action` classifies every `mcp_`-prefixed name as
+    /// `wirken_gateway::permissions::Action::McpToolCall`, which
+    /// resolves to Tier 3, and `execute_tool` runs the tier gate
+    /// before it routes the call to the MCP client. The tool names
+    /// are listed on attach so an operator can see which names a
+    /// configured MCP server introduced.
     pub fn attach_mcp(&mut self, client: Arc<tokio::sync::Mutex<McpProxyClient>>) {
         self.mcp = Some(client.clone());
         let agent_id = self.id.clone();
