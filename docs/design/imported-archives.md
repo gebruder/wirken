@@ -209,6 +209,12 @@ Natural keys: `(source_account, conversation_uuid)` for a conversation
 and `(source_account, message_uuid)` for a message. Both uuids are
 present on every record in the extracted structure.
 
+The store file is owner-only, converged on every open rather than set
+once at creation, so a database left loose by an earlier run does not
+stay loose. The data directory already restricts it; this is the
+posture the vault takes for the other file in that directory holding
+something confidential, and an imported corpus is that.
+
 ### Timestamps
 
 Conversation and project timestamps are both ISO 8601 in this archive
