@@ -49,6 +49,21 @@ reqwest-eventsource = "0.6"
 # SQLite
 rusqlite = { version = "0.40", features = ["bundled"] }
 
+# Zip reading for imported data-export archives. Narrowed deliberately:
+# the default feature set enables aes-crypto, bzip2, deflate64, lzma,
+# ppmd, zstd and xz, which is seven more decompressors parsing
+# attacker-influenced bytes than the format needs. Export archives are
+# DEFLATE, and `deflate-flate2` reuses flate2, already in the tree,
+# rather than adding a second backend. A member compressed with
+# anything else fails to open with a clear error, which is the
+# fail-closed direction.
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
+# zip's `deflate-flate2` enables the flate2 dependency but selects no
+# backend for it. Name the pure-Rust one explicitly so the feature
+# unifies on miniz_oxide, already in the tree, rather than pulling a C
+# or Rust zlib as a second compression backend.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 # Crypto
 chacha20poly1305 = "0.11"
 secrecy = "0.10"

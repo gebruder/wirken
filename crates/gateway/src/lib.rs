@@ -9,6 +9,7 @@ pub mod error;
 pub mod hook_dispatcher;
 pub mod hook_registry;
 pub mod imported;
+pub mod imported_archive;
 pub mod injection_detect;
 pub mod memory;
 pub mod migrate;

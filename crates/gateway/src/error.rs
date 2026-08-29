@@ -49,4 +49,11 @@ pub enum GatewayError {
 
     #[error("config error: {0}")]
     Config(String),
+
+    /// An archive was turned away on its structural shape: member
+    /// count, declared size, expansion ratio, or not being a readable
+    /// zip at all. Distinct from a parse failure, which is about a
+    /// member's contents rather than the archive's frame.
+    #[error("archive refused: {0}")]
+    ArchiveRefused(String),
 }

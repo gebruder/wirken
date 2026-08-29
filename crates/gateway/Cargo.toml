@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }
+zip = { workspace = true }
+flate2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
