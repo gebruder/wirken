@@ -147,6 +147,12 @@ enum Commands {
         agent: String,
     },
 
+    /// Import an assistant data-export archive into the local store
+    Import {
+        /// Path to the export archive.
+        archive: std::path::PathBuf,
+    },
+
     /// Run diagnostics
     Doctor,
 }
@@ -1316,6 +1322,7 @@ async fn main() -> Result<()> {
             CronCommands::Resume { id } => commands::cron::resume(&id).await,
         },
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
+        Commands::Import { archive } => commands::import::run(&archive).await,
         Commands::Doctor => commands::doctor::run().await,
         Commands::Lyrik(cmd) => match cmd {
             LyrikCommands::Run {

@@ -209,6 +209,7 @@ impl ImportStore {
         // from inside one.
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         let applied = crate::migrate::apply(&mut conn, MIGRATIONS)?;
+        restrict_to_owner(db_path)?;
         Ok((Self { conn }, applied))
     }
 
@@ -280,6 +281,27 @@ impl ImportStore {
             messages: messages as u64,
         })
     }
+}
+
+/// Pin the database to owner-only, converging a file that already
+/// exists under a looser mode.
+///
+/// The data directory is already 0o700, so this is defense in depth
+/// rather than the only barrier. It is worth having because this store
+/// holds an entire imported conversation corpus, including attachment
+/// text, which is the most confidential thing in the directory after
+/// the vault. The vault takes the same posture for the same reason;
+/// the stores that stay at the default hold registrations and
+/// schedules, not content.
+fn restrict_to_owner(db_path: &Path) -> Result<(), GatewayError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    #[cfg(not(unix))]
+    let _ = db_path;
+    Ok(())
 }
 
 /// What a source holds. Counts and nothing else.
@@ -376,6 +398,22 @@ mod tests {
         // The same account through the same provider is the same
         // source, however many archives it produces.
         assert!(s.conn.execute(insert, params!["src-2"]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_database_is_owner_only_and_converges_a_loose_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("imported.db");
+        let _ = ImportStore::open(&path).unwrap();
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        // A database left loose by an earlier run converges on reopen
+        // rather than staying loose forever.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _ = ImportStore::open(&path).unwrap();
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]
