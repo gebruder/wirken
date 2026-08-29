@@ -51,3 +51,7 @@ audit.log
 private/
 *-private/
 /analysis/
+
+# Python bytecode from the scripts/ test module
+__pycache__/
+*.pyc
