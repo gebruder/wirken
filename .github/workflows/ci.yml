@@ -74,6 +74,21 @@ jobs:
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo test --workspace
 
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The export schema extractor is stdlib-only by design, so this
+      # job installs nothing: no setup-python, no pip, no lockfile. The
+      # runner's own python3 is the same interpreter an operator runs
+      # the extractor with, which is the thing worth testing.
+      #
+      # Warnings are errors so an unclosed handle or a deprecation fails
+      # here rather than accumulating unread in the log.
+      - name: Extractor gate tests
+        run: python3 -W error::ResourceWarning scripts/test_anthropic_export_schema.py
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
