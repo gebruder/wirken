@@ -58,13 +58,9 @@ pub async fn run(archive: &Path) -> Result<()> {
             let counts = store
                 .counts(&source.id)
                 .with_context(|| format!("Failed to count records for source {}", source.id))?;
-            let mutability = if source.immutable {
-                "immutable"
-            } else {
-                "re-importable"
-            };
+            let seal = if source.sealed { "sealed" } else { "live" };
             println!(
-                "  {} provider={} account={} archive={} imported_at={} {mutability}",
+                "  {} provider={} account={} archive={} imported_at={} {seal}",
                 source.id,
                 source.provider,
                 source.source_account,

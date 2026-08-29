@@ -50,6 +50,16 @@ pub enum GatewayError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// A sealed source refused a further import. Typed rather than a
+    /// message so a caller can tell this apart from a parse failure
+    /// without reading prose.
+    #[error(
+        "source '{source_account}' is sealed and refuses further imports. It was declared a \
+         closed account when it was first imported, so its records are final. There is no \
+         unseal; importing a different archive means a different source account."
+    )]
+    SourceSealed { source_account: String },
+
     /// An archive was turned away on its structural shape: member
     /// count, declared size, expansion ratio, or not being a readable
     /// zip at all. Distinct from a parse failure, which is about a
