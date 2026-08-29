@@ -1,0 +1,279 @@
+[
+  {
+    "uuid": "11111111-1111-4111-8111-111111111111",
+    "name": "A titled conversation",
+    "summary": "A short summary.",
+    "created_at": "2026-01-02T03:04:05.000000Z",
+    "updated_at": "2026-01-03T03:04:05.000000Z",
+    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "chat_messages": [
+      {
+        "uuid": "1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a",
+        "sender": "human",
+        "text": "First turn.",
+        "created_at": "2026-01-02T03:04:05.000000Z",
+        "updated_at": "2026-01-02T03:04:05.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "start_timestamp": "2026-01-02T03:04:05.000000Z",
+            "stop_timestamp": "2026-01-02T03:04:06.000000Z",
+            "type": "text",
+            "text": "First turn.",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      },
+      {
+        "uuid": "1b1b1b1b-1b1b-4b1b-8b1b-1b1b1b1b1b1b",
+        "sender": "assistant",
+        "text": "A reply.",
+        "created_at": "2026-01-02T03:04:07.000000Z",
+        "updated_at": "2026-01-02T03:04:07.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "start_timestamp": null,
+            "stop_timestamp": null,
+            "type": "thinking",
+            "thinking": "Considering the question.",
+            "summaries": [{ "summary": "Considering the question" }],
+            "cut_off": false,
+            "flags": null
+          },
+          {
+            "start_timestamp": "2026-01-02T03:04:07.000000Z",
+            "stop_timestamp": "2026-01-02T03:04:08.000000Z",
+            "type": "text",
+            "text": "A reply.",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "uuid": "22222222-2222-4222-8222-222222222222",
+    "name": "",
+    "summary": "",
+    "created_at": "2026-02-02T03:04:05.000000Z",
+    "updated_at": "2026-02-02T03:04:05.000000Z",
+    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "chat_messages": [
+      {
+        "uuid": "2a2a2a2a-2a2a-4a2a-8a2a-2a2a2a2a2a2a",
+        "sender": "human",
+        "text": "Look at this file.",
+        "created_at": "2026-02-02T03:04:05.000000Z",
+        "updated_at": "2026-02-02T03:04:05.000000Z",
+        "attachments": [
+          {
+            "file_name": "notes.txt",
+            "file_size": 27,
+            "file_type": "text/plain",
+            "extracted_content": "Attachment body, which is message content that arrived as a file."
+          },
+          {
+            "file_name": "",
+            "file_size": 0,
+            "file_type": "",
+            "extracted_content": ""
+          }
+        ],
+        "files": [{ "file_name": "notes.txt" }],
+        "content": [
+          {
+            "type": "text",
+            "text": "Look at this file.",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      },
+      {
+        "uuid": "2b2b2b2b-2b2b-4b2b-8b2b-2b2b2b2b2b2b",
+        "sender": "assistant",
+        "text": "Fetched it.",
+        "created_at": "2026-02-02T03:04:09.000000Z",
+        "updated_at": "2026-02-02T03:04:09.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "type": "tool_use",
+            "name": "web_search",
+            "message": "Searching",
+            "integration_name": null,
+            "integration_icon_url": null,
+            "display_content": null,
+            "approval_key": null,
+            "approval_options": null,
+            "context": null,
+            "flags": null,
+            "input": {
+              "query": "a query",
+              "max_results": 5,
+              "md_citations": [
+                {
+                  "uuid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                  "title": "a source",
+                  "url": "https://example.invalid/a",
+                  "start_index": 0,
+                  "end_index": 10,
+                  "origin_tool_name": "web_search",
+                  "metadata": {
+                    "type": "generic_metadata",
+                    "uuid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    "source": "example",
+                    "preview_title": "a source",
+                    "icon_url": "https://example.invalid/icon.png"
+                  },
+                  "sources": [
+                    {
+                      "uuid": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+                      "title": "a source",
+                      "url": "https://example.invalid/a",
+                      "source": "example",
+                      "icon_url": "https://example.invalid/icon.png",
+                      "content_body": null,
+                      "resource_type": null,
+                      "subtitles": null
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "tool_result",
+            "name": "web_search",
+            "is_error": false,
+            "message": null,
+            "integration_name": null,
+            "integration_icon_url": null,
+            "display_content": null,
+            "approval_key": null,
+            "approval_options": null,
+            "context": null,
+            "flags": null,
+            "content": [
+              {
+                "type": "knowledge",
+                "title": "a source",
+                "url": "https://example.invalid/a",
+                "is_citable": true,
+                "is_missing": false,
+                "mime_type": null,
+                "ingestion_date": "",
+                "start": 0,
+                "metadata": {
+                  "type": "webpage_metadata",
+                  "site_domain": "example.invalid",
+                  "site_name": "Example",
+                  "favicon_url": "https://example.invalid/favicon.ico"
+                },
+                "prompt_context_metadata": {
+                  "url": "https://example.invalid/a",
+                  "age": "2 days ago"
+                }
+              },
+              {
+                "type": "text",
+                "text": "Result body."
+              }
+            ]
+          },
+          {
+            "type": "token_budget",
+            "flags": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "uuid": "33333333-3333-4333-8333-333333333333",
+    "name": "Markup and unicode as subject matter",
+    "summary": "A conversation whose content is markup, stored exactly as it arrived.",
+    "created_at": "2026-03-02T03:04:05.000000Z",
+    "updated_at": "2026-03-02T03:04:05.000000Z",
+    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "chat_messages": [
+      {
+        "uuid": "3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a",
+        "sender": "human",
+        "text": "Why does <script>alert('x')</script> get through here? Also: 日本語, emoji 🙂, and a quote \" plus a backslash \\.",
+        "created_at": "2026-03-02T03:04:05.000000Z",
+        "updated_at": "2026-03-02T03:04:05.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "type": "text",
+            "text": "Why does <script>alert('x')</script> get through here? Also: 日本語, emoji 🙂, and a quote \" plus a backslash \\.",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      },
+      {
+        "uuid": "3b3b3b3b-3b3b-4b3b-8b3b-3b3b3b3b3b3b",
+        "sender": "assistant",
+        "text": "It is stored as text and encoded at render, never rewritten at import.",
+        "created_at": "2026-03-02T03:04:06.000000Z",
+        "updated_at": "2026-03-02T03:04:06.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "type": "text",
+            "text": "It is stored as text and encoded at render, never rewritten at import.",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "uuid": "44444444-4444-4444-8444-444444444444",
+    "name": "Nameable but unfittable",
+    "created_at": "2026-04-02T03:04:05.000000Z",
+    "updated_at": "2026-04-02T03:04:05.000000Z",
+    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "chat_messages": "not an array, so this record does not fit and is skipped by uuid"
+  },
+  {
+    "name": "No uuid, so there is no identifier to skip it by",
+    "created_at": "2026-05-02T03:04:05.000000Z",
+    "updated_at": "2026-05-02T03:04:05.000000Z",
+    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "chat_messages": []
+  },
+  {
+    "uuid": "66666666-6666-4666-8666-666666666666",
+    "name": "Carries a field this parser has never seen",
+    "summary": "",
+    "created_at": "2026-06-02T03:04:05.000000Z",
+    "updated_at": "2026-06-02T03:04:05.000000Z",
+    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "a_field_added_upstream": { "shape": ["unknown", 1, null] },
+    "chat_messages": [
+      {
+        "uuid": "6a6a6a6a-6a6a-4a6a-8a6a-6a6a6a6a6a6a",
+        "sender": "human",
+        "text": "An addition upstream must cost its column, not the record.",
+        "created_at": "2026-06-02T03:04:05.000000Z",
+        "updated_at": "2026-06-02T03:04:05.000000Z",
+        "attachments": [],
+        "files": [],
+        "another_new_field": true,
+        "content": []
+      }
+    ]
+  }
+]

@@ -140,7 +140,11 @@ slack-morphism = { version = "2.23", features = ["hyper"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` is what keeps an imported content block byte-faithful.
+# Round-tripping through `Value` would reorder object keys and drop the
+# original whitespace, which is a mutation of a record the design says
+# is stored exactly as it arrived.
+serde_json = { version = "1", features = ["raw_value"] }
 
 # Testing
 tempfile = "3"
