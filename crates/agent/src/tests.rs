@@ -9116,6 +9116,87 @@ fn only_the_public_corpus_leaves_egress_unrestricted() {
     }
 }
 
+/// The tier and the key come from the classifier, not the tool.
+/// A gate that lived in the tool body would be a second copy of a
+/// rule the runtime never consults.
+/// The replay verifier attaches no import store, and the doc's tool
+/// slice closes partly on the tools being unreachable from it.
+///
+/// Unreachable here means the tool reads nothing: with no context
+/// installed it reports itself unconfigured and never touches a store.
+/// The verifier also never calls the LLM at all, so nothing dispatches
+/// a tool there in the first place, but this is the property that
+/// holds even if that changed.
+#[tokio::test]
+async fn an_imported_read_without_a_store_reads_nothing_and_says_so() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let registry = crate::tool::ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        crate::tool::ToolConfig::default(),
+    )
+    .expect("registry");
+
+    let result = registry
+        .execute(
+            "read_imported_chat",
+            r#"{"source":"src-1","conversation":"c-1"}"#,
+        )
+        .await
+        .expect("an unconfigured tool reports, it does not error");
+
+    assert!(!result.success, "an unconfigured read must not succeed");
+    assert!(
+        result.output.contains("not configured"),
+        "it says why: {}",
+        result.output
+    );
+    // Nothing about the request leaked into the answer either.
+    assert!(!result.output.contains("src-1"), "{}", result.output);
+}
+
+#[test]
+fn an_imported_chat_read_classifies_at_tier_three_keyed_per_source() {
+    let args = serde_json::json!({"source": "src-1", "conversation": "c-9"});
+    let action = crate::tool::tool_to_action("read_imported_chat", &args)
+        .expect("the classifier places this tool");
+    assert!(
+        matches!(&action, wirken_gateway::permissions::Action::ImportedChatRead { source_id }
+            if source_id == "src-1")
+    );
+    assert_eq!(
+        action.tier(),
+        wirken_gateway::permissions::PermissionTier::Tier3
+    );
+    assert_eq!(action.approval_key(), "imported_chat:src-1");
+}
+
+#[test]
+fn an_imported_chat_read_with_no_source_denies_rather_than_widening() {
+    // An empty key matches no source, so a call that omits the
+    // argument cannot ride an approval granted for a real archive.
+    let action = crate::tool::tool_to_action("read_imported_chat", &serde_json::json!({}))
+        .expect("the classifier still places it");
+    assert_eq!(action.approval_key(), "imported_chat:");
+    assert_eq!(
+        action.tier(),
+        wirken_gateway::permissions::PermissionTier::Tier3
+    );
+}
+
+#[test]
+fn an_imported_chat_read_is_marked_for_the_observed_sensitivity_set() {
+    use crate::tool::ReadSensitivity;
+
+    // Registered at the same site that classifies for tiering, so
+    // one edit decides both and a read enters the set through the
+    // path every other read uses.
+    assert_eq!(
+        crate::tool::tool_to_read_sensitivity("read_imported_chat"),
+        Some(ReadSensitivity::ImportedArchive)
+    );
+    assert!(ReadSensitivity::ImportedArchive.restricts_egress());
+}
+
 #[test]
 fn writes_and_network_tools_carry_no_read_label() {
     use crate::tool::tool_to_read_sensitivity;

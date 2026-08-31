@@ -457,12 +457,30 @@ history, which is an oracle over the same corpus. A lower tier would
 need a search shape that returns neither content nor presence, and that
 is not a useful tool.
 
-Approval keys are scoped per source, on the `cross_channel_memory:{from_channel}`
-pattern (`crates/gateway/src/permissions.rs:240-242`), so approving one
-archive approves no other. A missing or empty source argument yields a
-key that matches no source and therefore denies rather than widening,
-which is the behaviour the cross-channel key already relies on
-(`crates/agent/src/tool.rs:1668-1680`).
+### The approval key, and why it is shaped this way
+
+`imported_chat:{source_id}`, beside `cross_channel_memory:{from_channel}`,
+which it copies deliberately.
+
+The cross-channel key names the channel read *from* rather than the
+pair of channels, because the destination is the channel the turn is
+already on and putting it in the key would fragment one decision into
+many. An imported read is the same shape: the source is what the
+operator is being asked about, and the agent doing the asking is
+already known. So the key names the source and nothing else, and
+approving one archive approves no other, exactly as approving one
+channel's history approves no other channel's.
+
+A missing or empty source argument yields `imported_chat:`, a key no
+source carries, so such a call cannot ride an approval granted for a
+real archive. It denies rather than widening, which is the behaviour
+the cross-channel key already relies on.
+
+The key is built in the classifier arm, at the same site that decides
+the tier, and the tool body checks neither. A tool that re-checked
+would hold a second copy of a rule the runtime never consults, and the
+copy that is not consulted can be wrong for a long time without
+anything failing.
 
 ### Read sensitivity
 

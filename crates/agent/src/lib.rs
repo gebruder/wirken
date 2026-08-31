@@ -11,6 +11,7 @@ pub mod error;
 pub mod factory;
 pub mod http_tool;
 pub mod identity;
+pub mod imported_tool;
 pub mod inbound_interceptor;
 pub mod keycloak_identity;
 pub mod llm;

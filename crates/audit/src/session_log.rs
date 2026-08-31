@@ -1251,6 +1251,29 @@ pub enum SessionEvent {
         /// other labels do not carry the conversation segment.
         origin_session_id: String,
     },
+    /// An agent read a conversation out of an imported archive.
+    ///
+    /// Emitted after the Tier 3 gate admits the call, once per read,
+    /// whether or not the conversation was found. A read that found
+    /// nothing still records that the corpus was reached into.
+    ///
+    /// Identifiers and counts only. No title, no message text, and no
+    /// excerpt of either: the row says which conversation was read and
+    /// how much came back, and a reader who needs the content goes
+    /// through the gate like the agent did.
+    ImportedChatRead {
+        source_id: String,
+        source_account: String,
+        conversation_uuid: String,
+        /// Messages returned. Zero is a legitimate outcome and still
+        /// records the read.
+        message_count: u64,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
     /// An import of an assistant data-export archive began.
     ///
     /// Emitted by the operator's CLI, not by an agent turn, so there

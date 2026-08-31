@@ -627,6 +627,18 @@ fn extract_identity_for_sentinel(
         SessionEvent::ImportStarted { actor, .. } | SessionEvent::ImportCompleted { actor, .. } => {
             (None, Some(actor.clone()), None)
         }
+        // An agent ran this one, unlike an import, so it attributes
+        // like every other agent event rather than to an operator.
+        SessionEvent::ImportedChatRead {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
         SessionEvent::PermissionDenied { agent_id, .. }
         | SessionEvent::SkillPermissionDenied { agent_id, .. }
         | SessionEvent::AssistantMessage { agent_id, .. }

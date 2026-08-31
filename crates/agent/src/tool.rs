@@ -118,6 +118,9 @@ pub struct ToolRegistry {
     /// deny-everything posture: the container runs with no
     /// networking, which is also what an unconfigured channel gets.
     sandbox_egress: RwLock<Option<crate::sandbox_egress::SandboxEgressContext>>,
+    /// Imported-archive store and this turn's attribution. `None`
+    /// leaves the imported tools reporting themselves unconfigured.
+    imported: RwLock<Option<crate::imported_tool::ImportedContext>>,
 }
 
 impl ToolRegistry {
@@ -279,6 +282,32 @@ impl ToolRegistry {
         );
 
         tools.insert(
+            "read_imported_chat".into(),
+            ToolDef {
+                name: "read_imported_chat".into(),
+                description: "Read one conversation out of an imported archive of a \
+                              different assistant account. An archive is that account's \
+                              whole history, so this requires operator approval every \
+                              time, per archive."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "description": "Import source id the conversation belongs to"
+                        },
+                        "conversation": {
+                            "type": "string",
+                            "description": "Conversation uuid to read"
+                        }
+                    },
+                    "required": ["source", "conversation"]
+                }),
+            },
+        );
+
+        tools.insert(
             "memory_read_channel".into(),
             ToolDef {
                 name: "memory_read_channel".into(),
@@ -426,6 +455,7 @@ impl ToolRegistry {
             credential_resolver: RwLock::new(None),
             http_audit: RwLock::new(None),
             sandbox_egress: RwLock::new(None),
+            imported: RwLock::new(None),
             memory: RwLock::new(None),
         })
     }
@@ -459,6 +489,14 @@ impl ToolRegistry {
     /// denials are recorded under. Called by the agent once the
     /// bound channel is known. Leaving it unset denies all sandbox
     /// egress, so a wiring gap fails closed.
+    /// Install the imported-archive context. Until this is called the
+    /// imported tools read nothing and say so.
+    pub fn set_imported(&self, ctx: crate::imported_tool::ImportedContext) {
+        if let Ok(mut g) = self.imported.write() {
+            *g = Some(ctx);
+        }
+    }
+
     pub fn set_sandbox_egress(&self, ctx: crate::sandbox_egress::SandboxEgressContext) {
         if let Ok(mut g) = self.sandbox_egress.write() {
             *g = Some(ctx);
@@ -605,6 +643,20 @@ impl ToolRegistry {
                     Some(ctx) => crate::memory_tool::execute(&ctx, name, &args).await,
                     None => Ok(ToolResult {
                         output: "memory is not configured for this agent".into(),
+                        success: false,
+                    }),
+                }
+            }
+            "read_imported_chat" => {
+                // No context attached means no import store was
+                // installed for this agent. The tool reports that and
+                // reads nothing, exactly as the memory tools do when
+                // memory is unconfigured. This is what makes the tool
+                // unreachable on a path that installs no store.
+                match self.imported.read().ok().and_then(|g| g.clone()) {
+                    Some(ctx) => crate::imported_tool::execute(&ctx, name, &args).await,
+                    None => Ok(ToolResult {
+                        output: "imported archives are not configured for this agent".into(),
                         success: false,
                     }),
                 }
@@ -1568,6 +1620,12 @@ pub enum ReadSensitivity {
     ChannelMemory,
     /// Another channel's memory entries: a different trust zone.
     CrossChannelMemory,
+    /// Content out of an imported archive: another account's whole
+    /// conversation history, message text, attachment text and
+    /// project-document text alike. All three are conversation
+    /// content, so all three carry this label rather than the file
+    /// ones carrying something lesser.
+    ImportedArchive,
     /// The operator's workspace files.
     Workspace,
 }
@@ -1586,6 +1644,7 @@ impl ReadSensitivity {
             Self::AggregatedExternal => "aggregated_external",
             Self::ChannelMemory => "channel_memory",
             Self::CrossChannelMemory => "cross_channel_memory",
+            Self::ImportedArchive => "imported_archive",
             Self::Workspace => "workspace",
         }
     }
@@ -1609,6 +1668,7 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
         "sqlite_query" => Some(ReadSensitivity::AggregatedExternal),
         "memory_read" => Some(ReadSensitivity::ChannelMemory),
         "memory_read_channel" => Some(ReadSensitivity::CrossChannelMemory),
+        "read_imported_chat" => Some(ReadSensitivity::ImportedArchive),
         // Everything else is not a read of stored data. `web_search`
         // and `http_request` fetch from the public network, which is
         // the same confidentiality position as AggregatedExternal and
@@ -1674,6 +1734,19 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         "memory_read_channel" => Some(Action::CrossChannelMemoryRead {
             from_channel: args
                 .get("channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        // Reading an imported archive. The tier and the approval key
+        // are decided here, at the same site that classifies every
+        // other tool, so the gate runs in the runtime before dispatch
+        // reaches the tool body. A missing or empty `source` yields a
+        // key no source carries, so it denies rather than widening to
+        // every archive.
+        "read_imported_chat" => Some(Action::ImportedChatRead {
+            source_id: args
+                .get("source")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),

@@ -101,6 +101,24 @@ pub enum Action {
     CrossChannelMemoryRead {
         from_channel: String,
     },
+    /// Reading a conversation out of an imported archive. Always
+    /// Tier 3.
+    ///
+    /// The argument is not that imported text is untrustworthy, which
+    /// is a separate axis. It is what the corpus reveals: an archive is
+    /// the whole conversation history of an account, written with no
+    /// expectation that an agent would ever read it.
+    /// `CrossChannelMemoryRead` gates a smaller disclosure, one other
+    /// channel's deliberately labelled entries for the same agent, at
+    /// this tier; gating the larger one lower would invert the model.
+    ///
+    /// Keyed by the source read *from*, exactly as the cross-channel
+    /// key is keyed by the channel read from, so approving one archive
+    /// approves no other. A missing or empty source argument yields a
+    /// key no source carries, so it denies rather than widening.
+    ImportedChatRead {
+        source_id: String,
+    },
 }
 
 impl std::fmt::Display for Action {
@@ -124,6 +142,7 @@ impl std::fmt::Display for Action {
             Action::UnknownTool { .. } => "unknown_tool",
             Action::WasmSkillCall { .. } => "wasm_skill_call",
             Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
+            Action::ImportedChatRead { .. } => "imported_chat_read",
         };
         f.write_str(label)
     }
@@ -218,7 +237,8 @@ impl Action {
             | Action::McpToolCall { .. }
             | Action::UnknownTool { .. }
             | Action::WasmSkillCall { .. }
-            | Action::CrossChannelMemoryRead { .. } => PermissionTier::Tier3,
+            | Action::CrossChannelMemoryRead { .. }
+            | Action::ImportedChatRead { .. } => PermissionTier::Tier3,
         }
     }
 
@@ -240,6 +260,7 @@ impl Action {
             Action::CrossChannelMemoryRead { from_channel } => {
                 format!("cross_channel_memory:{from_channel}")
             }
+            Action::ImportedChatRead { source_id } => format!("imported_chat:{source_id}"),
             other => format!("{other:?}"),
         }
     }
@@ -1216,12 +1237,38 @@ mod tier_tests {
                 Action::UnknownTool { .. } => "unknown_tool",
                 Action::WasmSkillCall { .. } => "wasm_skill_call",
                 Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
+                Action::ImportedChatRead { .. } => "imported_chat_read",
             }
         }
         // Smoke a representative variant so the function isn't
         // dead-code-eliminated and the compile-time match still
         // gets exercised.
         assert_eq!(variant_label(&Action::WebSearch), "web_search");
+    }
+
+    #[test]
+    fn an_imported_chat_read_is_tier_three_and_keyed_per_source() {
+        let a = Action::ImportedChatRead {
+            source_id: "src-1".into(),
+        };
+        assert_eq!(a.tier(), PermissionTier::Tier3);
+        assert_eq!(a.approval_key(), "imported_chat:src-1");
+
+        // The same shape the cross-channel precedent uses: approving
+        // one archive approves no other, exactly as approving one
+        // channel's history approves no other channel's.
+        let b = Action::ImportedChatRead {
+            source_id: "src-2".into(),
+        };
+        assert_ne!(a.approval_key(), b.approval_key());
+
+        // An empty source yields a key no source carries, so it denies
+        // rather than widening to every archive.
+        let blank = Action::ImportedChatRead {
+            source_id: String::new(),
+        };
+        assert_eq!(blank.approval_key(), "imported_chat:");
+        assert_ne!(blank.approval_key(), a.approval_key());
     }
 
     #[test]

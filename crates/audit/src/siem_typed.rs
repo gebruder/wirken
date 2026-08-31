@@ -81,6 +81,8 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 /// - `ImportStarted`, `ImportCompleted`: archive imports and what they
 ///   did to the store. Counts and stable identifiers only; no title
 ///   and no message text is on either row.
+/// - `ImportedChatRead`: an agent reaching into an imported corpus
+///   through the Tier 3 gate. Identifiers and a count; no content.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -124,6 +126,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::CrossChannelMemoryRead { .. }
             | SessionEvent::ImportStarted { .. }
             | SessionEvent::ImportCompleted { .. }
+            | SessionEvent::ImportedChatRead { .. }
     );
     if !in_default {
         return false;
@@ -188,6 +191,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SandboxEgressUnsupported { .. } => "sandbox_egress_unsupported",
         SessionEvent::MemoryEntryWritten { .. } => "memory_entry_written",
         SessionEvent::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
+        SessionEvent::ImportedChatRead { .. } => "imported_chat_read",
         SessionEvent::ImportStarted { .. } => "import_started",
         SessionEvent::ImportCompleted { .. } => "import_completed",
         SessionEvent::ToolOutputRedacted { .. } => "tool_output_redacted",

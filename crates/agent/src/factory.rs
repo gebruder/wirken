@@ -229,6 +229,9 @@ pub struct AgentFactory {
     /// mirroring the other gateway-wide injections. `None` leaves the
     /// memory tools unconfigured.
     memory_store: std::sync::RwLock<Option<Arc<StdMutex<wirken_gateway::memory::MemoryStore>>>>,
+    /// Imported-archive store, shared by every agent this factory
+    /// wakes. `None` leaves the imported tools unconfigured.
+    imported_store: std::sync::RwLock<Option<Arc<StdMutex<wirken_gateway::imported::ImportStore>>>>,
     /// External veto-hook dispatcher. Defaults to `NoopDispatcher`
     /// so factories built without a hook layer pay no cost. The CLI
     /// runs `attach_veto_dispatcher` after constructing the factory
@@ -349,6 +352,7 @@ impl AgentFactory {
                 wirken_gateway::egress_dispatcher::NoopEgressDispatcher,
             )),
             memory_store: std::sync::RwLock::new(None),
+            imported_store: std::sync::RwLock::new(None),
             credential_resolver: std::sync::RwLock::new(None),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
@@ -436,6 +440,18 @@ impl AgentFactory {
     /// last writer wins.
     /// Install the cross-channel memory store. Called by the CLI
     /// after opening it, before any agent is woken.
+    /// Install the imported-archive store. Called by the CLI once the
+    /// store is open; a process that never calls it wakes agents whose
+    /// imported tools read nothing.
+    pub fn attach_imported_store(
+        &self,
+        store: Arc<StdMutex<wirken_gateway::imported::ImportStore>>,
+    ) {
+        if let Ok(mut g) = self.imported_store.write() {
+            *g = Some(store);
+        }
+    }
+
     pub fn attach_memory_store(&self, store: Arc<StdMutex<wirken_gateway::memory::MemoryStore>>) {
         if let Ok(mut g) = self.memory_store.write() {
             *g = Some(store);
@@ -629,6 +645,9 @@ impl AgentFactory {
         agent.attach_factory(self.weak());
         agent.attach_subagent_ceilings(cfg.allowed_subagents.clone());
         agent.set_channel_egress(cfg.channel_egress.clone());
+        if let Some(store) = self.imported_store.read().ok().and_then(|g| g.clone()) {
+            agent.set_imported_store(store);
+        }
         if let Some(store) = self.memory_store.read().ok().and_then(|g| g.clone()) {
             agent.set_memory_store(store);
         }

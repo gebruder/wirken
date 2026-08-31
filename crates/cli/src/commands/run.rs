@@ -1191,6 +1191,22 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         ),
     }
 
+    // --- Imported archives ---
+    //
+    // Opened here rather than lazily in the agent so a store that
+    // cannot be opened is one warning at start rather than a failure
+    // inside a gated tool call. An unopened store leaves the imported
+    // tools reporting themselves unconfigured, which reads nothing.
+    match wirken_gateway::imported::ImportStore::open(&cfg.imported_db_path()) {
+        Ok((store, _applied)) => {
+            factory.attach_imported_store(Arc::new(std::sync::Mutex::new(store)))
+        }
+        Err(e) => tracing::warn!(
+            "imported archives unavailable: could not open {}: {e}",
+            cfg.imported_db_path().display()
+        ),
+    }
+
     // --- http_request credential resolver ---
     //
     // Open the vault as a long-lived resolver so the `http_request`

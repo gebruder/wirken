@@ -231,6 +231,10 @@ pub struct Agent {
     /// tools unconfigured, which is the posture for any agent the
     /// gateway has not wired a store into.
     memory_store: Option<std::sync::Arc<std::sync::Mutex<wirken_gateway::memory::MemoryStore>>>,
+    /// Imported-archive store. `None` leaves the imported tools
+    /// reporting themselves unconfigured, which is the state the
+    /// replay verifier runs in.
+    imported_store: Option<std::sync::Arc<std::sync::Mutex<wirken_gateway::imported::ImportStore>>>,
     /// Per-channel sandbox egress policy from this agent's
     /// `AgentConfig`. Empty means no channel has egress, which is
     /// the deny posture for every turn.
@@ -403,6 +407,7 @@ impl Agent {
             allowed_subagents: BTreeMap::new(),
             channel_egress: BTreeMap::new(),
             memory_store: None,
+            imported_store: None,
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
@@ -497,6 +502,7 @@ impl Agent {
             allowed_subagents: BTreeMap::new(),
             channel_egress: BTreeMap::new(),
             memory_store: None,
+            imported_store: None,
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
@@ -824,6 +830,16 @@ impl Agent {
         self.install_sandbox_egress();
     }
 
+    /// Install the imported-archive store. Called by the factory at
+    /// wake time when the CLI attached one. An agent woken without it
+    /// has imported tools that read nothing.
+    pub fn set_imported_store(
+        &mut self,
+        store: std::sync::Arc<std::sync::Mutex<wirken_gateway::imported::ImportStore>>,
+    ) {
+        self.imported_store = Some(store);
+    }
+
     /// Install the cross-channel memory store. Called by the factory
     /// at wake time.
     pub fn set_memory_store(
@@ -864,12 +880,31 @@ impl Agent {
             sender_id,
             origin_session_id: self.session_handle.id().to_string(),
         };
+        self.install_imported();
         self.tools.set_memory(crate::memory_tool::MemoryContext {
             store: store.clone(),
             labels,
             log: self.session_log.clone(),
             handle: self.session_handle.clone(),
         });
+    }
+
+    /// Push the imported-archive store and this turn's attribution to
+    /// the tool registry. Attribution comes from the inbound context,
+    /// never from tool arguments.
+    fn install_imported(&self) {
+        let Some(store) = self.imported_store.clone() else {
+            return;
+        };
+        self.tools
+            .set_imported(crate::imported_tool::ImportedContext {
+                store,
+                agent_id: self.id.clone(),
+                adapter_id: self.current_inbound.adapter_id.clone(),
+                sender_id: self.current_inbound.sender_id.clone(),
+                log: self.session_log.clone(),
+                handle: self.session_handle.clone(),
+            });
     }
 
     /// Resolve the current turn's channel against the configured
