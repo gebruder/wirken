@@ -381,25 +381,37 @@ impl ImportStore {
             ));
         }
 
-        let incoming_updated = normalize_timestamp(&conversation.updated_at);
         let tx = self.conn.transaction()?;
 
-        let stored: Option<i64> = tx
+        // The stored raw string, not its epoch: whether a stored record
+        // can be ordered is a question about the string it arrived as.
+        let stored_raw: Option<String> = tx
             .query_row(
-                "SELECT updated_at_epoch FROM imported_conversation
+                "SELECT updated_at_raw FROM imported_conversation
                  WHERE source_account = ?1 AND conversation_uuid = ?2",
                 params![labels.source_account, conversation.uuid],
                 |row| row.get(0),
             )
             .optional()?;
 
-        let outcome = match stored {
-            Some(stored_updated) if incoming_updated <= stored_updated => {
-                tx.commit()?;
-                return Ok(UpsertOutcome::Unchanged);
-            }
-            Some(_) => UpsertOutcome::Updated,
+        let incoming_updated = normalize_timestamp(&conversation.updated_at);
+        let outcome = match stored_raw {
             None => UpsertOutcome::Added,
+            Some(stored_raw) => {
+                match (incoming_updated, normalize_timestamp(&stored_raw)) {
+                    (Some(incoming), Some(stored)) if incoming > stored => UpsertOutcome::Updated,
+                    (Some(_), Some(_)) => {
+                        tx.commit()?;
+                        return Ok(UpsertOutcome::Unchanged);
+                    }
+                    // No ordering evidence on one side or the other.
+                    // Nothing is written, and the caller is told why.
+                    _ => {
+                        tx.commit()?;
+                        return Ok(UpsertOutcome::Unorderable);
+                    }
+                }
+            }
         };
 
         if outcome == UpsertOutcome::Updated {
@@ -443,9 +455,9 @@ impl ImportStore {
                 conversation.name,
                 conversation.summary,
                 conversation.created_at,
-                normalize_timestamp(&conversation.created_at),
+                normalize_timestamp(&conversation.created_at).unwrap_or_default(),
                 conversation.updated_at,
-                incoming_updated,
+                incoming_updated.unwrap_or_default(),
             ],
         )?;
 
@@ -473,9 +485,9 @@ impl ImportStore {
                     message.text,
                     message.content_json(),
                     message.created_at,
-                    normalize_timestamp(&message.created_at),
+                    normalize_timestamp(&message.created_at).unwrap_or_default(),
                     message.updated_at,
-                    normalize_timestamp(&message.updated_at),
+                    normalize_timestamp(&message.updated_at).unwrap_or_default(),
                 ],
             )?;
 
@@ -578,27 +590,72 @@ impl ImportDecision {
     }
 }
 
-/// What upserting one conversation did.
+/// What upserting one record did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpsertOutcome {
+    /// Not previously stored.
     Added,
+    /// Stored, and the incoming snapshot is demonstrably newer.
     Updated,
+    /// Stored, and the incoming snapshot is demonstrably not newer.
     Unchanged,
+    /// Stored, and there is no ordering evidence either way, because a
+    /// timestamp on one side or the other could not be parsed. Nothing
+    /// is written.
+    ///
+    /// Distinct from `Unchanged` on purpose. Both write nothing, but
+    /// they mean opposite things: unchanged is a comparison that
+    /// happened and came out equal or older, unorderable is a
+    /// comparison that could not happen at all. Folding them together
+    /// would let an upstream timestamp format change land as a quiet
+    /// archive of unchanged records while the store went stale. Kept
+    /// apart, the same break reports a whole archive unorderable,
+    /// which is a signal.
+    Unorderable,
 }
 
 /// Normalize an ISO 8601 timestamp to microseconds for ordering.
 ///
-/// Unparseable yields zero, which orders oldest. That is deliberate
-/// and has a consequence worth stating: a conversation whose
-/// `updated_at` cannot be parsed is never newer than what is stored,
-/// so a re-import leaves it alone. The alternative, treating
-/// unorderable as newer, would let a record be replaced on no evidence
-/// that it changed. Not mutating a stored record is the safer of the
-/// two wrong answers.
-fn normalize_timestamp(raw: &str) -> i64 {
+/// `None` means the string could not be parsed, which is the absence
+/// of ordering evidence rather than a very old time. A sentinel would
+/// not do: a timestamp of the unix epoch parses legitimately and
+/// yields zero, so zero cannot also mean "unparseable" without making
+/// one real timestamp indistinguishable from a broken one.
+///
+/// Orderability is derived from the stored raw string rather than
+/// carried in its own column. The raw string is already stored
+/// verbatim, so it is the source of truth for whether a stored record
+/// could be ordered, and no schema change is needed to ask.
+fn normalize_timestamp(raw: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()
         .map(|dt| dt.timestamp_micros())
-        .unwrap_or(0)
+}
+
+/// The tally an import reports. Counts and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportCounts {
+    pub added: u64,
+    pub updated: u64,
+    pub unchanged: u64,
+    /// Records left alone because no ordering evidence was available.
+    /// A whole archive landing here is a format break, not a quiet
+    /// no-op.
+    pub unorderable: u64,
+    /// Records that did not fit the structs and were skipped.
+    pub skipped: u64,
+}
+
+impl ImportCounts {
+    /// Fold one outcome into the tally.
+    pub fn record(&mut self, outcome: UpsertOutcome) {
+        match outcome {
+            UpsertOutcome::Added => self.added += 1,
+            UpsertOutcome::Updated => self.updated += 1,
+            UpsertOutcome::Unchanged => self.unchanged += 1,
+            UpsertOutcome::Unorderable => self.unorderable += 1,
+        }
+    }
 }
 
 /// Pin the database to owner-only, converging a file that already
@@ -984,19 +1041,64 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_updated_at_never_counts_as_newer() {
-        // Stated so the consequence is pinned rather than discovered:
-        // a record whose timestamp cannot be ordered is never replaced.
+    fn an_unorderable_timestamp_reports_unorderable_rather_than_unchanged() {
+        // The distinction that makes a format break visible. Both
+        // outcomes write nothing; only one of them says a comparison
+        // happened.
         let (mut s, _, _t) = store();
         let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
         let labels = labels_for(&d, "acct-1");
         s.upsert_conversation(&labels, &conversation("c1", "not a timestamp", &["m1"]))
             .unwrap();
-        let outcome = s
-            .upsert_conversation(&labels, &conversation("c1", "also not one", &["m2"]))
+
+        // Unparseable on both sides.
+        assert_eq!(
+            s.upsert_conversation(&labels, &conversation("c1", "also not one", &["m2"]))
+                .unwrap(),
+            UpsertOutcome::Unorderable
+        );
+        // Unparseable on the stored side only: still no evidence.
+        assert_eq!(
+            s.upsert_conversation(
+                &labels,
+                &conversation("c1", "2026-09-09T00:00:00Z", &["m3"])
+            )
+            .unwrap(),
+            UpsertOutcome::Unorderable
+        );
+        // Nothing was written by either.
+        let surviving: String = s
+            .conn
+            .query_row(
+                "SELECT message_uuid FROM imported_message WHERE conversation_uuid = 'c1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(outcome, UpsertOutcome::Unchanged);
-        assert_eq!(normalize_timestamp("not a timestamp"), 0);
+        assert_eq!(surviving, "m1");
+    }
+
+    #[test]
+    fn the_unix_epoch_is_a_real_timestamp_not_an_unparseable_one() {
+        // Why orderability is not a sentinel value: this parses, and
+        // yields the same number a sentinel would have claimed for a
+        // broken string.
+        assert_eq!(normalize_timestamp("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(normalize_timestamp("not a timestamp"), None);
+    }
+
+    #[test]
+    fn counts_keep_unorderable_apart_from_unchanged() {
+        let mut counts = ImportCounts::default();
+        counts.record(UpsertOutcome::Added);
+        counts.record(UpsertOutcome::Unchanged);
+        counts.record(UpsertOutcome::Unorderable);
+        counts.record(UpsertOutcome::Unorderable);
+        counts.skipped += 1;
+        assert_eq!(counts.added, 1);
+        assert_eq!(counts.unchanged, 1);
+        assert_eq!(counts.unorderable, 2);
+        assert_eq!(counts.skipped, 1);
     }
 
     #[test]

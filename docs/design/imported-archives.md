@@ -302,12 +302,32 @@ then against something real.
 
 ### Multi-source
 
-Many sources per instance. A source backed by a closed account imports
-once and is marked immutable; a second import against it refuses. A
-source backed by a live account re-imports with upsert on the natural
-key, replacing a record when the incoming updated timestamp is newer
-than the stored one, and the completion event reports added, updated,
-and unchanged counts.
+Many sources per instance. Sealing is an operator declaration at import
+time: a source declared sealed is a closed account, imports once, and
+refuses whatever archive is presented afterwards, matching hash or not.
+The refusal names the sealed state, and there is no unseal.
+
+A live source re-imports with upsert on the natural key, replacing a
+record when the incoming updated timestamp is demonstrably newer than
+the stored one. Presented with the archive it already holds, a live
+source does nothing. The source row carries the most recent archive
+hash; the hash of any individual run rides that run's audit event.
+
+Replacement is wholesale. A record whose incoming snapshot is newer has
+its dependent rows deleted and rewritten as a unit rather than merged.
+An export is a snapshot, so a child absent from the newer archive is
+absent from the history, and merging would resurrect it into a record
+that existed in neither archive.
+
+The completion event reports added, updated, unchanged, unorderable,
+and skipped counts. Unorderable is kept apart from unchanged
+deliberately. Both write nothing, but unchanged is a comparison that
+happened and came out not-newer, while unorderable is a comparison that
+could not happen because a timestamp on one side would not parse.
+Folding them together would let an upstream timestamp format change
+land as a quiet archive of unchanged records while the store went
+stale; kept apart, the same break reports a whole archive unorderable,
+which is a signal.
 
 ### One source, and no assumption of a second
 
@@ -465,7 +485,7 @@ never message content:
 - import started, carrying source identifier, provider, source
   account, and archive hash.
 - import completed, carrying the same identifiers plus added,
-  updated, unchanged, and skipped counts.
+  updated, unchanged, unorderable, and skipped counts.
 - an imported-chat read, carrying source identifier, conversation
   uuid, and the number of messages returned.
 - an imported-chat search, carrying source identifier, match counts,
