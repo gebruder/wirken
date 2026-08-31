@@ -111,19 +111,22 @@ impl SourceLabels {
     }
 }
 
-/// One import source: an archive, and the account it came from.
+/// An existing import source, as much of it as the decision needs.
+///
+/// The row carries a provider and an import timestamp too. Neither is
+/// read when deciding what an import will be, so neither is selected:
+/// a field nothing reads is a field that can drift from the row
+/// without anything noticing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportSource {
-    pub id: String,
-    pub provider: String,
-    pub source_account: String,
-    pub archive_sha256: String,
-    pub imported_at: String,
+struct ImportSource {
+    id: String,
+    source_account: String,
+    archive_sha256: String,
     /// Declared by the operator at import time. A sealed source is a
     /// closed account: it imports once, and a second import against it
     /// refuses rather than replacing what is there. There is no
     /// unseal.
-    pub sealed: bool,
+    sealed: bool,
 }
 
 /// Append-only. A new migration goes on the end; an existing entry is
@@ -274,7 +277,7 @@ impl ImportStore {
     }
 
     /// The source for this provider and account, if one was imported.
-    pub fn source(
+    fn source(
         &self,
         provider: Provider,
         source_account: &str,
@@ -282,45 +285,20 @@ impl ImportStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, provider, source_account, archive_sha256, imported_at, sealed
+                "SELECT id, source_account, archive_sha256, sealed
                  FROM import_source WHERE provider = ?1 AND source_account = ?2",
                 params![provider.as_str(), source_account],
                 |row| {
                     Ok(ImportSource {
                         id: row.get(0)?,
-                        provider: row.get(1)?,
-                        source_account: row.get(2)?,
-                        archive_sha256: row.get(3)?,
-                        imported_at: row.get(4)?,
-                        sealed: row.get::<_, i64>(5)? != 0,
+                        source_account: row.get(1)?,
+                        archive_sha256: row.get(2)?,
+                        sealed: row.get::<_, i64>(3)? != 0,
                     })
                 },
             )
             .optional()?;
         Ok(row)
-    }
-
-    /// Every source, oldest import first.
-    pub fn sources(&self) -> Result<Vec<ImportSource>, GatewayError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, provider, source_account, archive_sha256, imported_at, sealed
-             FROM import_source ORDER BY imported_at, id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(ImportSource {
-                id: row.get(0)?,
-                provider: row.get(1)?,
-                source_account: row.get(2)?,
-                archive_sha256: row.get(3)?,
-                imported_at: row.get(4)?,
-                sealed: row.get::<_, i64>(5)? != 0,
-            })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
     }
 
     /// Decide what an import against this declaration will be, and
@@ -1437,6 +1415,5 @@ mod tests {
     fn a_missing_source_reads_as_absent_rather_than_erroring() {
         let (s, _, _t) = store();
         assert!(s.source(Provider::Anthropic, "nobody").unwrap().is_none());
-        assert!(s.sources().unwrap().is_empty());
     }
 }

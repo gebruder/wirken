@@ -151,6 +151,11 @@ enum Commands {
     Import {
         /// Path to the export archive.
         archive: std::path::PathBuf,
+        /// Declare this account closed. A sealed source imports once
+        /// and refuses afterwards, whatever archive is presented.
+        /// There is no unseal.
+        #[arg(long)]
+        sealed: bool,
     },
 
     /// Run diagnostics
@@ -1322,7 +1327,7 @@ async fn main() -> Result<()> {
             CronCommands::Resume { id } => commands::cron::resume(&id).await,
         },
         Commands::Ask { message, agent } => commands::agent::send(&message, &agent).await,
-        Commands::Import { archive } => commands::import::run(&archive).await,
+        Commands::Import { archive, sealed } => commands::import::run(&archive, sealed).await,
         Commands::Doctor => commands::doctor::run().await,
         Commands::Lyrik(cmd) => match cmd {
             LyrikCommands::Run {

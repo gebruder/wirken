@@ -1,7 +1,9 @@
 # Design: imported assistant archives
 
-Status: proposal. Nothing here is implemented. Every claim about
-current behaviour is settled against the repo and carries a file
+Status: in progress. The store, the archive reader, the parser, the
+write path, the audit events, and the `wirken import` command are
+built; the web views, the agent tools, and search are not. Every claim
+about current behaviour is settled against the repo and carries a file
 reference; the data model is derived from structure extracted from a
 real archive.
 

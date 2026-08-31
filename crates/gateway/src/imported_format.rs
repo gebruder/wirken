@@ -207,6 +207,25 @@ pub enum ParsedConversation {
     },
 }
 
+/// Why an element did not fit, without quoting it.
+///
+/// serde's own message embeds the offending value: a string field that
+/// arrived as an array produces `invalid type: string "..."` with the
+/// content inline. Logging that would put archive text into the
+/// tracing log, which is the thing the import surface exists to keep
+/// behind the gate, and a skip reason is not a place to make an
+/// exception. The classification and the position say what went wrong
+/// and where to look without repeating what was there.
+fn describe_failure(err: &serde_json::Error) -> String {
+    let kind = match err.classify() {
+        serde_json::error::Category::Data => "did not fit the expected shape",
+        serde_json::error::Category::Syntax => "was not valid JSON",
+        serde_json::error::Category::Eof => "ended early",
+        serde_json::error::Category::Io => "could not be read",
+    };
+    format!("{kind} at line {} column {}", err.line(), err.column())
+}
+
 /// Just enough of a conversation to name one that did not fit.
 #[derive(Deserialize)]
 struct UuidOnly {
@@ -328,7 +347,7 @@ where
                     let uuid = serde_json::from_str::<UuidOnly>(raw.get())
                         .ok()
                         .and_then(|u| u.uuid);
-                    (self.on_item)(index, Err((uuid, err.to_string())));
+                    (self.on_item)(index, Err((uuid, describe_failure(&err))));
                 }
             }
         }
@@ -402,6 +421,23 @@ mod tests {
                 // The uuid was not a string, so there is no identifier
                 // to name and the position stands in for it.
                 assert_eq!(*uuid, None);
+            }
+            other => panic!("expected Skipped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_skip_reason_never_quotes_the_content_that_failed() {
+        // serde's own message embeds the offending value. A skip
+        // reason reaches the tracing log, so it must not carry
+        // archive text.
+        let json = r#"[{"uuid":"c1","chat_messages":"SECRETVALUEINARCHIVE"}]"#;
+        let (items, _) = collect(json);
+        match &items[0] {
+            ParsedConversation::Skipped { reason, .. } => {
+                assert!(!reason.contains("SECRETVALUEINARCHIVE"), "{reason}");
+                assert!(reason.contains("did not fit"), "{reason}");
+                assert!(reason.contains("line"), "{reason}");
             }
             other => panic!("expected Skipped, got {other:?}"),
         }
