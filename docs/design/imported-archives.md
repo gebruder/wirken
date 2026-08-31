@@ -522,6 +522,20 @@ approval route, the denial reason, and the adapter and sender pair.
 Reusing it keeps imported-chat denials in the same stream and the same
 SIEM detections as every other denial.
 
+**Attribution on the import events is operator-CLI, on the convention
+already in the tree rather than a new one.** An import runs from the
+CLI, not from an agent turn, so there is no agent id and none is
+invented. The events carry an actor label populated the way a CLI
+approval populates `approved_by`: the operator's `$USER`, falling back
+to the literal `cli`, which is the actor half of the actor-versus-
+surface split the approval path already documents.
+
+The field is required rather than optional. An import row always has
+an actor, so a row that reaches a SIEM without one can only mean the
+extractor was never taught the variant. Making the field optional
+would make a genuinely unattributed event indistinguishable from a
+registration someone forgot.
+
 The search event records a keyed digest of the query, never the query
 text. HMAC-SHA256 on the pattern already in the tree
 (`crates/audit/src/alarm_log.rs:329-334`), keyed by a dedicated

@@ -78,6 +78,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 /// - `MemoryEntryWritten`, `CrossChannelMemoryRead`: memory
 ///   provenance and trust-zone crossings. Labels and counts only; no
 ///   entry content is on either row.
+/// - `ImportStarted`, `ImportCompleted`: archive imports and what they
+///   did to the store. Counts and stable identifiers only; no title
+///   and no message text is on either row.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -119,6 +122,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::SandboxEgressUnsupported { .. }
             | SessionEvent::MemoryEntryWritten { .. }
             | SessionEvent::CrossChannelMemoryRead { .. }
+            | SessionEvent::ImportStarted { .. }
+            | SessionEvent::ImportCompleted { .. }
     );
     if !in_default {
         return false;
@@ -183,6 +188,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SandboxEgressUnsupported { .. } => "sandbox_egress_unsupported",
         SessionEvent::MemoryEntryWritten { .. } => "memory_entry_written",
         SessionEvent::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
+        SessionEvent::ImportStarted { .. } => "import_started",
+        SessionEvent::ImportCompleted { .. } => "import_completed",
         SessionEvent::ToolOutputRedacted { .. } => "tool_output_redacted",
     }
 }
@@ -468,6 +475,79 @@ impl<'a> TypedTransport<'a> {
                 config,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod import_variant_tests {
+    use super::*;
+    use crate::session_log::SessionEvent;
+
+    fn started() -> SessionEvent {
+        SessionEvent::ImportStarted {
+            source_id: "src-1".into(),
+            provider: "anthropic".into(),
+            source_account: "acct-1".into(),
+            archive_sha256: "abc".into(),
+            actor: "an-operator".into(),
+        }
+    }
+
+    fn completed() -> SessionEvent {
+        SessionEvent::ImportCompleted {
+            source_id: "src-1".into(),
+            provider: "anthropic".into(),
+            source_account: "acct-1".into(),
+            archive_sha256: "abc".into(),
+            actor: "an-operator".into(),
+            added: 1,
+            updated: 2,
+            unchanged: 3,
+            unorderable: 4,
+            skipped: 5,
+        }
+    }
+
+    #[test]
+    fn the_variants_have_stable_kinds() {
+        assert_eq!(variant_kind_for(&started()), "import_started");
+        assert_eq!(variant_kind_for(&completed()), "import_completed");
+    }
+
+    #[test]
+    fn the_variants_forward_by_default() {
+        // The default-include list is not compiler-forced. A variant
+        // left out of it is silently never forwarded.
+        let config = SiemConfig {
+            target: SiemTarget::Webhook,
+            endpoint: "http://127.0.0.1:0/x".into(),
+            api_key: String::new(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        };
+        assert!(should_forward(&started(), &config));
+        assert!(should_forward(&completed(), &config));
+    }
+
+    #[test]
+    fn the_completed_row_carries_the_five_counts_and_no_content() {
+        let json = serde_json::to_string(&completed()).unwrap();
+        for field in [
+            "\"added\":1",
+            "\"updated\":2",
+            "\"unchanged\":3",
+            "\"unorderable\":4",
+            "\"skipped\":5",
+        ] {
+            assert!(json.contains(field), "missing {field} in {json}");
+        }
+        assert!(json.contains("\"kind\":\"import_completed\""));
     }
 }
 

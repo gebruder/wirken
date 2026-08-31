@@ -619,6 +619,14 @@ fn extract_identity_for_sentinel(
             sender_id,
             ..
         } => (None, sender_id.clone(), Some(agent_id.clone())),
+        // No agent ran an import: it is an operator CLI action. The
+        // actor label goes in the principal position, and agent stays
+        // genuinely absent rather than being invented. Without this
+        // arm the catch-all below would leave the row with nothing,
+        // which would look the same as an event that had no actor.
+        SessionEvent::ImportStarted { actor, .. } | SessionEvent::ImportCompleted { actor, .. } => {
+            (None, Some(actor.clone()), None)
+        }
         SessionEvent::PermissionDenied { agent_id, .. }
         | SessionEvent::SkillPermissionDenied { agent_id, .. }
         | SessionEvent::AssistantMessage { agent_id, .. }
@@ -747,4 +755,42 @@ fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "wirken".into())
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::session_log::SessionEvent;
+
+    /// The identity extractor is not compiler-forced: its catch-all
+    /// would leave an unregistered variant with no attribution, which
+    /// looks the same as an event that had nobody to name.
+    #[test]
+    fn import_rows_carry_the_operator_actor() {
+        let started = SessionEvent::ImportStarted {
+            source_id: "src-1".into(),
+            provider: "anthropic".into(),
+            source_account: "acct-1".into(),
+            archive_sha256: "abc".into(),
+            actor: "an-operator".into(),
+        };
+        let completed = SessionEvent::ImportCompleted {
+            source_id: "src-1".into(),
+            provider: "anthropic".into(),
+            source_account: "acct-1".into(),
+            archive_sha256: "abc".into(),
+            actor: "an-operator".into(),
+            added: 1,
+            updated: 0,
+            unchanged: 0,
+            unorderable: 0,
+            skipped: 0,
+        };
+        for event in [started, completed] {
+            let (channel, sender, agent) = extract_identity_for_sentinel(&event);
+            assert_eq!(sender.as_deref(), Some("an-operator"));
+            assert_eq!(channel, None);
+            assert_eq!(agent, None, "no agent ran an import");
+        }
+    }
 }

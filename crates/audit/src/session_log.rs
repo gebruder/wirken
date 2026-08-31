@@ -1251,6 +1251,54 @@ pub enum SessionEvent {
         /// other labels do not carry the conversation segment.
         origin_session_id: String,
     },
+    /// An import of an assistant data-export archive began.
+    ///
+    /// Emitted by the operator's CLI, not by an agent turn, so there
+    /// is no agent id to carry and none is invented. `actor` carries
+    /// the operator label on the existing actor-vs-surface convention:
+    /// the CLI's `$USER`, falling back to the literal `"cli"`, the
+    /// same value `approved_by` records for a CLI approval.
+    ///
+    /// It is a required field rather than an option on purpose. An
+    /// import row always has an actor, so a row that reaches a SIEM
+    /// without one can only mean the extractor was never taught this
+    /// variant, and that stays distinguishable from an event that
+    /// genuinely had nobody to name.
+    ///
+    /// The hash is this run's archive, which is not always the hash
+    /// the source row carries: the source keeps the most recent, and
+    /// each run's own hash lives here.
+    ImportStarted {
+        source_id: String,
+        provider: String,
+        source_account: String,
+        archive_sha256: String,
+        actor: String,
+    },
+    /// An import finished, with what it did to the store.
+    ///
+    /// The counts are the whole outcome. `unorderable` is deliberately
+    /// apart from `unchanged`: both wrote nothing, but unchanged is a
+    /// comparison that happened and came out not-newer, while
+    /// unorderable is a comparison that could not happen because a
+    /// timestamp would not parse. A whole archive landing in
+    /// `unorderable` is an upstream format break, which folding the
+    /// two together would have hidden as a quiet no-op.
+    ///
+    /// No title, no message text, and no excerpt of either appears
+    /// here. Counts and stable identifiers only.
+    ImportCompleted {
+        source_id: String,
+        provider: String,
+        source_account: String,
+        archive_sha256: String,
+        actor: String,
+        added: u64,
+        updated: u64,
+        unchanged: u64,
+        unorderable: u64,
+        skipped: u64,
+    },
     /// An agent read memory entries written on a different channel.
     /// Emitted after the Tier 3 gate admits the call, once per read,
     /// carrying both ends of the crossing.
