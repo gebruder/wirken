@@ -83,6 +83,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   and no message text is on either row.
 /// - `ImportedChatRead`: an agent reaching into an imported corpus
 ///   through the Tier 3 gate. Identifiers and a count; no content.
+/// - `ImportedChatSearched`: every search attempt that reached the
+///   tool, with its outcome, its match count, and a keyed digest of
+///   the query. The query itself is never on the row.
 ///
 /// Default-exclude (PII or noisy by default; opt-in only):
 ///
@@ -127,6 +130,7 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::ImportStarted { .. }
             | SessionEvent::ImportCompleted { .. }
             | SessionEvent::ImportedChatRead { .. }
+            | SessionEvent::ImportedChatSearched { .. }
     );
     if !in_default {
         return false;
@@ -192,6 +196,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::MemoryEntryWritten { .. } => "memory_entry_written",
         SessionEvent::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
         SessionEvent::ImportedChatRead { .. } => "imported_chat_read",
+        SessionEvent::ImportedChatSearched { .. } => "imported_chat_searched",
         SessionEvent::ImportStarted { .. } => "import_started",
         SessionEvent::ImportCompleted { .. } => "import_completed",
         SessionEvent::ToolOutputRedacted { .. } => "tool_output_redacted",

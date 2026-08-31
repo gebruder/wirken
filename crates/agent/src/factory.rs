@@ -232,6 +232,9 @@ pub struct AgentFactory {
     /// Imported-archive store, shared by every agent this factory
     /// wakes. `None` leaves the imported tools unconfigured.
     imported_store: std::sync::RwLock<Option<Arc<StdMutex<wirken_gateway::imported::ImportStore>>>>,
+    /// Key for the imported-search query digest, shared by every agent
+    /// this factory wakes.
+    imported_search_key: std::sync::RwLock<Option<Vec<u8>>>,
     /// External veto-hook dispatcher. Defaults to `NoopDispatcher`
     /// so factories built without a hook layer pay no cost. The CLI
     /// runs `attach_veto_dispatcher` after constructing the factory
@@ -353,6 +356,7 @@ impl AgentFactory {
             )),
             memory_store: std::sync::RwLock::new(None),
             imported_store: std::sync::RwLock::new(None),
+            imported_search_key: std::sync::RwLock::new(None),
             credential_resolver: std::sync::RwLock::new(None),
             approval_gate: std::sync::RwLock::new(None),
             telegram_approval_gate: std::sync::RwLock::new(None),
@@ -443,6 +447,15 @@ impl AgentFactory {
     /// Install the imported-archive store. Called by the CLI once the
     /// store is open; a process that never calls it wakes agents whose
     /// imported tools read nothing.
+    /// Install the key imported-search audit rows digest under. A
+    /// process that never calls it leaves the digest off those rows
+    /// rather than writing an unkeyed one.
+    pub fn attach_imported_search_key(&self, key: Vec<u8>) {
+        if let Ok(mut g) = self.imported_search_key.write() {
+            *g = Some(key);
+        }
+    }
+
     pub fn attach_imported_store(
         &self,
         store: Arc<StdMutex<wirken_gateway::imported::ImportStore>>,
@@ -647,6 +660,9 @@ impl AgentFactory {
         agent.set_channel_egress(cfg.channel_egress.clone());
         if let Some(store) = self.imported_store.read().ok().and_then(|g| g.clone()) {
             agent.set_imported_store(store);
+        }
+        if let Some(key) = self.imported_search_key.read().ok().and_then(|g| g.clone()) {
+            agent.set_imported_search_key(key);
         }
         if let Some(store) = self.memory_store.read().ok().and_then(|g| g.clone()) {
             agent.set_memory_store(store);

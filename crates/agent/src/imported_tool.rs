@@ -26,7 +26,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use wirken_audit::{OwnSession, SessionEvent, SessionHandle, SessionLog, TrustLevel};
+use wirken_audit::{
+    ImportedSearchOutcome, OwnSession, SessionEvent, SessionHandle, SessionLog, TrustLevel,
+};
 use wirken_gateway::imported::ImportStore;
 
 use crate::error::AgentError;
@@ -45,9 +47,40 @@ pub struct ImportedContext {
     pub sender_id: Option<String>,
     pub log: Arc<dyn SessionLog>,
     pub handle: SessionHandle<OwnSession>,
+    /// Key for the search-query digest. `None` when the keychain
+    /// could not supply one, in which case the digest is omitted
+    /// rather than replaced with an unkeyed one, which would put a
+    /// recoverable form of the query on the row.
+    pub search_digest_key: Option<Vec<u8>>,
 }
 
 impl ImportedContext {
+    /// Put one search attempt on the chain.
+    ///
+    /// Called on every path out of the search tool, including the ones
+    /// that return nothing and the ones that refuse, so the trail
+    /// records attempts rather than survivors.
+    fn record_search(
+        &self,
+        scope: &Option<String>,
+        query: &str,
+        outcome: ImportedSearchOutcome,
+        match_count: u64,
+    ) {
+        self.record(SessionEvent::ImportedChatSearched {
+            source_id: scope.clone(),
+            outcome,
+            match_count,
+            query_digest: self
+                .search_digest_key
+                .as_ref()
+                .map(|key| wirken_audit::imported_search_digest(key, query)),
+            agent_id: self.agent_id.clone(),
+            adapter_id: self.adapter_id.clone(),
+            sender_id: self.sender_id.clone(),
+        });
+    }
+
     fn record(&self, event: SessionEvent) {
         if let Err(e) = self.log.append(&self.handle, TrustLevel::System, event) {
             tracing::warn!("could not record imported-archive event: {e}");
@@ -63,6 +96,7 @@ pub async fn execute(
 ) -> Result<ToolResult, AgentError> {
     match tool {
         "read_imported_chat" => read_chat(ctx, args),
+        "search_imported_chats" => search(ctx, args),
         other => Err(AgentError::ToolNotFound(other.to_string())),
     }
 }
@@ -117,6 +151,114 @@ fn read_chat(ctx: &ImportedContext, args: &serde_json::Value) -> Result<ToolResu
         output: render(&detail),
         success: true,
     })
+}
+
+/// How many hits a search returns when the caller does not say.
+const SEARCH_LIMIT: usize = 20;
+
+/// Search imported archives.
+///
+/// Every attempt that reaches here emits an event, whether it found
+/// matches, found none, or was refused. A trail of only the searches
+/// that returned something would answer "what was looked for" with a
+/// filtered version of the truth, and the thing an auditor most wants
+/// to know about a compromised agent is what it went looking for.
+///
+/// The outcome is on the row alongside the count because the count
+/// cannot carry it: a refusal and an empty result both have no
+/// matches, and telling them apart is the difference between "the term
+/// is not in the corpus" and "nothing was searched".
+fn search(ctx: &ImportedContext, args: &serde_json::Value) -> Result<ToolResult, AgentError> {
+    // An absent scope is a search of every archive. That is a wider
+    // question than a scoped one, and the classifier already asked the
+    // operator about it under a key of its own.
+    let scope = args
+        .get("source")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if query.trim().is_empty() {
+        ctx.record_search(&scope, &query, ImportedSearchOutcome::Refused, 0);
+        return Ok(fail("search_imported_chats needs a 'query' string"));
+    }
+
+    let sources: Vec<String> = {
+        let store = ctx
+            .store
+            .lock()
+            .map_err(|e| AgentError::Tool(format!("import store lock: {e}")))?;
+        match &scope {
+            Some(id) => vec![id.clone()],
+            None => store
+                .source_views()
+                .map_err(|e| AgentError::Tool(format!("search_imported_chats: {e}")))?
+                .into_iter()
+                .map(|v| v.id)
+                .collect(),
+        }
+    };
+
+    let mut hits = Vec::new();
+    for source in &sources {
+        let found = {
+            let store = ctx
+                .store
+                .lock()
+                .map_err(|e| AgentError::Tool(format!("import store lock: {e}")))?;
+            store.search(source, &query, SEARCH_LIMIT)
+        };
+        match found {
+            Ok(found) => hits.extend(found),
+            Err(e) => {
+                // The query did not run. Recorded as refused, never as
+                // empty: empty would report an absence nothing checked.
+                ctx.record_search(&scope, &query, ImportedSearchOutcome::Refused, 0);
+                return Ok(fail(&format!("search_imported_chats: {e}")));
+            }
+        }
+    }
+    hits.truncate(SEARCH_LIMIT);
+
+    let outcome = if hits.is_empty() {
+        ImportedSearchOutcome::Empty
+    } else {
+        ImportedSearchOutcome::Hits
+    };
+    ctx.record_search(&scope, &query, outcome, hits.len() as u64);
+
+    Ok(ToolResult {
+        output: render_hits(&hits, &query),
+        success: true,
+    })
+}
+
+fn render_hits(hits: &[wirken_gateway::imported::SearchHit], query: &str) -> String {
+    if hits.is_empty() {
+        return format!("No imported content matches {query:?}.");
+    }
+    let mut out = format!("Imported content matching {query:?}:\n");
+    for hit in hits {
+        let owner = match (&hit.conversation_uuid, &hit.project_uuid) {
+            (Some(c), _) => format!("conversation {c}"),
+            (_, Some(p)) => format!("project {p}"),
+            _ => "unknown".to_string(),
+        };
+        out.push_str(&format!(
+            "  [{}] source {} {} ({}): {}\n",
+            hit.kind.as_str(),
+            hit.source_id,
+            owner,
+            hit.owner_uuid,
+            hit.snippet
+        ));
+    }
+    out
 }
 
 /// Render a conversation for the model.

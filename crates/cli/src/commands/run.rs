@@ -1207,6 +1207,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         ),
     }
 
+    // The key imported-search audit rows digest their query under. Its
+    // own key, never the alarm-log one, which exists to be handed to a
+    // reviewer. Without it the digest is left off the row rather than
+    // written unkeyed, since an unkeyed digest of a short query is
+    // recoverable by anyone holding the rows.
+    {
+        let keychain = probe_keychain(&cfg.data_dir, String::new);
+        match wirken_vault::load_or_create_imported_search_key(keychain.as_ref()) {
+            Ok(key) => factory.attach_imported_search_key(key),
+            Err(e) => tracing::warn!("imported-search audit rows will carry no query digest: {e}"),
+        }
+    }
+
     // --- http_request credential resolver ---
     //
     // Open the vault as a long-lived resolver so the `http_request`

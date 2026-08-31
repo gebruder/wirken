@@ -9119,6 +9119,189 @@ fn only_the_public_corpus_leaves_egress_unrestricted() {
 /// The tier and the key come from the classifier, not the tool.
 /// A gate that lived in the tool body would be a second copy of a
 /// rule the runtime never consults.
+/// Every attempt that reaches the search tool lands on the chain,
+/// whichever of the three outcomes it came to. A trail of only the
+/// searches that returned something would answer "what was looked
+/// for" with a filtered version of the truth, and what an agent went
+/// looking for is the thing an auditor most wants.
+#[tokio::test]
+async fn every_search_attempt_reaches_the_chain_with_its_outcome() {
+    use wirken_audit::{ImportedSearchOutcome, SessionEvent, SessionId, SessionLog};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let log = std::sync::Arc::new(
+        wirken_audit::SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap(),
+    );
+    let handle = log.handle_for(SessionId::new("t".to_string()));
+
+    let (store, _) =
+        wirken_gateway::imported::ImportStore::open(&tmp.path().join("imported.db")).unwrap();
+    let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+    let source_id = {
+        let mut s = store.lock().unwrap();
+        let decision = s
+            .begin_import(&wirken_gateway::imported::SourceDeclaration {
+                provider: wirken_gateway::imported::Provider::Anthropic,
+                source_account: "acct-1".into(),
+                archive_sha256: "hash".into(),
+                imported_at: "2026-01-01T00:00:00Z".into(),
+                sealed: false,
+            })
+            .unwrap();
+        let labels = wirken_gateway::imported::SourceLabels {
+            source_id: decision.source_id().to_string(),
+            provider: wirken_gateway::imported::Provider::Anthropic,
+            source_account: "acct-1".into(),
+        };
+        let conversation: wirken_gateway::imported_format::ExportConversation =
+            serde_json::from_str(
+                r#"{"uuid":"c1","name":"t","updated_at":"2026-01-02T00:00:00Z",
+                    "chat_messages":[{"uuid":"m1","sender":"human",
+                      "text":"a message about frumious things"}]}"#,
+            )
+            .unwrap();
+        s.upsert_conversation(&labels, &conversation).unwrap();
+        decision.source_id().to_string()
+    };
+
+    let ctx = crate::imported_tool::ImportedContext {
+        store,
+        agent_id: "a".into(),
+        adapter_id: None,
+        sender_id: None,
+        log: log.clone(),
+        handle: handle.clone(),
+        search_digest_key: Some(vec![9u8; 32]),
+    };
+
+    // Hits, empty, and refused: one call each.
+    let hit = crate::imported_tool::execute(
+        &ctx,
+        "search_imported_chats",
+        &serde_json::json!({"query": "frumious", "source": source_id}),
+    )
+    .await
+    .unwrap();
+    assert!(hit.success);
+    crate::imported_tool::execute(
+        &ctx,
+        "search_imported_chats",
+        &serde_json::json!({"query": "uffish", "source": source_id}),
+    )
+    .await
+    .unwrap();
+    crate::imported_tool::execute(
+        &ctx,
+        "search_imported_chats",
+        &serde_json::json!({"query": "\"unclosed", "source": source_id}),
+    )
+    .await
+    .unwrap();
+
+    let events: Vec<_> = log
+        .get_since(&handle, 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            SessionEvent::ImportedChatSearched {
+                outcome,
+                match_count,
+                query_digest,
+                ..
+            } => Some((outcome, match_count, query_digest)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(events.len(), 3, "every attempt is on the chain: {events:?}");
+    assert_eq!(events[0].0, ImportedSearchOutcome::Hits);
+    assert!(events[0].1 > 0);
+    assert_eq!(events[1].0, ImportedSearchOutcome::Empty);
+    assert_eq!(events[1].1, 0);
+    assert_eq!(events[2].0, ImportedSearchOutcome::Refused);
+    assert_eq!(events[2].1, 0);
+
+    // Empty and refused both carry no matches, which is why the
+    // outcome is on the row: the counts alone cannot tell them apart.
+    assert_eq!(events[1].1, events[2].1);
+    assert_ne!(events[1].0, events[2].0);
+
+    // The query is digested, never carried.
+    for (_, _, digest) in &events {
+        let digest = digest.as_ref().expect("a key was supplied");
+        assert_eq!(digest.len(), 64);
+        assert!(!digest.contains("frumious"));
+        assert!(!digest.contains("uffish"));
+    }
+    assert_ne!(
+        events[0].2, events[1].2,
+        "different queries, different digests"
+    );
+}
+
+#[test]
+fn a_search_classifies_scoped_and_unscoped_under_different_keys() {
+    use wirken_gateway::permissions::{Action, PermissionTier};
+
+    let scoped = crate::tool::tool_to_action(
+        "search_imported_chats",
+        &serde_json::json!({"query": "q", "source": "src-1"}),
+    )
+    .expect("the classifier places this tool");
+    assert!(matches!(&scoped, Action::ImportedChatSearch { source_id }
+        if source_id.as_deref() == Some("src-1")));
+    assert_eq!(scoped.tier(), PermissionTier::Tier3);
+    assert_eq!(scoped.approval_key(), "imported_search:src-1");
+
+    // No scope is a wider question and asks under its own key.
+    let corpus =
+        crate::tool::tool_to_action("search_imported_chats", &serde_json::json!({"query": "q"}))
+            .expect("the classifier still places it");
+    assert!(matches!(
+        &corpus,
+        Action::ImportedChatSearch { source_id: None }
+    ));
+    assert_eq!(corpus.approval_key(), "imported_search_corpus");
+    assert_ne!(scoped.approval_key(), corpus.approval_key());
+
+    // A blank scope is no scope, not a source named "".
+    let blank = crate::tool::tool_to_action(
+        "search_imported_chats",
+        &serde_json::json!({"query": "q", "source": "  "}),
+    )
+    .unwrap();
+    assert_eq!(blank.approval_key(), "imported_search_corpus");
+}
+
+#[test]
+fn searching_and_reading_are_separate_approvals_at_the_classifier() {
+    let read = crate::tool::tool_to_action(
+        "read_imported_chat",
+        &serde_json::json!({"source": "src-1", "conversation": "c-1"}),
+    )
+    .unwrap();
+    let search = crate::tool::tool_to_action(
+        "search_imported_chats",
+        &serde_json::json!({"query": "q", "source": "src-1"}),
+    )
+    .unwrap();
+    assert_ne!(
+        read.approval_key(),
+        search.approval_key(),
+        "one archive, two different questions"
+    );
+}
+
+#[test]
+fn a_search_is_marked_for_the_observed_sensitivity_set() {
+    use crate::tool::ReadSensitivity;
+
+    assert_eq!(
+        crate::tool::tool_to_read_sensitivity("search_imported_chats"),
+        Some(ReadSensitivity::ImportedArchive)
+    );
+}
+
 /// The replay verifier attaches no import store, and the doc's tool
 /// slice closes partly on the tools being unreachable from it.
 ///

@@ -482,6 +482,25 @@ would hold a second copy of a rule the runtime never consults, and the
 copy that is not consulted can be wrong for a long time without
 anything failing.
 
+Search takes an optional scope, and the two forms take different keys
+rather than two values of one key. A scoped search is
+`imported_search:{source_id}`. An unscoped one reaches every archive
+on the instance, which is a wider question, and takes
+`imported_search_corpus`, a key outside the scoped namespace that no
+source id can produce. A blank scope is no scope rather than a source
+named by the empty string.
+
+**Search and read approvals never imply each other, in either
+direction.** They are separate key namespaces, and the separation is
+the point rather than a side effect. Approving a read of a
+conversation the operator named is not approving a sweep for
+conversations they have not named: the read discloses one thing
+already identified, and the search discloses what exists. Approving a
+sweep is not approving reads of what it turns up either, because
+knowing a term appears somewhere is a smaller disclosure than the
+conversation around it. Each is asked once and answered on its own
+terms.
+
 ### Read sensitivity
 
 A new `ReadSensitivity` variant for imported archive content.

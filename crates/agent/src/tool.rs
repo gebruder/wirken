@@ -282,6 +282,32 @@ impl ToolRegistry {
         );
 
         tools.insert(
+            "search_imported_chats".into(),
+            ToolDef {
+                name: "search_imported_chats".into(),
+                description: "Search imported archives of a different assistant account. \
+                              Omit 'source' to search every archive, which is a wider \
+                              question and asks the operator separately. Requires \
+                              operator approval every time."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Full-text query"
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Optional import source id to search within"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        );
+
+        tools.insert(
             "read_imported_chat".into(),
             ToolDef {
                 name: "read_imported_chat".into(),
@@ -647,7 +673,7 @@ impl ToolRegistry {
                     }),
                 }
             }
-            "read_imported_chat" => {
+            "read_imported_chat" | "search_imported_chats" => {
                 // No context attached means no import store was
                 // installed for this agent. The tool reports that and
                 // reads nothing, exactly as the memory tools do when
@@ -1668,7 +1694,7 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
         "sqlite_query" => Some(ReadSensitivity::AggregatedExternal),
         "memory_read" => Some(ReadSensitivity::ChannelMemory),
         "memory_read_channel" => Some(ReadSensitivity::CrossChannelMemory),
-        "read_imported_chat" => Some(ReadSensitivity::ImportedArchive),
+        "read_imported_chat" | "search_imported_chats" => Some(ReadSensitivity::ImportedArchive),
         // Everything else is not a read of stored data. `web_search`
         // and `http_request` fetch from the public network, which is
         // the same confidentiality position as AggregatedExternal and
@@ -1750,6 +1776,16 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+        }),
+        // Searching imported archives. The scope is optional, and the
+        // two forms take different approval keys, so an approval to
+        // search one archive is never an approval to sweep them all.
+        "search_imported_chats" => Some(Action::ImportedChatSearch {
+            source_id: args
+                .get("source")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string()),
         }),
         "generate_image" => Some(Action::NetworkRequest {
             domain: "api.openai.com".to_string(),

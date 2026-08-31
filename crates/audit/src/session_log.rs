@@ -1274,6 +1274,41 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// An agent searched imported archives.
+    ///
+    /// Emitted for every attempt that reaches the tool, whether it
+    /// found matches, found none, or was refused. A trail that
+    /// recorded only searches that returned something would answer
+    /// "what was looked for" with a filtered version of the truth.
+    ///
+    /// `outcome` is on the row because counts alone cannot carry it:
+    /// a refused search and an empty one both have no matches, and
+    /// collapsing them would say a term is absent from the corpus when
+    /// in fact nothing was searched.
+    ///
+    /// The query is never here. `query_digest` is a keyed digest of
+    /// it, over the bytes exactly as issued, which preserves
+    /// repetition and correlation without carrying content. It is
+    /// absent when no key could be obtained, because falling back to
+    /// an unkeyed digest would put a recoverable form of the query on
+    /// the row.
+    ImportedChatSearched {
+        /// The source searched, or `None` for a search across every
+        /// archive on the instance.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<String>,
+        outcome: ImportedSearchOutcome,
+        /// Matches returned. Zero for an empty result and for a
+        /// refusal alike, which is why `outcome` exists.
+        match_count: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        query_digest: Option<String>,
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
     /// An import of an assistant data-export archive began.
     ///
     /// Emitted by the operator's CLI, not by an agent turn, so there
@@ -1395,6 +1430,20 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+}
+
+/// What a search of imported archives came to.
+///
+/// Three outcomes, each meaning only itself. `Hits` says the term is
+/// in the corpus, `Empty` says it is not, and `Refused` says the query
+/// never ran. Collapsing the last two would report an absence the
+/// search never established.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedSearchOutcome {
+    Hits,
+    Empty,
+    Refused,
 }
 
 /// Why the sandbox egress proxy refused a request. A closed set so

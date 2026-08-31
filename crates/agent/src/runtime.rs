@@ -235,6 +235,10 @@ pub struct Agent {
     /// reporting themselves unconfigured, which is the state the
     /// replay verifier runs in.
     imported_store: Option<std::sync::Arc<std::sync::Mutex<wirken_gateway::imported::ImportStore>>>,
+    /// Key for the imported-search query digest. `None` leaves the
+    /// digest off the audit row rather than replacing it with an
+    /// unkeyed one.
+    imported_search_key: Option<Vec<u8>>,
     /// Per-channel sandbox egress policy from this agent's
     /// `AgentConfig`. Empty means no channel has egress, which is
     /// the deny posture for every turn.
@@ -408,6 +412,7 @@ impl Agent {
             channel_egress: BTreeMap::new(),
             memory_store: None,
             imported_store: None,
+            imported_search_key: None,
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
@@ -503,6 +508,7 @@ impl Agent {
             channel_egress: BTreeMap::new(),
             memory_store: None,
             imported_store: None,
+            imported_search_key: None,
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
             auto_deny_above_tier: None,
@@ -840,6 +846,12 @@ impl Agent {
         self.imported_store = Some(store);
     }
 
+    /// Install the key the imported-search audit row digests its query
+    /// under. Absent leaves the digest off the row.
+    pub fn set_imported_search_key(&mut self, key: Vec<u8>) {
+        self.imported_search_key = Some(key);
+    }
+
     /// Install the cross-channel memory store. Called by the factory
     /// at wake time.
     pub fn set_memory_store(
@@ -904,6 +916,7 @@ impl Agent {
                 sender_id: self.current_inbound.sender_id.clone(),
                 log: self.session_log.clone(),
                 handle: self.session_handle.clone(),
+                search_digest_key: self.imported_search_key.clone(),
             });
     }
 

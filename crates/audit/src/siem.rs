@@ -634,6 +634,12 @@ fn extract_identity_for_sentinel(
             adapter_id,
             sender_id,
             ..
+        }
+        | SessionEvent::ImportedChatSearched {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
         } => (
             adapter_id.clone(),
             sender_id.clone(),

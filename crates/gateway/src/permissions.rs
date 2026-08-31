@@ -119,6 +119,24 @@ pub enum Action {
     ImportedChatRead {
         source_id: String,
     },
+    /// Searching imported archives. Always Tier 3, for the same reason
+    /// reading one is: what answers a query is the corpus.
+    ///
+    /// The scope is optional, and the two forms take different keys
+    /// rather than two values of one key. A scoped search is keyed by
+    /// the source, like a read. An unscoped search reaches every
+    /// archive on the instance, which is a different question to be
+    /// asked, so it takes a key of its own that no source id can
+    /// produce.
+    ///
+    /// Search and read keys are separate namespaces and neither
+    /// implies the other. Approving a read of a conversation the
+    /// operator named is not approving a sweep for conversations they
+    /// have not; approving a sweep is not approving the reads of
+    /// whatever it turns up.
+    ImportedChatSearch {
+        source_id: Option<String>,
+    },
 }
 
 impl std::fmt::Display for Action {
@@ -143,6 +161,7 @@ impl std::fmt::Display for Action {
             Action::WasmSkillCall { .. } => "wasm_skill_call",
             Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
             Action::ImportedChatRead { .. } => "imported_chat_read",
+            Action::ImportedChatSearch { .. } => "imported_chat_search",
         };
         f.write_str(label)
     }
@@ -238,7 +257,8 @@ impl Action {
             | Action::UnknownTool { .. }
             | Action::WasmSkillCall { .. }
             | Action::CrossChannelMemoryRead { .. }
-            | Action::ImportedChatRead { .. } => PermissionTier::Tier3,
+            | Action::ImportedChatRead { .. }
+            | Action::ImportedChatSearch { .. } => PermissionTier::Tier3,
         }
     }
 
@@ -261,6 +281,14 @@ impl Action {
                 format!("cross_channel_memory:{from_channel}")
             }
             Action::ImportedChatRead { source_id } => format!("imported_chat:{source_id}"),
+            Action::ImportedChatSearch { source_id } => match source_id {
+                Some(id) => format!("imported_search:{id}"),
+                // A key of its own rather than a value inside the
+                // scoped namespace, so no source id can ever produce
+                // it and an approval for one archive can never be
+                // mistaken for an approval to sweep them all.
+                None => "imported_search_corpus".to_string(),
+            },
             other => format!("{other:?}"),
         }
     }
@@ -1238,6 +1266,7 @@ mod tier_tests {
                 Action::WasmSkillCall { .. } => "wasm_skill_call",
                 Action::CrossChannelMemoryRead { .. } => "cross_channel_memory_read",
                 Action::ImportedChatRead { .. } => "imported_chat_read",
+                Action::ImportedChatSearch { .. } => "imported_chat_search",
             }
         }
         // Smoke a representative variant so the function isn't
@@ -1269,6 +1298,44 @@ mod tier_tests {
         };
         assert_eq!(blank.approval_key(), "imported_chat:");
         assert_ne!(blank.approval_key(), a.approval_key());
+    }
+
+    #[test]
+    fn a_scoped_and_an_unscoped_search_take_different_keys() {
+        let scoped = Action::ImportedChatSearch {
+            source_id: Some("src-1".into()),
+        };
+        let corpus = Action::ImportedChatSearch { source_id: None };
+        assert_eq!(scoped.tier(), PermissionTier::Tier3);
+        assert_eq!(corpus.tier(), PermissionTier::Tier3);
+        assert_eq!(scoped.approval_key(), "imported_search:src-1");
+        assert_eq!(corpus.approval_key(), "imported_search_corpus");
+
+        // The corpus key is not in the scoped namespace, so no source
+        // id can produce it however it is named.
+        assert!(!corpus.approval_key().starts_with("imported_search:"));
+        for id in ["corpus", "src-1", "", "*"] {
+            let any = Action::ImportedChatSearch {
+                source_id: Some(id.into()),
+            };
+            assert_ne!(any.approval_key(), corpus.approval_key(), "id {id:?}");
+        }
+    }
+
+    #[test]
+    fn search_and_read_approvals_never_imply_each_other() {
+        // Different questions. Reading a conversation the operator
+        // named is not sweeping for ones they did not; sweeping is not
+        // reading what the sweep turns up.
+        let read = Action::ImportedChatRead {
+            source_id: "src-1".into(),
+        };
+        let search = Action::ImportedChatSearch {
+            source_id: Some("src-1".into()),
+        };
+        assert_ne!(read.approval_key(), search.approval_key());
+        let corpus = Action::ImportedChatSearch { source_id: None };
+        assert_ne!(read.approval_key(), corpus.approval_key());
     }
 
     #[test]
