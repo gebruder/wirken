@@ -212,6 +212,43 @@ const MIGRATIONS: &[&str] = &[
     // rewriting it would leave them with the old name and no record
     // that anything was meant to change.
     "ALTER TABLE import_source RENAME COLUMN immutable TO sealed;",
+    "CREATE TABLE imported_project (
+         source_id           TEXT NOT NULL,
+         provider            TEXT NOT NULL,
+         source_account      TEXT NOT NULL,
+         project_uuid        TEXT NOT NULL,
+         name                TEXT NOT NULL,
+         description         TEXT NOT NULL,
+         prompt_template     TEXT NOT NULL,
+         is_private          INTEGER NOT NULL,
+         is_starter_project  INTEGER NOT NULL,
+         creator_uuid        TEXT NOT NULL,
+         created_at_raw      TEXT NOT NULL,
+         created_at_epoch    INTEGER NOT NULL,
+         updated_at_raw      TEXT NOT NULL,
+         updated_at_epoch    INTEGER NOT NULL,
+         PRIMARY KEY (source_account, project_uuid)
+     );
+
+     CREATE INDEX imported_project_by_source
+         ON imported_project (source_id, updated_at_epoch DESC);
+
+     CREATE TABLE imported_project_doc (
+         source_id         TEXT NOT NULL,
+         provider          TEXT NOT NULL,
+         source_account    TEXT NOT NULL,
+         project_uuid      TEXT NOT NULL,
+         doc_uuid          TEXT NOT NULL,
+         ordinal           INTEGER NOT NULL,
+         filename          TEXT NOT NULL,
+         content           TEXT NOT NULL,
+         created_at_raw    TEXT NOT NULL,
+         created_at_epoch  INTEGER NOT NULL,
+         PRIMARY KEY (source_account, doc_uuid)
+     );
+
+     CREATE INDEX imported_project_doc_by_project
+         ON imported_project_doc (source_account, project_uuid, ordinal);",
 ];
 
 /// Store for imported archives.
@@ -394,25 +431,11 @@ impl ImportStore {
             )
             .optional()?;
 
-        let incoming_updated = normalize_timestamp(&conversation.updated_at);
-        let outcome = match stored_raw {
-            None => UpsertOutcome::Added,
-            Some(stored_raw) => {
-                match (incoming_updated, normalize_timestamp(&stored_raw)) {
-                    (Some(incoming), Some(stored)) if incoming > stored => UpsertOutcome::Updated,
-                    (Some(_), Some(_)) => {
-                        tx.commit()?;
-                        return Ok(UpsertOutcome::Unchanged);
-                    }
-                    // No ordering evidence on one side or the other.
-                    // Nothing is written, and the caller is told why.
-                    _ => {
-                        tx.commit()?;
-                        return Ok(UpsertOutcome::Unorderable);
-                    }
-                }
-            }
-        };
+        let outcome = decide_outcome(stored_raw.as_deref(), &conversation.updated_at);
+        if outcome != UpsertOutcome::Added && outcome != UpsertOutcome::Updated {
+            tx.commit()?;
+            return Ok(outcome);
+        }
 
         if outcome == UpsertOutcome::Updated {
             // Wholesale: the children go before the parent is rewritten.
@@ -457,7 +480,7 @@ impl ImportStore {
                 conversation.created_at,
                 normalize_timestamp(&conversation.created_at).unwrap_or_default(),
                 conversation.updated_at,
-                incoming_updated.unwrap_or_default(),
+                normalize_timestamp(&conversation.updated_at).unwrap_or_default(),
             ],
         )?;
 
@@ -532,6 +555,113 @@ impl ImportStore {
         Ok(outcome)
     }
 
+    /// Write one project and its documents.
+    ///
+    /// Every semantic is the conversation's: the natural key is scoped
+    /// by source account, the ordering decision is the shared one, and
+    /// replacement is wholesale, with a project's documents deleted and
+    /// rewritten alongside it. A document absent from the newer
+    /// snapshot is absent from the project, and merging would leave a
+    /// project that existed in neither archive.
+    ///
+    /// A project's creator is stored as its uuid. The archive carries
+    /// the creator's name too; it is not in the parsed struct, so it
+    /// cannot arrive here.
+    pub fn upsert_project(
+        &mut self,
+        labels: &SourceLabels,
+        project: &crate::imported_format::ExportProject,
+    ) -> Result<UpsertOutcome, GatewayError> {
+        labels.require_complete()?;
+        if project.uuid.trim().is_empty() {
+            return Err(GatewayError::Config(
+                "refusing to write a project with no uuid: it is half the natural key".into(),
+            ));
+        }
+
+        let tx = self.conn.transaction()?;
+        let stored_raw: Option<String> = tx
+            .query_row(
+                "SELECT updated_at_raw FROM imported_project
+                 WHERE source_account = ?1 AND project_uuid = ?2",
+                params![labels.source_account, project.uuid],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let outcome = decide_outcome(stored_raw.as_deref(), &project.updated_at);
+        if outcome != UpsertOutcome::Added && outcome != UpsertOutcome::Updated {
+            tx.commit()?;
+            return Ok(outcome);
+        }
+
+        if outcome == UpsertOutcome::Updated {
+            tx.execute(
+                "DELETE FROM imported_project_doc
+                 WHERE source_account = ?1 AND project_uuid = ?2",
+                params![labels.source_account, project.uuid],
+            )?;
+            tx.execute(
+                "DELETE FROM imported_project
+                 WHERE source_account = ?1 AND project_uuid = ?2",
+                params![labels.source_account, project.uuid],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO imported_project
+             (source_id, provider, source_account, project_uuid, name, description,
+              prompt_template, is_private, is_starter_project, creator_uuid,
+              created_at_raw, created_at_epoch, updated_at_raw, updated_at_epoch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                labels.source_id,
+                labels.provider.as_str(),
+                labels.source_account,
+                project.uuid,
+                project.name,
+                project.description,
+                project.prompt_template,
+                i64::from(project.is_private),
+                i64::from(project.is_starter_project),
+                project.creator.uuid,
+                project.created_at,
+                normalize_timestamp(&project.created_at).unwrap_or_default(),
+                project.updated_at,
+                normalize_timestamp(&project.updated_at).unwrap_or_default(),
+            ],
+        )?;
+
+        for (ordinal, doc) in project.docs.iter().enumerate() {
+            if doc.uuid.trim().is_empty() {
+                // No natural key. Skipping costs one document; refusing
+                // would cost the project.
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO imported_project_doc
+                 (source_id, provider, source_account, project_uuid, doc_uuid, ordinal,
+                  filename, content, created_at_raw, created_at_epoch)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    labels.source_id,
+                    labels.provider.as_str(),
+                    labels.source_account,
+                    project.uuid,
+                    doc.uuid,
+                    ordinal as i64,
+                    doc.filename,
+                    doc.content,
+                    doc.created_at,
+                    normalize_timestamp(&doc.created_at).unwrap_or_default(),
+                ],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(outcome)
+    }
+
     /// Stored conversation and message counts for one source. Counts
     /// only: no title and no message text leaves this method.
     pub fn counts(&self, source_id: &str) -> Result<StoredCounts, GatewayError> {
@@ -545,9 +675,21 @@ impl ImportStore {
             params![source_id],
             |r| r.get(0),
         )?;
+        let projects: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM imported_project WHERE source_id = ?1",
+            params![source_id],
+            |r| r.get(0),
+        )?;
+        let project_docs: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM imported_project_doc WHERE source_id = ?1",
+            params![source_id],
+            |r| r.get(0),
+        )?;
         Ok(StoredCounts {
             conversations: conversations as u64,
             messages: messages as u64,
+            projects: projects as u64,
+            project_docs: project_docs as u64,
         })
     }
 }
@@ -632,6 +774,28 @@ fn normalize_timestamp(raw: &str) -> Option<i64> {
         .map(|dt| dt.timestamp_micros())
 }
 
+/// Decide what writing this record would be, from the stored raw
+/// timestamp and the incoming one.
+///
+/// One function for every record type. Conversations and projects do
+/// not each carry their own copy of this reasoning, so they cannot
+/// drift apart and a change to the rule reaches both.
+fn decide_outcome(stored_raw: Option<&str>, incoming_raw: &str) -> UpsertOutcome {
+    match stored_raw {
+        None => UpsertOutcome::Added,
+        Some(stored_raw) => match (
+            normalize_timestamp(incoming_raw),
+            normalize_timestamp(stored_raw),
+        ) {
+            (Some(incoming), Some(stored)) if incoming > stored => UpsertOutcome::Updated,
+            (Some(_), Some(_)) => UpsertOutcome::Unchanged,
+            // No ordering evidence on one side or the other. Nothing is
+            // written, and the caller is told which it was.
+            _ => UpsertOutcome::Unorderable,
+        },
+    }
+}
+
 /// The tally an import reports. Counts and nothing else.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImportCounts {
@@ -680,16 +844,18 @@ fn restrict_to_owner(db_path: &Path) -> Result<(), GatewayError> {
 }
 
 /// What a source holds. Counts and nothing else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StoredCounts {
     pub conversations: u64,
     pub messages: u64,
+    pub projects: u64,
+    pub project_docs: u64,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::imported_format::ExportConversation;
+    use crate::imported_format::{ExportConversation, ExportProject};
     use tempfile::TempDir;
 
     fn store() -> (ImportStore, usize, TempDir) {
@@ -1099,6 +1265,140 @@ mod tests {
         assert_eq!(counts.unchanged, 1);
         assert_eq!(counts.unorderable, 2);
         assert_eq!(counts.skipped, 1);
+    }
+
+    fn project(uuid: &str, updated_at: &str, docs: &[&str]) -> ExportProject {
+        let body = docs
+            .iter()
+            .map(|d| format!(r#"{{"uuid":"{d}","filename":"{d}.md","content":"{d} body"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"uuid":"{uuid}","name":"p","updated_at":"{updated_at}",
+                 "creator":{{"uuid":"creator-1","full_name":"A Person"}},
+                 "docs":[{body}]}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn a_project_is_added_with_its_documents() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        let outcome = s
+            .upsert_project(
+                &labels,
+                &project("p1", "2026-01-02T00:00:00Z", &["d1", "d2"]),
+            )
+            .unwrap();
+        assert_eq!(outcome, UpsertOutcome::Added);
+        let counts = s.counts(d.source_id()).unwrap();
+        assert_eq!(counts.projects, 1);
+        assert_eq!(counts.project_docs, 2);
+    }
+
+    #[test]
+    fn a_creator_name_never_reaches_the_store() {
+        // The archive carries it; the parsed struct has no field for
+        // it, so the exclusion holds by construction rather than by
+        // the insert site remembering.
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_project(&labels, &project("p1", "2026-01-02T00:00:00Z", &["d1"]))
+            .unwrap();
+
+        let stored_uuid: String = s
+            .conn
+            .query_row("SELECT creator_uuid FROM imported_project", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_uuid, "creator-1");
+
+        // The strong form: the name is absent from the stored bytes,
+        // not merely from a column someone remembered to leave out.
+        let stored: String = s
+            .conn
+            .query_row(
+                "SELECT group_concat(
+                     project_uuid || '|' || name || '|' || description || '|' ||
+                     prompt_template || '|' || creator_uuid, char(10))
+                 FROM imported_project",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !stored.contains("A Person"),
+            "the creator name reached the store: {stored}"
+        );
+    }
+
+    #[test]
+    fn a_newer_project_replaces_its_documents_wholesale() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_project(
+            &labels,
+            &project("p1", "2026-01-02T00:00:00Z", &["d1", "d2", "d3"]),
+        )
+        .unwrap();
+        assert_eq!(s.counts(d.source_id()).unwrap().project_docs, 3);
+
+        let outcome = s
+            .upsert_project(&labels, &project("p1", "2026-01-03T00:00:00Z", &["d2"]))
+            .unwrap();
+        assert_eq!(outcome, UpsertOutcome::Updated);
+        assert_eq!(
+            s.counts(d.source_id()).unwrap().project_docs,
+            1,
+            "documents dropped from the newer snapshot are gone, not merged"
+        );
+        let surviving: String = s
+            .conn
+            .query_row("SELECT doc_uuid FROM imported_project_doc", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(surviving, "d2");
+    }
+
+    #[test]
+    fn projects_inherit_the_ordering_decision() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_project(&labels, &project("p1", "2026-01-05T00:00:00Z", &["d1"]))
+            .unwrap();
+        assert_eq!(
+            s.upsert_project(&labels, &project("p1", "2026-01-01T00:00:00Z", &["x"]))
+                .unwrap(),
+            UpsertOutcome::Unchanged
+        );
+        assert_eq!(
+            s.upsert_project(&labels, &project("p1", "not a timestamp", &["x"]))
+                .unwrap(),
+            UpsertOutcome::Unorderable
+        );
+    }
+
+    #[test]
+    fn projects_inherit_the_provenance_refusal() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let blank = SourceLabels {
+            source_id: d.source_id().into(),
+            provider: Provider::Anthropic,
+            source_account: "  ".into(),
+        };
+        let err = s
+            .upsert_project(&blank, &project("p1", "2026-01-02T00:00:00Z", &["d1"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("source_account"), "{err}");
     }
 
     #[test]

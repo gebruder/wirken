@@ -1,0 +1,73 @@
+[
+  {
+    "uuid": "aaaa1111-1111-4111-8111-111111111111",
+    "name": "A project with documents",
+    "description": "Context the conversations refer to.",
+    "prompt_template": "You are helping with the attached notes.",
+    "created_at": "2026-01-02T03:04:05.123456+00:00",
+    "updated_at": "2026-01-03T03:04:05.123456+00:00",
+    "is_private": true,
+    "is_starter_project": false,
+    "creator": {
+      "uuid": "cccc0000-0000-4000-8000-000000000000",
+      "full_name": "A Person Whose Name Must Not Be Stored"
+    },
+    "docs": [
+      {
+        "uuid": "dddd1111-1111-4111-8111-111111111111",
+        "filename": "notes.md",
+        "content": "Document text, which is content for gating, sensitivity, and rendering alike.",
+        "created_at": "2026-01-02T03:04:05.123456+00:00"
+      },
+      {
+        "uuid": "dddd2222-2222-4222-8222-222222222222",
+        "filename": "empty.md",
+        "content": "",
+        "created_at": "2026-01-02T03:04:05.123456+00:00"
+      }
+    ]
+  },
+  {
+    "uuid": "aaaa2222-2222-4222-8222-222222222222",
+    "name": "A starter project with no documents",
+    "description": "",
+    "prompt_template": "",
+    "created_at": "2026-02-02T03:04:05.123456+00:00",
+    "updated_at": "2026-02-02T03:04:05.123456+00:00",
+    "is_private": false,
+    "is_starter_project": true,
+    "creator": {
+      "uuid": "cccc0000-0000-4000-8000-000000000000",
+      "full_name": "A Person Whose Name Must Not Be Stored"
+    },
+    "docs": []
+  },
+  {
+    "uuid": "aaaa3333-3333-4333-8333-333333333333",
+    "name": "Markup as subject matter",
+    "description": "<script>alert('project')</script> stored, not rewritten.",
+    "prompt_template": "",
+    "created_at": "2026-03-02T03:04:05.123456+00:00",
+    "updated_at": "2026-03-02T03:04:05.123456+00:00",
+    "is_private": true,
+    "is_starter_project": false,
+    "creator": { "uuid": "cccc0000-0000-4000-8000-000000000000" },
+    "a_field_added_upstream": ["unknown", 1, null],
+    "docs": [
+      {
+        "uuid": "dddd3333-3333-4333-8333-333333333333",
+        "filename": "payload.md",
+        "content": "<img src=x onerror=alert('doc')> and 日本語 and 🙂",
+        "created_at": "2026-03-02T03:04:05.123456+00:00"
+      }
+    ]
+  },
+  {
+    "uuid": "aaaa4444-4444-4444-8444-444444444444",
+    "name": "Nameable but unfittable",
+    "created_at": "2026-04-02T03:04:05.123456+00:00",
+    "updated_at": "2026-04-02T03:04:05.123456+00:00",
+    "creator": { "uuid": "cccc0000-0000-4000-8000-000000000000" },
+    "docs": "not an array, so this record does not fit and is skipped by uuid"
+  }
+]

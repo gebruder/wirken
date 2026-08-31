@@ -129,6 +129,69 @@ pub struct ExportConversation {
     pub chat_messages: Vec<ExportMessage>,
 }
 
+/// A project's creator, narrowed to the identifier.
+///
+/// The archive carries a `full_name` here. It is deliberately not a
+/// field: a name is third-party personal data, it is the category
+/// `users.json` is excluded for, and nothing in viewing or searching a
+/// project needs it. Absent from the struct, it cannot reach the
+/// store, so the exclusion is a property of the type rather than a
+/// rule someone has to remember at the insert site.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ExportCreator {
+    #[serde(default)]
+    pub uuid: String,
+}
+
+/// One document inside a project. Its `content` is among the largest
+/// text values an archive carries and is content for every purpose
+/// that word has here: gating, sensitivity, and rendering.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct ExportProjectDoc {
+    pub uuid: String,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+/// One project and its documents.
+#[derive(Debug, Deserialize)]
+pub struct ExportProject {
+    pub uuid: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub prompt_template: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub is_private: bool,
+    #[serde(default)]
+    pub is_starter_project: bool,
+    #[serde(default)]
+    pub creator: ExportCreator,
+    #[serde(default)]
+    pub docs: Vec<ExportProjectDoc>,
+}
+
+/// What happened to one element of the projects array.
+#[derive(Debug)]
+pub enum ParsedProject {
+    Ok(Box<ExportProject>),
+    Skipped {
+        index: usize,
+        uuid: Option<String>,
+        reason: String,
+    },
+}
+
 /// What happened to one element of the conversations array.
 #[derive(Debug)]
 pub enum ParsedConversation {
@@ -158,29 +221,73 @@ struct UuidOnly {
 /// Returns the number of elements seen. An error means the stream
 /// ended on JSON the parser could not read, and elements already
 /// handed to `on_item` stand.
-pub fn stream_conversations<R, F>(reader: R, on_item: F) -> Result<usize, serde_json::Error>
+pub fn stream_conversations<R, F>(reader: R, mut on_item: F) -> Result<usize, serde_json::Error>
 where
     R: Read,
     F: FnMut(ParsedConversation),
 {
+    stream_array::<ExportConversation, _, _>(reader, |index, parsed| {
+        on_item(match parsed {
+            Ok(c) => ParsedConversation::Ok(Box::new(c)),
+            Err((uuid, reason)) => ParsedConversation::Skipped {
+                index,
+                uuid,
+                reason,
+            },
+        })
+    })
+}
+
+/// Stream a projects array. Same shape and the same two kinds of
+/// failure as conversations; projects inherit the behaviour rather
+/// than restating it.
+pub fn stream_projects<R, F>(reader: R, mut on_item: F) -> Result<usize, serde_json::Error>
+where
+    R: Read,
+    F: FnMut(ParsedProject),
+{
+    stream_array::<ExportProject, _, _>(reader, |index, parsed| {
+        on_item(match parsed {
+            Ok(p) => ParsedProject::Ok(Box::new(p)),
+            Err((uuid, reason)) => ParsedProject::Skipped {
+                index,
+                uuid,
+                reason,
+            },
+        })
+    })
+}
+
+/// The streaming core. Each element is taken as a raw fragment before
+/// anything tries to fit it to `T`, which is what keeps a schema
+/// failure from ending the sequence.
+fn stream_array<T, R, F>(reader: R, on_item: F) -> Result<usize, serde_json::Error>
+where
+    T: serde::de::DeserializeOwned,
+    R: Read,
+    F: FnMut(usize, Result<T, (Option<String>, String)>),
+{
     let mut de = serde_json::Deserializer::from_reader(reader);
-    let seed = ConversationSeq {
+    let seed = ElementSeq {
         on_item,
         seen: 0,
         index: 0,
+        _element: std::marker::PhantomData::<T>,
     };
     seed.deserialize(&mut de)
 }
 
-struct ConversationSeq<F> {
+struct ElementSeq<T, F> {
     on_item: F,
     seen: usize,
     index: usize,
+    _element: std::marker::PhantomData<T>,
 }
 
-impl<'de, F> DeserializeSeed<'de> for ConversationSeq<F>
+impl<'de, T, F> DeserializeSeed<'de> for ElementSeq<T, F>
 where
-    F: FnMut(ParsedConversation),
+    T: serde::de::DeserializeOwned,
+    F: FnMut(usize, Result<T, (Option<String>, String)>),
 {
     type Value = usize;
 
@@ -192,14 +299,15 @@ where
     }
 }
 
-impl<'de, F> Visitor<'de> for ConversationSeq<F>
+impl<'de, T, F> Visitor<'de> for ElementSeq<T, F>
 where
-    F: FnMut(ParsedConversation),
+    T: serde::de::DeserializeOwned,
+    F: FnMut(usize, Result<T, (Option<String>, String)>),
 {
     type Value = usize;
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("an array of conversations")
+        f.write_str("an array of export records")
     }
 
     fn visit_seq<A>(mut self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -214,19 +322,13 @@ where
             let index = self.index;
             self.index += 1;
             self.seen += 1;
-            match serde_json::from_str::<ExportConversation>(raw.get()) {
-                Ok(conversation) => {
-                    (self.on_item)(ParsedConversation::Ok(Box::new(conversation)));
-                }
+            match serde_json::from_str::<T>(raw.get()) {
+                Ok(element) => (self.on_item)(index, Ok(element)),
                 Err(err) => {
                     let uuid = serde_json::from_str::<UuidOnly>(raw.get())
                         .ok()
                         .and_then(|u| u.uuid);
-                    (self.on_item)(ParsedConversation::Skipped {
-                        index,
-                        uuid,
-                        reason: err.to_string(),
-                    });
+                    (self.on_item)(index, Err((uuid, err.to_string())));
                 }
             }
         }
@@ -540,6 +642,92 @@ mod tests {
         assert!(hit.text.contains("日本語"));
         assert!(hit.text.contains('🙂'));
         assert!(hit.text.contains('\\'));
+    }
+
+    const PROJECT_CORPUS: &str = include_str!("../tests/fixtures/synthetic-export/projects.json");
+
+    fn collect_projects(json: &str) -> (Vec<ParsedProject>, Result<usize, String>) {
+        let mut items = Vec::new();
+        let result =
+            stream_projects(json.as_bytes(), |item| items.push(item)).map_err(|e| e.to_string());
+        (items, result)
+    }
+
+    #[test]
+    fn the_project_corpus_parses_and_skips_the_record_built_not_to_fit() {
+        let (items, result) = collect_projects(PROJECT_CORPUS);
+        let seen = result.expect("the corpus is readable JSON throughout");
+        assert_eq!(seen, items.len());
+
+        let ok: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                ParsedProject::Ok(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        let skipped: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                ParsedProject::Skipped { uuid, .. } => Some(uuid.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert_eq!(
+            skipped[0].as_deref(),
+            Some("aaaa4444-4444-4444-8444-444444444444"),
+            "the skip is named by uuid"
+        );
+
+        // Both booleans, an empty description, a project with no
+        // documents, and a document with empty content.
+        assert!(ok.iter().any(|p| p.is_starter_project));
+        assert!(ok.iter().any(|p| !p.is_starter_project));
+        assert!(ok.iter().any(|p| p.description.is_empty()));
+        assert!(ok.iter().any(|p| p.docs.is_empty()));
+        assert!(
+            ok.iter()
+                .flat_map(|p| &p.docs)
+                .any(|d| d.content.is_empty())
+        );
+
+        // A field added upstream costs its column, not the record.
+        assert!(
+            ok.iter()
+                .any(|p| p.uuid == "aaaa3333-3333-4333-8333-333333333333")
+        );
+    }
+
+    #[test]
+    fn a_creator_name_is_not_a_field_the_parser_has() {
+        // The corpus carries the name. Nothing the parser produces can
+        // hold it, because the struct has no place to put it.
+        assert!(PROJECT_CORPUS.contains("A Person Whose Name Must Not Be Stored"));
+        let (items, _) = collect_projects(PROJECT_CORPUS);
+        for item in &items {
+            let rendered = format!("{item:?}");
+            assert!(
+                !rendered.contains("A Person"),
+                "a parsed project carries the name: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_markup_is_kept_as_subject_matter() {
+        let (items, _) = collect_projects(PROJECT_CORPUS);
+        let p = items
+            .iter()
+            .filter_map(|i| match i {
+                ParsedProject::Ok(p) => Some(p),
+                _ => None,
+            })
+            .find(|p| p.description.contains("<script>"))
+            .expect("the markup project is in the corpus");
+        assert!(p.description.contains("<script>alert('project')</script>"));
+        assert!(p.docs[0].content.contains("onerror=alert('doc')"));
+        assert!(p.docs[0].content.contains("日本語"));
     }
 
     #[test]

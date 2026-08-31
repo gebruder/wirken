@@ -182,32 +182,57 @@ third-party personal data with no consumer in this feature and put it
 behind tools an agent can reach. The file stays in the archive,
 unparsed.
 
-**Projects and memories are a scoped decision, not a default.** Both
-carry substantive content: project documents hold the largest single
-text values in the archive, and the memories entries are the assistant's
-retained notes about the account holder. Neither is in the entity list
-this design was asked for. They are named here so the choice is
-deliberate rather than implied by silence. Recommended: import projects,
-because project documents are the context conversations refer to and a
-conversation view without them is missing what it cites; defer memories,
-because they are a different kind of artifact and want their own
-provenance question answered first.
+**Projects are imported. Memories are deferred.** Both carry
+substantive content and neither was in the entity list this design was
+first asked for, so both are decided here rather than left implied.
+Project documents are the context conversations refer to, and a
+conversation view without them is missing what it cites. The memories
+entries are the assistant's retained notes about the account holder, a
+different kind of artifact, and they want their own provenance
+question answered before they are stored.
+
+**A project's creator is stored as an identifier, never a name.** The
+archive carries the creator's `full_name` beside their uuid. That is
+the same category `users.json` is excluded for, and the same reasoning
+applies at a smaller scale: nothing in viewing or searching a project
+needs the name, so storing it would put third-party personal data
+behind the agent's tools with no consumer. The exclusion is a property
+of the parsed type, which has no field for the name, rather than a
+rule the insert site has to remember. So a comparison of the parser
+against the archive reads as a decision, not a gap.
 
 ### Entities
 
 `import_source` carries the provider, the source account, the archive
 hash, the import timestamp, and an immutability flag.
 
-`imported_conversation` and `imported_message` carry provenance columns
-`NOT NULL` on the cross-channel memory pattern: source identifier,
-source account, and provider on every row, with `imported_message` also
-carrying its conversation uuid. A labels struct with no `Default`
-constructs them, so a row cannot be written without complete
-provenance, and there is no other insert path.
+`imported_conversation`, `imported_message`, `imported_project`, and
+`imported_project_doc` carry provenance columns `NOT NULL` on the
+cross-channel memory pattern: source identifier, source account, and
+provider on every row, with `imported_message` also carrying its
+conversation uuid. A labels struct with no `Default` constructs them,
+so a row cannot be written without complete provenance, and there is
+no other insert path.
 
-Natural keys: `(source_account, conversation_uuid)` for a conversation
-and `(source_account, message_uuid)` for a message. Both uuids are
-present on every record in the extracted structure.
+Natural keys: `(source_account, conversation_uuid)` for a conversation,
+`(source_account, message_uuid)` for a message, `(source_account,
+project_uuid)` for a project, and `(source_account, doc_uuid)` for a
+project document. Every one of those uuids is present on every record
+in the extracted structure.
+
+Projects inherit the conversation semantics whole: the same natural-key
+scoping, the same sealed refusal through the same source path, the
+same wholesale snapshot replacement with a project's documents deleted
+and rewritten alongside it, and the same ordering decision, which is
+one function both record types call rather than a rule written twice.
+
+**A project document's text is content**, for gating, for sensitivity,
+and for rendering alike. It is among the largest text an archive
+carries, it is read through the same Tier 3 gate as a message body, a
+read of it enters the observed-sensitivity set the same way, and it is
+encoded at render like any other stored text. Nothing about arriving
+as a project attachment rather than a chat turn makes it less than
+conversation content.
 
 The store file is owner-only, converged on every open rather than set
 once at creation, so a database left loose by an earlier run does not
