@@ -415,6 +415,19 @@ pub async fn serve(
                     Err(_) => "[]".to_string(),
                 };
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
+            } else if let Some(route) = parse_imported_path(first_line) {
+                // Imported-archive reads. Same posture as the other
+                // read routes: Host is checked on every route, which
+                // is what closes DNS rebinding, and a present Origin
+                // is validated even though a browser omits it on a
+                // same-origin GET.
+                if let Some(resp) = api_preflight(&request, port, false) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let body = super::import::read_route_json(&cfg, &route);
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/sessions ") {
                 // GET /api/sessions — active-session list backing the
                 // sidebar. Safe read, same Host-only posture as the
@@ -864,6 +877,58 @@ fn json_forbidden(msg: &str) -> String {
     )
 }
 
+/// What an imported-archive read route is asking for.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ImportedRoute {
+    /// Every source, with what it holds.
+    Sources,
+    /// One source's conversations.
+    Conversations { source_id: String },
+    /// One conversation, projected.
+    Detail {
+        source_id: String,
+        conversation_uuid: String,
+    },
+}
+
+/// Parse the imported-archive read routes.
+///
+/// `GET /api/imported/sources`
+/// `GET /api/imported/sources/{source_id}/conversations`
+/// `GET /api/imported/sources/{source_id}/conversations/{conversation_uuid}`
+///
+/// Identifiers are opaque handles the store issued, so they are taken
+/// as data and never as a path: nothing here reaches a filesystem. The
+/// segment rules match the session route's for the same reasons, an
+/// empty segment, a `..`, or a control byte is refused rather than
+/// carried into a query, and the shape is fixed rather than a
+/// wildcard, so a longer path is not silently a shorter one.
+fn parse_imported_path(first_line: &str) -> Option<ImportedRoute> {
+    let rest = first_line.strip_prefix("GET /api/imported/")?;
+    let raw = rest.split(' ').next()?;
+    if raw == "sources" {
+        return Some(ImportedRoute::Sources);
+    }
+    let decoded = percent_decode(raw)?;
+    if decoded.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let segments: Vec<&str> = decoded.split('/').collect();
+    if segments.iter().any(|seg| seg.is_empty() || *seg == "..") {
+        return None;
+    }
+    match segments.as_slice() {
+        ["sources", source_id, "conversations"] => Some(ImportedRoute::Conversations {
+            source_id: (*source_id).to_string(),
+        }),
+        ["sources", source_id, "conversations", conversation_uuid] => Some(ImportedRoute::Detail {
+            source_id: (*source_id).to_string(),
+            conversation_uuid: (*conversation_uuid).to_string(),
+        }),
+        _ => None,
+    }
+}
+
 /// Parse `GET /api/sessions/{id}` and return the composite session id
 /// (`{agent}/{channel}/{conversation}`). The page URL-encodes the id
 /// with `encodeURIComponent`, so its `/` separators arrive as `%2F`;
@@ -928,8 +993,8 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_preflight, is_webchat_host, is_webchat_origin, parse_approval_path, parse_session_path,
-        percent_decode,
+        ImportedRoute, api_preflight, is_webchat_host, is_webchat_origin, parse_approval_path,
+        parse_imported_path, parse_session_path, percent_decode,
     };
 
     #[test]
@@ -1012,6 +1077,64 @@ mod tests {
         assert_eq!(
             parse_session_path(line).as_deref(),
             Some("default/webchat/webchat-default")
+        );
+    }
+
+    #[test]
+    fn imported_routes_parse_their_three_shapes() {
+        assert_eq!(
+            parse_imported_path("GET /api/imported/sources HTTP/1.1"),
+            Some(ImportedRoute::Sources)
+        );
+        assert_eq!(
+            parse_imported_path("GET /api/imported/sources/src-1/conversations HTTP/1.1"),
+            Some(ImportedRoute::Conversations {
+                source_id: "src-1".into()
+            })
+        );
+        assert_eq!(
+            parse_imported_path("GET /api/imported/sources/src-1/conversations/c-9 HTTP/1.1"),
+            Some(ImportedRoute::Detail {
+                source_id: "src-1".into(),
+                conversation_uuid: "c-9".into()
+            })
+        );
+    }
+
+    #[test]
+    fn imported_routes_refuse_anything_but_those_shapes() {
+        for line in [
+            // Wrong method: there is no write surface here.
+            "POST /api/imported/sources HTTP/1.1",
+            "DELETE /api/imported/sources/src-1/conversations HTTP/1.1",
+            // Traversal and empty segments.
+            "GET /api/imported/sources/../secrets/conversations HTTP/1.1",
+            "GET /api/imported/sources//conversations HTTP/1.1",
+            "GET /api/imported/sources/src-1/conversations/ HTTP/1.1",
+            // A longer path is not silently a shorter one.
+            "GET /api/imported/sources/src-1/conversations/c-9/extra HTTP/1.1",
+            // Unknown collection.
+            "GET /api/imported/secrets HTTP/1.1",
+            "GET /api/imported/ HTTP/1.1",
+        ] {
+            assert_eq!(parse_imported_path(line), None, "accepted: {line}");
+        }
+    }
+
+    #[test]
+    fn imported_routes_decode_an_encoded_identifier() {
+        // The page encodes identifiers, so a uuid with reserved
+        // characters arrives escaped and must decode to itself.
+        assert_eq!(
+            parse_imported_path("GET /api/imported/sources/src%2D1/conversations HTTP/1.1"),
+            Some(ImportedRoute::Conversations {
+                source_id: "src-1".into()
+            })
+        );
+        // A malformed escape is refused rather than guessed at.
+        assert_eq!(
+            parse_imported_path("GET /api/imported/sources/src%2/conversations HTTP/1.1"),
+            None
         );
     }
 

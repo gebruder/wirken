@@ -40,6 +40,7 @@ use wirken_gateway::imported_format::{
 };
 
 use super::config;
+use super::webchat::ImportedRoute;
 
 /// The archive members this reads. `users.json` is deliberately absent:
 /// it carries names, addresses, and numbers for people beyond the
@@ -261,6 +262,162 @@ fn import_projects(
     match failure {
         Some(e) => Err(e),
         None => Ok(counts),
+    }
+}
+
+/// Serve one imported-archive read route as JSON.
+///
+/// Read-only by construction: there is no write route, and this
+/// function has no path that mutates. A store failure returns an empty
+/// result rather than an error body, matching the session routes,
+/// which is what keeps a browser from rendering a database message.
+pub(crate) fn read_route_json(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    route: &ImportedRoute,
+) -> String {
+    let Ok((store, _)) = ImportStore::open(&cfg.imported_db_path()) else {
+        return "[]".to_string();
+    };
+    match route {
+        ImportedRoute::Sources => store
+            .source_views()
+            .ok()
+            .and_then(|views| {
+                let rows: Vec<_> = views.iter().map(SourceRow::from).collect();
+                serde_json::to_string(&rows).ok()
+            })
+            .unwrap_or_else(|| "[]".to_string()),
+        ImportedRoute::Conversations { source_id } => store
+            .conversation_rows(source_id, CONVERSATION_LIST_LIMIT)
+            .ok()
+            .and_then(|rows| {
+                let rows: Vec<_> = rows.iter().map(ConversationListRow::from).collect();
+                serde_json::to_string(&rows).ok()
+            })
+            .unwrap_or_else(|| "[]".to_string()),
+        ImportedRoute::Detail {
+            source_id,
+            conversation_uuid,
+        } => store
+            .conversation_detail(source_id, conversation_uuid)
+            .ok()
+            .flatten()
+            .and_then(|detail| serde_json::to_string(&DetailBody::from(&detail)).ok())
+            .unwrap_or_else(|| "null".to_string()),
+    }
+}
+
+/// How many conversations one list response carries. A real archive
+/// holds thousands, and a browser rendering all of them at once helps
+/// nobody; the view pages by source instead.
+const CONVERSATION_LIST_LIMIT: usize = 500;
+
+#[derive(serde::Serialize)]
+struct SourceRow<'a> {
+    id: &'a str,
+    provider: &'a str,
+    source_account: &'a str,
+    archive_sha256: &'a str,
+    imported_at: &'a str,
+    sealed: bool,
+    conversations: u64,
+    messages: u64,
+    projects: u64,
+    project_docs: u64,
+}
+
+impl<'a> From<&'a wirken_gateway::imported::SourceView> for SourceRow<'a> {
+    fn from(v: &'a wirken_gateway::imported::SourceView) -> Self {
+        Self {
+            id: &v.id,
+            provider: &v.provider,
+            source_account: &v.source_account,
+            archive_sha256: &v.archive_sha256,
+            imported_at: &v.imported_at,
+            sealed: v.sealed,
+            conversations: v.counts.conversations,
+            messages: v.counts.messages,
+            projects: v.counts.projects,
+            project_docs: v.counts.project_docs,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ConversationListRow<'a> {
+    uuid: &'a str,
+    title: &'a str,
+    updated_at: &'a str,
+    message_count: u64,
+}
+
+impl<'a> From<&'a wirken_gateway::imported::ConversationRow> for ConversationListRow<'a> {
+    fn from(r: &'a wirken_gateway::imported::ConversationRow) -> Self {
+        Self {
+            uuid: &r.conversation_uuid,
+            title: &r.title,
+            updated_at: &r.updated_at_raw,
+            message_count: r.message_count,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct DetailBody<'a> {
+    uuid: &'a str,
+    title: &'a str,
+    summary: &'a str,
+    created_at: &'a str,
+    updated_at: &'a str,
+    messages: Vec<DetailMessage<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct DetailMessage<'a> {
+    uuid: &'a str,
+    sender: &'a str,
+    text: &'a str,
+    created_at: &'a str,
+    attachments: Vec<DetailAttachment<'a>>,
+    /// Stored blocks this projection does not show. The view states
+    /// the number rather than pretending the record is all here.
+    unrendered_blocks: u64,
+}
+
+#[derive(serde::Serialize)]
+struct DetailAttachment<'a> {
+    file_name: &'a str,
+    text: &'a str,
+}
+
+impl<'a> From<&'a wirken_gateway::imported::ConversationDetail> for DetailBody<'a> {
+    fn from(d: &'a wirken_gateway::imported::ConversationDetail) -> Self {
+        Self {
+            uuid: &d.conversation_uuid,
+            title: &d.title,
+            summary: &d.summary,
+            created_at: &d.created_at_raw,
+            updated_at: &d.updated_at_raw,
+            messages: d
+                .messages
+                .iter()
+                .map(|m| DetailMessage {
+                    uuid: &m.message_uuid,
+                    sender: &m.sender,
+                    text: &m.text,
+                    created_at: &m.created_at_raw,
+                    attachments: m
+                        .attachments
+                        .iter()
+                        .map(|a| DetailAttachment {
+                            file_name: &a.file_name,
+                            text: &a.extracted_content,
+                        })
+                        .collect(),
+                    unrendered_blocks: m.unrendered_blocks,
+                })
+                .collect(),
+        }
     }
 }
 
