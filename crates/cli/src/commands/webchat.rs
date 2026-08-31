@@ -38,6 +38,12 @@ const HTML: &str = r#"<!DOCTYPE html>
   .session-row .ch { font-size: 13px; font-weight: 600; color: #c9d1d9; word-break: break-word; }
   .session-row .meta { font-size: 12px; color: #8b949e; margin-top: 2px; }
   #session-empty { padding: 12px 16px; font-size: 12px; color: #8b949e; }
+  .empty { padding: 12px 16px; font-size: 12px; color: #8b949e; }
+  .imported-head { padding: 12px 16px; font-size: 13px; font-weight: 600; color: #c9d1d9; border-bottom: 1px solid #21262d; }
+  .imported-note { padding: 8px 16px; font-size: 12px; color: #8b949e; font-style: italic; }
+  .imported-back { padding: 8px 16px; font-size: 12px; color: #58a6ff; cursor: pointer; }
+  .imported-attachment { padding: 4px 16px 10px 40px; font-size: 13px; color: #c9d1d9; }
+  #archive-notice { padding: 14px 16px; border-top: 1px solid #21262d; font-size: 12px; color: #8b949e; font-style: italic; }
   #main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   #header { padding: 16px 24px; border-bottom: 1px solid #21262d; font-size: 14px; color: #8b949e; }
   #header strong { color: #c9d1d9; }
@@ -72,6 +78,8 @@ const HTML: &str = r#"<!DOCTYPE html>
 <div id="sidebar">
   <div id="sidebar-header">Sessions</div>
   <div id="session-list"></div>
+  <div id="sidebar-header">Archives</div>
+  <div id="archive-list"></div>
 </div>
 <div id="main">
   <div id="header"><strong>wirken</strong> &mdash; webchat</div>
@@ -80,12 +88,16 @@ const HTML: &str = r#"<!DOCTYPE html>
     <input id="input" type="text" placeholder="Send a message..." autofocus>
     <button id="send">Send</button>
   </div>
+  <div id="archive-notice" hidden></div>
 </div>
 <script>
 const messages = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const sessionList = document.getElementById('session-list');
+const archiveList = document.getElementById('archive-list');
+const inputArea = document.getElementById('input-area');
+const archiveNotice = document.getElementById('archive-notice');
 const WEBCHAT_CHANNEL = 'webchat';
 // The single canonical webchat conversation. POST /api/chat always
 // wakes agent "default" on channel "webchat" with conversation
@@ -94,15 +106,43 @@ const WEBCHAT_CHANNEL = 'webchat';
 const WEBCHAT_LOG_ID = 'default/webchat/webchat-default';
 let activeSessionId = null;
 
+// The sole path from a stored value to the DOM.
+//
+// Everything that came out of a store goes through here, and here
+// assigns textContent. A browser renders textContent as characters: a
+// script tag inside an imported message is text on the page, not a tag
+// the parser acts on. Nothing in this page writes innerHTML,
+// insertAdjacentHTML, outerHTML or document.write with a value; the
+// only innerHTML writes assign an empty literal to clear a container.
+//
+// One helper rather than a convention, because a convention is kept by
+// remembering and a helper is kept by a test. The import surface can
+// hold text from anyone who ever got a message into the imported
+// account, so this is the control that makes that text inert, and it
+// is the only one.
+function setText(el, value) {
+  el.textContent = (value === null || value === undefined) ? '' : String(value);
+  return el;
+}
+
+// Build an element and fill it through setText. Nothing constructs
+// markup from a value.
+function el(tag, className, value) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (value !== undefined) setText(node, value);
+  return node;
+}
+
 function addMsg(role, text, isError) {
   const div = document.createElement('div');
   div.className = 'msg';
   const roleSpan = document.createElement('span');
   roleSpan.className = 'role ' + role;
-  roleSpan.textContent = role;
+  setText(roleSpan, role);
   const contentSpan = document.createElement('span');
   contentSpan.className = 'content' + (isError ? ' error' : '');
-  contentSpan.textContent = text || '';
+  setText(contentSpan, text || '');
   div.appendChild(roleSpan);
   div.appendChild(contentSpan);
   messages.appendChild(div);
@@ -129,7 +169,7 @@ function renderApproval(ev) {
   card.innerHTML = '';
   const title = document.createElement('div');
   title.className = 'approval-title';
-  title.textContent = 'Approval required';
+  setText(title, 'Approval required');
   card.appendChild(title);
   const fields = [
     ['agent', ev.triggering_agent],
@@ -143,10 +183,10 @@ function renderApproval(ev) {
     row.className = 'approval-field';
     const ks = document.createElement('span');
     ks.className = 'k';
-    ks.textContent = k + ':';
+    setText(ks, k + ':');
     const vs = document.createElement('span');
     vs.className = 'v';
-    vs.textContent = v;
+    setText(vs, v);
     row.appendChild(ks);
     row.appendChild(vs);
     card.appendChild(row);
@@ -159,10 +199,10 @@ function renderApproval(ev) {
   btnRow.className = 'approval-buttons';
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approval-btn approval-approve';
-  approveBtn.textContent = 'Approve';
+  setText(approveBtn, 'Approve');
   const denyBtn = document.createElement('button');
   denyBtn.className = 'approval-btn approval-deny';
-  denyBtn.textContent = 'Deny';
+  setText(denyBtn, 'Deny');
   btnRow.appendChild(approveBtn);
   btnRow.appendChild(denyBtn);
   card.appendChild(btnRow);
@@ -190,7 +230,7 @@ function renderApproval(ev) {
       denyBtn.disabled = false;
       const err = document.createElement('div');
       err.className = 'approval-expired';
-      err.textContent = 'Network error submitting decision: ' + e.message;
+      setText(err, 'Network error submitting decision: ' + e.message);
       card.appendChild(err);
     }
   };
@@ -204,9 +244,9 @@ function ackApproval(requestId, result) {
     if (result === 'expired' || result === 'unknown_key') {
       const note = document.createElement('div');
       note.className = 'approval-expired';
-      note.textContent = result === 'expired'
+      setText(note, result === 'expired'
         ? 'Approval expired before your decision was applied.'
-        : 'This approval is no longer pending (timeout, race, or already resolved).';
+        : 'This approval is no longer pending (timeout, race, or already resolved).');
       card.appendChild(note);
       // Leave the note visible briefly, then remove the card so
       // the chat history shows the decision was acknowledged.
@@ -241,7 +281,7 @@ async function send() {
 
     if (!res.ok) {
       const data = await res.json();
-      contentSpan.textContent = data.error || 'Request failed';
+      setText(contentSpan, data.error || 'Request failed');
       contentSpan.classList.add('error');
       sendBtn.disabled = false;
       input.focus();
@@ -268,10 +308,10 @@ async function send() {
             try {
               const event = JSON.parse(json);
               if (event.type === 'delta') {
-                contentSpan.textContent += event.text;
+                setText(contentSpan, contentSpan.textContent + event.text);
                 messages.scrollTop = messages.scrollHeight;
               } else if (event.type === 'error') {
-                contentSpan.textContent += event.text;
+                setText(contentSpan, contentSpan.textContent + event.text);
                 contentSpan.classList.add('error');
               } else if (event.type === 'approval_request') {
                 renderApproval(event);
@@ -284,7 +324,7 @@ async function send() {
       }
     }
   } catch (e) {
-    contentSpan.textContent = 'Connection error: ' + e.message;
+    setText(contentSpan, 'Connection error: ' + e.message);
     contentSpan.classList.add('error');
   }
   sendBtn.disabled = false;
@@ -312,7 +352,7 @@ async function loadSessions() {
   if (rows.length === 0) {
     const empty = document.createElement('div');
     empty.id = 'session-empty';
-    empty.textContent = 'No active sessions';
+    setText(empty, 'No active sessions');
     sessionList.appendChild(empty);
     return;
   }
@@ -321,10 +361,10 @@ async function loadSessions() {
     div.className = 'session-row' + (row.log_id === activeSessionId ? ' active' : '');
     const ch = document.createElement('div');
     ch.className = 'ch';
-    ch.textContent = row.channel;
+    setText(ch, row.channel);
     const meta = document.createElement('div');
     meta.className = 'meta';
-    meta.textContent = row.message_count + ' msg · last ' + fmtTime(row.last_activity);
+    setText(meta, row.message_count + ' msg · last ' + fmtTime(row.last_activity));
     div.appendChild(ch);
     div.appendChild(meta);
     div.addEventListener('click', () => loadTranscript(row.log_id));
@@ -334,6 +374,7 @@ async function loadSessions() {
 
 async function loadTranscript(id) {
   activeSessionId = id;
+  setArchiveMode(false);
   let turns;
   try {
     const res = await fetch('/api/sessions/' + encodeURIComponent(id));
@@ -345,11 +386,137 @@ async function loadTranscript(id) {
   loadSessions();
 }
 
+// The composer belongs to a live session. An imported archive is a
+// stored record, and there is nothing to send to it: the surface has
+// no write route, and the store's rows are read-only after import.
+//
+// Leaving the composer on screen under an archive would afford a send
+// that looks like it annotates the record and in fact starts a live
+// agent turn. The affordance is the defect, so it goes away rather
+// than being explained away, and a notice takes its place.
+function setArchiveMode(active) {
+  inputArea.hidden = active;
+  archiveNotice.hidden = !active;
+  if (active) {
+    setText(archiveNotice,
+      'Imported archive: a stored record, shown read-only. There is nothing to send to here.');
+  }
+}
+
+// Imported archives. Read-only: these views fetch and render, and
+// there is no route here that writes.
+//
+// Everything below reaches the DOM through setText or el, including
+// every value that came out of an imported archive. That text was
+// written by whoever got a message into the imported account, which
+// may be nobody the operator knows.
+async function loadArchives() {
+  let sources;
+  try {
+    const res = await fetch('/api/imported/sources');
+    if (!res.ok) return;
+    sources = await res.json();
+  } catch (e) { return; }
+  archiveList.innerHTML = '';
+  if (!sources.length) {
+    archiveList.appendChild(el('div', 'empty', 'No imported archives'));
+    return;
+  }
+  for (const source of sources) {
+    const row = el('div', 'session-row');
+    row.appendChild(el('div', 'ch', source.source_account));
+    row.appendChild(el('div', 'meta',
+      source.conversations + ' conversations · ' + source.projects + ' projects · ' +
+      (source.sealed ? 'sealed' : 'live')));
+    row.addEventListener('click', () => loadArchiveConversations(source));
+    archiveList.appendChild(row);
+  }
+}
+
+async function loadArchiveConversations(source) {
+  let rows;
+  try {
+    const res = await fetch('/api/imported/sources/' +
+      encodeURIComponent(source.id) + '/conversations');
+    if (!res.ok) return;
+    rows = await res.json();
+  } catch (e) { return; }
+  activeSessionId = null;
+  setArchiveMode(true);
+  messages.innerHTML = '';
+  messages.appendChild(el('div', 'imported-head', 'Imported archive: ' + source.source_account));
+  if (!rows.length) {
+    messages.appendChild(el('div', 'imported-note', 'This archive holds no conversations.'));
+    return;
+  }
+  for (const row of rows) {
+    const item = el('div', 'session-row');
+    // An untitled conversation is a real shape in an archive, so the
+    // uuid stands in rather than an empty line.
+    item.appendChild(el('div', 'ch', row.title || row.uuid));
+    item.appendChild(el('div', 'meta',
+      row.message_count + ' messages · ' + fmtTime(row.updated_at)));
+    item.addEventListener('click', () => loadImportedConversation(source, row.uuid));
+    messages.appendChild(item);
+  }
+}
+
+async function loadImportedConversation(source, uuid) {
+  let detail;
+  try {
+    const res = await fetch('/api/imported/sources/' + encodeURIComponent(source.id) +
+      '/conversations/' + encodeURIComponent(uuid));
+    if (!res.ok) return;
+    detail = await res.json();
+  } catch (e) { return; }
+  setArchiveMode(true);
+  messages.innerHTML = '';
+  if (!detail) {
+    messages.appendChild(el('div', 'imported-note', 'That conversation is not in the store.'));
+    return;
+  }
+  messages.appendChild(el('div', 'imported-head', detail.title || detail.uuid));
+  if (detail.summary) {
+    messages.appendChild(el('div', 'imported-note', detail.summary));
+  }
+  const back = el('div', 'imported-back', '← back to this archive');
+  back.addEventListener('click', () => loadArchiveConversations(source));
+  messages.appendChild(back);
+
+  for (const message of detail.messages) {
+    const div = el('div', 'msg');
+    div.appendChild(el('span', 'role ' + message.sender, message.sender));
+    div.appendChild(el('span', 'content', message.text));
+    messages.appendChild(div);
+
+    for (const attachment of message.attachments) {
+      const att = el('div', 'imported-attachment');
+      att.appendChild(el('div', 'meta', 'attachment: ' + (attachment.file_name || 'unnamed')));
+      // Attachment text is message content that arrived as a file, so
+      // it renders like any other message text and through the same
+      // helper.
+      att.appendChild(el('div', 'content', attachment.text));
+      messages.appendChild(att);
+    }
+
+    // The view is a projection and says so. The stored record carries
+    // blocks this does not render, and a reader should not have to
+    // guess whether a short message is short or truncated.
+    if (message.unrendered_blocks > 0) {
+      messages.appendChild(el('div', 'imported-note',
+        message.unrendered_blocks + ' stored content blocks are not shown here. ' +
+        'This view renders the message text and its attachments.'));
+    }
+  }
+  messages.scrollTop = 0;
+}
+
 sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
 // Restore the canonical webchat conversation on load so a browser
 // refresh keeps the visible history instead of dropping it.
 // loadTranscript's tail call also populates the sidebar.
+loadArchives();
 loadTranscript(WEBCHAT_LOG_ID);
 </script>
 </body>
@@ -993,8 +1160,8 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportedRoute, api_preflight, is_webchat_host, is_webchat_origin, parse_approval_path,
-        parse_imported_path, parse_session_path, percent_decode,
+        HTML, ImportedRoute, api_preflight, is_webchat_host, is_webchat_origin,
+        parse_approval_path, parse_imported_path, parse_session_path, percent_decode,
     };
 
     #[test]
@@ -1078,6 +1245,125 @@ mod tests {
             parse_session_path(line).as_deref(),
             Some("default/webchat/webchat-default")
         );
+    }
+
+    /// The page script, so a test can assert about it. The page is a
+    /// string constant, so nothing compiles it and no Rust error can
+    /// find a mistake in it; these assertions are what stand in.
+    fn page_script() -> &'static str {
+        let start = HTML.find("<script>").expect("the page has a script") + "<script>".len();
+        let end = HTML.find("</script>").expect("the script is closed");
+        &HTML[start..end]
+    }
+
+    /// Assignments to a property, ignoring reads. `x.foo = ` and
+    /// `x.foo += ` count; `y = x.foo` does not.
+    fn assignments_to(script: &str, property: &str) -> Vec<String> {
+        script
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//")
+                    && (line.contains(&format!("{property} ="))
+                        || line.contains(&format!("{property} +=")))
+            })
+            .map(|l| l.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn one_helper_is_the_sole_path_from_a_value_to_the_dom() {
+        // The control that makes imported text inert is that it
+        // becomes textContent. If a second place assigned textContent,
+        // "everything goes through setText" would be a convention
+        // rather than a fact, and a convention is kept by remembering.
+        let script = page_script();
+        let assignments = assignments_to(script, ".textContent");
+        assert_eq!(
+            assignments.len(),
+            1,
+            "textContent must be assigned in exactly one place: {assignments:#?}"
+        );
+        assert!(
+            assignments[0].starts_with("el.textContent ="),
+            "the one assignment is the helper's: {}",
+            assignments[0]
+        );
+        assert!(
+            script.contains("function setText(el, value)"),
+            "the helper exists under the name the assertion assumes"
+        );
+    }
+
+    #[test]
+    fn no_markup_sink_ever_receives_a_value() {
+        let script = page_script();
+
+        // innerHTML clears containers and does nothing else. An empty
+        // literal cannot carry a payload; anything else can.
+        for line in assignments_to(script, ".innerHTML") {
+            assert!(
+                line.ends_with("innerHTML = '';"),
+                "innerHTML may only be assigned an empty literal: {line}"
+            );
+        }
+
+        // These have no safe form here, so they are absent outright
+        // rather than conditionally allowed.
+        for sink in ["insertAdjacentHTML", "outerHTML", "document.write"] {
+            let hits: Vec<&str> = script
+                .lines()
+                .filter(|l| l.contains(sink) && !l.trim_start().starts_with("//"))
+                .collect();
+            assert!(hits.is_empty(), "{sink} appears in the page: {hits:#?}");
+        }
+    }
+
+    #[test]
+    fn the_imported_views_render_through_the_helper() {
+        // Every element the imported views build comes from `el` or is
+        // filled by setText. A view that reached for anything else
+        // would be caught by the two assertions above, but naming the
+        // views here says which code the control is protecting.
+        let script = page_script();
+        for view in [
+            "async function loadArchives()",
+            "async function loadArchiveConversations(source)",
+            "async function loadImportedConversation(source, uuid)",
+        ] {
+            assert!(script.contains(view), "missing view: {view}");
+        }
+        // The projection states what it does not show.
+        assert!(
+            script.contains("stored content blocks are not shown here"),
+            "the detail view must say it is a projection"
+        );
+    }
+
+    #[test]
+    fn an_archive_view_takes_the_composer_away() {
+        // A composer under a stored record affords a send that in fact
+        // starts a live agent turn. Every entry into an archive view
+        // turns the mode on, and returning to a live session turns it
+        // off, so the affordance cannot be left behind by one path.
+        let script = page_script();
+        assert!(
+            script.contains("function setArchiveMode(active)"),
+            "the mode switch exists"
+        );
+        let on = script.matches("setArchiveMode(true)").count();
+        assert_eq!(on, 2, "both archive views turn the mode on");
+        assert!(
+            script.contains("setArchiveMode(false)"),
+            "returning to a live session turns it off"
+        );
+
+        // The switch hides the composer rather than merely styling it,
+        // so a hidden composer cannot be tabbed into.
+        assert!(script.contains("inputArea.hidden = active;"));
+        // Its replacement text goes through the one helper like
+        // everything else.
+        assert!(script.contains("setText(archiveNotice,"));
     }
 
     #[test]
