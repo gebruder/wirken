@@ -222,6 +222,15 @@ project_uuid)` for a project, and `(source_account, doc_uuid)` for a
 project document. Every one of those uuids is present on every record
 in the extracted structure.
 
+A uuid collision inside one source account aborts the import loudly
+rather than being resolved. Keeping the first record drops the second's
+message, keeping the second rewrites history under the first parent,
+and scoping the key per conversation would let one message exist twice
+with different parents. Which is right depends on why the archive
+contains the collision, so it is not guessed at: the error names the
+uuid, both parents, and the fact that conversations imported before it
+are committed and remain.
+
 Projects inherit the conversation semantics whole: the same natural-key
 scoping, the same sealed refusal through the same source path, the
 same wholesale snapshot replacement with a project's documents deleted

@@ -50,6 +50,30 @@ pub enum GatewayError {
     #[error("config error: {0}")]
     Config(String),
 
+    /// One message uuid appeared in two conversations of the same
+    /// source account, which the natural key does not allow.
+    ///
+    /// The import aborts rather than resolving it, because no silent
+    /// resolution is correct: keeping the first drops the second's
+    /// message, keeping the second rewrites history under the first
+    /// conversation, and scoping the key per conversation would let
+    /// one message exist twice with different parents. Which is right
+    /// depends on why the archive contains the collision, and only the
+    /// operator can find that out.
+    #[error(
+        "message '{message_uuid}' appears in two conversations of source account \
+         '{source_account}': already stored under '{stored_conversation}', and again in \
+         '{incoming_conversation}'. The import stopped here. Conversations imported before \
+         this one are committed and remain; this one and everything after it are not. No \
+         silent resolution of the collision is correct, so it is not guessed at."
+    )]
+    DuplicateMessageUuid {
+        source_account: String,
+        message_uuid: String,
+        stored_conversation: String,
+        incoming_conversation: String,
+    },
+
     /// A sealed source refused a further import. Typed rather than a
     /// message so a caller can tell this apart from a parse failure
     /// without reading prose.

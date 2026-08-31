@@ -469,7 +469,7 @@ impl ImportStore {
                 // conversation.
                 continue;
             }
-            tx.execute(
+            let inserted = tx.execute(
                 "INSERT INTO imported_message
                  (source_id, provider, source_account, conversation_uuid, message_uuid,
                   ordinal, sender, text, content_json,
@@ -490,7 +490,32 @@ impl ImportStore {
                     message.updated_at,
                     normalize_timestamp(&message.updated_at).unwrap_or_default(),
                 ],
-            )?;
+            );
+            if let Err(err) = inserted {
+                // The collision is recoverable from inside the still
+                // open transaction: a constraint violation rolls back
+                // the statement, not the transaction, so the row that
+                // is already there can still be named before this
+                // conversation unwinds.
+                if is_primary_key_violation(&err) {
+                    let stored_conversation: Option<String> = tx
+                        .query_row(
+                            "SELECT conversation_uuid FROM imported_message
+                             WHERE source_account = ?1 AND message_uuid = ?2",
+                            params![labels.source_account, message.uuid],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    return Err(GatewayError::DuplicateMessageUuid {
+                        source_account: labels.source_account.clone(),
+                        message_uuid: message.uuid.clone(),
+                        stored_conversation: stored_conversation
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        incoming_conversation: conversation.uuid.clone(),
+                    });
+                }
+                return Err(err.into());
+            }
 
             for (att_ordinal, attachment) in message.attachments.iter().enumerate() {
                 tx.execute(
@@ -910,6 +935,16 @@ fn normalize_timestamp(raw: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|dt| dt.timestamp_micros())
+}
+
+/// Whether this is the natural key refusing a duplicate, as opposed
+/// to any other database failure.
+fn is_primary_key_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _)
+            if e.code == rusqlite::ErrorCode::ConstraintViolation
+    )
 }
 
 /// How many stored content blocks the flattened body does not
@@ -1739,6 +1774,61 @@ mod tests {
         let rendered = format!("{detail:?}");
         assert!(!rendered.contains("thinking"), "{rendered}");
         assert!(!rendered.contains("tool_use"), "{rendered}");
+    }
+
+    #[test]
+    fn a_duplicate_message_uuid_aborts_and_names_both_conversations() {
+        // The natural key is account-wide. A message in two
+        // conversations has no correct silent resolution, so the
+        // import stops and says exactly what collided.
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+
+        s.upsert_conversation(
+            &labels,
+            &conversation("first", "2026-01-01T00:00:00Z", &["shared"]),
+        )
+        .unwrap();
+        let err = s
+            .upsert_conversation(
+                &labels,
+                &conversation("second", "2026-01-02T00:00:00Z", &["shared"]),
+            )
+            .unwrap_err();
+
+        match &err {
+            GatewayError::DuplicateMessageUuid {
+                source_account,
+                message_uuid,
+                stored_conversation,
+                incoming_conversation,
+            } => {
+                assert_eq!(source_account, "acct-1");
+                assert_eq!(message_uuid, "shared");
+                assert_eq!(stored_conversation, "first");
+                assert_eq!(incoming_conversation, "second");
+            }
+            other => panic!("expected DuplicateMessageUuid, got {other:?}"),
+        }
+
+        let text = err.to_string();
+        assert!(text.contains("shared"), "names the message: {text}");
+        assert!(
+            text.contains("first") && text.contains("second"),
+            "names both: {text}"
+        );
+        assert!(text.contains("remain"), "says what survives: {text}");
+
+        // The conversation that imported before the collision stands.
+        assert_eq!(s.counts(d.source_id()).unwrap().conversations, 1);
+        assert_eq!(s.counts(d.source_id()).unwrap().messages, 1);
+        // The colliding one wrote nothing.
+        assert!(
+            s.conversation_detail(d.source_id(), "second")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
