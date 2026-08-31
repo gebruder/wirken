@@ -640,6 +640,166 @@ impl ImportStore {
         Ok(outcome)
     }
 
+    /// Every source with what it holds, oldest import first.
+    ///
+    /// This was removed in a subtraction pass while nothing needed it.
+    /// The archive list needs it now, which is the pass working rather
+    /// than churn: the surface exists because a caller does.
+    pub fn source_views(&self) -> Result<Vec<SourceView>, GatewayError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider, source_account, archive_sha256, imported_at, sealed
+             FROM import_source ORDER BY imported_at, id",
+        )?;
+        let rows: Vec<(String, String, String, String, String, bool)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get::<_, i64>(5)? != 0,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, provider, source_account, archive_sha256, imported_at, sealed) in rows {
+            let counts = self.counts(&id)?;
+            out.push(SourceView {
+                id,
+                provider,
+                source_account,
+                archive_sha256,
+                imported_at,
+                sealed,
+                counts,
+            });
+        }
+        Ok(out)
+    }
+
+    /// A source's conversations, most recently updated first.
+    ///
+    /// Ordered on the normalized epoch, which is what that column and
+    /// its index are for. A conversation whose timestamp would not
+    /// parse sorts oldest; it is still listed, and its raw timestamp
+    /// is what the view shows.
+    pub fn conversation_rows(
+        &self,
+        source_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationRow>, GatewayError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.conversation_uuid, c.title, c.updated_at_raw,
+                    (SELECT COUNT(*) FROM imported_message m
+                     WHERE m.source_account = c.source_account
+                       AND m.conversation_uuid = c.conversation_uuid)
+             FROM imported_conversation c
+             WHERE c.source_id = ?1
+             ORDER BY c.updated_at_epoch DESC, c.conversation_uuid
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![source_id, limit as i64], |row| {
+            Ok(ConversationRow {
+                conversation_uuid: row.get(0)?,
+                title: row.get(1)?,
+                updated_at_raw: row.get(2)?,
+                message_count: row.get::<_, i64>(3)? as u64,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// One conversation, projected for the detail view.
+    pub fn conversation_detail(
+        &self,
+        source_id: &str,
+        conversation_uuid: &str,
+    ) -> Result<Option<ConversationDetail>, GatewayError> {
+        let account: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT source_account FROM import_source WHERE id = ?1",
+                params![source_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(source_account) = account else {
+            return Ok(None);
+        };
+
+        let head: Option<(String, String, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT title, summary, created_at_raw, updated_at_raw
+                 FROM imported_conversation
+                 WHERE source_account = ?1 AND conversation_uuid = ?2",
+                params![source_account, conversation_uuid],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((title, summary, created_at_raw, updated_at_raw)) = head else {
+            return Ok(None);
+        };
+
+        let mut stmt = self.conn.prepare(
+            "SELECT message_uuid, sender, text, created_at_raw, content_json
+             FROM imported_message
+             WHERE source_account = ?1 AND conversation_uuid = ?2
+             ORDER BY ordinal",
+        )?;
+        let raw: Vec<(String, String, String, String, String)> = stmt
+            .query_map(params![source_account, conversation_uuid], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let mut messages = Vec::with_capacity(raw.len());
+        for (message_uuid, sender, text, created_at_raw, content_json) in raw {
+            let mut att = self.conn.prepare(
+                "SELECT file_name, extracted_content FROM imported_attachment
+                 WHERE source_account = ?1 AND message_uuid = ?2
+                 ORDER BY ordinal",
+            )?;
+            let attachments: Vec<AttachmentView> = att
+                .query_map(params![source_account, message_uuid], |row| {
+                    Ok(AttachmentView {
+                        file_name: row.get(0)?,
+                        extracted_content: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            messages.push(MessageView {
+                message_uuid,
+                sender,
+                text,
+                created_at_raw,
+                attachments,
+                unrendered_blocks: unrendered_block_count(&content_json),
+            });
+        }
+
+        Ok(Some(ConversationDetail {
+            conversation_uuid: conversation_uuid.to_string(),
+            title,
+            summary,
+            created_at_raw,
+            updated_at_raw,
+            messages,
+        }))
+    }
+
     /// Stored conversation and message counts for one source. Counts
     /// only: no title and no message text leaves this method.
     pub fn counts(&self, source_id: &str) -> Result<StoredCounts, GatewayError> {
@@ -752,6 +912,24 @@ fn normalize_timestamp(raw: &str) -> Option<i64> {
         .map(|dt| dt.timestamp_micros())
 }
 
+/// How many stored content blocks the flattened body does not
+/// represent.
+///
+/// Blocks of type `text` are what the flattened body is made of;
+/// everything else, a tool call, a tool result, a thinking block, is
+/// stored and not shown. Counting them is a read, not a parse of the
+/// union: only each block's `type` is inspected, and an unreadable or
+/// unexpected shape counts as nothing rather than failing a view.
+fn unrendered_block_count(content_json: &str) -> u64 {
+    let Ok(blocks) = serde_json::from_str::<Vec<serde_json::Value>>(content_json) else {
+        return 0;
+    };
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(|t| t.as_str()) != Some("text"))
+        .count() as u64
+}
+
 /// Decide what writing this record would be, from the stored raw
 /// timestamp and the incoming one.
 ///
@@ -819,6 +997,73 @@ fn restrict_to_owner(db_path: &Path) -> Result<(), GatewayError> {
     #[cfg(not(unix))]
     let _ = db_path;
     Ok(())
+}
+
+/// One source as the archive list shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceView {
+    pub id: String,
+    pub provider: String,
+    pub source_account: String,
+    pub archive_sha256: String,
+    pub imported_at: String,
+    pub sealed: bool,
+    pub counts: StoredCounts,
+}
+
+/// One row of the conversation list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationRow {
+    pub conversation_uuid: String,
+    /// Empty is a real value: archives carry untitled conversations,
+    /// so a view falls back to the uuid rather than treating this as
+    /// missing.
+    pub title: String,
+    pub updated_at_raw: String,
+    pub message_count: u64,
+}
+
+/// One conversation as the detail view shows it.
+///
+/// A projection, not the record. The stored content blocks are not
+/// here: the view renders the flattened body and attachment text, and
+/// says how many blocks it is not showing. Walking the block union
+/// would mean teaching the view a shape the store deliberately never
+/// parses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversationDetail {
+    pub conversation_uuid: String,
+    pub title: String,
+    pub summary: String,
+    pub created_at_raw: String,
+    pub updated_at_raw: String,
+    pub messages: Vec<MessageView>,
+}
+
+/// One message as the detail view shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageView {
+    pub message_uuid: String,
+    pub sender: String,
+    /// The flattened body. What the view renders and what search
+    /// covers.
+    pub text: String,
+    pub created_at_raw: String,
+    pub attachments: Vec<AttachmentView>,
+    /// Stored content blocks the flattened body does not represent:
+    /// everything whose type is not `text`. The view states this count
+    /// rather than rendering the blocks, which is how a projection
+    /// admits to being one.
+    pub unrendered_blocks: u64,
+}
+
+/// One attachment as the detail view shows it. Its extracted text is
+/// message content that arrived as a file, so the view renders it like
+/// any other message text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentView {
+    pub file_name: String,
+    pub extracted_content: String,
 }
 
 /// What a source holds. Counts and nothing else.
@@ -1377,6 +1622,146 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("source_account"), "{err}");
+    }
+
+    /// A conversation whose messages carry blocks beyond plain text,
+    /// so the projection has something to declare it is not showing.
+    fn conversation_with_blocks(uuid: &str, updated_at: &str) -> ExportConversation {
+        let json = format!(
+            r#"{{"uuid":"{uuid}","name":"titled","summary":"a summary",
+                 "created_at":"2026-01-01T00:00:00Z","updated_at":"{updated_at}",
+                 "chat_messages":[
+                   {{"uuid":"m1","sender":"human","text":"plain",
+                     "created_at":"2026-01-01T00:00:00Z",
+                     "content":[{{"type":"text","text":"plain"}}]}},
+                   {{"uuid":"m2","sender":"assistant","text":"answer",
+                     "created_at":"2026-01-01T00:00:01Z",
+                     "attachments":[{{"file_name":"a.txt","file_size":3,
+                                      "file_type":"text/plain",
+                                      "extracted_content":"attached body"}}],
+                     "content":[{{"type":"thinking","thinking":"..."}},
+                                {{"type":"tool_use","name":"x"}},
+                                {{"type":"text","text":"answer"}}]}}]}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn the_archive_list_shows_each_source_with_what_it_holds() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", true)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_conversation(
+            &labels,
+            &conversation_with_blocks("c1", "2026-01-02T00:00:00Z"),
+        )
+        .unwrap();
+
+        let views = s.source_views().unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].source_account, "acct-1");
+        assert!(views[0].sealed);
+        assert_eq!(views[0].counts.conversations, 1);
+        assert_eq!(views[0].counts.messages, 2);
+    }
+
+    #[test]
+    fn the_conversation_list_orders_by_the_normalized_timestamp() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        // Distinct message uuids across conversations, as a real
+        // archive has: the message key is (source_account,
+        // message_uuid), account-wide rather than per conversation.
+        for (uuid, stamp) in [
+            ("older", "2026-01-01T00:00:00Z"),
+            ("newest", "2026-03-01T00:00:00Z"),
+            ("middle", "2026-02-01T00:00:00Z"),
+        ] {
+            let message = format!("m-{uuid}");
+            s.upsert_conversation(&labels, &conversation(uuid, stamp, &[&message]))
+                .unwrap();
+        }
+        let rows = s.conversation_rows(d.source_id(), 10).unwrap();
+        let order: Vec<&str> = rows.iter().map(|r| r.conversation_uuid.as_str()).collect();
+        assert_eq!(order, ["newest", "middle", "older"]);
+        assert!(rows.iter().all(|r| r.message_count == 1));
+    }
+
+    #[test]
+    fn the_detail_view_projects_text_and_attachments_and_counts_the_rest() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_conversation(
+            &labels,
+            &conversation_with_blocks("c1", "2026-01-02T00:00:00Z"),
+        )
+        .unwrap();
+
+        let detail = s
+            .conversation_detail(d.source_id(), "c1")
+            .unwrap()
+            .expect("the conversation is stored");
+        assert_eq!(detail.title, "titled");
+        assert_eq!(detail.messages.len(), 2);
+
+        // A message of plain text alone has nothing unrendered.
+        assert_eq!(detail.messages[0].text, "plain");
+        assert_eq!(detail.messages[0].unrendered_blocks, 0);
+        assert!(detail.messages[0].attachments.is_empty());
+
+        // The second carries a thinking block and a tool call the
+        // flattened body does not represent.
+        assert_eq!(detail.messages[1].text, "answer");
+        assert_eq!(detail.messages[1].unrendered_blocks, 2);
+        assert_eq!(detail.messages[1].attachments.len(), 1);
+        assert_eq!(
+            detail.messages[1].attachments[0].extracted_content,
+            "attached body"
+        );
+    }
+
+    #[test]
+    fn the_detail_view_carries_no_content_blocks() {
+        // The projection must not smuggle the union through. If a
+        // block's text appeared here, the view would be rendering a
+        // shape the store deliberately never parses.
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_conversation(
+            &labels,
+            &conversation_with_blocks("c1", "2026-01-02T00:00:00Z"),
+        )
+        .unwrap();
+        let detail = s.conversation_detail(d.source_id(), "c1").unwrap().unwrap();
+        let rendered = format!("{detail:?}");
+        assert!(!rendered.contains("thinking"), "{rendered}");
+        assert!(!rendered.contains("tool_use"), "{rendered}");
+    }
+
+    #[test]
+    fn an_absent_source_or_conversation_reads_as_none() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        assert!(
+            s.conversation_detail("no-such-source", "c1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            s.conversation_detail(d.source_id(), "no-such-conversation")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unreadable_content_counts_as_nothing_rather_than_failing_a_view() {
+        assert_eq!(unrendered_block_count("not json"), 0);
+        assert_eq!(unrendered_block_count("[]"), 0);
+        assert_eq!(unrendered_block_count(r#"[{"no_type":1}]"#), 1);
     }
 
     #[test]
