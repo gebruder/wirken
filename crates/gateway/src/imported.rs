@@ -252,6 +252,65 @@ const MIGRATIONS: &[&str] = &[
 
      CREATE INDEX imported_project_doc_by_project
          ON imported_project_doc (source_account, project_uuid, ordinal);",
+    // Full-text search. Three external-content indexes rather than one
+    // table holding a second copy of the text: the substantive row
+    // stays in its base table and the index carries only the terms.
+    //
+    // Triggers rather than write-path calls. The write path already
+    // deletes and reinserts a record's rows wholesale, and an index
+    // maintained beside that by hand would drift the first time a new
+    // delete path forgot it. A trigger cannot be forgotten, and delete
+    // is by rowid rather than a scan.
+    //
+    // What is indexed is exactly what the views render and what the
+    // gate covers: flattened message text, attachment text, and
+    // project-document text. Content blocks are not indexed; they are
+    // stored verbatim and never parsed for meaning.
+    "CREATE VIRTUAL TABLE imported_message_fts USING fts5(
+         text,
+         content='imported_message',
+         content_rowid='rowid'
+     );
+
+     CREATE TRIGGER imported_message_fts_insert AFTER INSERT ON imported_message BEGIN
+         INSERT INTO imported_message_fts(rowid, text) VALUES (new.rowid, new.text);
+     END;
+
+     CREATE TRIGGER imported_message_fts_delete AFTER DELETE ON imported_message BEGIN
+         INSERT INTO imported_message_fts(imported_message_fts, rowid, text)
+             VALUES ('delete', old.rowid, old.text);
+     END;
+
+     CREATE VIRTUAL TABLE imported_attachment_fts USING fts5(
+         extracted_content,
+         content='imported_attachment',
+         content_rowid='rowid'
+     );
+
+     CREATE TRIGGER imported_attachment_fts_insert AFTER INSERT ON imported_attachment BEGIN
+         INSERT INTO imported_attachment_fts(rowid, extracted_content)
+             VALUES (new.rowid, new.extracted_content);
+     END;
+
+     CREATE TRIGGER imported_attachment_fts_delete AFTER DELETE ON imported_attachment BEGIN
+         INSERT INTO imported_attachment_fts(imported_attachment_fts, rowid, extracted_content)
+             VALUES ('delete', old.rowid, old.extracted_content);
+     END;
+
+     CREATE VIRTUAL TABLE imported_project_doc_fts USING fts5(
+         content,
+         content='imported_project_doc',
+         content_rowid='rowid'
+     );
+
+     CREATE TRIGGER imported_project_doc_fts_insert AFTER INSERT ON imported_project_doc BEGIN
+         INSERT INTO imported_project_doc_fts(rowid, content) VALUES (new.rowid, new.content);
+     END;
+
+     CREATE TRIGGER imported_project_doc_fts_delete AFTER DELETE ON imported_project_doc BEGIN
+         INSERT INTO imported_project_doc_fts(imported_project_doc_fts, rowid, content)
+             VALUES ('delete', old.rowid, old.content);
+     END;",
 ];
 
 /// Store for imported archives.
@@ -665,6 +724,151 @@ impl ImportStore {
         Ok(outcome)
     }
 
+    /// Search one source's imported content.
+    ///
+    /// Covers flattened message text, attachment text, and
+    /// project-document text, which is what the index covers and what
+    /// the gate covers. Content blocks are not searched: they are
+    /// stored verbatim and never parsed for meaning, so there is
+    /// nothing to match against that a reader would recognise.
+    ///
+    /// `query` is FTS5 match syntax. A query the matcher cannot parse
+    /// is a refusal naming that, not a crash and not an empty result:
+    /// an empty result would tell a caller their term is absent when
+    /// in fact their query was never run.
+    pub fn search(
+        &self,
+        source_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>, GatewayError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut hits = Vec::new();
+        self.search_messages(source_id, query, limit, &mut hits)?;
+        self.search_attachments(source_id, query, limit, &mut hits)?;
+        self.search_project_docs(source_id, query, limit, &mut hits)?;
+        hits.truncate(limit);
+        Ok(hits)
+    }
+
+    fn search_messages(
+        &self,
+        source_id: &str,
+        query: &str,
+        limit: usize,
+        out: &mut Vec<SearchHit>,
+    ) -> Result<(), GatewayError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.conversation_uuid, m.message_uuid,
+                    snippet(imported_message_fts, 0, '', '', '…', 16)
+             FROM imported_message_fts f
+             JOIN imported_message m ON m.rowid = f.rowid
+             WHERE imported_message_fts MATCH ?1 AND m.source_id = ?2
+             ORDER BY rank
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![query, source_id, limit as i64], |row| {
+                Ok(SearchHit {
+                    kind: SearchKind::Message,
+                    source_id: source_id.to_string(),
+                    conversation_uuid: Some(row.get(0)?),
+                    project_uuid: None,
+                    owner_uuid: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(malformed_query)?;
+        // The parse failure surfaces when the statement is stepped,
+        // not when it is prepared, so the step error is mapped too.
+        // Everything else in these statements is fixed SQL over tables
+        // that exist, so a failure here is the caller's query.
+        for row in rows {
+            out.push(row.map_err(malformed_query)?);
+        }
+        Ok(())
+    }
+
+    fn search_attachments(
+        &self,
+        source_id: &str,
+        query: &str,
+        limit: usize,
+        out: &mut Vec<SearchHit>,
+    ) -> Result<(), GatewayError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.conversation_uuid, a.message_uuid,
+                    snippet(imported_attachment_fts, 0, '', '', '…', 16)
+             FROM imported_attachment_fts f
+             JOIN imported_attachment a ON a.rowid = f.rowid
+             LEFT JOIN imported_message m
+                 ON m.source_account = a.source_account AND m.message_uuid = a.message_uuid
+             WHERE imported_attachment_fts MATCH ?1 AND a.source_id = ?2
+             ORDER BY rank
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![query, source_id, limit as i64], |row| {
+                Ok(SearchHit {
+                    kind: SearchKind::Attachment,
+                    source_id: source_id.to_string(),
+                    conversation_uuid: row.get(0)?,
+                    project_uuid: None,
+                    owner_uuid: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(malformed_query)?;
+        // The parse failure surfaces when the statement is stepped,
+        // not when it is prepared, so the step error is mapped too.
+        // Everything else in these statements is fixed SQL over tables
+        // that exist, so a failure here is the caller's query.
+        for row in rows {
+            out.push(row.map_err(malformed_query)?);
+        }
+        Ok(())
+    }
+
+    fn search_project_docs(
+        &self,
+        source_id: &str,
+        query: &str,
+        limit: usize,
+        out: &mut Vec<SearchHit>,
+    ) -> Result<(), GatewayError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.project_uuid, d.doc_uuid,
+                    snippet(imported_project_doc_fts, 0, '', '', '…', 16)
+             FROM imported_project_doc_fts f
+             JOIN imported_project_doc d ON d.rowid = f.rowid
+             WHERE imported_project_doc_fts MATCH ?1 AND d.source_id = ?2
+             ORDER BY rank
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![query, source_id, limit as i64], |row| {
+                Ok(SearchHit {
+                    kind: SearchKind::ProjectDocument,
+                    source_id: source_id.to_string(),
+                    conversation_uuid: None,
+                    project_uuid: Some(row.get(0)?),
+                    owner_uuid: row.get(1)?,
+                    snippet: row.get(2)?,
+                })
+            })
+            .map_err(malformed_query)?;
+        // The parse failure surfaces when the statement is stepped,
+        // not when it is prepared, so the step error is mapped too.
+        // Everything else in these statements is fixed SQL over tables
+        // that exist, so a failure here is the caller's query.
+        for row in rows {
+            out.push(row.map_err(malformed_query)?);
+        }
+        Ok(())
+    }
+
     /// Every source with what it holds, oldest import first.
     ///
     /// This was removed in a subtraction pass while nothing needed it.
@@ -937,6 +1141,17 @@ fn normalize_timestamp(raw: &str) -> Option<i64> {
         .map(|dt| dt.timestamp_micros())
 }
 
+/// Turn a match-syntax failure into a refusal that says so.
+///
+/// An unparseable query returning an empty result would tell a caller
+/// their term is absent from the corpus when in fact nothing was ever
+/// searched, which is the worst answer of the three available.
+fn malformed_query(err: rusqlite::Error) -> GatewayError {
+    GatewayError::Config(format!(
+        "the search query is not valid match syntax and was not run: {err}"
+    ))
+}
+
 /// Whether this is the natural key refusing a duplicate, as opposed
 /// to any other database failure.
 fn is_primary_key_violation(err: &rusqlite::Error) -> bool {
@@ -1032,6 +1247,45 @@ fn restrict_to_owner(db_path: &Path) -> Result<(), GatewayError> {
     #[cfg(not(unix))]
     let _ = db_path;
     Ok(())
+}
+
+/// Where a search hit came from.
+///
+/// The three kinds the index covers, which are the three the gate
+/// covers: attachment text and project-document text are conversation
+/// content that arrived as a file, so they are searched and gated
+/// exactly like a message body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    Message,
+    Attachment,
+    ProjectDocument,
+}
+
+impl SearchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Attachment => "attachment",
+            Self::ProjectDocument => "project_document",
+        }
+    }
+}
+
+/// One search hit. Carries content, which is why the tool that returns
+/// it is gated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub kind: SearchKind,
+    pub source_id: String,
+    /// The conversation a message or attachment belongs to. Absent for
+    /// a project document, which belongs to a project instead.
+    pub conversation_uuid: Option<String>,
+    pub project_uuid: Option<String>,
+    /// The message, attachment, or document the hit is in.
+    pub owner_uuid: String,
+    /// The matching text with its surroundings.
+    pub snippet: String,
 }
 
 /// One source as the archive list shows it.
@@ -1679,6 +1933,155 @@ mod tests {
                                 {{"type":"text","text":"answer"}}]}}]}}"#
         );
         serde_json::from_str(&json).unwrap()
+    }
+
+    /// A conversation whose message, attachment, and a sibling
+    /// project document each carry a findable phrase.
+    fn searchable(uuid: &str, updated_at: &str, phrase: &str) -> ExportConversation {
+        let json = format!(
+            r#"{{"uuid":"{uuid}","name":"t","updated_at":"{updated_at}",
+                 "chat_messages":[{{"uuid":"m-{uuid}","sender":"human",
+                   "text":"a message about {phrase} and other things",
+                   "attachments":[{{"file_name":"a.txt","file_size":9,
+                     "file_type":"text/plain",
+                     "extracted_content":"an attachment about {phrase} too"}}]}}]}}"#
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn search_covers_message_attachment_and_document_text() {
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_conversation(
+            &labels,
+            &searchable("c1", "2026-01-02T00:00:00Z", "borogove"),
+        )
+        .unwrap();
+        let project: ExportProject = serde_json::from_str(
+            r#"{"uuid":"p1","name":"p","updated_at":"2026-01-02T00:00:00Z",
+                "docs":[{"uuid":"d1","filename":"n.md","content":"a document about borogove"}]}"#,
+        )
+        .unwrap();
+        s.upsert_project(&labels, &project).unwrap();
+
+        let hits = s.search(d.source_id(), "borogove", 20).unwrap();
+        let kinds: std::collections::BTreeSet<&str> =
+            hits.iter().map(|h| h.kind.as_str()).collect();
+        assert!(kinds.contains("message"), "{kinds:?}");
+        assert!(kinds.contains("attachment"), "{kinds:?}");
+        assert!(kinds.contains("project_document"), "{kinds:?}");
+        assert!(hits.iter().all(|h| h.snippet.contains("borogove")));
+    }
+
+    #[test]
+    fn search_indexes_nothing_beyond_those_three() {
+        // Content blocks are stored verbatim and never parsed for
+        // meaning, so a term that appears only inside a block must not
+        // be findable. Indexing them would make the search surface
+        // wider than the gate that covers it.
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        let with_block: ExportConversation = serde_json::from_str(
+            r#"{"uuid":"c1","name":"t","updated_at":"2026-01-02T00:00:00Z",
+                "chat_messages":[{"uuid":"m1","sender":"assistant","text":"plain body",
+                  "content":[{"type":"tool_use","name":"x",
+                              "input":{"query":"slithytoves"}}]}]}"#,
+        )
+        .unwrap();
+        s.upsert_conversation(&labels, &with_block).unwrap();
+
+        // The block text is stored...
+        let detail = s.conversation_detail(d.source_id(), "c1").unwrap().unwrap();
+        assert_eq!(detail.messages[0].unrendered_blocks, 1);
+        // ...and is not findable.
+        assert!(
+            s.search(d.source_id(), "slithytoves", 20)
+                .unwrap()
+                .is_empty()
+        );
+        // The flattened body is.
+        assert!(!s.search(d.source_id(), "plain", 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replaced_text_becomes_unfindable() {
+        // The index has to follow wholesale replacement. A snapshot
+        // that drops a message leaves the store without it, and an
+        // index still carrying its terms would answer for a record
+        // that no longer exists in any archive.
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let labels = labels_for(&d, "acct-1");
+        s.upsert_conversation(
+            &labels,
+            &searchable("c1", "2026-01-02T00:00:00Z", "jabberwock"),
+        )
+        .unwrap();
+        assert!(
+            !s.search(d.source_id(), "jabberwock", 20)
+                .unwrap()
+                .is_empty()
+        );
+
+        // A newer snapshot of the same conversation, without the term.
+        s.upsert_conversation(
+            &labels,
+            &searchable("c1", "2026-01-03T00:00:00Z", "bandersnatch"),
+        )
+        .unwrap();
+        assert!(
+            s.search(d.source_id(), "jabberwock", 20)
+                .unwrap()
+                .is_empty(),
+            "the replaced message text is still findable"
+        );
+        assert!(
+            !s.search(d.source_id(), "bandersnatch", 20)
+                .unwrap()
+                .is_empty(),
+            "the replacing text is not findable"
+        );
+    }
+
+    #[test]
+    fn a_search_is_scoped_to_one_source() {
+        let (mut s, _, _t) = store();
+        let a = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        s.upsert_conversation(
+            &labels_for(&a, "acct-1"),
+            &searchable("c1", "2026-01-02T00:00:00Z", "mimsy"),
+        )
+        .unwrap();
+        let b = s.begin_import(&decl("acct-2", "hash-b", false)).unwrap();
+        s.upsert_conversation(
+            &labels_for(&b, "acct-2"),
+            &searchable("c2", "2026-01-02T00:00:00Z", "mimsy"),
+        )
+        .unwrap();
+
+        // Two datasets, and nothing joins across them.
+        let hits = s.search(a.source_id(), "mimsy", 20).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|h| h.source_id == a.source_id()));
+    }
+
+    #[test]
+    fn an_unparseable_query_refuses_rather_than_answering_empty() {
+        // An empty result would say the term is absent. It is not: the
+        // query never ran.
+        let (mut s, _, _t) = store();
+        let d = s.begin_import(&decl("acct-1", "hash-a", false)).unwrap();
+        let err = s
+            .search(d.source_id(), "\"unclosed", 20)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid match syntax"), "{err}");
+        assert!(err.contains("was not run"), "{err}");
+        // An empty query is not an error, just nothing to ask.
+        assert!(s.search(d.source_id(), "   ", 20).unwrap().is_empty());
     }
 
     #[test]
