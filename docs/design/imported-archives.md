@@ -647,8 +647,44 @@ parse is skipped by identifier and the run continues.
 ## Search
 
 FTS5, natively, since the bundled SQLite this workspace links has it
-compiled in. An external index over message text, with the substantive
-row kept in the base table. No embeddings in this scope.
+compiled in. External indexes over flattened message text, attachment
+text, and project-document text, with the substantive rows kept in
+their base tables. Those three are what the gate covers, so indexing
+anything else would make the search surface wider than the control
+over it. Stored content blocks are not indexed: they are never parsed
+for meaning, and a term found only inside one would be a hit no reader
+could place. No embeddings in this scope.
+
+The indexes are maintained by trigger rather than by the write path.
+Replacement is wholesale, and an index kept beside that by hand would
+drift the first time a new delete path forgot it.
+
+### Three outcomes, each meaning only itself
+
+A search returns hits, returns nothing, or refuses. The three are kept
+distinct because collapsing any two of them makes the tool lie.
+
+**Hits** mean the term is in the corpus.
+
+**Empty** means the term is not in the corpus. It is a fact about the
+archive, and a caller may act on it.
+
+**A refusal** means the query was not run: it was not valid match
+syntax, or the store could not be reached. Returning empty here would
+report absence the search never established, and a caller acting on
+that would be acting on a fact nobody checked.
+
+The audit event follows the same rule. Every attempt that reaches the
+tool emits one, whether it found hits, found nothing, or was refused,
+so the trail records attempts rather than survivors. A trail that
+recorded only successful searches would answer "what was looked for"
+with a filtered version of the truth.
+
+The query itself never appears; the event carries a keyed digest of it
+instead. The digest is over the query bytes exactly as issued, with no
+trimming, case folding, or normalization, because two queries that
+differ by a byte are two queries and folding them would claim a
+repetition that did not happen.
 
 ## Slices
 

@@ -76,6 +76,42 @@ pub trait Keychain: Send + Sync {
 /// Returns `Err` only when both the retrieve and the
 /// generate-then-store paths fail. The caller is expected to fall
 /// back to unsigned alarm-log mode and emit a prominent warn.
+/// Load the imported-search pseudonymization key from `keychain`,
+/// generating and storing one if it is missing.
+///
+/// A key of its own, never the alarm-log key. That one exists to be
+/// shared: a reviewer holding it can tell a signed alarm record from a
+/// tampered one, which is the whole point of it. Handing a reviewer
+/// the key that also pseudonymizes search queries would hand them the
+/// queries, so the two are separate and this one goes into no handout.
+///
+/// Same shape as the alarm-log key otherwise: random bytes in the
+/// keychain, and a caller that cannot get one omits the digest rather
+/// than falling back to an unkeyed hash.
+pub fn load_or_create_imported_search_key(keychain: &dyn Keychain) -> Result<Vec<u8>, VaultError> {
+    const IMPORTED_SEARCH_KEY_NAME: &str = "imported-search-hmac";
+    if let Ok(bytes) = keychain.retrieve_aux_key(IMPORTED_SEARCH_KEY_NAME)
+        && bytes.len() == 32
+    {
+        return Ok(bytes);
+    }
+    // Same refusal the alarm-log key makes: creating an aux key under
+    // an unlocked-with-nothing age-file keychain would wrap it under an
+    // empty passphrase, which protects nothing.
+    if keychain.kind() == KeychainKind::AgeFile && keychain.retrieve_device_key().is_err() {
+        return Err(VaultError::Keychain(
+            "age-file keychain not unlocked; will not create the imported-search key \
+             under an empty passphrase. Open the vault first (or run `wirken setup`) \
+             so the device key is reachable."
+                .into(),
+        ));
+    }
+    let mut key = [0u8; 32];
+    rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
+    keychain.store_aux_key(IMPORTED_SEARCH_KEY_NAME, &key)?;
+    Ok(key.to_vec())
+}
+
 pub fn load_or_create_alarm_log_key(keychain: &dyn Keychain) -> Result<Vec<u8>, VaultError> {
     const ALARM_LOG_KEY_NAME: &str = "alarm-log-hmac";
     if let Ok(bytes) = keychain.retrieve_aux_key(ALARM_LOG_KEY_NAME)

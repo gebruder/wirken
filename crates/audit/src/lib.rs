@@ -17,7 +17,7 @@ mod writer;
 
 pub use alarm_log::{
     ACKNOWLEDGE_PROCEED_TYPES, AlarmLog, AlarmRecord, AlarmVerifyStatus,
-    UnacknowledgedBlocksReport, VerifiedAlarmRecord,
+    UnacknowledgedBlocksReport, VerifiedAlarmRecord, imported_search_digest,
 };
 pub use error::AuditError;
 pub use event::{ActorKind, AuditEvent, StoredEvent};

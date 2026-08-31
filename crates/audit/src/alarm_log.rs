@@ -326,6 +326,27 @@ impl AlarmLog {
     }
 }
 
+/// Keyed digest of a search query, for an audit row that must not
+/// carry the query itself.
+///
+/// Over the query bytes exactly as issued. No trimming, no case
+/// folding, no normalization of any kind: two queries that differ by a
+/// byte are two queries, and folding them together would make the
+/// trail claim a repetition that did not happen. The cost is that a
+/// caller who retypes a query with different spacing produces a
+/// different digest, which is the honest answer.
+///
+/// Keyed rather than a plain hash because an agent under injection can
+/// echo archive content into a query, which makes the query a content
+/// path out of the corpus and into every SIEM the forwarder feeds. The
+/// space of plausible queries is small enough to enumerate, so an
+/// unkeyed digest would be recoverable by anyone holding the rows. A
+/// keyed one is not, and still compares equal for the same query,
+/// which is what preserves repetition and correlation for an auditor.
+pub fn imported_search_digest(key: &[u8], query: &str) -> String {
+    compute_hmac_hex(key, query.as_bytes())
+}
+
 fn compute_hmac_hex(key: &[u8], message: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(message);
@@ -676,5 +697,58 @@ mod tests {
         let read_back = reader.read_all().unwrap();
         assert_eq!(read_back.len(), 1);
         assert_eq!(read_back[0].status, AlarmVerifyStatus::Tampered);
+    }
+}
+
+#[cfg(test)]
+mod imported_search_digest_tests {
+    use super::*;
+
+    #[test]
+    fn the_digest_is_over_the_query_exactly_as_issued() {
+        let key = [7u8; 32];
+        // Anything that would fold two distinct queries together is a
+        // claim of repetition that did not happen.
+        let variants = [" term", "term ", "Term", "term", "te rm"];
+        let digests: std::collections::BTreeSet<String> = variants
+            .iter()
+            .map(|q| imported_search_digest(&key, q))
+            .collect();
+        assert_eq!(
+            digests.len(),
+            variants.len(),
+            "distinct queries must produce distinct digests"
+        );
+    }
+
+    #[test]
+    fn the_same_query_digests_the_same_and_a_different_key_does_not() {
+        let query = "borogove";
+        assert_eq!(
+            imported_search_digest(&[1u8; 32], query),
+            imported_search_digest(&[1u8; 32], query),
+            "repetition is what the digest preserves"
+        );
+        assert_ne!(
+            imported_search_digest(&[1u8; 32], query),
+            imported_search_digest(&[2u8; 32], query),
+            "the key is what makes it unrecoverable"
+        );
+    }
+
+    #[test]
+    fn the_query_does_not_appear_in_its_digest() {
+        let digest = imported_search_digest(&[3u8; 32], "a distinctive secret phrase");
+        assert!(!digest.contains("secret"));
+        assert!(!digest.contains("phrase"));
+        assert_eq!(digest.len(), 64, "hex of a sha256 tag");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn an_empty_query_still_digests() {
+        // The tool emits an event for every attempt, including ones
+        // that carried nothing, so this must not panic or be special.
+        assert_eq!(imported_search_digest(&[0u8; 32], "").len(), 64);
     }
 }
