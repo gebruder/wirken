@@ -1,11 +1,20 @@
 # Design: imported assistant archives
 
+Citations verified against 73dcdd7. They are a record of a check
+made against that tree, not a live index: a file that grows moves
+every line below the change, and a citation cannot know that. The
+repo is authoritative for the live question; these say what was
+true when someone looked, and when.
+
 Status: in progress. The store, the archive reader, the parser, the
-write path, the audit events, and the `wirken import` command are
-built; the web views, the agent tools, and search are not. Every claim
-about current behaviour is settled against the repo and carries a file
-reference; the data model is derived from structure extracted from a
-real archive.
+write path, the audit events, the `wirken import` command, the
+read-only web views, the search index, and both gated agent tools are
+built. What remains is the Search slice's own closing observation:
+retrieval against the real corpus, index behaviour under re-import,
+and the digest audit shape end to end. Every claim about current
+behaviour is settled against the repo and carries a file reference;
+the data model is derived from structure extracted from a real
+archive.
 
 ## What this is
 
@@ -29,14 +38,14 @@ below would otherwise be assumptions.
 
 **Storage.** SQLite through `rusqlite`, one database file per concern,
 each reached by an accessor on `GatewayConfig`
-(`crates/gateway/src/config.rs:44-82`). FTS5 is compiled into the
+(`crates/gateway/src/config.rs:44-90`). FTS5 is compiled into the
 bundled SQLite this workspace links, confirmed by building against the
 workspace dependency line and creating a virtual table, so native
 full-text search is available rather than assumed.
 
 **Migration.** The repo carries more than one shape. Core gateway
 stores have no versioning: `open()` runs `execute_batch` with
-`CREATE TABLE IF NOT EXISTS` (`crates/gateway/src/memory.rs:97-113`),
+`CREATE TABLE IF NOT EXISTS` (`crates/gateway/src/memory.rs:104-120`),
 so a later column addition never reaches a database that already
 exists. `wirken-skill-store` carries a real runner:
 `SkillStore::migrate` applies migrations by slice index, records them
@@ -44,47 +53,47 @@ in a `_migrations` table, and is idempotent
 (`crates/skill-store/src/lib.rs:130-163`).
 
 **The permission gate.** `tool_to_action`
-(`crates/agent/src/tool.rs:1622`) classifies a tool name into an
+(`crates/agent/src/tool.rs:1708`) classifies a tool name into an
 `Action`. A `None` return does **not** skip the gate. The runtime maps
 `None` to `WasmSkillCall` for a known Wasm skill and otherwise to
-`UnknownTool` (`crates/agent/src/runtime.rs:2835-2846`), and both
-resolve to Tier 3 (`crates/gateway/src/permissions.rs:219-222`). Tier 3
+`UnknownTool` (`crates/agent/src/runtime.rs:2885-2896`), and both
+resolve to Tier 3 (`crates/gateway/src/permissions.rs:255-262`). Tier 3
 is always-prompt; it refuses outright only where no approval surface is
 reachable. So omitting a classifier arm for a new tool denies it rather
 than admitting it ungated.
 
 **Where the gate applies.** Every production entry point attaches a
 permission store, so the gate runs on every path this feature is
-reachable from (`crates/agent/src/runtime.rs:2823`, field at `:165`).
+reachable from (`crates/agent/src/runtime.rs:2873`, field at `:165`).
 Enumerated under "Permission attachment" below.
 
 **Confidentiality labels.** `ReadSensitivity`
-(`crates/agent/src/tool.rs:1563-1591`) marks what a session has read.
+(`crates/agent/src/tool.rs:1641-1675`) marks what a session has read.
 The variants are unordered by construction and `Ord` is deliberately
 not derived. `restricts_egress()` is true for every variant except
 `AggregatedExternal`. Registration is `tool_to_read_sensitivity`
-(`crates/agent/src/tool.rs:1606-1620`); a tool the classifier cannot
+(`crates/agent/src/tool.rs:1691-1706`); a tool the classifier cannot
 place is labelled `Workspace`, the most restricting value
-(`crates/agent/src/runtime.rs:2860-2866`).
+(`crates/agent/src/runtime.rs:2908-2916`).
 
 **Cross-channel memory, the pattern this feature copies.**
 `crates/gateway/src/memory.rs` stamps provenance labels `NOT NULL` in
-the DDL (`:97-113`), carries them in an `OriginLabels` struct with no
-`Default` so a write cannot be constructed without them (`:59-66`), and
-refuses a write naming the missing label (`:125-141`). Its read tool is
+the DDL (`:104-120`), carries them in an `OriginLabels` struct with no
+`Default` so a write cannot be constructed without them (`:61-68`), and
+refuses a write naming the missing label (`:132-148`). Its read tool is
 gated at Tier 3 keyed by the channel read from, so approving one
 channel approves no other
-(`crates/agent/src/tool.rs:1674`,
-`crates/gateway/src/permissions.rs:221,240-242`).
+(`crates/agent/src/tool.rs:1760`,
+`crates/gateway/src/permissions.rs:261,281-283`).
 
 **Audit events.** `SessionEvent` is `#[serde(tag = "kind", rename_all = "snake_case")]`
 (`crates/audit/src/session_log.rs:419-421`); additive variants are
 forward-compatible. Exactly one registration site is compiler-forced:
-`variant_kind` (`crates/audit/src/siem_typed.rs:142-187`) is exhaustive
+`variant_kind` (`crates/audit/src/siem_typed.rs:154-203`) is exhaustive
 with no catch-all. Two are silent and must be edited deliberately: the
-default-forward list (`crates/audit/src/siem_typed.rs:104-122`) omits a
+default-forward list (`crates/audit/src/siem_typed.rs:111-133`) omits a
 new variant, and the actor-field extractor
-(`crates/audit/src/siem.rs:629`) has a catch-all that yields no
+(`crates/audit/src/siem.rs:655`) has a catch-all that yields no
 attribution.
 
 ## Permission attachment
@@ -94,11 +103,11 @@ caller that passes none is the replay verifier.
 
 `wirken run` builds one `AgentFactory` carrying the store
 (`crates/cli/src/commands/run.rs:1153`) and clones it to the webchat
-server (`:1349`), the cron scheduler (`:1389`), and the adapter accept
-loop (`:1483`). The factory attaches it to each agent it wakes
-(`crates/agent/src/factory.rs:566-567`). Subagents wake through the same
-factory (`crates/agent/src/runtime.rs:3661`) and inherit it; an agent
-with no factory bound cannot spawn children at all (`:4033-4039`). The
+server (`:1378`), the cron scheduler (`:1418`), and the adapter accept
+loop (`:1512`). The factory attaches it to each agent it wakes
+(`crates/agent/src/factory.rs:596-597`). Subagents wake through the same
+factory (`crates/agent/src/runtime.rs:3711`) and inherit it; an agent
+with no factory bound cannot spawn children at all (`:4083-4089`). The
 direct CLI agent paths attach their own
 (`crates/cli/src/commands/agent.rs:118,220`), as do the lyrik paths
 (`crates/cli/src/commands/lyrik.rs:472,1025`).
@@ -403,25 +412,26 @@ the run.
 ## Web UI
 
 Read-only, on the existing hand-rolled server
-(`crates/cli/src/commands/webchat.rs:360`). Archive list grouped by
+(`crates/cli/src/commands/webchat.rs:527`). Archive list grouped by
 source, conversation list per source, and a detail view per
 conversation. The views read the import store the same way the session
 sidebar and transcript read theirs
 (`crates/cli/src/commands/webchat.rs:413,427`).
 
 The server binds loopback only, hardcoded, with the port configurable
-(`:368`). The new routes are reads and take the same preflight posture
+(`:535`). The new routes are reads and take the same preflight posture
 as the existing read routes: `Host` is checked against loopback names
 on every route, which is what closes DNS rebinding, and a present
 `Origin` is validated on reads even though browsers omit it on a
-same-origin GET (`:806-845`).
+same-origin GET (`:1008-1047`).
 
-Rendering follows the discipline the session view already holds: every
-value that comes from a store is written with `textContent`
-(`:102-105`, `:146-149`, `:324-327`), and the only `innerHTML` writes
-assign an empty string literal to clear a container (`:129`, `:311`,
-`:343`). No new view introduces `innerHTML` with data,
-`insertAdjacentHTML`, or string-concatenated markup.
+Every value that comes from a store reaches the DOM through one
+helper, `setText` (`:123-126`), which assigns `textContent` and
+nothing else. `textContent` is assigned in exactly that one place in
+the page, so "everything goes through the helper" is a fact a test can
+check rather than a discipline someone has to remember. `innerHTML` is
+written only with an empty literal to clear a container, and
+`insertAdjacentHTML`, `outerHTML` and `document.write` appear nowhere.
 
 ## Agent tools
 
@@ -436,7 +446,7 @@ an unregistered name lands on `UnknownTool` at Tier 3 and is denied.
 The argument is what the corpus reveals, not that its contents are
 untrustworthy. Injectability is a separate axis handled by
 `ReadSensitivity` like any other foreign text entering context;
-`crates/agent/src/tool.rs:1549-1556` states explicitly that
+`crates/agent/src/tool.rs:1627-1634` states explicitly that
 `ReadSensitivity` is a confidentiality axis and deliberately not a
 trust axis.
 
@@ -517,12 +527,12 @@ egress suggests.
 A read of imported content adds a restricting label to the session's
 observed-sensitivity set. That set is consulted at exactly one place:
 `SandboxEgressContext::restricting_basis`
-(`crates/agent/src/sandbox_egress.rs:370-386`), reached from
+(`crates/agent/src/sandbox_egress.rs:371-387`), reached from
 `exec_command` where the context is handed to `sandbox.exec`
-(`crates/agent/src/tool.rs:617-626`). So the effect is on **network
+(`crates/agent/src/tool.rs:695-704`). So the effect is on **network
 egress attempted from inside a sandboxed `exec`**, and the audit row
 that carries the basis is `SandboxEgressVerdict`
-(`crates/audit/src/session_log.rs:1302`).
+(`crates/audit/src/session_log.rs:1408`).
 
 With a restricting label present
 (`crates/agent/src/sandbox_egress.rs:469-520`): `open` mode refuses;
@@ -586,7 +596,7 @@ registration someone forgot.
 
 The search event records a keyed digest of the query, never the query
 text. HMAC-SHA256 on the pattern already in the tree
-(`crates/audit/src/alarm_log.rs:329-334`), keyed by a dedicated
+(`crates/audit/src/alarm_log.rs:350-355`), keyed by a dedicated
 pseudonymization key held in the data directory and never forwarded.
 
 Keyed rather than a plain content hash, because an agent under
@@ -608,7 +618,7 @@ also pseudonymizes queries would give them the queries.
 Key residence. The pseudonymization key is an aux key held in the
 keychain and loaded through the vault crate, on the pattern
 `load_or_create_alarm_log_key` already uses for the alarm-log HMAC key
-(`crates/vault/src/keychain.rs:79`): random bytes, hex-encoded at rest,
+(`crates/vault/src/keychain.rs:115`): random bytes, hex-encoded at rest,
 wrapped by the OS keychain or, on the age-file backend, by the
 operator's passphrase. It is never forwarded to a SIEM and never
 included in a reviewer handout. Note that this is the custody path for
@@ -656,12 +666,13 @@ imported account. The escalation target is concrete, since the UI
 serves an approval surface at a same-origin `POST /api/approvals/{id}`;
 script running in that origin could answer a Tier 3 prompt for itself.
 
-The control is output encoding at render, and only that. The existing
-path already implements it: values from a store reach the DOM through
-`textContent`, and `innerHTML` is written only with an empty literal
-(`crates/cli/src/commands/webchat.rs:102-105`, `:129`, `:311`,
-`:324-327`, `:343`). The new views hold the same line, and the view
-slice closes on observing it rather than on asserting it.
+The control is output encoding at render, and only that. One helper
+implements it for the whole page: `setText`
+(`crates/cli/src/commands/webchat.rs:123-126`) assigns `textContent`,
+and it is the only place in the page that assigns it. Structural tests
+hold that, and hold that no markup sink ever receives a value. The
+view slice closed on an operator seeing the markup render as inert
+text, because a structural test cannot prove what a browser does.
 
 The control is **not** sanitizing at import. Imported records stay
 byte-faithful. An archive may legitimately contain a script tag or an
