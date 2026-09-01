@@ -59,6 +59,34 @@
             "flags": null
           }
         ]
+      },
+      {
+        "uuid": "7c7c7c7c-7c7c-4c7c-8c7c-7c7c7c7c7c7c",
+        "sender": "human",
+        "text": "",
+        "created_at": "2026-07-02T03:04:07.000000Z",
+        "updated_at": "2026-07-02T03:04:07.000000Z",
+        "attachments": [
+          {
+            "file_name": "only-content.txt",
+            "file_size": 31,
+            "file_type": "text/plain",
+            "extracted_content": "The message text is empty; this file is all the content there is."
+          }
+        ],
+        "files": [
+          {
+            "file_name": "only-content.txt"
+          }
+        ],
+        "content": [
+          {
+            "type": "text",
+            "text": "",
+            "citations": [],
+            "flags": null
+          }
+        ]
       }
     ]
   },
@@ -343,34 +371,6 @@
           {
             "start_timestamp": "2026-07-02T03:04:06.000000Z",
             "stop_timestamp": "2026-07-02T03:04:06.000000Z",
-            "type": "text",
-            "text": "",
-            "citations": [],
-            "flags": null
-          }
-        ]
-      },
-      {
-        "uuid": "7c7c7c7c-7c7c-4c7c-8c7c-7c7c7c7c7c7c",
-        "sender": "human",
-        "text": "",
-        "created_at": "2026-07-02T03:04:07.000000Z",
-        "updated_at": "2026-07-02T03:04:07.000000Z",
-        "attachments": [
-          {
-            "file_name": "only-content.txt",
-            "file_size": 31,
-            "file_type": "text/plain",
-            "extracted_content": "The message text is empty; this file is all the content there is."
-          }
-        ],
-        "files": [
-          {
-            "file_name": "only-content.txt"
-          }
-        ],
-        "content": [
-          {
             "type": "text",
             "text": "",
             "citations": [],

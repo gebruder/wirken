@@ -9279,16 +9279,21 @@ async fn a_read_row_names_the_account_not_the_source_id() {
     );
 }
 
-/// A conversation whose messages carry no text reads as a labelled
-/// record, not as a run of blank turns.
+/// Both text-less shapes a real archive carries read as labelled
+/// records rather than as blank turns.
 ///
-/// The shape is from a real archive: an untitled conversation whose
-/// messages have an empty flattened `text` and a `content` array
+/// *Contentless*: an empty flattened `text` and a `content` array
 /// holding one text block whose own text is also empty. The text is in
 /// neither place, so there is nothing to re-derive; what was wrong was
-/// rendering the absence as silence.
+/// rendering the absence as silence. Clusters in unnamed conversations.
+///
+/// *Attachment-only*: the same empty text, with the message's content
+/// arriving as a file. Clusters in named conversations. The label and
+/// the attachment must both appear -- an empty text field does not make
+/// the record empty, and rendering only the label would drop the only
+/// content the message has.
 #[tokio::test]
-async fn a_conversation_with_no_stored_text_reads_as_labelled_not_blank() {
+async fn both_text_less_shapes_read_as_labelled_records() {
     let tmp = tempfile::TempDir::new().unwrap();
     let (store, _) =
         wirken_gateway::imported::ImportStore::open(&tmp.path().join("imported.db")).unwrap();
@@ -9320,11 +9325,18 @@ async fn a_conversation_with_no_stored_text_reads_as_labelled_not_blank() {
                 .into_iter()
                 .filter_map(|v| serde_json::from_value(v).ok())
                 .collect();
-        let textless = all
-            .iter()
-            .find(|c| c.uuid == "77777777-7777-4777-8777-777777777777")
-            .expect("the corpus models a conversation with no stored text");
-        s.upsert_conversation(&labels, textless).unwrap();
+        for uuid in [
+            // Contentless, unnamed.
+            "77777777-7777-4777-8777-777777777777",
+            // Named, and carries the attachment-only message.
+            "11111111-1111-4111-8111-111111111111",
+        ] {
+            let conversation = all
+                .iter()
+                .find(|c| c.uuid == uuid)
+                .unwrap_or_else(|| panic!("the corpus models conversation {uuid}"));
+            s.upsert_conversation(&labels, conversation).unwrap();
+        }
         decision.source_id().to_string()
     };
 
@@ -9358,8 +9370,8 @@ async fn a_conversation_with_no_stored_text_reads_as_labelled_not_blank() {
         out.output
             .matches("(no text stored for this message)")
             .count(),
-        3,
-        "every text-less message is labelled rather than left blank: {}",
+        2,
+        "every contentless message is labelled rather than left blank: {}",
         out.output,
     );
     assert!(
@@ -9367,11 +9379,35 @@ async fn a_conversation_with_no_stored_text_reads_as_labelled_not_blank() {
         "no bare sender line survives: {}",
         out.output,
     );
-    // The one message carrying an attachment still shows it: an empty
-    // text field does not mean the record is empty.
+
+    // The attachment-only shape, in the named conversation where the
+    // real archive keeps it.
+    let out = crate::imported_tool::execute(
+        &ctx,
+        "read_imported_chat",
+        &serde_json::json!({
+            "source": source_id,
+            "conversation": "11111111-1111-4111-8111-111111111111",
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(out.success);
+    assert!(
+        out.output.contains("(no text stored for this message)"),
+        "the text-less message is labelled: {}",
+        out.output,
+    );
     assert!(
         out.output.contains("only-content.txt"),
-        "attachment content still renders: {}",
+        "and its attachment still renders: {}",
+        out.output,
+    );
+    assert!(
+        out.output
+            .contains("The message text is empty; this file is all the content there is."),
+        "including the attachment's extracted content: {}",
         out.output,
     );
 }
