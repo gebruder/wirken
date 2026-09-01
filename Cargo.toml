@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.18.0"
+version = "1.19.0"
 edition = "2024"
 # Floor is set by the wasmtime family: 48.x uses `cfg_select!`, which
 # stabilized in 1.95. Verified by the MSRV job in ci.yml, not by hand.
