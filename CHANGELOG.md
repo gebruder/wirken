@@ -8,6 +8,111 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [1.19.0] - 2026-09-02
+
+### Added
+
+- **Imported archives.** `wirken import <archive.zip>` reads a
+  claude.ai data export into a local store. Conversations, messages,
+  attachment text, projects and project documents are stored; the
+  archive's user roster, its memory entries, and project creator names
+  are not. Structured content blocks are stored byte for byte and are
+  not rendered. `--sealed` declares the source a closed account: it
+  imports once and refuses afterwards, and there is no unseal. Without
+  it the source stays live and a later export of the same account
+  updates what changed, replacing a conversation whole where the
+  incoming snapshot is newer. The command reports added, updated,
+  unchanged, unorderable and skipped counts per run.
+
+- The web UI gains an Archives section listing imported sources, their
+  conversations, and one conversation at a time. Archive views are
+  read-only: the composer is replaced by a notice and a control that
+  returns to the live session.
+
+- Two agent tools, `read_imported_chat` and `search_imported_chats`.
+  Both are Tier 3 and prompt on every call. Reading one conversation,
+  searching within one source, and searching across every source are
+  three separate approvals with three separate keys, so approving one
+  does not approve another. Search covers message text, attachment text
+  and project documents, returns bounded windows rather than whole
+  conversations, and records each attempt as hits, empty or refused so
+  a refusal is never read as an absence.
+
+- Search records a keyed digest of the query instead of the query text.
+
+- `docs/imported-archives.md`, an operator page for the whole feature.
+
+### Fixed
+
+- **A channel's `none` egress policy gave a sandboxed `exec` more
+  network than `allowlist` did.** Where the legacy `network` flag in
+  `sandbox.json` was set, a policy granting no egress produced no proxy
+  and no network name, which was indistinguishable from an exec no
+  policy had reached, so the flag decided and the container joined
+  Docker's default bridge. The strictest of the three settings produced
+  the widest network. The egress decision now reaches the sandbox as
+  three states rather than two: a decision to deny holds against the
+  flag, and only the absence of a decision defers to it. Closes #232.
+
+- Approval cards never appeared in the web UI. The gate looked the
+  browser's stream up under an id it derived by appending the channel
+  and conversation segments to a value that already carried them, so no
+  card was ever pushed and every Tier 3 call on that surface became a
+  deny by timeout the operator was never asked about.
+
+- Turns served over the web UI installed none of their per-turn
+  context. The memory and imported-archive tools reported themselves
+  unconfigured there even after an operator approved the call, and
+  `exec` resolved its network from the legacy flag rather than from the
+  channel's egress policy.
+
+- The composer stayed on screen, and focusable, under an archive view.
+  It was hidden by a property that an id selector's `display` rule
+  outranked.
+
+- The composer stayed on screen while the transcript pane showed a
+  session it does not write to, so a send joined a different
+  conversation from the one being read.
+
+- An archive view had no way back to the live session.
+
+- The imported-read audit row named the source id twice instead of
+  naming the account the read touched.
+
+- Search returned nothing over archives imported before the search
+  index existed. The index is maintained by trigger and had no
+  backfill, so rows already present when it was created were never
+  indexed and every query over them came back empty. A migration
+  rebuilds the index on the first start after upgrading.
+
+- The search digest key was loaded with an empty passphrase, so on the
+  file-based keychain an operator who had already unlocked the vault
+  was told it was locked and every search record went out without a
+  digest.
+
+### Changed
+
+- `agents set` can change an agent's model, base url and API key.
+  Previously it reached one setting, so changing a model meant removing
+  the agent and adding it back, which drops its channel bindings and
+  subagent ceilings.
+
+- `agents add` runs from flags, so registering an agent can be
+  scripted. The API key is read from a named environment variable
+  rather than an argument.
+
+- `agents add` and `wirken setup` no longer offer model names of their
+  own. They ask the provider and offer what it returns; where no
+  listing is available the operator types the id and nothing is
+  pre-filled.
+
+- A message the store holds no text for is labelled rather than drawn
+  blank. Real archives carry these in quantity.
+
+- When the search digest key is unavailable, the gateway records that
+  on the audit chain rather than only warning, so a record without a
+  digest can be traced to a start that said why.
+
 ## [1.18.0] - 2026-08-27
 
 ### Added
