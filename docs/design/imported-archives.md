@@ -9,12 +9,12 @@ true when someone looked, and when.
 Status: in progress. The store, the archive reader, the parser, the
 write path, the audit events, the `wirken import` command, the
 read-only web views, the search index, and both gated agent tools are
-built. What remains is the Search slice's own closing observation:
-retrieval against the real corpus, index behaviour under re-import,
-and the digest audit shape end to end. Every claim about current
-behaviour is settled against the repo and carries a file reference;
-the data model is derived from structure extracted from a real
-archive.
+built. Two slices remain open on their closing observations: Tools,
+condition by condition under Slices below, and Search -- retrieval
+against the real corpus, index behaviour under re-import, and the
+digest audit shape end to end. Every claim about current behaviour is
+settled against the repo and carries a file reference; the data model
+is derived from structure extracted from a real archive.
 
 ## What this is
 
@@ -780,6 +780,39 @@ with its context, and a taint-carrying egress verdict for imported-chat
 content is observed on network egress from a sandboxed `exec`. Also
 closes on confirming the tools are unreachable from the replay verifier
 path that attaches no permission store.
+
+Open. Condition by condition:
+
+*A read prompts at Tier 3.* Enforcement is observed: the gate
+classifies the call at Tier 3, keyed per source, and the operator's
+first attempt was denied by timeout with the tier recorded. Delivery is
+observed to the wire: an `approval_request` event carrying the request
+id, the tool, the action key and the tier arrives on the `/api/chat`
+stream. Neither of those is an operator watching a card appear in a
+browser, which is what this condition asks for and what has not been
+observed. It could not have been: the gate looked the browser's stream
+up under a session id it derived by appending the channel and
+conversation segments to a value that already carried them, so no
+event was ever pushed and the only trace was a denial reading
+"approval timeout".
+
+*A denial is recorded with its context.* Met. The row names the tool,
+the action key, the denial source and tier, the agent, the triggering
+message, the route the approval took, and the adapter and sender.
+
+*A taint-carrying egress verdict on egress from a sandboxed `exec`.*
+Deferred on infrastructure: the sandbox path requires a container
+runtime this workstation does not have configured. Independently, it
+could not have been observed from the web surface whatever the
+infrastructure, because the streaming turn installed no sandbox-egress
+context at all: `exec` there resolved its network from the legacy
+`network` flag rather than from the channel's egress policy, so the
+allowlist and the observed-sensitivity restriction were both out of the
+path. Both turn paths install it now, which makes the condition
+observable rather than observed.
+
+*Unreachable from the replay verifier path.* Held by a test, not by an
+observation. Recorded as such rather than counted as closed.
 
 **Search.** Closes when a query returns matches from the imported
 corpus through the gated tool at its assigned tier.
