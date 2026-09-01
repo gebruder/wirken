@@ -28,6 +28,13 @@ const HTML: &str = r#"<!DOCTYPE html>
 <title>wirken</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* The UA's own [hidden] rule loses to any author rule that sets
+     display, and several elements here are laid out with an id
+     selector. Without this, setting .hidden on one of them changes
+     nothing on screen: the composer stayed drawn under an archive,
+     focusable and inviting a send. Author-level and !important so a
+     later layout rule cannot quietly take it back. */
+  [hidden] { display: none !important; }
   body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: grid; grid-template-columns: 260px 1fr; overflow: hidden; }
   #sidebar { border-right: 1px solid #21262d; display: flex; flex-direction: column; min-height: 0; }
   #sidebar-header { padding: 16px 16px 10px; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #8b949e; }
@@ -1361,9 +1368,66 @@ mod tests {
         // The switch hides the composer rather than merely styling it,
         // so a hidden composer cannot be tabbed into.
         assert!(script.contains("inputArea.hidden = active;"));
+
+        // And the property has to reach the screen. `#input-area` is
+        // laid out `display: flex` by an id selector, which outranks
+        // the UA stylesheet's `[hidden] { display: none }`: without an
+        // author rule of its own the composer stayed drawn, and
+        // focusable, under every archive view. The assertion above
+        // passed the whole time.
+        assert!(
+            HTML.contains("[hidden] { display: none !important; }"),
+            "an author-level [hidden] rule must outrank the id selectors \
+             that lay these elements out",
+        );
         // Its replacement text goes through the one helper like
         // everything else.
         assert!(script.contains("setText(archiveNotice,"));
+    }
+
+    /// Every event the gateway can push into this page's SSE stream
+    /// has a branch here that does something with it.
+    ///
+    /// The page reads `event.type`, and `SseEvent` is tagged
+    /// `#[serde(tag = "type", rename_all = "snake_case")]`, so the
+    /// wire strings are the variant names in snake_case. An event the
+    /// gateway sends and this page ignores is invisible from both
+    /// ends: the server logs a successful write and the operator sees
+    /// nothing at all.
+    #[test]
+    fn every_sse_event_the_gateway_sends_has_a_handler_here() {
+        let script = page_script();
+        for kind in [
+            "approval_request",
+            "approval_decision_ack",
+            // Emitted by the agent loop's forwarder rather than by
+            // SseEvent, on the same stream and read by the same code.
+            "delta",
+            "error",
+        ] {
+            assert!(
+                script.contains(&format!("event.type === '{kind}'")),
+                "the page must branch on '{kind}'; an unhandled event \
+                 is dropped silently",
+            );
+        }
+
+        // Branching is not handling. The approval branch has to build
+        // the card, and the ack branch has to resolve it.
+        assert!(
+            script.contains("renderApproval(event)"),
+            "the approval branch must render the card",
+        );
+        assert!(
+            script.contains("ackApproval(event.request_id, event.result)"),
+            "the ack branch must resolve the card it belongs to",
+        );
+        // And the card has to reach the document. Building a detached
+        // node and never appending it would satisfy everything above.
+        assert!(
+            script.contains("messages.appendChild(card)"),
+            "renderApproval must put the card in the transcript",
+        );
     }
 
     #[test]
