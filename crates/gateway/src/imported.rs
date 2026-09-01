@@ -945,6 +945,24 @@ impl ImportStore {
     }
 
     /// One conversation, projected for the detail view.
+    /// The account a source belongs to, or `None` when no source
+    /// carries that id.
+    ///
+    /// Its own lookup rather than a field on `ConversationDetail`:
+    /// the read audit row is written whether or not the conversation
+    /// was found, and a source that exists with a conversation that
+    /// does not still has an account to name.
+    pub fn source_account(&self, source_id: &str) -> Result<Option<String>, GatewayError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT source_account FROM import_source WHERE id = ?1",
+                params![source_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn conversation_detail(
         &self,
         source_id: &str,

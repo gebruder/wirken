@@ -9193,6 +9193,92 @@ fn only_the_public_corpus_leaves_egress_unrestricted() {
 /// searches that returned something would answer "what was looked
 /// for" with a filtered version of the truth, and what an agent went
 /// looking for is the thing an auditor most wants.
+/// The read row names the account the archive belongs to. It used to
+/// be filled with the source id in both arms of a match that could not
+/// produce anything else, so the two fields on the row said the same
+/// thing and neither said whose account was read.
+#[tokio::test]
+async fn a_read_row_names_the_account_not_the_source_id() {
+    use wirken_audit::{SessionEvent, SessionId, SessionLog};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let log = std::sync::Arc::new(
+        wirken_audit::SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap(),
+    );
+    let handle = log.handle_for(SessionId::new("t".to_string()));
+
+    let (store, _) =
+        wirken_gateway::imported::ImportStore::open(&tmp.path().join("imported.db")).unwrap();
+    let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+    let source_id = {
+        let mut s = store.lock().unwrap();
+        let decision = s
+            .begin_import(&wirken_gateway::imported::SourceDeclaration {
+                provider: wirken_gateway::imported::Provider::Anthropic,
+                source_account: "acct-1".into(),
+                archive_sha256: "hash".into(),
+                imported_at: "2026-01-01T00:00:00Z".into(),
+                sealed: false,
+            })
+            .unwrap();
+        let labels = wirken_gateway::imported::SourceLabels {
+            source_id: decision.source_id().to_string(),
+            provider: wirken_gateway::imported::Provider::Anthropic,
+            source_account: "acct-1".into(),
+        };
+        let conversation: wirken_gateway::imported_format::ExportConversation =
+            serde_json::from_str(
+                r#"{"uuid":"c1","name":"t","updated_at":"2026-01-02T00:00:00Z",
+                    "chat_messages":[{"uuid":"m1","sender":"human","text":"hello"}]}"#,
+            )
+            .unwrap();
+        s.upsert_conversation(&labels, &conversation).unwrap();
+        decision.source_id().to_string()
+    };
+
+    let ctx = crate::imported_tool::ImportedContext {
+        store,
+        agent_id: "a".into(),
+        adapter_id: None,
+        sender_id: None,
+        log: log.clone(),
+        handle: handle.clone(),
+        search_digest_key: None,
+    };
+
+    // A conversation that exists, one that does not, and a source that
+    // does not. All three write a row; the first two know the account.
+    for (source, conversation) in [
+        (source_id.as_str(), "c1"),
+        (source_id.as_str(), "no-such-conversation"),
+        ("src-not-a-source", "c1"),
+    ] {
+        crate::imported_tool::execute(
+            &ctx,
+            "read_imported_chat",
+            &serde_json::json!({"source": source, "conversation": conversation}),
+        )
+        .await
+        .unwrap();
+    }
+
+    let accounts: Vec<Option<String>> = log
+        .get_since(&handle, 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.event {
+            SessionEvent::ImportedChatRead { source_account, .. } => Some(source_account),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        accounts,
+        vec![Some("acct-1".to_string()), Some("acct-1".to_string()), None,],
+        "a read of a known source names its account whether or not the \
+         conversation was found; a read of an unknown source names none",
+    );
+}
+
 #[tokio::test]
 async fn every_search_attempt_reaches_the_chain_with_its_outcome() {
     use wirken_audit::{ImportedSearchOutcome, SessionEvent, SessionId, SessionLog};

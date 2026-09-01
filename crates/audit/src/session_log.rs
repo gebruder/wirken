@@ -1263,7 +1263,12 @@ pub enum SessionEvent {
     /// through the gate like the agent did.
     ImportedChatRead {
         source_id: String,
-        source_account: String,
+        /// The account the source belongs to. Absent when no source
+        /// carries the requested id, which is reachable: the tier
+        /// gate keys on the id the agent asked for, so an operator
+        /// can approve a read of a source that does not exist.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_account: Option<String>,
         conversation_uuid: String,
         /// Messages returned. Zero is a legitimate outcome and still
         /// records the read.

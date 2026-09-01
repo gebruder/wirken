@@ -116,17 +116,20 @@ fn read_chat(ctx: &ImportedContext, args: &serde_json::Value) -> Result<ToolResu
         return Ok(fail("read_imported_chat needs a 'conversation' string"));
     };
 
-    let detail = ctx
-        .store
-        .lock()
-        .map_err(|e| AgentError::Tool(format!("import store lock: {e}")))?
-        .conversation_detail(source, conversation)
-        .map_err(|e| AgentError::Tool(format!("read_imported_chat: {e}")))?;
-
-    let (source_account, messages) = match &detail {
-        Some(d) => (source.to_string(), d.messages.len() as u64),
-        None => (source.to_string(), 0),
+    let (source_account, detail) = {
+        let store = ctx
+            .store
+            .lock()
+            .map_err(|e| AgentError::Tool(format!("import store lock: {e}")))?;
+        let account = store
+            .source_account(source)
+            .map_err(|e| AgentError::Tool(format!("read_imported_chat: {e}")))?;
+        let detail = store
+            .conversation_detail(source, conversation)
+            .map_err(|e| AgentError::Tool(format!("read_imported_chat: {e}")))?;
+        (account, detail)
     };
+    let messages = detail.as_ref().map_or(0, |d| d.messages.len() as u64);
 
     // Emitted whether or not the conversation was found. A read that
     // found nothing still records that the corpus was reached into,
