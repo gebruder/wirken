@@ -3394,10 +3394,10 @@ fn sandbox_gvisor_constraints_match_docker() {
 
 #[test]
 fn host_config_drops_all_caps() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", None);
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
     let empty: &[String] = &[];
     assert_eq!(hc.cap_add.as_deref(), Some(empty));
@@ -3405,10 +3405,10 @@ fn host_config_drops_all_caps() {
 
 #[test]
 fn host_config_sets_no_new_privileges_and_seccomp() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", None);
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     let opts = hc.security_opt.expect("security_opt must be set");
     assert!(
         opts.iter().any(|o| o == "no-new-privileges:true"),
@@ -3425,10 +3425,10 @@ fn host_config_sets_no_new_privileges_and_seccomp() {
 
 #[test]
 fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", None);
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     assert_eq!(hc.readonly_rootfs, Some(true));
     let tmpfs = hc.tmpfs.expect("tmpfs must be set");
     let opts = tmpfs.get("/tmp").expect("/tmp must be a tmpfs mount");
@@ -3441,12 +3441,12 @@ fn host_config_is_readonly_rootfs_with_tmpfs_tmp() {
 
 #[test]
 fn host_config_without_egress_network_has_no_networking() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     // The default posture: no egress configured for the channel, so
     // the container gets no network namespace connectivity at all.
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", None);
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     assert_eq!(hc.network_mode.as_deref(), Some("none"));
     assert!(
         hc.dns.is_none(),
@@ -3456,10 +3456,14 @@ fn host_config_without_egress_network_has_no_networking() {
 
 #[test]
 fn host_config_joins_the_egress_network_and_pins_dns() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", Some("wirken-egress-abc123"));
+    let hc = build_host_config(
+        &cfg,
+        "/host/workspace",
+        EgressDecision::Proxied("wirken-egress-abc123"),
+    );
     assert_eq!(hc.network_mode.as_deref(), Some("wirken-egress-abc123"));
     // The container must not resolve names itself; the proxy
     // resolves after the allowlist decision.
@@ -3468,7 +3472,7 @@ fn host_config_joins_the_egress_network_and_pins_dns() {
 
 #[test]
 fn egress_network_wins_over_the_legacy_network_flag() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     // `network: true` predates per-channel egress and means
     // unrestricted host networking. Once a channel has a policed
@@ -3477,17 +3481,114 @@ fn egress_network_wins_over_the_legacy_network_flag() {
         network: true,
         ..SandboxConfig::default()
     };
-    let hc = build_host_config(&cfg, "/host/workspace", Some("wirken-egress-abc123"));
+    let hc = build_host_config(
+        &cfg,
+        "/host/workspace",
+        EgressDecision::Proxied("wirken-egress-abc123"),
+    );
     assert_eq!(hc.network_mode.as_deref(), Some("wirken-egress-abc123"));
+}
+
+/// A channel that grants no egress must not get more network than one
+/// that grants some.
+///
+/// Issue 232. `needs_proxy` is false for mode `None`, so no proxy is
+/// provisioned and no network name is produced. That used to arrive at
+/// `build_host_config` as the same absent value an exec with no policy
+/// at all produces, and the legacy `network` flag decided: with it
+/// set, the deny policy joined Docker's default bridge while
+/// `allowlist` stayed on the policed internal network. The strictest
+/// setting produced the widest network.
+#[test]
+fn a_denied_egress_policy_overrides_the_legacy_network_flag() {
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
+
+    // The legacy flag on, which is the only configuration where the
+    // inversion was reachable.
+    let cfg = SandboxConfig {
+        network: true,
+        ..SandboxConfig::default()
+    };
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Denied);
+    assert_eq!(
+        hc.network_mode.as_deref(),
+        Some("none"),
+        "a policy that grants no egress must leave the container with no \
+         network, whatever the legacy flag says",
+    );
+    assert!(
+        hc.dns.is_none(),
+        "no resolver needs pinning when there is no network",
+    );
+}
+
+/// The exec site reads a deny policy as a decision, not as an absence.
+///
+/// This is the seam the collapse happens at. `build_host_config` can
+/// carry three states and still be fed two if the caller maps a
+/// present-but-denying policy back onto `Unset`, which is exactly what
+/// the pre-fix code did by having nothing but a network name to pass.
+#[test]
+fn a_policy_that_needs_no_proxy_is_read_as_denied_not_unset() {
+    use crate::sandbox::{EgressDecision, egress_decision};
+
+    assert_eq!(
+        egress_decision(false, None),
+        EgressDecision::Unset,
+        "no policy reached this exec, so the legacy flag decides",
+    );
+    assert_eq!(
+        egress_decision(true, None),
+        EgressDecision::Denied,
+        "a policy that provisioned no proxy granted no egress; that is a \
+         decision and must not be read as the absence of one",
+    );
+}
+
+/// The three states stay three. A decision of deny and the absence of a
+/// decision are different inputs and must not produce the same network.
+#[test]
+fn deny_and_no_decision_differ_only_where_the_legacy_flag_is_set() {
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
+
+    for (network, denied, unset) in [
+        // Flag off: both end with no network, by different routes.
+        (false, Some("none"), Some("none")),
+        // Flag on: the decision holds, the absence defers to the flag.
+        (true, Some("none"), None),
+    ] {
+        let cfg = SandboxConfig {
+            network,
+            ..SandboxConfig::default()
+        };
+        assert_eq!(
+            build_host_config(&cfg, "/w", EgressDecision::Denied)
+                .network_mode
+                .as_deref(),
+            denied,
+            "denied, legacy flag {network}",
+        );
+        assert_eq!(
+            build_host_config(&cfg, "/w", EgressDecision::Unset)
+                .network_mode
+                .as_deref(),
+            unset,
+            "unset, legacy flag {network}",
+        );
+    }
 }
 
 #[test]
 fn egress_network_keeps_the_rest_of_the_hardening() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     // Granting bounded egress must not relax any other control.
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", Some("wirken-egress-abc123"));
+    let hc = build_host_config(
+        &cfg,
+        "/host/workspace",
+        EgressDecision::Proxied("wirken-egress-abc123"),
+    );
     assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
     assert_eq!(hc.readonly_rootfs, Some(true));
     assert_eq!(hc.memory, Some(512 * 1024 * 1024));
@@ -3498,12 +3599,12 @@ fn egress_network_keeps_the_rest_of_the_hardening() {
 
 #[test]
 fn host_config_preserves_workspace_and_resource_caps() {
-    use crate::sandbox::{SandboxConfig, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, build_host_config};
 
     // The pre-existing restrictions must still be in place after
     // adding cap_drop / seccomp / readonly_rootfs / tmpfs.
     let cfg = SandboxConfig::default();
-    let hc = build_host_config(&cfg, "/host/workspace", None);
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     assert_eq!(
         hc.binds.as_deref(),
         Some(&["/host/workspace:/workspace:rw".to_string()][..])
@@ -3518,13 +3619,13 @@ fn host_config_preserves_workspace_and_resource_caps() {
 
 #[test]
 fn host_config_gvisor_adds_runsc_runtime_without_loosening_hardening() {
-    use crate::sandbox::{SandboxConfig, SandboxMode, build_host_config};
+    use crate::sandbox::{EgressDecision, SandboxConfig, SandboxMode, build_host_config};
 
     let cfg = SandboxConfig {
         mode: SandboxMode::GVisor,
         ..Default::default()
     };
-    let hc = build_host_config(&cfg, "/host/workspace", None);
+    let hc = build_host_config(&cfg, "/host/workspace", EgressDecision::Unset);
     assert_eq!(hc.runtime.as_deref(), Some("runsc"));
     assert_eq!(hc.cap_drop.as_deref(), Some(&["ALL".to_string()][..]));
     assert_eq!(hc.readonly_rootfs, Some(true));
@@ -3536,6 +3637,75 @@ fn host_config_gvisor_adds_runsc_runtime_without_loosening_hardening() {
 // rather than just the struct shape. Requires the `debian:bookworm-slim`
 // image to be pulled on the host.
 // ---------------------------------------------------------------------------
+
+/// Live container check for issue 232: a denying policy with the
+/// legacy flag set leaves the container with no network interface.
+///
+/// The struct-level tests assert the `HostConfig` this produces. This
+/// one asserts what the kernel then does with it, which is the claim
+/// that actually matters: with `--network none` the container has only
+/// loopback, and on Docker's default bridge it also has `eth0`. Before
+/// the fix this configuration produced the bridge.
+#[tokio::test]
+async fn a_denied_policy_leaves_a_live_container_with_no_interface() {
+    use crate::sandbox::{DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime};
+    use crate::sandbox_egress::{
+        SandboxEgressAttribution, SandboxEgressContext, SandboxEgressMode, SandboxEgressPolicy,
+    };
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+
+    // The one configuration where the inversion was reachable: a
+    // channel granting no egress, with the legacy flag on.
+    let cfg = SandboxConfig {
+        mode: SandboxMode::ExecOnly,
+        image: "debian:bookworm-slim".into(),
+        network: true,
+        ..Default::default()
+    };
+    let sandbox = DockerSandbox::new(cfg).expect("sandbox");
+
+    let ctx = SandboxEgressContext {
+        observed: Default::default(),
+        approval: None,
+        policy: SandboxEgressPolicy {
+            mode: SandboxEgressMode::None,
+            ..SandboxEgressPolicy::denied()
+        },
+        attribution: SandboxEgressAttribution {
+            agent_id: "work".into(),
+            channel: Some("webchat".into()),
+            adapter_id: Some("webchat".into()),
+            sender_id: Some("webchat-user".into()),
+        },
+        audit: None,
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let result = sandbox
+        .exec("ls /sys/class/net", tmp.path(), Some(&ctx))
+        .await
+        .expect("exec runs");
+
+    assert!(
+        result.output.contains("lo"),
+        "loopback is always present: {:?}",
+        result.output,
+    );
+    assert!(
+        !result.output.contains("eth"),
+        "a policy granting no egress must leave no external interface, and the \
+         legacy network flag must not put one back: {:?}",
+        result.output,
+    );
+}
 
 #[tokio::test]
 async fn sandbox_blocks_write_to_rootfs_but_allows_workspace_and_tmp() {

@@ -284,7 +284,7 @@ pub struct DockerSandbox {
 /// and is the only path to the internet. The sandbox therefore cannot
 /// reach anything except the sidecar, and the sidecar is the only
 /// thing that can reach out.
-struct EgressSetup {
+pub(crate) struct EgressSetup {
     internal_network: String,
     egress_network: String,
     sidecar_id: String,
@@ -373,9 +373,12 @@ impl DockerSandbox {
             return Err(e);
         }
         #[cfg(unix)]
-        let network_name = egress_setup.as_ref().map(|s| s.internal_network.as_str());
+        let decision = egress_decision(egress.is_some(), egress_setup.as_ref());
+        // No broker transport here, so a proxy-needing policy has
+        // already refused above. A policy that needs no proxy still
+        // decided, and decided deny.
         #[cfg(not(unix))]
-        let network_name: Option<&str> = None;
+        let decision = egress_decision(egress.is_some(), None);
         #[cfg(unix)]
         let env = egress_setup.as_ref().map(|s| {
             let url = s.proxy_url();
@@ -399,11 +402,7 @@ impl DockerSandbox {
             working_dir: Some("/workspace".into()),
             user: Some("1000:1000".into()),
             env,
-            host_config: Some(build_host_config(
-                &self.config,
-                &workspace_str,
-                network_name,
-            )),
+            host_config: Some(build_host_config(&self.config, &workspace_str, decision)),
             ..Default::default()
         };
 
@@ -909,6 +908,53 @@ impl DockerSandbox {
     }
 }
 
+/// Which of the three states this exec is in.
+///
+/// `policy_present` is whether a `SandboxEgressContext` reached
+/// `exec`; `setup` is the provisioned proxy, which exists only for a
+/// policy whose mode needs one. A policy present with no setup is
+/// therefore a policy that granted no egress: a decision, not an
+/// absence, and the distinction the two-state form could not carry.
+///
+/// Its own function so the mapping is reachable without Docker. The
+/// three-state type alone does not prevent the collapse; something has
+/// to assert that a deny policy is read as `Denied` rather than folded
+/// back into `Unset`, and that assertion needs a callable seam.
+pub(crate) fn egress_decision(
+    policy_present: bool,
+    setup: Option<&EgressSetup>,
+) -> EgressDecision<'_> {
+    match (policy_present, setup) {
+        (_, Some(setup)) => EgressDecision::Proxied(setup.internal_network.as_str()),
+        (true, None) => EgressDecision::Denied,
+        (false, None) => EgressDecision::Unset,
+    }
+}
+
+/// What the egress layer decided about this exec's network, as three
+/// states rather than two.
+///
+/// The distinction that matters is between *no decision* and a
+/// decision of *deny*. Both used to arrive as `None` alongside a
+/// network name, so a channel whose policy said "no egress" was
+/// indistinguishable from an exec that had no policy at all, and both
+/// fell through to the legacy `network` flag. With that flag set, the
+/// deny case joined Docker's default bridge: the strictest policy
+/// produced the widest network. See issue 232.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EgressDecision<'a> {
+    /// No egress policy reached this exec. The legacy `network` flag
+    /// decides, as it did before per-channel egress existed.
+    Unset,
+    /// A policy decided: no egress. Nothing to proxy because nothing
+    /// is granted, so the container gets no network whatever the
+    /// legacy flag says.
+    Denied,
+    /// A policy decided: egress through the proxy on this internal
+    /// network.
+    Proxied(&'a str),
+}
+
 /// Build the `HostConfig` for a sandboxed exec. Extracted so the
 /// hardening settings can be asserted without spinning up Docker.
 ///
@@ -927,30 +973,38 @@ impl DockerSandbox {
 /// * `readonly_rootfs`: make the container's `/` read-only. The
 ///   workspace bind-mount stays RW, and a tmpfs at `/tmp` gives the
 ///   shell somewhere to scratch.
-/// * `egress_network`: when `Some`, the container joins that Docker
-///   network instead of running with no networking. The network is
-///   created `Internal` with inter-container communication off, so
-///   the only address it can reach is the gateway where this exec's
-///   egress proxy listens. DNS is pinned to an address with nothing
-///   behind it: the container must not resolve names itself, because
-///   the proxy resolves them after the allowlist decision.
+/// * `egress`: what the egress layer decided. `Proxied` joins the
+///   named Docker network, created `Internal` with inter-container
+///   communication off, so the only address it can reach is the
+///   gateway where this exec's egress proxy listens. DNS is pinned to
+///   an address with nothing behind it: the container must not resolve
+///   names itself, because the proxy resolves them after the allowlist
+///   decision. `Denied` gets no network. `Unset` means no policy
+///   reached this exec and the legacy flag decides.
 pub(crate) fn build_host_config(
     config: &SandboxConfig,
     workspace_str: &str,
-    egress_network: Option<&str>,
+    egress: EgressDecision<'_>,
 ) -> HostConfig {
-    // Egress-network mode wins over the legacy `network` bool: the
-    // proxy path is the bounded one, and letting `network: true`
-    // widen it back to unrestricted host networking would defeat the
-    // allowlist the operator configured.
-    let network_mode = match (egress_network, config.network) {
-        (Some(name), _) => Some(name.to_string()),
-        (None, true) => None,
-        (None, false) => Some("none".to_string()),
+    // An egress decision wins over the legacy `network` bool, in both
+    // directions. The proxy path is the bounded one, and letting
+    // `network: true` widen it back to unrestricted host networking
+    // would defeat the allowlist the operator configured. A decision
+    // of `Denied` is equally a decision: it is not the absence of one,
+    // and it does not hand the question back to a flag that predates
+    // per-channel egress. Only `Unset` does that.
+    let network_mode = match (egress, config.network) {
+        (EgressDecision::Proxied(name), _) => Some(name.to_string()),
+        (EgressDecision::Denied, _) => Some("none".to_string()),
+        (EgressDecision::Unset, true) => None,
+        (EgressDecision::Unset, false) => Some("none".to_string()),
     };
     // Only meaningful on the egress-network path; harmless otherwise
     // since `--network none` has no resolver to point anywhere.
-    let dns = egress_network.map(|_| vec!["127.0.0.1".to_string()]);
+    let dns = match egress {
+        EgressDecision::Proxied(_) => Some(vec!["127.0.0.1".to_string()]),
+        _ => None,
+    };
     let tmpfs_mounts: std::collections::HashMap<String, String> = {
         let mut m = std::collections::HashMap::new();
         m.insert("/tmp".into(), "size=64m,mode=1777".into());
