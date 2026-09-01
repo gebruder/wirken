@@ -9,15 +9,14 @@ true when someone looked, and when.
 Status: in progress. The store, the archive reader, the parser, the
 write path, the audit events, the `wirken import` command, the
 read-only web views, the search index, and both gated agent tools are
-built. Two slices remain open. Tools is open on one condition of four:
+built. One slice remains open. Tools is open on one condition of four:
 the gating and the denial record are closed on chain evidence, the
 replay-verifier condition is held by a test rather than an observation,
-and the egress condition is deferred on a rootful container runtime
-this workstation does not have. Search remains open on retrieval
-against the real corpus, index behaviour under re-import, and the
-digest audit shape end to end. Every claim about current behaviour is
-settled against the repo and carries a file reference; the data model
-is derived from structure extracted from a real archive.
+and the egress condition is runnable rather than deferred, on a rootful
+runtime this workstation does have once the sidecar is given a
+statically linked binary. Search is closed. Every claim about current
+behaviour is settled against the repo and carries a file reference; the
+data model is derived from structure extracted from a real archive.
 
 ## What this is
 
@@ -878,14 +877,18 @@ triggering message, the route the approval took, and the adapter and
 sender.
 
 *A taint-carrying egress verdict on egress from a sandboxed `exec`.*
-Deferred on infrastructure: the sandbox path requires a rootful
-container runtime this workstation does not have configured. Independently, it
-could not have been observed from the web surface whatever the
-infrastructure, because the streaming turn installed no sandbox-egress
-context at all: `exec` there resolved its network from the legacy
-`network` flag rather than from the channel's egress policy, so the
-allowlist and the observed-sensitivity restriction were both out of the
-path. Both turn paths install it now, which makes the condition
+Open, and runnable. The rootful runtime it needs is present; the
+environment's `DOCKER_HOST` points at a socket that is not, which is
+what made it look absent. The sidecar runs the gateway binary inside
+the sandbox image and so needs the statically linked build, and the
+image carries no HTTP client, both of which the runbook works around.
+
+Independently of the infrastructure, it could not have been observed
+from the web surface at all, because the streaming turn installed no
+sandbox-egress context: `exec` there resolved its network from the
+legacy `network` flag rather than from the channel's egress policy, so
+the allowlist and the observed-sensitivity restriction were both out of
+the path. Both turn paths install it now, which makes the condition
 observable rather than observed.
 
 *Unreachable from the replay verifier path.* Held by a test, not by an
@@ -893,6 +896,25 @@ observation. Recorded as such rather than counted as closed.
 
 **Search.** Closes when a query returns matches from the imported
 corpus through the gated tool at its assigned tier.
+
+Closed. A scoped search over a real archive returned matches through
+the gated tool, prompting at Tier 3 like any other call into a corpus,
+and its row carries the keyed digest of the query and no plaintext.
+
+The digest half of that could not be observed until the key was
+reachable. Two earlier boots each recorded a
+`imported-search.digest-unavailable` attestation and then wrote
+searches with the field absent, which is the degrade behaving as
+designed and saying so. The boot this closed on recorded no
+attestation, and its search row carries the digest. The three boots
+together are the evidence: the attestation and the absent field appear
+and disappear as a pair, so a row without a digest can be dated to a
+boot that said why.
+
+Index behaviour under re-import is not part of this condition and was
+not observed. It belongs to the Re-import slice, and the source it
+would be observed against is sealed, so it cannot be observed there
+either without a second archive.
 
 ## Out of scope, carried as follow-ups
 
