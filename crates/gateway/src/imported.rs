@@ -311,7 +311,32 @@ const MIGRATIONS: &[&str] = &[
          INSERT INTO imported_project_doc_fts(imported_project_doc_fts, rowid, content)
              VALUES ('delete', old.rowid, old.content);
      END;",
+    // The migration above creates the indexes and the triggers that
+    // keep them current. Triggers fire on writes that happen after
+    // they exist, so a store that already held rows when it ran came
+    // out of it with three empty indexes and no error: every search
+    // against that corpus returned nothing, which reads exactly like
+    // a corpus that does not contain the term.
+    //
+    // `rebuild` reads the content tables and reconstructs each index
+    // from them. Appended rather than folded into the migration above,
+    // per the append-only rule: a store that already recorded that
+    // migration would never re-run an edited copy of it.
+    //
+    // Idempotent and safe on a store that needs nothing: rebuilding an
+    // index that is already correct produces the same index. It reads
+    // the content tables and writes only index rows, so the archive's
+    // own bytes are untouched and a sealed source stays sealed.
+    "INSERT INTO imported_message_fts(imported_message_fts) VALUES('rebuild');
+     INSERT INTO imported_attachment_fts(imported_attachment_fts) VALUES('rebuild');
+     INSERT INTO imported_project_doc_fts(imported_project_doc_fts) VALUES('rebuild');",
 ];
+
+/// Index of the migration that creates the FTS tables and triggers.
+/// Tests build a store with rows written before it to reproduce the
+/// state a real store reached: content present, index empty.
+#[cfg(test)]
+const FTS_MIGRATION_INDEX: usize = 3;
 
 /// Store for imported archives.
 pub struct ImportStore {
@@ -2305,6 +2330,95 @@ mod tests {
             )
             .unwrap();
         assert_eq!(new_name, 1);
+    }
+
+    #[test]
+    fn the_fts_migration_reaches_rows_that_were_written_before_it() {
+        // The exact gap the trigger tests could not see. Those write a
+        // row and find it, which exercises the insert trigger; the
+        // trigger fires on writes that happen after it exists. A store
+        // that already held rows when the FTS migration ran came out of
+        // it with empty indexes and no error, and every search over
+        // that corpus returned nothing -- indistinguishable, to the
+        // operator and to the agent, from a corpus not containing the
+        // term.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("imported.db");
+        let mut conn = Connection::open(&path).unwrap();
+
+        // Everything up to but not including the FTS migration: the
+        // state a store reached by importing before that shipped.
+        let applied = crate::migrate::apply(&mut conn, &MIGRATIONS[..FTS_MIGRATION_INDEX]).unwrap();
+        assert_eq!(applied, FTS_MIGRATION_INDEX);
+        let fts_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'imported_message_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_tables, 0,
+            "the index must not exist yet, or this proves nothing",
+        );
+
+        conn.execute_batch(
+            "INSERT INTO import_source
+                 (id, provider, source_account, archive_sha256, imported_at, sealed)
+             VALUES ('src-1', 'anthropic', 'acct-1', 'hash', '2026-01-01T00:00:00Z', 0);
+
+             INSERT INTO imported_conversation
+                 (source_id, provider, source_account, conversation_uuid, title, summary,
+                  created_at_raw, created_at_epoch, updated_at_raw, updated_at_epoch)
+             VALUES ('src-1','anthropic','acct-1','c1','t','',
+                     '2026-01-01T00:00:00Z', 0, '2026-01-01T00:00:00Z', 0);
+
+             INSERT INTO imported_message
+                 (source_id, provider, source_account, conversation_uuid, message_uuid,
+                  ordinal, sender, text, content_json,
+                  created_at_raw, created_at_epoch, updated_at_raw, updated_at_epoch)
+             VALUES ('src-1','anthropic','acct-1','c1','m1',0,'human',
+                     'a message about frumious things','[]',
+                     '2026-01-01T00:00:00Z', 0, '2026-01-01T00:00:00Z', 0);
+
+             INSERT INTO imported_attachment
+                 (source_id, provider, source_account, message_uuid, ordinal,
+                  file_name, file_size, file_type, extracted_content)
+             VALUES ('src-1','anthropic','acct-1','m1',0,'notes.txt',10,'text/plain',
+                     'an attachment mentioning brillig');
+
+             INSERT INTO imported_project
+                 (source_id, provider, source_account, project_uuid, name, description,
+                  prompt_template, is_private, is_starter_project, creator_uuid,
+                  created_at_raw, created_at_epoch, updated_at_raw, updated_at_epoch)
+             VALUES ('src-1','anthropic','acct-1','p1','proj','','',1,0,'creator-1',
+                     '2026-01-01T00:00:00Z', 0, '2026-01-01T00:00:00Z', 0);
+
+             INSERT INTO imported_project_doc
+                 (source_id, provider, source_account, project_uuid, doc_uuid, ordinal,
+                  filename, content, created_at_raw, created_at_epoch)
+             VALUES ('src-1','anthropic','acct-1','p1','d1',0,'doc.md',
+                     'a document about slithy toves','2026-01-01T00:00:00Z', 0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        // Opening applies the FTS migration and the backfill after it.
+        let (store, applied) = ImportStore::open(&path).unwrap();
+        assert_eq!(
+            applied,
+            MIGRATIONS.len() - FTS_MIGRATION_INDEX,
+            "the FTS migration and its backfill both ran",
+        );
+
+        for term in ["frumious", "brillig", "slithy"] {
+            let hits = store.search("src-1", term, 10).unwrap();
+            assert!(
+                !hits.is_empty(),
+                "'{term}' was written before the index existed and must still be findable; \
+                 an index built only by triggers never sees it",
+            );
+        }
     }
 
     #[test]
