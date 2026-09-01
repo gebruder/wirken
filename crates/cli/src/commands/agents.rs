@@ -31,54 +31,56 @@ pub async fn add() -> Result<()> {
         .default(0)
         .interact()?;
 
-    let (provider, model, base_url, needs_key) = match provider_idx {
-        0 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("gpt-4o".into())
-                .interact_text()?;
-            (
-                "openai".to_string(),
-                model,
-                "https://api.openai.com/v1".to_string(),
-                true,
-            )
-        }
-        1 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("claude-sonnet-4-20250514".into())
-                .interact_text()?;
-            (
-                "anthropic".to_string(),
-                model,
-                "https://api.anthropic.com/v1".to_string(),
-                true,
-            )
-        }
+    // The key comes before the model because the model list comes from
+    // the provider, and asking for it needs the key. Nothing here
+    // carries a model name of its own: a name written into this file
+    // is a guess about someone else's catalogue that goes stale
+    // silently, and an operator who accepts the offered default gets a
+    // model that 404s at the first turn rather than at config time.
+    let (provider, base_url, needs_key) = match provider_idx {
+        0 => (
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            true,
+        ),
+        1 => (
+            "anthropic".to_string(),
+            "https://api.anthropic.com/v1".to_string(),
+            true,
+        ),
         2 => {
-            let model: String = Input::new()
-                .with_prompt("  Model")
-                .default("llama3".into())
-                .interact_text()?;
             let url: String = Input::new()
                 .with_prompt("  Ollama URL")
                 .default("http://localhost:11434/v1".into())
                 .interact_text()?;
-            ("ollama".to_string(), model, url, false)
+            ("ollama".to_string(), url, false)
         }
         3 => {
             let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
-            let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
-            ("custom".to_string(), model, url, true)
+            ("custom".to_string(), url, true)
         }
         _ => unreachable!(),
     };
 
-    // Store API key in vault with agent-specific credential name
-    let api_key_credential = if needs_key {
-        let api_key = super::read_secret("  API key: ")?;
+    let api_key = if needs_key {
+        Some(super::read_secret("  API key: ")?)
+    } else {
+        None
+    };
 
+    let models = match provider.as_str() {
+        "openai" => super::list_openai_models(&base_url, api_key.as_deref().unwrap_or("")).await,
+        "anthropic" => super::list_anthropic_models(api_key.as_deref().unwrap_or("")).await,
+        "ollama" => super::list_ollama_models(&base_url).await,
+        _ => super::list_openai_compatible_models(&base_url, api_key.as_deref().unwrap_or(""))
+            .await
+            .unwrap_or_default(),
+    };
+
+    let model = super::pick_model(models)?;
+
+    // Store API key in vault with agent-specific credential name
+    let api_key_credential = if let Some(api_key) = api_key {
         let cred_name = format!("{id}-{provider}-key");
         let keychain = probe_keychain(&cfg.data_dir, || {
             Password::new()

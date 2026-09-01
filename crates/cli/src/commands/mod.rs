@@ -383,6 +383,41 @@ pub async fn list_openai_models(base_url: &str, api_key: &str) -> Vec<String> {
     models
 }
 
+/// Ask the operator which model to use.
+///
+/// `models` is what the provider itself answered. When it is empty --
+/// no key yet, provider unreachable, an endpoint that does not list --
+/// the operator types the name, with no default offered.
+///
+/// Nothing here supplies a fallback model name. A name written into
+/// this repo is a guess about a catalogue this repo does not own: it
+/// is right until the provider retires it and wrong silently
+/// afterwards, and an operator who takes the offered default finds out
+/// at their first turn rather than at config time. Asking is the
+/// honest failure mode.
+pub fn pick_model(models: Vec<String>) -> anyhow::Result<String> {
+    if models.is_empty() {
+        println!("  Could not list models from the provider. Enter the model id to use.");
+        let model: String = dialoguer::Input::new()
+            .with_prompt("  Model")
+            .validate_with(|input: &String| -> Result<(), &str> {
+                if input.trim().is_empty() {
+                    Err("a model id is required")
+                } else {
+                    Ok(())
+                }
+            })
+            .interact_text()?;
+        return Ok(model.trim().to_string());
+    }
+    let idx = dialoguer::Select::new()
+        .with_prompt("  Model")
+        .items(&models)
+        .default(0)
+        .interact()?;
+    Ok(models[idx].clone())
+}
+
 /// List models available from the Google Gemini API.
 pub async fn list_gemini_models(api_key: &str) -> Vec<String> {
     let client = match reqwest::Client::builder()
@@ -615,5 +650,54 @@ mod tests {
         std::fs::write(tmp.path().join("sandbox.json"), "not json").unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::default());
+    }
+
+    /// No model name is written into the paths that configure one.
+    ///
+    /// A model id in this repo is a guess about a catalogue this repo
+    /// does not own. It is correct until the provider retires it and
+    /// wrong silently afterwards: the operator accepts the offered
+    /// default and finds out at their first turn. `pick_model` offers
+    /// what the provider itself listed and otherwise asks.
+    ///
+    /// The needles are assembled at runtime so this test's own source
+    /// does not contain them.
+    #[test]
+    fn no_model_name_is_stored_in_the_config_paths() {
+        // The paths that choose a model to store. `mod.rs` is not one
+        // of them: its listers filter what a provider returned, and
+        // `"gpt-"` there is a prefix test over the provider's own
+        // answer rather than a name this repo offers anyone.
+        let sources = [
+            ("agents.rs", include_str!("agents.rs")),
+            ("setup.rs", include_str!("setup.rs")),
+        ];
+        // Vendor names a versioned model id starts with.
+        let vendors = ["claude", "gpt", "gemini", "llama", "mistral"];
+        for (name, src) in sources {
+            for line in src.lines() {
+                // Only string literals matter; prose about a provider
+                // is not a stored configuration value.
+                let Some((_, after)) = line.split_once('"') else {
+                    continue;
+                };
+                let Some((literal, _)) = after.split_once('"') else {
+                    continue;
+                };
+                // A vendor name plus a digit is a version: "gpt-4o",
+                // "llama3", "claude-sonnet-4-20250514". A bare vendor
+                // word in prose or a url is not.
+                if !literal.chars().any(|c| c.is_ascii_digit()) {
+                    continue;
+                }
+                for vendor in vendors {
+                    assert!(
+                        !literal.contains(vendor),
+                        "{name} stores a model name in a literal: {literal:?}. \
+                         Offer the provider's own list, or ask.",
+                    );
+                }
+            }
+        }
     }
 }

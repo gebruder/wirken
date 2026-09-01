@@ -123,14 +123,19 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
         // Helper: ask for key, list models, store key, return (provider, model, url)
         // Used by all cloud providers for a consistent key → model → encrypt flow.
-        let store_key_and_pick_model = |api_key: String,
-                                        provider_name: &str,
-                                        _base_url: &str,
-                                        default_model: &str,
-                                        models: Vec<String>,
-                                        cfg: &wirken_gateway::config::GatewayConfig,
-                                        data: &std::path::Path|
-         -> Result<String> {
+        // Storing the key and choosing a model were one closure, which
+        // is why it carried a fallback model name per provider: the
+        // callers that only wanted the key still had to pass one. They
+        // are separate jobs and are separate now, so no caller supplies
+        // a model name to a function whose job is encryption. Choosing
+        // is `super::pick_model`, which offers what the provider
+        // itself listed and otherwise asks, never a name from this
+        // repo.
+        let store_key = |api_key: String,
+                         provider_name: &str,
+                         cfg: &wirken_gateway::config::GatewayConfig,
+                         data: &std::path::Path|
+         -> Result<()> {
             println!("  Encrypting API key...");
             let pp = super::cached_vault_passphrase()?;
             let keychain = probe_keychain(data, move || pp);
@@ -146,20 +151,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 Some(rotation_due),
             )?;
             println!("  API key encrypted and stored.");
-            let model = if models.is_empty() {
-                Input::new()
-                    .with_prompt("  Model")
-                    .default(default_model.into())
-                    .interact_text()?
-            } else {
-                let idx = Select::new()
-                    .with_prompt("  Model")
-                    .items(&models)
-                    .default(0)
-                    .interact()?;
-                models[idx].clone()
-            };
-            Ok(model)
+            Ok(())
         };
 
         let (provider_name, model, base_url, needs_key) = match provider_idx {
@@ -174,10 +166,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 }
                 let models = super::list_ollama_models(&url).await;
                 let model = if models.is_empty() {
-                    Input::new()
-                        .with_prompt("  Model")
-                        .default("llama3".into())
-                        .interact_text()?
+                    super::pick_model(models.clone())?
                 } else {
                     let idx = Select::new()
                         .with_prompt("  Model")
@@ -248,15 +237,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                         // free-text prompt; we discard its return
                         // and use the model id the operator
                         // already typed.
-                        let _ = store_key_and_pick_model(
-                            api_key.clone(),
-                            "custom",
-                            &url,
-                            &manual,
-                            Vec::new(),
-                            &cfg,
-                            &data,
-                        )?;
+                        store_key(api_key.clone(), "custom", &cfg, &data)?;
                     }
                     manual
                 } else if api_key.is_empty() {
@@ -267,16 +248,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                         .interact()?;
                     models[idx].clone()
                 } else {
-                    let default_model = models[0].clone();
-                    store_key_and_pick_model(
-                        api_key,
-                        "custom",
-                        &url,
-                        &default_model,
-                        models,
-                        &cfg,
-                        &data,
-                    )?
+                    store_key(api_key, "custom", &cfg, &data)?;
+                    super::pick_model(models)?
                 };
                 ("custom".to_string(), model, url, false)
             }
@@ -284,15 +257,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 // Anthropic
                 let api_key = super::read_secret("  API key: ")?;
                 let models = super::list_anthropic_models(&api_key).await;
-                let model = store_key_and_pick_model(
-                    api_key,
-                    "anthropic",
-                    "https://api.anthropic.com/v1",
-                    "claude-sonnet-4-20250514",
-                    models,
-                    &cfg,
-                    &data,
-                )?;
+                store_key(api_key, "anthropic", &cfg, &data)?;
+                let model = super::pick_model(models)?;
                 (
                     "anthropic".to_string(),
                     model,
@@ -304,15 +270,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 // OpenAI
                 let api_key = super::read_secret("  API key: ")?;
                 let models = super::list_openai_models("https://api.openai.com/v1", &api_key).await;
-                let model = store_key_and_pick_model(
-                    api_key,
-                    "openai",
-                    "https://api.openai.com/v1",
-                    "gpt-4.1-mini",
-                    models,
-                    &cfg,
-                    &data,
-                )?;
+                store_key(api_key, "openai", &cfg, &data)?;
+                let model = super::pick_model(models)?;
                 (
                     "openai".to_string(),
                     model,
@@ -324,15 +283,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 // Google Gemini
                 let api_key = super::read_secret("  API key: ")?;
                 let models = super::list_gemini_models(&api_key).await;
-                let model = store_key_and_pick_model(
-                    api_key,
-                    "gemini",
-                    "https://generativelanguage.googleapis.com/v1beta",
-                    "gemini-2.0-flash",
-                    models,
-                    &cfg,
-                    &data,
-                )?;
+                store_key(api_key, "gemini", &cfg, &data)?;
+                let model = super::pick_model(models)?;
                 (
                     "gemini".to_string(),
                     model,
@@ -348,10 +300,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     .interact_text()?;
                 let base = format!("https://bedrock-runtime.{r}.amazonaws.com");
                 println!("  Bedrock uses AWS credentials (access key ID : secret access key).");
-                let model: String = Input::new()
-                    .with_prompt("  Model ID")
-                    .default("anthropic.claude-sonnet-4-20250514-v2:0".into())
-                    .interact_text()?;
+                // Bedrock has no listing endpoint reachable with the
+                // credentials collected here, so the id is typed. No
+                // default: a model id written into this repo is a guess
+                // about someone else's catalogue.
+                let model: String = super::pick_model(Vec::new())?;
                 region = Some(r);
                 ("bedrock".to_string(), model, base, true)
             }
@@ -372,15 +325,8 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 let api_key = super::read_secret("  API key: ")?;
                 let models =
                     super::list_openai_models("https://inference.tinfoil.sh/v1", &api_key).await;
-                let model = store_key_and_pick_model(
-                    api_key,
-                    "tinfoil",
-                    "https://inference.tinfoil.sh/v1",
-                    "llama3-3-70b",
-                    models,
-                    &cfg,
-                    &data,
-                )?;
+                store_key(api_key, "tinfoil", &cfg, &data)?;
+                let model = super::pick_model(models)?;
                 (
                     "tinfoil".to_string(),
                     model,
@@ -470,36 +416,19 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     break (base_url, api_key, Vec::new(), Some(model));
                 };
 
-                let default_model = models
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "apertus".to_string());
                 let model = if let Some(manual) = manual_model {
                     // Manual-fallback path still encrypts the token so
                     // the vault is consistent with the model-picker
                     // path; the empty models vec forces the free-text
                     // prompt, whose return we discard for the id the
                     // operator already typed.
-                    let _ = store_key_and_pick_model(
-                        api_key.clone(),
-                        "infomaniak",
-                        &base_url,
-                        &manual,
-                        Vec::new(),
-                        &cfg,
-                        &data,
-                    )?;
+                    store_key(api_key.clone(), "infomaniak", &cfg, &data)?;
                     manual
                 } else {
-                    store_key_and_pick_model(
-                        api_key,
-                        "infomaniak",
-                        &base_url,
-                        &default_model,
-                        models,
-                        &cfg,
-                        &data,
-                    )?
+                    {
+                        store_key(api_key, "infomaniak", &cfg, &data)?;
+                        super::pick_model(models)?
+                    }
                 };
                 ("infomaniak".to_string(), model, base_url, false)
             }
@@ -546,33 +475,19 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     break (api_key, Vec::new(), Some(model));
                 };
 
-                let default_model = models.first().cloned().unwrap_or_default();
                 let model = if let Some(manual) = manual_model {
                     // Manual-fallback path still encrypts the token so
                     // the vault is consistent with the model-picker
                     // path; the empty models vec forces the free-text
                     // prompt, whose return we discard for the id the
                     // operator already typed.
-                    let _ = store_key_and_pick_model(
-                        api_key.clone(),
-                        "hetzner",
-                        base_url,
-                        &manual,
-                        Vec::new(),
-                        &cfg,
-                        &data,
-                    )?;
+                    store_key(api_key.clone(), "hetzner", &cfg, &data)?;
                     manual
                 } else {
-                    store_key_and_pick_model(
-                        api_key,
-                        "hetzner",
-                        base_url,
-                        &default_model,
-                        models,
-                        &cfg,
-                        &data,
-                    )?
+                    {
+                        store_key(api_key, "hetzner", &cfg, &data)?;
+                        super::pick_model(models)?
+                    }
                 };
                 ("hetzner".to_string(), model, base_url.to_string(), false)
             }
@@ -586,9 +501,10 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 let model = if has_key {
                     let api_key = super::read_secret("  API key: ")?;
                     let models = super::list_openai_models(&url, &api_key).await;
-                    store_key_and_pick_model(
-                        api_key, "custom", &url, "default", models, &cfg, &data,
-                    )?
+                    {
+                        store_key(api_key, "custom", &cfg, &data)?;
+                        super::pick_model(models)?
+                    }
                 } else {
                     Input::new().with_prompt("  Model ID").interact_text()?
                 };
