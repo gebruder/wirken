@@ -6,17 +6,20 @@ every line below the change, and a citation cannot know that. The
 repo is authoritative for the live question; these say what was
 true when someone looked, and when.
 
-Status: in progress. The store, the archive reader, the parser, the
-write path, the audit events, the `wirken import` command, the
+Status: the slices are done. The store, the archive reader, the parser,
+the write path, the audit events, the `wirken import` command, the
 read-only web views, the search index, and both gated agent tools are
-built. One slice remains open. Tools is open on one condition of four:
-the gating and the denial record are closed on chain evidence, the
-replay-verifier condition is held by a test rather than an observation,
-and the egress condition is runnable rather than deferred, on a rootful
-runtime this workstation does have once the sidecar is given a
-statically linked binary. Search is closed. Every claim about current
-behaviour is settled against the repo and carries a file reference; the
-data model is derived from structure extracted from a real archive.
+built, and every slice's closing condition is closed on an observation
+or held by a test. Three of the Tools slice's four closed on chain
+evidence: the gating, the denial record, and the taint-carrying egress
+verdict. The fourth, unreachability from the replay verifier path, is
+held by a test and is recorded as that rather than counted as observed.
+The egress condition closed against a scratch data directory rather
+than the operator's store, which is set out under Slices below.
+
+Every claim about current behaviour is settled against the repo and
+carries a file reference; the data model is derived from structure
+extracted from a real archive.
 
 ## What this is
 
@@ -503,7 +506,7 @@ The tier does not rest on search disclosing less than a read, and it is
 worth being explicit that it does not, because the shapes differ in
 kind rather than in size. A read returns one conversation entire. A
 search returns a bounded number of hits, each a short window around the
-match, drawn from wherever in the corpus they fall — so a single search
+match, drawn from wherever in the corpus they fall, so a single search
 can characterise many conversations at once while a single read
 characterises one deeply. Measured against a real archive, one search
 returns well under the text of one average conversation in total, and
@@ -877,19 +880,62 @@ triggering message, the route the approval took, and the adapter and
 sender.
 
 *A taint-carrying egress verdict on egress from a sandboxed `exec`.*
-Open, and runnable. The rootful runtime it needs is present; the
-environment's `DOCKER_HOST` points at a socket that is not, which is
-what made it look absent. The sidecar runs the gateway binary inside
-the sandbox image and so needs the statically linked build, and the
-image carries no HTTP client, both of which the runbook works around.
+Closed. A session read a conversation out of an imported archive, then
+reached the network from a sandboxed `exec`. The operator was asked
+about the destination by a prompt naming the basis, in the form
+`sandbox egress to <host>:<port> after reading imported_archive`, and
+the verdict written to the chain carried `imported_archive` in
+`sensitivity_basis` with `escalated` set. The request then completed
+through the proxy.
 
-Independently of the infrastructure, it could not have been observed
-from the web surface at all, because the streaming turn installed no
-sandbox-egress context: `exec` there resolved its network from the
-legacy `network` flag rather than from the channel's egress policy, so
-the allowlist and the observed-sensitivity restriction were both out of
-the path. Both turn paths install it now, which makes the condition
-observable rather than observed.
+Where the evidence comes from, stated so it can be weighed. A scratch
+data directory, not the operator's store. A synthetic corpus, not a
+real archive. The gateway path was real end to end: a real read setting
+the label, a real container, a real egress proxy and broker, a real
+approval prompt, a real chain row. What stood in for the model was a
+stub that emitted the two tool calls and exercised no judgment.
+
+The caveat that leaves. The other conditions closed against the real
+store; this one did not. The label does not depend on corpus content,
+because `tool_to_read_sensitivity` keys on the tool rather than on what
+it returned, so the mechanism under observation is the same one a real
+archive would drive. The difference is real and is recorded rather than
+argued away.
+
+Why a stub driver is the right instrument here and not a shortcut. The
+observed-sensitivity restriction exists for a session that has been
+steered into carrying archive content outward, which is a session whose
+model does not decline. A driver without judgment is therefore the case
+the control is built for, not an evasion of the case. Demonstrating it
+through a model that chooses to cooperate would exercise a path the
+control is not for.
+
+Observed model behaviour, recorded as that and not as a property of
+this system. Asked on the real store to run the probe the runbook
+carried, a production model declined it three times: it would not treat
+an operator claim made in chat text as a credential, named the
+session's own approval mechanism as the legitimate path for such a
+grant, reached the same host through the sanctioned `http_request` tool
+instead, and refused opaque raw-socket code presented on asserted
+authority. That is a second layer and a welcome one. It is not a
+control this repository implements, it is not relied on anywhere in
+this document, and a different model, a later version of the same one,
+or a session under injection could all do otherwise. The egress
+restriction is what holds when the judgement does not.
+
+The runbook that asked for it is recorded as wrong in its assumption.
+It was written as though the agent transcribes a command handed to it,
+which is not true of any capable model and should not be designed for
+again. The probe it carried is not an operator diagnostic, and this
+condition is not reachable as a manual observation made through a
+cooperating agent.
+
+Independently of all of that, the condition could not have been
+observed from the web surface at all before this work, because the
+streaming turn installed no sandbox-egress context: `exec` there
+resolved its network from the legacy `network` flag rather than from
+the channel's egress policy, so the allowlist and the
+observed-sensitivity restriction were both out of the path.
 
 *Unreachable from the replay verifier path.* Held by a test, not by an
 observation. Recorded as such rather than counted as closed.
