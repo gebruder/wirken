@@ -7,9 +7,58 @@ use wirken_vault::{CredentialStore, VaultSecret, probe_keychain};
 
 use super::config;
 
-pub async fn add() -> Result<()> {
+/// What `agents add` was told on the command line. Every field empty
+/// is the interactive form; `id`, `provider` and `model` together are
+/// enough to run without prompting.
+#[derive(Debug, Default)]
+pub struct AddArgs {
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub base_url: Option<String>,
+    pub channels: Option<String>,
+    pub api_key_env: Option<String>,
+}
+
+impl AddArgs {
+    /// Whether this invocation is the scripted form.
+    ///
+    /// Any flag that names the agent itself means the operator is
+    /// scripting, and the missing ones are reported rather than
+    /// prompted for: a command that drops into a prompt inside a
+    /// pipeline hangs it instead of failing it. Deliberately not "all
+    /// three present" -- that would silently prompt for the rest of a
+    /// half-written command line.
+    fn is_scripted(&self) -> bool {
+        self.id.is_some()
+            || self.provider.is_some()
+            || self.model.is_some()
+            || self.base_url.is_some()
+            || self.api_key_env.is_some()
+            || self.channels.is_some()
+            || self.name.is_some()
+    }
+}
+
+/// The provider's own API base, for the providers whose endpoint is
+/// fixed. `custom` has none and must be given one.
+fn default_base_url(provider: &str) -> Option<&'static str> {
+    match provider {
+        "openai" => Some("https://api.openai.com/v1"),
+        "anthropic" => Some("https://api.anthropic.com/v1"),
+        "ollama" => Some("http://localhost:11434/v1"),
+        _ => None,
+    }
+}
+
+pub async fn add(args: AddArgs) -> Result<()> {
     let cfg = config();
     cfg.ensure_dirs()?;
+
+    if args.is_scripted() {
+        return add_noninteractive(args).await;
+    }
 
     println!();
     println!("  Add a new agent");
@@ -172,6 +221,127 @@ pub async fn add() -> Result<()> {
         println!("  Channels: {}", display.join(", "));
     }
     println!();
+
+    Ok(())
+}
+
+/// `agents add` without prompts.
+///
+/// Everything an agent needs comes from flags or from the provider's
+/// own defaults, and anything missing is named rather than prompted
+/// for: a command that blocks on a prompt in a script hangs a pipeline
+/// instead of failing it.
+async fn add_noninteractive(args: AddArgs) -> Result<()> {
+    let cfg = config();
+
+    let id = args
+        .id
+        .ok_or_else(|| anyhow::anyhow!("--id is required when adding an agent from flags"))?;
+    let provider = args
+        .provider
+        .ok_or_else(|| anyhow::anyhow!("--provider is required when adding an agent from flags"))?;
+    let model = args
+        .model
+        .ok_or_else(|| anyhow::anyhow!("--model is required when adding an agent from flags"))?;
+
+    if !matches!(
+        provider.as_str(),
+        "openai" | "anthropic" | "ollama" | "custom"
+    ) {
+        anyhow::bail!(
+            "unknown --provider '{provider}'; expected openai, anthropic, ollama, or custom"
+        );
+    }
+
+    let base_url = match args.base_url {
+        Some(url) => url,
+        None => default_base_url(&provider)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--base-url is required for provider '{provider}', which has no fixed endpoint"
+                )
+            })?
+            .to_string(),
+    };
+
+    let name = args.name.unwrap_or_else(|| id.clone());
+
+    // The key arrives through the environment, never as an argument:
+    // arguments are visible in the process table to every other user
+    // on the machine.
+    let api_key_credential = match args.api_key_env {
+        Some(var) => {
+            let api_key = std::env::var(&var).map_err(|_| {
+                anyhow::anyhow!("--api-key-env named '{var}', which is not set in this environment")
+            })?;
+            if api_key.is_empty() {
+                anyhow::bail!("environment variable '{var}' is empty");
+            }
+            let cred_name = format!("{id}-{provider}-key");
+            // The vault passphrase comes from the environment on this
+            // path, the same place the key did. `cached_vault_passphrase`
+            // falls back to a prompt, which fails with a message naming
+            // the variable rather than sealing the vault under an empty
+            // string.
+            let pp = super::cached_vault_passphrase()?;
+            let keychain = probe_keychain(&cfg.data_dir, move || pp);
+            let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+                .context("Failed to open credential store")?;
+            let secret = VaultSecret::new(api_key);
+            let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+            store
+                .store(&cred_name, &provider, &secret, None, Some(rotation_due))
+                .context("Failed to store API key")?;
+            println!("  API key encrypted as '{cred_name}'.");
+            cred_name
+        }
+        None => String::new(),
+    };
+
+    let channels: Vec<String> = args
+        .channels
+        .map(|c| {
+            c.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let agent_store = AgentConfigStore::open(&cfg.agent_config_db_path())
+        .context("Failed to open agent config store")?;
+
+    let agent_config = AgentConfig {
+        id: id.clone(),
+        name: name.clone(),
+        provider,
+        model: model.clone(),
+        base_url,
+        api_key_credential,
+        channels: channels.clone(),
+        allowed_subagents: Default::default(),
+        tools_enabled: None,
+        preset: None,
+        // Same posture as the interactive path: no sandbox egress for
+        // any channel until an operator grants it per channel.
+        channel_egress: Default::default(),
+    };
+
+    agent_store
+        .register(&agent_config)
+        .context(format!("Failed to register agent '{id}'"))?;
+
+    std::fs::create_dir_all(cfg.agent_workspace(&id))?;
+    std::fs::create_dir_all(cfg.agent_skills_dir(&id))?;
+
+    println!("  Agent '{name}' ({id}) registered.");
+    println!("  Model: {model}");
+    if channels.is_empty() {
+        println!("  Channels: none (bind with `wirken agents bind {id} <channel>`)");
+    } else {
+        println!("  Channels: {}", channels.join(", "));
+    }
 
     Ok(())
 }
@@ -495,7 +665,11 @@ fn resolve_api_key(
     if credential.is_empty() {
         return None;
     }
-    let keychain = probe_keychain(&cfg.data_dir, String::new);
+    // Never prompts: this is a listing convenience, and a command that
+    // blocks on a passphrase to offer a menu is worse than one that
+    // asks for the model id.
+    let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()?;
     let (secret, _) = store.retrieve(credential).ok()?;
     Some(secret.expose().to_string())
@@ -627,7 +801,7 @@ fn validate_egress_domain(s: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_egress_domain;
+    use super::*;
 
     #[test]
     fn plain_and_wildcard_hosts_accepted() {
@@ -662,5 +836,61 @@ mod tests {
     #[test]
     fn empty_domain_rejected() {
         assert!(validate_egress_domain("").is_err());
+    }
+
+    #[test]
+    fn any_agent_naming_flag_means_the_scripted_form() {
+        assert!(
+            !AddArgs::default().is_scripted(),
+            "no flags is the prompt form"
+        );
+        for args in [
+            AddArgs {
+                id: Some("a".into()),
+                ..Default::default()
+            },
+            AddArgs {
+                provider: Some("ollama".into()),
+                ..Default::default()
+            },
+            AddArgs {
+                model: Some("m".into()),
+                ..Default::default()
+            },
+            AddArgs {
+                channels: Some("webchat".into()),
+                ..Default::default()
+            },
+            AddArgs {
+                api_key_env: Some("VAR".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                args.is_scripted(),
+                "a half-written command line must be reported, not completed by prompts: {args:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_custom_endpoint_has_no_default_base_url() {
+        assert_eq!(
+            default_base_url("openai"),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            default_base_url("anthropic"),
+            Some("https://api.anthropic.com/v1")
+        );
+        assert_eq!(
+            default_base_url("ollama"),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(
+            default_base_url("custom"),
+            None,
+            "a custom endpoint is the operator's to name",
+        );
     }
 }

@@ -425,7 +425,32 @@ enum PendingCommands {
 #[derive(Subcommand)]
 enum AgentCommands {
     /// Add a new agent with its own model, workspace, and channel bindings
-    Add,
+    Add {
+        /// Agent ID. Supplying it, --provider and --model runs the
+        /// command without prompts, for scripted and headless setup.
+        #[arg(long)]
+        id: Option<String>,
+        /// Display name (defaults to the id)
+        #[arg(long)]
+        name: Option<String>,
+        /// openai, anthropic, ollama, or custom
+        #[arg(long)]
+        provider: Option<String>,
+        /// Model id to run this agent against
+        #[arg(long)]
+        model: Option<String>,
+        /// API base URL. Defaults to the provider's own; required for
+        /// custom.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Channels to bind, comma-separated
+        #[arg(long)]
+        channels: Option<String>,
+        /// Read the API key from this environment variable rather than
+        /// prompting. The value never appears on the command line.
+        #[arg(long)]
+        api_key_env: Option<String>,
+    },
     /// List all configured agents
     List,
     /// Remove an agent
@@ -1289,7 +1314,26 @@ async fn main() -> Result<()> {
             } => commands::zirkel::calibrate(run_id.as_deref(), buckets, &by).await,
         },
         Commands::Agents(cmd) => match cmd {
-            AgentCommands::Add => commands::agents::add().await,
+            AgentCommands::Add {
+                id,
+                name,
+                provider,
+                model,
+                base_url,
+                channels,
+                api_key_env,
+            } => {
+                commands::agents::add(commands::agents::AddArgs {
+                    id,
+                    name,
+                    provider,
+                    model,
+                    base_url,
+                    channels,
+                    api_key_env,
+                })
+                .await
+            }
             AgentCommands::List => commands::agents::list().await,
             AgentCommands::Remove { id } => commands::agents::remove(&id).await,
             AgentCommands::Bind { agent, channel } => {
