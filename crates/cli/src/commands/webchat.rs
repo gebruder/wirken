@@ -50,7 +50,10 @@ const HTML: &str = r#"<!DOCTYPE html>
   .imported-note { padding: 8px 16px; font-size: 12px; color: #8b949e; font-style: italic; }
   .imported-back { padding: 8px 16px; font-size: 12px; color: #58a6ff; cursor: pointer; }
   .imported-attachment { padding: 4px 16px 10px 40px; font-size: 13px; color: #c9d1d9; }
-  #archive-notice { padding: 14px 16px; border-top: 1px solid #21262d; font-size: 12px; color: #8b949e; font-style: italic; }
+  #archive-bar { padding: 14px 16px; border-top: 1px solid #21262d; display: flex; gap: 12px; align-items: center; }
+  #archive-notice { flex: 1; font-size: 12px; color: #8b949e; font-style: italic; }
+  #back-to-live { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  #back-to-live:hover { background: #30363d; }
   #main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
   #header { padding: 16px 24px; border-bottom: 1px solid #21262d; font-size: 14px; color: #8b949e; }
   #header strong { color: #c9d1d9; }
@@ -95,7 +98,10 @@ const HTML: &str = r#"<!DOCTYPE html>
     <input id="input" type="text" placeholder="Send a message..." autofocus>
     <button id="send">Send</button>
   </div>
-  <div id="archive-notice" hidden></div>
+  <div id="archive-bar" hidden>
+    <span id="archive-notice"></span>
+    <button id="back-to-live">Back to the live session</button>
+  </div>
 </div>
 <script>
 const messages = document.getElementById('messages');
@@ -105,6 +111,8 @@ const sessionList = document.getElementById('session-list');
 const archiveList = document.getElementById('archive-list');
 const inputArea = document.getElementById('input-area');
 const archiveNotice = document.getElementById('archive-notice');
+const archiveBar = document.getElementById('archive-bar');
+const backToLive = document.getElementById('back-to-live');
 const WEBCHAT_CHANNEL = 'webchat';
 // The single canonical webchat conversation. POST /api/chat always
 // wakes agent "default" on channel "webchat" with conversation
@@ -403,12 +411,19 @@ async function loadTranscript(id) {
 // than being explained away, and a notice takes its place.
 function setArchiveMode(active) {
   inputArea.hidden = active;
-  archiveNotice.hidden = !active;
+  archiveBar.hidden = !active;
   if (active) {
     setText(archiveNotice,
       'Imported archive: a stored record, shown read-only. There is nothing to send to here.');
   }
 }
+
+// Taking the composer away leaves the operator somewhere with no way
+// out: the archive views reach each other, and nothing reaches back to
+// the conversation they were having. Reloading the page was the only
+// exit. The bar that replaces the composer carries the way out, so it
+// is on screen exactly when it is needed and by the same switch.
+backToLive.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID));
 
 // Imported archives. Read-only: these views fetch and render, and
 // there is no route here that writes.
@@ -1383,6 +1398,26 @@ mod tests {
         // Its replacement text goes through the one helper like
         // everything else.
         assert!(script.contains("setText(archiveNotice,"));
+
+        // Taking the composer away has to leave a way out. The archive
+        // views reach each other and nothing reached back, so a reload
+        // was the only exit from a stored record.
+        assert!(
+            HTML.contains(r#"<button id="back-to-live">"#),
+            "the bar that replaces the composer carries the way back",
+        );
+        assert!(
+            script.contains(
+                "backToLive.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID))"
+            ),
+            "the way back returns to the live webchat conversation",
+        );
+        // And it is shown and hidden by the same switch as the notice,
+        // so no path can leave the operator in a view with no exit.
+        assert!(
+            script.contains("archiveBar.hidden = !active;"),
+            "the bar carrying the exit is toggled by the mode switch",
+        );
     }
 
     /// Every event the gateway can push into this page's SSE stream
