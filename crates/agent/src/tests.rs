@@ -7317,6 +7317,35 @@ mod phase_overlay {
         );
     }
 
+    /// Imported archives do not depend on cross-channel memory. The
+    /// imported install used to sit inside install_memory, behind that
+    /// function's own guards, so an agent with no memory store — or a
+    /// turn whose labels were too incomplete for a memory origin row —
+    /// silently lost access to archives the operator had approved.
+    #[tokio::test]
+    async fn imported_archives_install_without_a_memory_store() {
+        let (mut agent, _log, _id) = agent_with_session_log();
+        let tmp = TempDir::new().unwrap();
+
+        let (imported, _applied) =
+            wirken_gateway::imported::ImportStore::open(&tmp.path().join("imported.db")).unwrap();
+        agent.set_imported_store(Arc::new(std::sync::Mutex::new(imported)));
+        // Deliberately no memory store.
+
+        agent.begin_turn(&crate::InboundContext {
+            adapter_id: Some("webchat".into()),
+            sender_id: Some("webchat-user".into()),
+            channel: Some("webchat".into()),
+        });
+
+        let (_egress, memory, imported) = agent.installed_turn_contexts();
+        assert!(!memory, "no memory store attached, so none installs");
+        assert!(
+            imported,
+            "the imported context must install on its own store, not on memory's",
+        );
+    }
+
     fn overlay_denying_tool(phase_name: &str, tool: &str) -> PhaseDenyOverlay {
         let mut tools = BTreeSet::new();
         tools.insert(tool.to_string());

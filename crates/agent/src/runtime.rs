@@ -900,6 +900,12 @@ impl Agent {
         // Same reasoning for memory: the origin labels are per turn,
         // so they are rebuilt from this turn's inbound context.
         self.install_memory();
+        // And for imported archives, which take their attribution from
+        // the same turn. Installed here rather than from inside
+        // install_memory: an agent with no cross-channel memory store,
+        // or a turn whose labels are too incomplete for memory's
+        // origin row, still reads archives the operator approved.
+        self.install_imported();
     }
 
     /// Build this turn's origin labels and hand them to the tool
@@ -932,7 +938,6 @@ impl Agent {
             sender_id,
             origin_session_id: self.session_handle.id().to_string(),
         };
-        self.install_imported();
         self.tools.set_memory(crate::memory_tool::MemoryContext {
             store: store.clone(),
             labels,
