@@ -1213,7 +1213,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // written unkeyed, since an unkeyed digest of a short query is
     // recoverable by anyone holding the rows.
     {
-        let keychain = probe_keychain(&cfg.data_dir, String::new);
+        // Through the shared supplier like every other probe in this
+        // function. It used to pass `String::new`, which cannot unwrap
+        // a device key wrapped under a real passphrase on the age-file
+        // backend: an operator who had already typed their passphrase
+        // for the provider key still got "keychain not unlocked" here,
+        // and every search row went out without a digest. See the note
+        // on `prompt_vault_passphrase`, which named this exact failure
+        // for two earlier subsystems before this one repeated it.
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        });
         match wirken_vault::load_or_create_imported_search_key(keychain.as_ref()) {
             Ok(key) => factory.attach_imported_search_key(key),
             Err(e) => {
@@ -4065,5 +4075,43 @@ mod truncate_tests {
         let t = truncate(&s, 50);
         assert!(t.ends_with("..."));
         assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod keychain_supplier_tests {
+    /// Every keychain probe in this function goes through the shared
+    /// passphrase supplier.
+    ///
+    /// `prompt_vault_passphrase` has carried that rule in its doc
+    /// comment, along with the two subsystems that broke it and
+    /// silently degraded -- the alarm log to unsigned, the
+    /// `http_request` resolver to refusing credentialed calls. The
+    /// imported-search digest key then broke it a third time: an
+    /// operator who had already entered their passphrase for the
+    /// provider key was told the keychain was not unlocked, and every
+    /// search row went out with no digest.
+    ///
+    /// A rule that only exists in prose gets broken by the next person
+    /// who does not read the prose. This reads the source instead.
+    #[test]
+    fn no_keychain_probe_supplies_an_empty_passphrase() {
+        // Assembled at runtime so this test's own source does not
+        // contain either needle and match itself.
+        let probe = format!("probe_{}(", "keychain");
+        let empty = format!("String::{}", "new");
+        let src = include_str!("run.rs");
+        let offenders: Vec<&str> = src
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .filter(|line| line.contains(&probe) && line.contains(&empty))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "a keychain probe supplies an empty passphrase, which cannot unwrap a \
+             device key on the age-file backend and degrades that subsystem \
+             silently. Use prompt_vault_passphrase. Offending lines: {offenders:?}",
+        );
     }
 }
