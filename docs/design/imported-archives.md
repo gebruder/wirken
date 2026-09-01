@@ -676,6 +676,19 @@ Egress scope is unaffected by the read. The honest summary is that the
 label raises the cost of one exfiltration route and leaves the others
 where they already were.
 
+Fixed condition, recorded because it was true of every build before the
+commit that installs the per-turn contexts on the streaming path: the
+web surface installed no sandbox-egress context at all, so `exec`
+launched from it resolved its network from the legacy `network` flag in
+`sandbox.json` rather than from the channel's egress policy. With that
+flag at its default the container got no network and the gap was
+closed; with an operator having set it true the container joined
+Docker's default bridge instead of the internal network the egress
+proxy fronts, and neither the allowlist nor the observed-sensitivity
+restriction applied to it. The one controlled route was therefore
+uncontrolled from the web surface under that setting, and the label's
+reach was narrower than this section described.
+
 **Stored cross-site scripting.** A property of the transcript rendering
 path generally rather than of this feature, but this feature raises
 exposure to corpus scale: not just text the operator's own agent
