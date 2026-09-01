@@ -284,7 +284,7 @@ pub struct DockerSandbox {
 /// and is the only path to the internet. The sandbox therefore cannot
 /// reach anything except the sidecar, and the sidecar is the only
 /// thing that can reach out.
-pub(crate) struct EgressSetup {
+struct EgressSetup {
     internal_network: String,
     egress_network: String,
     sidecar_id: String,
@@ -373,7 +373,10 @@ impl DockerSandbox {
             return Err(e);
         }
         #[cfg(unix)]
-        let decision = egress_decision(egress.is_some(), egress_setup.as_ref());
+        let decision = egress_decision(
+            egress.is_some(),
+            egress_setup.as_ref().map(|s| s.internal_network.as_str()),
+        );
         // No broker transport here, so a proxy-needing policy has
         // already refused above. A policy that needs no proxy still
         // decided, and decided deny.
@@ -911,10 +914,14 @@ impl DockerSandbox {
 /// Which of the three states this exec is in.
 ///
 /// `policy_present` is whether a `SandboxEgressContext` reached
-/// `exec`; `setup` is the provisioned proxy, which exists only for a
-/// policy whose mode needs one. A policy present with no setup is
-/// therefore a policy that granted no egress: a decision, not an
-/// absence, and the distinction the two-state form could not carry.
+/// `exec`; `proxy_network` is the internal network of the provisioned
+/// proxy, which exists only for a policy whose mode needs one. A
+/// policy present with no proxy network is therefore a policy that
+/// granted no egress: a decision, not an absence, and the distinction
+/// the two-state form could not carry.
+///
+/// Takes the network name rather than the `EgressSetup` that carries
+/// it, because that struct is unix-only and this mapping is not.
 ///
 /// Its own function so the mapping is reachable without Docker. The
 /// three-state type alone does not prevent the collapse; something has
@@ -922,10 +929,10 @@ impl DockerSandbox {
 /// back into `Unset`, and that assertion needs a callable seam.
 pub(crate) fn egress_decision(
     policy_present: bool,
-    setup: Option<&EgressSetup>,
+    proxy_network: Option<&str>,
 ) -> EgressDecision<'_> {
-    match (policy_present, setup) {
-        (_, Some(setup)) => EgressDecision::Proxied(setup.internal_network.as_str()),
+    match (policy_present, proxy_network) {
+        (_, Some(network)) => EgressDecision::Proxied(network),
         (true, None) => EgressDecision::Denied,
         (false, None) => EgressDecision::Unset,
     }
