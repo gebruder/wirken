@@ -566,6 +566,65 @@ mod tests {
         assert_eq!(got.channels, vec!["slack", "teams"]);
     }
 
+    /// Changing an agent's model keeps everything else about it.
+    ///
+    /// Before `agents set` could reach the model, the only way to
+    /// change one was to remove the agent and add it back, which drops
+    /// its channel bindings and its subagent ceilings on the floor.
+    /// `update` replaces the agent's channel set, so this pins that a
+    /// change to an unrelated column does not empty it.
+    #[test]
+    fn updating_a_model_keeps_the_agent_s_bindings_and_ceilings() {
+        let tmp = TempDir::new().unwrap();
+        let store = AgentConfigStore::open(&tmp.path().join("agents.db")).unwrap();
+
+        let mut ceilings = std::collections::BTreeMap::new();
+        ceilings.insert(
+            "child".to_string(),
+            SubagentCeiling {
+                tool_allowlist: vec!["read_file".into()],
+                max_permission_tier: PermissionTier::Tier1,
+                max_rounds: 3,
+                max_runtime_secs: 30,
+            },
+        );
+        let config = AgentConfig {
+            id: "work".into(),
+            name: "Work Agent".into(),
+            provider: "anthropic".into(),
+            model: "a-model".into(),
+            base_url: "https://api.anthropic.com/v1".into(),
+            api_key_credential: "work-anthropic-key".into(),
+            channels: vec!["slack".into(), "teams".into()],
+            allowed_subagents: ceilings,
+            tools_enabled: Some(true),
+            preset: None,
+            channel_egress: Default::default(),
+        };
+        store.register(&config).unwrap();
+
+        let mut updated = store.get("work").unwrap();
+        updated.model = "another-model".into();
+        updated.base_url = "https://elsewhere.invalid/v1".into();
+        store.update(&updated).unwrap();
+
+        let got = store.get("work").unwrap();
+        assert_eq!(got.model, "another-model");
+        assert_eq!(got.base_url, "https://elsewhere.invalid/v1");
+        assert_eq!(
+            got.channels,
+            vec!["slack", "teams"],
+            "a model change must not unbind the agent's channels",
+        );
+        assert_eq!(
+            got.allowed_subagents.keys().collect::<Vec<_>>(),
+            vec!["child"],
+            "nor drop its subagent ceilings",
+        );
+        assert_eq!(got.tools_enabled, Some(true));
+        assert_eq!(got.api_key_credential, "work-anthropic-key");
+    }
+
     #[test]
     fn register_and_list_multiple() {
         let tmp = TempDir::new().unwrap();

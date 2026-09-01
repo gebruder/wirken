@@ -351,13 +351,105 @@ pub async fn deny_subagent(parent: &str, child: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn set(id: &str, tools_enabled: Option<&str>) -> Result<()> {
+pub async fn set(
+    id: &str,
+    tools_enabled: Option<&str>,
+    model: Option<&str>,
+    base_url: Option<&str>,
+    replace_api_key: bool,
+) -> Result<()> {
     let cfg = config();
     let store = AgentConfigStore::open(&cfg.agent_config_db_path())
         .context("Failed to open agent config store")?;
 
     // Verify agent exists.
-    store.get(id).context(format!("Agent '{id}' not found"))?;
+    let existing = store.get(id).context(format!("Agent '{id}' not found"))?;
+
+    let mut changed = false;
+
+    // Model, base url and key live on the agent row and had no route
+    // to them: an operator whose provider retired a model, or who
+    // rotated a key, had to remove the agent and add it back, losing
+    // its channel bindings and subagent ceilings with it.
+    if model.is_some() || base_url.is_some() {
+        let mut updated = existing.clone();
+        if let Some(url) = base_url {
+            updated.base_url = url.to_string();
+        }
+        if let Some(m) = model {
+            // `--model list` asks the provider rather than taking the
+            // literal word as an id.
+            updated.model = if m == "list" {
+                let key = resolve_api_key(&cfg, &existing.api_key_credential);
+                let models = match updated.provider.as_str() {
+                    "openai" => {
+                        super::list_openai_models(&updated.base_url, key.as_deref().unwrap_or(""))
+                            .await
+                    }
+                    "anthropic" => super::list_anthropic_models(key.as_deref().unwrap_or("")).await,
+                    "ollama" => super::list_ollama_models(&updated.base_url).await,
+                    _ => super::list_openai_compatible_models(
+                        &updated.base_url,
+                        key.as_deref().unwrap_or(""),
+                    )
+                    .await
+                    .unwrap_or_default(),
+                };
+                super::pick_model(models)?
+            } else {
+                m.to_string()
+            };
+        }
+        store
+            .update(&updated)
+            .context("Failed to update agent model or base url")?;
+        println!(
+            "  Agent '{id}' now runs {}/{} at {}.",
+            updated.provider, updated.model, updated.base_url
+        );
+        changed = true;
+    }
+
+    if replace_api_key {
+        let api_key = super::read_secret("  New API key: ")?;
+        // Reuse the credential name already on the row when there is
+        // one, so the vault entry the gateway resolves is the entry
+        // that gets replaced. A row with none gets the same name
+        // `agents add` would have given it.
+        let cred_name = if existing.api_key_credential.is_empty() {
+            format!("{id}-{}-key", existing.provider)
+        } else {
+            existing.api_key_credential.clone()
+        };
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            Password::new()
+                .with_prompt("  Vault passphrase")
+                .interact()
+                .unwrap_or_default()
+        });
+        let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+            .context("Failed to open credential store")?;
+        let secret = VaultSecret::new(api_key);
+        let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
+        vault
+            .store(
+                &cred_name,
+                &existing.provider,
+                &secret,
+                None,
+                Some(rotation_due),
+            )
+            .context("Failed to store API key")?;
+        if existing.api_key_credential != cred_name {
+            let mut updated = store.get(id).context("Failed to re-read agent")?;
+            updated.api_key_credential = cred_name.clone();
+            store
+                .update(&updated)
+                .context("Failed to record the credential name")?;
+        }
+        println!("  Agent '{id}' API key replaced in '{cred_name}'.");
+        changed = true;
+    }
 
     if let Some(val) = tools_enabled {
         let parsed = match val {
@@ -377,11 +469,36 @@ pub async fn set(id: &str, tools_enabled: Option<&str>) -> Result<()> {
             None => "auto (provider default)",
         };
         println!("  Agent '{id}' tools_enabled set to {display}.");
-    } else {
-        println!("  No settings to change. Use --tools-enabled <true|false|auto>.");
+        changed = true;
+    }
+
+    if !changed {
+        println!(
+            "  No settings to change. Use --model, --base-url, --api-key, \
+             or --tools-enabled <true|false|auto>."
+        );
     }
 
     Ok(())
+}
+
+/// Read an agent's API key out of the vault for a model listing.
+///
+/// Best effort: a locked vault, a missing entry or a row with no
+/// credential all yield `None`, and the listing then comes back empty
+/// and the operator types the id. Not being able to list is not a
+/// reason to refuse the command.
+fn resolve_api_key(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    credential: &str,
+) -> Option<String> {
+    if credential.is_empty() {
+        return None;
+    }
+    let keychain = probe_keychain(&cfg.data_dir, String::new);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()?;
+    let (secret, _) = store.retrieve(credential).ok()?;
+    Some(secret.expose().to_string())
 }
 
 /// Grant or revoke sandbox egress for one of an agent's channels.

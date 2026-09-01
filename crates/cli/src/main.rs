@@ -473,6 +473,18 @@ enum AgentCommands {
         /// Override tool calling: true, false, or auto (provider default)
         #[arg(long)]
         tools_enabled: Option<String>,
+        /// Model id to run this agent against. Pass `--model list` to
+        /// choose from what the provider currently offers.
+        #[arg(long)]
+        model: Option<String>,
+        /// API base URL for this agent's provider
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Replace this agent's API key. The value is prompted for,
+        /// never taken from the command line, so it does not reach the
+        /// shell history or the process table.
+        #[arg(long)]
+        api_key: bool,
     },
     /// Grant or revoke sandbox egress for one of an agent's channels
     SetEgress {
@@ -1304,8 +1316,21 @@ async fn main() -> Result<()> {
             AgentCommands::DenySubagent { parent, child } => {
                 commands::agents::deny_subagent(&parent, &child).await
             }
-            AgentCommands::Set { id, tools_enabled } => {
-                commands::agents::set(&id, tools_enabled.as_deref()).await
+            AgentCommands::Set {
+                id,
+                tools_enabled,
+                model,
+                base_url,
+                api_key,
+            } => {
+                commands::agents::set(
+                    &id,
+                    tools_enabled.as_deref(),
+                    model.as_deref(),
+                    base_url.as_deref(),
+                    api_key,
+                )
+                .await
             }
             AgentCommands::SetEgress {
                 id,
