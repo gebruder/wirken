@@ -741,6 +741,16 @@ restriction applied to it. The one controlled route was therefore
 uncontrolled from the web surface under that setting, and the label's
 reach was narrower than this section described.
 
+A second fixed condition, on the same setting and from the same
+mismatch between an egress decision and the network the container got:
+a channel whose policy granted no egress at all produced no proxy and
+no network name, which was indistinguishable from an exec that no
+policy had reached, so the legacy flag decided and the container joined
+the default bridge. Under that setting the strictest of the three
+policies gave a sandbox more network than the allowlist did, and the
+label's restriction had nothing to act on because the proxy it acts
+through was never provisioned.
+
 **Stored cross-site scripting.** A property of the transcript rendering
 path generally rather than of this feature, but this feature raises
 exposure to corpus scale: not just text the operator's own agent
