@@ -389,13 +389,19 @@ async function loadSessions() {
 
 async function loadTranscript(id) {
   activeSessionId = id;
-  setArchiveMode(false);
+  // The composer posts to /api/chat, which always resolves the one
+  // canonical webchat conversation. Displaying any other session and
+  // leaving the composer up meant a send landed somewhere other than
+  // what was on screen: the reply streamed into the transcript being
+  // read, the message joined a conversation the operator was not
+  // looking at, and nothing said so.
+  setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE);
   let turns;
   try {
     const res = await fetch('/api/sessions/' + encodeURIComponent(id));
-    if (!res.ok) return;
+    if (!res.ok) { loadSessions(); return; }
     turns = await res.json();
-  } catch (e) { return; }
+  } catch (e) { loadSessions(); return; }
   messages.innerHTML = '';
   for (const t of turns) addMsg(t.role, t.content);
   loadSessions();
@@ -409,13 +415,24 @@ async function loadTranscript(id) {
 // that looks like it annotates the record and in fact starts a live
 // agent turn. The affordance is the defect, so it goes away rather
 // than being explained away, and a notice takes its place.
+const ARCHIVE_NOTICE =
+  'Imported archive: a stored record, shown read-only. There is nothing to send to here.';
+const OTHER_SESSION_NOTICE =
+  'Another session, shown read-only. The composer writes to this browser\'s own ' +
+  'conversation, not to this one.';
+
+// One switch owns whether the composer is on screen, and it takes the
+// reason. Passing null means the pane is showing the conversation the
+// composer writes to; anything else is a record being read, and gets
+// the notice and the way back in the composer's place.
+function setReadOnly(notice) {
+  inputArea.hidden = notice !== null;
+  archiveBar.hidden = notice === null;
+  if (notice !== null) setText(archiveNotice, notice);
+}
+
 function setArchiveMode(active) {
-  inputArea.hidden = active;
-  archiveBar.hidden = !active;
-  if (active) {
-    setText(archiveNotice,
-      'Imported archive: a stored record, shown read-only. There is nothing to send to here.');
-  }
+  setReadOnly(active ? ARCHIVE_NOTICE : null);
 }
 
 // Taking the composer away leaves the operator somewhere with no way
@@ -1375,14 +1392,17 @@ mod tests {
         );
         let on = script.matches("setArchiveMode(true)").count();
         assert_eq!(on, 2, "both archive views turn the mode on");
+        // Leaving an archive goes through the transcript loader, which
+        // decides from the session it is about to show. There is no
+        // second way to put the composer back.
         assert!(
-            script.contains("setArchiveMode(false)"),
-            "returning to a live session turns it off"
+            script.contains("setReadOnly(active ? ARCHIVE_NOTICE : null)"),
+            "the archive switch delegates to the one that owns the composer",
         );
 
         // The switch hides the composer rather than merely styling it,
         // so a hidden composer cannot be tabbed into.
-        assert!(script.contains("inputArea.hidden = active;"));
+        assert!(script.contains("inputArea.hidden = notice !== null;"));
 
         // And the property has to reach the screen. `#input-area` is
         // laid out `display: flex` by an id selector, which outranks
@@ -1415,8 +1435,8 @@ mod tests {
         // And it is shown and hidden by the same switch as the notice,
         // so no path can leave the operator in a view with no exit.
         assert!(
-            script.contains("archiveBar.hidden = !active;"),
-            "the bar carrying the exit is toggled by the mode switch",
+            script.contains("archiveBar.hidden = notice === null;"),
+            "the bar carrying the exit is toggled by the same switch",
         );
     }
 
@@ -1462,6 +1482,66 @@ mod tests {
         assert!(
             script.contains("messages.appendChild(card)"),
             "renderApproval must put the card in the transcript",
+        );
+    }
+
+    /// The composer is on screen only for the conversation it writes
+    /// to.
+    ///
+    /// `send` posts to /api/chat, which always resolves the one
+    /// canonical webchat conversation whatever the transcript pane is
+    /// displaying. Clicking another channel's session in the sidebar
+    /// left the composer up: the message joined the webchat
+    /// conversation, the reply streamed into the transcript being
+    /// read, and the two had nothing to do with each other.
+    #[test]
+    fn the_composer_is_absent_for_a_session_it_does_not_write_to() {
+        let script = page_script();
+
+        // One switch owns the composer, and it takes the reason rather
+        // than a bare flag, so a caller cannot hide the composer and
+        // forget to say why it is gone.
+        assert!(
+            script.contains("function setReadOnly(notice)"),
+            "one switch owns whether the composer is on screen",
+        );
+        assert!(
+            script.contains("setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE)"),
+            "loading a transcript decides from the session it is showing",
+        );
+        assert!(
+            script.contains("const OTHER_SESSION_NOTICE ="),
+            "a session that is not the composer's says so in its own words",
+        );
+    }
+
+    /// The sidebar is refreshed however the transcript load ends.
+    ///
+    /// It used to be refreshed only after a successful fetch, so a
+    /// transcript that failed to load left the sidebar holding
+    /// whatever it had -- including the empty state, under a page that
+    /// had a running session.
+    #[test]
+    fn a_failed_transcript_load_still_refreshes_the_sidebar() {
+        let body = page_script()
+            .split_once("async function loadTranscript(id) {")
+            .expect("loadTranscript exists")
+            .1
+            .split_once("\n}")
+            .expect("loadTranscript closes")
+            .0;
+        assert_eq!(
+            body.matches("loadSessions()").count(),
+            3,
+            "both early returns and the success path refresh the sidebar",
+        );
+        assert!(
+            body.contains("if (!res.ok) { loadSessions(); return; }"),
+            "a non-ok response refreshes before returning",
+        );
+        assert!(
+            body.contains("catch (e) { loadSessions(); return; }"),
+            "a thrown fetch refreshes before returning",
         );
     }
 
