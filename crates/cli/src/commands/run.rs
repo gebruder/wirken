@@ -1216,7 +1216,41 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let keychain = probe_keychain(&cfg.data_dir, String::new);
         match wirken_vault::load_or_create_imported_search_key(keychain.as_ref()) {
             Ok(key) => factory.attach_imported_search_key(key),
-            Err(e) => tracing::warn!("imported-search audit rows will carry no query digest: {e}"),
+            Err(e) => {
+                // Deliberate degrade, not a refusal. The Tier 3 gate is
+                // the enforcement boundary for reaching a corpus and it
+                // still runs; the row still records that a search
+                // happened, by whom, over which source, and with what
+                // outcome. What is lost is the ability to prove which
+                // term was searched. Refusing instead would make a
+                // locked vault a denial of the operator's own
+                // archives, trading a large functional loss for a
+                // smaller forensic one.
+                //
+                // The degrade goes on the chain rather than only into
+                // stderr. `query_digest: None` on a search row is
+                // otherwise ambiguous -- no key, or a build that never
+                // wrote one -- and a reviewer holding only the rows
+                // cannot tell which. This event dates the window.
+                tracing::warn!("imported-search audit rows will carry no query digest: {e}");
+                let _ = audit
+                    .log(
+                        AuditEvent::new(
+                            ActorKind::Service,
+                            "gateway",
+                            "imported-search.digest-unavailable",
+                            cfg.data_dir.display().to_string(),
+                        )
+                        .with_detail(serde_json::json!({
+                            "reason": e.to_string(),
+                            "consequence":
+                                "search proceeds; ImportedChatSearched rows carry no \
+                                 query_digest until the vault is unlocked and the gateway \
+                                 restarted",
+                        })),
+                    )
+                    .await;
+            }
         }
     }
 

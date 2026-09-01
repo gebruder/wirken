@@ -635,6 +635,24 @@ which is the right trade for an integrity tag; the equivalent trade
 here would emit exactly the recoverable digest the keying exists to
 prevent.
 
+Searching still runs in that state. The alternative, refusing the tool
+until the key is reachable, was considered and rejected: the tier gate
+is the enforcement boundary for reaching a corpus at all, and it runs
+either way, per source, every time. A row written without the digest
+still names the agent, the adapter, the sender, the source scope, the
+outcome and the match count. What is lost is the ability to prove which
+term was searched. Refusing would make a locked vault a denial of the
+operator's own archives, which trades a large functional loss for a
+smaller forensic one.
+
+The degrade is recorded rather than inferred. A row carrying no digest
+is ambiguous on its own -- no key at the time, or a build that never
+wrote one -- so the gateway puts an
+`imported-search.digest-unavailable` event on the chain at startup
+naming the reason. A reviewer holding only the rows can date the window
+in which digests were off instead of correlating against a log line
+that may not have been captured.
+
 Each new variant is registered in three places: `variant_kind`, which
 the compiler forces; the default-forward list, which does not; and the
 actor-field extractor, whose catch-all otherwise leaves the row without
