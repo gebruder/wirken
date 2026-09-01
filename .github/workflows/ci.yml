@@ -89,6 +89,12 @@ jobs:
       - name: Extractor gate tests
         run: python3 -W error::ResourceWarning scripts/test_anthropic_export_schema.py
 
+      # Its companion, on the same terms and for the same property: the
+      # message-field reporter prints sizes rather than values, so a
+      # run against a real archive is safe to paste.
+      - name: Message-field reporter gate tests
+        run: python3 -W error::ResourceWarning scripts/test_anthropic_export_message_fields.py
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest
