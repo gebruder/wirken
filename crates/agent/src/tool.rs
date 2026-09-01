@@ -523,6 +523,19 @@ impl ToolRegistry {
         }
     }
 
+    /// Which per-turn contexts `Agent::begin_turn` has installed.
+    /// Observes the wiring only: what each tool does once configured
+    /// is covered by that tool's own tests. Ordered
+    /// (sandbox_egress, memory, imported).
+    #[cfg(test)]
+    pub(crate) fn installed_turn_contexts(&self) -> (bool, bool, bool) {
+        (
+            self.sandbox_egress.read().is_ok_and(|g| g.is_some()),
+            self.memory.read().is_ok_and(|g| g.is_some()),
+            self.imported.read().is_ok_and(|g| g.is_some()),
+        )
+    }
+
     pub fn set_sandbox_egress(&self, ctx: crate::sandbox_egress::SandboxEgressContext) {
         if let Ok(mut g) = self.sandbox_egress.write() {
             *g = Some(ctx);

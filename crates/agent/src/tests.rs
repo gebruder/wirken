@@ -7277,6 +7277,46 @@ mod phase_overlay {
         (agent, concrete, agent_id)
     }
 
+    /// A webchat-shaped turn must arrive with every per-turn context
+    /// installed. The streaming path used to stash the inbound
+    /// context and install nothing, so on webchat the memory and
+    /// imported tools answered "not configured" and `exec` never saw
+    /// the channel's egress policy. Nothing failed loudly: the
+    /// operator got a tool that read nothing after they had approved
+    /// it.
+    #[tokio::test]
+    async fn begin_turn_installs_every_per_turn_context() {
+        let (mut agent, _log, _id) = agent_with_session_log();
+        let tmp = TempDir::new().unwrap();
+
+        let (imported, _applied) =
+            wirken_gateway::imported::ImportStore::open(&tmp.path().join("imported.db")).unwrap();
+        agent.set_imported_store(Arc::new(std::sync::Mutex::new(imported)));
+        let memory =
+            wirken_gateway::memory::MemoryStore::open(&tmp.path().join("memory.db")).unwrap();
+        agent.set_memory_store(Arc::new(std::sync::Mutex::new(memory)));
+
+        assert_eq!(
+            agent.installed_turn_contexts(),
+            (false, false, false),
+            "attaching stores at wake time must not install per-turn \
+             contexts; the turn's own labels are not known yet",
+        );
+
+        agent.begin_turn(&crate::InboundContext {
+            adapter_id: Some("webchat".into()),
+            sender_id: Some("webchat-user".into()),
+            channel: Some("webchat".into()),
+        });
+
+        assert_eq!(
+            agent.installed_turn_contexts(),
+            (true, true, true),
+            "begin_turn must install sandbox egress, memory and \
+             imported archives for the turn",
+        );
+    }
+
     fn overlay_denying_tool(phase_name: &str, tool: &str) -> PhaseDenyOverlay {
         let mut tools = BTreeSet::new();
         tools.insert(tool.to_string());

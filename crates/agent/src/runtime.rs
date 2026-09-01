@@ -862,6 +862,46 @@ impl Agent {
         self.install_memory();
     }
 
+    /// Which per-turn contexts the tool registry currently holds.
+    /// Ordered (sandbox_egress, memory, imported).
+    #[cfg(test)]
+    pub(crate) fn installed_turn_contexts(&self) -> (bool, bool, bool) {
+        self.tools.installed_turn_contexts()
+    }
+
+    /// Open a turn: stash its inbound context and install everything
+    /// derived from it.
+    ///
+    /// Both turn paths enter here. They used to stash
+    /// `current_inbound` themselves and then call the installers, and
+    /// the streaming path — the one webchat runs — stashed the
+    /// context and called nothing. Its agent therefore served every
+    /// turn with no sandbox-egress context, no memory context and no
+    /// imported-archive context: the memory and imported tools
+    /// reported themselves unconfigured, and `exec` fell to the
+    /// legacy `network` flag instead of the channel's egress policy,
+    /// which bypasses the allowlist outright where that flag is on.
+    ///
+    /// Binding the stash to the installs in one place is what keeps a
+    /// third turn path from repeating it: there is no way to record
+    /// this turn's inbound context without installing from it.
+    pub(crate) fn begin_turn(&mut self, inbound: &InboundContext) {
+        // Held for the duration of the turn so tool-call emits
+        // (`AssistantToolCalls`, `ToolResult`) carry the same
+        // `adapter_id` / `sender_id` as the sibling `UserMessage` row.
+        self.current_inbound = inbound.clone();
+
+        // Resolve this turn's sandbox egress from the channel it
+        // arrived on, and install it with the attribution any denial
+        // will be recorded under. Done per turn because the policy is
+        // per channel and one agent can serve several. A turn with no
+        // channel resolves to the deny posture.
+        self.install_sandbox_egress();
+        // Same reasoning for memory: the origin labels are per turn,
+        // so they are rebuilt from this turn's inbound context.
+        self.install_memory();
+    }
+
     /// Build this turn's origin labels and hand them to the tool
     /// registry with the store.
     ///
@@ -1921,21 +1961,7 @@ impl Agent {
             return Ok(replay);
         }
 
-        // Stash the inbound context for the duration of the turn so
-        // tool-call emits (`AssistantToolCalls`, `ToolResult`) can
-        // carry the same `adapter_id` / `sender_id` as the sibling
-        // `UserMessage` row.
-        self.current_inbound = inbound.clone();
-
-        // Resolve this turn's sandbox egress from the channel it
-        // arrived on, and install it with the attribution any denial
-        // will be recorded under. Done per turn because the policy is
-        // per channel and one agent can serve several. A turn with no
-        // channel resolves to the deny posture.
-        self.install_sandbox_egress();
-        // Same reasoning for memory: the origin labels are per turn,
-        // so they are rebuilt from this turn's inbound context.
-        self.install_memory();
+        self.begin_turn(&inbound);
 
         // agent-runtime-error-recovery: reset the per-turn
         // tool-validation counter so a tool that hit its retry cap on
@@ -2306,9 +2332,7 @@ impl Agent {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
         inbound: InboundContext,
     ) -> Result<ProcessResult, AgentError> {
-        // Stash inbound for tool-call emits during the streaming turn.
-        // Same rationale as the non-streaming path.
-        self.current_inbound = inbound.clone();
+        self.begin_turn(&inbound);
 
         if let Some(replay) = self.dedup_inbound(&inbound_id)? {
             let _ = tx
