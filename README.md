@@ -268,6 +268,7 @@ Wirken contains the blast radius of a compromised agent; it does not make compro
 - [Configuration reference](docs/configuration.md)
 - [Channel setup](docs/channels.md) (Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage)
 - [Multi-agent setup](docs/multi-agent.md)
+- [Imported archives](docs/imported-archives.md) (importing a hosted assistant export, viewing it, the agent's gated access)
 - [Skills guide](docs/skills.md) (markdown skills, Wasm skills, registry)
 - [Lyrik overview](docs/lyrik-overview.md) (security-assessment skill, what it is and why)
 - [MCP setup](docs/mcp.md)
