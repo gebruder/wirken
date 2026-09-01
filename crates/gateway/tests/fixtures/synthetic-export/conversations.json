@@ -5,7 +5,9 @@
     "summary": "A short summary.",
     "created_at": "2026-01-02T03:04:05.000000Z",
     "updated_at": "2026-01-03T03:04:05.000000Z",
-    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
     "chat_messages": [
       {
         "uuid": "1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a",
@@ -40,7 +42,11 @@
             "stop_timestamp": null,
             "type": "thinking",
             "thinking": "Considering the question.",
-            "summaries": [{ "summary": "Considering the question" }],
+            "summaries": [
+              {
+                "summary": "Considering the question"
+              }
+            ],
             "cut_off": false,
             "flags": null
           },
@@ -62,7 +68,9 @@
     "summary": "",
     "created_at": "2026-02-02T03:04:05.000000Z",
     "updated_at": "2026-02-02T03:04:05.000000Z",
-    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
     "chat_messages": [
       {
         "uuid": "2a2a2a2a-2a2a-4a2a-8a2a-2a2a2a2a2a2a",
@@ -84,7 +92,11 @@
             "extracted_content": ""
           }
         ],
-        "files": [{ "file_name": "notes.txt" }],
+        "files": [
+          {
+            "file_name": "notes.txt"
+          }
+        ],
         "content": [
           {
             "type": "text",
@@ -201,7 +213,9 @@
     "summary": "A conversation whose content is markup, stored exactly as it arrived.",
     "created_at": "2026-03-02T03:04:05.000000Z",
     "updated_at": "2026-03-02T03:04:05.000000Z",
-    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
     "chat_messages": [
       {
         "uuid": "3a3a3a3a-3a3a-4a3a-8a3a-3a3a3a3a3a3a",
@@ -244,14 +258,18 @@
     "name": "Nameable but unfittable",
     "created_at": "2026-04-02T03:04:05.000000Z",
     "updated_at": "2026-04-02T03:04:05.000000Z",
-    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
     "chat_messages": "not an array, so this record does not fit and is skipped by uuid"
   },
   {
     "name": "No uuid, so there is no identifier to skip it by",
     "created_at": "2026-05-02T03:04:05.000000Z",
     "updated_at": "2026-05-02T03:04:05.000000Z",
-    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
     "chat_messages": []
   },
   {
@@ -260,8 +278,16 @@
     "summary": "",
     "created_at": "2026-06-02T03:04:05.000000Z",
     "updated_at": "2026-06-02T03:04:05.000000Z",
-    "account": { "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
-    "a_field_added_upstream": { "shape": ["unknown", 1, null] },
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
+    "a_field_added_upstream": {
+      "shape": [
+        "unknown",
+        1,
+        null
+      ]
+    },
     "chat_messages": [
       {
         "uuid": "6a6a6a6a-6a6a-4a6a-8a6a-6a6a6a6a6a6a",
@@ -273,6 +299,84 @@
         "files": [],
         "another_new_field": true,
         "content": []
+      }
+    ]
+  },
+  {
+    "uuid": "77777777-7777-4777-8777-777777777777",
+    "name": "",
+    "summary": "",
+    "created_at": "2026-07-02T03:04:05.000000Z",
+    "updated_at": "2026-07-02T03:04:05.000000Z",
+    "account": {
+      "uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    },
+    "chat_messages": [
+      {
+        "uuid": "7a7a7a7a-7a7a-4a7a-8a7a-7a7a7a7a7a7a",
+        "sender": "human",
+        "text": "",
+        "created_at": "2026-07-02T03:04:05.000000Z",
+        "updated_at": "2026-07-02T03:04:05.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "start_timestamp": "2026-07-02T03:04:05.000000Z",
+            "stop_timestamp": "2026-07-02T03:04:05.000000Z",
+            "type": "text",
+            "text": "",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      },
+      {
+        "uuid": "7b7b7b7b-7b7b-4b7b-8b7b-7b7b7b7b7b7b",
+        "sender": "assistant",
+        "text": "",
+        "created_at": "2026-07-02T03:04:06.000000Z",
+        "updated_at": "2026-07-02T03:04:06.000000Z",
+        "attachments": [],
+        "files": [],
+        "content": [
+          {
+            "start_timestamp": "2026-07-02T03:04:06.000000Z",
+            "stop_timestamp": "2026-07-02T03:04:06.000000Z",
+            "type": "text",
+            "text": "",
+            "citations": [],
+            "flags": null
+          }
+        ]
+      },
+      {
+        "uuid": "7c7c7c7c-7c7c-4c7c-8c7c-7c7c7c7c7c7c",
+        "sender": "human",
+        "text": "",
+        "created_at": "2026-07-02T03:04:07.000000Z",
+        "updated_at": "2026-07-02T03:04:07.000000Z",
+        "attachments": [
+          {
+            "file_name": "only-content.txt",
+            "file_size": 31,
+            "file_type": "text/plain",
+            "extracted_content": "The message text is empty; this file is all the content there is."
+          }
+        ],
+        "files": [
+          {
+            "file_name": "only-content.txt"
+          }
+        ],
+        "content": [
+          {
+            "type": "text",
+            "text": "",
+            "citations": [],
+            "flags": null
+          }
+        ]
       }
     ]
   }

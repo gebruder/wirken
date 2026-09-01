@@ -9279,6 +9279,103 @@ async fn a_read_row_names_the_account_not_the_source_id() {
     );
 }
 
+/// A conversation whose messages carry no text reads as a labelled
+/// record, not as a run of blank turns.
+///
+/// The shape is from a real archive: an untitled conversation whose
+/// messages have an empty flattened `text` and a `content` array
+/// holding one text block whose own text is also empty. The text is in
+/// neither place, so there is nothing to re-derive; what was wrong was
+/// rendering the absence as silence.
+#[tokio::test]
+async fn a_conversation_with_no_stored_text_reads_as_labelled_not_blank() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (store, _) =
+        wirken_gateway::imported::ImportStore::open(&tmp.path().join("imported.db")).unwrap();
+    let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+
+    let source_id = {
+        let mut s = store.lock().unwrap();
+        let decision = s
+            .begin_import(&wirken_gateway::imported::SourceDeclaration {
+                provider: wirken_gateway::imported::Provider::Anthropic,
+                source_account: "acct-1".into(),
+                archive_sha256: "hash".into(),
+                imported_at: "2026-01-01T00:00:00Z".into(),
+                sealed: false,
+            })
+            .unwrap();
+        let labels = wirken_gateway::imported::SourceLabels {
+            source_id: decision.source_id().to_string(),
+            provider: wirken_gateway::imported::Provider::Anthropic,
+            source_account: "acct-1".into(),
+        };
+        // Straight out of the committed corpus, so the fixture and the
+        // shape the corpus models cannot drift apart.
+        let corpus =
+            include_str!("../../gateway/tests/fixtures/synthetic-export/conversations.json");
+        let all: Vec<wirken_gateway::imported_format::ExportConversation> =
+            serde_json::from_str::<Vec<serde_json::Value>>(corpus)
+                .unwrap()
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+        let textless = all
+            .iter()
+            .find(|c| c.uuid == "77777777-7777-4777-8777-777777777777")
+            .expect("the corpus models a conversation with no stored text");
+        s.upsert_conversation(&labels, textless).unwrap();
+        decision.source_id().to_string()
+    };
+
+    let log = std::sync::Arc::new(
+        wirken_audit::SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap(),
+    );
+    let handle = log.handle_for(wirken_audit::SessionId::new("t".to_string()));
+    let ctx = crate::imported_tool::ImportedContext {
+        store,
+        agent_id: "a".into(),
+        adapter_id: None,
+        sender_id: None,
+        log: log.clone(),
+        handle,
+        search_digest_key: None,
+    };
+
+    let out = crate::imported_tool::execute(
+        &ctx,
+        "read_imported_chat",
+        &serde_json::json!({
+            "source": source_id,
+            "conversation": "77777777-7777-4777-8777-777777777777",
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(out.success, "the read succeeds: the record exists");
+    assert_eq!(
+        out.output
+            .matches("(no text stored for this message)")
+            .count(),
+        3,
+        "every text-less message is labelled rather than left blank: {}",
+        out.output,
+    );
+    assert!(
+        !out.output.contains("[human] \n"),
+        "no bare sender line survives: {}",
+        out.output,
+    );
+    // The one message carrying an attachment still shows it: an empty
+    // text field does not mean the record is empty.
+    assert!(
+        out.output.contains("only-content.txt"),
+        "attachment content still renders: {}",
+        out.output,
+    );
+}
+
 #[tokio::test]
 async fn every_search_attempt_reaches_the_chain_with_its_outcome() {
     use wirken_audit::{ImportedSearchOutcome, SessionEvent, SessionId, SessionLog};

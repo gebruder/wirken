@@ -50,6 +50,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   .imported-note { padding: 8px 16px; font-size: 12px; color: #8b949e; font-style: italic; }
   .imported-back { padding: 8px 16px; font-size: 12px; color: #58a6ff; cursor: pointer; }
   .imported-attachment { padding: 4px 16px 10px 40px; font-size: 13px; color: #c9d1d9; }
+  .content.empty { color: #8b949e; font-style: italic; }
   #archive-bar { padding: 14px 16px; border-top: 1px solid #21262d; display: flex; gap: 12px; align-items: center; }
   #archive-notice { flex: 1; font-size: 12px; color: #8b949e; font-style: italic; }
   #back-to-live { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
@@ -525,7 +526,16 @@ async function loadImportedConversation(source, uuid) {
   for (const message of detail.messages) {
     const div = el('div', 'msg');
     div.appendChild(el('span', 'role ' + message.sender, message.sender));
-    div.appendChild(el('span', 'content', message.text));
+    // A message the store holds no text for gets a label, not an empty
+    // span. Real archives carry these in quantity, and a blank turn
+    // reads as a message that said nothing rather than as one whose
+    // text was not imported. The claim is about what is stored, which
+    // is the only thing this page can check.
+    if (message.text.trim() === '') {
+      div.appendChild(el('span', 'content empty', 'no text stored for this message'));
+    } else {
+      div.appendChild(el('span', 'content', message.text));
+    }
     messages.appendChild(div);
 
     for (const attachment of message.attachments) {
@@ -1542,6 +1552,33 @@ mod tests {
         assert!(
             body.contains("catch (e) { loadSessions(); return; }"),
             "a thrown fetch refreshes before returning",
+        );
+    }
+
+    /// A message the store holds no text for is labelled, not drawn
+    /// blank.
+    ///
+    /// Real archives carry these in quantity -- in the store this was
+    /// found in, 15506 of 43807 messages had an empty text field and
+    /// an empty text block, concentrated in untitled conversations.
+    /// Rendering them as an empty span produced turns that looked like
+    /// messages saying nothing.
+    #[test]
+    fn a_message_with_no_stored_text_says_so() {
+        let script = page_script();
+        assert!(
+            script.contains("message.text.trim() === ''"),
+            "the detail view must test for a text-less message",
+        );
+        assert!(
+            script.contains("'no text stored for this message'"),
+            "and label it rather than append an empty span",
+        );
+        // The label goes through the same helper as every other value
+        // out of an archive.
+        assert!(
+            script.contains("el('span', 'content empty', 'no text stored for this message')"),
+            "the label is built by el, which encodes at render",
         );
     }
 

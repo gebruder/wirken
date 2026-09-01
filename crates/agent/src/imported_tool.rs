@@ -283,7 +283,21 @@ fn render(detail: &wirken_gateway::imported::ConversationDetail) -> String {
     }
     out.push('\n');
     for message in &detail.messages {
-        out.push_str(&format!("[{}] {}\n", message.sender, message.text));
+        // A message the store holds no text for is labelled rather
+        // than rendered as a bare sender line. Real archives carry
+        // these in quantity, and an empty line reads as a message that
+        // said nothing rather than as one whose text was not imported.
+        // The label says what the store holds, not what the archive
+        // held: those are different claims and only one is checkable
+        // from here.
+        if message.text.trim().is_empty() {
+            out.push_str(&format!(
+                "[{}] (no text stored for this message)\n",
+                message.sender
+            ));
+        } else {
+            out.push_str(&format!("[{}] {}\n", message.sender, message.text));
+        }
         for attachment in &message.attachments {
             let name = if attachment.file_name.trim().is_empty() {
                 "unnamed"

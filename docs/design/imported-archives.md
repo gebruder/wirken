@@ -358,6 +358,36 @@ the stored one. Presented with the archive it already holds, a live
 source does nothing. The source row carries the most recent archive
 hash; the hash of any individual run rides that run's audit event.
 
+### Text a message does not carry, and where a derivation would live
+
+A real archive turns out to hold messages with no text at all: an empty
+flattened `text` field, and a `content` array holding one text block
+whose own text is also empty. In the store this was measured in, 15506
+of 43807 messages had that shape, almost all of them in conversations
+whose name is also empty. There is nothing to recover from the stored
+blocks for those rows, because the blocks are empty too. Whether the
+archive itself carries that text under some field the parser does not
+read is a question about the archive, not about the store, and is not
+answered here.
+
+The decision, should a message ever be found whose text is present in
+its blocks and absent from the flattened field: the derived text is a
+column of its own, written beside the archive's `text` and never over
+it. The archive's own bytes stay verbatim, `content_json` included, and
+`text` continues to hold exactly what the export put there, empty
+included. Re-deriving a projection from bytes already stored is not an
+import and does not touch the seal, but a derivation that silently
+replaced the archive's field would make the store stop answering what
+the archive said, which is the one thing it exists to answer. Two
+columns, and the reader is told which it is looking at.
+
+No such column exists, because in the corpus that raised the question a
+derivation recovers zero rows. What the views and the read tool do
+instead is label the absence: a message the store holds no text for
+renders as a labelled record rather than a blank turn, and the label
+claims only what is checkable from the store -- that no text is stored
+-- not that the archive carried none.
+
 Replacement is wholesale. A record whose incoming snapshot is newer has
 its dependent rows deleted and rewritten as a unit rather than merged.
 An export is a snapshot, so a child absent from the newer archive is
