@@ -8788,6 +8788,20 @@ mod sandbox_egress_live {
             .collect()
     }
 
+    /// Every verdict row, allow and deny alike. `denials` filters to
+    /// refusals; the escalation tests need the allow row too, since an
+    /// allow after a restricting read is the case the label exists to
+    /// make visible.
+    fn verdicts(h: &Harness) -> Vec<SessionEvent> {
+        h.log
+            .get_since(&h.handle, 0)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event)
+            .filter(|e| matches!(e, SessionEvent::SandboxEgressVerdict { .. }))
+            .collect()
+    }
+
     fn reasons(h: &Harness) -> Vec<SandboxEgressDenyReason> {
         denials(h)
             .into_iter()
@@ -9043,6 +9057,228 @@ mod sandbox_egress_live {
             "an allowed request must not record a denial, got {:?}",
             reasons(&h)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // #235: the taint-to-verdict ladder, guarded.
+    //
+    // Deliberately narrower than the observation that closed the
+    // imported-archives egress condition. That run drove a real turn:
+    // the archive read set the label through tool dispatch and
+    // `begin_turn` installed the context from the channel's policy.
+    // These build the context by hand, so an installation regression
+    // is invisible to them; `begin_turn_installs_every_per_turn_context`
+    // covers that half separately, and nothing joins the two. What is
+    // guarded here is the ladder in `decide_with_sensitivity` and the
+    // row it writes, which is what a change to `restricting_basis`,
+    // the ladder, or the verdict shape would otherwise pass silently.
+    // -----------------------------------------------------------------
+
+    /// Gate double that answers with a fixed outcome and keeps every
+    /// context it was asked with. `ScriptedGate` in `approval_gate`
+    /// keeps only the tool name; the assertions here are about what
+    /// the trigger says, so the whole context is needed.
+    struct RecordingGate {
+        allow: bool,
+        asked: std::sync::Mutex<Vec<crate::error::PermissionDenialContext>>,
+    }
+
+    impl RecordingGate {
+        fn new(allow: bool) -> Arc<Self> {
+            Arc::new(Self {
+                allow,
+                asked: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn asked(&self) -> Vec<crate::error::PermissionDenialContext> {
+            self.asked.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::approval_gate::ApprovalGate for RecordingGate {
+        async fn request_approval(
+            &self,
+            ctx: &crate::error::PermissionDenialContext,
+        ) -> crate::approval_gate::ApprovalOutcome {
+            self.asked.lock().unwrap().push(ctx.clone());
+            if self.allow {
+                crate::approval_gate::ApprovalOutcome::Approved {
+                    actor: Some("test-operator".into()),
+                }
+            } else {
+                crate::approval_gate::ApprovalOutcome::Denied {
+                    reason: Some("test says no".into()),
+                    actor: Some("test-operator".into()),
+                }
+            }
+        }
+        fn source(&self) -> wirken_audit::ApprovalSource {
+            wirken_audit::ApprovalSource::Stdin
+        }
+    }
+
+    /// An allowlist harness whose session has already read an imported
+    /// archive. The label goes into `observed` the way `dispatch_tool`
+    /// puts it there after a `read_imported_chat`: by inserting the
+    /// `ReadSensitivity` the tool maps to, not by naming a string.
+    async fn tainted_harness(gate: Option<Arc<RecordingGate>>) -> Option<Harness> {
+        let mut h = harness(allowlist(&["example.com"]), CURL_IMAGE).await?;
+        h.ctx
+            .observed
+            .write()
+            .unwrap()
+            .insert(crate::tool::ReadSensitivity::ImportedArchive);
+        h.ctx.approval = gate.map(|g| g as Arc<dyn crate::approval_gate::ApprovalGate>);
+        Some(h)
+    }
+
+    const FETCH_EXAMPLE: &str = "command -v curl >/dev/null && echo ran=1; \
+         code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 https://example.com/); \
+         echo http=$code";
+
+    /// Allow branch: the operator is asked with the basis named, says
+    /// yes, the connection completes, and the row says it was permitted
+    /// after the read.
+    #[tokio::test]
+    async fn an_imported_archive_read_escalates_egress_and_the_allow_row_names_it() {
+        let gate = RecordingGate::new(true);
+        let Some(h) = tainted_harness(Some(gate.clone())).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(FETCH_EXAMPLE, h.tmp.path(), Some(&h.ctx))
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(
+            r.output.contains("http=200"),
+            "an approved escalation must connect end to end, got: {}",
+            r.output
+        );
+
+        let asked = gate.asked();
+        assert_eq!(
+            asked.len(),
+            1,
+            "the operator is asked exactly once: {asked:?}"
+        );
+        let ctx = &asked[0];
+        assert_eq!(ctx.tool_name, "sandbox_egress");
+        assert!(
+            matches!(
+                &ctx.action,
+                wirken_gateway::permissions::Action::NetworkRequest { domain } if domain == "example.com"
+            ),
+            "the prompt is about the destination: {:?}",
+            ctx.action
+        );
+        let trigger = ctx.trigger_message.as_deref().unwrap_or_default();
+        assert!(
+            trigger.contains("example.com:443")
+                && trigger.contains("after reading imported_archive"),
+            "the trigger names the destination and the basis: {trigger:?}"
+        );
+
+        let rows = verdicts(&h);
+        assert_eq!(rows.len(), 1, "one verdict for one CONNECT: {rows:?}");
+        match &rows[0] {
+            SessionEvent::SandboxEgressVerdict {
+                host,
+                port,
+                allowed,
+                reason,
+                mode,
+                sensitivity_basis,
+                escalated,
+                ..
+            } => {
+                assert_eq!(host, "example.com");
+                assert_eq!(*port, 443);
+                assert!(*allowed, "the operator said yes");
+                assert_eq!(*reason, None);
+                assert_eq!(*mode, wirken_audit::SandboxEgressModeLabel::Allowlist);
+                assert_eq!(sensitivity_basis, &["imported_archive".to_string()]);
+                assert!(*escalated, "a restricting label changed the verdict path");
+            }
+            other => panic!("expected a verdict row, got {other:?}"),
+        }
+    }
+
+    /// Deny branch: the same prompt, the operator says no, the
+    /// connection does not complete, and the row carries the refusal.
+    #[tokio::test]
+    async fn a_denied_escalation_refuses_and_the_row_carries_the_reason() {
+        let gate = RecordingGate::new(false);
+        let Some(h) = tainted_harness(Some(gate.clone())).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(FETCH_EXAMPLE, h.tmp.path(), Some(&h.ctx))
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(
+            !r.output.contains("http=200"),
+            "a denied escalation must not connect, got: {}",
+            r.output
+        );
+        assert_eq!(gate.asked().len(), 1, "the operator was asked");
+
+        let rows = verdicts(&h);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        match &rows[0] {
+            SessionEvent::SandboxEgressVerdict {
+                allowed,
+                reason,
+                sensitivity_basis,
+                escalated,
+                ..
+            } => {
+                assert!(!*allowed);
+                assert_eq!(*reason, Some(SandboxEgressDenyReason::SensitivityRefused));
+                assert_eq!(sensitivity_basis, &["imported_archive".to_string()]);
+                assert!(*escalated);
+            }
+            other => panic!("expected a verdict row, got {other:?}"),
+        }
+    }
+
+    /// No operator reachable: the headless branch fails closed with the
+    /// same reason and basis, and nobody is asked. This is the arm a
+    /// cron or subagent turn lands on.
+    #[tokio::test]
+    async fn a_tainted_session_with_no_operator_refuses_without_asking() {
+        let Some(h) = tainted_harness(None).await else {
+            return;
+        };
+        let r = h
+            .sandbox
+            .exec(FETCH_EXAMPLE, h.tmp.path(), Some(&h.ctx))
+            .await
+            .expect("exec");
+        assert_client_ran(&r.output);
+        assert!(!r.output.contains("http=200"), "got: {}", r.output);
+
+        let rows = verdicts(&h);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        match &rows[0] {
+            SessionEvent::SandboxEgressVerdict {
+                allowed,
+                reason,
+                sensitivity_basis,
+                escalated,
+                ..
+            } => {
+                assert!(!*allowed);
+                assert_eq!(*reason, Some(SandboxEgressDenyReason::SensitivityRefused));
+                assert_eq!(sensitivity_basis, &["imported_archive".to_string()]);
+                assert!(*escalated);
+            }
+            other => panic!("expected a verdict row, got {other:?}"),
+        }
     }
 
     /// #202 acceptance: tier none creates no sidecar and no network.
