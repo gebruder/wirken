@@ -729,8 +729,13 @@ mod tests {
             .expect("loader present");
         let end = src[start..].find("\n}\n").expect("loader closes") + start;
         let body = &src[start..end];
+        // `.get("` rather than `val.get("`: rustfmt wraps the longer
+        // chains as `val` on one line and `.get("...")` on the next, and
+        // a needle that assumed one line found two keys out of five and
+        // shipped red. Inside the loader body the only map queried is
+        // `val`, so the shorter needle is exact.
         let mut read: Vec<&str> = body
-            .split("val.get(\"")
+            .split(".get(\"")
             .skip(1)
             .filter_map(|rest| rest.split('"').next())
             .collect();
