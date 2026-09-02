@@ -662,6 +662,101 @@ mod tests {
     ///
     /// The needles are assembled at runtime so this test's own source
     /// does not contain them.
+    /// No keychain probe in this crate supplies an empty passphrase,
+    /// except the two named here with their reason.
+    ///
+    /// `prompt_vault_passphrase` in `run.rs` carries the rule and its
+    /// casualties: an empty supplier cannot unwrap a device key wrapped
+    /// under a real passphrase on the age-file backend, so the
+    /// subsystem that probed with one degrades silently. The rule was
+    /// written for `run`, and a guard scoped to `run.rs` let two probes
+    /// elsewhere pass. Issue 233. This reads every source file in the
+    /// crate, so a new file cannot start outside the rule.
+    ///
+    /// Each allowance is asserted to still hold exactly its offenders.
+    /// An allowance that stopped matching would otherwise stay in the
+    /// list as a hole for the next offender to hide in, and a fix that
+    /// removed an offender would leave a stale reason behind.
+    #[test]
+    fn no_keychain_probe_supplies_an_empty_passphrase_outside_the_named_allowances() {
+        // Needles assembled at runtime so this test's own source does
+        // not contain either and match itself.
+        let probe = format!("probe_{}(", "keychain");
+        let empty = format!("String::{}", "new");
+
+        // (file relative to src/, offenders it may hold, why)
+        let allowances: &[(&str, usize, &str)] = &[
+            (
+                "commands/doctor.rs",
+                1,
+                "a diagnostic must not prompt, and it reports the posture it lands in: \
+                 the surrounding comment says so and is_signed() is printed",
+            ),
+            (
+                "commands/zirkel.rs",
+                1,
+                "open decision under issue 233: whether zirkel prompts, refuses, or \
+                 degrades-and-reports depends on whether it runs non-interactively, \
+                 a zirkel product question rather than a keychain-rule fix. Left \
+                 exactly as found until that is decided.",
+            ),
+        ];
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs(&root, &mut files);
+        assert!(
+            files.len() > 10,
+            "the walker saw too few files to be trusted: {files:?}"
+        );
+
+        let mut seen_rules_home = false;
+        for path in &files {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "commands/run.rs" {
+                seen_rules_home = true;
+            }
+            let src = std::fs::read_to_string(path).unwrap();
+            let offenders: Vec<&str> = src
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//"))
+                .filter(|l| l.contains(&probe) && l.contains(&empty))
+                .collect();
+            match allowances.iter().find(|(f, _, _)| *f == rel) {
+                Some((_, expected, why)) => assert_eq!(
+                    offenders.len(),
+                    *expected,
+                    "{rel}: the allowance ({why}) no longer matches what the file holds. \
+                     If the probe was fixed, remove the allowance with it. Found: {offenders:?}",
+                ),
+                None => assert!(
+                    offenders.is_empty(),
+                    "{rel}: a keychain probe supplies an empty passphrase, which cannot \
+                     unwrap a device key on the age-file backend and degrades that \
+                     subsystem silently. Use prompt_vault_passphrase, or name an \
+                     allowance here with its reason. Offending lines: {offenders:?}",
+                ),
+            }
+        }
+        assert!(seen_rules_home, "the walker never reached commands/run.rs");
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                collect_rs(&p, out);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
     #[test]
     fn no_model_name_is_stored_in_the_config_paths() {
         // The paths that choose a model to store. `mod.rs` is not one
