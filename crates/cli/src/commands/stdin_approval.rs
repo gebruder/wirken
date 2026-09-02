@@ -242,14 +242,18 @@ mod tests {
         assert_eq!(outcome, ApprovalOutcome::Timeout);
     }
 
+    /// The three tests below write the same process-global variable.
+    /// cargo runs a binary's tests on parallel threads, so without a
+    /// lock one test's set can land between another's set and read:
+    /// that interleaving was observed once in a full workspace run,
+    /// where the zero-fallback test read 5s. Serialised here; the
+    /// helper reads once, so the critical section is the set, the
+    /// read and the remove together.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_timeout_uses_env_when_set() {
-        // SAFETY: cargo test runs this binary's tests in parallel
-        // by default. Use a unique env value and read it back
-        // through the helper before any other test could touch it;
-        // the helper reads once and returns. We do not assert
-        // global cleanup because every test that touches this var
-        // sets it explicitly before reading.
+        let _serial = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S", "5");
         }
@@ -262,6 +266,7 @@ mod tests {
 
     #[test]
     fn resolve_timeout_falls_back_on_malformed() {
+        let _serial = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S", "not-a-number");
         }
@@ -277,6 +282,7 @@ mod tests {
         // Zero would mean "never wait"; not what an operator means
         // when they configure a timeout. Fall back to the default
         // so a misconfiguration doesn't auto-deny every prompt.
+        let _serial = ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S", "0");
         }
