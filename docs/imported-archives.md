@@ -242,9 +242,6 @@ tool, or what your agent writes back to you in chat. An agent that has
 read an archive can repeat its contents in a reply, and nothing here
 stops that. Issue #230 tracks `http_request`.
 
-Related open issues: #234 for the sandbox image, and #235 for test
-coverage of the egress path above.
-
 ## Operational notes
 
 **The query digest needs an unlocked vault.** Search records a keyed
@@ -254,8 +251,9 @@ their records carry no digest. The audit log records that this
 happened, so a record without a digest can be traced to a start that
 said why. Unlock the vault at start to get digests.
 
-**The sandbox image ships no HTTP client.** An `exec` asked to fetch a
-URL with a common client tool will not find one. This is issue #234.
+**The default sandbox image ships no HTTP client.** An `exec` asked to
+fetch a URL with a common client tool will not find one unless
+`sandbox.json` sets `image` to an image that carries one.
 
 **A search index migration runs on the first start after upgrading.**
 It builds the search index over archives imported before the index

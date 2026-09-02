@@ -102,6 +102,17 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from);
+    // The container image `exec` runs in. Absent or empty means the
+    // compiled-in default. The field, its consumers and its default all
+    // existed before this line did; the key was read by nothing, and an
+    // operator who set it got the default with no word about it.
+    let image = val
+        .get("image")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| SandboxConfig::default().image);
     let shell_str = val.get("shell").and_then(|v| v.as_str()).unwrap_or("");
     let shell = if shell_str.is_empty() {
         ShellMode::default()
@@ -113,6 +124,7 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         network,
         shell,
         sidecar_binary,
+        image,
         ..Default::default()
     }
 }
@@ -618,6 +630,31 @@ mod tests {
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::ExecOnly);
         assert!(!cfg.network);
+    }
+
+    /// Issue 234: `image` was a field on `SandboxConfig` that no
+    /// configuration path set, so a key written into sandbox.json was
+    /// read by nothing and the sandbox always ran the compiled-in image.
+    #[test]
+    fn load_sandbox_config_reads_image() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("sandbox.json"),
+            r#"{"mode":"exec-only","image":"curlimages/curl:latest"}"#,
+        )
+        .unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.image, "curlimages/curl:latest");
+    }
+
+    /// A key that is present but empty names no image, so the default
+    /// stands rather than an unnamed image being configured.
+    #[test]
+    fn load_sandbox_config_empty_image_uses_default() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sandbox.json"), r#"{"image":"  "}"#).unwrap();
+        let cfg = load_sandbox_config(tmp.path());
+        assert_eq!(cfg.image, SandboxConfig::default().image);
     }
 
     #[test]

@@ -94,17 +94,26 @@ unchanged on this path.
 
 The sidecar runs the wirken binary itself, bind-mounted read-only, which
 requires the statically linked build. `sandbox.json` sets `sidecar_binary` to
-point at a static binary when the running gateway is not one:
+point at a static binary when the running gateway is not one, and `image` to
+name the container image `exec` runs in:
 
 ```json
 {
   "mode": "exec-only",
+  "image": "curlimages/curl:latest",
   "sidecar_binary": "/usr/local/bin/wirken"
 }
 ```
 
-Absent, it defaults to the gateway's own executable. A configured path that
-does not exist refuses the `exec` rather than running it unproxied.
+`sidecar_binary` absent defaults to the gateway's own executable. A configured
+path that does not exist refuses the `exec` rather than running it unproxied.
+
+`image` absent or empty means the compiled-in default. That default carries no
+HTTP client, so an `exec` on a channel granted proxied egress reaches nothing
+from it; naming an image that carries one is how an operator exercises the
+egress path. The choice is per install and opt-in, which is where it belongs:
+a default image with a network client widens every sandbox's capability
+surface for everyone.
 
 See [egress.md](egress.md) for the modes, properties, runtime requirement, and
 the known CONNECT/SNI limit.
