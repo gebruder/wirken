@@ -1,10 +1,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod build_info;
 mod commands;
 
 #[derive(Parser)]
-#[command(name = "wirken", version, about = "Secure personal AI agent gateway")]
+#[command(
+    name = "wirken",
+    version = build_info::version_static(),
+    about = "Secure personal AI agent gateway"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

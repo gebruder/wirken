@@ -119,7 +119,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     cfg.ensure_dirs()?;
 
     println!();
-    println!("  wirken v{}", env!("CARGO_PKG_VERSION"));
+    // Version, commit and cleanliness on one line, the executable's
+    // path on the next, so a paste that starts with a restart names
+    // the build it is evidence about. Issue 231.
+    println!("  wirken v{}", crate::build_info::identity());
+    println!("  binary: {}", crate::build_info::binary_path());
     println!("  ──────");
     println!();
 

@@ -8,6 +8,17 @@ The `release-process.md` runbook covers how versions get cut and
 signed. Unreleased changes accumulate at the top until a release is
 tagged.
 
+## [Unreleased]
+
+### Changed
+
+- `wirken --version` and the startup banner name the commit the
+  binary was built from, whether the tree had uncommitted changes at
+  build time, and the absolute path of the running executable. A build
+  with no repository to ask prints `unknown` rather than failing. No
+  build timestamp is embedded, so the same commit builds to the same
+  binary. Closes #231.
+
 ## [1.19.0] - 2026-09-02
 
 ### Added
