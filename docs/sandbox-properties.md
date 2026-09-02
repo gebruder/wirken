@@ -115,6 +115,11 @@ egress path. The choice is per install and opt-in, which is where it belongs:
 a default image with a network client widens every sandbox's capability
 surface for everyone.
 
+A key in `sandbox.json` that the loader does not read is named in a warning
+at start and ignored. The loader never refuses a file over one, so a file
+written for a newer build does not stop an older one from starting; the
+warning is what says the setting did nothing.
+
 See [egress.md](egress.md) for the modes, properties, runtime requirement, and
 the known CONNECT/SNI limit.
 

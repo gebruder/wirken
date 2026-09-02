@@ -59,6 +59,30 @@ pub fn config() -> GatewayConfig {
 /// `permissions.sandbox_mode` is set on the pulled org config, so the
 /// precedence is: org config (force-overwrites each `wirken run`) >
 /// locally configured `sandbox.json` > default.
+/// Every key `load_sandbox_config` reads, sorted. The drift guard in
+/// the tests reads the loader's source and asserts this list matches
+/// it, so a key added to one and not the other fails rather than
+/// quietly joining the set the loader ignores.
+pub(crate) const SANDBOX_KEYS: &[&str] = &["image", "mode", "network", "shell", "sidecar_binary"];
+
+/// Top-level keys in `sandbox.json` that the loader will not read,
+/// sorted. An unread key produced nothing at all before this existed:
+/// the operator wrote a setting, the file parsed, the gateway started
+/// clean, and the setting did nothing. The only way to find out was to
+/// read the loader. Issue 234.
+pub(crate) fn unknown_sandbox_keys(val: &serde_json::Value) -> Vec<String> {
+    let Some(obj) = val.as_object() else {
+        return Vec::new();
+    };
+    let mut unknown: Vec<String> = obj
+        .keys()
+        .filter(|k| !SANDBOX_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown
+}
+
 pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
     let path = data_dir.join("sandbox.json");
     if !path.exists() {
@@ -84,6 +108,16 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
             return SandboxConfig::default();
         }
     };
+    // Warn, never refuse: a file written for a newer build must not
+    // stop an older one from starting, and the message names the key
+    // rather than failing the boot with a parse error.
+    let unknown = unknown_sandbox_keys(&val);
+    if !unknown.is_empty() {
+        tracing::warn!(
+            "{}: unrecognised key(s) {unknown:?} are ignored; the keys read are {SANDBOX_KEYS:?}",
+            path.display()
+        );
+    }
     let mode_str = val.get("mode").and_then(|v| v.as_str()).unwrap_or("");
     let mode = if mode_str.is_empty() {
         SandboxMode::default()
@@ -655,6 +689,57 @@ mod tests {
         std::fs::write(tmp.path().join("sandbox.json"), r#"{"image":"  "}"#).unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.image, SandboxConfig::default().image);
+    }
+
+    #[test]
+    fn unknown_sandbox_keys_names_what_the_loader_will_ignore() {
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"mode":"exec-only","timeout":30,"image":"x","imgae":"y"}"#)
+                .unwrap();
+        assert_eq!(
+            unknown_sandbox_keys(&v),
+            vec!["imgae".to_string(), "timeout".to_string()]
+        );
+        let known: serde_json::Value = serde_json::from_str(
+            r#"{"image":"a","mode":"b","network":true,"shell":"c","sidecar_binary":"d"}"#,
+        )
+        .unwrap();
+        assert!(unknown_sandbox_keys(&known).is_empty());
+    }
+
+    #[test]
+    fn unknown_sandbox_keys_is_empty_for_a_non_object() {
+        for v in ["[]", "3", "\"s\"", "null"] {
+            let v: serde_json::Value = serde_json::from_str(v).unwrap();
+            assert!(unknown_sandbox_keys(&v).is_empty(), "{v}");
+        }
+    }
+
+    /// The key list and the loader must not drift. This reads the
+    /// loader's own source, collects every `val.get("...")` it makes,
+    /// and asserts that set is exactly SANDBOX_KEYS. A key read by the
+    /// loader but missing from the list would be warned about as
+    /// unknown; a key in the list the loader never reads would be
+    /// silently ignored again, which is the defect this exists for.
+    #[test]
+    fn sandbox_keys_matches_what_the_loader_reads() {
+        let src = include_str!("mod.rs");
+        let start = src
+            .find("pub fn load_sandbox_config(")
+            .expect("loader present");
+        let end = src[start..].find("\n}\n").expect("loader closes") + start;
+        let body = &src[start..end];
+        let mut read: Vec<&str> = body
+            .split("val.get(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        read.sort();
+        read.dedup();
+        assert_eq!(
+            read, SANDBOX_KEYS,
+            "SANDBOX_KEYS and the loader's reads have drifted"
+        );
     }
 
     #[test]

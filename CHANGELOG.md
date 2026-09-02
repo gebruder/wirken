@@ -19,6 +19,14 @@ tagged.
   build timestamp is embedded, so the same commit builds to the same
   binary. Closes #231.
 
+- `sandbox.json` reads `image`, naming the container image `exec` runs
+  in. The field existed and was consumed; no configuration path set it.
+  Absent or empty means the compiled-in default, which is unchanged.
+
+- A key in `sandbox.json` the loader does not read is now named in a
+  warning at start and ignored, where before it produced nothing at all.
+  Closes #234.
+
 ## [1.19.0] - 2026-09-02
 
 ### Added
