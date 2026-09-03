@@ -812,22 +812,12 @@ mod tests {
         let empty = format!("String::{}", "new");
 
         // (file relative to src/, offenders it may hold, why)
-        let allowances: &[(&str, usize, &str)] = &[
-            (
-                "commands/doctor.rs",
-                1,
-                "a diagnostic must not prompt, and it reports the posture it lands in: \
+        let allowances: &[(&str, usize, &str)] = &[(
+            "commands/doctor.rs",
+            1,
+            "a diagnostic must not prompt, and it reports the posture it lands in: \
                  the surrounding comment says so and is_signed() is printed",
-            ),
-            (
-                "commands/zirkel.rs",
-                1,
-                "open decision under issue 233: whether zirkel prompts, refuses, or \
-                 degrades-and-reports depends on whether it runs non-interactively, \
-                 a zirkel product question rather than a keychain-rule fix. Left \
-                 exactly as found until that is decided.",
-            ),
-        ];
+        )];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();

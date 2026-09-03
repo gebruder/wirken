@@ -76,7 +76,7 @@ pub async fn run() -> Result<()> {
     // vault directly; the keys never reach the agent / LLM layer.
     // Sources without a key in the vault are recorded as
     // unsupported by the orchestrator with a clear message.
-    let source_api_keys = resolve_zirkel_source_api_keys(&data_dir);
+    let source_api_keys = resolve_zirkel_source_api_keys(&data_dir)?;
 
     let summary = orchestrator_run(OrchestratorConfig {
         preset_dir,
@@ -535,36 +535,144 @@ impl SourceAuthValidator {
 /// is configured — `wirken zirkel run` is allowed to fire on a
 /// host with only public RSS / Federal Register sources, and
 /// requiring an empty vault to exist would be a footgun.
-fn resolve_zirkel_source_api_keys(
-    data_dir: &std::path::Path,
-) -> std::collections::HashMap<String, String> {
-    use wirken_vault::{CredentialStore, probe_keychain};
-    let mut out = std::collections::HashMap::new();
+/// The keyed sources this orchestrator knows, and the vault slot each
+/// one's key lives in. Adding a keyed source means a row here plus its
+/// fetcher registration in wirken-zirkel's orchestrator.
+const KEYED_SOURCES: &[(&str, &str)] = &[
+    ("congress-gov", "zirkel-congress-gov-api-key"),
+    ("govinfo-gov", "zirkel-govinfo-gov-api-key"),
+];
 
+/// What a scheduled run found for one keyed source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyedSource {
+    /// A key was stored and could be read.
+    Resolved(String),
+    /// No key was ever stored under this source's slot. Not an error:
+    /// the orchestrator reports the source unsupported and the run
+    /// stands.
+    Unconfigured,
+    /// A key is stored under this source's slot and could not be read,
+    /// with why. A run that proceeded would report itself complete
+    /// while missing something the operator configured.
+    Unreadable(String),
+}
+
+/// Resolve every keyed source against the vault, for a run with no
+/// operator at a terminal. Issue 233.
+///
+/// `wirken zirkel run` is what cron calls, so there is nobody to
+/// prompt: the passphrase comes from WIRKEN_VAULT_PASSPHRASE or it does
+/// not come at all. The names in the vault are readable without it,
+/// which is what lets this tell a configured key it cannot unlock apart
+/// from a key that was never stored. If nothing keyed is configured the
+/// vault is not opened, and there is nothing to report.
+fn keyed_source_posture(data_dir: &std::path::Path) -> Vec<(&'static str, KeyedSource)> {
+    use wirken_vault::{CredentialStore, probe_keychain};
     let vault_db = data_dir.join("vault.db");
-    if !vault_db.exists() {
+    let names = match CredentialStore::names(&vault_db) {
+        Ok(n) => n,
+        Err(e) => {
+            // The file is there and its names cannot be read. Nothing
+            // can be ruled out, so every keyed source is treated as
+            // configured and unreadable.
+            let why = format!(
+                "could not read credential names from {}: {e}",
+                vault_db.display()
+            );
+            return KEYED_SOURCES
+                .iter()
+                .map(|(src, _)| (*src, KeyedSource::Unreadable(why.clone())))
+                .collect();
+        }
+    };
+    let configured: Vec<&(&str, &str)> = KEYED_SOURCES
+        .iter()
+        .filter(|(_, slot)| names.iter().any(|n| n == slot))
+        .collect();
+    let mut out: Vec<(&'static str, KeyedSource)> = KEYED_SOURCES
+        .iter()
+        .filter(|entry| !configured.contains(entry))
+        .map(|(src, _)| (*src, KeyedSource::Unconfigured))
+        .collect();
+    if configured.is_empty() {
         return out;
     }
-
-    let keychain = probe_keychain(data_dir, String::new);
-    let Ok(store) = CredentialStore::open(&vault_db, keychain.as_ref()) else {
-        tracing::debug!("zirkel: vault.db present but could not be opened");
-        return out;
-    };
-
-    // Well-known keyed sources. Adding a new keyed source means
-    // adding a row here plus its fetcher registration in
-    // wirken-zirkel's orchestrator.
-    let sources = [
-        ("congress-gov", "zirkel-congress-gov-api-key"),
-        ("govinfo-gov", "zirkel-govinfo-gov-api-key"),
-    ];
-    for (source_name, vault_key) in sources {
-        if let Ok((secret, _)) = store.retrieve(vault_key) {
-            out.insert(source_name.to_string(), secret.expose().to_string());
-        }
+    // Headless: the environment supplies the passphrase or nothing does.
+    let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
+    let keychain = probe_keychain(data_dir, move || pp);
+    let store = CredentialStore::open(&vault_db, keychain.as_ref());
+    for (src, slot) in configured {
+        let state = match &store {
+            Ok(store) => match store.retrieve(slot) {
+                Ok((secret, _)) => KeyedSource::Resolved(secret.expose().to_string()),
+                Err(e) => {
+                    KeyedSource::Unreadable(format!("stored as {slot} but not readable: {e}"))
+                }
+            },
+            Err(e) => KeyedSource::Unreadable(format!(
+                "stored as {slot} but the vault would not open: {e}"
+            )),
+        };
+        out.push((src, state));
     }
     out
+}
+
+/// The decision a run makes from its posture, kept pure so it can be
+/// tested for every shape without a vault.
+///
+/// Any configured key that cannot be read refuses the run and names
+/// every such source. Unconfigured sources pass through to the
+/// orchestrator, which reports them unsupported in the summary; that
+/// is a run being honest about its scope, not a run missing something.
+fn key_decision(
+    posture: &[(&'static str, KeyedSource)],
+) -> Result<std::collections::HashMap<String, String>, Vec<String>> {
+    let unreadable: Vec<String> = posture
+        .iter()
+        .filter_map(|(src, state)| match state {
+            KeyedSource::Unreadable(why) => Some(format!("{src}: {why}")),
+            _ => None,
+        })
+        .collect();
+    if !unreadable.is_empty() {
+        return Err(unreadable);
+    }
+    Ok(posture
+        .iter()
+        .filter_map(|(src, state)| match state {
+            KeyedSource::Resolved(key) => Some((src.to_string(), key.clone())),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Resolve keyed-source API keys for this run, or refuse it.
+///
+/// Every unreadable configured source is reported at warn, which is
+/// the default log floor, so the reason reaches the cron mail or the
+/// journal whether or not stdout is kept. The refusal itself is the
+/// returned error, so the exit status says the run did not happen.
+fn resolve_zirkel_source_api_keys(
+    data_dir: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>> {
+    let posture = keyed_source_posture(data_dir);
+    match key_decision(&posture) {
+        Ok(keys) => Ok(keys),
+        Err(unreadable) => {
+            for line in &unreadable {
+                tracing::warn!("zirkel: configured keyed source not resolved: {line}");
+            }
+            Err(anyhow!(
+                "refusing to run: {} configured keyed source(s) could not be read, so a run \
+                 would report complete while missing them. {}. For a scheduled run, put the \
+                 vault passphrase in WIRKEN_VAULT_PASSPHRASE in the cron environment.",
+                unreadable.len(),
+                unreadable.join("; ")
+            ))
+        }
+    }
 }
 
 /// Idempotent migration application — same shape SkillStore uses.
@@ -668,5 +776,52 @@ async fn push_digest_for_run(
             Ok(())
         }
         Err(e) => Err(anyhow!("digest push failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod key_posture_tests {
+    use super::{KeyedSource, key_decision};
+
+    #[test]
+    fn nothing_configured_proceeds_with_no_keys() {
+        let p = vec![
+            ("congress-gov", KeyedSource::Unconfigured),
+            ("govinfo-gov", KeyedSource::Unconfigured),
+        ];
+        assert!(key_decision(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolved_keys_pass_through_and_unconfigured_ones_are_not_errors() {
+        let p = vec![
+            ("congress-gov", KeyedSource::Resolved("abc".into())),
+            ("govinfo-gov", KeyedSource::Unconfigured),
+        ];
+        let keys = key_decision(&p).unwrap();
+        assert_eq!(keys.get("congress-gov").map(String::as_str), Some("abc"));
+        assert!(!keys.contains_key("govinfo-gov"));
+    }
+
+    #[test]
+    fn one_unreadable_configured_source_refuses_the_run_and_names_it() {
+        let p = vec![
+            ("congress-gov", KeyedSource::Resolved("abc".into())),
+            (
+                "govinfo-gov",
+                KeyedSource::Unreadable("vault would not open".into()),
+            ),
+        ];
+        let err = key_decision(&p).unwrap_err();
+        assert_eq!(err, vec!["govinfo-gov: vault would not open".to_string()]);
+    }
+
+    #[test]
+    fn every_unreadable_source_is_named_not_only_the_first() {
+        let p = vec![
+            ("congress-gov", KeyedSource::Unreadable("a".into())),
+            ("govinfo-gov", KeyedSource::Unreadable("b".into())),
+        ];
+        assert_eq!(key_decision(&p).unwrap_err().len(), 2);
     }
 }

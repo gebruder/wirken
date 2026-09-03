@@ -19,6 +19,8 @@ Zirkel's `sources.toml` enumerates each source the operator wants polled. Every 
 
 API keys live in the wirken vault (`zirkel-<source>-api-key` slot, written via `wirken zirkel auth-set`). The orchestrator reads the vault at startup, passes resolved keys to the fetcher's constructor, and the fetcher injects them into the `X-Api-Key` header at request time. Keys never cross the agent or LLM boundary; only the parsed `FetchedItem` flows downstream.
 
+A scheduled run has nobody to prompt, so it reads the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` in its environment and never asks. Credential names are readable without the passphrase, which is how the run tells the two cases apart: a source with no key stored is reported unsupported in the summary and the run stands; a source whose key is stored but cannot be read is named at warn level and the run refuses, with a non-zero exit, rather than reporting itself complete while missing something configured. Set the variable in the cron entry's environment.
+
 Each fetcher declares a per-host daily request budget via `Fetcher::default_rate_limit_per_day`. The orchestrator merges these into `RateLimitConfig.per_host_overrides` at startup, so authenticated APIs run within their published quotas while unauthenticated hosts stay at the polite 2/day default.
 
 ---
