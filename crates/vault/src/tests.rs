@@ -858,3 +858,54 @@ fn vault_reset_plan_counts_rows_without_the_device_key() {
     assert!(plan.keychain_dir.is_some());
     assert!(plan.db_files.iter().any(|p| p == &db_path));
 }
+
+/// `names` answers "what is configured" from a process that holds no
+/// device key. A scheduled zirkel run uses it to tell a configured key
+/// it cannot read apart from a key that was never stored.
+#[test]
+fn names_are_listable_without_the_device_key() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("vault.db");
+    {
+        let store = CredentialStore::open_with_key(&db, crate::crypto::generate_key()).unwrap();
+        store
+            .store(
+                "zirkel-congress-gov-api-key",
+                "zirkel",
+                &VaultSecret::new("s3cret".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        store
+            .store(
+                "telegram-bot-token",
+                "telegram",
+                &VaultSecret::new("t0k3n".into()),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+    // No key, no keychain: only the file.
+    let names = CredentialStore::names(&db).unwrap();
+    assert_eq!(
+        names,
+        vec![
+            "telegram-bot-token".to_string(),
+            "zirkel-congress-gov-api-key".to_string()
+        ]
+    );
+    // And an absent store is an empty one, not an error.
+    assert!(
+        CredentialStore::names(&tmp.path().join("missing.db"))
+            .unwrap()
+            .is_empty()
+    );
+    // So is a pre-created file with no schema yet: `open` creates the
+    // file before writing the table, and a command that fails between
+    // the two leaves exactly this behind. Seen on a real run.
+    let bare = tmp.path().join("bare.db");
+    std::fs::write(&bare, b"").unwrap();
+    assert!(CredentialStore::names(&bare).unwrap().is_empty());
+}

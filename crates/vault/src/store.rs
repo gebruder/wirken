@@ -135,6 +135,46 @@ impl CredentialStore {
         Ok(Self { conn, device_key })
     }
 
+    /// The names of every credential in the store at `db_path`, read
+    /// without a device key.
+    ///
+    /// Names are not secrets: the schema keeps them in clear beside the
+    /// encrypted value, and `list` already shows them to whoever can
+    /// open the store. What this adds is the answer to "is anything
+    /// configured under this name" from a process that cannot unlock
+    /// the vault, such as a scheduled run with no passphrase in its
+    /// environment. A run that can see a name it cannot read knows it
+    /// is missing something configured, which is different from
+    /// nothing having been configured, and the two must not be
+    /// reported alike. An absent file is an empty store.
+    pub fn names(db_path: &Path) -> Result<Vec<String>, VaultError> {
+        if !db_path.exists() {
+            return Ok(Vec::new());
+        }
+        // A plain open, as the constructors use. Only SELECTs follow.
+        let conn = Connection::open(db_path)?;
+        // `open` pre-creates the file before the schema is written, and
+        // a command can fail between the two, so a vault file with no
+        // credentials table is real and means nothing was stored.
+        let has_table: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'credentials'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)?;
+        if !has_table {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare("SELECT name FROM credentials ORDER BY name")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut names = Vec::new();
+        for row in rows {
+            names.push(row?);
+        }
+        Ok(names)
+    }
+
     /// Store a credential with no host binding. Encrypts the secret
     /// before writing. A credential stored this way is unusable by
     /// `http_request` (deny by default); use [`Self::store_with_hosts`]
