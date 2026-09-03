@@ -108,12 +108,15 @@ name the container image `exec` runs in:
 `sidecar_binary` absent defaults to the gateway's own executable. A configured
 path that does not exist refuses the `exec` rather than running it unproxied.
 
-`image` absent or empty means the compiled-in default. That default carries no
-HTTP client, so an `exec` on a channel granted proxied egress reaches nothing
-from it; naming an image that carries one is how an operator exercises the
-egress path. The choice is per install and opt-in, which is where it belongs:
-a default image with a network client widens every sandbox's capability
-surface for everyone.
+`image` absent or empty means the compiled-in default, and the default carries
+no HTTP client by decision. An `exec` on a channel granted proxied egress
+reaches nothing from the default image. An operator who needs that path
+exercised sets `image` to an image that carries a proxy-aware client, as in the
+block above, and that opt-in key is the supported way to get one. The default
+stays without a client because a client there widens the sandbox surface for
+every install, including the installs that never configure egress and rely on
+no interface and no client as two independent walls. Putting the choice in
+`sandbox.json` puts it where the consequence lands.
 
 A key in `sandbox.json` that the loader does not read is named in a warning
 at start and ignored. The loader never refuses a file over one, so a file
