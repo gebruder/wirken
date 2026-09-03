@@ -109,6 +109,12 @@ Non-OAuth credentials cannot be rescoped; the command errors with
 a typed message before any picker UI is rendered. Use `wirken
 credentials rotate <name>` to replace a raw secret.
 
+Every credentials verb reads the vault passphrase from
+`WIRKEN_VAULT_PASSPHRASE` when it is set and prompts only when it is
+not. `add` and `rotate` take the value from `--stdin` or
+`--value-file`, so a setup script or a container entrypoint can store
+or replace a credential with no terminal.
+
 ## Scope-not-granted failures
 
 If a tool call fails because the OAuth credential is missing a

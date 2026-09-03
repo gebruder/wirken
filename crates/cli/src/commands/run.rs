@@ -105,6 +105,16 @@ fn prompt_vault_passphrase(cache: &mut Option<String>) -> String {
     if let Some(existing) = cache {
         return existing.clone();
     }
+    // Headless starts (a service unit, a container entrypoint) hand the
+    // passphrase over in the environment; a prompt that cannot reach a
+    // TTY would otherwise fall to an empty string and degrade every
+    // subsystem below silently.
+    if let Ok(p) = std::env::var("WIRKEN_VAULT_PASSPHRASE")
+        && !p.is_empty()
+    {
+        *cache = Some(p.clone());
+        return p;
+    }
     let pp = dialoguer::Password::new()
         .with_prompt("  Vault passphrase")
         .interact()

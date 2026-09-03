@@ -143,8 +143,16 @@ Manage encrypted credentials in the vault.
 
 ```
 wirken credentials list      # metadata only, no secrets shown
-wirken credentials rotate <NAME>
+wirken credentials add <NAME> [--stdin | --value-file FILE] [--host HOST]...
+wirken credentials rotate <NAME> [--stdin | --value-file FILE]
+wirken credentials show <NAME>
+wirken credentials remove <NAME>
 ```
+
+Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when
+it is set and prompts only when it is not. With the variable set and the
+value supplied by `--stdin` or `--value-file`, `add` and `rotate` complete
+with no terminal.
 
 ## wirken doctor
 

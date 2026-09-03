@@ -6,7 +6,6 @@
 //! configured with `auth.type = "oauth2"` in `~/.wirken/mcp.json`.
 
 use anyhow::{Context, Result};
-use dialoguer::Password;
 use ed25519_dalek::SigningKey;
 
 use wirken_gateway::skill_registry::{self, generate_signing_keypair};
@@ -135,12 +134,8 @@ pub async fn authorize(
         .map_err(|e| anyhow::anyhow!("OAuth authorization failed: {e}"))?;
 
     // Store the resulting tokens in the vault.
-    let keychain = probe_keychain(&cfg.data_dir, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 

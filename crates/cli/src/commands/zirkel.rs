@@ -360,12 +360,8 @@ pub async fn auth_set(source: &str) -> Result<()> {
     }
 
     let cfg = super::config();
-    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, || {
-        dialoguer::Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, move || pp);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .map_err(|e| anyhow!("open credential store: {e}"))?;
     let vault_key_name = format!("zirkel-{source}-api-key");
@@ -392,12 +388,8 @@ pub async fn auth_list() -> Result<()> {
         println!("No vault. Run `wirken zirkel auth-set --source <name>` to create one.");
         return Ok(());
     }
-    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, || {
-        dialoguer::Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = wirken_vault::probe_keychain(&cfg.data_dir, move || pp);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .map_err(|e| anyhow!("open credential store: {e}"))?;
     let entries = store.list().map_err(|e| anyhow!("list vault: {e}"))?;

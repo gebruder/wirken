@@ -65,12 +65,8 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // path below.
     let mut api_key_credential: Option<String> = None;
     let api_key = if provider != "ollama" {
-        let keychain = probe_keychain(&cfg.data_dir, || {
-            dialoguer::Password::new()
-                .with_prompt("  Vault passphrase")
-                .interact()
-                .unwrap_or_default()
-        });
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
         let cred_name = format!("{provider}-api-key");
@@ -181,12 +177,8 @@ async fn send_with_agent_config(
         Some(agent_cfg.api_key_credential.clone())
     };
     let api_key = if !agent_cfg.api_key_credential.is_empty() {
-        let keychain = probe_keychain(&cfg.data_dir, || {
-            dialoguer::Password::new()
-                .with_prompt("  Vault passphrase")
-                .interact()
-                .unwrap_or_default()
-        });
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
         match store.retrieve(&agent_cfg.api_key_credential) {

@@ -27,6 +27,21 @@ tagged.
   warning at start and ignored, where before it produced nothing at all.
   Closes #234.
 
+- `wirken credentials rotate` takes `--stdin` and `--value-file` like
+  `add`.
+
+### Fixed
+
+- Every command that opens the vault takes the passphrase from
+  `WIRKEN_VAULT_PASSPHRASE` when it is set and prompts only when it is
+  not. `credentials list`, `add` and `rotate`, `agent send`, `channel
+  add` for slack and whatsapp, `zirkel auth-set` and `auth-list`, `mcp
+  authorize`, and `agents add` and `set` prompted unconditionally, so
+  none could run without a terminal while their failure text named the
+  variable. `wirken run` reads the variable before it prompts. A test
+  over the crate's source now requires every keychain probe to take its
+  passphrase from a supplier that reads the variable. Closes #239.
+
 ## [1.19.0] - 2026-09-02
 
 ### Added

@@ -779,45 +779,50 @@ mod tests {
         assert_eq!(cfg.mode, SandboxMode::default());
     }
 
-    /// No model name is written into the paths that configure one.
+    /// Every keychain probe in the crate takes its passphrase from a
+    /// supplier that reads `WIRKEN_VAULT_PASSPHRASE`. Three exist: the
+    /// shared `cached_vault_passphrase` (environment first, one prompt,
+    /// cached into the environment), `run`'s per-boot cache
+    /// `prompt_vault_passphrase` (environment first, no environment
+    /// write because the gateway is multi-threaded), and a direct read
+    /// of the variable at a site that must never prompt. A probe that
+    /// prompts without reading the variable cannot run headless, and
+    /// its failure text names a variable the command ignored (issue
+    /// 239); a probe that supplies a constant seals or degrades silently
+    /// (issue 233). The earlier guard forbade the constant and let the
+    /// prompt-only probes through; this one names what is allowed.
     ///
-    /// A model id in this repo is a guess about a catalogue this repo
-    /// does not own. It is correct until the provider retires it and
-    /// wrong silently afterwards: the operator accepts the offered
-    /// default and finds out at their first turn. `pick_model` offers
-    /// what the provider itself listed and otherwise asks.
-    ///
-    /// The needles are assembled at runtime so this test's own source
-    /// does not contain them.
-    /// No keychain probe in this crate supplies an empty passphrase,
-    /// except the two named here with their reason.
-    ///
-    /// `prompt_vault_passphrase` in `run.rs` carries the rule and its
-    /// casualties: an empty supplier cannot unwrap a device key wrapped
-    /// under a real passphrase on the age-file backend, so the
-    /// subsystem that probed with one degrades silently. The rule was
-    /// written for `run`, and a guard scoped to `run.rs` let two probes
-    /// elsewhere pass. Issue 233. This reads every source file in the
-    /// crate, so a new file cannot start outside the rule.
-    ///
-    /// Each allowance is asserted to still hold exactly its offenders.
-    /// An allowance that stopped matching would otherwise stay in the
-    /// list as a hole for the next offender to hide in, and a fix that
-    /// removed an offender would leave a stale reason behind.
+    /// The check is textual: the probe line and the four lines on each
+    /// side must name one of the suppliers. Each allowance is asserted
+    /// to still hold exactly its probes, so a fix that removed one
+    /// cannot leave a stale reason behind and a new probe cannot hide
+    /// under an old allowance.
     #[test]
-    fn no_keychain_probe_supplies_an_empty_passphrase_outside_the_named_allowances() {
+    fn every_keychain_probe_takes_its_passphrase_from_a_supplier_that_reads_the_environment() {
         // Needles assembled at runtime so this test's own source does
-        // not contain either and match itself.
+        // not contain them and match itself.
         let probe = format!("probe_{}(", "keychain");
-        let empty = format!("String::{}", "new");
+        let suppliers = [
+            format!("cached_vault_{}()", "passphrase"),
+            format!("prompt_vault_{}(", "passphrase"),
+            format!("env::var(\"WIRKEN_VAULT_{}\")", "PASSPHRASE"),
+        ];
 
-        // (file relative to src/, offenders it may hold, why)
-        let allowances: &[(&str, usize, &str)] = &[(
-            "commands/doctor.rs",
-            1,
-            "a diagnostic must not prompt, and it reports the posture it lands in: \
-                 the surrounding comment says so and is_signed() is printed",
-        )];
+        // (file relative to src/, probes it may hold outside a supplier, why)
+        let allowances: &[(&str, usize, &str)] = &[
+            (
+                "commands/doctor.rs",
+                1,
+                "a diagnostic must neither prompt nor depend on the environment; \
+                 it reports the posture it lands in, and is_signed() is printed",
+            ),
+            (
+                "commands/run.rs",
+                1,
+                "resolve_channel_overrides takes run's per-boot passphrase as a \
+                 parameter; its supplier is prompt_vault_passphrase at the call site",
+            ),
+        ];
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut files = Vec::new();
@@ -827,6 +832,7 @@ mod tests {
             "the walker saw too few files to be trusted: {files:?}"
         );
 
+        let mut probes_seen = 0usize;
         let mut seen_rules_home = false;
         for path in &files {
             let rel = path
@@ -838,12 +844,21 @@ mod tests {
                 seen_rules_home = true;
             }
             let src = std::fs::read_to_string(path).unwrap();
-            let offenders: Vec<&str> = src
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.starts_with("//"))
-                .filter(|l| l.contains(&probe) && l.contains(&empty))
-                .collect();
+            let lines: Vec<&str> = src.lines().collect();
+            let mut offenders = Vec::new();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim();
+                if t.starts_with("//") || t.starts_with("use ") || !t.contains(&probe) {
+                    continue;
+                }
+                probes_seen += 1;
+                let lo = i.saturating_sub(4);
+                let hi = (i + 5).min(lines.len());
+                let window = lines[lo..hi].join("\n");
+                if !suppliers.iter().any(|s| window.contains(s.as_str())) {
+                    offenders.push(format!("{rel}:{}", i + 1));
+                }
+            }
             match allowances.iter().find(|(f, _, _)| *f == rel) {
                 Some((_, expected, why)) => assert_eq!(
                     offenders.len(),
@@ -853,14 +868,19 @@ mod tests {
                 ),
                 None => assert!(
                     offenders.is_empty(),
-                    "{rel}: a keychain probe supplies an empty passphrase, which cannot \
-                     unwrap a device key on the age-file backend and degrades that \
-                     subsystem silently. Use prompt_vault_passphrase, or name an \
-                     allowance here with its reason. Offending lines: {offenders:?}",
+                    "{rel}: a keychain probe takes its passphrase from something that does \
+                     not read WIRKEN_VAULT_PASSPHRASE, so the command cannot run headless \
+                     and its failure text names a variable it ignores. Take the passphrase \
+                     from cached_vault_passphrase (or prompt_vault_passphrase inside run), \
+                     or name an allowance here with its reason. Probes: {offenders:?}",
                 ),
             }
         }
         assert!(seen_rules_home, "the walker never reached commands/run.rs");
+        assert!(
+            probes_seen > 25,
+            "the walker saw too few probes to be trusted: {probes_seen}"
+        );
     }
 
     fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {

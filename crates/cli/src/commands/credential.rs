@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-use dialoguer::Password;
 use url::Url;
 
 use wirken_mcp_proxy::{
@@ -19,12 +18,8 @@ const OAUTH_CHANNEL: &str = "oauth";
 pub async fn list() -> Result<()> {
     let cfg = config();
 
-    let keychain = probe_keychain(&cfg.data_dir, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
@@ -376,12 +371,8 @@ pub async fn add(
         anyhow::bail!("empty value");
     }
 
-    let keychain = probe_keychain(&cfg.data_dir, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
@@ -463,17 +454,16 @@ pub async fn remove(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn rotate(name: &str) -> Result<()> {
+pub async fn rotate(name: &str, source: ValueSource) -> Result<()> {
     let cfg = config();
 
-    let new_value = super::read_secret(&format!("  New value for '{name}': "))?;
+    let new_value = read_credential_value(name, source)?;
+    if new_value.is_empty() {
+        anyhow::bail!("empty value");
+    }
 
-    let keychain = probe_keychain(&cfg.data_dir, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(&cfg.data_dir, move || pp);
 
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use dialoguer::{Input, Password, Select};
+use dialoguer::{Input, Select};
 
 use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, ChannelEgress, SubagentCeiling};
 use wirken_gateway::permissions::PermissionTier;
@@ -131,12 +131,8 @@ pub async fn add(args: AddArgs) -> Result<()> {
     // Store API key in vault with agent-specific credential name
     let api_key_credential = if let Some(api_key) = api_key {
         let cred_name = format!("{id}-{provider}-key");
-        let keychain = probe_keychain(&cfg.data_dir, || {
-            Password::new()
-                .with_prompt("  Vault passphrase")
-                .interact()
-                .unwrap_or_default()
-        });
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
 
@@ -591,12 +587,8 @@ pub async fn set(
         } else {
             existing.api_key_credential.clone()
         };
-        let keychain = probe_keychain(&cfg.data_dir, || {
-            Password::new()
-                .with_prompt("  Vault passphrase")
-                .interact()
-                .unwrap_or_default()
-        });
+        let pp = super::cached_vault_passphrase()?;
+        let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let vault = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
         let secret = VaultSecret::new(api_key);

@@ -850,10 +850,19 @@ enum CredentialCommands {
         #[arg(long = "host")]
         host: Vec<String>,
     },
-    /// Rotate a credential
+    /// Rotate a credential's value. Prompts for the new value on
+    /// stderr unless --stdin or --value-file supplies it.
     Rotate {
         /// Credential name
         name: String,
+        /// Read the new value from stdin instead of prompting. A
+        /// single trailing newline is stripped.
+        #[arg(long, conflicts_with = "value_file")]
+        stdin: bool,
+        /// Read the new value from a file. A single trailing newline
+        /// is stripped. Mutually exclusive with --stdin.
+        #[arg(long, conflicts_with = "stdin")]
+        value_file: Option<std::path::PathBuf>,
     },
     /// Remove a credential by name. The encrypted row is deleted from
     /// the vault. Errors if no credential with that name exists.
@@ -1173,7 +1182,17 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
-            CredentialCommands::Rotate { name } => commands::credential::rotate(&name).await,
+            CredentialCommands::Rotate {
+                name,
+                stdin,
+                value_file,
+            } => {
+                commands::credential::rotate(
+                    &name,
+                    commands::credential::ValueSource::from_flags(stdin, value_file),
+                )
+                .await
+            }
             CredentialCommands::Remove { name } => commands::credential::remove(&name).await,
             CredentialCommands::Show { name } => commands::credential::show(&name).await,
             CredentialCommands::Rescope {

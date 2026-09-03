@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use dialoguer::Password;
 
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::config::GatewayConfig;
@@ -235,12 +234,8 @@ async fn add_slack(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags)
         _ => super::read_secret("  Slack app token (xapp-...): ")?,
     };
 
-    let keychain = probe_keychain(data, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
@@ -280,12 +275,8 @@ async fn add_slack(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags)
 async fn add_whatsapp(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
     let creds = collect_whatsapp_creds(flags).context("Failed to collect WhatsApp credentials")?;
 
-    let keychain = probe_keychain(data, || {
-        Password::new()
-            .with_prompt("  Vault passphrase")
-            .interact()
-            .unwrap_or_default()
-    });
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
