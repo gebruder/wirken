@@ -120,6 +120,9 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             // `PermissionRenewed` follows the sibling rather than
             // this one.
             | SessionEvent::PermissionGrantExpired { .. }
+            // A row the gate could never have read, removed. Same
+            // reason as the lapse above: it changes what is granted.
+            | SessionEvent::PermissionGrantPruned { .. }
             | SessionEvent::SkillPermissionDenied { .. }
             | SessionEvent::SubagentSpawned { .. }
             | SessionEvent::SubagentResult { .. }
@@ -171,6 +174,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionApproved { .. } => "permission_approved",
         SessionEvent::PermissionRenewed { .. } => "permission_renewed",
         SessionEvent::PermissionGrantExpired { .. } => "permission_grant_expired",
+        SessionEvent::PermissionGrantPruned { .. } => "permission_grant_pruned",
         SessionEvent::SessionScopedApprovalsCleared { .. } => "session_scoped_approvals_cleared",
         SessionEvent::PhaseEntered { .. } => "phase_entered",
         SessionEvent::PhaseExited { .. } => "phase_exited",

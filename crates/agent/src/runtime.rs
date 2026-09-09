@@ -3009,9 +3009,10 @@ impl Agent {
                             SessionEvent::PermissionGrantExpired {
                                 action_key: action.approval_key(),
                                 agent_id: self.id.clone(),
-                                tool: name.to_string(),
-                                tier: action.tier().label().to_string(),
+                                tool: Some(name.to_string()),
+                                tier: Some(action.tier().label().to_string()),
                                 expired_at,
+                                detected_by: wirken_audit::GrantExpiryDetection::ToolCall,
                                 adapter_id: self.current_inbound.adapter_id.clone(),
                                 sender_id: self.current_inbound.sender_id.clone(),
                             },

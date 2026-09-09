@@ -26,11 +26,12 @@ pub use otel_exporter::{FederatedIdentity, OtelConfig, OtelError, StaticFederate
 pub use otel_projector::{OtelProjector, Span, SpanId, SpanKind, SpanStatus, TraceId};
 pub use session_log::{
     ApprovalScopeKind, ApprovalSource, BudgetAction, ChainHeadReason, DenialSource, EgressDecision,
-    HashHex, HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome,
-    ImportedSearchOutcome, OwnSession, PermissionDenialRecord, PhaseDenyContent, PhaseExitReason,
-    SandboxEgressDenyReason, SandboxEgressModeLabel, SchemaDriftRecord, SessionEvent,
-    SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,
-    SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord, TrustLevel,
+    GrantExpiryDetection, HashHex, HexBytes, HookDecision, HookKind, HookSignatureStatus,
+    HttpFetchOutcome, ImportedSearchOutcome, OwnSession, PermissionDenialRecord, PhaseDenyContent,
+    PhaseExitReason, SandboxEgressDenyReason, SandboxEgressModeLabel, SchemaDriftRecord,
+    SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult,
+    SkillDeniedReason, SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord,
+    TrustLevel,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

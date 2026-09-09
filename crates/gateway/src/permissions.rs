@@ -455,6 +455,42 @@ fn canonical_agent_id(agent_id: &str) -> &str {
     agent_id.split('/').next().unwrap_or(agent_id)
 }
 
+/// One row the open-time sweep removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaleGrant {
+    pub action_key: String,
+    pub agent_id: String,
+    /// The window the row carried. In the past for a lapsed grant;
+    /// possibly in the future for a not-storable one, which is part
+    /// of why it read as live.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// What [`PermissionStore::sweep_stale_grants`] removed.
+///
+/// Returned rather than logged from inside the store because the
+/// store holds no session handle, and an audit row belongs in a
+/// chain. [`PermissionStore::open`] keeps the report so a caller
+/// that does have a log can emit it; see
+/// `PermissionStore::take_sweep_report`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Keys the gate can never read: Tier 1 or Tier 3.
+    pub not_storable: Vec<StaleGrant>,
+    /// Storable keys whose window closed with nothing calling them.
+    pub lapsed: Vec<StaleGrant>,
+}
+
+impl SweepReport {
+    pub fn is_empty(&self) -> bool {
+        self.not_storable.is_empty() && self.lapsed.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.not_storable.len() + self.lapsed.len()
+    }
+}
+
 /// Permission store backed by SQLite.
 ///
 /// `session_cache` holds session-scoped approvals: nested map of
@@ -471,6 +507,10 @@ pub struct PermissionStore {
     conn: Connection,
     default_expiry_days: u32,
     session_cache: RefCell<HashMap<String, HashMap<String, Approval>>>,
+    /// What the open-time sweep removed, held until a caller with a
+    /// session log takes it. Empty on the overwhelmingly common
+    /// open, where there was nothing stale to remove.
+    last_sweep: SweepReport,
 }
 
 impl PermissionStore {
@@ -537,8 +577,9 @@ impl PermissionStore {
             conn,
             default_expiry_days,
             session_cache: RefCell::new(HashMap::new()),
+            last_sweep: SweepReport::default(),
         };
-        store.prune_non_tier2_shell_approvals()?;
+        store.last_sweep = store.sweep_stale_grants()?;
         Ok(store)
     }
 
@@ -548,51 +589,108 @@ impl PermissionStore {
         self.default_expiry_days
     }
 
-    /// Delete every `shell:<prefix>` approval row whose prefix is not
-    /// on [`TIER2_ALLOWLIST`]. Called once from [`Self::open`]. Logs
-    /// a single `info` line listing what was pruned if the set is
-    /// non-empty; no-op otherwise. Called publicly as well so
-    /// integration tests can exercise the migration directly.
-    pub fn prune_non_tier2_shell_approvals(&mut self) -> Result<Vec<String>, GatewayError> {
-        let mut select = self
-            .conn
-            .prepare("SELECT DISTINCT action_key FROM approvals WHERE action_key LIKE 'shell:%'")?;
-        let rows = select.query_map([], |row| row.get::<_, String>(0))?;
+    /// Take the open-time sweep report, leaving the store's copy
+    /// empty.
+    ///
+    /// Taking rather than borrowing so the rows cannot be emitted
+    /// twice by two callers that both hold the store. The removal
+    /// already happened and is durable; this is the record of it,
+    /// and the record has exactly one owner.
+    pub fn take_sweep_report(&mut self) -> SweepReport {
+        std::mem::take(&mut self.last_sweep)
+    }
 
-        let mut stale = Vec::new();
-        for row in rows {
-            let key = row?;
-            let Some(prefix) = key.strip_prefix("shell:") else {
-                continue;
-            };
-            if !TIER2_ALLOWLIST.contains(&prefix) {
-                stale.push(key);
+    /// Drop every stored row the gate can no longer act on, and
+    /// report what went so the caller can put it in the audit chain.
+    ///
+    /// Two kinds, kept apart because they are different situations:
+    ///
+    /// - **Not storable.** The key names a Tier 1 or Tier 3 action
+    ///   (see [`is_storable_approval_key`]). Nothing about the row
+    ///   ran out; it was inert from the moment it was written,
+    ///   because the gate answers those tiers without reading
+    ///   storage. Rows like this exist because the write path used
+    ///   to accept them, and because the Tier 2 model flipped from a
+    ///   denylist to an allowlist and stranded `shell:git`,
+    ///   `shell:kubectl`, `shell:make` and every language
+    ///   interpreter.
+    /// - **Lapsed.** The key is storable and the window closed.
+    ///   [`Self::check`] drops these too, but only when something
+    ///   calls the action. A grant that lapsed while nothing used it
+    ///   sits in the table until it is next read, which for a key
+    ///   nothing calls is never.
+    ///
+    /// Both left `wirken permissions list` printing rows that read
+    /// as grants and were not. Refusing the writes fixed that going
+    /// forward and did nothing for anyone who had already upgraded,
+    /// which is what this is for.
+    ///
+    /// Called from [`Self::open`], so the table is honest from the
+    /// moment it opens rather than from the first call that happens
+    /// to touch each key. Idempotent: a second run over a swept
+    /// store reports nothing.
+    pub fn sweep_stale_grants(&mut self) -> Result<SweepReport, GatewayError> {
+        let now = Utc::now();
+        let mut report = SweepReport::default();
+        {
+            let mut select = self
+                .conn
+                .prepare("SELECT action_key, agent_id, expires_at FROM approvals")?;
+            let rows = select.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (action_key, agent_id, expires_raw) = row?;
+                let expires_at = parse_dt(&expires_raw);
+                // Storability first. A row that is both unreadable
+                // and lapsed is reported as unreadable, because that
+                // is the older and more surprising fact about it:
+                // it would not have worked even inside its window.
+                if !is_storable_approval_key(&action_key) {
+                    report.not_storable.push(StaleGrant {
+                        action_key,
+                        agent_id,
+                        expires_at,
+                    });
+                } else if now > expires_at {
+                    report.lapsed.push(StaleGrant {
+                        action_key,
+                        agent_id,
+                        expires_at,
+                    });
+                }
             }
         }
-        drop(select);
 
-        if stale.is_empty() {
-            return Ok(stale);
+        if report.is_empty() {
+            return Ok(report);
         }
 
         let tx = self.conn.transaction()?;
         {
-            let mut delete = tx.prepare("DELETE FROM approvals WHERE action_key = ?1")?;
-            for key in &stale {
-                delete.execute(params![key])?;
+            let mut delete =
+                tx.prepare("DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2")?;
+            for grant in report.not_storable.iter().chain(report.lapsed.iter()) {
+                delete.execute(params![grant.action_key, grant.agent_id])?;
             }
         }
         tx.commit()?;
 
+        // Logged after the commit, not before it. The line claims
+        // the rows are gone, and it is only true once they are.
         tracing::info!(
-            count = stale.len(),
-            keys = ?stale,
-            "permissions: pruned approvals for shell verbs that are no longer Tier 2 eligible \
-             under the current allowlist. These approvals would have been ignored by the gate; \
-             removing them keeps `wirken permissions list` honest."
+            not_storable = report.not_storable.len(),
+            lapsed = report.lapsed.len(),
+            "permissions: swept stored grants the gate cannot act on. Rows whose action key is \
+             Tier 1 or Tier 3 were never read by the gate; rows past their window had lapsed \
+             without anything calling them. Both listed in `wirken permissions list` as grants."
         );
 
-        Ok(stale)
+        Ok(report)
     }
 
     /// Check if an action is allowed for a given agent.
@@ -1419,6 +1517,57 @@ pub fn emit_operator_approval(
     Ok(())
 }
 
+/// Append one audit row per grant the open-time sweep removed.
+///
+/// Split from the sweep itself because the store holds no session
+/// handle. The rows are already gone from SQLite by the time this
+/// runs, so a failure here loses the record, not the removal; the
+/// caller surfaces the `Err` rather than proceeding as though the
+/// chain were complete.
+///
+/// Lapsed rows carry `detected_by: StoreOpen` and no tool, because
+/// no call was involved. Not-storable rows are
+/// `PermissionGrantPruned`, which is a different fact: they were
+/// never readable, window or no window.
+pub fn emit_sweep_report(
+    report: &SweepReport,
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+) -> Result<(), GatewayError> {
+    for grant in &report.not_storable {
+        log.append(
+            handle,
+            wirken_audit::TrustLevel::System,
+            wirken_audit::SessionEvent::PermissionGrantPruned {
+                action_key: grant.action_key.clone(),
+                agent_id: grant.agent_id.clone(),
+                expires_at: grant.expires_at,
+            },
+        )?;
+    }
+    for grant in &report.lapsed {
+        log.append(
+            handle,
+            wirken_audit::TrustLevel::System,
+            wirken_audit::SessionEvent::PermissionGrantExpired {
+                action_key: grant.action_key.clone(),
+                agent_id: grant.agent_id.clone(),
+                // No call, so no tool and no tier. The sweep reads a
+                // stored key, and recovering a typed action from one
+                // is lossy; guessing a tier to fill the field would
+                // put a guess in the chain.
+                tool: None,
+                tier: None,
+                expired_at: grant.expires_at,
+                detected_by: wirken_audit::GrantExpiryDetection::StoreOpen,
+                adapter_id: None,
+                sender_id: None,
+            },
+        )?;
+    }
+    Ok(())
+}
+
 fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
@@ -1702,15 +1851,13 @@ mod tier_tests {
     }
 
     #[test]
-    fn prune_is_idempotent_and_noop_on_clean_store() {
+    fn sweep_is_idempotent_and_noop_on_clean_store() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let mut store = PermissionStore::open(tmp.path()).unwrap();
         // Fresh store is already clean.
-        let first = store.prune_non_tier2_shell_approvals().unwrap();
-        assert!(first.is_empty());
+        assert!(store.sweep_stale_grants().unwrap().is_empty());
         // Running again is still a no-op.
-        let second = store.prune_non_tier2_shell_approvals().unwrap();
-        assert!(second.is_empty());
+        assert!(store.sweep_stale_grants().unwrap().is_empty());
     }
 
     #[test]
@@ -2859,5 +3006,218 @@ mod tier_tests {
             "a session grant has no window to have discarded, so re-granting is idempotent, \
              not a renewal",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Open-time sweep of rows the gate cannot act on
+    // -----------------------------------------------------------------
+
+    /// Write a row straight to the table, bypassing the write-path
+    /// allowlist. Reproduces what an older build left behind.
+    fn seed_row(path: &std::path::Path, key: &str, agent: &str, expires_at: DateTime<Utc>) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS approvals (
+                 action_key TEXT NOT NULL,
+                 agent_id TEXT NOT NULL,
+                 approved_at TEXT NOT NULL,
+                 approved_by TEXT NOT NULL,
+                 expires_at TEXT NOT NULL,
+                 PRIMARY KEY (action_key, agent_id)
+             );",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO approvals
+             (action_key, agent_id, approved_at, approved_by, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                key,
+                agent,
+                (expires_at - Duration::days(30)).to_rfc3339(),
+                "operator",
+                expires_at.to_rfc3339()
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn open_sweeps_rows_an_upgrade_left_behind_and_leaves_live_tier2_alone() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let future = Utc::now() + Duration::days(10);
+        let past = Utc::now() - Duration::days(1);
+
+        // Not storable, and not expired, so nothing else would ever
+        // have removed them. This is the false floor: an operator
+        // reading `wirken permissions list` saw grants.
+        for key in [
+            "mcp:mcp_github_create_issue",
+            "tool:unregistered",
+            "wasm:my_skill",
+            "imported_chat:src-1",
+            "imported_search_corpus",
+            "cross_channel_memory:slack",
+            "shell:kubectl",
+            "CredentialAccess",
+            "WebSearch",
+        ] {
+            seed_row(tmp.path(), key, "agent-a", future);
+        }
+        // Storable but lapsed, with nothing having called it.
+        seed_row(tmp.path(), "shell:ls", "agent-a", past);
+        // Storable and live: must survive.
+        seed_row(tmp.path(), "shell:cat", "agent-a", future);
+        seed_row(tmp.path(), "file:/tmp/x", "agent-a", future);
+
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        let report = store.take_sweep_report();
+
+        assert_eq!(report.not_storable.len(), 9, "{report:#?}");
+        assert_eq!(report.lapsed.len(), 1, "{report:#?}");
+        assert_eq!(report.lapsed[0].action_key, "shell:ls");
+        assert!((report.lapsed[0].expires_at - past).num_seconds().abs() <= 1);
+
+        let survivors: std::collections::HashSet<String> = store
+            .list("agent-a")
+            .unwrap()
+            .into_iter()
+            .map(|a| a.action_key)
+            .collect();
+        assert_eq!(
+            survivors,
+            ["shell:cat", "file:/tmp/x"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        );
+    }
+
+    #[test]
+    fn a_row_that_is_both_unreadable_and_lapsed_reports_as_unreadable() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        seed_row(
+            tmp.path(),
+            "mcp:mcp_vendor_tool",
+            "agent-a",
+            Utc::now() - Duration::days(1),
+        );
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        let report = store.take_sweep_report();
+        assert_eq!(report.not_storable.len(), 1);
+        assert!(
+            report.lapsed.is_empty(),
+            "the older and more surprising fact is that it never worked at all",
+        );
+    }
+
+    #[test]
+    fn the_sweep_report_has_one_owner() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        seed_row(
+            tmp.path(),
+            "mcp:x",
+            "agent-a",
+            Utc::now() + Duration::days(5),
+        );
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        assert_eq!(store.take_sweep_report().len(), 1);
+        assert!(
+            store.take_sweep_report().is_empty(),
+            "a second taker must not emit the same removal twice",
+        );
+    }
+
+    #[test]
+    fn reopening_a_swept_store_sweeps_nothing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        seed_row(
+            tmp.path(),
+            "mcp:x",
+            "agent-a",
+            Utc::now() + Duration::days(5),
+        );
+        seed_row(
+            tmp.path(),
+            "shell:ls",
+            "agent-a",
+            Utc::now() - Duration::days(1),
+        );
+        let mut first = PermissionStore::open(tmp.path()).unwrap();
+        assert_eq!(first.take_sweep_report().len(), 2);
+        drop(first);
+
+        let mut second = PermissionStore::open(tmp.path()).unwrap();
+        assert!(second.take_sweep_report().is_empty());
+    }
+
+    #[test]
+    fn the_sweep_writes_one_audit_row_per_removal_with_the_right_kind() {
+        use wirken_audit::{
+            GrantExpiryDetection, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let lapsed_at = Utc::now() - Duration::days(2);
+        let live = Utc::now() + Duration::days(5);
+        seed_row(tmp.path(), "mcp:mcp_vendor_tool", "agent-a", live);
+        seed_row(tmp.path(), "shell:ls", "agent-a", lapsed_at);
+
+        let mut store = PermissionStore::open(tmp.path()).unwrap();
+        let report = store.take_sweep_report();
+
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
+        super::emit_sweep_report(&report, &log, &handle).unwrap();
+
+        let events = log.get_since(&handle, 0).unwrap();
+        assert_eq!(events.len(), 2, "{events:#?}");
+
+        match &events[0].event {
+            SessionEvent::PermissionGrantPruned {
+                action_key,
+                agent_id,
+                expires_at,
+            } => {
+                assert_eq!(action_key, "mcp:mcp_vendor_tool");
+                assert_eq!(agent_id, "agent-a");
+                assert!(
+                    (*expires_at - live).num_seconds().abs() <= 1,
+                    "the window the operator would have seen listed",
+                );
+            }
+            other => panic!("expected PermissionGrantPruned, got {other:?}"),
+        }
+        match &events[1].event {
+            SessionEvent::PermissionGrantExpired {
+                action_key,
+                tool,
+                tier,
+                expired_at,
+                detected_by,
+                ..
+            } => {
+                assert_eq!(action_key, "shell:ls");
+                assert_eq!(*detected_by, GrantExpiryDetection::StoreOpen);
+                assert!(tool.is_none(), "no call was involved");
+                assert!(
+                    tier.is_none(),
+                    "a guessed tier would be a guess in the chain"
+                );
+                assert!((*expired_at - lapsed_at).num_seconds().abs() <= 1);
+            }
+            other => panic!("expected PermissionGrantExpired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_report_writes_nothing() {
+        use wirken_audit::{SessionId, SessionLog, SqliteSessionLog};
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
+        super::emit_sweep_report(&SweepReport::default(), &log, &handle).unwrap();
+        assert!(log.get_since(&handle, 0).unwrap().is_empty());
     }
 }

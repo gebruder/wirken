@@ -266,6 +266,22 @@ pub enum ApprovalSource {
     ChannelAdapter { channel: String },
 }
 
+/// What noticed that a stored grant had lapsed, on
+/// [`SessionEvent::PermissionGrantExpired`].
+///
+/// `Default` is `ToolCall` so a row written before this field
+/// existed reads back as the case that existed then: the runtime's
+/// tier gate was the only thing that reported a lapse.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantExpiryDetection {
+    /// A tool call consulted the grant and the gate found it lapsed.
+    #[default]
+    ToolCall,
+    /// The store's open-time sweep found it with no call involved.
+    StoreOpen,
+}
+
 /// Storage lifetime of a recorded permission approval. Defined here
 /// rather than in `wirken-gateway::permissions` because audit cannot
 /// depend on gateway (the dependency direction is `gateway →
@@ -789,18 +805,52 @@ pub enum SessionEvent {
     PermissionGrantExpired {
         action_key: String,
         agent_id: String,
-        /// Tool whose call consulted the lapsed grant.
-        tool: String,
+        /// Tool whose call consulted the lapsed grant. `None` when
+        /// the sweep found it, because no call was involved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
         /// Tier label the action resolved to, matching
-        /// [`Self::PermissionDenied::tier`].
-        tier: String,
+        /// [`Self::PermissionDenied::tier`]. `None` from the sweep,
+        /// which sees a stored key rather than a typed action and
+        /// cannot recover the tier from it without guessing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
         /// Expiry the dropped row carried. Always in the past
         /// relative to the row's own `ts`.
         expired_at: DateTime<Utc>,
+        /// What noticed. A lapse found at a call is a grant that ran
+        /// out under an agent doing work; one found by the sweep sat
+        /// idle past its window and nothing asked. Same row removed,
+        /// different thing happened, and a reviewer chasing an
+        /// interrupted task wants only the first.
+        #[serde(default)]
+        detected_by: GrantExpiryDetection,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         adapter_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+    },
+    /// A stored grant was dropped because its action key is not one
+    /// the gate can ever read.
+    ///
+    /// Distinct from [`Self::PermissionGrantExpired`]: nothing about
+    /// this row ran out. It names an action that is Tier 1, allowed
+    /// with no lookup, or Tier 3, which prompts without consulting
+    /// storage, so it was inert from the moment it was written and
+    /// would have stayed inert.
+    ///
+    /// Emitted only by the store's open-time sweep. The write path
+    /// refuses these keys outright, so the rows that exist were
+    /// written by an older build, or by a build whose tier model
+    /// placed the key differently. That is why the sweep exists: an
+    /// operator who upgraded still has the rows, and
+    /// `wirken permissions list` was still showing them as grants.
+    PermissionGrantPruned {
+        action_key: String,
+        agent_id: String,
+        /// Expiry the dropped row carried, past or future. Recorded
+        /// because it is what the operator would have seen listed.
+        expires_at: DateTime<Utc>,
     },
     /// Session-scoped approvals were cleared for `session_id`.
     /// Emitted once per session end (clean shutdown or crash

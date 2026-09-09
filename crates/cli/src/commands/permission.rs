@@ -317,7 +317,9 @@ pub async fn approve(
         Some(session_id) => {
             if expires_in_days.is_some() {
                 anyhow::bail!(
-                    "--expires-in-days does not apply to a session-scoped grant: it is cleared                      on session end, not on a date. Drop --session for a persisted grant with                      a window, or drop --expires-in-days."
+                    "--expires-in-days does not apply to a session-scoped grant: it is \
+                     cleared on session end, not on a date. Drop --session for a persisted \
+                     grant with a window, or drop --expires-in-days."
                 );
             }
             let handle = log.handle_for(SessionId::new(session_id.to_string()));

@@ -248,9 +248,40 @@ pub fn open_permission_store(
     cfg: &GatewayConfig,
 ) -> anyhow::Result<wirken_gateway::permissions::PermissionStore> {
     use anyhow::Context;
+    use wirken_gateway::permissions::{OPERATOR_PERMISSIONS_SESSION, emit_sweep_report};
+
     let days = load_permission_expiry_days(&cfg.data_dir);
-    wirken_gateway::permissions::PermissionStore::open_with_expiry(&cfg.permissions_db_path(), days)
-        .context("Failed to open permission store")
+    let mut store = wirken_gateway::permissions::PermissionStore::open_with_expiry(
+        &cfg.permissions_db_path(),
+        days,
+    )
+    .context("Failed to open permission store")?;
+
+    // The sweep already ran and already deleted. What is left is
+    // recording it. The audit log is opened only when there is
+    // something to record, which on a store that has been opened
+    // once is never, so the common path does not touch audit.db at
+    // all.
+    let report = store.take_sweep_report();
+    if !report.is_empty() {
+        let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("Failed to open session log to record the permission sweep")?;
+        let handle = wirken_audit::SessionLog::handle_for(
+            &log,
+            wirken_audit::SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()),
+        );
+        emit_sweep_report(&report, &log, &handle)
+            .context("Failed to record the permission sweep in the audit chain")?;
+        eprintln!(
+            "  Removed {} stored permission row(s) the gate cannot act on: {} whose action key \
+             is Tier 1 or Tier 3, {} past their expiry. Recorded under the \
+             '{OPERATOR_PERMISSIONS_SESSION}' audit session.",
+            report.len(),
+            report.not_storable.len(),
+            report.lapsed.len(),
+        );
+    }
+    Ok(store)
 }
 
 /// Probe a running Ollama instance for its version.

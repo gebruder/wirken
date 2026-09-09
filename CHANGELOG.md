@@ -34,11 +34,23 @@ tagged.
   replaced alongside the one it installed; the store keeps a single row
   per key, so that is the only surviving record of the previous window.
 
+- `PermissionStore::open` sweeps stored rows the gate cannot act on:
+  keys that are Tier 1 or Tier 3 under the current model, and grants
+  whose window closed with nothing having called them. The write-side
+  refusal above governs writes only, so an operator who upgraded still
+  had the rows and `wirken permissions list` still printed them as
+  grants. Each removal appends `PermissionGrantPruned` or
+  `PermissionGrantExpired` to the `gateway-permissions` session, and
+  the CLI prints a one-line summary. Idempotent.
+
 - The audit chain records a grant found lapsed.
-  `PermissionGrantExpired` carries the expiry the dropped row held and
-  the tool and tier that hit it. The store previously deleted the row
-  and emitted nothing, leaving "granted, then lapsed" and "never
-  granted" with the same trace.
+  `PermissionGrantExpired` carries the expiry the dropped row held and,
+  when a call was what noticed, the tool and tier that hit it.
+  `detected_by` separates a lapse a call ran into from one the sweep
+  found. The store previously deleted the row and emitted nothing,
+  leaving "granted, then lapsed" and "never granted" with the same
+  trace. Expiry is observed at a call or at a store open, never on a
+  timer.
 
 - `wirken permissions approve` without `--session` writes to the audit
   chain under the `gateway-permissions` sentinel session, alongside the

@@ -56,6 +56,8 @@ The rule is an allowlist of storable shapes rather than a denylist of unstorable
 
 A persisted grant carries an `expires_at`. When the gate reads a grant whose window has closed it drops the row and falls back to prompting, and the action stays at prompt-on-every-call until the operator grants it again.
 
+**Expiry is observed, not scheduled.** Nothing runs at the moment a window closes. A lapse is noticed at one of two points: the next call that consults the grant, or the next time the store is opened, which sweeps lapsed rows (see below). A grant on a key nothing calls, in a `wirken run` daemon that stays up for a week, lapses on paper and is noticed when that daemon restarts. Do not read `PermissionGrantExpired` timestamps as a schedule of when grants ended; read `expired_at` on the row for that, and the row's own `ts` for when it was noticed. The `detected_by` field says which of the two points did the noticing.
+
 The default window is 30 days. To change it, set `default_expiry_days` in `~/.wirken/permissions.json`:
 
 ```json
@@ -72,15 +74,27 @@ The default is what an operator gets when they say nothing, not a ceiling on wha
 
 `--expires-in-days` does not apply to `--session` grants and is refused alongside it: a session-scoped grant is cleared on session end, not on a date.
 
+### Rows an upgrade leaves behind
+
+The Tier 2 rule above governs writes. It does nothing about rows already in `permissions.db`, and there are two kinds worth removing:
+
+- Keys that are not storable under the current tier model. Older builds accepted `mcp:`, `tool:`, `wasm:`, `imported_chat:`, `imported_search:` and `imported_search_corpus`, and the Tier 2 flip from a denylist to an allowlist stranded `shell:git`, `shell:kubectl`, `shell:make` and the language interpreters. None of these were ever read by the gate.
+- Grants whose window closed with nothing having called them. `check` only drops a lapsed row when something consults it, so a grant on an unused key stays in the table indefinitely.
+
+Both printed in `wirken permissions list` as though they were grants, which is a false floor: the list overstated what was approved.
+
+`PermissionStore::open` sweeps both, so the table is honest from the moment it opens rather than from the first call that happens to touch each key. Each removal gets an audit row (`PermissionGrantPruned` or `PermissionGrantExpired`, see below), and the CLI prints a one-line summary when a sweep removed anything. The sweep is idempotent; a second open reports nothing.
+
 ### What the chain records about a grant
 
-Four events, so a reviewer can tell four different situations apart.
+Five events, so a reviewer can tell five different situations apart.
 
 | Event | Means |
 | --- | --- |
 | `PermissionApproved` | A grant was written where none existed. |
 | `PermissionRenewed` | A grant was written over one that was already there. Carries `previous_expires_at` alongside `expires_at`. |
-| `PermissionGrantExpired` | The gate found a grant lapsed and dropped it. Carries the `expired_at` the row held, plus the tool and tier that hit it. |
+| `PermissionGrantExpired` | A grant was found lapsed and dropped. Carries the `expired_at` the row held. `detected_by: tool_call` means a call hit it, and the tool and tier are on the row; `detected_by: store_open` means the sweep found it, with no tool and no tier because no call was involved. |
+| `PermissionGrantPruned` | A grant was dropped because its key is Tier 1 or Tier 3 and the gate could never read it. Nothing ran out. Sweep only. |
 | `PermissionDenied` | The call was refused. |
 
 The store keeps one row per key and renewal overwrites in place, so `previous_expires_at` on a renewal row is the only surviving record of the window that was discarded. A key granted once and renewed twenty times is otherwise indistinguishable from one granted yesterday.

@@ -2875,27 +2875,31 @@ mod subagent {
 
         let perm_path = tmp.path().join("perms.db");
         let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
-        drop(store);
-
-        let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
-        {
-            let conn = rusqlite::Connection::open(&perm_path).unwrap();
-            conn.execute(
-                "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    "shell:ls",
-                    "lapsed",
-                    (expired_at - chrono::Duration::days(30)).to_rfc3339(),
-                    "test-operator",
-                    expired_at.to_rfc3339()
-                ],
-            )
-            .unwrap();
-        }
-
-        let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
         agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+
+        // Insert AFTER the store is open, on a second connection.
+        // `open` sweeps lapsed rows, so a row written before it would
+        // be gone before any call could consult it, which is the
+        // sweep working and not what this fixture is for. What it
+        // reproduces is a grant that lapses while a long-running
+        // store is already open, which is the case the sweep cannot
+        // reach.
+        let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        let conn = rusqlite::Connection::open(&perm_path).unwrap();
+        conn.execute(
+            "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                "shell:ls",
+                "lapsed",
+                (expired_at - chrono::Duration::days(30)).to_rfc3339(),
+                "test-operator",
+                expired_at.to_rfc3339()
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
         (agent, tmp, expired_at)
     }
 
@@ -2943,8 +2947,8 @@ mod subagent {
         assert_eq!(lapses.len(), 1, "exactly one lapse row: {events:#?}");
         assert_eq!(lapses[0].0, "shell:ls");
         assert_eq!(lapses[0].1, "lapsed");
-        assert_eq!(lapses[0].2, "exec");
-        assert_eq!(lapses[0].3, "tier2");
+        assert_eq!(lapses[0].2.as_deref(), Some("exec"));
+        assert_eq!(lapses[0].3.as_deref(), Some("tier2"));
         assert!(
             (lapses[0].4 - expired_at).num_seconds().abs() <= 1,
             "the row carries the window the dropped grant held",
