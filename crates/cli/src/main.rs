@@ -353,7 +353,9 @@ enum PermissionCommands {
         agent: String,
     },
     /// Grant an approval for an action key. Without `--session`,
-    /// writes a 30-day persisted approval to `permissions.db`.
+    /// writes a persisted approval to `permissions.db` for the
+    /// window in `permissions.json` (30 days when unset), or for
+    /// `--expires-in-days` when given.
     /// With `--session <id>`, writes a session-scoped approval that
     /// lives in-memory for the named agent session only and is
     /// cleared on session end; the grant is recorded in the
@@ -367,9 +369,14 @@ enum PermissionCommands {
         agent: String,
         /// Scope the grant to a single agent session. Pass the
         /// full session id (`{agent}/{channel}/{conversation}`).
-        /// Without this flag the approval is persisted for 30 days.
+        /// Without this flag the approval is persisted.
         #[arg(long)]
         session: Option<String>,
+        /// Window for this grant in days, overriding the store
+        /// default. Persisted grants only; a session grant is
+        /// cleared on session end and has no window.
+        #[arg(long, value_name = "DAYS")]
+        expires_in_days: Option<u32>,
     },
     /// Revoke a permission
     Revoke {
@@ -1145,7 +1152,11 @@ async fn main() -> Result<()> {
                 key,
                 agent,
                 session,
-            } => commands::permission::approve(&key, &agent, session.as_deref()).await,
+                expires_in_days,
+            } => {
+                commands::permission::approve(&key, &agent, session.as_deref(), expires_in_days)
+                    .await
+            }
             PermissionCommands::Revoke { key, agent } => {
                 commands::permission::revoke(&key, &agent).await
             }

@@ -345,7 +345,8 @@ fn tier2_needs_approval_first_time() {
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
-            tier: PermissionTier::Tier2
+            tier: PermissionTier::Tier2,
+            lapsed_at: None,
         }
     );
 }
@@ -379,7 +380,8 @@ fn tier2_approval_scoped_to_agent() {
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
-            tier: PermissionTier::Tier2
+            tier: PermissionTier::Tier2,
+            lapsed_at: None,
         }
     );
 }
@@ -560,7 +562,8 @@ fn tier3_always_needs_approval() {
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
-            tier: PermissionTier::Tier3
+            tier: PermissionTier::Tier3,
+            lapsed_at: None,
         }
     );
 
@@ -568,7 +571,8 @@ fn tier3_always_needs_approval() {
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
-            tier: PermissionTier::Tier3
+            tier: PermissionTier::Tier3,
+            lapsed_at: None,
         }
     );
 }
@@ -589,7 +593,8 @@ fn revoke_approval() {
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
-            tier: PermissionTier::Tier2
+            tier: PermissionTier::Tier2,
+            lapsed_at: None,
         }
     );
 }

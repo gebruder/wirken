@@ -38,11 +38,56 @@ Edge case not handled here: a bare shell binary as argv (`bash` alone, no metach
 
 ### Where approvals live
 
-Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix — `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation for 30 days.
+Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix — `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation until its window closes.
 
 On upgrade from pre-allowlist versions, `PermissionStore::open` prunes any stored `shell:<prefix>` rows whose prefix is no longer Tier 2 eligible (e.g., `shell:git`, `shell:kubectl`, `shell:make`). Operators see a single log line at startup enumerating what was dropped. The gate would have ignored those rows anyway; the prune keeps `wirken permission list` honest.
 
 `wirken permission list --agent work` prints all approvals for an agent. `wirken permission revoke <key> --agent work` removes one.
+
+### Only Tier 2 keys can be stored
+
+`permissions.db` accepts a grant only for an action key that is Tier 2: a shell verb on the Tier 2 allowlist, `file:<path>`, or `cross-conversation`. Every other key is refused at write time.
+
+Tier 3 keys are refused because the gate answers Tier 3 without consulting storage at all, so a stored row would never be read while still listing in `wirken permission list` as though the operator had pre-approved something. Tier 1 keys are refused for the mirror reason: Tier 1 is allowed without a lookup, so the row is equally inert.
+
+The rule is an allowlist of storable shapes rather than a denylist of unstorable ones. A key namespace added later is refused until it is named here deliberately.
+
+### Grant expiry
+
+A persisted grant carries an `expires_at`. When the gate reads a grant whose window has closed it drops the row and falls back to prompting, and the action stays at prompt-on-every-call until the operator grants it again.
+
+The default window is 30 days. To change it, set `default_expiry_days` in `~/.wirken/permissions.json`:
+
+```json
+{ "default_expiry_days": 7 }
+```
+
+An unreadable, unparseable, or absent file means 30 days, and an unrecognised key is named in a warning and ignored rather than failing startup. A single grant can override the default in either direction:
+
+```
+wirken permissions approve shell:ls --agent work --expires-in-days 1
+```
+
+The default is what an operator gets when they say nothing, not a ceiling on what they can ask for. Zero days is refused at both levels: it stores a grant that has already expired by the time the gate reads it, which reads as a live grant in `wirken permissions list` while prompting on every call. To stop granting an action, revoke it.
+
+`--expires-in-days` does not apply to `--session` grants and is refused alongside it: a session-scoped grant is cleared on session end, not on a date.
+
+### What the chain records about a grant
+
+Four events, so a reviewer can tell four different situations apart.
+
+| Event | Means |
+| --- | --- |
+| `PermissionApproved` | A grant was written where none existed. |
+| `PermissionRenewed` | A grant was written over one that was already there. Carries `previous_expires_at` alongside `expires_at`. |
+| `PermissionGrantExpired` | The gate found a grant lapsed and dropped it. Carries the `expired_at` the row held, plus the tool and tier that hit it. |
+| `PermissionDenied` | The call was refused. |
+
+The store keeps one row per key and renewal overwrites in place, so `previous_expires_at` on a renewal row is the only surviving record of the window that was discarded. A key granted once and renewed twenty times is otherwise indistinguishable from one granted yesterday.
+
+`PermissionGrantExpired` is the row that separates "the operator granted this and the window ran out" from "the operator never granted this". Both reach the agent as the same prompt, and only one is worth investigating.
+
+Operator grants made out of band of any conversation (`wirken permissions approve` without `--session`) are recorded under the `gateway-permissions` sentinel session, alongside the existing `gateway-hooks` and `gateway-mcp` lanes. They do not appear in `wirken sessions list`.
 
 ### Platform sender identity is audited, not authorized
 
@@ -54,7 +99,7 @@ Each channel adapter extracts the platform sender identity on every inbound mess
 
 The gateway writes this to the audit log as the `actor` field of the `message.inbound` event. The full event carries actor, action, target, channel, conversation id (as session), and a detail payload.
 
-The sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:terraform apply` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, for 30 days.
+The sender id does not flow into the permission check. Permission lookups key on `(action_key, agent_id)` only. Consequence: **a Tier 2 approval granted when any user on a channel first triggers an action applies to every user on that channel until the approval expires.** If Alice first runs a `shell:terraform apply` pattern on Slack and approves it, Bob gets the same tool-call approval without being prompted, until that grant's window closes.
 
 This is a real gap if the deployment uses one shared agent across a team. Workarounds today:
 

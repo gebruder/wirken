@@ -114,6 +114,12 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::ToolResult { .. }
             | SessionEvent::HttpFetch { .. }
             | SessionEvent::PermissionDenied { .. }
+            // Forwarded for the same reason `PermissionDenied` is: it
+            // is a gate outcome that turned a call away. Its sibling
+            // `PermissionApproved` is not in the default set, and
+            // `PermissionRenewed` follows the sibling rather than
+            // this one.
+            | SessionEvent::PermissionGrantExpired { .. }
             | SessionEvent::SkillPermissionDenied { .. }
             | SessionEvent::SubagentSpawned { .. }
             | SessionEvent::SubagentResult { .. }
@@ -163,6 +169,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::BudgetExceeded { .. } => "budget_exceeded",
         SessionEvent::PermissionDenied { .. } => "permission_denied",
         SessionEvent::PermissionApproved { .. } => "permission_approved",
+        SessionEvent::PermissionRenewed { .. } => "permission_renewed",
+        SessionEvent::PermissionGrantExpired { .. } => "permission_grant_expired",
         SessionEvent::SessionScopedApprovalsCleared { .. } => "session_scoped_approvals_cleared",
         SessionEvent::PhaseEntered { .. } => "phase_entered",
         SessionEvent::PhaseExited { .. } => "phase_exited",

@@ -86,6 +86,7 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
         store.check(&ls, session_scoped).expect("check"),
         PermissionCheck::NeedsApproval {
             tier: PermissionTier::Tier2,
+            lapsed_at: None,
         },
         "first use of allowlisted shell verb must prompt"
     );
@@ -128,6 +129,7 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
         store.check(&curl, session_scoped).expect("check"),
         PermissionCheck::NeedsApproval {
             tier: PermissionTier::Tier3,
+            lapsed_at: None,
         }
     ));
     // And Tier 3 cannot be pre-approved

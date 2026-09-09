@@ -38,6 +38,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use wirken_agent::sandbox::{SandboxConfig, SandboxMode, ShellMode};
 use wirken_gateway::config::GatewayConfig;
+use wirken_gateway::permissions::DEFAULT_GRANT_EXPIRY_DAYS;
 
 /// Resolve the data directory, ensuring it exists.
 pub fn data_dir() -> anyhow::Result<PathBuf> {
@@ -161,6 +162,95 @@ pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
         image,
         ..Default::default()
     }
+}
+
+/// Every key `open_permission_store` reads from `permissions.json`,
+/// sorted. Mirrors [`SANDBOX_KEYS`] so an unread key is named rather
+/// than silently ignored.
+pub(crate) const PERMISSION_KEYS: &[&str] = &["default_expiry_days"];
+
+/// Top-level keys in `permissions.json` the loader will not read,
+/// sorted.
+pub(crate) fn unknown_permission_keys(val: &serde_json::Value) -> Vec<String> {
+    let Some(obj) = val.as_object() else {
+        return Vec::new();
+    };
+    let mut unknown: Vec<String> = obj
+        .keys()
+        .filter(|k| !PERMISSION_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown
+}
+
+/// Read `{data_dir}/permissions.json` for the default grant window.
+/// Absent file, unreadable file, unparseable file, or absent key all
+/// mean [`DEFAULT_GRANT_EXPIRY_DAYS`].
+///
+/// Warn, never refuse, matching `load_sandbox_config`: a config
+/// written for a newer build must not stop an older one from
+/// starting.
+pub fn load_permission_expiry_days(data_dir: &Path) -> u32 {
+    let path = data_dir.join("permissions.json");
+    if !path.exists() {
+        return DEFAULT_GRANT_EXPIRY_DAYS;
+    }
+    let body = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                "Could not read {}: {e}. Using the default {DEFAULT_GRANT_EXPIRY_DAYS}-day \
+                 grant window.",
+                path.display()
+            );
+            return DEFAULT_GRANT_EXPIRY_DAYS;
+        }
+    };
+    let val: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Could not parse {}: {e}. Using the default {DEFAULT_GRANT_EXPIRY_DAYS}-day \
+                 grant window.",
+                path.display()
+            );
+            return DEFAULT_GRANT_EXPIRY_DAYS;
+        }
+    };
+    let unknown = unknown_permission_keys(&val);
+    if !unknown.is_empty() {
+        tracing::warn!(
+            "{}: unrecognised key(s) {unknown:?} are ignored; the keys read are \
+             {PERMISSION_KEYS:?}",
+            path.display()
+        );
+    }
+    match val.get("default_expiry_days").and_then(|v| v.as_u64()) {
+        Some(days) if days > 0 && days <= u32::MAX as u64 => days as u32,
+        Some(bad) => {
+            tracing::warn!(
+                "{}: default_expiry_days is {bad}, which is not a positive day count. Using \
+                 the default {DEFAULT_GRANT_EXPIRY_DAYS}.",
+                path.display()
+            );
+            DEFAULT_GRANT_EXPIRY_DAYS
+        }
+        None => DEFAULT_GRANT_EXPIRY_DAYS,
+    }
+}
+
+/// Open the permission store with the operator's configured default
+/// grant window. The single opening path for every CLI command, so a
+/// window set in `permissions.json` applies wherever a grant is
+/// written rather than only where somebody remembered to read it.
+pub fn open_permission_store(
+    cfg: &GatewayConfig,
+) -> anyhow::Result<wirken_gateway::permissions::PermissionStore> {
+    use anyhow::Context;
+    let days = load_permission_expiry_days(&cfg.data_dir);
+    wirken_gateway::permissions::PermissionStore::open_with_expiry(&cfg.permissions_db_path(), days)
+        .context("Failed to open permission store")
 }
 
 /// Probe a running Ollama instance for its version.

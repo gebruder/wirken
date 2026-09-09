@@ -734,6 +734,74 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// A persisted grant was written over a row that already
+    /// existed for the same `(action_key, agent_id)`. Distinct from
+    /// [`Self::PermissionApproved`], which means no row was there
+    /// before.
+    ///
+    /// The distinction is the point. Both write the same table with
+    /// the same `INSERT OR REPLACE`, so the store keeps only the
+    /// current window and the previous one is gone the moment the
+    /// replacement lands. Recording `previous_expires_at` next to
+    /// `expires_at` puts the window that was discarded in the chain,
+    /// which is the only place it survives. A reviewer asking "how
+    /// long has this key been continuously granted" reads a run of
+    /// these rows; without them a key granted once and renewed
+    /// twenty times is indistinguishable from one granted
+    /// yesterday.
+    ///
+    /// Session-scoped grants never emit this. Their expiry is the
+    /// `DateTime::<Utc>::MAX_UTC` sentinel and re-granting one is
+    /// idempotent, so there is no window to have discarded.
+    PermissionRenewed {
+        action_key: String,
+        agent_id: String,
+        approved_by: String,
+        /// Expiry the replaced row carried. Serializes RFC3339.
+        previous_expires_at: DateTime<Utc>,
+        /// Expiry the replacement row carries.
+        expires_at: DateTime<Utc>,
+        /// Which surface mediated the renewal. See
+        /// [`Self::PermissionApproved::approved_via`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved_via: Option<ApprovalSource>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
+    /// A stored grant was consulted, found lapsed, and dropped. The
+    /// tool call that triggered the lookup falls back to prompting.
+    ///
+    /// Emitted by the runtime's tier gate, not by the store: the
+    /// store is shared across sessions and holds no session handle,
+    /// while the lapse is only interesting attached to the call that
+    /// hit it.
+    ///
+    /// This is the row that separates "the operator never granted
+    /// this" from "the operator granted this and the window ran
+    /// out". Both surface to the agent as the same prompt, and
+    /// before this variant existed both left the same trace in the
+    /// chain, which was none: the store deleted the row and said
+    /// nothing. A grant lapsing mid-task and a grant never made are
+    /// different operator situations and the second one is not
+    /// worth investigating.
+    PermissionGrantExpired {
+        action_key: String,
+        agent_id: String,
+        /// Tool whose call consulted the lapsed grant.
+        tool: String,
+        /// Tier label the action resolved to, matching
+        /// [`Self::PermissionDenied::tier`].
+        tier: String,
+        /// Expiry the dropped row carried. Always in the past
+        /// relative to the row's own `ts`.
+        expired_at: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
     /// Session-scoped approvals were cleared for `session_id`.
     /// Emitted once per session end (clean shutdown or crash
     /// recovery) so a replay path sees the boundary and does not

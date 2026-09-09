@@ -359,6 +359,51 @@ impl ApprovalScope {
     }
 }
 
+/// Fallback expiry for persisted grants when no store-level default
+/// and no per-grant override is given. The value `PermissionStore::open`
+/// has always used.
+pub const DEFAULT_GRANT_EXPIRY_DAYS: u32 = 30;
+
+/// Whether `action_key` names a Tier 2 action, and so may be written
+/// to `permissions.db`.
+///
+/// This is an allowlist over the key namespaces `Action::approval_key`
+/// produces, not a denylist of the Tier 3 ones. The denylist form was
+/// already here in two hand-written special cases (`shell:` verbs off
+/// [`TIER2_ALLOWLIST`], and `cross_channel_memory:`) and it had the
+/// shape every denylist has: `mcp:`, `tool:`, `wasm:`,
+/// `imported_chat:`, `imported_search:` and `imported_search_corpus`
+/// are all Tier 3 and all of them were accepted. Those rows never took
+/// effect, because [`PermissionStore::check`] answers Tier 3 without
+/// consulting storage at all, but they listed in
+/// `wirken permissions list` as if they had, which is the exact
+/// failure the `shell:` refusal exists to prevent.
+///
+/// Inverting it also fixes the next one before it is written: a key
+/// namespace added later is refused until someone adds it here
+/// deliberately, rather than admitted by default because nobody
+/// remembered to deny it.
+///
+/// Tier 1 keys are refused too. Tier 1 is allowed without a lookup,
+/// so a stored Tier 1 row is dead weight in the same way a Tier 3 row
+/// is, and it would read as though it were doing something.
+pub fn is_storable_approval_key(action_key: &str) -> bool {
+    match action_key {
+        // Action::CrossConversationMessage, Tier 2.
+        "cross-conversation" => true,
+        // Action::ShellExec, Tier 2 only for the inspection verbs.
+        // The key is already canonicalized by `approval_key`.
+        key if key.starts_with("shell:") => {
+            TIER2_ALLOWLIST.contains(&key.trim_start_matches("shell:"))
+        }
+        // Action::ExternalFileAccess, Tier 2. An empty path is not a
+        // path any access carries, so it refuses rather than storing
+        // a row that matches nothing.
+        key if key.starts_with("file:") => key.len() > "file:".len(),
+        _ => false,
+    }
+}
+
 /// A stored permission approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Approval {
@@ -372,6 +417,31 @@ pub struct Approval {
     /// which is the only form the pre-slice-1 emit path produced.
     #[serde(default)]
     pub scope: ApprovalScope,
+}
+
+/// What a grant write did, as opposed to what it wrote.
+///
+/// [`PermissionStore::approve_by_key_with_expiry`] returns this so
+/// the caller can emit `PermissionApproved` or `PermissionRenewed`
+/// without a second lookup. Reading the prior row and writing the
+/// new one in one call is what makes the two events trustworthy:
+/// a caller that queried the expiry first and then approved would be
+/// reporting a window that another writer could have changed in
+/// between.
+#[derive(Debug, Clone)]
+pub struct GrantOutcome {
+    /// The row now in the store.
+    pub approval: Approval,
+    /// `Some(expiry)` when this write replaced an existing row for
+    /// the same `(action_key, agent_id)`, carrying that row's
+    /// expiry. `None` when the key was not previously granted.
+    ///
+    /// A lapsed row still counts as a replacement: the operator is
+    /// renewing a grant they made before, and losing that history
+    /// because the window happened to close first would be the same
+    /// gap this field exists to close. Always `None` for
+    /// session-scoped writes.
+    pub renewed_from: Option<DateTime<Utc>>,
 }
 
 /// Normalize a runtime `agent_id` to the logical agent id used in
@@ -418,7 +488,38 @@ impl PermissionStore {
     /// enumerating what was pruned rather than discovering later that
     /// `wirken permissions list` shows approvals that no longer take
     /// effect.
+    /// Open with the built-in [`DEFAULT_GRANT_EXPIRY_DAYS`] window.
+    /// Equivalent to `open_with_expiry(db_path, DEFAULT_GRANT_EXPIRY_DAYS)`.
     pub fn open(db_path: &Path) -> Result<Self, GatewayError> {
+        Self::open_with_expiry(db_path, DEFAULT_GRANT_EXPIRY_DAYS)
+    }
+
+    /// Open with an operator-chosen default grant window, in days.
+    ///
+    /// The window applies to every persisted grant written through
+    /// this handle that does not carry its own override. It is a
+    /// default, not a cap: a per-grant override may exceed it (see
+    /// [`Self::approve_by_key_with_expiry`]).
+    ///
+    /// Zero is refused. A zero-day default writes grants that are
+    /// already expired when [`Self::check`] next reads them, so every
+    /// Tier 2 action would prompt on every call while
+    /// `wirken permissions list` showed a table of grants. An
+    /// operator who wants that should be revoking, and an operator
+    /// who typed it by accident should be told.
+    pub fn open_with_expiry(
+        db_path: &Path,
+        default_expiry_days: u32,
+    ) -> Result<Self, GatewayError> {
+        if default_expiry_days == 0 {
+            return Err(GatewayError::Config(
+                "permissions: default_expiry_days must be at least 1. A zero-day window \
+                 stores grants that have already expired by the time the gate reads them, \
+                 so every Tier 2 action prompts on every call while `wirken permissions \
+                 list` still shows the grant. To stop granting an action, revoke it."
+                    .to_string(),
+            ));
+        }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -434,11 +535,17 @@ impl PermissionStore {
 
         let mut store = Self {
             conn,
-            default_expiry_days: 30,
+            default_expiry_days,
             session_cache: RefCell::new(HashMap::new()),
         };
         store.prune_non_tier2_shell_approvals()?;
         Ok(store)
+    }
+
+    /// The default grant window in days, for callers that report it
+    /// to an operator before a grant is written.
+    pub fn default_expiry_days(&self) -> u32 {
+        self.default_expiry_days
     }
 
     /// Delete every `shell:<prefix>` approval row whose prefix is not
@@ -528,10 +635,17 @@ impl PermissionStore {
                 match self.get_approval(&key, agent_id)? {
                     Some(approval) => {
                         if Utc::now() > approval.expires_at {
-                            // Expired — needs re-approval
+                            // Expired — needs re-approval. The row is
+                            // dropped here and its expiry is handed
+                            // back on `lapsed_at`, because after the
+                            // revoke this is the last point that knows
+                            // the window existed. The caller has the
+                            // session handle and emits
+                            // `PermissionGrantExpired`.
                             self.revoke(&key, agent_id)?;
                             Ok(PermissionCheck::NeedsApproval {
                                 tier: PermissionTier::Tier2,
+                                lapsed_at: Some(approval.expires_at),
                             })
                         } else {
                             Ok(PermissionCheck::Allowed)
@@ -539,11 +653,15 @@ impl PermissionStore {
                     }
                     None => Ok(PermissionCheck::NeedsApproval {
                         tier: PermissionTier::Tier2,
+                        lapsed_at: None,
                     }),
                 }
             }
+            // Tier 3 never consults storage, so it can never have
+            // found a grant to lapse.
             PermissionTier::Tier3 => Ok(PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier3,
+                lapsed_at: None,
             }),
         }
     }
@@ -601,11 +719,41 @@ impl PermissionStore {
         approved_by: &str,
         scope: ApprovalScope,
     ) -> Result<Approval, GatewayError> {
+        Ok(self
+            .approve_with_scope_by_key_with_expiry(action_key, agent_id, approved_by, scope, None)?
+            .approval)
+    }
+
+    /// [`Self::approve_with_scope_by_key`] with a per-grant window
+    /// and a report of what the write did.
+    ///
+    /// `expires_in_days` is ignored for `ApprovalScope::Session`:
+    /// session grants end with the session and carry the
+    /// `DateTime::<Utc>::MAX_UTC` sentinel rather than a window, so
+    /// there is nothing for a day count to shorten. Session writes
+    /// likewise always report `renewed_from: None`; re-granting one
+    /// is idempotent, not a renewal.
+    pub fn approve_with_scope_by_key_with_expiry(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+        approved_by: &str,
+        scope: ApprovalScope,
+        expires_in_days: Option<u32>,
+    ) -> Result<GrantOutcome, GatewayError> {
         match scope {
-            ApprovalScope::Persisted => self.approve_by_key(action_key, agent_id, approved_by),
-            ApprovalScope::Session { session_id } => {
-                self.approve_session_scoped_by_key(action_key, agent_id, approved_by, session_id)
+            ApprovalScope::Persisted => {
+                self.approve_by_key_with_expiry(action_key, agent_id, approved_by, expires_in_days)
             }
+            ApprovalScope::Session { session_id } => Ok(GrantOutcome {
+                approval: self.approve_session_scoped_by_key(
+                    action_key,
+                    agent_id,
+                    approved_by,
+                    session_id,
+                )?,
+                renewed_from: None,
+            }),
         }
     }
 
@@ -712,30 +860,65 @@ impl PermissionStore {
         agent_id: &str,
         approved_by: &str,
     ) -> Result<Approval, GatewayError> {
-        if let Some(prefix) = action_key.strip_prefix("shell:")
-            && !TIER2_ALLOWLIST.contains(&prefix)
-        {
+        Ok(self
+            .approve_by_key_with_expiry(action_key, agent_id, approved_by, None)?
+            .approval)
+    }
+
+    /// [`Self::approve_by_key`] with an explicit window and a report
+    /// of what the write did.
+    ///
+    /// `expires_in_days` overrides the store default for this grant
+    /// only; `None` takes the default. The override may be longer
+    /// than the default. The default is what an operator gets when
+    /// they say nothing, not a ceiling on what they can ask for, and
+    /// a ceiling here would be enforcing an approval policy in the
+    /// same call that carries out an approval the operator already
+    /// decided on.
+    ///
+    /// Zero is refused, for the reason [`Self::open_with_expiry`]
+    /// refuses a zero default.
+    ///
+    /// The row is still written with `INSERT OR REPLACE`, so a
+    /// renewal overwrites in place and the store holds one window per
+    /// key. `GrantOutcome::renewed_from` carries the window that was
+    /// overwritten so the caller can put it in the audit chain, which
+    /// is where the history lives.
+    pub fn approve_by_key_with_expiry(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+        approved_by: &str,
+        expires_in_days: Option<u32>,
+    ) -> Result<GrantOutcome, GatewayError> {
+        if !is_storable_approval_key(action_key) {
             return Err(GatewayError::Config(format!(
-                "refusing to store approval for '{action_key}': '{prefix}' is Tier 3 under the \
-                 current allowlist and cannot be pre-approved. Tier 3 actions prompt on every \
-                 use by design."
+                "refusing to store approval for '{action_key}': only Tier 2 action keys can be \
+                 pre-approved (shell verbs on the Tier 2 allowlist, 'file:<path>', and \
+                 'cross-conversation'). Every other action is Tier 1, which is allowed without \
+                 a stored grant, or Tier 3, which prompts on every use by design. A stored row \
+                 for either would list in `wirken permissions list` without the gate ever \
+                 reading it."
             )));
         }
-        // Same reasoning for the cross-channel memory key: the gate
-        // returns NeedsApproval for Tier 3 without consulting stored
-        // approvals, so accepting one here would leave the operator
-        // believing they had pre-approved a crossing that still
-        // prompts every time.
-        if action_key.starts_with("cross_channel_memory:") {
+        if expires_in_days == Some(0) {
             return Err(GatewayError::Config(format!(
-                "refusing to store approval for '{action_key}': reading another channel's \
-                 memory is Tier 3 and cannot be pre-approved. It prompts on every use by design."
+                "refusing to store approval for '{action_key}': a zero-day window expires \
+                 before the gate next reads it. To stop granting an action, revoke it."
             )));
         }
 
         let agent_id = canonical_agent_id(agent_id);
         let now = Utc::now();
-        let expires = now + Duration::days(self.default_expiry_days as i64);
+        let days = expires_in_days.unwrap_or(self.default_expiry_days);
+        let expires = now + Duration::days(days as i64);
+
+        // Read the window we are about to overwrite before
+        // overwriting it. Same call, same `&self`, so no caller can
+        // observe or interleave the two halves.
+        let renewed_from = self
+            .get_approval(action_key, agent_id)?
+            .map(|prior| prior.expires_at);
 
         self.conn.execute(
             "INSERT OR REPLACE INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
@@ -743,13 +926,16 @@ impl PermissionStore {
             params![action_key, agent_id, now.to_rfc3339(), approved_by, expires.to_rfc3339()],
         )?;
 
-        Ok(Approval {
-            action_key: action_key.to_string(),
-            agent_id: agent_id.to_string(),
-            approved_at: now,
-            approved_by: approved_by.to_string(),
-            expires_at: expires,
-            scope: ApprovalScope::Persisted,
+        Ok(GrantOutcome {
+            approval: Approval {
+                action_key: action_key.to_string(),
+                agent_id: agent_id.to_string(),
+                approved_at: now,
+                approved_by: approved_by.to_string(),
+                expires_at: expires,
+                scope: ApprovalScope::Persisted,
+            },
+            renewed_from,
         })
     }
 
@@ -844,7 +1030,22 @@ pub enum PermissionCheck {
     /// Action is allowed (Tier 1 or approved Tier 2).
     Allowed,
     /// Action needs user approval before proceeding.
-    NeedsApproval { tier: PermissionTier },
+    NeedsApproval {
+        tier: PermissionTier,
+        /// `Some(expiry)` when a stored grant was found lapsed and
+        /// dropped by this check, carrying the expiry it held.
+        /// `None` when no grant was stored, or when the tier never
+        /// consults storage.
+        ///
+        /// This is a field on the existing variant rather than a
+        /// variant of its own on purpose. A new variant would slip
+        /// past the `if let PermissionCheck::NeedsApproval` in the
+        /// runtime's tier gate and let a lapsed grant run the tool,
+        /// and the compiler would not have said a word. A new field
+        /// breaks every match site instead, which is the direction
+        /// this wants to fail in.
+        lapsed_at: Option<DateTime<Utc>>,
+    },
 }
 
 /// Stable label for the `reason` field on
@@ -854,6 +1055,24 @@ pub enum PermissionCheck {
 /// centralises the "clean shutdown" case so the emitter and any
 /// downstream pattern-match share one string.
 pub const SESSION_CLEAR_REASON_ENDED: &str = "session_ended";
+
+/// Session id the audit chain uses for operator actions on the
+/// permission store that belong to no agent session.
+///
+/// `wirken permissions approve <key>` without `--session` writes a
+/// persisted grant out of band of any conversation, so there is no
+/// agent session to attribute it to. Before this constant those
+/// grants were simply not recorded, which is a hole exactly where the
+/// record matters: the persisted CLI path is the only production
+/// writer of persisted grants, so `PermissionRenewed` would have had
+/// nothing to fire on.
+///
+/// A sentinel lane rather than a synthetic agent session. The gateway
+/// already keeps `gateway-hooks` (`crates/cli/src/commands/run.rs`)
+/// and `gateway-mcp` for the same reason, and none of them show up as
+/// agent sessions in `wirken sessions list`, which is what the
+/// earlier objection to recording these was about.
+pub const OPERATOR_PERMISSIONS_SESSION: &str = "gateway-permissions";
 
 /// Append a `SessionEvent::SessionScopedApprovalsCleared` tombstone
 /// to `log` under `session_id`. The shared emission point for any
@@ -1075,12 +1294,62 @@ pub fn approve_and_log_by_key(
     adapter_id: Option<&str>,
     sender_id: Option<&str>,
 ) -> Result<Approval, GatewayError> {
-    let approval = store.approve_with_scope_by_key(action_key, agent_id, approved_by, scope)?;
-    let (scope_kind, session_id) = approval.scope.to_audit_repr();
-    log.append(
+    approve_and_log_by_key_with_expiry(
+        store,
+        action_key,
+        agent_id,
+        approved_by,
+        scope,
+        log,
         handle,
-        wirken_audit::TrustLevel::System,
-        wirken_audit::SessionEvent::PermissionApproved {
+        adapter_id,
+        sender_id,
+        None,
+    )
+}
+
+/// [`approve_and_log_by_key`] with a per-grant window.
+///
+/// Emits `PermissionRenewed` instead of `PermissionApproved` when
+/// the write replaced a row that was already there, carrying both
+/// the window it discarded and the one it installed. The store
+/// reports which happened from inside the write itself, so the two
+/// events cannot disagree with what landed in the table.
+#[allow(clippy::too_many_arguments)]
+pub fn approve_and_log_by_key_with_expiry(
+    store: &PermissionStore,
+    action_key: &str,
+    agent_id: &str,
+    approved_by: &str,
+    scope: ApprovalScope,
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    adapter_id: Option<&str>,
+    sender_id: Option<&str>,
+    expires_in_days: Option<u32>,
+) -> Result<Approval, GatewayError> {
+    let outcome = store.approve_with_scope_by_key_with_expiry(
+        action_key,
+        agent_id,
+        approved_by,
+        scope,
+        expires_in_days,
+    )?;
+    let approval = outcome.approval;
+    let (scope_kind, session_id) = approval.scope.to_audit_repr();
+    let event = match outcome.renewed_from {
+        Some(previous_expires_at) => wirken_audit::SessionEvent::PermissionRenewed {
+            action_key: approval.action_key.clone(),
+            agent_id: approval.agent_id.clone(),
+            approved_by: approval.approved_by.clone(),
+            previous_expires_at,
+            expires_at: approval.expires_at,
+            // Same reasoning as the `approved_via: None` below.
+            approved_via: None,
+            adapter_id: adapter_id.map(str::to_string),
+            sender_id: sender_id.map(str::to_string),
+        },
+        None => wirken_audit::SessionEvent::PermissionApproved {
             action_key: approval.action_key.clone(),
             agent_id: approval.agent_id.clone(),
             approved_by: approval.approved_by.clone(),
@@ -1096,7 +1365,8 @@ pub fn approve_and_log_by_key(
             adapter_id: adapter_id.map(str::to_string),
             sender_id: sender_id.map(str::to_string),
         },
-    )?;
+    };
+    log.append(handle, wirken_audit::TrustLevel::System, event)?;
     Ok(approval)
 }
 
@@ -1358,6 +1628,7 @@ mod tier_tests {
             result,
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier3,
+                lapsed_at: None,
             },
         );
     }
@@ -1452,6 +1723,7 @@ mod tier_tests {
             first,
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
         // Operator approves once.
@@ -1552,6 +1824,7 @@ mod tier_tests {
             store.check(&shell("ls"), session).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
 
@@ -1589,6 +1862,7 @@ mod tier_tests {
             store.check(&shell("ls"), other).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
 
@@ -1598,6 +1872,7 @@ mod tier_tests {
             store.check(&shell("ls"), "default").unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
     }
@@ -1632,12 +1907,14 @@ mod tier_tests {
             store.check(&shell("ls"), session).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
         assert_eq!(
             store.check(&shell("cat"), session).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
         // Untouched session still allowed.
@@ -1667,6 +1944,7 @@ mod tier_tests {
             store.check(&shell("ls"), "default").unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
         store.approve(&shell("ls"), "default", "operator").unwrap();
@@ -2186,6 +2464,400 @@ mod tier_tests {
         assert_eq!(
             rows[0].approved_by, "operator-b",
             "post-clear grant wins; pre-clear approved_by is gone",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Grant expiry: store default, per-grant override, renewal, lapse
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn open_uses_the_documented_thirty_day_default() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        assert_eq!(store.default_expiry_days(), DEFAULT_GRANT_EXPIRY_DAYS);
+        assert_eq!(DEFAULT_GRANT_EXPIRY_DAYS, 30);
+    }
+
+    #[test]
+    fn store_default_window_applies_to_grants_that_name_none() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open_with_expiry(tmp.path(), 7).unwrap();
+        let before = Utc::now();
+        let approval = store
+            .approve_by_key("shell:ls", "agent-a", "operator")
+            .unwrap();
+        let window = approval.expires_at - before;
+        assert!(
+            window >= Duration::days(7) - Duration::minutes(1)
+                && window <= Duration::days(7) + Duration::minutes(1),
+            "expected a 7-day window from the store default, got {window}",
+        );
+    }
+
+    #[test]
+    fn per_grant_override_beats_the_store_default_in_both_directions() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open_with_expiry(tmp.path(), 7).unwrap();
+
+        // Shorter than the default.
+        let before = Utc::now();
+        let short = store
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(1))
+            .unwrap();
+        assert!(short.approval.expires_at - before < Duration::days(2));
+
+        // Longer than the default. The default is what an operator
+        // gets when they say nothing, not a ceiling on what they can
+        // ask for.
+        let before = Utc::now();
+        let long = store
+            .approve_by_key_with_expiry("shell:cat", "agent-a", "operator", Some(90))
+            .unwrap();
+        assert!(long.approval.expires_at - before > Duration::days(89));
+    }
+
+    #[test]
+    fn zero_day_windows_are_refused_at_open_and_at_grant() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        assert!(
+            PermissionStore::open_with_expiry(tmp.path(), 0).is_err(),
+            "a zero-day store default stores grants that are already expired",
+        );
+
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        assert!(
+            store
+                .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(0))
+                .is_err(),
+            "a zero-day per-grant override has the same problem",
+        );
+    }
+
+    #[test]
+    fn first_grant_reports_no_prior_window_and_a_regrant_reports_the_one_it_replaced() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+
+        let first = store
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(3))
+            .unwrap();
+        assert!(first.renewed_from.is_none(), "nothing was there to replace",);
+
+        let second = store
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", Some(30))
+            .unwrap();
+        assert_eq!(
+            second.renewed_from,
+            Some(first.approval.expires_at),
+            "the renewal carries the window it discarded",
+        );
+        assert!(
+            second.approval.expires_at > first.approval.expires_at,
+            "and the window it installed",
+        );
+
+        // INSERT OR REPLACE, so one row per key, not two.
+        assert_eq!(store.list("agent-a").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_lapsed_grant_is_still_a_renewal_when_regranted() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let lapsed = Utc::now() - Duration::days(2);
+        store
+            .conn
+            .execute(
+                "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "shell:ls",
+                    "agent-a",
+                    (lapsed - Duration::days(30)).to_rfc3339(),
+                    "operator",
+                    lapsed.to_rfc3339()
+                ],
+            )
+            .unwrap();
+
+        let outcome = store
+            .approve_by_key_with_expiry("shell:ls", "agent-a", "operator", None)
+            .unwrap();
+        assert!(
+            outcome.renewed_from.is_some(),
+            "losing the history because the window closed first is the gap this closes",
+        );
+    }
+
+    #[test]
+    fn check_reports_the_window_a_lapsed_grant_held_then_drops_the_row() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let action = Action::ShellExec {
+            pattern: "ls".into(),
+        };
+        let lapsed = Utc::now() - Duration::hours(1);
+        store
+            .conn
+            .execute(
+                "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "shell:ls",
+                    "agent-a",
+                    (lapsed - Duration::days(30)).to_rfc3339(),
+                    "operator",
+                    lapsed.to_rfc3339()
+                ],
+            )
+            .unwrap();
+
+        match store.check(&action, "agent-a").unwrap() {
+            PermissionCheck::NeedsApproval {
+                tier,
+                lapsed_at: Some(at),
+            } => {
+                assert_eq!(tier, PermissionTier::Tier2);
+                // Whole-second RFC3339 round-trip through SQLite.
+                assert!((at - lapsed).num_seconds().abs() <= 1);
+            }
+            other => panic!("expected a reported lapse, got {other:?}"),
+        }
+
+        // The row is gone, so the second check reports no grant
+        // rather than reporting the same lapse twice.
+        assert!(
+            matches!(
+                store.check(&action, "agent-a").unwrap(),
+                PermissionCheck::NeedsApproval {
+                    lapsed_at: None,
+                    ..
+                }
+            ),
+            "the lapse is reported once, by the check that dropped the row",
+        );
+    }
+
+    #[test]
+    fn a_live_grant_and_an_ungranted_key_both_report_no_lapse() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let action = Action::ShellExec {
+            pattern: "ls".into(),
+        };
+
+        assert!(matches!(
+            store.check(&action, "agent-a").unwrap(),
+            PermissionCheck::NeedsApproval {
+                lapsed_at: None,
+                ..
+            }
+        ));
+
+        store.approve(&action, "agent-a", "operator").unwrap();
+        assert_eq!(
+            store.check(&action, "agent-a").unwrap(),
+            PermissionCheck::Allowed,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Storable-key allowlist
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn only_tier2_keys_are_storable() {
+        for key in ["shell:ls", "shell:cat", "file:/tmp/x", "cross-conversation"] {
+            assert!(
+                is_storable_approval_key(key),
+                "{key} is Tier 2 and must be storable",
+            );
+        }
+        for key in [
+            // Tier 3, refused before this change.
+            "shell:curl",
+            "cross_channel_memory:slack",
+            // Tier 3, accepted before this change.
+            "mcp:mcp_github_create_issue",
+            "tool:something_unregistered",
+            "wasm:my_skill",
+            "imported_chat:src-1",
+            "imported_search:src-1",
+            "imported_search_corpus",
+            "NetworkRequest { domain: \"api.openai.com\" }",
+            "CredentialAccess",
+            "CronCreate",
+            "DestructiveFileOp",
+            // Tier 1: allowed with no lookup, so a stored row is
+            // dead weight that reads as though it did something.
+            "WorkspaceFileAccess",
+            "WebSearch",
+            "HttpRequest",
+            // Degenerate.
+            "file:",
+            "",
+        ] {
+            assert!(
+                !is_storable_approval_key(key),
+                "{key} is not Tier 2 and must not be storable",
+            );
+        }
+    }
+
+    #[test]
+    fn every_tier3_approval_key_is_refused_by_approve_by_key() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+
+        let tier3 = [
+            Action::McpToolCall {
+                tool: "mcp_github_create_issue".into(),
+            },
+            Action::UnknownTool {
+                tool: "unregistered".into(),
+            },
+            Action::WasmSkillCall {
+                skill: "my_skill".into(),
+            },
+            Action::CrossChannelMemoryRead {
+                from_channel: "slack".into(),
+            },
+            Action::ImportedChatRead {
+                source_id: "src-1".into(),
+            },
+            Action::ImportedChatSearch {
+                source_id: Some("src-1".into()),
+            },
+            Action::ImportedChatSearch { source_id: None },
+            Action::DestructiveFileOp,
+            Action::CredentialAccess,
+            Action::CronCreate,
+            Action::NetworkRequest {
+                domain: "api.openai.com".into(),
+            },
+            Action::ShellExec {
+                pattern: "curl".into(),
+            },
+        ];
+        for action in &tier3 {
+            assert_eq!(action.tier(), PermissionTier::Tier3, "{action} sanity");
+            let key = action.approval_key();
+            assert!(
+                store.approve_by_key(&key, "agent-a", "operator").is_err(),
+                "storing '{key}' would list a grant the gate never reads",
+            );
+        }
+        assert!(
+            store.list("agent-a").unwrap().is_empty(),
+            "no refused key left a row behind",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Audit: renewal is a distinct event from first grant
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn first_grant_logs_approved_and_the_regrant_logs_renewed() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
+
+        let first = super::approve_and_log_by_key_with_expiry(
+            &store,
+            "shell:ls",
+            "agent-a",
+            "operator",
+            ApprovalScope::Persisted,
+            &log,
+            &handle,
+            None,
+            None,
+            Some(3),
+        )
+        .unwrap();
+        let second = super::approve_and_log_by_key_with_expiry(
+            &store,
+            "shell:ls",
+            "agent-a",
+            "operator",
+            ApprovalScope::Persisted,
+            &log,
+            &handle,
+            None,
+            None,
+            Some(30),
+        )
+        .unwrap();
+
+        let events = log.get_since(&handle, 0).unwrap();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| match &e.event {
+                SessionEvent::PermissionApproved { .. } => "approved",
+                SessionEvent::PermissionRenewed { .. } => "renewed",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["approved", "renewed"]);
+
+        match &events[1].event {
+            SessionEvent::PermissionRenewed {
+                action_key,
+                agent_id,
+                previous_expires_at,
+                expires_at,
+                ..
+            } => {
+                assert_eq!(action_key, "shell:ls");
+                assert_eq!(agent_id, "agent-a");
+                assert_eq!(*previous_expires_at, first.expires_at);
+                assert_eq!(*expires_at, second.expires_at);
+            }
+            other => panic!("expected PermissionRenewed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regranting_a_session_scope_stays_an_approval_not_a_renewal() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let session = "agent-a/webchat/conv-1";
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+        let scope = ApprovalScope::Session {
+            session_id: session.to_string(),
+        };
+
+        for _ in 0..2 {
+            super::approve_and_log_by_key(
+                &store,
+                "shell:ls",
+                "agent-a",
+                "operator",
+                scope.clone(),
+                &log,
+                &handle,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        let events = log.get_since(&handle, 0).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|e| matches!(e.event, SessionEvent::PermissionApproved { .. })),
+            "a session grant has no window to have discarded, so re-granting is idempotent, \
+             not a renewal",
         );
     }
 }

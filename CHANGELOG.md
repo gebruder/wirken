@@ -12,6 +12,41 @@ tagged.
 
 ### Changed
 
+- Persisted permission grants take their expiry window from
+  `default_expiry_days` in `permissions.json` rather than a compiled-in
+  30 days, and `wirken permissions approve` takes `--expires-in-days`
+  to override the default for one grant. Absent or unparseable config
+  means 30 days, unchanged. Zero days is refused at both levels: it
+  writes a grant that has already expired when the gate next reads it,
+  which lists as a live grant while prompting on every call.
+
+- `permissions.db` accepts a grant only for a Tier 2 action key: a
+  shell verb on the Tier 2 allowlist, `file:<path>`, or
+  `cross-conversation`. The refusal was a denylist naming two of the
+  Tier 3 namespaces, so `mcp:`, `tool:`, `wasm:`, `imported_chat:`,
+  `imported_search:` and `imported_search_corpus` were accepted. Those
+  rows were never read, because the gate answers Tier 3 without
+  consulting storage, and listed in `wirken permissions list` as though
+  they were grants. Tier 1 keys are refused for the same reason.
+
+- The audit chain distinguishes a grant written over an existing one
+  from a first grant. `PermissionRenewed` carries the window it
+  replaced alongside the one it installed; the store keeps a single row
+  per key, so that is the only surviving record of the previous window.
+
+- The audit chain records a grant found lapsed.
+  `PermissionGrantExpired` carries the expiry the dropped row held and
+  the tool and tier that hit it. The store previously deleted the row
+  and emitted nothing, leaving "granted, then lapsed" and "never
+  granted" with the same trace.
+
+- `wirken permissions approve` without `--session` writes to the audit
+  chain under the `gateway-permissions` sentinel session, alongside the
+  existing `gateway-hooks` and `gateway-mcp` lanes. It previously wrote
+  nothing, which left the only production writer of persisted grants
+  absent from the chain. The lane does not appear in
+  `wirken sessions list`.
+
 - `wirken --version` and the startup banner name the commit the
   binary was built from, whether the tree had uncommitted changes at
   build time, and the absolute path of the running executable. A build

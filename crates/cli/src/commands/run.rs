@@ -529,10 +529,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     ));
 
     // --- Open permission store ---
-    let permissions = Arc::new(std::sync::Mutex::new(
-        wirken_gateway::permissions::PermissionStore::open(&cfg.permissions_db_path())
-            .context("Failed to open permission store")?,
-    ));
+    let permissions = Arc::new(std::sync::Mutex::new(super::open_permission_store(&cfg)?));
 
     // --- Setup router and gather per-agent static configs ---
     //

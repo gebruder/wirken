@@ -754,6 +754,10 @@ impl AgentFactory {
 /// `PermissionApproved` with `scope == Persisted` is intentionally a
 /// no-op here: SQLite is the source of truth for persisted
 /// approvals, and `PermissionStore::open` has already loaded them.
+/// `PermissionRenewed` and `PermissionGrantExpired` are no-ops for
+/// the same reason. Both describe persisted rows, and both describe
+/// a change SQLite already carries by the time a replay runs: the
+/// renewal is the row, and the expiry already revoked it.
 /// Variants other than the two permission-lifecycle ones are
 /// ignored; this pass is concerned with the cache only.
 fn replay_session_scoped_approvals(
@@ -979,6 +983,7 @@ mod replay_tests {
             store.check(&shell_ls(), session).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
     }
@@ -1044,6 +1049,7 @@ mod replay_tests {
             store.check(&shell_ls(), session).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
+                lapsed_at: None,
             },
         );
     }
@@ -1091,6 +1097,7 @@ mod replay_tests {
                 store.check(&action, session).unwrap(),
                 PermissionCheck::NeedsApproval {
                     tier: PermissionTier::Tier2,
+                    lapsed_at: None,
                 },
                 "{} must require approval after clean clear",
                 action,

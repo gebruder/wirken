@@ -2993,7 +2993,30 @@ impl Agent {
                         AgentError::PermissionDenied(format!("permission check failed: {e}"))
                     })?
                 };
-                if let PermissionCheck::NeedsApproval { tier } = check {
+                if let PermissionCheck::NeedsApproval { tier, lapsed_at } = check {
+                    // A grant was there and its window had closed.
+                    // The store dropped the row and handed back the
+                    // expiry; record it before the denial so the
+                    // chain distinguishes "never granted" from
+                    // "granted, then lapsed". Emitted even when the
+                    // one-shot bypass below lets this call through:
+                    // the bypass is about this invocation, the lapse
+                    // is about the stored grant, and the grant is
+                    // gone either way.
+                    if let Some(expired_at) = lapsed_at {
+                        self.log_event(
+                            TrustLevel::System,
+                            SessionEvent::PermissionGrantExpired {
+                                action_key: action.approval_key(),
+                                agent_id: self.id.clone(),
+                                tool: name.to_string(),
+                                tier: action.tier().label().to_string(),
+                                expired_at,
+                                adapter_id: self.current_inbound.adapter_id.clone(),
+                                sender_id: self.current_inbound.sender_id.clone(),
+                            },
+                        )?;
+                    }
                     // One-shot bypass: set by
                     // `dispatch_tool_with_approval` immediately
                     // before retrying after the gate returned
@@ -4530,6 +4553,7 @@ impl Agent {
                     events_unverifiable += 1;
                 }
                 // Structural events (Compaction, PermissionDenied,
+                // PermissionRenewed, PermissionGrantExpired,
                 // Attestation, Subagent*, AuditLegacy) are not part
                 // of the LLM-visible projection but they pass the
                 // chain check and require no further verification

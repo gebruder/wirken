@@ -3,12 +3,12 @@ use std::collections::HashSet;
 
 use wirken_audit::{SessionId, SessionLog, SqliteSessionLog};
 use wirken_gateway::permissions::{
-    ApprovalScope, PermissionStore, approve_and_log_by_key,
+    ApprovalScope, OPERATOR_PERMISSIONS_SESSION, approve_and_log_by_key_with_expiry,
     list_active_session_scoped_grants_for_agent,
 };
 use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
 
-use super::config;
+use super::{config, open_permission_store};
 
 /// Connect to `gateway-permissions.sock`, send one request, read
 /// one response, close. Mirrors the orchestrator-push client
@@ -191,8 +191,7 @@ fn print_decision(resp: PermissionsResponse, request_id: &str, verb: &str) -> Re
 /// expiry; it ends with the session).
 pub async fn list(agent: &str) -> Result<()> {
     let cfg = config();
-    let store = PermissionStore::open(&cfg.permissions_db_path())
-        .context("Failed to open permission store")?;
+    let store = open_permission_store(&cfg)?;
 
     let persisted = store.list(agent).context("Failed to list permissions")?;
 
@@ -252,8 +251,7 @@ pub async fn list(agent: &str) -> Result<()> {
 
 pub async fn revoke(key: &str, agent: &str) -> Result<()> {
     let cfg = config();
-    let store = PermissionStore::open(&cfg.permissions_db_path())
-        .context("Failed to open permission store")?;
+    let store = open_permission_store(&cfg)?;
 
     store
         .revoke(key, agent)
@@ -265,29 +263,50 @@ pub async fn revoke(key: &str, agent: &str) -> Result<()> {
 
 /// Grant an approval for `key`, operator-initiated.
 ///
-/// When `session` is `None`, writes a 30-day persisted approval
-/// directly to `permissions.db` (unchanged from the pre-slice-4
-/// behaviour). When `session` is `Some(session_id)`, writes a
-/// session-scoped approval to the in-memory cache and appends a
-/// `PermissionApproved` event to the session's audit chain via
-/// `approve_and_log_by_key`; the grant covers only the named
-/// session and is cleared on session end.
+/// When `session` is `None`, writes a persisted approval to
+/// `permissions.db` for the store's configured default window, or
+/// for `expires_in_days` when the operator named one.
 ///
-/// The persisted path stays silent on the audit chain by design:
-/// an operator-initiated persisted grant is structurally out of
-/// band of any agent session log, and a synthetic operator-session
-/// would pollute `wirken sessions list`. A non-session operator-
-/// action audit channel is the cleaner future home for these.
-pub async fn approve(key: &str, agent: &str, session: Option<&str>) -> Result<()> {
+/// When `session` is `Some(session_id)`, writes a session-scoped
+/// approval to the in-memory cache; the grant covers only the named
+/// session and is cleared on session end. A day count passed
+/// alongside `--session` is refused rather than ignored: session
+/// grants end with the session and carry no window, so accepting the
+/// flag would tell the operator they had set an expiry that nothing
+/// reads.
+///
+/// Both paths append to the audit chain. The session path writes to
+/// the named session; the persisted path writes to the
+/// `gateway-permissions` sentinel lane, because an operator grant made
+/// out of band of any conversation belongs to no agent session. The
+/// persisted path used to write nothing at all, which left the only
+/// production writer of persisted grants absent from the chain.
+pub async fn approve(
+    key: &str,
+    agent: &str,
+    session: Option<&str>,
+    expires_in_days: Option<u32>,
+) -> Result<()> {
     let cfg = config();
-    let store = PermissionStore::open(&cfg.permissions_db_path())
-        .context("Failed to open permission store")?;
+    let store = open_permission_store(&cfg)?;
+    let log = SqliteSessionLog::open(&cfg.audit_db_path()).context("Failed to open session log")?;
 
     match session {
         None => {
-            let approval = store
-                .approve_by_key(key, agent, "operator")
-                .context(format!("Failed to approve permission '{key}'"))?;
+            let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
+            let approval = approve_and_log_by_key_with_expiry(
+                &store,
+                key,
+                agent,
+                "operator",
+                ApprovalScope::Persisted,
+                &log,
+                &handle,
+                None,
+                None,
+                expires_in_days,
+            )
+            .context(format!("Failed to approve permission '{key}'"))?;
             println!(
                 "  Approved '{}' for agent '{}' until {}.",
                 approval.action_key,
@@ -296,14 +315,17 @@ pub async fn approve(key: &str, agent: &str, session: Option<&str>) -> Result<()
             );
         }
         Some(session_id) => {
-            let log = SqliteSessionLog::open(&cfg.audit_db_path())
-                .context("Failed to open session log")?;
+            if expires_in_days.is_some() {
+                anyhow::bail!(
+                    "--expires-in-days does not apply to a session-scoped grant: it is cleared                      on session end, not on a date. Drop --session for a persisted grant with                      a window, or drop --expires-in-days."
+                );
+            }
             let handle = log.handle_for(SessionId::new(session_id.to_string()));
             let scope = ApprovalScope::Session {
                 session_id: session_id.to_string(),
             };
-            let approval = approve_and_log_by_key(
-                &store, key, agent, "operator", scope, &log, &handle, None, None,
+            let approval = approve_and_log_by_key_with_expiry(
+                &store, key, agent, "operator", scope, &log, &handle, None, None, None,
             )
             .context(format!(
                 "Failed to approve permission '{key}' for session '{session_id}'"
@@ -323,8 +345,7 @@ pub async fn approve(key: &str, agent: &str, session: Option<&str>) -> Result<()
 pub async fn list_pending(agent: &str) -> Result<()> {
     let cfg = config();
     let log = SqliteSessionLog::open(&cfg.audit_db_path()).context("Failed to open session log")?;
-    let perms = PermissionStore::open(&cfg.permissions_db_path())
-        .context("Failed to open permission store")?;
+    let perms = open_permission_store(&cfg)?;
 
     let denials = log.find_permission_denials(agent);
 

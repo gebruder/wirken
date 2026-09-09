@@ -134,8 +134,20 @@ Manage tool approval records.
 
 ```
 wirken permissions list [--agent <AGENT>]
+wirken permissions approve <KEY> [--agent <AGENT>] [--session <SESSION_ID>] [--expires-in-days <DAYS>]
 wirken permissions revoke <KEY> [--agent <AGENT>]
 ```
+
+Only Tier 2 action keys can be approved: a shell verb on the Tier 2
+allowlist, `file:<path>`, or `cross-conversation`. Tier 1 is allowed
+without a stored grant and Tier 3 prompts on every use, so a stored row
+for either would never be read by the gate.
+
+`--expires-in-days` overrides the window for one grant. Without it a
+persisted grant takes `default_expiry_days` from
+`~/.wirken/permissions.json`, which defaults to 30. The flag is refused
+alongside `--session`: a session grant is cleared on session end and
+carries no window.
 
 ## wirken credentials
 

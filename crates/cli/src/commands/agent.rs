@@ -5,10 +5,9 @@ use anyhow::{Context, Result};
 use wirken_agent::Agent;
 use wirken_agent::llm::LlmConfig;
 use wirken_gateway::agent_config::AgentConfigStore;
-use wirken_gateway::permissions::PermissionStore;
 use wirken_vault::{CredentialStore, probe_keychain};
 
-use super::config;
+use super::{config, open_permission_store};
 
 pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     let cfg = config();
@@ -109,8 +108,7 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // Attach the gateway's permission store so tier gating applies
     // on the ask path too — otherwise Tier 2/3 actions execute
     // unchecked and bypass the three-tier model.
-    let perms = PermissionStore::open(&cfg.permissions_db_path())
-        .context("Failed to open permission store")?;
+    let perms = open_permission_store(&cfg)?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 
     // Attach the stdin approval gate when (and only when) stdin is
@@ -207,8 +205,7 @@ async fn send_with_agent_config(
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
-    let perms = PermissionStore::open(&cfg.permissions_db_path())
-        .context("Failed to open permission store")?;
+    let perms = open_permission_store(cfg)?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 
     if super::oauth_scope::stdin_is_tty() {

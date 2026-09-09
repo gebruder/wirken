@@ -26,6 +26,7 @@ use super::lyrik_walks::{
     build_walk_prompt, default_walks_source_dir, ensure_walk_staging, parse_walks_config,
     stage_walk_skills,
 };
+use super::open_permission_store;
 
 const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -466,8 +467,7 @@ async fn dispatch_via_agent_runtime(
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
-    let perms =
-        PermissionStore::open(&cfg.permissions_db_path()).context("open permission store")?;
+    let perms = open_permission_store(&cfg)?;
     let perms_arc = Arc::new(Mutex::new(perms));
     agent.set_permissions(perms_arc.clone());
 

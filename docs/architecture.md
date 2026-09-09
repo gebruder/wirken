@@ -154,7 +154,7 @@ Agents operate under a **capability-based permission model** with three tiers:
 - Cron job creation
 - Skill installation
 
-Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `approved_at`, `approved_by` (channel the approval came from), and `expires_at` (default 30 days, re-promptable).
+Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `approved_at`, `approved_by` (channel the approval came from), and `expires_at` (30 days by default, set by `default_expiry_days` in `permissions.json` or per grant by `--expires-in-days`, re-promptable). Only Tier 2 keys are storable.
 
 **Multi-agent isolation:** Each agent gets its own workspace directory, session store, permission set, and bound channels. Agent A cannot invoke Agent B's tools or read Agent B's sessions. The gateway enforces this at the IPC boundary using the same channel-typed generic pattern as adapters — agent handles are parameterized by agent ID at the type level.
 

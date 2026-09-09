@@ -2853,6 +2853,141 @@ mod subagent {
         s
     }
 
+    /// Build an agent whose store holds a `shell:ls` grant whose
+    /// window closed an hour ago. Written with raw SQL because no
+    /// store API produces a lapsed grant: the shortest window
+    /// `approve_by_key_with_expiry` accepts is a day, and a
+    /// zero-day window is refused precisely so this state cannot be
+    /// created on purpose in production.
+    fn make_agent_with_lapsed_ls_grant() -> (Agent, TempDir, chrono::DateTime<chrono::Utc>) {
+        use rusqlite::params;
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let mut agent = Agent::new(
+            "lapsed".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log,
+        )
+        .unwrap();
+
+        let perm_path = tmp.path().join("perms.db");
+        let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        drop(store);
+
+        let expired_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        {
+            let conn = rusqlite::Connection::open(&perm_path).unwrap();
+            conn.execute(
+                "INSERT INTO approvals (action_key, agent_id, approved_at, approved_by, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "shell:ls",
+                    "lapsed",
+                    (expired_at - chrono::Duration::days(30)).to_rfc3339(),
+                    "test-operator",
+                    expired_at.to_rfc3339()
+                ],
+            )
+            .unwrap();
+        }
+
+        let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+        (agent, tmp, expired_at)
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_grant_logs_that_it_lapsed_before_denying_the_call() {
+        // The gap this closes: before, the store deleted the row and
+        // said nothing, so "the operator granted this and the window
+        // ran out" and "the operator never granted this" left the
+        // same trace in the chain, which was none.
+        let (mut agent, _tmp, expired_at) = make_agent_with_lapsed_ls_grant();
+
+        let err = agent
+            .execute_tool("exec", r#"{"command":"ls"}"#)
+            .await
+            .expect_err("a lapsed grant must fall back to prompting, not run the tool");
+        assert!(
+            matches!(err, AgentError::PermissionDeniedCtx(_)),
+            "expected the approval-needed denial, got {err:?}",
+        );
+
+        let log = agent.session_log_for_test().clone();
+        let handle = log.handle_for(SessionId::new(agent.id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        let lapses: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::PermissionGrantExpired {
+                    action_key,
+                    agent_id,
+                    tool,
+                    tier,
+                    expired_at,
+                    ..
+                } => Some((
+                    action_key.clone(),
+                    agent_id.clone(),
+                    tool.clone(),
+                    tier.clone(),
+                    *expired_at,
+                )),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(lapses.len(), 1, "exactly one lapse row: {events:#?}");
+        assert_eq!(lapses[0].0, "shell:ls");
+        assert_eq!(lapses[0].1, "lapsed");
+        assert_eq!(lapses[0].2, "exec");
+        assert_eq!(lapses[0].3, "tier2");
+        assert!(
+            (lapses[0].4 - expired_at).num_seconds().abs() <= 1,
+            "the row carries the window the dropped grant held",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_never_granted_key_logs_no_lapse() {
+        // The other half of the distinction. Same tool, same tier,
+        // same denial, no grant behind it, so no lapse row.
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let mut agent = Agent::new(
+            "ungranted".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log,
+        )
+        .unwrap();
+        let store =
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+
+        let err = agent
+            .execute_tool("exec", r#"{"command":"ls"}"#)
+            .await
+            .expect_err("an ungranted Tier 2 verb prompts");
+        assert!(matches!(err, AgentError::PermissionDeniedCtx(_)));
+
+        let log = agent.session_log_for_test().clone();
+        let handle = log.handle_for(SessionId::new(agent.id.clone()));
+        let events = log.get_since(&handle, 0).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, SessionEvent::PermissionGrantExpired { .. })),
+            "nothing lapsed, so nothing to report",
+        );
+    }
+
     #[tokio::test]
     async fn subagent_tier_ceiling_overrides_per_agent_approval() {
         // Tier 2 verb (ls) is APPROVED at the store level. Without
