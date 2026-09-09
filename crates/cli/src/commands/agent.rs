@@ -108,6 +108,11 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     // Attach the gateway's permission store so tier gating applies
     // on the ask path too — otherwise Tier 2/3 actions execute
     // unchecked and bypass the three-tier model.
+    //
+    // The agent id must be set before the store: an agent that has
+    // not named itself gets no persisted grants and prompts for
+    // every Tier 2 action.
+    agent.set_agent_id("default");
     let perms = open_permission_store(&cfg)?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 
@@ -205,6 +210,7 @@ async fn send_with_agent_config(
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
+    agent.set_agent_id("default");
     let perms = open_permission_store(cfg)?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 

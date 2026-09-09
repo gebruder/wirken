@@ -2875,6 +2875,7 @@ mod subagent {
 
         let perm_path = tmp.path().join("perms.db");
         let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        agent.set_agent_id("lapsed");
         agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
 
         // Insert AFTER the store is open, on a second connection.
@@ -2901,6 +2902,132 @@ mod subagent {
         drop(conn);
 
         (agent, tmp, expired_at)
+    }
+
+    /// Issue #242 closing condition, at the runtime.
+    ///
+    /// A parent holds a Tier 2 shell allowlist grant. A child is
+    /// woken exactly as `spawn_subagent_intercept` wakes one: the
+    /// child's configured agent id, and a session id that is the
+    /// parent's with a `#sub-N` suffix. The child must be denied the
+    /// shell action, and the audit row must name the child.
+    ///
+    /// The LLM round is not exercised. `spawn_subagent_intercept`
+    /// drives the child through `process_message_inner`, which calls
+    /// the model; the permission behaviour under test is entirely in
+    /// the wake and the tier gate, which this reaches directly.
+    #[tokio::test]
+    async fn a_subagent_is_denied_the_shell_grant_its_parent_holds() {
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let perm_path = tmp.path().join("perms.db");
+        let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
+        // Only the parent is granted.
+        store
+            .approve(
+                &wirken_gateway::permissions::Action::ShellExec {
+                    pattern: "ls".into(),
+                },
+                "parent",
+                "test-operator",
+            )
+            .unwrap();
+        let store = Arc::new(std::sync::Mutex::new(store));
+
+        let mut configs = HashMap::new();
+        for id in ["parent", "researcher"] {
+            configs.insert(
+                id.to_string(),
+                AgentStaticConfig {
+                    agent_id: id.to_string(),
+                    workspace: tmp.path().to_path_buf(),
+                    llm_config: LlmConfig::ollama("test"),
+                    channel_overrides: std::collections::HashMap::new(),
+                    api_key: None,
+                    api_key_credential: None,
+                    skills: Vec::new(),
+                    wasm_skills: Vec::new(),
+                    mcp_client: None,
+                    identity: None,
+                    allowed_subagents: Default::default(),
+                    sandbox: Default::default(),
+                    extra_interceptors: vec![],
+                    zirkel_db_path: None,
+                    channel_egress: Default::default(),
+                },
+            );
+        }
+        let factory = AgentFactory::with_options(
+            configs,
+            log.clone(),
+            Some(store),
+            None,
+            crate::factory::CacheMode::Drop,
+            64,
+        );
+
+        let parent_session = "parent/slack/C1";
+        let child_session = format!("{parent_session}#sub-0");
+
+        // The parent runs it, which is the control: the grant is
+        // real and live, so a denial below is about who is asking.
+        {
+            let parent_arc = factory.wake("parent", parent_session).unwrap();
+            let mut parent = parent_arc.lock().await;
+            // Not asserting success: what exec does after the gate
+            // depends on the sandbox and on Docker being present.
+            // What matters is that it is not the gate that stops it.
+            let out = parent.execute_tool("exec", r#"{"command":"ls"}"#).await;
+            assert!(
+                !matches!(out, Err(AgentError::PermissionDeniedCtx(_))),
+                "the parent holds the grant and must clear the gate",
+            );
+        }
+
+        // The child, woken the way the spawn path wakes one.
+        let child_arc = factory.wake("researcher", &child_session).unwrap();
+        let mut child = child_arc.lock().await;
+        child.set_subagent_runtime(
+            1,
+            wirken_gateway::permissions::PermissionTier::Tier2,
+            restrict_tools_with_exec(),
+        );
+
+        let err = child
+            .execute_tool("exec", r#"{"command":"ls"}"#)
+            .await
+            .expect_err("the child holds no grant of its own and must be gated");
+        let ctx = match err {
+            AgentError::PermissionDeniedCtx(ctx) => ctx,
+            other => panic!("expected the approval-needed denial, got {other:?}"),
+        };
+        assert_eq!(ctx.action.approval_key(), "shell:ls");
+        assert_eq!(
+            ctx.agent_id, "researcher",
+            "the denial names the callee, not the caller and not the session",
+        );
+
+        // And the same on the row that reaches the chain.
+        child.emit_unmediated_denial_for_test(&ctx).unwrap();
+        let handle = log.handle_for(SessionId::new(child_session.clone()));
+        let denials: Vec<String> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::PermissionDenied {
+                    agent_id,
+                    action_key,
+                    ..
+                } if action_key == "shell:ls" => Some(agent_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            denials,
+            vec!["researcher".to_string()],
+            "the audit event shows the callee's own id",
+        );
     }
 
     #[tokio::test]
@@ -2973,6 +3100,7 @@ mod subagent {
         let store =
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap();
+        agent.set_agent_id("ungranted");
         agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
 
         let err = agent

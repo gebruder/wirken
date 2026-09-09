@@ -693,27 +693,58 @@ impl PermissionStore {
         Ok(report)
     }
 
-    /// Check if an action is allowed for a given agent.
-    /// Returns:
-    /// - Ok(true) for Tier 1 (always allowed) or approved Tier 2
-    /// - Ok(false) for unapproved Tier 2 or any Tier 3
-    /// - Err for database errors
+    /// Check whether `action` is allowed.
     ///
-    /// Session-scoped approvals win over persisted ones: the cache is
-    /// consulted against the raw `agent_id` (which the runtime passes
-    /// as the full `{agent}/{channel}/{conversation}` form, matching
-    /// the `session_id` recorded under `ApprovalScope::Session`)
-    /// before the canonical-prefix SQLite lookup.
-    pub fn check(&self, action: &Action, agent_id: &str) -> Result<PermissionCheck, GatewayError> {
+    /// Takes the session id and the logical agent id separately
+    /// because they answer different questions and used to be the
+    /// same argument. Session-scoped grants are keyed on the session;
+    /// persisted grants are keyed on the agent.
+    ///
+    /// Collapsing them is what let a sub-agent run on its caller's
+    /// grants. The runtime passed one id, its session id, and this
+    /// method reduced it to an agent by taking the prefix before the
+    /// first `/`. A child's session id is its parent's with a
+    /// `#sub-N` suffix, so the prefix is the parent's agent id and
+    /// the child was checked against the parent's grant set. The
+    /// child's own configured agent id never reached the store. See
+    /// issue #242.
+    ///
+    /// `agent_id` is used verbatim, with no prefix reduction. The
+    /// write path still reduces (see [`canonical_agent_id`]), so a
+    /// caller that passes a session-shaped string here writes under
+    /// the prefix and reads under the full string, matches nothing,
+    /// and prompts. That asymmetry is deliberate: reducing on read is
+    /// the bug, and failing to find a grant is the safe direction to
+    /// fail in.
+    ///
+    /// `None` means the caller has no logical agent, so there are no
+    /// persisted grants to consult and every Tier 2 action prompts.
+    /// Tier 1 is still allowed, because Tier 1 is allowed without a
+    /// lookup and there is nothing to look up either way.
+    ///
+    /// Returns:
+    /// - `Allowed` for Tier 1, an approved Tier 2, or a session-scoped grant
+    /// - `NeedsApproval` for unapproved Tier 2 or any Tier 3
+    /// - `Err` for database errors
+    pub fn check(
+        &self,
+        action: &Action,
+        session_id: &str,
+        agent_id: Option<&str>,
+    ) -> Result<PermissionCheck, GatewayError> {
         // Session-cache short-circuit. Applies to every tier so a
         // Tier 3 action could in principle be session-granted in a
         // future slice; for now the only emitters target Tier 2, but
         // gating the lookup on tier here would make session-scoped
         // semantics tier-coupled in a way the data model is not.
+        //
+        // Keyed on the session id exactly as recorded, so a child's
+        // `#sub-N` session is a different key from its parent's and
+        // sees none of the parent's session grants.
         let session_hit = {
             let cache = self.session_cache.borrow();
             cache
-                .get(agent_id)
+                .get(session_id)
                 .and_then(|per_session| {
                     per_session
                         .contains_key(&action.approval_key())
@@ -725,20 +756,30 @@ impl PermissionStore {
             return Ok(PermissionCheck::Allowed);
         }
 
-        let agent_id = canonical_agent_id(agent_id);
-        match action.tier() {
+        let tier = action.tier();
+        let Some(agent_id) = agent_id else {
+            return Ok(match tier {
+                PermissionTier::Tier1 => PermissionCheck::Allowed,
+                tier => PermissionCheck::NeedsApproval {
+                    tier,
+                    lapsed_at: None,
+                },
+            });
+        };
+
+        match tier {
             PermissionTier::Tier1 => Ok(PermissionCheck::Allowed),
             PermissionTier::Tier2 => {
                 let key = action.approval_key();
                 match self.get_approval(&key, agent_id)? {
                     Some(approval) => {
                         if Utc::now() > approval.expires_at {
-                            // Expired — needs re-approval. The row is
-                            // dropped here and its expiry is handed
-                            // back on `lapsed_at`, because after the
-                            // revoke this is the last point that knows
-                            // the window existed. The caller has the
-                            // session handle and emits
+                            // Expired, so re-approval is needed. The
+                            // row is dropped here and its expiry is
+                            // handed back on `lapsed_at`, because
+                            // after the revoke this is the last point
+                            // that knows the window existed. The
+                            // caller has the session handle and emits
                             // `PermissionGrantExpired`.
                             self.revoke(&key, agent_id)?;
                             Ok(PermissionCheck::NeedsApproval {
@@ -1772,7 +1813,9 @@ mod tier_tests {
             GatewayError::Config(msg) => assert!(msg.contains("Tier 3"), "msg: {msg}"),
             other => panic!("expected Config error, got {other:?}"),
         }
-        let result = store.check(&shell("curl"), "default").unwrap();
+        let result = store
+            .check(&shell("curl"), "default", Some("default"))
+            .unwrap();
         assert_eq!(
             result,
             PermissionCheck::NeedsApproval {
@@ -1865,7 +1908,9 @@ mod tier_tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
         // First call: no record, needs approval at Tier 2.
-        let first = store.check(&shell("ls"), "default").unwrap();
+        let first = store
+            .check(&shell("ls"), "default", Some("default"))
+            .unwrap();
         assert_eq!(
             first,
             PermissionCheck::NeedsApproval {
@@ -1881,11 +1926,15 @@ mod tier_tests {
         // without prompting. We check two calls to mirror the user
         // behavior "prompts once then runs silently".
         assert_eq!(
-            store.check(&shell("ls"), "default").unwrap(),
+            store
+                .check(&shell("ls"), "default", Some("default"))
+                .unwrap(),
             PermissionCheck::Allowed
         );
         assert_eq!(
-            store.check(&shell("ls"), "default").unwrap(),
+            store
+                .check(&shell("ls"), "default", Some("default"))
+                .unwrap(),
             PermissionCheck::Allowed
         );
     }
@@ -1905,13 +1954,17 @@ mod tier_tests {
 
         assert_eq!(
             store
-                .check(&shell("ls"), "default/webchat/webchat-default")
+                .check(
+                    &shell("ls"),
+                    "default/webchat/webchat-default",
+                    Some("default")
+                )
                 .unwrap(),
             PermissionCheck::Allowed,
         );
         assert_eq!(
             store
-                .check(&shell("ls"), "default/telegram/chat-42")
+                .check(&shell("ls"), "default/telegram/chat-42", Some("default"))
                 .unwrap(),
             PermissionCheck::Allowed,
         );
@@ -1921,7 +1974,9 @@ mod tier_tests {
             .approve_by_key("shell:cat", "default/webchat/x", "test-operator")
             .unwrap();
         assert_eq!(
-            store.check(&shell("cat"), "default").unwrap(),
+            store
+                .check(&shell("cat"), "default", Some("default"))
+                .unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -1968,7 +2023,7 @@ mod tier_tests {
 
         // Baseline: no grant, Tier 2 needs approval.
         assert_eq!(
-            store.check(&shell("ls"), session).unwrap(),
+            store.check(&shell("ls"), session, Some("default")).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -1982,11 +2037,11 @@ mod tier_tests {
         // Same session id passed to check resolves to Allowed.
         // Two calls in a row prove the cache survives the first read.
         assert_eq!(
-            store.check(&shell("ls"), session).unwrap(),
+            store.check(&shell("ls"), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
         assert_eq!(
-            store.check(&shell("ls"), session).unwrap(),
+            store.check(&shell("ls"), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -2006,7 +2061,7 @@ mod tier_tests {
         // needs approval. Session-scoping is finer than the
         // canonical-agent-id lookup the SQLite path uses.
         assert_eq!(
-            store.check(&shell("ls"), other).unwrap(),
+            store.check(&shell("ls"), other, Some("default")).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -2016,7 +2071,9 @@ mod tier_tests {
         // Bare agent id (no `/`) is also not the session id and must
         // fall through to the SQLite path, which is empty.
         assert_eq!(
-            store.check(&shell("ls"), "default").unwrap(),
+            store
+                .check(&shell("ls"), "default", Some("default"))
+                .unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -2051,14 +2108,16 @@ mod tier_tests {
 
         // Cleared session: back to needing approval.
         assert_eq!(
-            store.check(&shell("ls"), session).unwrap(),
+            store.check(&shell("ls"), session, Some("default")).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
             },
         );
         assert_eq!(
-            store.check(&shell("cat"), session).unwrap(),
+            store
+                .check(&shell("cat"), session, Some("default"))
+                .unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -2067,7 +2126,7 @@ mod tier_tests {
         // Untouched session still allowed.
         assert_eq!(
             store
-                .check(&shell("head"), "default/webchat/other")
+                .check(&shell("head"), "default/webchat/other", Some("default"))
                 .unwrap(),
             PermissionCheck::Allowed,
         );
@@ -2088,7 +2147,9 @@ mod tier_tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
         assert_eq!(
-            store.check(&shell("ls"), "default").unwrap(),
+            store
+                .check(&shell("ls"), "default", Some("default"))
+                .unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -2096,7 +2157,9 @@ mod tier_tests {
         );
         store.approve(&shell("ls"), "default", "operator").unwrap();
         assert_eq!(
-            store.check(&shell("ls"), "default").unwrap(),
+            store
+                .check(&shell("ls"), "default", Some("default"))
+                .unwrap(),
             PermissionCheck::Allowed,
         );
         // Persisted approvals are still listed by `list()`.
@@ -2120,7 +2183,7 @@ mod tier_tests {
             .unwrap();
 
         assert_eq!(
-            store.check(&shell("ls"), session).unwrap(),
+            store.check(&shell("ls"), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
         // And the SQLite store is still empty under this agent id.
@@ -2286,7 +2349,7 @@ mod tier_tests {
 
         // check() inside the same session id is Allowed.
         assert_eq!(
-            store.check(&shell("ls"), session).unwrap(),
+            store.check(&shell("ls"), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -2760,7 +2823,7 @@ mod tier_tests {
             )
             .unwrap();
 
-        match store.check(&action, "agent-a").unwrap() {
+        match store.check(&action, "agent-a", Some("agent-a")).unwrap() {
             PermissionCheck::NeedsApproval {
                 tier,
                 lapsed_at: Some(at),
@@ -2776,7 +2839,7 @@ mod tier_tests {
         // rather than reporting the same lapse twice.
         assert!(
             matches!(
-                store.check(&action, "agent-a").unwrap(),
+                store.check(&action, "agent-a", Some("agent-a")).unwrap(),
                 PermissionCheck::NeedsApproval {
                     lapsed_at: None,
                     ..
@@ -2795,7 +2858,7 @@ mod tier_tests {
         };
 
         assert!(matches!(
-            store.check(&action, "agent-a").unwrap(),
+            store.check(&action, "agent-a", Some("agent-a")).unwrap(),
             PermissionCheck::NeedsApproval {
                 lapsed_at: None,
                 ..
@@ -2804,7 +2867,7 @@ mod tier_tests {
 
         store.approve(&action, "agent-a", "operator").unwrap();
         assert_eq!(
-            store.check(&action, "agent-a").unwrap(),
+            store.check(&action, "agent-a", Some("agent-a")).unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -3219,5 +3282,150 @@ mod tier_tests {
         let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
         super::emit_sweep_report(&SweepReport::default(), &log, &handle).unwrap();
         assert!(log.get_since(&handle, 0).unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #242: the callee is checked against its own agent id
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_child_session_id_does_not_reach_the_parents_grants() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        // The parent holds a live Tier 2 shell grant.
+        store.approve(&shell("ls"), "parent", "operator").unwrap();
+
+        let parent_session = "parent/slack/C1";
+        let child_session = "parent/slack/C1#sub-0";
+
+        // Parent, checked as itself: allowed.
+        assert_eq!(
+            store
+                .check(&shell("ls"), parent_session, Some("parent"))
+                .unwrap(),
+            PermissionCheck::Allowed,
+        );
+
+        // Child, checked as the agent it actually is. The session id
+        // still carries the parent's prefix, which is exactly what
+        // used to resolve it to "parent".
+        assert_eq!(
+            store
+                .check(&shell("ls"), child_session, Some("researcher"))
+                .unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+                lapsed_at: None,
+            },
+            "a child must not inherit its caller's grants",
+        );
+    }
+
+    #[test]
+    fn an_agent_with_no_id_of_its_own_gets_no_persisted_grants() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        store.approve(&shell("ls"), "parent", "operator").unwrap();
+
+        assert_eq!(
+            store
+                .check(&shell("ls"), "parent/slack/C1#sub-0", None)
+                .unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+                lapsed_at: None,
+            },
+        );
+        // Tier 1 is still allowed: it never consults storage, so
+        // there is nothing an unnamed agent is being denied.
+        assert_eq!(
+            store
+                .check(&Action::WebSearch, "parent/slack/C1#sub-0", None)
+                .unwrap(),
+            PermissionCheck::Allowed,
+        );
+    }
+
+    #[test]
+    fn a_session_shaped_agent_id_finds_nothing_rather_than_reducing_to_a_prefix() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        store.approve(&shell("ls"), "parent", "operator").unwrap();
+
+        // The read path does not reduce. A caller that passes a
+        // session id where an agent id belongs gets no grants, which
+        // is the direction this must fail in: reducing on read is
+        // what let the child inherit.
+        assert_eq!(
+            store
+                .check(&shell("ls"), "parent/slack/C1", Some("parent/slack/C1"))
+                .unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+                lapsed_at: None,
+            },
+        );
+    }
+
+    #[test]
+    fn a_childs_own_grant_applies_to_the_child_and_not_to_the_parent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        // Only the child is granted.
+        store
+            .approve(&shell("ls"), "researcher", "operator")
+            .unwrap();
+
+        assert_eq!(
+            store
+                .check(&shell("ls"), "parent/slack/C1#sub-0", Some("researcher"))
+                .unwrap(),
+            PermissionCheck::Allowed,
+            "the child runs on its own grant",
+        );
+        assert_eq!(
+            store
+                .check(&shell("ls"), "parent/slack/C1", Some("parent"))
+                .unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+                lapsed_at: None,
+            },
+            "and the parent gains nothing from it",
+        );
+    }
+
+    #[test]
+    fn session_grants_stay_keyed_on_the_session_not_the_agent() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let parent_session = "parent/slack/C1";
+        store
+            .approve_with_scope(
+                &shell("ls"),
+                "parent",
+                "operator",
+                session_scope(parent_session),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .check(&shell("ls"), parent_session, Some("parent"))
+                .unwrap(),
+            PermissionCheck::Allowed,
+        );
+        // Same agent, different session: the child's `#sub-0` id is
+        // a different cache key, so the session grant does not reach
+        // it even when the agent id matches.
+        assert_eq!(
+            store
+                .check(&shell("ls"), "parent/slack/C1#sub-0", Some("parent"))
+                .unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier2,
+                lapsed_at: None,
+            },
+        );
     }
 }

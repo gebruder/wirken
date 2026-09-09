@@ -142,6 +142,22 @@ pub struct ProcessResult {
 /// executes tools, and produces responses.
 pub struct Agent {
     pub id: String,
+    /// Logical agent id this runtime is an instance of, when it has
+    /// one: the key its static config is registered under, which the
+    /// factory supplies at wake.
+    ///
+    /// Distinct from `id`, which is the session id. The two used to
+    /// be conflated at the permission gate, where the agent was
+    /// recovered from the session id by taking the prefix before the
+    /// first `/`. That is the parent's agent id for a sub-agent,
+    /// whose session id is the parent's plus a `#sub-N` suffix, so a
+    /// child was checked against its caller's grants (issue #242).
+    ///
+    /// `None` for an agent that was never told which agent it is.
+    /// Such an agent gets no persisted grants and prompts for every
+    /// Tier 2 action, which is the safe direction: a runtime that
+    /// cannot name itself cannot claim another's approvals.
+    agent_id: Option<String>,
     conversation: Conversation,
     llm: LlmClient,
     tools: ToolRegistry,
@@ -415,6 +431,7 @@ impl Agent {
             imported_search_key: None,
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
+            agent_id: None,
             auto_deny_above_tier: None,
             budget: None,
             budget_ledger: None,
@@ -511,6 +528,7 @@ impl Agent {
             imported_search_key: None,
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
+            agent_id: None,
             auto_deny_above_tier: None,
             budget: None,
             budget_ledger: None,
@@ -652,6 +670,32 @@ impl Agent {
     /// stdin is a TTY; non-TTY invocations leave it `None` so a
     /// piped or redirected `wirken ask` exits cleanly rather than
     /// blocking on a stdin prompt nobody can answer.
+    /// The agent id to record on a permission audit row.
+    ///
+    /// Prefers the logical agent id, which is what the gate actually
+    /// checked against. Falls back to the session id for an agent
+    /// that has none, so the row still names something traceable
+    /// rather than an empty string.
+    ///
+    /// Scope note: this is applied to the permission-gate rows, the
+    /// ones that say what was and was not allowed. Other events on
+    /// this runtime still record the session id in their `agent_id`
+    /// field; that predates this and is left alone here.
+    fn audited_agent_id(&self) -> String {
+        self.agent_id.clone().unwrap_or_else(|| self.id.clone())
+    }
+
+    /// Declare which logical agent this runtime is an instance of.
+    ///
+    /// Callers that build an agent directly must set this or the
+    /// agent gets no persisted grants. The factory sets it at wake
+    /// from the config key it looked the agent up under, so every
+    /// factory-woken agent, including every sub-agent, carries its
+    /// own.
+    pub fn set_agent_id(&mut self, agent_id: impl Into<String>) {
+        self.agent_id = Some(agent_id.into());
+    }
+
     pub fn set_approval_gate(&mut self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
         self.approval_gate = Some(gate);
     }
@@ -1774,6 +1818,20 @@ impl Agent {
         &self.session_log
     }
 
+    /// Drive the no-gate denial emitter directly. Test-only.
+    ///
+    /// The production caller is `handle_permission_denial`, reached
+    /// through a full tool round. A test that only needs the audit
+    /// row calls the same emitter rather than a parallel one, so the
+    /// row it asserts on is the row production writes.
+    #[cfg(test)]
+    pub(crate) fn emit_unmediated_denial_for_test(
+        &self,
+        ctx: &PermissionDenialContext,
+    ) -> Result<(), AgentError> {
+        self.emit_unmediated_denial(ctx)
+    }
+
     /// Drive the pre-call budget gate directly. Test-only.
     #[cfg(test)]
     pub(crate) fn test_check_budget(&self) -> Result<Option<String>, AgentError> {
@@ -2883,7 +2941,7 @@ impl Agent {
                         action_key,
                         denial_source: wirken_audit::DenialSource::OrgPolicy,
                         tier: None,
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_via: None,
                         denial_reason: None,
@@ -2966,7 +3024,7 @@ impl Agent {
                             action_key: action.approval_key(),
                             denial_source: wirken_audit::DenialSource::Tier,
                             tier: Some(action.tier().label().to_string()),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                             trigger: self.current_trigger.clone(),
                             denied_via: None,
                             denial_reason: None,
@@ -2989,9 +3047,11 @@ impl Agent {
                     let store = perms.lock().map_err(|e| {
                         AgentError::PermissionDenied(format!("permission store lock: {e}"))
                     })?;
-                    store.check(&action, &self.id).map_err(|e| {
-                        AgentError::PermissionDenied(format!("permission check failed: {e}"))
-                    })?
+                    store
+                        .check(&action, &self.id, self.agent_id.as_deref())
+                        .map_err(|e| {
+                            AgentError::PermissionDenied(format!("permission check failed: {e}"))
+                        })?
                 };
                 if let PermissionCheck::NeedsApproval { tier, lapsed_at } = check {
                     // A grant was there and its window had closed.
@@ -3008,7 +3068,7 @@ impl Agent {
                             TrustLevel::System,
                             SessionEvent::PermissionGrantExpired {
                                 action_key: action.approval_key(),
-                                agent_id: self.id.clone(),
+                                agent_id: self.audited_agent_id(),
                                 tool: Some(name.to_string()),
                                 tier: Some(action.tier().label().to_string()),
                                 expired_at,
@@ -3034,7 +3094,7 @@ impl Agent {
                             tool_name: name.to_string(),
                             action,
                             requested_tier: tier,
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                             trigger_message: self.current_trigger.clone(),
                         }));
                     }

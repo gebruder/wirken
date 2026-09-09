@@ -12,6 +12,19 @@ tagged.
 
 ### Changed
 
+- A sub-agent is checked against its own agent id rather than its
+  caller's. The permission gate took one id, the runtime passed its
+  session id, and the store recovered an agent from it by taking the
+  prefix before the first `/`. A child's session id is its parent's
+  with a `#sub-N` suffix, so that prefix is the parent's agent id and
+  the child ran on the parent's persisted grants; the child's own
+  configured agent id never reached the store. The tier ceiling
+  narrowed this without closing it. `check` now takes the session id
+  and the logical agent id separately, uses the agent id verbatim with
+  no prefix reduction, and consults no persisted grants at all for an
+  agent that has none. Permission audit rows name the agent that was
+  checked. Closes #242.
+
 - Persisted permission grants take their expiry window from
   `default_expiry_days` in `permissions.json` rather than a compiled-in
   30 days, and `wirken permissions approve` takes `--expires-in-days`

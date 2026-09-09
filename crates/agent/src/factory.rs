@@ -590,6 +590,12 @@ impl AgentFactory {
             self.session_log.clone(),
             cfg.sandbox.clone(),
         )?;
+        // Name the agent before anything can gate on it. `agent_id`
+        // is the key this config was looked up under, so a sub-agent
+        // woken as a different config carries that config's id and is
+        // checked against its own grants rather than its caller's
+        // (issue #242).
+        agent.set_agent_id(agent_id);
         // Inject the per-agent shared resources.
         agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone())?;
         if let Some(perms) = &self.permissions {
@@ -953,11 +959,11 @@ mod replay_tests {
 
         let store = perms.lock().unwrap();
         assert_eq!(
-            store.check(&shell_ls(), session).unwrap(),
+            store.check(&shell_ls(), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
         assert_eq!(
-            store.check(&shell_cat(), session).unwrap(),
+            store.check(&shell_cat(), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -980,7 +986,7 @@ mod replay_tests {
 
         let store = perms.lock().unwrap();
         assert_eq!(
-            store.check(&shell_ls(), session).unwrap(),
+            store.check(&shell_ls(), session, Some("default")).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -1006,7 +1012,7 @@ mod replay_tests {
 
         let store = perms.lock().unwrap();
         assert_eq!(
-            store.check(&shell_ls(), session).unwrap(),
+            store.check(&shell_ls(), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -1046,7 +1052,7 @@ mod replay_tests {
         // NeedsApproval because SQLite is also empty in this test.
         let store = perms.lock().unwrap();
         assert_eq!(
-            store.check(&shell_ls(), session).unwrap(),
+            store.check(&shell_ls(), session, Some("default")).unwrap(),
             PermissionCheck::NeedsApproval {
                 tier: PermissionTier::Tier2,
                 lapsed_at: None,
@@ -1071,7 +1077,7 @@ mod replay_tests {
 
         let store = perms.lock().unwrap();
         assert_eq!(
-            store.check(&shell_ls(), session).unwrap(),
+            store.check(&shell_ls(), session, Some("default")).unwrap(),
             PermissionCheck::Allowed,
         );
     }
@@ -1094,7 +1100,7 @@ mod replay_tests {
         let store = perms.lock().unwrap();
         for action in [shell_ls(), shell_cat()] {
             assert_eq!(
-                store.check(&action, session).unwrap(),
+                store.check(&action, session, Some("default")).unwrap(),
                 PermissionCheck::NeedsApproval {
                     tier: PermissionTier::Tier2,
                     lapsed_at: None,

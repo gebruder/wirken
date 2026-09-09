@@ -324,11 +324,13 @@ fn tier1_always_allowed() {
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
     let check = perms
-        .check(&Action::WorkspaceFileAccess, "agent-1")
+        .check(&Action::WorkspaceFileAccess, "agent-1", Some("agent-1"))
         .unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 
-    let check = perms.check(&Action::WebSearch, "agent-1").unwrap();
+    let check = perms
+        .check(&Action::WebSearch, "agent-1", Some("agent-1"))
+        .unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 }
 
@@ -341,7 +343,7 @@ fn tier2_needs_approval_first_time() {
     let action = Action::ShellExec {
         pattern: "ls".into(),
     };
-    let check = perms.check(&action, "agent-1").unwrap();
+    let check = perms.check(&action, "agent-1", Some("agent-1")).unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -361,7 +363,7 @@ fn tier2_allowed_after_approval() {
     };
     perms.approve(&action, "agent-1", "telegram").unwrap();
 
-    let check = perms.check(&action, "agent-1").unwrap();
+    let check = perms.check(&action, "agent-1", Some("agent-1")).unwrap();
     assert_eq!(check, PermissionCheck::Allowed);
 }
 
@@ -376,7 +378,7 @@ fn tier2_approval_scoped_to_agent() {
     perms.approve(&action, "agent-1", "telegram").unwrap();
 
     // Different agent — not approved
-    let check = perms.check(&action, "agent-2").unwrap();
+    let check = perms.check(&action, "agent-2", Some("agent-2")).unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -558,7 +560,9 @@ fn tier3_always_needs_approval() {
     let tmp = TempDir::new().unwrap();
     let perms = PermissionStore::open(&tmp.path().join("perms.db")).unwrap();
 
-    let check = perms.check(&Action::CredentialAccess, "agent-1").unwrap();
+    let check = perms
+        .check(&Action::CredentialAccess, "agent-1", Some("agent-1"))
+        .unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -567,7 +571,9 @@ fn tier3_always_needs_approval() {
         }
     );
 
-    let check = perms.check(&Action::DestructiveFileOp, "agent-1").unwrap();
+    let check = perms
+        .check(&Action::DestructiveFileOp, "agent-1", Some("agent-1"))
+        .unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {
@@ -589,7 +595,7 @@ fn revoke_approval() {
 
     perms.revoke(&action.approval_key(), "agent-1").unwrap();
 
-    let check = perms.check(&action, "agent-1").unwrap();
+    let check = perms.check(&action, "agent-1", Some("agent-1")).unwrap();
     assert_eq!(
         check,
         PermissionCheck::NeedsApproval {

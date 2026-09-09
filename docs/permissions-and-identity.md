@@ -137,6 +137,16 @@ wirken agents allow-subagent parent child --tools "read_file,web_search" --max-t
 
 The ceiling is stored as JSON in the `agents.allowed_subagents` column.
 
+#### A child runs on its own grants, not its caller's
+
+The permission gate takes the session id and the logical agent id as separate arguments. Session-scoped grants are keyed on the session; persisted grants are keyed on the agent. A child's session id is its parent's with a `#sub-N` suffix and its agent id is whatever config it was woken as, so neither kind of grant reaches it from its caller.
+
+This used to be one argument. The runtime passed its session id and the store recovered an agent from it by taking the prefix before the first `/`, which for a child is the parent's agent id. A child was checked against its caller's persisted grant set, and its own configured agent id never reached the store. The tier ceiling narrowed that but did not close it: a ceiling of `tier2` still admitted every Tier 2 grant the parent held. Issue #242.
+
+Grants do not compose in the other direction either. A child's grant applies to the child alone; a parent gains nothing from what its children are allowed. There is no intersection logic, and none is planned until a case calls for it: each agent is checked against itself.
+
+An agent that was never told which logical agent it is gets no persisted grants and prompts for every Tier 2 action. That is the safe direction, and it means a caller building an agent directly must name it (`set_agent_id`) before attaching a permission store. The factory does this at wake for every agent it produces, sub-agents included.
+
 ### Org-level tool policy
 
 The pulled org config (`wirken setup --org <url>`) deserializes `permissions.allowed_tools`, `permissions.blocked_tools`, and `permissions.sandbox_mode` into `OrgPermissions`. All three are enforced:

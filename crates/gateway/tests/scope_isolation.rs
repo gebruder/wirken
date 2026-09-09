@@ -83,7 +83,9 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
         pattern: "ls".into(),
     };
     assert_eq!(
-        store.check(&ls, session_scoped).expect("check"),
+        store
+            .check(&ls, session_scoped, Some(agent_id))
+            .expect("check"),
         PermissionCheck::NeedsApproval {
             tier: PermissionTier::Tier2,
             lapsed_at: None,
@@ -102,7 +104,9 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
     // no record for B yet. Wirken's design is the former: B sees
     // the approval that A's earlier message set up.
     assert_eq!(
-        store.check(&ls, session_scoped).expect("check"),
+        store
+            .check(&ls, session_scoped, Some(agent_id))
+            .expect("check"),
         PermissionCheck::Allowed,
         "second sender on same conversation gets the agent-scoped \
          approval (Wirken's documented model)",
@@ -112,7 +116,9 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
     // channel/conversation also sees the approval. This pins the
     // canonicalization at permissions.rs:174.
     assert_eq!(
-        store.check(&ls, "default/slack/C9").expect("check"),
+        store
+            .check(&ls, "default/slack/C9", Some("default"))
+            .expect("check"),
         PermissionCheck::Allowed,
         "approval for the logical agent applies across all sessions \
          scoped to that agent (canonical_agent_id at \
@@ -126,7 +132,9 @@ fn q1_multi_sender_share_agent_scope_no_per_sender_context_leak() {
         pattern: "curl https://example.com".into(),
     };
     assert!(matches!(
-        store.check(&curl, session_scoped).expect("check"),
+        store
+            .check(&curl, session_scoped, Some(agent_id))
+            .expect("check"),
         PermissionCheck::NeedsApproval {
             tier: PermissionTier::Tier3,
             lapsed_at: None,
@@ -185,6 +193,7 @@ fn q1_concurrent_checks_serialize_through_store_mutex() {
                         pattern: "ls".into(),
                     },
                     &format!("default/ch/{i}"),
+                    Some("default"),
                 )
                 .expect("check");
             assert_eq!(res, PermissionCheck::Allowed);

@@ -467,6 +467,10 @@ async fn dispatch_via_agent_runtime(
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
+    // Named before the store is attached: an agent that has not
+    // named itself gets no persisted grants. The run's agent id is
+    // also its session id here, both derived from the run id.
+    agent.set_agent_id(agent_id.clone());
     let perms = open_permission_store(&cfg)?;
     let perms_arc = Arc::new(Mutex::new(perms));
     agent.set_permissions(perms_arc.clone());
@@ -1022,6 +1026,10 @@ async fn dispatch_walks_concurrent(
                     };
                 }
             };
+            // Named before the store, like the run agent above:
+            // an agent that has not named itself gets no persisted
+            // grants.
+            local_agent.set_agent_id(agent_id_t.clone());
             local_agent.set_permissions(permissions_t);
 
             if skills_dir_t.is_dir()
