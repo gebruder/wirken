@@ -2904,6 +2904,68 @@ mod subagent {
         (agent, tmp, expired_at)
     }
 
+    /// Audit rows name the logical agent, and the one consumer that
+    /// filters on that field finds them.
+    ///
+    /// `find_permission_denials` compares `agent_id` for equality
+    /// against an operator-supplied logical agent, and every row this
+    /// runtime wrote carried the session id instead, so
+    /// `wirken permissions list-pending --agent default` matched
+    /// nothing a factory-woken agent had produced.
+    #[tokio::test]
+    async fn permission_rows_carry_the_logical_agent_and_list_pending_finds_them() {
+        use wirken_audit::SqliteSessionLog;
+
+        let tmp = TempDir::new().unwrap();
+        let audit_path = tmp.path().join("audit.db");
+        let concrete = SqliteSessionLog::open(&audit_path).unwrap();
+        let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open(&audit_path).unwrap());
+
+        // A factory-woken agent's session id, which is where the two
+        // ids diverge: the row used to record this whole string.
+        let session_id = "default/webchat/conv-1";
+        let mut agent = Agent::new(
+            session_id.into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log,
+        )
+        .unwrap();
+        agent.set_agent_id("default");
+        let store =
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+
+        let err = agent
+            .execute_tool("exec", r#"{"command":"ls"}"#)
+            .await
+            .expect_err("ungranted Tier 2 verb is gated");
+        let ctx = match err {
+            AgentError::PermissionDeniedCtx(ctx) => ctx,
+            other => panic!("expected the approval-needed denial, got {other:?}"),
+        };
+        agent.emit_unmediated_denial_for_test(&ctx).unwrap();
+
+        let found = concrete.find_permission_denials("default");
+        assert_eq!(
+            found.len(),
+            1,
+            "the logical agent id must match what the row carries",
+        );
+        assert_eq!(found[0].action_key, "shell:ls");
+        assert_eq!(
+            found[0].session_id, session_id,
+            "the session is still on the row, as the row's own key",
+        );
+        assert!(
+            concrete.find_permission_denials(session_id).is_empty(),
+            "the session id is no longer what the agent_id field holds",
+        );
+    }
+
     /// Issue #242 closing condition, at the runtime.
     ///
     /// A parent holds a Tier 2 shell allowlist grant. A child is

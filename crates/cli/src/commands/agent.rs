@@ -210,7 +210,11 @@ async fn send_with_agent_config(
         super::load_sandbox_config(&cfg.data_dir),
     )?;
 
-    agent.set_agent_id("default");
+    // The configured agent's own id, not the literal "default": this
+    // is the multi-agent path, and checking a named agent against
+    // another agent's grants is the failure this whole argument split
+    // exists to prevent.
+    agent.set_agent_id(agent_cfg.id.clone());
     let perms = open_permission_store(cfg)?;
     agent.set_permissions(Arc::new(Mutex::new(perms)));
 

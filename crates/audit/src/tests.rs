@@ -2374,3 +2374,72 @@ mod chain_head_signing {
         s
     }
 }
+
+use crate::{DenialSource, SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel};
+
+/// The `find_permission_denials` prefilter matches the serde wire
+/// form, not the Rust variant name.
+///
+/// The two differ: `SessionEvent` carries `rename_all = "snake_case"`
+/// on its `tag = "kind"` repr. A predicate written against the
+/// variant name rejects every row, and the function returns empty
+/// with no error, which reads exactly like "this agent has no
+/// denials".
+#[test]
+fn permission_denied_tag_matches_the_wire_form() {
+    let event = SessionEvent::PermissionDenied {
+        tool: "exec".into(),
+        action_key: "shell:ls".into(),
+        denial_source: DenialSource::Tier,
+        tier: Some("tier2".into()),
+        agent_id: "default".into(),
+        trigger: None,
+        denied_via: None,
+        denial_reason: None,
+        adapter_id: None,
+        sender_id: None,
+    };
+    let payload = serde_json::to_string(&event).unwrap();
+    assert!(
+        payload.contains(r#""permission_denied""#),
+        "the query prefilter looks for this exact tag: {payload}",
+    );
+}
+
+#[test]
+fn find_permission_denials_matches_on_the_logical_agent_id() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    // A factory-woken agent's session id. The row's `agent_id` field
+    // carries the logical agent; the session lives on the row's key.
+    let handle = log.handle_for(SessionId::new("default/webchat/conv-1".to_string()));
+    log.append(
+        &handle,
+        TrustLevel::System,
+        SessionEvent::PermissionDenied {
+            tool: "exec".into(),
+            action_key: "shell:ls".into(),
+            denial_source: DenialSource::Tier,
+            tier: Some("tier2".into()),
+            agent_id: "default".into(),
+            trigger: None,
+            denied_via: None,
+            denial_reason: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+    )
+    .unwrap();
+
+    let found = log.find_permission_denials("default");
+    assert_eq!(found.len(), 1, "operator filters on the logical agent");
+    assert_eq!(found[0].action_key, "shell:ls");
+    assert_eq!(found[0].session_id, "default/webchat/conv-1");
+
+    assert!(
+        log.find_permission_denials("default/webchat/conv-1")
+            .is_empty(),
+        "the session id is not what the agent_id field holds",
+    );
+    assert!(log.find_permission_denials("other").is_empty());
+}

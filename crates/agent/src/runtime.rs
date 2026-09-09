@@ -670,17 +670,27 @@ impl Agent {
     /// stdin is a TTY; non-TTY invocations leave it `None` so a
     /// piped or redirected `wirken ask` exits cleanly rather than
     /// blocking on a stdin prompt nobody can answer.
-    /// The agent id to record on a permission audit row.
+    /// The agent id to record on an audit row's `agent_id` field.
     ///
-    /// Prefers the logical agent id, which is what the gate actually
-    /// checked against. Falls back to the session id for an agent
-    /// that has none, so the row still names something traceable
-    /// rather than an empty string.
+    /// The logical agent, which for a permission row is what the gate
+    /// actually checked against. Falls back to the session id for an
+    /// agent that has none, so the row still names something
+    /// traceable rather than an empty string.
     ///
-    /// Scope note: this is applied to the permission-gate rows, the
-    /// ones that say what was and was not allowed. Other events on
-    /// this runtime still record the session id in their `agent_id`
-    /// field; that predates this and is left alone here.
+    /// Every `agent_id` field this runtime writes goes through here.
+    /// They previously carried `self.id`, the session id, which for a
+    /// factory-woken agent is `{agent}/{channel}/{conversation}` and
+    /// for a sub-agent has a `#sub-N` suffix on top. A field named
+    /// `agent_id` holding a session id is wrong on its face, and it
+    /// broke the one consumer that filters on it:
+    /// `SqliteSessionLog::find_permission_denials` compares
+    /// `agent_id` for equality against an operator-supplied logical
+    /// agent, so `wirken permissions list-pending --agent default`
+    /// matched nothing a factory-woken agent had written.
+    ///
+    /// The session is not lost by this: every row already carries its
+    /// session id as the row's own key, which is where a caller that
+    /// wants the session should read it.
     fn audited_agent_id(&self) -> String {
         self.agent_id.clone().unwrap_or_else(|| self.id.clone())
     }
@@ -857,7 +867,7 @@ impl Agent {
         self.tools.set_http_audit(crate::http_tool::HttpAuditCtx {
             log: self.session_log.clone(),
             handle: self.session_handle.clone(),
-            agent_id: self.id.clone(),
+            agent_id: self.audited_agent_id(),
         });
         // Re-attach clears any active phase overlay: attach_skills can
         // unload the skill that set it, and a dangling overlay outside
@@ -976,7 +986,7 @@ impl Agent {
             return;
         };
         let labels = wirken_gateway::memory::OriginLabels {
-            agent_id: self.id.clone(),
+            agent_id: self.audited_agent_id(),
             channel,
             adapter_id,
             sender_id,
@@ -1000,7 +1010,7 @@ impl Agent {
         self.tools
             .set_imported(crate::imported_tool::ImportedContext {
                 store,
-                agent_id: self.id.clone(),
+                agent_id: self.audited_agent_id(),
                 adapter_id: self.current_inbound.adapter_id.clone(),
                 sender_id: self.current_inbound.sender_id.clone(),
                 log: self.session_log.clone(),
@@ -1023,7 +1033,7 @@ impl Agent {
             .set_sandbox_egress(crate::sandbox_egress::SandboxEgressContext {
                 policy,
                 attribution: crate::sandbox_egress::SandboxEgressAttribution {
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     channel: self.current_inbound.channel.clone(),
                     adapter_id: self.current_inbound.adapter_id.clone(),
                     sender_id: self.current_inbound.sender_id.clone(),
@@ -1134,7 +1144,7 @@ impl Agent {
                     SessionEvent::SkillPermissionDenied {
                         axis: axis.axis_label().to_string(),
                         requested: provider.clone(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason: SkillDeniedReason::Phase {
                             phase_name: phase_name.clone(),
@@ -1151,7 +1161,7 @@ impl Agent {
                     SessionEvent::SkillPermissionDenied {
                         axis: "inference".to_string(),
                         requested: provider.clone(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason: SkillDeniedReason::Profile,
                     },
@@ -1294,7 +1304,7 @@ impl Agent {
         self.log_event(
             TrustLevel::System,
             SessionEvent::BudgetExceeded {
-                agent_id: self.id.clone(),
+                agent_id: self.audited_agent_id(),
                 credential_id: self.api_key_credential.clone(),
                 window_spend_usd_micros,
                 ceiling_usd_micros,
@@ -1788,7 +1798,7 @@ impl Agent {
             TrustLevel::System,
             SessionEvent::SystemPromptSet {
                 content: current,
-                agent_id: self.id.clone(),
+                agent_id: self.audited_agent_id(),
             },
         )
     }
@@ -2066,7 +2076,7 @@ impl Agent {
                     TrustLevel::System,
                     SessionEvent::AssistantMessage {
                         content: reply.clone(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                     },
                 )?;
                 return Ok(ProcessResult {
@@ -2203,7 +2213,7 @@ impl Agent {
                     request_id: request_id.clone(),
                     tools_hash,
                     messages_hash,
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
                     sender_id: self.current_inbound.sender_id.clone(),
                 },
@@ -2239,7 +2249,7 @@ impl Agent {
                     cache_creation_input_tokens,
                     cache_read_input_tokens,
                     latency_ms,
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
                     input_cost_usd_micros,
                     output_cost_usd_micros,
@@ -2256,7 +2266,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: text.clone(),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -2277,7 +2287,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
                         },
@@ -2302,7 +2312,7 @@ impl Agent {
                                 tool_name: call.name.clone(),
                                 output: result.output.clone(),
                                 success: result.success,
-                                agent_id: self.id.clone(),
+                                agent_id: self.audited_agent_id(),
                                 adapter_id: self.current_inbound.adapter_id.clone(),
                                 sender_id: self.current_inbound.sender_id.clone(),
                             },
@@ -2324,7 +2334,7 @@ impl Agent {
                                     tool_name: call.name.clone(),
                                     output: result.output.clone(),
                                     success: result.success,
-                                    agent_id: self.id.clone(),
+                                    agent_id: self.audited_agent_id(),
                                     adapter_id: self.current_inbound.adapter_id.clone(),
                                     sender_id: self.current_inbound.sender_id.clone(),
                                 },
@@ -2341,7 +2351,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: fallback.clone(),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -2436,7 +2446,7 @@ impl Agent {
                     TrustLevel::System,
                     SessionEvent::AssistantMessage {
                         content: reply.clone(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                     },
                 )?;
                 let _ = tx
@@ -2537,7 +2547,7 @@ impl Agent {
                     request_id: request_id.clone(),
                     tools_hash,
                     messages_hash,
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
                     sender_id: self.current_inbound.sender_id.clone(),
                 },
@@ -2590,7 +2600,7 @@ impl Agent {
                     cache_creation_input_tokens,
                     cache_read_input_tokens,
                     latency_ms,
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
                     input_cost_usd_micros,
                     output_cost_usd_micros,
@@ -2607,7 +2617,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: text.clone(),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -2625,7 +2635,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
                         },
@@ -2651,7 +2661,7 @@ impl Agent {
                                 tool_name: call.name.clone(),
                                 output: result.output.clone(),
                                 success: result.success,
-                                agent_id: self.id.clone(),
+                                agent_id: self.audited_agent_id(),
                                 adapter_id: self.current_inbound.adapter_id.clone(),
                                 sender_id: self.current_inbound.sender_id.clone(),
                             },
@@ -2665,7 +2675,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantMessage {
                             content: fallback.clone(),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                         },
                     )?;
                     let _ = self.maybe_attest().await?;
@@ -2779,7 +2789,7 @@ impl Agent {
                     SessionEvent::SkillPermissionDenied {
                         axis: axis.axis_label().to_string(),
                         requested: name.to_string(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason: SkillDeniedReason::Phase {
                             phase_name: phase_name.clone(),
@@ -2797,7 +2807,7 @@ impl Agent {
                     SessionEvent::SkillPermissionDenied {
                         axis: "tools".to_string(),
                         requested: name.to_string(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason: SkillDeniedReason::Profile,
                     },
@@ -2825,7 +2835,7 @@ impl Agent {
                 SessionEvent::SkillPermissionDenied {
                     axis: axis.to_string(),
                     requested: "http_request".to_string(),
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     trigger: self.current_trigger.clone(),
                     denied_reason: SkillDeniedReason::Profile,
                 },
@@ -2859,7 +2869,7 @@ impl Agent {
                         SessionEvent::SkillPermissionDenied {
                             axis: phase_axis.axis_label().to_string(),
                             requested: requested.display().to_string(),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                             trigger: self.current_trigger.clone(),
                             denied_reason: SkillDeniedReason::Phase {
                                 phase_name: phase_name.clone(),
@@ -2889,7 +2899,7 @@ impl Agent {
                         SessionEvent::SkillPermissionDenied {
                             axis: axis_str.to_string(),
                             requested: requested.display().to_string(),
-                            agent_id: self.id.clone(),
+                            agent_id: self.audited_agent_id(),
                             trigger: self.current_trigger.clone(),
                             denied_reason: SkillDeniedReason::Profile,
                         },
@@ -3133,7 +3143,7 @@ impl Agent {
                     SessionEvent::HookDispatched {
                         hook_id: dispatched.hook_id.clone(),
                         tool_name: name.to_string(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         decision,
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
@@ -3232,7 +3242,7 @@ impl Agent {
                     SessionEvent::SkillPermissionDenied {
                         axis: "egress".to_string(),
                         requested: denied.host.clone(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         trigger: self.current_trigger.clone(),
                         denied_reason,
                     },
@@ -3372,7 +3382,7 @@ impl Agent {
                     SessionEvent::EgressHookDispatched {
                         hook_id: dispatched.hook_id.clone(),
                         tool_name: call.name.clone(),
-                        agent_id: self.id.clone(),
+                        agent_id: self.audited_agent_id(),
                         decision,
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
@@ -3468,7 +3478,7 @@ impl Agent {
                     original_size,
                     redacted_sha256,
                     redacted_size,
-                    agent_id: self.id.clone(),
+                    agent_id: self.audited_agent_id(),
                     adapter_id: self.current_inbound.adapter_id.clone(),
                     sender_id: self.current_inbound.sender_id.clone(),
                 },

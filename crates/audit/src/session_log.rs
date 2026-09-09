@@ -2502,8 +2502,16 @@ impl SqliteSessionLog {
     pub fn find_permission_denials(&self, agent_id: &str) -> Vec<PermissionDenialRecord> {
         let conn = self.conn.lock().expect("session log mutex");
         let mut stmt = match conn.prepare(
+            // The tag is the serde wire form, not the Rust variant
+            // name: `SessionEvent` carries `rename_all = "snake_case"`
+            // on its `tag = "kind"` repr, so a stored row reads
+            // `{"kind":"permission_denied",...}`. This predicate is a
+            // prefilter only, and the match below is what decides;
+            // getting it wrong made the prefilter reject every row and
+            // the function return empty always.
+            // `permission_denied_tag_matches_the_wire_form` pins it.
             "SELECT session_id, seq, ts, payload FROM session_events
-             WHERE payload LIKE '%\"PermissionDenied\"%'
+             WHERE payload LIKE '%\"permission_denied\"%'
              ORDER BY ts DESC",
         ) {
             Ok(s) => s,

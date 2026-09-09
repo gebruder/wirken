@@ -22,8 +22,19 @@ tagged.
   narrowed this without closing it. `check` now takes the session id
   and the logical agent id separately, uses the agent id verbatim with
   no prefix reduction, and consults no persisted grants at all for an
-  agent that has none. Permission audit rows name the agent that was
-  checked. Closes #242.
+  agent that has none. Issue #242.
+
+- Audit rows carry the logical agent id in their `agent_id` field. They
+  carried the session id, which for a factory-woken agent is
+  `{agent}/{channel}/{conversation}` and for a sub-agent has a `#sub-N`
+  suffix on top.
+
+- `wirken permissions list-pending` finds denials. Its query prefiltered
+  on `payload LIKE '%"PermissionDenied"%'` while the serde tag is
+  snake_case, so the prefilter rejected every row and the command
+  reported no pending denials for any agent, whatever had been denied.
+  The agent-id change above was a second reason the same command found
+  nothing.
 
 - Persisted permission grants take their expiry window from
   `default_expiry_days` in `permissions.json` rather than a compiled-in
