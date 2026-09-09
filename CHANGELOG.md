@@ -36,6 +36,15 @@ tagged.
   The agent-id change above was a second reason the same command found
   nothing.
 
+- Wire tags for `SessionEvent` are pinned by drift guards. One asserts
+  that every `siem_typed::variant_kind` label equals the tag serde
+  emits, which is what operator `typed_include_variants` /
+  `typed_exclude_variants` filters select on. Another asserts that every
+  `LIKE '%"..."%'` predicate in the workspace names a real tag. A
+  predicate written against the Rust variant name matches no row and
+  returns empty with no error, which reads as "there is nothing to
+  find".
+
 - Persisted permission grants take their expiry window from
   `default_expiry_days` in `permissions.json` rather than a compiled-in
   30 days, and `wirken permissions approve` takes `--expires-in-days`

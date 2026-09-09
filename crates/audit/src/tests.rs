@@ -2375,35 +2375,265 @@ mod chain_head_signing {
     }
 }
 
-use crate::{DenialSource, SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel};
+use crate::{
+    DenialSource, HashHex, SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel,
+};
 
-/// The `find_permission_denials` prefilter matches the serde wire
-/// form, not the Rust variant name.
+/// serde's `rename_all = "snake_case"`, reimplemented so the drift
+/// guards below can compute the wire tag of a variant without
+/// constructing one.
 ///
-/// The two differ: `SessionEvent` carries `rename_all = "snake_case"`
-/// on its `tag = "kind"` repr. A predicate written against the
-/// variant name rejects every row, and the function returns empty
-/// with no error, which reads exactly like "this agent has no
-/// denials".
-#[test]
-fn permission_denied_tag_matches_the_wire_form() {
-    let event = SessionEvent::PermissionDenied {
-        tool: "exec".into(),
-        action_key: "shell:ls".into(),
-        denial_source: DenialSource::Tier,
-        tier: Some("tier2".into()),
-        agent_id: "default".into(),
-        trigger: None,
-        denied_via: None,
-        denial_reason: None,
-        adapter_id: None,
-        sender_id: None,
-    };
-    let payload = serde_json::to_string(&event).unwrap();
+/// Pinned against real serde output by
+/// `wire_tag_matches_serde_for_representative_variants`; if serde ever
+/// changes its casing rule, that test fails and this one is wrong.
+fn wire_tag(variant: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in variant.char_indices() {
+        if i > 0 && ch.is_uppercase() {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Every `SessionEvent` variant name declared in `session_log.rs`.
+/// Read from the source rather than listed here, so a variant added
+/// without a matching wire tag fails rather than going unchecked.
+fn declared_variants() -> Vec<String> {
+    let src = include_str!("session_log.rs");
+    let start = src
+        .find("pub enum SessionEvent {")
+        .expect("SessionEvent enum not found");
+    let mut depth = 0usize;
+    let mut end = start;
+    for (i, ch) in src[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let body = &src[start..end];
+    let mut names = Vec::new();
+    for line in body.lines() {
+        // A variant declaration sits at exactly one level of
+        // indentation and opens a struct body or ends the arm.
+        let Some(rest) = line.strip_prefix("    ") else {
+            continue;
+        };
+        if rest.starts_with(' ') || rest.starts_with('#') || rest.starts_with("//") {
+            continue;
+        }
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() || !name.starts_with(|c: char| c.is_uppercase()) {
+            continue;
+        }
+        if rest[name.len()..].trim_start().starts_with(['{', ',']) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.dedup();
     assert!(
-        payload.contains(r#""permission_denied""#),
-        "the query prefilter looks for this exact tag: {payload}",
+        names.len() > 40,
+        "the variant scraper found too few to be trusted: {names:?}",
     );
+    names
+}
+
+/// The wire tag this crate computes is the one serde actually emits.
+///
+/// The guards below compare hand-written strings against
+/// [`wire_tag`], so [`wire_tag`] itself has to be right. These are
+/// real values through real serde: a plain name, one with a leading
+/// acronym, and a long multi-word one.
+#[test]
+fn wire_tag_matches_serde_for_representative_variants() {
+    fn tag_of(event: &SessionEvent) -> String {
+        serde_json::to_value(event).unwrap()["kind"]
+            .as_str()
+            .expect("tagged repr always carries a string kind")
+            .to_string()
+    }
+
+    let cases: Vec<(&str, SessionEvent)> = vec![
+        (
+            "PermissionDenied",
+            SessionEvent::PermissionDenied {
+                tool: "exec".into(),
+                action_key: "shell:ls".into(),
+                denial_source: DenialSource::Tier,
+                tier: Some("tier2".into()),
+                agent_id: "default".into(),
+                trigger: None,
+                denied_via: None,
+                denial_reason: None,
+                adapter_id: None,
+                sender_id: None,
+            },
+        ),
+        (
+            "LlmRequest",
+            SessionEvent::LlmRequest {
+                provider: "custom".into(),
+                model: "stub".into(),
+                request_id: "req-1".into(),
+                tools_hash: HashHex(String::new()),
+                messages_hash: HashHex(String::new()),
+                agent_id: "default".into(),
+                credential_id: None,
+                sender_id: None,
+            },
+        ),
+        (
+            "SessionScopedApprovalsCleared",
+            SessionEvent::SessionScopedApprovalsCleared {
+                session_id: "default/webchat/c1".into(),
+                count: 1,
+                reason: "session_ended".into(),
+            },
+        ),
+    ];
+
+    for (name, event) in &cases {
+        assert_eq!(
+            tag_of(event),
+            wire_tag(name),
+            "serde's casing rule and `wire_tag` disagree on {name}",
+        );
+    }
+    // And the specific one a shipped query depends on.
+    assert_eq!(wire_tag("PermissionDenied"), "permission_denied");
+    assert_eq!(wire_tag("ChainHead"), "chain_head");
+}
+
+/// `siem_typed::variant_kind` hand-writes the same strings serde
+/// derives, and nothing makes the two agree.
+///
+/// The strings are not cosmetic: operators select events with them
+/// through `typed_include_variants` / `typed_exclude_variants`, so a
+/// label that drifts from the tag on the forwarded JSON silently
+/// filters the wrong set. The match itself is exhaustive, so the
+/// compiler catches a missing arm; only the string content can rot,
+/// which is what this reads.
+#[test]
+fn every_variant_kind_label_is_the_serde_wire_tag() {
+    let src = include_str!("siem_typed.rs");
+    let start = src
+        .find("fn variant_kind(event: &SessionEvent) -> &'static str {")
+        .expect("variant_kind not found");
+    let body = &src[start..];
+
+    let mut checked = 0usize;
+    for variant in declared_variants() {
+        let needle = format!("SessionEvent::{variant} {{ .. }} => \"");
+        let at = body.find(&needle).unwrap_or_else(|| {
+            panic!("variant_kind has no arm for {variant}; wire tag would be unmapped")
+        });
+        let rest = &body[at + needle.len()..];
+        let label: String = rest.chars().take_while(|c| *c != '"').collect();
+        assert_eq!(
+            label,
+            wire_tag(&variant),
+            "variant_kind labels {variant} as {label:?}, but serde emits \"{}\"",
+            wire_tag(&variant),
+        );
+        checked += 1;
+    }
+    assert!(checked > 40, "checked too few variants: {checked}");
+}
+
+/// Every `LIKE '%"..."%'` predicate in the workspace names a real
+/// wire tag.
+///
+/// A predicate written against the Rust variant name matches no row
+/// and returns an empty result with no error, which is
+/// indistinguishable from "there is nothing to find". That is how
+/// `find_permission_denials` came to report no denials for any agent
+/// for as long as it existed. Audit owns `SessionEvent`, so the guard
+/// over its wire tags lives here even though it reads other crates.
+#[test]
+fn every_event_kind_like_predicate_names_a_real_wire_tag() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/audit has a parent");
+    let mut files = Vec::new();
+    collect_rs_files(crates_dir, &mut files);
+    assert!(
+        files.len() > 50,
+        "the walker saw too few files to be trusted: {}",
+        files.len()
+    );
+
+    let tags: std::collections::HashSet<String> = declared_variants()
+        .into_iter()
+        .map(|v| wire_tag(&v))
+        .collect();
+
+    let mut found = 0usize;
+    for path in &files {
+        let src = std::fs::read_to_string(path).unwrap();
+        for (i, line) in src.lines().enumerate() {
+            // Skip comments: this guard's own prose describes the
+            // shape it looks for, and would otherwise flag itself.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let Some(at) = line.find("LIKE '%") else {
+                continue;
+            };
+            let rest = &line[at..];
+            let token: String = rest
+                .trim_start_matches("LIKE '%")
+                .trim_start_matches('\\')
+                .trim_start_matches('"')
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if token.is_empty() {
+                continue;
+            }
+            found += 1;
+            assert!(
+                tags.contains(&token),
+                "{}:{} matches on {token:?}, which is not a SessionEvent wire tag. \
+                 The tag is the serde form, not the Rust variant name.",
+                path.display(),
+                i + 1,
+            );
+        }
+    }
+    assert!(
+        found >= 2,
+        "expected to find the known predicates; the scanner is not seeing them",
+    );
+}
+
+fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            collect_rs_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
 }
 
 #[test]
