@@ -2105,49 +2105,7 @@ impl Agent {
             None => Vec::new(),
         };
 
-        let mut tool_defs = if self.llm.config().tools_enabled {
-            let mut defs = self.tools.definitions();
-            defs.extend(mcp_defs);
-            defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
-            // Item 6 slice 1: expose `spawn_subagent` to the LLM
-            // only when the agent has at least one allowed child.
-            // Empty allowed_subagents = never offer the tool.
-            if !self.allowed_subagents.is_empty() && self.subagent_depth < MAX_SUBAGENT_DEPTH {
-                defs.push(spawn_subagent_tool_def());
-            }
-            // Per-pass deny overlay slice 3: phase tools are
-            // discoverable only when a loaded skill has them in its
-            // declared `tools.allow`. Legacy mode (no skills attached)
-            // does not advertise them; agents with no opted-in skill
-            // see them not at all.
-            if self
-                .effective_permissions
-                .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
-            {
-                defs.push(wirken_enter_phase_tool_def());
-            }
-            if self
-                .effective_permissions
-                .skills_admit_tool(WIRKEN_EXIT_PHASE_TOOL)
-            {
-                defs.push(wirken_exit_phase_tool_def());
-            }
-            defs
-        } else {
-            Vec::new()
-        };
-        // Item 6 slice 1: when this agent is running as a child
-        // with a `restrict_tools` clamp, drop every tool the parent
-        // didn't grant. The clamp is applied AFTER the spawn tool
-        // is appended so a child cannot accidentally inherit
-        // spawn_subagent unless its own ceiling explicitly grants
-        // it via the same name.
-        if let Some(ref allowed) = self.restrict_tools {
-            tool_defs.retain(|t| allowed.contains(&t.name));
-        }
-        // Stable tool def ordering — prompt-cache friendly even
-        // before slice 3 adds provider-specific cache markers.
-        tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+        let tool_defs = self.build_turn_tool_defs(mcp_defs);
 
         // Initial fit before the first LLM call.
         let fit_result = self.context_engine.fit(
@@ -2475,17 +2433,7 @@ impl Agent {
             None => Vec::new(),
         };
 
-        let mut tool_defs = if self.llm.config().tools_enabled {
-            let mut defs = self.tools.definitions();
-            defs.extend(mcp_defs);
-            defs
-        } else {
-            Vec::new()
-        };
-        // Stable tool def ordering — see process_message for the
-        // reasoning. Slice 3 of item 4 layers provider-specific
-        // cache_control on top of this stable prefix.
-        tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+        let tool_defs = self.build_turn_tool_defs(mcp_defs);
 
         // Initial fit before the first LLM call.
         let fit_result = self.context_engine.fit(
@@ -4649,6 +4597,76 @@ impl Agent {
     /// [`Self::verify`] to recompute `tools_hash`. Tool defs are
     /// sorted by name for stable hashing (matches the slice 1 sort
     /// in `process_message`).
+    /// The tool set offered to the LLM for one turn.
+    ///
+    /// Both message dispatches call this. They each used to assemble
+    /// their own list and had drifted: the streaming path, which is
+    /// what webchat drives, omitted wasm skill defs, `spawn_subagent`,
+    /// both phase tools, and the `restrict_tools` ceiling clamp. An
+    /// agent's capabilities therefore depended on which channel drove
+    /// it, and nothing said so; a parent with a configured
+    /// `allowed_subagents` ceiling simply could not delegate from
+    /// webchat, because the tool was never in the request and the
+    /// model never asked for it. Issue #245.
+    ///
+    /// Silent in both directions is what made it worth removing
+    /// rather than keeping in sync: a capability that is not offered
+    /// produces no refusal and no log line, only an agent that does
+    /// not do the thing.
+    ///
+    /// `mcp_defs` is passed in because reading it takes an async lock
+    /// and this is a sync method; both callers already hold the
+    /// result.
+    pub(crate) fn build_turn_tool_defs(
+        &self,
+        mcp_defs: Vec<crate::tool::ToolDef>,
+    ) -> Vec<crate::tool::ToolDef> {
+        let mut tool_defs = if self.llm.config().tools_enabled {
+            let mut defs = self.tools.definitions();
+            defs.extend(mcp_defs);
+            defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
+            // Item 6 slice 1: expose `spawn_subagent` to the LLM
+            // only when the agent has at least one allowed child.
+            // Empty allowed_subagents = never offer the tool.
+            if !self.allowed_subagents.is_empty() && self.subagent_depth < MAX_SUBAGENT_DEPTH {
+                defs.push(spawn_subagent_tool_def());
+            }
+            // Per-pass deny overlay slice 3: phase tools are
+            // discoverable only when a loaded skill has them in its
+            // declared `tools.allow`. Legacy mode (no skills attached)
+            // does not advertise them; agents with no opted-in skill
+            // see them not at all.
+            if self
+                .effective_permissions
+                .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
+            {
+                defs.push(wirken_enter_phase_tool_def());
+            }
+            if self
+                .effective_permissions
+                .skills_admit_tool(WIRKEN_EXIT_PHASE_TOOL)
+            {
+                defs.push(wirken_exit_phase_tool_def());
+            }
+            defs
+        } else {
+            Vec::new()
+        };
+        // Item 6 slice 1: when this agent is running as a child
+        // with a `restrict_tools` clamp, drop every tool the parent
+        // didn't grant. The clamp is applied AFTER the spawn tool
+        // is appended so a child cannot accidentally inherit
+        // spawn_subagent unless its own ceiling explicitly grants
+        // it via the same name.
+        if let Some(ref allowed) = self.restrict_tools {
+            tool_defs.retain(|t| allowed.contains(&t.name));
+        }
+        // Stable tool def ordering — prompt-cache friendly even
+        // before slice 3 adds provider-specific cache markers.
+        tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+        tool_defs
+    }
+
     pub(crate) async fn snapshot_tool_defs(&self) -> Vec<crate::tool::ToolDef> {
         let mcp_defs = match &self.mcp {
             Some(mcp) => mcp.lock().await.definitions(),

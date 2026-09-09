@@ -107,6 +107,8 @@ wirken ask -m "what's the weather" --agent personal
 
 ## Default agent
 
+Delegation works the same on every channel. Both the streaming dispatch (webchat) and the non-streaming one (cron, adapters, `wirken ask`) build the offered tool set from one place, so a configured `allowed_subagents` ceiling reaches the model regardless of what drove the turn.
+
 If any channels are not explicitly bound to an agent, they route to the `default` agent. The default agent uses the provider configured during `wirken setup`.
 
 You don't need to create a default agent. It exists automatically from your initial setup.

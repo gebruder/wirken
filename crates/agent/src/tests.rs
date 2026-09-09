@@ -2966,6 +2966,102 @@ mod subagent {
         );
     }
 
+    /// Both message dispatches offer the same tools.
+    ///
+    /// They used to build the list separately and had drifted: the
+    /// streaming path, which webchat drives, left out wasm skill
+    /// defs, `spawn_subagent`, both phase tools, and the
+    /// `restrict_tools` clamp. This asserts against the source that
+    /// neither dispatch assembles its own list any more, so the two
+    /// cannot drift apart again without the assembly moving back
+    /// into one of them. Issue #245.
+    #[test]
+    fn neither_dispatch_assembles_its_own_tool_list() {
+        let src = include_str!("runtime.rs");
+        let builders = src
+            .matches("let mut tool_defs = if self.llm.config().tools_enabled {")
+            .count();
+        assert_eq!(
+            builders, 1,
+            "exactly one place may assemble the turn tool list; found {builders}. \
+             A second one is the drift that hid spawn_subagent from webchat.",
+        );
+
+        for dispatch in ["process_message_turn", "process_message_stream_turn"] {
+            let at = src
+                .find(&format!("fn {dispatch}("))
+                .unwrap_or_else(|| panic!("{dispatch} not found"));
+            // Read forward far enough to cover the setup before the
+            // first LLM call in either dispatch. Taken by chars, not
+            // bytes: this file has multi-byte characters in its
+            // comments and a byte slice can land inside one.
+            let window: String = src[at..].chars().take(4000).collect();
+            assert!(
+                window.contains("self.build_turn_tool_defs(mcp_defs)"),
+                "{dispatch} must take its tool list from the shared builder",
+            );
+        }
+    }
+
+    /// A parent with a configured ceiling is offered `spawn_subagent`
+    /// on both dispatches, and a child clamped to one tool sees only
+    /// that tool on both.
+    #[tokio::test]
+    async fn the_shared_builder_offers_the_ceiling_and_applies_the_clamp() {
+        let tmp = TempDir::new().unwrap();
+        let mut agent = Agent::new(
+            "parent".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            make_log(),
+        )
+        .unwrap();
+
+        let names = |a: &Agent| -> Vec<String> {
+            a.build_turn_tool_defs(Vec::new())
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        };
+
+        assert!(
+            !names(&agent).contains(&"spawn_subagent".to_string()),
+            "no ceiling configured, so the tool is not offered",
+        );
+
+        let mut ceilings = std::collections::BTreeMap::new();
+        ceilings.insert(
+            "researcher".to_string(),
+            wirken_gateway::agent_config::SubagentCeiling {
+                tool_allowlist: vec!["exec".into()],
+                max_permission_tier: wirken_gateway::permissions::PermissionTier::Tier2,
+                max_rounds: 3,
+                max_runtime_secs: 20,
+            },
+        );
+        agent.attach_subagent_ceilings(ceilings);
+        assert!(
+            names(&agent).contains(&"spawn_subagent".to_string()),
+            "a configured ceiling must reach the tool list: {:?}",
+            names(&agent),
+        );
+
+        // Now as a clamped child: the ceiling allowlist is the whole
+        // offered set, and the spawn tool is not in it.
+        agent.set_subagent_runtime(
+            1,
+            wirken_gateway::permissions::PermissionTier::Tier2,
+            restrict_tools_with_exec(),
+        );
+        assert_eq!(
+            names(&agent),
+            vec!["exec".to_string()],
+            "the clamp is applied after the spawn tool is appended",
+        );
+    }
+
     /// Issue #242 closing condition, at the runtime.
     ///
     /// A parent holds a Tier 2 shell allowlist grant. A child is

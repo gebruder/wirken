@@ -36,6 +36,16 @@ tagged.
   The agent-id change above was a second reason the same command found
   nothing.
 
+- Both message dispatches offer the same tools. They each assembled
+  their own list and had drifted: the streaming path, which is what
+  webchat drives, omitted wasm skill definitions, `spawn_subagent`,
+  both phase tools, and the sub-agent `restrict_tools` clamp. An agent
+  bound to webchat could not delegate at all however its
+  `allowed_subagents` ceiling was configured, and nothing reported it,
+  because a capability that is never offered produces no refusal. One
+  builder now serves both, and a test asserts neither dispatch
+  assembles a list of its own. Issue #245.
+
 - Wire tags for `SessionEvent` are pinned by drift guards. One asserts
   that every `siem_typed::variant_kind` label equals the tag serde
   emits, which is what operator `typed_include_variants` /
