@@ -266,6 +266,40 @@ pub enum ApprovalSource {
     ChannelAdapter { channel: String },
 }
 
+/// Which tool-def builder a recorded `tools_hash` was computed over,
+/// on [`SessionEvent::LlmRequest`].
+///
+/// The hash attests "these are the tools the model was offered", and
+/// what that sentence covers has changed. Recording the version keeps
+/// an old session verifiable under the rules it was written by
+/// instead of being re-judged against rules that did not exist yet.
+///
+/// - `V1`: the emit and verify sides assembled the list separately
+///   and did not agree. The recomputation covered the base tools, MCP
+///   defs, wasm skill defs and the phase tools, filtered by the
+///   per-skill profile. It did **not** cover `spawn_subagent`, so a
+///   parent's configured sub-agent ceiling was outside what the hash
+///   attested, and it did not cover the sub-agent `restrict_tools`
+///   clamp, so a child's narrowed set was outside it too.
+/// - `V2`: one builder serves the model call and the recomputation,
+///   so the hash covers exactly what was offered: base tools, MCP,
+///   wasm, `spawn_subagent` when a ceiling is configured, the phase
+///   tools, the `restrict_tools` clamp, and the per-skill profile
+///   filter.
+///
+/// `Default` is `V1` so a row written before this field existed reads
+/// back as the rules it was actually written under. Nothing upgrades
+/// a stored row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolsHashVersion {
+    /// Emit and verify disagreed; ceilings and clamps uncovered.
+    #[default]
+    V1,
+    /// One builder, covering exactly the offered set.
+    V2,
+}
+
 /// What noticed that a stored grant had lapsed, on
 /// [`SessionEvent::PermissionGrantExpired`].
 ///
@@ -545,6 +579,11 @@ pub enum SessionEvent {
         model: String,
         request_id: String,
         tools_hash: HashHex,
+        /// Which builder `tools_hash` was computed over. Defaulted on
+        /// deserialize, so a row written before the field existed
+        /// reads as [`ToolsHashVersion::V1`], which is what it was.
+        #[serde(default)]
+        tools_hash_version: ToolsHashVersion,
         messages_hash: HashHex,
         #[serde(default)]
         agent_id: String,

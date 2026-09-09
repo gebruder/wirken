@@ -5938,6 +5938,24 @@ mod verify {
         messages_hash: HashHex,
         tools_hash: HashHex,
     ) {
+        seed_llm_request_versioned(
+            log,
+            session,
+            request_id,
+            messages_hash,
+            tools_hash,
+            wirken_audit::ToolsHashVersion::V2,
+        )
+    }
+
+    fn seed_llm_request_versioned(
+        log: &dyn SessionLog,
+        session: &str,
+        request_id: &str,
+        messages_hash: HashHex,
+        tools_hash: HashHex,
+        tools_hash_version: wirken_audit::ToolsHashVersion,
+    ) {
         let h = log.handle_for(SessionId::new(session));
         log.append(
             &h,
@@ -5946,6 +5964,7 @@ mod verify {
                 provider: "ollama".into(),
                 model: "test".into(),
                 request_id: request_id.into(),
+                tools_hash_version,
                 tools_hash,
                 messages_hash,
                 agent_id: "test-agent".into(),
@@ -6064,7 +6083,137 @@ mod verify {
     }
 
     async fn agent_snapshot_tools(agent: &Agent) -> Vec<crate::tool::ToolDef> {
-        agent.snapshot_tool_defs().await
+        agent
+            .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V2)
+            .await
+    }
+
+    /// An agent with a configured sub-agent ceiling records a
+    /// `tools_hash` that verify reproduces.
+    ///
+    /// Under V1 it could not: the model was offered `spawn_subagent`
+    /// and the recomputation did not include it, so the hash the
+    /// agent wrote was over a set the verifier never rebuilt. The
+    /// ceiling was the one part of the tool surface the attestation
+    /// could not speak to, which is the part an operator most wants
+    /// attested.
+    #[test]
+    fn a_configured_ceiling_is_covered_by_the_v2_tools_hash() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (mut agent, log, _tmp) = fresh_agent_and_log();
+            let session = "verify-test";
+
+            let mut ceilings = std::collections::BTreeMap::new();
+            ceilings.insert(
+                "researcher".to_string(),
+                wirken_gateway::agent_config::SubagentCeiling {
+                    tool_allowlist: vec!["exec".into()],
+                    max_permission_tier: wirken_gateway::permissions::PermissionTier::Tier2,
+                    max_rounds: 3,
+                    max_runtime_secs: 20,
+                },
+            );
+            agent.attach_subagent_ceilings(ceilings);
+
+            let tools = agent_snapshot_tools(&agent).await;
+            assert!(
+                tools.iter().any(|t| t.name == "spawn_subagent"),
+                "the ceiling must be inside what the hash covers",
+            );
+
+            seed_system_prompt(&*log, session, "sys");
+            seed_user_message(&*log, session, "hello");
+            let mut conv = Conversation::new(100_000);
+            conv.set_system_prompt("sys");
+            conv.add_user_message("hello");
+            let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));
+            let messages_hash = hash_after_fit(&engine, &conv, &tools);
+            seed_llm_request(
+                &*log,
+                session,
+                "req-1",
+                messages_hash,
+                compute_tools_hash(&tools),
+            );
+            seed_assistant_message(&*log, session, "hi");
+
+            let report = agent.verify().await.unwrap();
+            assert!(
+                report.events_divergent.is_empty(),
+                "a ceiling-carrying session must verify clean: {:?}",
+                report.events_divergent,
+            );
+            assert_eq!(report.tools_hash_v1_rows, 0, "this row is v2");
+        });
+    }
+
+    /// A v1 fixture still verifies clean, against the rules it was
+    /// written by.
+    ///
+    /// The same agent, the same configured ceiling, and a row that
+    /// says v1. The recomputation must use the older shape, which
+    /// excluded `spawn_subagent`, so the row verifies rather than
+    /// being re-judged against a rule that postdates it. The report
+    /// reports the count so a reader knows the attestation over those
+    /// rows is the narrower one.
+    #[test]
+    fn a_v1_row_verifies_against_the_older_shape_and_is_counted() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let (mut agent, log, _tmp) = fresh_agent_and_log();
+            let session = "verify-test";
+
+            let mut ceilings = std::collections::BTreeMap::new();
+            ceilings.insert(
+                "researcher".to_string(),
+                wirken_gateway::agent_config::SubagentCeiling {
+                    tool_allowlist: vec!["exec".into()],
+                    max_permission_tier: wirken_gateway::permissions::PermissionTier::Tier2,
+                    max_rounds: 3,
+                    max_runtime_secs: 20,
+                },
+            );
+            agent.attach_subagent_ceilings(ceilings);
+
+            let v1_tools = agent
+                .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V1)
+                .await;
+            let v2_tools = agent_snapshot_tools(&agent).await;
+            assert_ne!(
+                compute_tools_hash(&v1_tools),
+                compute_tools_hash(&v2_tools),
+                "the two shapes must actually differ, or this proves nothing",
+            );
+
+            seed_system_prompt(&*log, session, "sys");
+            seed_user_message(&*log, session, "hello");
+            let mut conv = Conversation::new(100_000);
+            conv.set_system_prompt("sys");
+            conv.add_user_message("hello");
+            let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));
+            let messages_hash = hash_after_fit(&engine, &conv, &v1_tools);
+            seed_llm_request_versioned(
+                &*log,
+                session,
+                "req-1",
+                messages_hash,
+                compute_tools_hash(&v1_tools),
+                wirken_audit::ToolsHashVersion::V1,
+            );
+            seed_assistant_message(&*log, session, "hi");
+
+            let report = agent.verify().await.unwrap();
+            assert!(
+                report.events_divergent.is_empty(),
+                "a v1 row must verify under v1 rules: {:?}",
+                report.events_divergent,
+            );
+            assert_eq!(
+                report.tools_hash_v1_rows, 1,
+                "and the report must say the attestation was the narrower one",
+            );
+        });
     }
 
     #[test]
@@ -6702,6 +6851,7 @@ mod per_channel_llm_override {
                     model: a.llm_config_for_test().model.clone(),
                     request_id: format!("req-{channel}"),
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
+                    tools_hash_version: wirken_audit::ToolsHashVersion::V2,
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "test-agent".into(),
                     credential_id: None,
@@ -6757,6 +6907,7 @@ mod per_channel_llm_override {
                     provider: provider.into(),
                     model: model.into(),
                     request_id: req_id.into(),
+                    tools_hash_version: wirken_audit::ToolsHashVersion::V2,
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "test-agent".into(),
@@ -6851,6 +7002,7 @@ mod per_channel_llm_override {
                     model: a.llm_config_for_test().model.clone(),
                     request_id: format!("req-{channel}"),
                     tools_hash: wirken_audit::HashHex("00".repeat(32)),
+                    tools_hash_version: wirken_audit::ToolsHashVersion::V2,
                     messages_hash: wirken_audit::HashHex("00".repeat(32)),
                     agent_id: "a1".into(),
                     credential_id: a.api_key_credential_for_test().map(String::from),

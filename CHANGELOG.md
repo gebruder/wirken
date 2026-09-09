@@ -36,6 +36,27 @@ tagged.
   The agent-id change above was a second reason the same command found
   nothing.
 
+- `tools_hash` covers exactly the tools the model was offered. The
+  recomputation `wirken sessions verify` runs assembled its own list
+  and did not match the one the model call used: it omitted
+  `spawn_subagent`, so a configured sub-agent ceiling fell outside the
+  attestation, and omitted the sub-agent `restrict_tools` clamp, while
+  applying a per-skill profile filter the model call did not. One
+  builder now serves both, and the profile filter runs on the call side
+  too, so a tool the profile refuses is no longer offered.
+
+- `LlmRequest` records a `tools_hash_version`. `verify` recomputes each
+  row under its own version, so sessions recorded under the older rules
+  verify as before rather than being re-judged. Rows written before the
+  field existed read as `v1`. A report covering any `v1` rows prints the
+  count and states that those rows do not attest a sub-agent ceiling or
+  clamp. `docs/cli.md` carries the per-version table.
+
+- `wirken sessions verify` carries the agent's sub-agent ceilings into
+  the rebuild. Without them the recomputation omits `spawn_subagent`
+  and reports a divergence for a session that was recorded correctly.
+  Verifying a sub-agent session is a known gap, issue #246.
+
 - Both message dispatches offer the same tools. They each assembled
   their own list and had drifted: the streaming path, which is what
   webchat drives, omitted wasm skill definitions, `spawn_subagent`,

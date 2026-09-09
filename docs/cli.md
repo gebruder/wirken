@@ -128,6 +128,21 @@ wirken sessions verify <SESSION-ID>
 
 `verify` replays the session log, re-checks per-session hash chain integrity, recomputes message hashes at each LlmRequest event, and re-executes deterministic tools (read_file, list_files) against the current workspace. Reports events as verified, unverifiable, or divergent.
 
+### What a tools_hash attests
+
+Each `LlmRequest` row records a `tools_hash` over the tools the model was offered, and a `tools_hash_version` naming the rules it was computed under. `verify` recomputes each row under its own version, so a session recorded under older rules is not re-judged against rules that postdate it.
+
+| Version | Covers | Does not cover |
+| --- | --- | --- |
+| `v1` | Base tools, MCP definitions, wasm skill definitions, the phase tools, filtered by the per-skill permission profile. | `spawn_subagent`, so a configured sub-agent ceiling was outside the attestation. The sub-agent `restrict_tools` clamp, so a child's narrowed tool set was outside it too. |
+| `v2` | Everything `v1` covers, plus `spawn_subagent` when a ceiling is configured, plus the `restrict_tools` clamp. One builder produces both the offered set and the recomputation, so the hash attests exactly what the model saw. |  |
+
+Rows written before the version field existed read as `v1`, which is what they are. Nothing rewrites a stored row.
+
+Verifying a sub-agent session (`{parent}#sub-N`) is a known gap. `verify` resolves the agent from the session id prefix, which is the parent's, and the child's `restrict_tools` clamp is a runtime value the parent passed at spawn rather than anything on the child's own session. Both are recorded on the parent's `SubagentSpawned` row, but `verify` does not read across sessions today, so a child session reports a `tools_hash` divergence. Verify the parent session, which covers the spawn.
+
+When a report covers any `v1` rows it prints a `tools_hash v1 rows` line with the count and says what those rows do not attest. A clean verify over `v1` rows is a narrower claim than a clean verify over `v2` rows, and the difference is exactly the sub-agent ceiling and clamp.
+
 ## wirken permissions
 
 Manage tool approval records.

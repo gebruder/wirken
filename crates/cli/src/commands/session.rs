@@ -359,7 +359,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     // Look up the agent's static config. Falls back to the default
     // provider config if no per-agent record exists.
     let agent_config_path = cfg.agent_config_db_path();
-    let (workspace, llm_config) = if agent_config_path.exists()
+    let (workspace, llm_config, allowed_subagents) = if agent_config_path.exists()
         && let Ok(store) = AgentConfigStore::open(&agent_config_path)
         && let Ok(agent_cfg) = store.get(&agent_id)
     {
@@ -372,7 +372,17 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
                 .and_then(|s| s.strip_suffix(".amazonaws.com"))
                 .map(String::from);
         }
-        (cfg.agent_workspace(&agent_cfg.id), llm)
+        // The sub-agent ceilings have to come along. A `v2`
+        // `tools_hash` covers `spawn_subagent`, which the agent is
+        // offered only when a ceiling is configured, so recomputing
+        // without them rebuilds a smaller set than the one the model
+        // saw and reports a divergence for a session that was
+        // recorded correctly.
+        (
+            cfg.agent_workspace(&agent_cfg.id),
+            llm,
+            agent_cfg.allowed_subagents.clone(),
+        )
     } else {
         // Fall back to provider.json (the default agent's config).
         let provider_path = cfg.data_dir.join("provider.json");
@@ -390,6 +400,9 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
         (
             cfg.data_dir.join("workspace"),
             LlmConfig::from_provider(provider, base_url, model),
+            // The provider.json fallback has no AgentConfig row, so
+            // it has no ceilings to carry.
+            Default::default(),
         )
     };
 
@@ -425,7 +438,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             wasm_skills: Vec::new(),
             mcp_client: None,
             identity: None, // verify never signs new attestations
-            allowed_subagents: Default::default(),
+            allowed_subagents,
             // verify re-executes deterministic read-only tools against
             // the current workspace; no shell exec is ever replayed,
             // so the sandbox config is inert here. Use the default
@@ -462,6 +475,18 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     println!("  events_verified:     {}", report.events_verified);
     println!("  events_unverifiable: {}", report.events_unverifiable);
     println!("  events_divergent:    {}", report.events_divergent.len());
+    // A clean report over V1 rows attests less than the same report
+    // over V2 rows. Say which, rather than leaving the reader to
+    // assume the stronger reading.
+    if report.tools_hash_v1_rows > 0 {
+        println!(
+            "  tools_hash v1 rows:  {} (of the LLM requests walked)",
+            report.tools_hash_v1_rows,
+        );
+        println!("        Those rows were recorded before the tools_hash covered a configured");
+        println!("        sub-agent ceiling or a sub-agent's restricted tool set. They verify");
+        println!("        against the tools recorded at the time, which did not include either.");
+    }
     match &report.chain_status {
         wirken_audit::SessionVerifyResult::Ok { rows_verified } => {
             println!("  chain:               OK ({rows_verified} rows)");

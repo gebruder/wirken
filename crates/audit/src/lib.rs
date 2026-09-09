@@ -31,7 +31,7 @@ pub use session_log::{
     PhaseExitReason, SandboxEgressDenyReason, SandboxEgressModeLabel, SchemaDriftRecord,
     SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult,
     SkillDeniedReason, SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord,
-    TrustLevel,
+    ToolsHashVersion, TrustLevel,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

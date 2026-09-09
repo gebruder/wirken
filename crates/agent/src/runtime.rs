@@ -2170,6 +2170,7 @@ impl Agent {
                     model: self.llm.config().model.clone(),
                     request_id: request_id.clone(),
                     tools_hash,
+                    tools_hash_version: wirken_audit::ToolsHashVersion::V2,
                     messages_hash,
                     agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
@@ -2494,6 +2495,7 @@ impl Agent {
                     model: self.llm.config().model.clone(),
                     request_id: request_id.clone(),
                     tools_hash,
+                    tools_hash_version: wirken_audit::ToolsHashVersion::V2,
                     messages_hash,
                     agent_id: self.audited_agent_id(),
                     credential_id: self.api_key_credential.clone(),
@@ -4360,6 +4362,7 @@ impl Agent {
                 events_unverifiable: 0,
                 events_divergent: Vec::new(),
                 chain_status,
+                tools_hash_v1_rows: 0,
             });
         }
 
@@ -4394,7 +4397,15 @@ impl Agent {
         // installed/removed, MCP servers reconfigured). This is a
         // meaningful signal — verify only succeeds when the agent
         // can still produce the same tool surface.
-        let current_tool_defs = self.snapshot_tool_defs().await;
+        // Both recomputation shapes, built once. Each LlmRequest row
+        // says which it was written under; see `snapshot_tool_defs_for`.
+        let tool_defs_v2 = self
+            .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V2)
+            .await;
+        let tool_defs_v1 = self
+            .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V1)
+            .await;
+        let mut tools_hash_v1_rows = 0usize;
 
         // Throwaway session log for dry-run fit() calls. Compaction
         // events go here and are discarded; the real session log
@@ -4505,6 +4516,7 @@ impl Agent {
                 }
                 wirken_audit::SessionEvent::LlmRequest {
                     tools_hash,
+                    tools_hash_version,
                     messages_hash,
                     ..
                 } => {
@@ -4518,12 +4530,26 @@ impl Agent {
                         events_unverifiable += 1;
                         continue;
                     }
+                    // Recompute under the rules this row was written
+                    // by, not under today's. A V1 row predates the
+                    // hash covering sub-agent ceilings and clamps;
+                    // judging it against V2 would report divergence
+                    // for a session that was recorded correctly. The
+                    // choice comes before `fit`, which sizes the
+                    // context against the same tool defs.
+                    let current_tool_defs = match tools_hash_version {
+                        wirken_audit::ToolsHashVersion::V2 => &tool_defs_v2,
+                        wirken_audit::ToolsHashVersion::V1 => {
+                            tools_hash_v1_rows += 1;
+                            &tool_defs_v1
+                        }
+                    };
                     // C1: clone the conversation, run the same
                     // fit() the original call did, hash the result.
                     let mut conv_copy = conv.clone();
                     if let Err(e) = self.context_engine.fit(
                         &mut conv_copy,
-                        &current_tool_defs,
+                        current_tool_defs,
                         &*dryrun_log,
                         &dryrun_handle,
                         &self.id,
@@ -4541,7 +4567,7 @@ impl Agent {
                         continue;
                     }
                     let recomputed_messages = compute_messages_hash(conv_copy.messages());
-                    let recomputed_tools = compute_tools_hash(&current_tool_defs);
+                    let recomputed_tools = compute_tools_hash(current_tool_defs);
 
                     let mut event_ok = true;
                     if &recomputed_messages != messages_hash {
@@ -4589,14 +4615,10 @@ impl Agent {
             events_unverifiable,
             events_divergent: divergences,
             chain_status,
+            tools_hash_v1_rows,
         })
     }
 
-    /// Snapshot the agent's current tool defs in the same shape
-    /// `process_message` builds for an LLM call. Used by
-    /// [`Self::verify`] to recompute `tools_hash`. Tool defs are
-    /// sorted by name for stable hashing (matches the slice 1 sort
-    /// in `process_message`).
     /// The tool set offered to the LLM for one turn.
     ///
     /// Both message dispatches call this. They each used to assemble
@@ -4661,26 +4683,69 @@ impl Agent {
         if let Some(ref allowed) = self.restrict_tools {
             tool_defs.retain(|t| allowed.contains(&t.name));
         }
+        // Per-skill permission profile (#76): only surface tools the
+        // effective profile allows. `Legacy` admits everything, so an
+        // agent with no profile attached sees no change.
+        //
+        // This filter used to run on the recomputation side only, so
+        // the model was offered tools its profile would refuse at
+        // call time and `tools_hash` could not match. Offering a tool
+        // that is already decided against is its own small lie to the
+        // model; running the filter here removes both problems.
+        tool_defs.retain(|d| {
+            matches!(
+                self.effective_permissions.gate_tool(&d.name),
+                crate::skill_perms::GateDecision::Allow
+            )
+        });
         // Stable tool def ordering — prompt-cache friendly even
         // before slice 3 adds provider-specific cache markers.
         tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
         tool_defs
     }
 
-    pub(crate) async fn snapshot_tool_defs(&self) -> Vec<crate::tool::ToolDef> {
+    /// The tool defs `verify` recomputes a `tools_hash` over, under
+    /// the rules the row was written by.
+    ///
+    /// `V2` rows are recomputed with [`Self::build_turn_tool_defs`],
+    /// the same builder the model call used, so the hash attests
+    /// exactly the offered set.
+    ///
+    /// `V1` rows are recomputed with [`Self::snapshot_tool_defs_v1`],
+    /// the shape the recomputation had when those rows were written.
+    /// They are not re-judged under a rule that postdates them; see
+    /// `wirken_audit::ToolsHashVersion` for what each covers.
+    pub(crate) async fn snapshot_tool_defs_for(
+        &self,
+        version: wirken_audit::ToolsHashVersion,
+    ) -> Vec<crate::tool::ToolDef> {
         let mcp_defs = match &self.mcp {
             Some(mcp) => mcp.lock().await.definitions(),
             None => Vec::new(),
         };
+        match version {
+            wirken_audit::ToolsHashVersion::V2 => self.build_turn_tool_defs(mcp_defs),
+            wirken_audit::ToolsHashVersion::V1 => self.snapshot_tool_defs_v1(mcp_defs),
+        }
+    }
+
+    /// The pre-`V2` recomputation, preserved so sessions recorded
+    /// under it keep verifying as they did.
+    ///
+    /// It differs from what the model was offered, which is why `V2`
+    /// exists: no `spawn_subagent`, so a configured sub-agent ceiling
+    /// fell outside the hash, and no `restrict_tools` clamp, so a
+    /// child's narrowed set did too. Reproducing those gaps is the
+    /// point. Correcting them here would make an old row diverge
+    /// against a rule it was never written under.
+    fn snapshot_tool_defs_v1(
+        &self,
+        mcp_defs: Vec<crate::tool::ToolDef>,
+    ) -> Vec<crate::tool::ToolDef> {
         let mut defs = if self.llm.config().tools_enabled {
             let mut d = self.tools.definitions();
             d.extend(mcp_defs);
             d.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
-            // Per-pass deny overlay slice 3: same opt-in surface as
-            // `process_message_turn` so `snapshot_tool_defs` returns
-            // the same set verify-time as the LLM was offered at
-            // emit-time. Without this mirror the `tools_hash`
-            // recomputation in `Self::verify` would not match.
             if self
                 .effective_permissions
                 .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
@@ -4697,8 +4762,6 @@ impl Agent {
         } else {
             Vec::new()
         };
-        // Per-skill permission profile (#76): only surface tools the
-        // effective profile allows. `Legacy` admits everything.
         defs.retain(|d| {
             matches!(
                 self.effective_permissions.gate_tool(&d.name),
@@ -5260,6 +5323,15 @@ pub struct VerifyReport {
     /// this is `Broken`, no further per-event checks were
     /// performed.
     pub chain_status: wirken_audit::SessionVerifyResult,
+    /// How many `LlmRequest` rows carried a `V1` `tools_hash`.
+    ///
+    /// Those rows verified, under the rules they were written by,
+    /// which did not cover a configured sub-agent ceiling or a
+    /// child's `restrict_tools` clamp. A clean report with a non-zero
+    /// count here attests less about those rows than the same report
+    /// over `V2` rows, and the CLI says so rather than leaving the
+    /// reader to assume otherwise.
+    pub tools_hash_v1_rows: usize,
 }
 
 impl VerifyReport {
