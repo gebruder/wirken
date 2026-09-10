@@ -167,6 +167,11 @@ pub struct Agent {
     /// Tier 2 action, which is the safe direction: a runtime that
     /// cannot name itself cannot claim another's approvals.
     agent_id: Option<String>,
+    /// Set when this session has the sub-agent shape but no
+    /// `SubagentSessionBound` row, so the tool set it was offered is
+    /// not reconstructible. Only ever set when rebuilding for
+    /// inspection; see `FactoryPurpose`.
+    subagent_binding_missing: bool,
     conversation: Conversation,
     llm: LlmClient,
     tools: ToolRegistry,
@@ -441,6 +446,7 @@ impl Agent {
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
             agent_id: None,
+            subagent_binding_missing: false,
             auto_deny_above_tier: None,
             budget: None,
             budget_ledger: None,
@@ -538,6 +544,7 @@ impl Agent {
             observed_sensitivity: Default::default(),
             subagent_depth: 0,
             agent_id: None,
+            subagent_binding_missing: false,
             auto_deny_above_tier: None,
             budget: None,
             budget_ledger: None,
@@ -1519,18 +1526,15 @@ impl Agent {
         self.restrict_tools = Some(restrict_tools);
     }
 
-    /// Clamp the permission tier without touching the tool set.
+    /// Record that this session has the sub-agent shape but carries
+    /// no binding row, so its offered tool set cannot be
+    /// reconstructed.
     ///
-    /// For a sub-agent session whose binding row is absent: the tier
-    /// cap is known to be *at most* what a ceiling would have set, so
-    /// the most restricting one is safe to apply, while the tool
-    /// allowlist is genuinely unknown. Narrowing tools to the empty
-    /// set would be a guess in the other direction, and one that
-    /// makes a recomputation over the session wrong rather than
-    /// conservative.
-    pub(crate) fn set_subagent_tier_clamp(&mut self, depth: usize, max_tier: PermissionTier) {
-        self.subagent_depth = depth;
-        self.auto_deny_above_tier = Some(max_tier);
+    /// Set only when rebuilding for inspection. `verify` reads it and
+    /// reports the tools as not attestable rather than comparing the
+    /// recorded hash against a set it would have had to invent.
+    pub(crate) fn mark_subagent_binding_missing(&mut self) {
+        self.subagent_binding_missing = true;
     }
 
     /// Bind this agent as a sub-agent and record the binding on its
@@ -1897,6 +1901,12 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn session_log_for_test(&self) -> &Arc<dyn SessionLog> {
         &self.session_log
+    }
+
+    /// Whether this session was marked as carrying no binding row.
+    #[cfg(test)]
+    pub(crate) fn subagent_binding_missing_for_test(&self) -> bool {
+        self.subagent_binding_missing
     }
 
     /// The sub-agent tier cap, for tests asserting the clamp.
@@ -4446,6 +4456,7 @@ impl Agent {
                 events_divergent: Vec::new(),
                 chain_status,
                 tools_hash_v1_rows: 0,
+                tools_not_attestable_rows: 0,
             });
         }
 
@@ -4489,6 +4500,7 @@ impl Agent {
             .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V1)
             .await;
         let mut tools_hash_v1_rows = 0usize;
+        let mut tools_not_attestable_rows = 0usize;
 
         // Throwaway session log for dry-run fit() calls. Compaction
         // events go here and are discarded; the real session log
@@ -4662,7 +4674,15 @@ impl Agent {
                         });
                         event_ok = false;
                     }
-                    if &recomputed_tools != tools_hash {
+                    // A sub-agent session with no binding row cannot
+                    // say what tool set it was offered, so there is
+                    // nothing to compare the recorded hash against.
+                    // Reporting a divergence here would be reporting
+                    // a difference from a set this verifier chose,
+                    // which is not a finding about the session.
+                    if self.subagent_binding_missing {
+                        tools_not_attestable_rows += 1;
+                    } else if &recomputed_tools != tools_hash {
                         divergences.push(DivergenceRecord {
                             seq: row.seq,
                             kind: "tools_hash".into(),
@@ -4700,6 +4720,7 @@ impl Agent {
             events_divergent: divergences,
             chain_status,
             tools_hash_v1_rows,
+            tools_not_attestable_rows,
         })
     }
 
@@ -5416,6 +5437,17 @@ pub struct VerifyReport {
     /// over `V2` rows, and the CLI says so rather than leaving the
     /// reader to assume otherwise.
     pub tools_hash_v1_rows: usize,
+    /// How many `LlmRequest` rows had their `tools_hash` left
+    /// unchecked because the session is a sub-agent one carrying no
+    /// `SubagentSessionBound` row.
+    ///
+    /// Distinct from a divergence and from an unverifiable event.
+    /// The row is intact and its hash is real; what is missing is any
+    /// record of the tool set it was taken over, so there is nothing
+    /// to recompute against. A clean report with a non-zero count
+    /// here says nothing at all about which tools that session
+    /// offered.
+    pub tools_not_attestable_rows: usize,
 }
 
 impl VerifyReport {

@@ -6206,6 +6206,66 @@ mod verify {
         });
     }
 
+    /// A sub-agent session with no binding row reports its tools as
+    /// not attestable rather than as divergent.
+    ///
+    /// The row is intact and its hash is real; what is missing is any
+    /// record of the tool set it was taken over. Calling that a
+    /// divergence would report a difference from a set the verifier
+    /// chose, which is not a finding about the session.
+    #[test]
+    fn a_session_with_no_binding_row_reports_tools_as_not_attestable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = TempDir::new().unwrap();
+            let log: Arc<dyn SessionLog> = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
+            let session = "parent/webchat/c1#sub-0";
+            let mut agent = Agent::new(
+                session.into(),
+                tmp.path().to_path_buf(),
+                LlmConfig::ollama("test"),
+                None,
+                None,
+                log.clone(),
+            )
+            .unwrap();
+            // What the verify-purpose factory does for a sub-agent
+            // session it finds no binding row on.
+            agent.mark_subagent_binding_missing();
+
+            seed_system_prompt(&*log, session, "sys");
+            seed_user_message(&*log, session, "hello");
+            // A hash over a tool set this verifier has no way to
+            // rebuild: it is not the current one, deliberately.
+            seed_llm_request(
+                &*log,
+                session,
+                "req-1",
+                {
+                    let mut conv = Conversation::new(100_000);
+                    conv.set_system_prompt("sys");
+                    conv.add_user_message("hello");
+                    let engine = ContextEngine::for_model(&LlmConfig::ollama("test"));
+                    let tools = agent_snapshot_tools(&agent).await;
+                    hash_after_fit(&engine, &conv, &tools)
+                },
+                wirken_audit::HashHex("ff".repeat(32)),
+            );
+            seed_assistant_message(&*log, session, "hi");
+
+            let report = agent.verify().await.unwrap();
+            assert!(
+                report.events_divergent.is_empty(),
+                "an unrecordable tool set is not a divergence: {:?}",
+                report.events_divergent,
+            );
+            assert_eq!(
+                report.tools_not_attestable_rows, 1,
+                "and it is reported rather than passed over in silence",
+            );
+        });
+    }
+
     /// A v1 fixture still verifies clean, against the rules it was
     /// written by.
     ///

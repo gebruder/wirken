@@ -216,6 +216,21 @@ struct BudgetWiring {
     config: BudgetConfig,
 }
 
+/// What a factory is waking agents for.
+///
+/// The two differ only where a session's recorded state is
+/// incomplete. Running an agent under an unknown constraint has to
+/// fail closed, because the agent will act; rebuilding one for
+/// inspection has to avoid inventing the constraint, because a guess
+/// would be reported as though it were what happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactoryPurpose {
+    /// Waking agents that will run.
+    Live,
+    /// Rebuilding recorded sessions for offline inspection.
+    Verify,
+}
+
 pub struct AgentFactory {
     static_configs: HashMap<String, AgentStaticConfig>,
     session_log: Arc<dyn SessionLog>,
@@ -291,6 +306,8 @@ pub struct AgentFactory {
     /// [`Self::attach_budget`]; absent means the budget gate is a
     /// no-op.
     budget_wiring: std::sync::RwLock<Option<BudgetWiring>>,
+    /// What this factory wakes agents for. See [`FactoryPurpose`].
+    purpose: FactoryPurpose,
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
@@ -338,6 +355,45 @@ impl AgentFactory {
         cache_mode: CacheMode,
         cache_capacity: usize,
     ) -> Arc<Self> {
+        Self::with_purpose(
+            static_configs,
+            session_log,
+            permissions,
+            org_permissions,
+            cache_mode,
+            cache_capacity,
+            FactoryPurpose::Live,
+        )
+    }
+
+    /// A factory for rebuilding recorded sessions offline. Wakes no
+    /// agent that will run, so an incomplete session is reported
+    /// rather than guessed at. See [`FactoryPurpose`].
+    pub fn for_verify(
+        static_configs: HashMap<String, AgentStaticConfig>,
+        session_log: Arc<dyn SessionLog>,
+    ) -> Arc<Self> {
+        Self::with_purpose(
+            static_configs,
+            session_log,
+            None,
+            None,
+            CacheMode::Drop,
+            1,
+            FactoryPurpose::Verify,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_purpose(
+        static_configs: HashMap<String, AgentStaticConfig>,
+        session_log: Arc<dyn SessionLog>,
+        permissions: Option<Arc<StdMutex<PermissionStore>>>,
+        org_permissions: Option<Arc<OrgPermissions>>,
+        cache_mode: CacheMode,
+        cache_capacity: usize,
+        purpose: FactoryPurpose,
+    ) -> Arc<Self> {
         if cache_mode == CacheMode::Drop {
             tracing::info!("AgentFactory: cache disabled (drop mode)");
         }
@@ -363,6 +419,7 @@ impl AgentFactory {
             signal_approval_gate: std::sync::RwLock::new(None),
             sse_approval_gate: std::sync::RwLock::new(None),
             budget_wiring: std::sync::RwLock::new(None),
+            purpose,
             cache: StdMutex::new(LruCache::new(capacity)),
             cache_mode,
             self_weak: weak.clone(),
@@ -638,7 +695,9 @@ impl AgentFactory {
         // constrained, on crash recovery and on offline verify
         // alike. A read failure leaves the agent unclamped, which is
         // the wrong direction, so it is loud rather than silent.
-        if let Err(err) = replay_subagent_binding(&mut agent, &self.session_log, session_id) {
+        if let Err(err) =
+            replay_subagent_binding(&mut agent, &self.session_log, session_id, self.purpose)
+        {
             tracing::error!(
                 session_id,
                 error = %err,
@@ -838,6 +897,7 @@ fn replay_subagent_binding(
     agent: &mut Agent,
     log: &Arc<dyn SessionLog>,
     session_id: &str,
+    purpose: FactoryPurpose,
 ) -> Result<(), wirken_audit::AuditError> {
     let handle = log.handle_for(SessionId::new(session_id.to_string()));
     let events = log.get_since(&handle, 0)?;
@@ -873,15 +933,47 @@ fn replay_subagent_binding(
         // level, so nesting stays capped without the row.
         if session_id.contains(SUBAGENT_SESSION_MARKER) {
             let depth = session_id.matches(SUBAGENT_SESSION_MARKER).count();
-            tracing::error!(
-                session_id,
-                depth,
-                "factory: sub-agent session has no binding row; clamping to tier1. The tool \
-                 allowlist is not recoverable without the row, so only the tier is clamped. \
-                 This is a chain written before the row existed, or one missing it."
-            );
-            agent
-                .set_subagent_tier_clamp(depth, wirken_gateway::permissions::PermissionTier::Tier1);
+            match purpose {
+                FactoryPurpose::Live => {
+                    // This agent will act, and the constraint it
+                    // should act under is unrecoverable, so it gets
+                    // the tightest one there is: `tier1` and no
+                    // tools. Deliberately unusable. A child whose
+                    // binding is gone cannot be resumed faithfully,
+                    // and the move is to respawn it from its parent
+                    // rather than let it continue under a guess.
+                    tracing::error!(
+                        session_id,
+                        depth,
+                        "factory: sub-agent session has no binding row; clamping to tier1 with \
+                         an empty tool set. It cannot be resumed under its original ceiling, \
+                         because that ceiling is not recorded on this session. Respawn the \
+                         child from its parent."
+                    );
+                    agent.set_subagent_runtime(
+                        depth,
+                        wirken_gateway::permissions::PermissionTier::Tier1,
+                        Default::default(),
+                    );
+                }
+                FactoryPurpose::Verify => {
+                    // Nothing will act, so nothing has to fail
+                    // closed, and inventing a ceiling here would be
+                    // worse than reporting none: the recomputation
+                    // would attest a tool set this function chose
+                    // rather than one the session recorded. Leave
+                    // the agent as configured and mark the session,
+                    // so `verify` says the tools are not attestable
+                    // instead of comparing against a made-up number.
+                    tracing::warn!(
+                        session_id,
+                        depth,
+                        "factory: sub-agent session has no binding row; the tools it was \
+                         offered are not attestable for this session"
+                    );
+                    agent.mark_subagent_binding_missing();
+                }
+            }
         }
         return Ok(());
     };
@@ -1319,7 +1411,8 @@ mod replay_tests {
         append_subagent_binding(&log, &session_id, "researcher", "tier2", &["exec"]);
         let log_dyn: Arc<dyn SessionLog> = log.clone();
 
-        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)
+            .unwrap();
 
         let offered: Vec<String> = agent
             .build_turn_tool_defs(Vec::new())
@@ -1356,20 +1449,58 @@ mod replay_tests {
         )
         .unwrap();
 
-        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)
+            .unwrap();
 
         assert_eq!(
             agent.auto_deny_above_tier_for_test(),
             Some(wirken_gateway::permissions::PermissionTier::Tier1),
             "an unknown clamp is not an absent one",
         );
-        // The tool allowlist is genuinely unknown, so it is not
-        // guessed. Narrowing to the empty set would make a
-        // recomputation over the session wrong rather than
-        // conservative.
+        assert!(
+            agent.build_turn_tool_defs(Vec::new()).is_empty(),
+            "a live rewake gets no tools: the session cannot be resumed under its original \
+             ceiling, so it is not resumed under a guessed one either",
+        );
+    }
+
+    /// The same session rebuilt for inspection is not clamped, and is
+    /// marked instead.
+    ///
+    /// Clamping here would have the recomputation attest a tool set
+    /// chosen by the replay rather than recorded by the session.
+    #[test]
+    fn a_subagent_session_with_no_binding_row_is_marked_not_clamped_under_verify() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("audit.db");
+        let concrete = Arc::new(SqliteSessionLog::open(&log_path).unwrap());
+        let log_dyn: Arc<dyn SessionLog> = concrete.clone();
+        let session_id = "parent/webchat/c1#sub-0".to_string();
+        let mut agent = Agent::new(
+            session_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log_dyn.clone(),
+        )
+        .unwrap();
+
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Verify)
+            .unwrap();
+
+        assert_eq!(
+            agent.auto_deny_above_tier_for_test(),
+            None,
+            "verify must not invent a ceiling",
+        );
         assert!(
             agent.build_turn_tool_defs(Vec::new()).len() > 1,
-            "the tool set is left alone; only the tier is clamped",
+            "and must not invent a tool set",
+        );
+        assert!(
+            agent.subagent_binding_missing_for_test(),
+            "the session is marked so verify can report it",
         );
     }
 
@@ -1391,7 +1522,8 @@ mod replay_tests {
             log_dyn.clone(),
         )
         .unwrap();
-        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)
+            .unwrap();
         assert_eq!(agent.subagent_depth_for_test(), 2);
     }
 
@@ -1401,7 +1533,8 @@ mod replay_tests {
     fn replay_without_a_binding_row_leaves_the_agent_unclamped() {
         let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
         let log_dyn: Arc<dyn SessionLog> = log.clone();
-        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)
+            .unwrap();
         let offered = agent.build_turn_tool_defs(Vec::new()).len();
         assert!(
             offered > 1,
@@ -1423,7 +1556,8 @@ mod replay_tests {
         );
         append_subagent_binding(&log, &session_id, "researcher", "tier2", &["read_file"]);
         let log_dyn: Arc<dyn SessionLog> = log.clone();
-        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)
+            .unwrap();
         let offered: Vec<String> = agent
             .build_turn_tool_defs(Vec::new())
             .into_iter()
@@ -1439,7 +1573,8 @@ mod replay_tests {
         let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
         append_subagent_binding(&log, &session_id, "researcher", "tier9000", &["exec"]);
         let log_dyn: Arc<dyn SessionLog> = log.clone();
-        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)
+            .unwrap();
         // The tool clamp still applies, and the tier cap is Tier1, so
         // a Tier 2 action is auto-denied rather than admitted.
         assert_eq!(

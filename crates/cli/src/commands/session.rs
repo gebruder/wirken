@@ -327,7 +327,6 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use wirken_agent::factory::CacheMode;
     use wirken_agent::llm::LlmConfig;
     use wirken_agent::{AgentFactory, AgentStaticConfig};
     use wirken_audit::SqliteSessionLog;
@@ -489,8 +488,7 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
             zirkel_db_path: None,
         },
     );
-    let factory =
-        AgentFactory::with_options(configs, session_log.clone(), None, None, CacheMode::Drop, 1);
+    let factory = AgentFactory::for_verify(configs, session_log.clone());
 
     let agent_arc = factory
         .wake(&agent_id, session_id)
@@ -515,6 +513,15 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     // A clean report over V1 rows attests less than the same report
     // over V2 rows. Say which, rather than leaving the reader to
     // assume the stronger reading.
+    if report.tools_not_attestable_rows > 0 {
+        println!(
+            "  tools not attestable: {} (of the LLM requests walked)",
+            report.tools_not_attestable_rows,
+        );
+        println!("        This sub-agent session carries no binding row, so the tool set it");
+        println!("        was offered is not recorded anywhere and the recorded tools_hash");
+        println!("        has nothing to be checked against. Everything else still verified.");
+    }
     if report.tools_hash_v1_rows > 0 {
         println!(
             "  tools_hash v1 rows:  {} (of the LLM requests walked)",

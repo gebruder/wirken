@@ -73,12 +73,17 @@ tagged.
   no tier cap.
 
 - A session whose id has the sub-agent shape but carries no binding row
-  clamps to `tier1` and logs at `error`, matching a row that names an
-  unrecognised tier. The state arises from a chain written before the
-  row existed, or one missing it; either way the clamp is unknown, and
-  an unknown clamp is not an absent one. Only the tier is clamped,
-  because the tool allowlist is not recoverable without the row.
-  Nesting depth comes from the session id.
+  is handled by what is being done with it. A live rewake clamps to
+  `tier1` with an empty tool set and logs at `error`: the child cannot
+  be resumed under its original ceiling, because that ceiling is not
+  recorded on it, so it is not resumed under a guessed one either and
+  the operator respawns it from the parent. `wirken sessions verify`
+  neither clamps nor recomputes a ceiling, because inventing one would
+  attest a tool set the verifier chose; it leaves those `tools_hash`
+  rows unchecked and prints a `tools not attestable` count beside the
+  `tools_hash v1 rows` count. Everything else about such a session
+  verifies normally. The state arises from a chain written before the
+  row existed, or one missing it.
 
 - Both message dispatches offer the same tools. They each assembled
   their own list and had drifted: the streaming path, which is what

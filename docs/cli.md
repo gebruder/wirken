@@ -143,7 +143,13 @@ A sub-agent session (`{parent}#sub-N`) verifies on its own. At spawn the child w
 
 The parent's `SubagentSpawned` row is unchanged and records the same grant from the parent's side. The two are independent records; comparing them is a separate check that `verify` does not perform.
 
-A session whose id has the sub-agent shape but carries no binding row clamps to `tier1` and logs at `error`, the same treatment a row naming an unrecognised tier gets. That state arises two ways, and neither is a session that should run unclamped: a chain written before the row existed, or one where the row is missing because the write failed or the chain was truncated. The clamp is unknown, and an unknown clamp is not an absent one. Only the tier is clamped: the tool allowlist is not recoverable without the row, and narrowing it to nothing would make a recomputation over that session wrong rather than conservative. Nesting depth comes from the id, which carries one `#sub-` per level.
+A session whose id has the sub-agent shape but carries no binding row arises two ways: a chain written before the row existed, or one where the row is missing because the write failed or the chain was truncated. Either way the ceiling it ran under is unrecoverable, and the two things you can do with such a session want opposite handling.
+
+**Running it.** A live rewake clamps to `tier1` with an empty tool set and logs at `error`. That is deliberately unusable: the child cannot be resumed under its original ceiling, because that ceiling is not recorded on it, and running it under a guessed one is worse than not running it. Respawn the child from its parent instead.
+
+**Verifying it.** `verify` does not clamp and does not recompute a ceiling. Inventing one would have the recomputation attest a tool set the verifier chose rather than one the session recorded. Instead the `tools_hash` on those rows is left unchecked and the report prints a `tools not attestable` count next to the `tools_hash v1 rows` count. Everything else about the session, the chain, the message hashes, the deterministic tool replays, still verifies normally. A clean report carrying a non-zero `tools not attestable` count says nothing at all about which tools that session offered.
+
+Nesting depth comes from the id in both cases, which carries one `#sub-` per level.
 
 When a report covers any `v1` rows it prints a `tools_hash v1 rows` line with the count and says what those rows do not attest. A clean verify over `v1` rows is a narrower claim than a clean verify over `v2` rows, and the difference is exactly the sub-agent ceiling and clamp.
 
