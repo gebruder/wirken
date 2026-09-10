@@ -143,6 +143,8 @@ A sub-agent session (`{parent}#sub-N`) verifies on its own. At spawn the child w
 
 The parent's `SubagentSpawned` row is unchanged and records the same grant from the parent's side. The two are independent records; comparing them is a separate check that `verify` does not perform.
 
+A session whose id has the sub-agent shape but carries no binding row clamps to `tier1` and logs at `error`, the same treatment a row naming an unrecognised tier gets. That state arises two ways, and neither is a session that should run unclamped: a chain written before the row existed, or one where the row is missing because the write failed or the chain was truncated. The clamp is unknown, and an unknown clamp is not an absent one. Only the tier is clamped: the tool allowlist is not recoverable without the row, and narrowing it to nothing would make a recomputation over that session wrong rather than conservative. Nesting depth comes from the id, which carries one `#sub-` per level.
+
 When a report covers any `v1` rows it prints a `tools_hash v1 rows` line with the count and says what those rows do not attest. A clean verify over `v1` rows is a narrower claim than a clean verify over `v2` rows, and the difference is exactly the sub-agent ceiling and clamp.
 
 ## wirken permissions

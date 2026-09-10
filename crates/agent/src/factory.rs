@@ -53,7 +53,7 @@ use wirken_gateway::permissions::{
 use crate::error::AgentError;
 use crate::llm::LlmConfig;
 use crate::mcp::McpProxyClient;
-use crate::runtime::Agent;
+use crate::runtime::{Agent, SUBAGENT_SESSION_MARKER};
 use crate::skill::Skill;
 use crate::wasm_sandbox::WasmSkill;
 
@@ -854,6 +854,35 @@ fn replay_subagent_binding(
         }
     }
     let Some((depth, tier_label, tools_granted)) = latest else {
+        // A session whose id has the sub-agent shape but carries no
+        // binding row. Two ways to get here, and neither is a session
+        // that should run unclamped: a chain written before 80fb023,
+        // when the binding was held in memory and never recorded, or
+        // one where the row is missing because the write failed or
+        // the chain was truncated.
+        //
+        // Treated as the unrecognised-tier case is treated, and for
+        // the same reason: the clamp is what is unknown, and an
+        // unknown clamp is not an absent one. `tier1` is the most
+        // restricting cap. The tool allowlist is not recoverable
+        // without the row, so only the tier is clamped; that still
+        // refuses every Tier 2 and Tier 3 action, which is the part
+        // a ceiling exists to bound.
+        //
+        // Depth comes from the id, which encodes one `#sub-` per
+        // level, so nesting stays capped without the row.
+        if session_id.contains(SUBAGENT_SESSION_MARKER) {
+            let depth = session_id.matches(SUBAGENT_SESSION_MARKER).count();
+            tracing::error!(
+                session_id,
+                depth,
+                "factory: sub-agent session has no binding row; clamping to tier1. The tool \
+                 allowlist is not recoverable without the row, so only the tier is clamped. \
+                 This is a chain written before the row existed, or one missing it."
+            );
+            agent
+                .set_subagent_tier_clamp(depth, wirken_gateway::permissions::PermissionTier::Tier1);
+        }
         return Ok(());
     };
     let max_tier = match tier_label.as_str() {
@@ -1302,6 +1331,68 @@ mod replay_tests {
             vec!["exec".to_string()],
             "the clamp must be the whole offered set",
         );
+    }
+
+    /// A sub-agent session with no binding row clamps to tier1.
+    ///
+    /// The state arises from a chain written before the row existed,
+    /// or one missing it. Either way the clamp is unknown, and an
+    /// unknown clamp is not an absent one.
+    #[test]
+    fn a_subagent_session_with_no_binding_row_clamps_to_tier1() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("audit.db");
+        let concrete = Arc::new(SqliteSessionLog::open(&log_path).unwrap());
+        let log_dyn: Arc<dyn SessionLog> = concrete.clone();
+        // The sub-agent shape, and nothing else on the chain.
+        let session_id = "parent/webchat/c1#sub-0".to_string();
+        let mut agent = Agent::new(
+            session_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log_dyn.clone(),
+        )
+        .unwrap();
+
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+
+        assert_eq!(
+            agent.auto_deny_above_tier_for_test(),
+            Some(wirken_gateway::permissions::PermissionTier::Tier1),
+            "an unknown clamp is not an absent one",
+        );
+        // The tool allowlist is genuinely unknown, so it is not
+        // guessed. Narrowing to the empty set would make a
+        // recomputation over the session wrong rather than
+        // conservative.
+        assert!(
+            agent.build_turn_tool_defs(Vec::new()).len() > 1,
+            "the tool set is left alone; only the tier is clamped",
+        );
+    }
+
+    /// Nesting depth comes from the id when the row is absent, so a
+    /// deeper session does not read as a direct child.
+    #[test]
+    fn depth_without_a_binding_row_comes_from_the_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let log_path = tmp.path().join("audit.db");
+        let concrete = Arc::new(SqliteSessionLog::open(&log_path).unwrap());
+        let log_dyn: Arc<dyn SessionLog> = concrete.clone();
+        let session_id = "parent/webchat/c1#sub-0#sub-1".to_string();
+        let mut agent = Agent::new(
+            session_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log_dyn.clone(),
+        )
+        .unwrap();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        assert_eq!(agent.subagent_depth_for_test(), 2);
     }
 
     /// No binding row means no clamp, which is every non-sub-agent

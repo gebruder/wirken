@@ -63,9 +63,22 @@ tagged.
   session before: its id names its parent, and the clamp was held only
   in memory, so a rebuild produced the wrong agent with the wrong tools
   and every sub-agent session reported a `tools_hash` divergence. The
-  factory replays the row at wake, so a child also comes back clamped
-  on crash recovery rather than unclamped. The parent's chain is never
-  read, and its `SubagentSpawned` row is unchanged. Issue #246.
+  parent's chain is never read, and its `SubagentSpawned` row is
+  unchanged. Issue #246.
+
+- A sub-agent re-woken after a crash comes back clamped. The factory
+  replays the binding row at wake, so the constraint is restored from
+  the chain rather than lost with the process. A child recovered on a
+  live daemon previously came back with its parent's full tool set and
+  no tier cap.
+
+- A session whose id has the sub-agent shape but carries no binding row
+  clamps to `tier1` and logs at `error`, matching a row that names an
+  unrecognised tier. The state arises from a chain written before the
+  row existed, or one missing it; either way the clamp is unknown, and
+  an unknown clamp is not an absent one. Only the tier is clamped,
+  because the tool allowlist is not recoverable without the row.
+  Nesting depth comes from the session id.
 
 - Both message dispatches offer the same tools. They each assembled
   their own list and had drifted: the streaming path, which is what

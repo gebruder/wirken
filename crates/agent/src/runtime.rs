@@ -62,6 +62,15 @@ const MAX_SUBAGENT_DEPTH: usize = 4;
 /// The built-in tool name for spawning a child agent. Item 6 slice 1.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
+/// Separator a child's session id appends to its parent's, once per
+/// nesting level. `{parent_session}#sub-{n}`.
+///
+/// The only thing a child's session id says about the child, which is
+/// why a session carrying it but no `SubagentSessionBound` row is
+/// treated as a sub-agent whose clamp is unknown rather than as an
+/// ordinary session. See `replay_subagent_binding`.
+pub(crate) const SUBAGENT_SESSION_MARKER: &str = "#sub-";
+
 /// Per-pass deny overlay slice 3: synthetic tool name a skill emits to
 /// install a phase deny overlay. Intercepted at the top of
 /// [`Agent::execute_tool`] before any gate check or MCP dispatch, so
@@ -1508,6 +1517,20 @@ impl Agent {
         self.subagent_depth = depth;
         self.auto_deny_above_tier = Some(max_tier);
         self.restrict_tools = Some(restrict_tools);
+    }
+
+    /// Clamp the permission tier without touching the tool set.
+    ///
+    /// For a sub-agent session whose binding row is absent: the tier
+    /// cap is known to be *at most* what a ceiling would have set, so
+    /// the most restricting one is safe to apply, while the tool
+    /// allowlist is genuinely unknown. Narrowing tools to the empty
+    /// set would be a guess in the other direction, and one that
+    /// makes a recomputation over the session wrong rather than
+    /// conservative.
+    pub(crate) fn set_subagent_tier_clamp(&mut self, depth: usize, max_tier: PermissionTier) {
+        self.subagent_depth = depth;
+        self.auto_deny_above_tier = Some(max_tier);
     }
 
     /// Bind this agent as a sub-agent and record the binding on its
@@ -3824,7 +3847,8 @@ impl Agent {
 
             let parent_session_id = self.session_handle.id().to_string();
             let prior_spawns = self.count_subagent_spawns()?;
-            let child_session_id = format!("{parent_session_id}#sub-{prior_spawns}");
+            let child_session_id =
+                format!("{parent_session_id}{SUBAGENT_SESSION_MARKER}{prior_spawns}");
 
             self.log_event(
                 TrustLevel::System,
@@ -4256,7 +4280,8 @@ impl Agent {
         // (item 10's verify cares).
         let parent_session_id = self.session_handle.id().to_string();
         let prior_spawns = self.count_subagent_spawns()?;
-        let child_session_id = format!("{parent_session_id}#sub-{prior_spawns}");
+        let child_session_id =
+            format!("{parent_session_id}{SUBAGENT_SESSION_MARKER}{prior_spawns}");
 
         // Audit the spawn BEFORE waking the child so a crash
         // between this point and the result write surfaces the
