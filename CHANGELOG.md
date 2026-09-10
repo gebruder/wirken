@@ -55,7 +55,17 @@ tagged.
 - `wirken sessions verify` carries the agent's sub-agent ceilings into
   the rebuild. Without them the recomputation omits `spawn_subagent`
   and reports a divergence for a session that was recorded correctly.
-  Verifying a sub-agent session is a known gap, issue #246.
+
+- A sub-agent session verifies on its own. At spawn the child writes a
+  `SubagentSessionBound` row on its own chain, before its first
+  `LlmRequest`, naming the agent it was woken as and the tool set its
+  parent's ceiling narrowed it to. Neither was derivable from a child's
+  session before: its id names its parent, and the clamp was held only
+  in memory, so a rebuild produced the wrong agent with the wrong tools
+  and every sub-agent session reported a `tools_hash` divergence. The
+  factory replays the row at wake, so a child also comes back clamped
+  on crash recovery rather than unclamped. The parent's chain is never
+  read, and its `SubagentSpawned` row is unchanged. Issue #246.
 
 - Both message dispatches offer the same tools. They each assembled
   their own list and had drifted: the streaming path, which is what

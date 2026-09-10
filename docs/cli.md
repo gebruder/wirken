@@ -139,7 +139,9 @@ Each `LlmRequest` row records a `tools_hash` over the tools the model was offere
 
 Rows written before the version field existed read as `v1`, which is what they are. Nothing rewrites a stored row.
 
-Verifying a sub-agent session (`{parent}#sub-N`) is a known gap. `verify` resolves the agent from the session id prefix, which is the parent's, and the child's `restrict_tools` clamp is a runtime value the parent passed at spawn rather than anything on the child's own session. Both are recorded on the parent's `SubagentSpawned` row, but `verify` does not read across sessions today, so a child session reports a `tools_hash` divergence. Verify the parent session, which covers the spawn.
+A sub-agent session (`{parent}#sub-N`) verifies on its own. At spawn the child writes a `SubagentSessionBound` row on its own chain, before its first `LlmRequest`, naming the agent it was woken as and the tool set its parent's ceiling narrowed it to. `verify` reads the agent and the clamp from that row and prints which agent it resolved. The parent's chain is never opened; a child session verifies clean even when the parent's session is not present at all.
+
+The parent's `SubagentSpawned` row is unchanged and records the same grant from the parent's side. The two are independent records; comparing them is a separate check that `verify` does not perform.
 
 When a report covers any `v1` rows it prints a `tools_hash v1 rows` line with the count and says what those rows do not attest. A clean verify over `v1` rows is a narrower claim than a clean verify over `v2` rows, and the difference is exactly the sub-agent ceiling and clamp.
 

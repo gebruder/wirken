@@ -125,6 +125,9 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
             | SessionEvent::PermissionGrantPruned { .. }
             | SessionEvent::SkillPermissionDenied { .. }
             | SessionEvent::SubagentSpawned { .. }
+            // Same reason as the spawn row: it records what a child
+            // was granted, from the child's own side.
+            | SessionEvent::SubagentSessionBound { .. }
             | SessionEvent::SubagentResult { .. }
             | SessionEvent::ChainHead { .. }
             | SessionEvent::McpEntryVerified { .. }
@@ -195,6 +198,7 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SystemPromptSet { .. } => "system_prompt_set",
         SessionEvent::Rewind { .. } => "rewind",
         SessionEvent::SubagentSpawned { .. } => "subagent_spawned",
+        SessionEvent::SubagentSessionBound { .. } => "subagent_session_bound",
         SessionEvent::SubagentResult { .. } => "subagent_result",
         SessionEvent::AuditLegacy { .. } => "audit_legacy",
         SessionEvent::HookRegistered { .. } => "hook_registered",

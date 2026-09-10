@@ -299,6 +299,30 @@ pub async fn close(id: &str) -> Result<()> {
 ///   2  --strict and at least one unverifiable event with no divergences
 ///   3  underlying chain broken
 ///   4  command setup failure (agent_id not found, log unreachable, …)
+/// The agent a sub-agent session was woken as, read from the
+/// `SubagentSessionBound` row on that session's own chain.
+///
+/// `None` when the session carries no such row, which is every
+/// non-sub-agent session and every sub-agent session recorded before
+/// the row existed. Those keep the prefix-derived agent id, which is
+/// what they had.
+fn subagent_agent_id(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    session_id: &str,
+) -> Option<String> {
+    use wirken_audit::SessionLog;
+    let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).ok()?;
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    let events = log.get_since(&handle, 0).ok()?;
+    events
+        .into_iter()
+        .rev()
+        .find_map(|stored| match stored.event {
+            wirken_audit::SessionEvent::SubagentSessionBound { agent_id, .. } => Some(agent_id),
+            _ => None,
+        })
+}
+
 pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -354,6 +378,19 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     let agent_id = match session_id.split_once('/') {
         Some((aid, _)) => aid.to_string(),
         None => session_id.to_string(),
+    };
+
+    // A sub-agent session's id names its parent, so the prefix above
+    // resolves to the wrong agent for one. The child records the agent
+    // it was woken as on its own chain at spawn; read it from there.
+    // The parent's session is never opened. Issue #246.
+    let agent_id = match subagent_agent_id(&cfg, session_id) {
+        Some(child_agent) => {
+            println!();
+            println!("  Sub-agent session: resolved agent '{child_agent}' from its own chain.");
+            child_agent
+        }
+        None => agent_id,
     };
 
     // Look up the agent's static config. Falls back to the default

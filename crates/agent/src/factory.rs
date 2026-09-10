@@ -633,6 +633,19 @@ impl AgentFactory {
                 "factory: failed to replay phase overlay; agent starts with no active phase"
             );
         }
+        // A sub-agent session carries its own clamp. Replaying it
+        // means a child woken from its session alone comes back
+        // constrained, on crash recovery and on offline verify
+        // alike. A read failure leaves the agent unclamped, which is
+        // the wrong direction, so it is loud rather than silent.
+        if let Err(err) = replay_subagent_binding(&mut agent, &self.session_log, session_id) {
+            tracing::error!(
+                session_id,
+                error = %err,
+                "factory: failed to replay the sub-agent binding; this agent is NOT clamped \
+                 to its parent's ceiling"
+            );
+        }
         if let Some(org) = &self.org_permissions {
             agent.set_org_permissions(org.clone());
         }
@@ -802,6 +815,60 @@ fn replay_session_scoped_approvals(
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Re-apply a `SubagentSessionBound` row to the freshly woken agent.
+///
+/// The row is written on the child's own chain at spawn and carries
+/// the clamp the parent's ceiling imposed. Replaying it means a child
+/// woken from its session alone comes back constrained, whether that
+/// wake is crash recovery on a live daemon or `wirken sessions
+/// verify` rebuilding the session offline. Without it the rebuild is
+/// an unclamped agent and every recomputation over its tool set is
+/// wrong. Issue #246.
+///
+/// The parent's chain is never consulted. Last row wins, so a session
+/// re-bound across restarts reflects the most recent binding.
+///
+/// Fails closed in one specific way: a row naming a tier label this
+/// build does not recognise clamps to `Tier1`, the most restricting,
+/// rather than leaving the agent unclamped.
+fn replay_subagent_binding(
+    agent: &mut Agent,
+    log: &Arc<dyn SessionLog>,
+    session_id: &str,
+) -> Result<(), wirken_audit::AuditError> {
+    let handle = log.handle_for(SessionId::new(session_id.to_string()));
+    let events = log.get_since(&handle, 0)?;
+    let mut latest: Option<(usize, String, Vec<String>)> = None;
+    for stored in events {
+        if let SessionEvent::SubagentSessionBound {
+            depth,
+            max_permission_tier,
+            tools_granted,
+            ..
+        } = stored.event
+        {
+            latest = Some((depth, max_permission_tier, tools_granted));
+        }
+    }
+    let Some((depth, tier_label, tools_granted)) = latest else {
+        return Ok(());
+    };
+    let max_tier = match tier_label.as_str() {
+        "tier1" => wirken_gateway::permissions::PermissionTier::Tier1,
+        "tier2" => wirken_gateway::permissions::PermissionTier::Tier2,
+        "tier3" => wirken_gateway::permissions::PermissionTier::Tier3,
+        other => {
+            tracing::warn!(
+                "subagent binding for {session_id} names an unrecognised tier {other:?}; \
+                 clamping to tier1"
+            );
+            wirken_gateway::permissions::PermissionTier::Tier1
+        }
+    };
+    agent.set_subagent_runtime(depth, max_tier, tools_granted.into_iter().collect());
     Ok(())
 }
 
@@ -1187,6 +1254,107 @@ mod replay_tests {
             },
         )
         .unwrap();
+    }
+
+    fn append_subagent_binding(
+        log: &Arc<SqliteSessionLog>,
+        session_id: &str,
+        agent_id: &str,
+        tier: &str,
+        tools: &[&str],
+    ) {
+        let handle = log.handle_for(SessionId::new(session_id.to_string()));
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::SubagentSessionBound {
+                agent_id: agent_id.to_string(),
+                parent_session_id: "parent/webchat/c1".to_string(),
+                depth: 1,
+                max_permission_tier: tier.to_string(),
+                tools_granted: tools.iter().map(|t| t.to_string()).collect(),
+                offered_tools: tools.iter().map(|t| t.to_string()).collect(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// A child woken from its own session comes back clamped.
+    ///
+    /// Nothing reads the parent's chain. The binding row is the whole
+    /// input, which is what lets a sub-agent session be verified on
+    /// its own. Issue #246.
+    #[test]
+    fn replay_restores_the_clamp_from_the_childs_own_row() {
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_subagent_binding(&log, &session_id, "researcher", "tier2", &["exec"]);
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+
+        let offered: Vec<String> = agent
+            .build_turn_tool_defs(Vec::new())
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(
+            offered,
+            vec!["exec".to_string()],
+            "the clamp must be the whole offered set",
+        );
+    }
+
+    /// No binding row means no clamp, which is every non-sub-agent
+    /// session.
+    #[test]
+    fn replay_without_a_binding_row_leaves_the_agent_unclamped() {
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        let offered = agent.build_turn_tool_defs(Vec::new()).len();
+        assert!(
+            offered > 1,
+            "an ordinary session keeps its full tool set, got {offered}",
+        );
+    }
+
+    /// The latest binding wins, so a session re-bound across restarts
+    /// reflects the most recent one.
+    #[test]
+    fn replay_takes_the_latest_binding() {
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_subagent_binding(
+            &log,
+            &session_id,
+            "researcher",
+            "tier2",
+            &["exec", "read_file"],
+        );
+        append_subagent_binding(&log, &session_id, "researcher", "tier2", &["read_file"]);
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        let offered: Vec<String> = agent
+            .build_turn_tool_defs(Vec::new())
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(offered, vec!["read_file".to_string()]);
+    }
+
+    /// A tier label this build does not know clamps to the most
+    /// restricting tier rather than leaving the agent unclamped.
+    #[test]
+    fn an_unknown_tier_label_clamps_closed() {
+        let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();
+        append_subagent_binding(&log, &session_id, "researcher", "tier9000", &["exec"]);
+        let log_dyn: Arc<dyn SessionLog> = log.clone();
+        super::replay_subagent_binding(&mut agent, &log_dyn, &session_id).unwrap();
+        // The tool clamp still applies, and the tier cap is Tier1, so
+        // a Tier 2 action is auto-denied rather than admitted.
+        assert_eq!(
+            agent.auto_deny_above_tier_for_test(),
+            Some(wirken_gateway::permissions::PermissionTier::Tier1),
+        );
     }
 
     #[test]

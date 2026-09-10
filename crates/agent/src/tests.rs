@@ -3062,6 +3062,64 @@ mod subagent {
         );
     }
 
+    /// The binding row lands before anything else the child writes.
+    ///
+    /// A recomputation walking the session forward has to have the
+    /// clamp in hand by the time it reaches the first `LlmRequest`,
+    /// or it sizes and hashes against the wrong tool set. Issue #246.
+    #[tokio::test]
+    async fn the_subagent_binding_row_precedes_everything_else_on_the_chain() {
+        let tmp = TempDir::new().unwrap();
+        let log = make_log();
+        let session_id = "parent/webchat/c1#sub-0";
+        let mut child = Agent::new(
+            session_id.into(),
+            tmp.path().to_path_buf(),
+            LlmConfig::ollama("test"),
+            None,
+            None,
+            log.clone(),
+        )
+        .unwrap();
+        child.set_agent_id("researcher");
+
+        child
+            .bind_as_subagent(
+                1,
+                wirken_gateway::permissions::PermissionTier::Tier2,
+                restrict_tools_with_exec(),
+                "parent/webchat/c1",
+            )
+            .await
+            .unwrap();
+
+        let handle = log.handle_for(SessionId::new(session_id));
+        let events = log.get_since(&handle, 0).unwrap();
+        assert_eq!(events.len(), 1, "the binding is the first row written");
+        match &events[0].event {
+            SessionEvent::SubagentSessionBound {
+                agent_id,
+                parent_session_id,
+                depth,
+                max_permission_tier,
+                tools_granted,
+                offered_tools,
+            } => {
+                assert_eq!(agent_id, "researcher", "the child's own id, not the prefix");
+                assert_eq!(parent_session_id, "parent/webchat/c1");
+                assert_eq!(*depth, 1);
+                assert_eq!(max_permission_tier, "tier2");
+                assert_eq!(tools_granted, &vec!["exec".to_string()]);
+                assert_eq!(
+                    offered_tools,
+                    &vec!["exec".to_string()],
+                    "what the model is actually offered after the clamp",
+                );
+            }
+            other => panic!("expected SubagentSessionBound, got {other:?}"),
+        }
+    }
+
     /// Issue #242 closing condition, at the runtime.
     ///
     /// A parent holds a Tier 2 shell allowlist grant. A child is

@@ -1510,6 +1510,54 @@ impl Agent {
         self.restrict_tools = Some(restrict_tools);
     }
 
+    /// Bind this agent as a sub-agent and record the binding on its
+    /// own chain, before anything else it writes.
+    ///
+    /// The session id of a child names its parent and nothing about
+    /// the child, so the agent it was woken as and the tool set its
+    /// ceiling narrowed it to lived only in memory. A reader with the
+    /// child's session and nothing else could not reconstruct either,
+    /// which is what made a child session unverifiable on its own.
+    /// Issue #246.
+    ///
+    /// The row goes down before the first `LlmRequest`, so a
+    /// recomputation walking the session forward has the binding in
+    /// hand by the time it reaches anything that depends on it.
+    pub(crate) async fn bind_as_subagent(
+        &mut self,
+        depth: usize,
+        max_tier: PermissionTier,
+        restrict_tools: BTreeSet<String>,
+        parent_session_id: &str,
+    ) -> Result<(), AgentError> {
+        self.set_subagent_runtime(depth, max_tier, restrict_tools.clone());
+
+        // The offered set, after the clamp and the per-skill profile
+        // filter, as the model will actually see it.
+        let mcp_defs = match &self.mcp {
+            Some(mcp) => mcp.lock().await.definitions(),
+            None => Vec::new(),
+        };
+        let offered_tools: Vec<String> = self
+            .build_turn_tool_defs(mcp_defs)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+
+        self.log_event(
+            TrustLevel::System,
+            SessionEvent::SubagentSessionBound {
+                agent_id: self.audited_agent_id(),
+                parent_session_id: parent_session_id.to_string(),
+                depth,
+                max_permission_tier: max_tier.label().to_string(),
+                tools_granted: restrict_tools.into_iter().collect(),
+                offered_tools,
+            },
+        )?;
+        Ok(())
+    }
+
     /// Test-only access to the depth counter for assertions.
     #[cfg(test)]
     pub(crate) fn subagent_depth_for_test(&self) -> usize {
@@ -1826,6 +1874,12 @@ impl Agent {
     #[cfg(test)]
     pub(crate) fn session_log_for_test(&self) -> &Arc<dyn SessionLog> {
         &self.session_log
+    }
+
+    /// The sub-agent tier cap, for tests asserting the clamp.
+    #[cfg(test)]
+    pub(crate) fn auto_deny_above_tier_for_test(&self) -> Option<PermissionTier> {
+        self.auto_deny_above_tier
     }
 
     /// Drive the no-gate denial emitter directly. Test-only.
@@ -4250,7 +4304,11 @@ impl Agent {
         // distinct from this parent's lock (different session id),
         // so no deadlock.
         let mut child = child_arc.lock().await;
-        child.set_subagent_runtime(depth, max_tier, intersected);
+        // Binds the clamp and records it on the child's own chain, so
+        // the child session can be read without the parent's.
+        child
+            .bind_as_subagent(depth, max_tier, intersected, &parent_session_id)
+            .await?;
 
         // Run the child under a wall-clock timeout AND a round
         // budget. Either limit produces a structured envelope
@@ -4599,7 +4657,8 @@ impl Agent {
                 }
                 // Structural events (Compaction, PermissionDenied,
                 // PermissionRenewed, PermissionGrantExpired,
-                // Attestation, Subagent*, AuditLegacy) are not part
+                // Attestation, Subagent* including SubagentSessionBound,
+                // AuditLegacy) are not part
                 // of the LLM-visible projection but they pass the
                 // chain check and require no further verification
                 // work.

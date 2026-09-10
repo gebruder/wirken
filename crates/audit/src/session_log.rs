@@ -891,6 +891,43 @@ pub enum SessionEvent {
         /// because it is what the operator would have seen listed.
         expires_at: DateTime<Utc>,
     },
+    /// A sub-agent session was bound to its runtime constraints,
+    /// written on the child's own chain at wake, before its first
+    /// `LlmRequest`.
+    ///
+    /// The child's session id is `{parent_session}#sub-N` and carries
+    /// nothing else about what made the child different: the agent it
+    /// was woken as, and the tool set its parent's ceiling narrowed it
+    /// to, were runtime values held only in memory. Anything rebuilding
+    /// the child from its session alone therefore rebuilt the wrong
+    /// agent with the wrong tools, which is why `wirken sessions
+    /// verify` reported a `tools_hash` divergence on every sub-agent
+    /// session. Issue #246.
+    ///
+    /// This row makes a child session self-contained. `parent_session_id`
+    /// is recorded for correlation, not for lookup: nothing reads the
+    /// parent's chain to interpret this row, and the parent's
+    /// [`Self::SubagentSpawned`] row is unchanged and independent.
+    /// Comparing the two is a separate question from being able to
+    /// read either.
+    SubagentSessionBound {
+        /// The logical agent this session was woken as. Not derivable
+        /// from the session id, whose prefix names the parent.
+        agent_id: String,
+        /// The parent session that spawned this one. Correlation only.
+        parent_session_id: String,
+        /// Nesting depth, 1 for a direct child.
+        depth: usize,
+        /// The ceiling's permission-tier cap, as a tier label.
+        max_permission_tier: String,
+        /// Tool names the parent's ceiling narrowed the child to: the
+        /// `restrict_tools` clamp.
+        tools_granted: Vec<String>,
+        /// Names of the tools actually offered to the model after the
+        /// clamp and the per-skill profile filter. A subset of
+        /// `tools_granted` whenever the profile removes more.
+        offered_tools: Vec<String>,
+    },
     /// Session-scoped approvals were cleared for `session_id`.
     /// Emitted once per session end (clean shutdown or crash
     /// recovery) so a replay path sees the boundary and does not
