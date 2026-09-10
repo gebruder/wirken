@@ -66,15 +66,26 @@ tagged.
   parent's chain is never read, and its `SubagentSpawned` row is
   unchanged. Issue #246.
 
-- A sub-agent re-woken after a crash comes back clamped. The factory
-  replays the binding row at wake, so the constraint is restored from
-  the chain rather than lost with the process. A child recovered on a
-  live daemon previously came back with its parent's full tool set and
-  no tier cap.
+- A sub-agent woken from its own session comes back clamped. The
+  factory replays the binding row at wake, so the constraint is
+  restored from the chain rather than lost with the process, where
+  before the agent came back with its parent's full tool set and no
+  tier cap.
+
+  Scope, because the shape of this is easy to overstate: no daemon path
+  re-addresses an existing `#sub-N` session today. A spawn allocates its
+  slot from the count of `SubagentSpawned` rows on the parent, so a
+  re-spawn takes the next slot rather than reopening an earlier one, and
+  no channel routes to a child session id. The clamp is therefore
+  reached through `AgentFactory::wake` only. That is the path `wirken
+  sessions verify` uses, and the path any future caller that wakes a
+  recorded child session would use; it is not a code path a running
+  daemon reaches on its own.
 
 - A session whose id has the sub-agent shape but carries no binding row
-  is handled by what is being done with it. A live rewake clamps to
-  `tier1` with an empty tool set and logs at `error`: the child cannot
+  is handled by what is being done with it. A live-purpose wake, reached
+  as described above, clamps to `tier1` with an empty tool set and logs
+  at `error`: the child cannot
   be resumed under its original ceiling, because that ceiling is not
   recorded on it, so it is not resumed under a guessed one either and
   the operator respawns it from the parent. `wirken sessions verify`
