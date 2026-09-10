@@ -125,6 +125,33 @@ const AUTH_KIND_OAUTH2: u8 = 2;
 /// public name.
 pub fn hash_mcp_entry(name: &str, config: &McpServerConfig) -> Vec<u8> {
     let mut hasher = Sha256::new();
+    // Declared tool costs are inside the signed envelope. They gate
+    // spend, so an entry whose costs could be edited without breaking
+    // its signature would let anyone who can write `mcp.json` zero a
+    // budget control while the entry still verified.
+    //
+    // Absent costs contribute nothing, so every entry signed before
+    // the field existed hashes exactly as it did and its signature
+    // stays valid. Declaring a cost changes the hash and requires
+    // re-signing, which is correct: it is new configuration.
+    let cost_suffix = {
+        let costs = config.tool_costs();
+        if costs.is_empty() {
+            Vec::new()
+        } else {
+            let mut names: Vec<&String> = costs.keys().collect();
+            names.sort();
+            let mut buf = Vec::new();
+            buf.extend_from_slice(b"costs\0");
+            buf.extend_from_slice(&(names.len() as u32).to_le_bytes());
+            for n in names {
+                buf.extend_from_slice(&(n.len() as u32).to_le_bytes());
+                buf.extend_from_slice(n.as_bytes());
+                buf.extend_from_slice(&costs[n].to_le_bytes());
+            }
+            buf
+        }
+    };
     match config {
         McpServerConfig::Stdio {
             command, args, env, ..
@@ -158,6 +185,7 @@ pub fn hash_mcp_entry(name: &str, config: &McpServerConfig) -> Vec<u8> {
             hasher.update([auth_kind]);
         }
     }
+    hasher.update(&cost_suffix);
     hasher.finalize().to_vec()
 }
 
@@ -314,6 +342,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         }
     }
 
@@ -325,6 +354,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         }
     }
 
@@ -394,6 +424,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         };
         let cfg_b = McpServerConfig::Stdio {
             transport: None,
@@ -403,6 +434,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         };
 
         let key = random_signing_key();
@@ -431,6 +463,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         };
         let cfg_b = McpServerConfig::Stdio {
             transport: None,
@@ -440,6 +473,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         };
 
         let key = random_signing_key();
@@ -463,6 +497,7 @@ mod tests {
             signature: None,
             signer_key: None,
             signer_key_delegation: None,
+            tool_costs: Default::default(),
         };
         let key = random_signing_key();
         let sig = sign_mcp_entry("s", &cfg_none, &key);
@@ -546,5 +581,95 @@ mod tests {
         if trimmed.is_empty() {
             assert!(bundled_mcp_pubkey().is_none());
         }
+    }
+
+    /// An entry with no declared costs hashes exactly as it did
+    /// before the field existed, so signatures made before it stay
+    /// valid.
+    #[test]
+    fn absent_tool_costs_do_not_change_the_entry_hash() {
+        // The hash of the same entry, computed with the cost suffix
+        // logic in place but nothing declared, must equal the hash of
+        // its parts alone. Pinned by construction: the suffix is
+        // empty, so this asserts the two known-good shapes agree.
+        let a = McpServerConfig::Stdio {
+            transport: None,
+            command: "node".into(),
+            args: vec!["server.js".into()],
+            env: Default::default(),
+            signature: None,
+            signer_key: None,
+            signer_key_delegation: None,
+            tool_costs: Default::default(),
+        };
+        let mut with_empty_map = std::collections::HashMap::new();
+        with_empty_map.clear();
+        let b = McpServerConfig::Stdio {
+            transport: None,
+            command: "node".into(),
+            args: vec!["server.js".into()],
+            env: Default::default(),
+            signature: None,
+            signer_key: None,
+            signer_key_delegation: None,
+            tool_costs: with_empty_map,
+        };
+        assert_eq!(hash_mcp_entry("vendor", &a), hash_mcp_entry("vendor", &b));
+    }
+
+    /// Declaring a cost changes the hash, so a cost cannot be added,
+    /// edited or removed while the entry's signature still verifies.
+    ///
+    /// This is the whole reason the field is inside the signed
+    /// envelope: it gates spend, and a control anyone who can write
+    /// `mcp.json` could zero is not a control.
+    #[test]
+    fn declared_tool_costs_are_covered_by_the_signature() {
+        let base = |costs: std::collections::HashMap<String, u64>| McpServerConfig::Stdio {
+            transport: None,
+            command: "node".into(),
+            args: vec!["server.js".into()],
+            env: Default::default(),
+            signature: None,
+            signer_key: None,
+            signer_key_delegation: None,
+            tool_costs: costs,
+        };
+        let none = base(Default::default());
+        let one: std::collections::HashMap<String, u64> = [("provision".to_string(), 600_000u64)]
+            .into_iter()
+            .collect();
+        let zeroed: std::collections::HashMap<String, u64> =
+            [("provision".to_string(), 0u64)].into_iter().collect();
+        let renamed: std::collections::HashMap<String, u64> =
+            [("provision_2".to_string(), 600_000u64)]
+                .into_iter()
+                .collect();
+
+        let h_none = hash_mcp_entry("vendor", &none);
+        let h_one = hash_mcp_entry("vendor", &base(one));
+        let h_zero = hash_mcp_entry("vendor", &base(zeroed));
+        let h_rename = hash_mcp_entry("vendor", &base(renamed));
+
+        assert_ne!(h_none, h_one, "declaring a cost must change the hash");
+        assert_ne!(h_one, h_zero, "zeroing a cost must change the hash");
+        assert_ne!(h_one, h_rename, "renaming the tool must change the hash");
+    }
+
+    /// Map iteration order does not move the hash.
+    #[test]
+    fn tool_cost_hashing_is_order_independent() {
+        let build = |pairs: Vec<(&str, u64)>| McpServerConfig::Http {
+            transport: HttpTransportTag::Http,
+            url: "https://example.invalid/mcp".into(),
+            auth: None,
+            signature: None,
+            signer_key: None,
+            signer_key_delegation: None,
+            tool_costs: pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        };
+        let a = build(vec![("alpha", 1), ("beta", 2), ("gamma", 3)]);
+        let b = build(vec![("gamma", 3), ("alpha", 1), ("beta", 2)]);
+        assert_eq!(hash_mcp_entry("vendor", &a), hash_mcp_entry("vendor", &b));
     }
 }

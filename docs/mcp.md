@@ -144,3 +144,37 @@ This is not a sandbox. There is no `cap_drop`, seccomp filter, namespace, gVisor
   - `OAuth2Auth`: authorization code flow with PKCE via the `oauth2` crate. Token refresh is automatic. Bootstrap an OAuth credential with `wirken mcp authorize <server>`; see [`credentials.md`](credentials.md) for the interactive scope picker and the inspection / rescoping commands.
 
 The MCP proxy runs as a separate process (`wirken-mcp-proxy`), communicating with the agent over a Unix domain socket. MCP credentials (bearer tokens, OAuth2 client secrets) are held in the proxy process and never exposed to the agent.
+
+## Declaring what a tool costs
+
+An MCP tool can carry a per-call cost, in USD micros, on its server entry:
+
+```json
+{
+  "servers": {
+    "vendor": {
+      "transport": "stdio",
+      "command": "vendor-mcp",
+      "tool_costs": { "provision": 600000 }
+    }
+  }
+}
+```
+
+A tool named here is gated by the agent's budget rather than by the permission tier model. Before the call, the window's spend is checked against the agent's ceiling; after a call that succeeded, the declared cost is debited. Both go through the same ledger and the same `BudgetExceeded` row that inference spend uses, so one budget covers both. A refused or failed call debits nothing.
+
+A tool absent from `tool_costs` is not budget gated and debits nothing, which is every tool on every server until an operator declares otherwise. Spend is not a permission tier, so nothing about a declared cost changes what tier a tool sits at: MCP tools stay Tier 3 and still prompt.
+
+The figure is what the operator declares, not what the vendor charges. Nothing reconciles the two. This is a budget set against calls known to be expensive, not metering.
+
+`tool_costs` is inside the signed entry envelope. Declaring, editing or removing a cost changes the entry hash and requires re-signing, so a cost cannot be zeroed while the entry still verifies. Entries signed before the field existed hash unchanged and keep working.
+
+When the gate turns a call away, the `BudgetExceeded` row names the tool:
+
+```json
+{ "kind": "budget_exceeded", "agent_id": "default",
+  "window_spend_usd_micros": 600000, "ceiling_usd_micros": 500000,
+  "window": "day", "action": "blocked", "tool": "mcp_vendor_provision" }
+```
+
+An inference block carries no `tool`, which is how the two are told apart.

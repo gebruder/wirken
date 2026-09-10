@@ -200,4 +200,13 @@ pub struct ToolDefWire {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// Operator-declared cost of one call, in USD micros, from the
+    /// server entry's `tool_costs`. `None` for a tool with no
+    /// declared cost, which is the default and behaves as it always
+    /// has: the call is not budget-gated and debits nothing.
+    ///
+    /// Defaulted on deserialize, so a proxy or agent from either side
+    /// of this change talks to the other without a protocol break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd_micros: Option<u64>,
 }

@@ -9053,6 +9053,78 @@ mod budget_enforcement {
             .collect()
     }
 
+    /// A budget block on a tool call names the tool on the row.
+    ///
+    /// Spend is a budget concern, not a permission tier, so an
+    /// expensive MCP tool is turned away by the ledger rather than
+    /// classified into the tier model. The row has to say what
+    /// reached the ceiling, or an operator reading a `BudgetExceeded`
+    /// cannot tell an inference block from a tool block. Issue #244.
+    #[tokio::test]
+    async fn a_budget_block_on_a_tool_call_names_the_tool() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_spend("priced", day_window_start(), 600_000)
+            .unwrap();
+        let (agent, log) = agent_with_budget("priced", budget(BudgetMode::Block, 500_000), store);
+
+        let blocked = agent
+            .test_check_budget_for_tool(Some("mcp_vendor_provision"))
+            .unwrap();
+        assert!(
+            blocked.is_some(),
+            "over the ceiling, so the call is refused"
+        );
+
+        let rows: Vec<_> = events(&log, "priced")
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::BudgetExceeded {
+                    action,
+                    tool,
+                    window_spend_usd_micros,
+                    ceiling_usd_micros,
+                    ..
+                } => Some((action, tool, window_spend_usd_micros, ceiling_usd_micros)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 1, "one row for one blocked call");
+        assert_eq!(rows[0].0, wirken_audit::BudgetAction::Blocked);
+        assert_eq!(
+            rows[0].1.as_deref(),
+            Some("mcp_vendor_provision"),
+            "the row names what reached the ceiling",
+        );
+        assert_eq!(rows[0].2, 600_000);
+        assert_eq!(rows[0].3, 500_000);
+    }
+
+    /// An inference block carries no tool, which is what distinguishes
+    /// the two on the same row shape.
+    #[tokio::test]
+    async fn a_budget_block_on_inference_carries_no_tool() {
+        let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
+        store
+            .lock()
+            .unwrap()
+            .add_spend("infer", day_window_start(), 600_000)
+            .unwrap();
+        let (agent, log) = agent_with_budget("infer", budget(BudgetMode::Block, 500_000), store);
+
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_some());
+        let tools: Vec<Option<String>> = events(&log, "infer")
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::BudgetExceeded { tool, .. } => Some(tool),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools, vec![None]);
+    }
+
     // Synthetic non-compliant agent: an over-budget agent must be
     // blocked, the block must land in the audit chain, and no orphaned
     // LlmRequest may precede it.
@@ -9114,7 +9186,7 @@ mod budget_enforcement {
         let (agent, log) = agent_with_budget("bud", budget(BudgetMode::Alert, 100), store);
 
         assert!(
-            agent.test_check_budget().unwrap().is_none(),
+            agent.test_check_budget_for_tool(None).unwrap().is_none(),
             "alert mode must never block"
         );
 
@@ -9124,6 +9196,7 @@ mod budget_enforcement {
                 e,
                 SessionEvent::BudgetExceeded {
                     action: BudgetAction::Alerted,
+                    tool: None,
                     ..
                 }
             )),
@@ -9134,6 +9207,7 @@ mod budget_enforcement {
                 e,
                 SessionEvent::BudgetExceeded {
                     action: BudgetAction::Blocked,
+                    tool: None,
                     ..
                 }
             )),
@@ -9141,7 +9215,7 @@ mod budget_enforcement {
         );
 
         // A second gate check in the same window does not re-alert.
-        assert!(agent.test_check_budget().unwrap().is_none());
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
         let alerts = events(&log, "bud")
             .iter()
             .filter(|e| {
@@ -9149,6 +9223,7 @@ mod budget_enforcement {
                     e,
                     SessionEvent::BudgetExceeded {
                         action: BudgetAction::Alerted,
+                        tool: None,
                         ..
                     }
                 )
@@ -9166,7 +9241,7 @@ mod budget_enforcement {
             .add_spend("bud", day_window_start(), 50)
             .unwrap();
         let (agent, log) = agent_with_budget("bud", budget(BudgetMode::Block, 100), store);
-        assert!(agent.test_check_budget().unwrap().is_none());
+        assert!(agent.test_check_budget_for_tool(None).unwrap().is_none());
         assert!(
             events(&log, "bud").is_empty(),
             "no event while under the ceiling"
@@ -9212,7 +9287,7 @@ mod budget_enforcement {
         .join();
 
         assert!(
-            agent.test_check_budget().unwrap().is_some(),
+            agent.test_check_budget_for_tool(None).unwrap().is_some(),
             "block mode fails closed when the ledger is unreadable"
         );
         assert!(
@@ -9220,6 +9295,7 @@ mod budget_enforcement {
                 e,
                 SessionEvent::BudgetExceeded {
                     action: BudgetAction::Blocked,
+                    tool: None,
                     ..
                 }
             )),
@@ -9275,6 +9351,7 @@ mod budget_enforcement {
             e,
             SessionEvent::BudgetExceeded {
                 action: BudgetAction::Blocked,
+                tool: None,
                 ..
             }
         )));

@@ -62,6 +62,10 @@ pub type SharedVault = Arc<Mutex<Option<CredentialStore>>>;
 pub struct ProxyRegistry {
     /// agent_id → server_name → client
     by_agent: HashMap<String, HashMap<String, McpClient>>,
+    /// Declared tool costs per agent, per server, keyed by bare tool
+    /// name. Read from the signed `mcp.json` entry at load time and
+    /// stamped onto each definition handed to an agent.
+    costs_by_agent: HashMap<String, HashMap<String, HashMap<String, u64>>>,
     /// agent_id → Ed25519 public key used to authenticate incoming
     /// proxy connections claiming this agent_id. Populated at proxy
     /// startup from each agent's `identity.pub` file.
@@ -79,6 +83,7 @@ impl ProxyRegistry {
     pub fn new() -> Self {
         Self {
             by_agent: HashMap::new(),
+            costs_by_agent: HashMap::new(),
             identities: HashMap::new(),
             oauth_refresh_locks: HashMap::new(),
         }
@@ -242,6 +247,19 @@ impl ProxyRegistry {
 
         let count = clients.len();
         if !clients.is_empty() {
+            let costs: HashMap<String, HashMap<String, u64>> = clients
+                .keys()
+                .filter_map(|server| {
+                    config
+                        .servers
+                        .get(server)
+                        .map(|c| (server.clone(), c.tool_costs().clone()))
+                })
+                .filter(|(_, m)| !m.is_empty())
+                .collect();
+            if !costs.is_empty() {
+                self.costs_by_agent.insert(agent_id.to_string(), costs);
+            }
             self.by_agent.insert(agent_id.to_string(), clients);
         }
         Ok(count)
@@ -253,14 +271,28 @@ impl ProxyRegistry {
     }
 
     /// Tool definitions for one agent. Empty if the agent has no servers.
+    /// Each definition carries its operator-declared cost, looked up
+    /// by bare tool name against the server entry's `tool_costs`. A
+    /// tool with no declared cost carries `None` and is not budget
+    /// gated.
     pub fn definitions(&self, agent_id: &str) -> Vec<ToolDefWire> {
-        match self.by_agent.get(agent_id) {
-            Some(servers) => servers
-                .values()
-                .flat_map(|c| c.tools().iter().cloned())
-                .collect(),
-            None => Vec::new(),
-        }
+        let Some(servers) = self.by_agent.get(agent_id) else {
+            return Vec::new();
+        };
+        let costs = self.costs_by_agent.get(agent_id);
+        servers
+            .iter()
+            .flat_map(|(server_name, client)| {
+                let prefix = format!("mcp_{server_name}_");
+                let server_costs = costs.and_then(|c| c.get(server_name));
+                client.tools().iter().map(move |t| {
+                    let bare = t.name.strip_prefix(&prefix).unwrap_or(&t.name);
+                    let mut def = t.clone();
+                    def.cost_usd_micros = server_costs.and_then(|m| m.get(bare)).copied();
+                    def
+                })
+            })
+            .collect()
     }
 
     /// Execute a tool call from one agent. Routes to the correct MCP

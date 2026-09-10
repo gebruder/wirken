@@ -687,6 +687,15 @@ pub enum SessionEvent {
         ceiling_usd_micros: u64,
         window: String,
         action: BudgetAction,
+        /// The MCP tool whose call the budget gate turned away, when
+        /// the gate fired on a tool call rather than on inference.
+        ///
+        /// `None` for an inference block, which is where this gate
+        /// started and remains the common case. Spend is not a
+        /// permission tier and this row is not a denial: it says the
+        /// window's ceiling was reached, and names what reached it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
     },
     /// Permission denial recorded by the harness. `action_key` is
     /// the canonical key under which an operator can grant approval

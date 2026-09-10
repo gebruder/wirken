@@ -119,6 +119,10 @@ impl McpClient {
                 name: prefixed_name,
                 description: format!("[{}] {}", self.name, description),
                 parameters,
+                // The server does not declare its own price. The
+                // registry stamps the operator's declared cost on
+                // the way out; see `McpToolRegistry::definitions`.
+                cost_usd_micros: None,
             });
         }
 

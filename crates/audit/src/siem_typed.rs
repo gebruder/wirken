@@ -652,6 +652,7 @@ mod tests {
             ceiling_usd_micros: 10_000,
             window: "day".into(),
             action: crate::session_log::BudgetAction::Blocked,
+            tool: None,
         };
         assert!(should_forward(&ev, &cfg));
         assert_eq!(variant_kind_for(&ev), "budget_exceeded");
@@ -666,6 +667,7 @@ mod tests {
             ceiling_usd_micros: 4,
             window: "hour".into(),
             action: crate::session_log::BudgetAction::Alerted,
+            tool: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"kind\":\"budget_exceeded\""));

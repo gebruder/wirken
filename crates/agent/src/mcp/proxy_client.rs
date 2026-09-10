@@ -46,6 +46,10 @@ pub struct McpProxyClient {
     writer: WriteHalf<BoxStream>,
     next_id: u64,
     cached_tools: Vec<ToolDef>,
+    /// Operator-declared per-call cost in USD micros, keyed by the
+    /// prefixed tool name, for the tools that declare one. A tool
+    /// absent here has no declared cost and is not budget gated.
+    tool_costs: std::collections::HashMap<String, u64>,
     has_servers: bool,
 }
 
@@ -130,6 +134,7 @@ impl McpProxyClient {
             writer,
             next_id: 1,
             cached_tools: Vec::new(),
+            tool_costs: std::collections::HashMap::new(),
             has_servers: ack.has_servers,
         })
     }
@@ -150,6 +155,10 @@ impl McpProxyClient {
         let resp = self.rpc(req).await?;
         match resp {
             Response::ListToolsResult { tools, .. } => {
+                self.tool_costs = tools
+                    .iter()
+                    .filter_map(|t| t.cost_usd_micros.map(|c| (t.name.clone(), c)))
+                    .collect();
                 self.cached_tools = tools.into_iter().map(wire_to_tool_def).collect();
                 Ok(self.cached_tools.len())
             }
@@ -163,6 +172,18 @@ impl McpProxyClient {
     /// Tool definitions cached from the most recent [`Self::load_tools`] call.
     pub fn definitions(&self) -> Vec<ToolDef> {
         self.cached_tools.clone()
+    }
+
+    /// The operator-declared cost of one call to `name`, in USD
+    /// micros, or `None` when the tool declares none.
+    ///
+    /// A declared cost makes the call budget-gated: it is checked
+    /// against the agent's ceiling before dispatch and debited after,
+    /// through the same ledger an inference call uses. Absent means
+    /// the call is not gated and debits nothing, which is every MCP
+    /// tool until an operator declares otherwise.
+    pub fn declared_cost(&self, name: &str) -> Option<u64> {
+        self.tool_costs.get(name).copied()
     }
 
     /// Execute a tool by its prefixed name (`mcp_{server}_{tool}`).

@@ -1206,6 +1206,7 @@ impl Agent {
     /// without violating its non-blocking contract).
     fn budget_unavailable(
         &self,
+        tool: Option<&str>,
         budget: AgentBudget,
         window: BudgetWindow,
         reason: &str,
@@ -1221,6 +1222,7 @@ impl Agent {
                     budget.ceiling_usd_micros,
                     window.label(),
                     BudgetAction::Blocked,
+                    tool,
                 )?;
                 Ok(Some(BUDGET_BLOCK_MESSAGE.to_string()))
             }
@@ -1242,7 +1244,7 @@ impl Agent {
     /// (block mode at/over ceiling, or a ledger error under block mode
     /// = fail closed); `None` to proceed. Emits `BudgetExceeded` as a
     /// side effect: on every block, and once per window in alert mode.
-    fn check_budget(&self) -> Result<Option<String>, AgentError> {
+    fn check_budget(&self, tool: Option<&str>) -> Result<Option<String>, AgentError> {
         let Some(budget) = self.budget else {
             return Ok(None);
         };
@@ -1257,13 +1259,14 @@ impl Agent {
 
         let guard = match store.lock() {
             Ok(g) => g,
-            Err(_) => return self.budget_unavailable(budget, window, "store lock poisoned"),
+            Err(_) => return self.budget_unavailable(tool, budget, window, "store lock poisoned"),
         };
         let spend = match guard.window_spend(self.budget_key(), window_start) {
             Ok(s) => s,
             Err(e) => {
                 drop(guard);
                 return self.budget_unavailable(
+                    tool,
                     budget,
                     window,
                     &format!("ledger read failed: {e}"),
@@ -1284,6 +1287,7 @@ impl Agent {
                     budget.ceiling_usd_micros,
                     window.label(),
                     BudgetAction::Blocked,
+                    tool,
                 )?;
                 Ok(Some(BUDGET_BLOCK_MESSAGE.to_string()))
             }
@@ -1300,6 +1304,7 @@ impl Agent {
                         budget.ceiling_usd_micros,
                         window.label(),
                         BudgetAction::Alerted,
+                        tool,
                     )?;
                 }
                 Ok(None)
@@ -1316,6 +1321,7 @@ impl Agent {
         ceiling_usd_micros: u64,
         window: &str,
         action: BudgetAction,
+        tool: Option<&str>,
     ) -> Result<(), AgentError> {
         self.log_event(
             TrustLevel::System,
@@ -1326,6 +1332,7 @@ impl Agent {
                 ceiling_usd_micros,
                 window: window.to_string(),
                 action,
+                tool: tool.map(str::to_string),
             },
         )
     }
@@ -1931,8 +1938,11 @@ impl Agent {
 
     /// Drive the pre-call budget gate directly. Test-only.
     #[cfg(test)]
-    pub(crate) fn test_check_budget(&self) -> Result<Option<String>, AgentError> {
-        self.check_budget()
+    pub(crate) fn test_check_budget_for_tool(
+        &self,
+        tool: Option<&str>,
+    ) -> Result<Option<String>, AgentError> {
+        self.check_budget(tool)
     }
 
     /// Drive the post-response budget charge directly. Test-only.
@@ -2244,7 +2254,7 @@ impl Agent {
             // Pre-call budget gate: runs before the LlmRequest emit so
             // a block writes only BudgetExceeded, never an orphaned
             // LlmRequest.
-            if let Some(block_msg) = self.check_budget()? {
+            if let Some(block_msg) = self.check_budget(None)? {
                 return Ok(ProcessResult {
                     response: block_msg,
                     denials,
@@ -2566,7 +2576,7 @@ impl Agent {
             // a block writes only BudgetExceeded, never an orphaned
             // LlmRequest. Surface the block message on the stream too
             // so a streaming client sees it as the turn's final text.
-            if let Some(block_msg) = self.check_budget()? {
+            if let Some(block_msg) = self.check_budget(None)? {
                 let _ = tx
                     .send(StreamEvent::Done(LlmResponse::Text(block_msg.clone())))
                     .await;
@@ -3217,10 +3227,42 @@ impl Agent {
         // error message rather than `ToolNotFound`, so prefix routing is
         // the cheap unambiguous way to dispatch.
         if name.starts_with("mcp_") {
-            return match &self.mcp {
-                Some(mcp) => mcp.lock().await.execute(name, arguments).await,
-                None => Err(AgentError::ToolNotFound(name.to_string())),
+            let Some(mcp) = &self.mcp else {
+                return Err(AgentError::ToolNotFound(name.to_string()));
             };
+            let mcp = mcp.clone();
+
+            // Spend is a budget concern, not a permission tier, so an
+            // expensive MCP tool is gated by the ledger rather than
+            // classified into the tier model. A tool with no declared
+            // cost is not gated and debits nothing, which is every
+            // tool until an operator declares otherwise.
+            let declared_cost = mcp.lock().await.declared_cost(name);
+            if let Some(cost) = declared_cost
+                && let Some(block_msg) = self.check_budget(Some(name))?
+            {
+                tracing::warn!(
+                    tool = name,
+                    cost_usd_micros = cost,
+                    "budget ceiling reached; refusing the call"
+                );
+                return Ok(crate::tool::ToolResult {
+                    output: block_msg,
+                    success: false,
+                });
+            }
+
+            let result = mcp.lock().await.execute(name, arguments).await;
+
+            // Debit only a call that happened. A refused or failed
+            // call bought nothing, and charging for it would make the
+            // ledger a record of attempts rather than of spend.
+            if let Some(cost) = declared_cost
+                && matches!(&result, Ok(r) if r.success)
+            {
+                self.charge_budget(Some(cost));
+            }
+            return result;
         }
 
         // Wasm skills carry an explicit `wasm_` prefix.

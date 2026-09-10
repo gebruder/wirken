@@ -102,6 +102,24 @@ pub enum McpServerConfig {
         /// returns `Some`; ignored when the bundled root is empty.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signer_key_delegation: Option<String>,
+        /// Declared per-call cost of this server's tools, in USD
+        /// micros, keyed by the bare tool name as the server reports
+        /// it (no `mcp_{server}_` prefix).
+        ///
+        /// Spend is a budget concern, not a permission tier. A tool
+        /// named here debits the agent's budget ledger through the
+        /// same path an inference call does, and a call made with the
+        /// window already at its ceiling is refused with a
+        /// `BudgetExceeded` row. A tool absent from this map costs
+        /// nothing and behaves exactly as before, which is every tool
+        /// on every server until an operator says otherwise.
+        ///
+        /// The figure is what the operator declares, not what the
+        /// vendor charges. Nothing reconciles the two; this is a
+        /// budget an operator sets against calls they know to be
+        /// expensive, not metering.
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        tool_costs: HashMap<String, u64>,
     },
     /// Stdio transport: spawn a process and communicate over stdin/stdout.
     Stdio {
@@ -124,7 +142,20 @@ pub enum McpServerConfig {
         /// See [`Self::Http::signer_key_delegation`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signer_key_delegation: Option<String>,
+        /// See [`Self::Http::tool_costs`].
+        #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+        tool_costs: HashMap<String, u64>,
     },
+}
+
+impl McpServerConfig {
+    /// Declared per-call costs for this server's tools, in USD
+    /// micros, keyed by the bare tool name.
+    pub fn tool_costs(&self) -> &HashMap<String, u64> {
+        match self {
+            Self::Http { tool_costs, .. } | Self::Stdio { tool_costs, .. } => tool_costs,
+        }
+    }
 }
 
 /// Tag type for the HTTP transport variant. Forces the JSON value

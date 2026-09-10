@@ -12,6 +12,28 @@ tagged.
 
 ### Changed
 
+- An MCP tool can declare a per-call cost on its server entry
+  (`tool_costs`, USD micros, keyed by bare tool name), and a call to it
+  is gated by the agent's budget: checked against the window ceiling
+  before dispatch, debited after a call that succeeded, through the
+  same ledger and the same `BudgetExceeded` row inference spend uses. A
+  refused or failed call debits nothing. A tool with no declared cost
+  is not gated and debits nothing, which is every tool until an
+  operator says otherwise.
+
+  Spend is a budget concern, not a permission tier, so no class was
+  added to `tool_to_action` and no tier moved: MCP tools stay Tier 3
+  and still prompt. Issue #244.
+
+- `BudgetExceeded` carries the tool whose call the gate turned away.
+  Absent for an inference block, which is how the two are told apart on
+  one row shape.
+
+- `tool_costs` is inside the signed MCP entry envelope, so a cost
+  cannot be declared, edited or zeroed while the entry still verifies.
+  Entries signed before the field existed hash unchanged and keep
+  working.
+
 - A sub-agent is checked against its own agent id rather than its
   caller's. The permission gate took one id, the runtime passed its
   session id, and the store recovered an agent from it by taking the
