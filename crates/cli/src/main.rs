@@ -300,7 +300,15 @@ enum AuditCommands {
         anchors: Vec<String>,
     },
     /// Verify session attestation signatures across every session
-    VerifyAttestations,
+    VerifyAttestations {
+        /// Pin every session's verification to this agent's
+        /// configured identity, rather than resolving each session's
+        /// own agent. Answers "is this log signed by that agent's
+        /// key", which is the question when a log arrives from
+        /// elsewhere.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Acknowledge unacknowledged alarm records by archiving the
     /// current `audit-alarms.log` to a timestamped sibling file.
     /// Required after a prior session halted on
@@ -1142,7 +1150,9 @@ async fn main() -> Result<()> {
                 require_signed,
                 anchors,
             } => commands::audit::verify(&format, require_signed, &anchors).await,
-            AuditCommands::VerifyAttestations => commands::audit::verify_attestations().await,
+            AuditCommands::VerifyAttestations { agent } => {
+                commands::audit::verify_attestations(agent).await
+            }
             AuditCommands::Acknowledge { all } => commands::audit::acknowledge(all).await,
         },
         Commands::Sessions(cmd) => match cmd {

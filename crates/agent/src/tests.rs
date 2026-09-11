@@ -5001,6 +5001,67 @@ mod attestation_tests {
         );
     }
 
+    /// The multi-session path pins each session's key from the
+    /// caller, so a chain attested by one agent fails under another's
+    /// key and passes under its own. Issue #243.
+    #[test]
+    fn recent_attestations_are_pinned_to_the_resolved_key() {
+        use crate::attestation::{RecentAttestationResult, verify_recent_attestations};
+        let (log, h) = fresh_log_with_events(2);
+        let signer = AgentIdentity::generate("agent-a");
+        let other = AgentIdentity::generate("agent-b");
+        attest_session(&log, &h, &signer).unwrap();
+        let ids = vec![h.id().to_string()];
+
+        let under_own = |_: &str| Some(signer.verifying_key());
+        match verify_recent_attestations(&log, &ids, &under_own).unwrap() {
+            RecentAttestationResult::Ok {
+                attestations_verified,
+                sessions_unpinned,
+                ..
+            } => {
+                assert_eq!(attestations_verified, 1);
+                assert_eq!(sessions_unpinned, 0);
+            }
+            other => panic!("expected Ok under the signer's key, got {other:?}"),
+        }
+
+        let under_other = |_: &str| Some(other.verifying_key());
+        match verify_recent_attestations(&log, &ids, &under_other).unwrap() {
+            RecentAttestationResult::Broken { reason, .. } => {
+                assert!(reason.contains("pubkey mismatch"), "got {reason}");
+            }
+            other => panic!("expected Broken under another key, got {other:?}"),
+        }
+    }
+
+    /// No configured identity is reported as unpinned, not as
+    /// verified. The signatures are real; nothing can say whose.
+    #[test]
+    fn attestations_with_no_configured_identity_are_unpinned() {
+        use crate::attestation::{RecentAttestationResult, verify_recent_attestations};
+        let (log, h) = fresh_log_with_events(2);
+        let signer = AgentIdentity::generate("agent-a");
+        attest_session(&log, &h, &signer).unwrap();
+        let ids = vec![h.id().to_string()];
+
+        let none = |_: &str| None;
+        match verify_recent_attestations(&log, &ids, &none).unwrap() {
+            RecentAttestationResult::Ok {
+                sessions_checked,
+                attestations_verified,
+                sessions_unpinned,
+                attestations_unpinned,
+            } => {
+                assert_eq!(sessions_checked, 0, "nothing was pinned, so nothing checked");
+                assert_eq!(attestations_verified, 0);
+                assert_eq!(sessions_unpinned, 1);
+                assert_eq!(attestations_unpinned, 1);
+            }
+            other => panic!("expected Ok with unpinned counts, got {other:?}"),
+        }
+    }
+
     #[test]
     fn verify_with_wrong_key_fails() {
         let (log, h) = fresh_log_with_events(2);

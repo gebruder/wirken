@@ -110,30 +110,84 @@ pub async fn log(
     }
 }
 
-pub async fn verify_attestations() -> Result<()> {
+/// Resolve the agent a session belongs to.
+///
+/// A sub-agent session's id names its parent, so the prefix is wrong
+/// for one; its own `SubagentSessionBound` row names the agent it was
+/// woken as. Everything else takes the prefix before the first `/`.
+pub(crate) fn agent_for_session(log: &dyn wirken_audit::SessionLog, session_id: &str) -> String {
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    if let Ok(rows) = log.get_since(&handle, 0)
+        && let Some(agent) = rows.into_iter().rev().find_map(|r| match r.event {
+            wirken_audit::SessionEvent::SubagentSessionBound { agent_id, .. } => Some(agent_id),
+            _ => None,
+        })
+    {
+        return agent;
+    }
+    session_id
+        .split_once('/')
+        .map(|(a, _)| a.to_string())
+        .unwrap_or_else(|| session_id.to_string())
+}
+
+pub async fn verify_attestations(pin_agent: Option<String>) -> Result<()> {
     let cfg = config();
     let audit = AuditLog::open(&cfg.audit_db_path()).context("Failed to open audit log")?;
     let session_log = audit.session_log();
     let session_ids = audit.list_session_ids()?;
-    let result =
-        wirken_agent::attestation::verify_recent_attestations(session_log.as_ref(), &session_ids)
-            .map_err(|e| anyhow::anyhow!("attestation verification: {e}"))?;
+
+    // The verifying key comes from the agent's configured identity on
+    // disk, never from the attestation row. A row naming its own
+    // signer and checked against that same key establishes only that
+    // the row is self-consistent, which is true of any row an
+    // attacker writes.
+    let data_dir = cfg.data_dir.clone();
+    let log_for_resolve = session_log.clone();
+    let resolve = move |sid: &str| -> Option<wirken_agent::identity::VerifyingKey> {
+        let agent = match &pin_agent {
+            Some(a) => a.clone(),
+            None => agent_for_session(log_for_resolve.as_ref(), sid),
+        };
+        wirken_agent::identity::load_public_key(&data_dir, &agent)
+            .ok()
+            .flatten()
+    };
+
+    let result = wirken_agent::attestation::verify_recent_attestations(
+        session_log.as_ref(),
+        &session_ids,
+        &resolve,
+    )
+    .map_err(|e| anyhow::anyhow!("attestation verification: {e}"))?;
     use wirken_agent::attestation::RecentAttestationResult;
     match result {
         RecentAttestationResult::Ok {
             sessions_checked,
             attestations_verified,
+            sessions_unpinned,
+            attestations_unpinned,
         } => {
-            println!("  Attestation verification: OK");
+            if sessions_unpinned == 0 {
+                println!("  Attestation verification: OK");
+            } else {
+                println!("  Attestation verification: OK, WITH UNPINNED SESSIONS");
+            }
             println!(
                 "  {sessions_checked} sessions with attestations checked, \
-                 {attestations_verified} signatures verified."
+                 {attestations_verified} signatures verified against the agent's \
+                 configured identity."
             );
-            println!(
-                "  Note: this verifies internal consistency only. The signer key \
-                 carried on each attestation is the agent's own identity key; an \
-                 operator-pinned trust anchor is not yet wired up."
-            );
+            if sessions_unpinned > 0 {
+                println!(
+                    "  {sessions_unpinned} sessions ({attestations_unpinned} attestations) \
+                     UNPINNED: their agent has no identity on disk."
+                );
+                println!("        Those signatures are real and nothing here can say whose.");
+                println!("        Configure an identity for the agent, or treat its sessions");
+                println!("        as unattributed.");
+                std::process::exit(6);
+            }
         }
         RecentAttestationResult::ChainBroken {
             session_id,

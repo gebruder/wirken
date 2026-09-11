@@ -12,6 +12,24 @@ tagged.
 
 ### Changed
 
+- `wirken audit verify-attestations` and `wirken doctor` verify each
+  attestation against the configured identity of the agent whose
+  session it is, read from `agents/<id>/identity.pub`. The key was
+  taken from the attestation row itself, so the check established only
+  that a row was internally consistent, which is true of any row an
+  attacker writes. The row's `signer_pubkey` is still checked, now
+  against the configured key, and a mismatch is the failure. The
+  "operator-pinned trust anchor is not yet wired up" note is gone
+  because it is. Issue #243.
+
+- `verify-attestations` takes `--agent <AGENT>`, pinning every session
+  to one agent's identity rather than resolving each session's own.
+  The question a log arriving from elsewhere raises.
+
+- Sessions whose agent has no identity on disk are reported as unpinned
+  under their own count and exit `6`, distinct from a verification
+  failure at `1`. The signatures are real; nothing can say whose.
+
 - `wirken sessions verify --with-parent` pairs a sub-agent session's
   `SubagentSessionBound` row with the `SubagentSpawned` row on its
   parent's chain and reports where the two disagree, on the agent id,

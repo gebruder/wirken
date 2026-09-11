@@ -106,7 +106,14 @@ Query and verify the audit log.
 ```
 wirken audit log [OPTIONS]
 wirken audit verify
+wirken audit verify-attestations [--agent <AGENT>]
 ```
+
+`verify-attestations` checks every attestation signature in the log against the **configured identity** of the agent whose session it is, read from `{data_dir}/agents/<id>/identity.pub`. The key is never taken from the attestation row. A row naming its own signer and checked against that same key establishes only that the row is internally consistent, which is true of any row an attacker writes; pinning to a configured identity is what makes the signature say *who*. The row's `signer_pubkey` is still checked, against the configured key, and a mismatch is the failure.
+
+Each session's agent is resolved from its id, except a sub-agent session, whose id names its parent and whose own `SubagentSessionBound` row names the agent it was woken as. `--agent <AGENT>` pins every session to one agent's identity instead, which is the question to ask when a log arrives from elsewhere: is this signed by that agent's key.
+
+An agent with no identity on disk has attestation disabled, so its sessions carry signatures only if they were written when one existed. Those are reported as **unpinned** under their own count and exit `6`: the signatures are real and nothing here can say whose. That is distinct from a verification failure, which exits `1`.
 
 | Option | Description |
 |--------|-------------|

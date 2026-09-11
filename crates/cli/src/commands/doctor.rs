@@ -233,23 +233,41 @@ pub async fn run() -> Result<()> {
             Ok(log) => match log.list_session_ids() {
                 Ok(ids) => {
                     let session_log = log.session_log();
+                    // The verifying key comes from each agent's
+                    // configured identity on disk, never from the
+                    // attestation row.
+                    let data_dir = cfg.data_dir.clone();
+                    let resolve_log = session_log.clone();
+                    let resolve = move |sid: &str| {
+                        let agent = super::audit::agent_for_session(resolve_log.as_ref(), sid);
+                        wirken_agent::identity::load_public_key(&data_dir, &agent)
+                            .ok()
+                            .flatten()
+                    };
                     match wirken_agent::attestation::verify_recent_attestations(
                         session_log.as_ref(),
                         &ids,
+                        &resolve,
                     ) {
                         Ok(wirken_agent::attestation::RecentAttestationResult::Ok {
                             sessions_checked,
                             attestations_verified,
+                            sessions_unpinned,
+                            attestations_unpinned,
                         }) => {
-                            print_ok();
+                            if sessions_unpinned == 0 {
+                                print_ok();
+                            } else {
+                                print_fail(&format!(
+                                    "  {sessions_unpinned} sessions ({attestations_unpinned} \
+                                     attestations) have no configured identity to pin them to"
+                                ));
+                                issues += 1;
+                            }
                             println!(
                                 "    {sessions_checked} sessions, \
-                                 {attestations_verified} attestation signatures verified."
-                            );
-                            println!(
-                                "    Note: this verifies internal consistency only. The signer key \
-                                 carried on each attestation is the agent's own identity key; an \
-                                 operator-pinned trust anchor is not yet wired up."
+                                 {attestations_verified} attestation signatures verified \
+                                 against the agent's configured identity."
                             );
                         }
                         Ok(other) => {

@@ -299,20 +299,41 @@ fn map_audit_err(e: AuditError) -> AgentError {
 ///
 /// Returns the aggregate result. The first session whose attestations
 /// fail to verify produces a `Broken` result and the walk stops there.
+/// Verify every attestation across `session_ids` against the key the
+/// caller pins for each session.
+///
+/// `resolve_key` maps a session id to the configured identity of the
+/// agent that session belongs to. It is the caller's job because the
+/// key must come from configuration, not from the log: an attestation
+/// naming its own signer and being checked against that same key
+/// establishes only that the row is internally consistent, which is
+/// true of any row an attacker writes. Pinning the key to the agent
+/// an operator configured is what makes the signature say *who*.
+///
+/// `resolve_key` returning `None` means the agent has no identity on
+/// disk. Those sessions are counted as unpinned rather than verified:
+/// their attestations are real signatures, and nothing here can say
+/// whose. Callers surface that separately from a clean result.
 pub fn verify_recent_attestations(
     session_log: &dyn SessionLog,
     session_ids: &[String],
+    resolve_key: &dyn Fn(&str) -> Option<VerifyingKey>,
 ) -> Result<RecentAttestationResult, AgentError> {
     let mut sessions_checked: usize = 0;
     let mut attestations_verified: usize = 0;
+    let mut sessions_unpinned: usize = 0;
+    let mut attestations_unpinned: usize = 0;
     for sid in session_ids {
         let handle = session_log.handle_for(wirken_audit::SessionId::new(sid.clone()));
-        let pubkey = match find_session_pubkey(session_log, &handle)? {
-            Some(k) => k,
-            None => {
-                // No attestation in this session — nothing to verify.
-                continue;
-            }
+        let attested = count_attestations(session_log, &handle)?;
+        if attested == 0 {
+            // Nothing to verify in this session.
+            continue;
+        }
+        let Some(pubkey) = resolve_key(sid) else {
+            sessions_unpinned += 1;
+            attestations_unpinned += attested;
+            continue;
         };
         sessions_checked += 1;
         match verify_session_attestations(session_log, &handle, &pubkey)? {
@@ -346,7 +367,21 @@ pub fn verify_recent_attestations(
     Ok(RecentAttestationResult::Ok {
         sessions_checked,
         attestations_verified,
+        sessions_unpinned,
+        attestations_unpinned,
     })
+}
+
+/// How many `Attestation` rows a session carries.
+fn count_attestations(
+    log: &dyn SessionLog,
+    session: &SessionHandle<OwnSession>,
+) -> Result<usize, AgentError> {
+    let rows = log.get_since(session, 0).map_err(map_audit_err)?;
+    Ok(rows
+        .iter()
+        .filter(|r| matches!(r.event, SessionEvent::Attestation { .. }))
+        .count())
 }
 
 /// Aggregate result of [`verify_recent_attestations`].
@@ -355,6 +390,12 @@ pub enum RecentAttestationResult {
     Ok {
         sessions_checked: usize,
         attestations_verified: usize,
+        /// Sessions carrying attestations whose agent has no
+        /// configured identity, so nothing could pin them.
+        sessions_unpinned: usize,
+        /// Attestations inside those sessions. Real signatures that
+        /// this run cannot attribute to a configured agent.
+        attestations_unpinned: usize,
     },
     ChainBroken {
         session_id: String,
@@ -367,29 +408,4 @@ pub enum RecentAttestationResult {
         attestations_verified_before: usize,
         reason: String,
     },
-}
-
-fn find_session_pubkey(
-    log: &dyn SessionLog,
-    session: &SessionHandle<OwnSession>,
-) -> Result<Option<VerifyingKey>, AgentError> {
-    let rows = log.get_since(session, 0).map_err(map_audit_err)?;
-    for row in rows.iter().rev() {
-        if let SessionEvent::Attestation { signer_pubkey, .. } = &row.event {
-            let bytes = decode_hex(&signer_pubkey.0)
-                .map_err(|e| AgentError::Identity(format!("attestation pubkey hex: {e}")))?;
-            if bytes.len() != 32 {
-                return Err(AgentError::Identity(format!(
-                    "attestation pubkey length {} != 32",
-                    bytes.len()
-                )));
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            let key = VerifyingKey::from_bytes(&arr)
-                .map_err(|e| AgentError::Identity(format!("invalid attestation pubkey: {e}")))?;
-            return Ok(Some(key));
-        }
-    }
-    Ok(None)
 }

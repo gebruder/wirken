@@ -29,7 +29,8 @@
 
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+pub use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, Signer, SigningKey};
 
 use crate::error::AgentError;
 
@@ -146,6 +147,45 @@ impl AgentIdentity {
 /// Default directory for an agent's identity files inside a wirken
 /// data directory. Mirrors `GatewayConfig::agent_workspace` etc. so
 /// callers can compute the path without depending on `wirken-gateway`.
+/// Load an agent's public key, without creating anything.
+///
+/// The verification counterpart to [`AgentIdentity::load_or_create`].
+/// Verifying an attestation needs the public half only, and a verify
+/// path that could mint a key would be worse than useless: it would
+/// answer "is this log from the agent's key" by generating a key and
+/// finding it did not match, or worse, by writing one into a data dir
+/// an operator is inspecting.
+///
+/// `Ok(None)` means the agent has no identity on disk, which is a
+/// real state: attestation is disabled for such an agent, so its
+/// sessions carry no signatures to pin. Callers report that rather
+/// than treating it as verified.
+pub fn load_public_key(
+    data_dir: &Path,
+    agent_id: &str,
+) -> Result<Option<VerifyingKey>, AgentError> {
+    let path = identity_dir(data_dir, agent_id).join("identity.pub");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let hex = std::fs::read_to_string(&path)
+        .map_err(|e| AgentError::Identity(format!("read {}: {e}", path.display())))?;
+    let bytes = hex_decode(hex.trim())
+        .map_err(|e| AgentError::Identity(format!("{}: {e}", path.display())))?;
+    if bytes.len() != 32 {
+        return Err(AgentError::Identity(format!(
+            "{}: public key length {} != 32",
+            path.display(),
+            bytes.len()
+        )));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    VerifyingKey::from_bytes(&arr)
+        .map(Some)
+        .map_err(|e| AgentError::Identity(format!("{}: invalid public key: {e}", path.display())))
+}
+
 pub fn identity_dir(data_dir: &Path, agent_id: &str) -> PathBuf {
     data_dir.join("agents").join(agent_id)
 }
