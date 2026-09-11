@@ -79,10 +79,26 @@ Run top to bottom. Replace `0.7.4` with the target version.
        --jq '.[] | select(.state == "open") | {num: .number, sev: .security_advisory.severity, pkg: .dependency.package.name, ghsa: .security_advisory.ghsa_id}'
    gh api repos/gebruder/wirken/code-scanning/alerts \
        --jq '.[] | select(.state == "open") | {num: .number, sev: .rule.security_severity_level, rule: .rule.id, tool: .tool.name, path: .most_recent_instance.location.path}'
-   gh api repos/gebruder/wirken/secret-scanning/alerts \
-       --jq '.[] | select(.state == "open") | {num: .number, type: .secret_type_display_name}' 2>/dev/null || true
+   if secrets=$(gh api repos/gebruder/wirken/secret-scanning/alerts \
+           --jq '.[] | select(.state == "open") | {num: .number, type: .secret_type_display_name}' 2>&1); then
+       echo "${secrets:-no open secret-scanning alerts}"
+   else
+       echo "UNVERIFIED: secret scanning not enabled, or this account cannot read it."
+       echo "  Reading these alerts needs admin or security-manager on the repo;"
+       echo "  push/triage is not enough and the API answers 404 either way."
+       echo "  Check with: gh api repos/gebruder/wirken --jq .permissions"
+       echo "  Do not record this as clean."
+   fi
    gh pr list --label dependencies --state open
    ```
+
+   The secret-scanning branch is spelled out because the original line
+   ended in `|| true`, which turned every failure into a silent pass.
+   The API answers `404` both when the feature is off and when the
+   caller lacks the permission to read it, so a swallowed error was
+   indistinguishable from a clean surface — and on this repo it is the
+   permission case: the release account has push and triage, not admin.
+   An unverified surface is recorded as unverified.
 
    The `shellcheck` and SHA checks exist because a locally modified
    `install.sh` that has not been pushed will not be caught by the
