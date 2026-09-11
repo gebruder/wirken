@@ -1281,6 +1281,18 @@ pub enum SessionEvent {
         child_session_id: String,
         child_agent_id: String,
         tools_granted: Vec<String>,
+        /// The ceiling's permission-tier cap, as a tier label.
+        ///
+        /// The child records the same cap on its own
+        /// [`Self::SubagentSessionBound`] row. Recording it here too
+        /// is what lets the two be compared: a tier on one side only
+        /// is a claim nothing can check.
+        ///
+        /// `None` on rows written before this field existed. The
+        /// cross-check reports the tier as not comparable for those
+        /// rather than treating absence as agreement.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_permission_tier: Option<String>,
     },
     /// Sub-agent result. The parent harness writes this to its own
     /// session AFTER the child completes.
@@ -3452,6 +3464,11 @@ pub struct SubagentCrossCheck {
     pub status: CrossCheckStatus,
     /// Fields the two rows disagree on. Empty on agreement.
     pub disagreements: Vec<CrossCheckDisagreement>,
+    /// Whether the parent's row recorded a permission-tier cap at
+    /// all. `false` for a row written before the field existed, where
+    /// the tier is not comparable and its agreement is unknown rather
+    /// than established.
+    pub parent_tier_recorded: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3500,6 +3517,7 @@ pub fn cross_check_subagent_session(
     let Some(SessionEvent::SubagentSessionBound {
         agent_id: child_agent_id,
         parent_session_id,
+        max_permission_tier: child_tier,
         tools_granted: child_tools,
         ..
     }) = binding
@@ -3509,6 +3527,7 @@ pub fn cross_check_subagent_session(
             parent_session_id: None,
             status: CrossCheckStatus::NotASubagentSession,
             disagreements: Vec::new(),
+            parent_tier_recorded: false,
         });
     };
 
@@ -3526,6 +3545,7 @@ pub fn cross_check_subagent_session(
     let Some(SessionEvent::SubagentSpawned {
         child_agent_id: parent_child_agent_id,
         tools_granted: parent_tools,
+        max_permission_tier: parent_tier,
         ..
     }) = spawn
     else {
@@ -3534,6 +3554,7 @@ pub fn cross_check_subagent_session(
             parent_session_id: Some(parent_session_id),
             status: CrossCheckStatus::ParentRowMissing,
             disagreements: Vec::new(),
+            parent_tier_recorded: false,
         });
     };
 
@@ -3560,11 +3581,25 @@ pub fn cross_check_subagent_session(
         });
     }
 
+    // A tier on one side only is a claim nothing can check, so it is
+    // reported as not comparable rather than passed over as agreement.
+    let parent_tier_recorded = parent_tier.is_some();
+    if let Some(pt) = parent_tier
+        && pt != child_tier
+    {
+        disagreements.push(CrossCheckDisagreement {
+            field: "max_permission_tier",
+            parent_value: pt,
+            child_value: child_tier,
+        });
+    }
+
     Ok(SubagentCrossCheck {
         child_session_id: child_session_id.to_string(),
         parent_session_id: Some(parent_session_id),
         status: CrossCheckStatus::Checked,
         disagreements,
+        parent_tier_recorded,
     })
 }
 

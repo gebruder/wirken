@@ -148,7 +148,9 @@ wirken sessions verify '<agent>/<channel>/<conv>#sub-0' --with-parent
   parent cross-check:  OK (agrees with '<agent>/<channel>/<conv>')
 ```
 
-It reads the parent named on the child's own row, finds that chain's `SubagentSpawned` row for this child session, and compares the agent id and the granted tool set. Granted tools are compared as a set, since order is not meaningful on either side. `offered_tools` is deliberately not compared: it is the granted set after the per-skill profile filter, so it is a subset rather than an equal, and asserting equality would report a disagreement every time a profile did its job.
+It reads the parent named on the child's own row, finds that chain's `SubagentSpawned` row for this child session, and compares the agent id, the granted tool set, and the permission-tier cap. Granted tools are compared as a set, since order is not meaningful on either side. `offered_tools` is deliberately not compared: it is the granted set after the per-skill profile filter, so it is a subset rather than an equal, and asserting equality would report a disagreement every time a profile did its job.
+
+A parent spawn row written before the tier was recorded there cannot be compared on that field, and the output says so rather than letting absence read as agreement.
 
 Without the flag nothing opens the parent's chain, and the single-session checks are identical either way.
 

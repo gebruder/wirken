@@ -594,6 +594,11 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
                         "  parent cross-check:  OK (agrees with '{}')",
                         check.parent_session_id.as_deref().unwrap_or("?"),
                     );
+                    if !check.parent_tier_recorded {
+                        println!(
+                            "        Tier not compared: the parent's spawn row predates the field."
+                        );
+                    }
                 }
                 wirken_audit::CrossCheckStatus::Checked => {
                     cross_check_failed = true;

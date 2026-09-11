@@ -3908,6 +3908,7 @@ impl Agent {
                     child_session_id: child_session_id.clone(),
                     child_agent_id: parsed.agent_id.clone(),
                     tools_granted: intersected.iter().cloned().collect(),
+                    max_permission_tier: Some(ceiling.max_permission_tier.label().to_string()),
                 },
             )?;
 
@@ -4344,6 +4345,10 @@ impl Agent {
                 child_session_id: child_session_id.clone(),
                 child_agent_id: parsed.agent_id.clone(),
                 tools_granted: intersected.iter().cloned().collect(),
+                // The child records the same cap on its own binding
+                // row; recording it here is what makes the two
+                // comparable.
+                max_permission_tier: Some(ceiling.max_permission_tier.label().to_string()),
             },
         )?;
 

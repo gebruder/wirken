@@ -1112,6 +1112,7 @@ mod session {
                     child_session_id: "sess-A/sub-0".into(),
                     child_agent_id: "researcher".into(),
                     tools_granted: vec!["read_file".into(), "web_search".into()],
+                    max_permission_tier: None,
                 },
             ),
             (
@@ -2694,7 +2695,14 @@ fn seed_bound(log: &SqliteSessionLog, child: &str, parent: &str, agent: &str, to
     .unwrap();
 }
 
-fn seed_spawned(log: &SqliteSessionLog, parent: &str, child: &str, agent: &str, tools: &[&str]) {
+fn seed_spawned(
+    log: &SqliteSessionLog,
+    parent: &str,
+    child: &str,
+    agent: &str,
+    tools: &[&str],
+    tier: &str,
+) {
     let h = log.handle_for(SessionId::new(parent.to_string()));
     log.append(
         &h,
@@ -2703,6 +2711,7 @@ fn seed_spawned(log: &SqliteSessionLog, parent: &str, child: &str, agent: &str, 
             child_session_id: child.into(),
             child_agent_id: agent.into(),
             tools_granted: tools.iter().map(|t| t.to_string()).collect(),
+            max_permission_tier: Some(tier.to_string()),
         },
     )
     .unwrap();
@@ -2719,6 +2728,7 @@ fn cross_check_agrees_when_both_rows_match() {
         "p/webchat/c1#sub-0",
         "researcher",
         &["exec"],
+        "tier2",
     );
     seed_bound(
         &log,
@@ -2776,6 +2786,7 @@ fn cross_check_reports_a_missing_parent_row() {
         "p/webchat/c1#sub-9",
         "other",
         &["exec"],
+        "tier2",
     );
 
     let out = cross_check_subagent_session(&log, "p/webchat/c1#sub-0").unwrap();
@@ -2794,6 +2805,7 @@ fn cross_check_names_each_field_the_two_sides_disagree_on() {
         "p/webchat/c1#sub-0",
         "researcher",
         &["exec"],
+        "tier2",
     );
     seed_bound(
         &log,
@@ -2817,8 +2829,77 @@ fn cross_check_names_each_field_the_two_sides_disagree_on() {
 fn cross_check_compares_granted_tools_as_a_set() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let log = SqliteSessionLog::open(tmp.path()).unwrap();
-    seed_spawned(&log, "p/c/1", "p/c/1#sub-0", "r", &["exec", "read_file"]);
+    seed_spawned(
+        &log,
+        "p/c/1",
+        "p/c/1#sub-0",
+        "r",
+        &["exec", "read_file"],
+        "tier2",
+    );
     seed_bound(&log, "p/c/1#sub-0", "p/c/1", "r", &["read_file", "exec"]);
     let out = cross_check_subagent_session(&log, "p/c/1#sub-0").unwrap();
     assert!(out.disagreements.is_empty(), "{out:?}");
+}
+
+/// The tier is compared, so a ceiling that disagrees between the two
+/// sides is a finding rather than something only one side records.
+#[test]
+fn cross_check_reports_a_tier_disagreement() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    seed_spawned(&log, "p/c/1", "p/c/1#sub-0", "r", &["exec"], "tier2");
+    // The child claims it ran under a looser cap than the parent set.
+    let h = log.handle_for(SessionId::new("p/c/1#sub-0".to_string()));
+    log.append(
+        &h,
+        TrustLevel::System,
+        SessionEvent::SubagentSessionBound {
+            agent_id: "r".into(),
+            parent_session_id: "p/c/1".into(),
+            depth: 1,
+            max_permission_tier: "tier3".into(),
+            tools_granted: vec!["exec".into()],
+            offered_tools: vec!["exec".into()],
+        },
+    )
+    .unwrap();
+
+    let out = cross_check_subagent_session(&log, "p/c/1#sub-0").unwrap();
+    let fields: Vec<&str> = out.disagreements.iter().map(|d| d.field).collect();
+    assert_eq!(fields, vec!["max_permission_tier"]);
+    assert_eq!(out.disagreements[0].parent_value, "tier2");
+    assert_eq!(out.disagreements[0].child_value, "tier3");
+    assert!(out.parent_tier_recorded);
+}
+
+/// A parent row from before the tier existed cannot be compared, and
+/// says so rather than passing as agreement.
+#[test]
+fn cross_check_marks_the_tier_not_comparable_on_an_older_parent_row() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    let h = log.handle_for(SessionId::new("p/c/1".to_string()));
+    log.append(
+        &h,
+        TrustLevel::System,
+        SessionEvent::SubagentSpawned {
+            child_session_id: "p/c/1#sub-0".into(),
+            child_agent_id: "r".into(),
+            tools_granted: vec!["exec".into()],
+            max_permission_tier: None,
+        },
+    )
+    .unwrap();
+    seed_bound(&log, "p/c/1#sub-0", "p/c/1", "r", &["exec"]);
+
+    let out = cross_check_subagent_session(&log, "p/c/1#sub-0").unwrap();
+    assert!(
+        out.disagreements.is_empty(),
+        "nothing to compare is not a disagreement"
+    );
+    assert!(
+        !out.parent_tier_recorded,
+        "and the caller is told the tier was not checked",
+    );
 }

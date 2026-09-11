@@ -1289,6 +1289,7 @@ mod tests {
             child_session_id: child_session_id.to_string(),
             child_agent_id: child_agent_id.to_string(),
             tools_granted: Vec::new(),
+            max_permission_tier: None,
         }
     }
 

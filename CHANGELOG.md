@@ -14,8 +14,8 @@ tagged.
 
 - `wirken sessions verify --with-parent` pairs a sub-agent session's
   `SubagentSessionBound` row with the `SubagentSpawned` row on its
-  parent's chain and reports where the two disagree, on the agent id
-  and on the granted tool set. Granted tools are compared as a set;
+  parent's chain and reports where the two disagree, on the agent id,
+  the granted tool set, and the permission-tier cap. Granted tools are compared as a set;
   `offered_tools` is not compared, being the granted set after the
   per-skill profile filter and so a subset rather than an equal. A
   disagreement, or a parent chain carrying no spawn row for this child,
@@ -24,6 +24,12 @@ tagged.
   that do not belong together being presented as a pair. Without the
   flag nothing opens the parent's chain and the single-session checks
   are unchanged. Issue #247.
+
+- `SubagentSpawned` records the ceiling's permission-tier cap. The
+  child's binding row already carried it; a tier on one side only is a
+  claim nothing can check. Absent on rows written before the field, and
+  the cross-check reports the tier as not comparable for those rather
+  than reading absence as agreement.
 
 - Windows CI takes Cap'n Proto from the upstream release, pinned by
   version and sha256 and cached between runs, and asserts
