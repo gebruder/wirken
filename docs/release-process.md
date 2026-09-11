@@ -95,8 +95,65 @@ Run top to bottom. Replace `0.7.4` with the target version.
    non-empty by default. Read every open row on every surface. For
    each, fold the fix into this release or defer it explicitly in
    the CHANGELOG. Patch and non-0.x-minor dependabot bumps fold
-   cleanly; 0.x-minor and major bumps take a soak cycle. Do not tag
-   while a critical or high-severity advisory is open on any surface.
+   cleanly; 0.x-minor and major bumps take a soak cycle.
+
+   **What gates a tag.** Three surfaces, and they are not
+   interchangeable:
+
+   - **Code-scanning code findings** (CodeQL). A critical or high
+     finding blocks the tag until it is fixed or dismissed per the
+     policy below.
+   - **Dependabot advisories.** Any open alert blocks the tag.
+   - **`cargo deny check advisories`**, with `unsound` and `yanked`
+     enforced. `deny.toml` sets `unsound = "all"`, `yanked = "deny"`,
+     and `[graph] all-features = true`; do not relax any of the three
+     to get a green run. An advisory ignored there needs a written
+     reason in the `ignore` entry naming the reachable path and what
+     would make it revisitable.
+
+   **Scorecard findings are reviewed and recorded, not gating.** They
+   score repository posture (branch protection, review requirements,
+   pinned actions), not defects in the code or its dependencies, and
+   they have been open across prior releases. Read them; do not block
+   on them. The one exception is `VulnerabilitiesID`, whose body lists
+   OSV ids: treat that list as a **cross-check** against
+   `cargo deny check advisories`, not as its own gate. The two
+   disagreeing is itself the finding. Scorecard reads `Cargo.lock`
+   directly, so it reports advisories against crates that are locked
+   but not in any shipped build graph; cargo-deny reads the build
+   graph. When Scorecard names an id cargo-deny does not, establish
+   which of the two is right before deciding anything, because both
+   failure directions have happened:
+
+   - v1.20.0 pre-flight: Scorecard named RUSTSEC-2026-0221 against
+     `event-listener`. cargo-deny was silent for two independent
+     reasons, either sufficient alone — the crate reached the tree only
+     through an optional feature and so was outside a default-feature
+     graph, and the advisory is `informational = "unsound"`, a class the
+     default config does not deny. Both are now closed in `deny.toml`.
+     The crate was genuinely outside every shipped binary, so Scorecard
+     was right that the lockfile carried it and wrong that releases were
+     exposed.
+
+   **Per-alert dismissal policy (code scanning).** Dismiss individually,
+   never in bulk, and never by rule. Before dismissing, record for each
+   alert: `file:line`, what the flagged value actually is, what it is
+   used for, and a verdict of *not a secret* (domain string, test
+   vector, public constant) or *real finding*. A real finding is fixed
+   in its own commit, not dismissed. Use the narrowest reason GitHub
+   offers — `used in tests` where the value is a test vector, `false
+   positive` where the rule misread the value — and put the evidence in
+   the dismissal comment, including what makes the site test-only (the
+   `#[cfg(test)]` line, or the `tests/` directory). A dismissal with no
+   reason recorded is indistinguishable later from one nobody read.
+
+   Do not suppress a rule repository-wide to clear test-path noise.
+   CodeQL's config cannot scope a single rule to a path: `query-filters`
+   selects on query metadata with no path dimension, and `paths-ignore`
+   selects on path with no rule dimension, so the first would drop the
+   rule from production `src` and the second would drop every rule from
+   the test paths. Per-alert dismissal is the mechanism; it persists
+   while the fingerprint does.
 
 2. **Bump the workspace version.** Edit `Cargo.toml`:
    ```toml
