@@ -15,6 +15,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Upstream Cap'n Proto release, pinned. Bumping the version
+  # means recording the new archive's sha256 here as well; the
+  # install refuses a mismatch.
+  CAPNP_VERSION: "1.3.0"
+  CAPNP_SHA256: "2c503361f8bf26fa9e7caccb6db04d6b271d5f0ad3da0616cf40e9a51335c89c"
 
 jobs:
   ipc-smoke:
@@ -26,8 +31,60 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
 
+      # Cap'n Proto comes from the upstream release, pinned by version
+      # and checksum, and is cached between runs.
+      #
+      # It used to be `choco install capnproto -y`. During one build the
+      # Chocolatey community feed returned 503, the command reported
+      # "Chocolatey installed 0/0 packages", and exited 0 anyway. The
+      # job then ran two more minutes and failed inside
+      # `crates/ipc/build.rs` with "capnp --version: program not found",
+      # which reads like a code fault and was not one. A third-party
+      # redistribution feed that can hand back nothing and call it
+      # success is not a dependency a release build should have.
+      #
+      # The checksum is the point of the pin: without it this is still a
+      # network fetch that could hand back anything.
+      - name: Cache Cap'n Proto
+        id: capnp-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: capnp-tools
+          key: capnp-${{ runner.os }}-${{ env.CAPNP_VERSION }}-${{ env.CAPNP_SHA256 }}
+
       - name: Install Cap'n Proto
-        run: choco install capnproto -y
+        if: steps.capnp-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://capnproto.org/capnproto-c++-win32-$env:CAPNP_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile capnp.zip
+          $got = (Get-FileHash capnp.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:CAPNP_SHA256) {
+            Write-Host "capnp archive checksum mismatch"
+            Write-Host "  expected $env:CAPNP_SHA256"
+            Write-Host "  got      $got"
+            exit 1
+          }
+          Expand-Archive -Path capnp.zip -DestinationPath capnp-extract -Force
+          New-Item -ItemType Directory -Force -Path capnp-tools | Out-Null
+          Copy-Item "capnp-extract/capnproto-tools-win32-$env:CAPNP_VERSION/*" `
+            -Destination capnp-tools -Recurse -Force
+
+      - name: Add Cap'n Proto to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$PWD\capnp-tools"
+
+      # Asserted here rather than discovered by a build failure two
+      # minutes downstream. A missing or unrunnable capnp fails the job
+      # at the step that was supposed to provide it, naming the reason.
+      - name: Verify Cap'n Proto
+        shell: pwsh
+        run: |
+          capnp --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "capnp is not runnable after install"
+            exit 1
+          }
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

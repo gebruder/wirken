@@ -12,6 +12,17 @@ tagged.
 
 ### Changed
 
+- Windows CI takes Cap'n Proto from the upstream release, pinned by
+  version and sha256 and cached between runs, and asserts
+  `capnp --version` immediately after installing it. It came from the
+  Chocolatey community feed, which during one build returned 503,
+  reported "Chocolatey installed 0/0 packages", and exited 0 anyway;
+  the job then ran two more minutes and failed inside
+  `crates/ipc/build.rs` with "capnp not found", which reads like a code
+  fault and was not one. Both `windows-smoke.yml` and `release.yml`
+  carried that shape, so a feed outage during a release build would
+  have failed the same confusing way.
+
 - An MCP tool can declare a per-call cost on its server entry
   (`tool_costs`, USD micros, keyed by bare tool name), and a call to it
   is gated by the agent's budget: checked against the window ceiling
