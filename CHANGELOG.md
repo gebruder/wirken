@@ -10,7 +10,21 @@ tagged.
 
 ## [Unreleased]
 
-### Changed
+## [1.20.0] - 2026-09-12
+
+Two behaviour changes to read before upgrading, then a note for anyone
+with an existing `permissions.db`.
+
+### Behaviour changes
+
+- `permissions.db` accepts a grant only for a Tier 2 action key: a
+  shell verb on the Tier 2 allowlist, `file:<path>`, or
+  `cross-conversation`. The refusal was a denylist naming two of the
+  Tier 3 namespaces, so `mcp:`, `tool:`, `wasm:`, `imported_chat:`,
+  `imported_search:` and `imported_search_corpus` were accepted. Those
+  rows were never read, because the gate answers Tier 3 without
+  consulting storage, and listed in `wirken permissions list` as though
+  they were grants. Tier 1 keys are refused for the same reason.
 
 - `wirken audit verify-attestations` and `wirken doctor` verify each
   attestation against the configured identity of the agent whose
@@ -22,26 +36,54 @@ tagged.
   "operator-pinned trust anchor is not yet wired up" note is gone
   because it is. Issue #243.
 
-- `verify-attestations` takes `--agent <AGENT>`, pinning every session
-  to one agent's identity rather than resolving each session's own.
-  The question a log arriving from elsewhere raises.
+### For upgraders
 
-- Sessions whose agent has no identity on disk are reported as unpinned
-  under their own count and exit `6`, distinct from a verification
-  failure at `1`. The signatures are real; nothing can say whose.
+- `PermissionStore::open` sweeps stored rows the gate cannot act on:
+  keys that are Tier 1 or Tier 3 under the current model, and grants
+  whose window closed with nothing having called them. The write-side
+  refusal above governs writes only, so an operator who upgraded still
+  had the rows and `wirken permissions list` still printed them as
+  grants. Each removal appends `PermissionGrantPruned` or
+  `PermissionGrantExpired` to the `gateway-permissions` session, and
+  the CLI prints a one-line summary. Idempotent.
 
-- `wirken sessions verify --with-parent` pairs a sub-agent session's
-  `SubagentSessionBound` row with the `SubagentSpawned` row on its
-  parent's chain and reports where the two disagree, on the agent id,
-  the granted tool set, and the permission-tier cap. Granted tools are compared as a set;
-  `offered_tools` is not compared, being the granted set after the
-  per-skill profile filter and so a subset rather than an equal. A
-  disagreement, or a parent chain carrying no spawn row for this child,
-  exits `5`, its own code: both rows verify inside their own chains, so
-  this is not a tampered row but either a spawn-path bug or two chains
-  that do not belong together being presented as a pair. Without the
-  flag nothing opens the parent's chain and the single-session checks
-  are unchanged. Issue #247.
+### Added
+
+- Persisted permission grants take their expiry window from
+  `default_expiry_days` in `permissions.json` rather than a compiled-in
+  30 days, and `wirken permissions approve` takes `--expires-in-days`
+  to override the default for one grant. Absent or unparseable config
+  means 30 days, unchanged. Zero days is refused at both levels: it
+  writes a grant that has already expired when the gate next reads it,
+  which lists as a live grant while prompting on every call.
+
+- The audit chain distinguishes a grant written over an existing one
+  from a first grant. `PermissionRenewed` carries the window it
+  replaced alongside the one it installed; the store keeps a single row
+  per key, so that is the only surviving record of the previous window.
+
+- The audit chain records a grant found lapsed.
+  `PermissionGrantExpired` carries the expiry the dropped row held and,
+  when a call was what noticed, the tool and tier that hit it.
+  `detected_by` separates a lapse a call ran into from one the sweep
+  found. The store previously deleted the row and emitted nothing,
+  leaving "granted, then lapsed" and "never granted" with the same
+  trace. Expiry is observed at a call or at a store open, never on a
+  timer.
+
+- `wirken permissions approve` without `--session` writes to the audit
+  chain under the `gateway-permissions` sentinel session, alongside the
+  existing `gateway-hooks` and `gateway-mcp` lanes. It previously wrote
+  nothing, which left the only production writer of persisted grants
+  absent from the chain. The lane does not appear in
+  `wirken sessions list`.
+
+- `LlmRequest` records a `tools_hash_version`. `verify` recomputes each
+  row under its own version, so sessions recorded under the older rules
+  verify as before rather than being re-judged. Rows written before the
+  field existed read as `v1`. A report covering any `v1` rows prints the
+  count and states that those rows do not attest a sub-agent ceiling or
+  clamp. `docs/cli.md` carries the per-version table.
 
 - `SubagentSpawned` records the ceiling's permission-tier cap. The
   child's binding row already carried it; a tier on one side only is a
@@ -49,16 +91,9 @@ tagged.
   the cross-check reports the tier as not comparable for those rather
   than reading absence as agreement.
 
-- Windows CI takes Cap'n Proto from the upstream release, pinned by
-  version and sha256 and cached between runs, and asserts
-  `capnp --version` immediately after installing it. It came from the
-  Chocolatey community feed, which during one build returned 503,
-  reported "Chocolatey installed 0/0 packages", and exited 0 anyway;
-  the job then ran two more minutes and failed inside
-  `crates/ipc/build.rs` with "capnp not found", which reads like a code
-  fault and was not one. Both `windows-smoke.yml` and `release.yml`
-  carried that shape, so a feed outage during a release build would
-  have failed the same confusing way.
+- `BudgetExceeded` carries the tool whose call the gate turned away.
+  Absent for an inference block, which is how the two are told apart on
+  one row shape.
 
 - An MCP tool can declare a per-call cost on its server entry
   (`tool_costs`, USD micros, keyed by bare tool name), and a call to it
@@ -73,14 +108,91 @@ tagged.
   added to `tool_to_action` and no tier moved: MCP tools stay Tier 3
   and still prompt. Issue #244.
 
-- `BudgetExceeded` carries the tool whose call the gate turned away.
-  Absent for an inference block, which is how the two are told apart on
-  one row shape.
-
 - `tool_costs` is inside the signed MCP entry envelope, so a cost
   cannot be declared, edited or zeroed while the entry still verifies.
   Entries signed before the field existed hash unchanged and keep
   working.
+
+- `wirken sessions verify --with-parent` pairs a sub-agent session's
+  `SubagentSessionBound` row with the `SubagentSpawned` row on its
+  parent's chain and reports where the two disagree, on the agent id,
+  the granted tool set, and the permission-tier cap. Granted tools are compared as a set;
+  `offered_tools` is not compared, being the granted set after the
+  per-skill profile filter and so a subset rather than an equal. A
+  disagreement, or a parent chain carrying no spawn row for this child,
+  exits `5`, its own code: both rows verify inside their own chains, so
+  this is not a tampered row but either a spawn-path bug or two chains
+  that do not belong together being presented as a pair. Without the
+  flag nothing opens the parent's chain and the single-session checks
+  are unchanged. Issue #247.
+
+- `verify-attestations` takes `--agent <AGENT>`, pinning every session
+  to one agent's identity rather than resolving each session's own.
+  The question a log arriving from elsewhere raises.
+
+- Sessions whose agent has no identity on disk are reported as unpinned
+  under their own count and exit `6`, distinct from a verification
+  failure at `1`. The signatures are real; nothing can say whose.
+
+- A sub-agent session verifies on its own. At spawn the child writes a
+  `SubagentSessionBound` row on its own chain, before its first
+  `LlmRequest`, naming the agent it was woken as and the tool set its
+  parent's ceiling narrowed it to. Neither was derivable from a child's
+  session before: its id names its parent, and the clamp was held only
+  in memory, so a rebuild produced the wrong agent with the wrong tools
+  and every sub-agent session reported a `tools_hash` divergence. The
+  parent's chain is never read, and its `SubagentSpawned` row is
+  unchanged. Issue #246.
+
+- Wire tags for `SessionEvent` are pinned by drift guards. One asserts
+  that every `siem_typed::variant_kind` label equals the tag serde
+  emits, which is what operator `typed_include_variants` /
+  `typed_exclude_variants` filters select on. Another asserts that every
+  `LIKE '%"..."%'` predicate in the workspace names a real tag. A
+  predicate written against the Rust variant name matches no row and
+  returns empty with no error, which reads as "there is nothing to
+  find".
+
+- Windows CI takes Cap'n Proto from the upstream release, pinned by
+  version and sha256 and cached between runs, and asserts
+  `capnp --version` immediately after installing it. It came from the
+  Chocolatey community feed, which during one build returned 503,
+  reported "Chocolatey installed 0/0 packages", and exited 0 anyway;
+  the job then ran two more minutes and failed inside
+  `crates/ipc/build.rs` with "capnp not found", which reads like a code
+  fault and was not one. Both `windows-smoke.yml` and `release.yml`
+  carried that shape, so a feed outage during a release build would
+  have failed the same confusing way.
+
+- `wirken --version` and the startup banner name the commit the
+  binary was built from, whether the tree had uncommitted changes at
+  build time, and the absolute path of the running executable. A build
+  with no repository to ask prints `unknown` rather than failing. No
+  build timestamp is embedded, so the same commit builds to the same
+  binary. Closes #231.
+
+- `sandbox.json` reads `image`, naming the container image `exec` runs
+  in. The field existed and was consumed; no configuration path set it.
+  Absent or empty means the compiled-in default, which is unchanged.
+
+- A key in `sandbox.json` the loader does not read is now named in a
+  warning at start and ignored, where before it produced nothing at all.
+  Closes #234.
+
+- `wirken credentials rotate` takes `--stdin` and `--value-file` like
+  `add`.
+
+- Every command that opens the vault takes the passphrase from
+  `WIRKEN_VAULT_PASSPHRASE` when it is set and prompts only when it is
+  not. `credentials list`, `add` and `rotate`, `agent send`, `channel
+  add` for slack and whatsapp, `zirkel auth-set` and `auth-list`, `mcp
+  authorize`, and `agents add` and `set` prompted unconditionally, so
+  none could run without a terminal while their failure text named the
+  variable. `wirken run` reads the variable before it prompts. A test
+  over the crate's source now requires every keychain probe to take its
+  passphrase from a supplier that reads the variable. Closes #239.
+
+### Fixed
 
 - A sub-agent is checked against its own agent id rather than its
   caller's. The permission gate took one id, the runtime passed its
@@ -115,26 +227,9 @@ tagged.
   builder now serves both, and the profile filter runs on the call side
   too, so a tool the profile refuses is no longer offered.
 
-- `LlmRequest` records a `tools_hash_version`. `verify` recomputes each
-  row under its own version, so sessions recorded under the older rules
-  verify as before rather than being re-judged. Rows written before the
-  field existed read as `v1`. A report covering any `v1` rows prints the
-  count and states that those rows do not attest a sub-agent ceiling or
-  clamp. `docs/cli.md` carries the per-version table.
-
 - `wirken sessions verify` carries the agent's sub-agent ceilings into
   the rebuild. Without them the recomputation omits `spawn_subagent`
   and reports a divergence for a session that was recorded correctly.
-
-- A sub-agent session verifies on its own. At spawn the child writes a
-  `SubagentSessionBound` row on its own chain, before its first
-  `LlmRequest`, naming the agent it was woken as and the tool set its
-  parent's ceiling narrowed it to. Neither was derivable from a child's
-  session before: its id names its parent, and the clamp was held only
-  in memory, so a rebuild produced the wrong agent with the wrong tools
-  and every sub-agent session reported a `tools_hash` divergence. The
-  parent's chain is never read, and its `SubagentSpawned` row is
-  unchanged. Issue #246.
 
 - A sub-agent woken from its own session comes back clamped. The
   factory replays the binding row at wake, so the constraint is
@@ -176,91 +271,29 @@ tagged.
   builder now serves both, and a test asserts neither dispatch
   assembles a list of its own. Issue #245.
 
-- Wire tags for `SessionEvent` are pinned by drift guards. One asserts
-  that every `siem_typed::variant_kind` label equals the tag serde
-  emits, which is what operator `typed_include_variants` /
-  `typed_exclude_variants` filters select on. Another asserts that every
-  `LIKE '%"..."%'` predicate in the workspace names a real tag. A
-  predicate written against the Rust variant name matches no row and
-  returns empty with no error, which reads as "there is nothing to
-  find".
+- `event-listener` 5.4.1 to 5.4.2, clearing RUSTSEC-2026-0221, an
+  unsoundness letting a `!Send` tag cross a thread boundary via
+  `StackSlot`. Reachability verified rather than assumed: the crate
+  enters the tree only through the vault's optional `keychain-linux`
+  feature (`secret-service` -> `zbus` -> `async-broadcast`), which no
+  default build enables, so released binaries never carried it. The
+  lockfile did.
 
-- Persisted permission grants take their expiry window from
-  `default_expiry_days` in `permissions.json` rather than a compiled-in
-  30 days, and `wirken permissions approve` takes `--expires-in-days`
-  to override the default for one grant. Absent or unparseable config
-  means 30 days, unchanged. Zero days is refused at both levels: it
-  writes a grant that has already expired when the gate next reads it,
-  which lists as a live grant while prompting on every call.
+- `chacha20` 0.10.0 to 0.10.2, off a yanked version. 0.10.0 and 0.10.1
+  are both yanked: the SSE2 backend of the RNG and legacy
+  64-bit-counter variants used an SSE4.1 intrinsic, so a target
+  selecting SSE2 without SSE4.1 would execute an illegal instruction.
+  Reachability verified: wirken reaches `chacha20` through
+  `chacha20poly1305` in the vault and uses neither the RNG nor the
+  legacy variant, so the fault was not reachable here. The crate was
+  yanked regardless and the vault's AEAD is not where to carry one.
 
-- `permissions.db` accepts a grant only for a Tier 2 action key: a
-  shell verb on the Tier 2 allowlist, `file:<path>`, or
-  `cross-conversation`. The refusal was a denylist naming two of the
-  Tier 3 namespaces, so `mcp:`, `tool:`, `wasm:`, `imported_chat:`,
-  `imported_search:` and `imported_search_corpus` were accepted. Those
-  rows were never read, because the gate answers Tier 3 without
-  consulting storage, and listed in `wirken permissions list` as though
-  they were grants. Tier 1 keys are refused for the same reason.
-
-- The audit chain distinguishes a grant written over an existing one
-  from a first grant. `PermissionRenewed` carries the window it
-  replaced alongside the one it installed; the store keeps a single row
-  per key, so that is the only surviving record of the previous window.
-
-- `PermissionStore::open` sweeps stored rows the gate cannot act on:
-  keys that are Tier 1 or Tier 3 under the current model, and grants
-  whose window closed with nothing having called them. The write-side
-  refusal above governs writes only, so an operator who upgraded still
-  had the rows and `wirken permissions list` still printed them as
-  grants. Each removal appends `PermissionGrantPruned` or
-  `PermissionGrantExpired` to the `gateway-permissions` session, and
-  the CLI prints a one-line summary. Idempotent.
-
-- The audit chain records a grant found lapsed.
-  `PermissionGrantExpired` carries the expiry the dropped row held and,
-  when a call was what noticed, the tool and tier that hit it.
-  `detected_by` separates a lapse a call ran into from one the sweep
-  found. The store previously deleted the row and emitted nothing,
-  leaving "granted, then lapsed" and "never granted" with the same
-  trace. Expiry is observed at a call or at a store open, never on a
-  timer.
-
-- `wirken permissions approve` without `--session` writes to the audit
-  chain under the `gateway-permissions` sentinel session, alongside the
-  existing `gateway-hooks` and `gateway-mcp` lanes. It previously wrote
-  nothing, which left the only production writer of persisted grants
-  absent from the chain. The lane does not appear in
-  `wirken sessions list`.
-
-- `wirken --version` and the startup banner name the commit the
-  binary was built from, whether the tree had uncommitted changes at
-  build time, and the absolute path of the running executable. A build
-  with no repository to ask prints `unknown` rather than failing. No
-  build timestamp is embedded, so the same commit builds to the same
-  binary. Closes #231.
-
-- `sandbox.json` reads `image`, naming the container image `exec` runs
-  in. The field existed and was consumed; no configuration path set it.
-  Absent or empty means the compiled-in default, which is unchanged.
-
-- A key in `sandbox.json` the loader does not read is now named in a
-  warning at start and ignored, where before it produced nothing at all.
-  Closes #234.
-
-- `wirken credentials rotate` takes `--stdin` and `--value-file` like
-  `add`.
-
-### Fixed
-
-- Every command that opens the vault takes the passphrase from
-  `WIRKEN_VAULT_PASSPHRASE` when it is set and prompts only when it is
-  not. `credentials list`, `add` and `rotate`, `agent send`, `channel
-  add` for slack and whatsapp, `zirkel auth-set` and `auth-list`, `mcp
-  authorize`, and `agents add` and `set` prompted unconditionally, so
-  none could run without a terminal while their failure text named the
-  variable. `wirken run` reads the variable before it prompts. A test
-  over the crate's source now requires every keychain probe to take its
-  passphrase from a supplier that reads the variable. Closes #239.
+- The release gate that let both through is closed. `cargo deny` now
+  runs with `[graph] all-features = true` and `unsound = "all"`, and
+  `yanked` errors rather than warns. RUSTSEC-2026-0221 passed for two
+  independent reasons, either sufficient alone: the crate sat outside a
+  default-feature graph, and its advisory class was not denied. CI runs
+  `cargo-deny` as its own job, so this is enforced on every push.
 
 ## [1.19.0] - 2026-09-02
 
