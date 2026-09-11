@@ -1,5 +1,27 @@
+# Optional-feature dependencies are part of what this repo locks, so
+# they are part of what gets checked. Without this, cargo-deny builds
+# its graph from default features only, and a crate reachable solely
+# through an optional feature is absent from the graph rather than
+# cleared by it. RUSTSEC-2026-0221 sat unreported that way: event-listener
+# arrives via the vault's optional keychain-linux feature
+# (secret-service -> zbus -> async-broadcast), which no default build
+# enables, so the advisory never had a package to attach to.
+[graph]
+all-features = true
+
 [advisories]
 version = 2
+# Unsoundness is denied, at every depth. The default leaves this class
+# unreported, which is how RUSTSEC-2026-0221 passed twice over: once for
+# being outside the graph (see [graph] above) and again for being
+# informational = "unsound". Either gap alone was enough to keep it
+# quiet, so both are closed; neither closes it by itself.
+unsound = "all"
+# A yanked crate errors rather than warns. A warning does not fail the
+# pre-flight, which is the same as not having the check during a
+# release: chacha20 0.10.0 sat yanked under the vault's AEAD and the
+# gate said so in passing.
+yanked = "deny"
 ignore = [
     # rustls-webpki CRL distribution point matching issue (low impact,
     # requires CA compromise). Pinned by serenity 0.12 via rustls 0.22;
