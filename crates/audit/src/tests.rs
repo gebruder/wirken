@@ -2377,7 +2377,8 @@ mod chain_head_signing {
 }
 
 use crate::{
-    DenialSource, HashHex, SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel,
+    CrossCheckStatus, DenialSource, HashHex, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
+    TrustLevel, cross_check_subagent_session,
 };
 
 /// serde's `rename_all = "snake_case"`, reimplemented so the drift
@@ -2674,4 +2675,150 @@ fn find_permission_denials_matches_on_the_logical_agent_id() {
         "the session id is not what the agent_id field holds",
     );
     assert!(log.find_permission_denials("other").is_empty());
+}
+
+fn seed_bound(log: &SqliteSessionLog, child: &str, parent: &str, agent: &str, tools: &[&str]) {
+    let h = log.handle_for(SessionId::new(child.to_string()));
+    log.append(
+        &h,
+        TrustLevel::System,
+        SessionEvent::SubagentSessionBound {
+            agent_id: agent.into(),
+            parent_session_id: parent.into(),
+            depth: 1,
+            max_permission_tier: "tier2".into(),
+            tools_granted: tools.iter().map(|t| t.to_string()).collect(),
+            offered_tools: tools.iter().map(|t| t.to_string()).collect(),
+        },
+    )
+    .unwrap();
+}
+
+fn seed_spawned(log: &SqliteSessionLog, parent: &str, child: &str, agent: &str, tools: &[&str]) {
+    let h = log.handle_for(SessionId::new(parent.to_string()));
+    log.append(
+        &h,
+        TrustLevel::System,
+        SessionEvent::SubagentSpawned {
+            child_session_id: child.into(),
+            child_agent_id: agent.into(),
+            tools_granted: tools.iter().map(|t| t.to_string()).collect(),
+        },
+    )
+    .unwrap();
+}
+
+/// The two sides agreeing is the ordinary case.
+#[test]
+fn cross_check_agrees_when_both_rows_match() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    seed_spawned(
+        &log,
+        "p/webchat/c1",
+        "p/webchat/c1#sub-0",
+        "researcher",
+        &["exec"],
+    );
+    seed_bound(
+        &log,
+        "p/webchat/c1#sub-0",
+        "p/webchat/c1",
+        "researcher",
+        &["exec"],
+    );
+
+    let out = cross_check_subagent_session(&log, "p/webchat/c1#sub-0").unwrap();
+    assert_eq!(out.status, CrossCheckStatus::Checked);
+    assert!(out.disagreements.is_empty(), "{out:?}");
+    assert_eq!(out.parent_session_id.as_deref(), Some("p/webchat/c1"));
+}
+
+/// A session with no binding row has no claim to check, which is
+/// every ordinary session.
+#[test]
+fn cross_check_is_not_applicable_without_a_binding_row() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    let h = log.handle_for(SessionId::new("p/webchat/c1".to_string()));
+    log.append(
+        &h,
+        TrustLevel::System,
+        SessionEvent::AssistantMessage {
+            content: "hi".into(),
+            agent_id: "p".into(),
+        },
+    )
+    .unwrap();
+    let out = cross_check_subagent_session(&log, "p/webchat/c1").unwrap();
+    assert_eq!(out.status, CrossCheckStatus::NotASubagentSession);
+    assert_eq!(out.parent_session_id, None);
+}
+
+/// A child naming a parent whose chain records no such spawn. This is
+/// the splice shape: a child session offered as evidence for a spawn
+/// that chain does not contain.
+#[test]
+fn cross_check_reports_a_missing_parent_row() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    seed_bound(
+        &log,
+        "p/webchat/c1#sub-0",
+        "p/webchat/c1",
+        "researcher",
+        &["exec"],
+    );
+    // The parent chain exists but spawned a different child.
+    seed_spawned(
+        &log,
+        "p/webchat/c1",
+        "p/webchat/c1#sub-9",
+        "other",
+        &["exec"],
+    );
+
+    let out = cross_check_subagent_session(&log, "p/webchat/c1#sub-0").unwrap();
+    assert_eq!(out.status, CrossCheckStatus::ParentRowMissing);
+}
+
+/// The two sides disagreeing on who the child was, and on what it was
+/// granted.
+#[test]
+fn cross_check_names_each_field_the_two_sides_disagree_on() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    seed_spawned(
+        &log,
+        "p/webchat/c1",
+        "p/webchat/c1#sub-0",
+        "researcher",
+        &["exec"],
+    );
+    seed_bound(
+        &log,
+        "p/webchat/c1#sub-0",
+        "p/webchat/c1",
+        "impostor",
+        &["exec", "write_file"],
+    );
+
+    let out = cross_check_subagent_session(&log, "p/webchat/c1#sub-0").unwrap();
+    assert_eq!(out.status, CrossCheckStatus::Checked);
+    let fields: Vec<&str> = out.disagreements.iter().map(|d| d.field).collect();
+    assert_eq!(fields, vec!["agent_id", "tools_granted"]);
+    assert_eq!(out.disagreements[0].parent_value, "researcher");
+    assert_eq!(out.disagreements[0].child_value, "impostor");
+}
+
+/// Tool order is not meaningful on either side, so it is not a
+/// disagreement.
+#[test]
+fn cross_check_compares_granted_tools_as_a_set() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let log = SqliteSessionLog::open(tmp.path()).unwrap();
+    seed_spawned(&log, "p/c/1", "p/c/1#sub-0", "r", &["exec", "read_file"]);
+    seed_bound(&log, "p/c/1#sub-0", "p/c/1", "r", &["read_file", "exec"]);
+    let out = cross_check_subagent_session(&log, "p/c/1#sub-0").unwrap();
+    assert!(out.disagreements.is_empty(), "{out:?}");
 }

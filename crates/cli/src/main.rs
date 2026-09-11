@@ -341,6 +341,12 @@ enum SessionCommands {
         /// not just divergences.
         #[arg(long)]
         strict: bool,
+        /// Also pair a sub-agent session's binding row with the
+        /// `SubagentSpawned` row on its parent's chain and report
+        /// where the two disagree. Opens the parent's session; the
+        /// single-session checks are unchanged either way.
+        #[arg(long)]
+        with_parent: bool,
     },
 }
 
@@ -1144,7 +1150,11 @@ async fn main() -> Result<()> {
                 commands::session::list(channel, parent).await
             }
             SessionCommands::Close { id } => commands::session::close(&id).await,
-            SessionCommands::Verify { id, strict } => commands::session::verify(&id, strict).await,
+            SessionCommands::Verify {
+                id,
+                strict,
+                with_parent,
+            } => commands::session::verify(&id, strict, with_parent).await,
         },
         Commands::Permissions(cmd) => match cmd {
             PermissionCommands::List { agent } => commands::permission::list(&agent).await,

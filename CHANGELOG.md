@@ -12,6 +12,19 @@ tagged.
 
 ### Changed
 
+- `wirken sessions verify --with-parent` pairs a sub-agent session's
+  `SubagentSessionBound` row with the `SubagentSpawned` row on its
+  parent's chain and reports where the two disagree, on the agent id
+  and on the granted tool set. Granted tools are compared as a set;
+  `offered_tools` is not compared, being the granted set after the
+  per-skill profile filter and so a subset rather than an equal. A
+  disagreement, or a parent chain carrying no spawn row for this child,
+  exits `5`, its own code: both rows verify inside their own chains, so
+  this is not a tampered row but either a spawn-path bug or two chains
+  that do not belong together being presented as a pair. Without the
+  flag nothing opens the parent's chain and the single-session checks
+  are unchanged. Issue #247.
+
 - Windows CI takes Cap'n Proto from the upstream release, pinned by
   version and sha256 and cached between runs, and asserts
   `capnp --version` immediately after installing it. It came from the

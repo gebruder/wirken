@@ -25,13 +25,14 @@ pub use log::{AuditLog, AuditQuery, VerifyResult};
 pub use otel_exporter::{FederatedIdentity, OtelConfig, OtelError, StaticFederatedIdentity};
 pub use otel_projector::{OtelProjector, Span, SpanId, SpanKind, SpanStatus, TraceId};
 pub use session_log::{
-    ApprovalScopeKind, ApprovalSource, BudgetAction, ChainHeadReason, DenialSource, EgressDecision,
-    GrantExpiryDetection, HashHex, HexBytes, HookDecision, HookKind, HookSignatureStatus,
-    HttpFetchOutcome, ImportedSearchOutcome, OwnSession, PermissionDenialRecord, PhaseDenyContent,
-    PhaseExitReason, SandboxEgressDenyReason, SandboxEgressModeLabel, SchemaDriftRecord,
-    SessionEvent, SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult,
-    SkillDeniedReason, SqliteSessionLog, StoredSessionEvent, SubagentStatus, ToolCallRecord,
-    ToolsHashVersion, TrustLevel,
+    ApprovalScopeKind, ApprovalSource, BudgetAction, ChainHeadReason, CrossCheckDisagreement,
+    CrossCheckStatus, DenialSource, EgressDecision, GrantExpiryDetection, HashHex, HexBytes,
+    HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, ImportedSearchOutcome,
+    OwnSession, PermissionDenialRecord, PhaseDenyContent, PhaseExitReason, SandboxEgressDenyReason,
+    SandboxEgressModeLabel, SchemaDriftRecord, SessionEvent, SessionHandle, SessionId, SessionLog,
+    SessionScope, SessionVerifyResult, SkillDeniedReason, SqliteSessionLog, StoredSessionEvent,
+    SubagentCrossCheck, SubagentStatus, ToolCallRecord, ToolsHashVersion, TrustLevel,
+    cross_check_subagent_session,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

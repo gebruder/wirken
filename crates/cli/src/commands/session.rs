@@ -323,7 +323,7 @@ fn subagent_agent_id(
         })
 }
 
-pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
+pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result<()> {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -564,6 +564,60 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
         }
     }
 
+    // Cross-chain check, opt-in. The two rows record the same grant
+    // from the two sides and are written by different code at
+    // different moments; each verifies inside its own chain, so a
+    // disagreement is not a tampered row but either a spawn-path bug
+    // or two chains that do not belong together.
+    let mut cross_check_failed = false;
+    if with_parent {
+        println!();
+        match wirken_audit::cross_check_subagent_session(&*session_log, session_id) {
+            Ok(check) => match check.status {
+                wirken_audit::CrossCheckStatus::NotASubagentSession => {
+                    println!(
+                        "  parent cross-check:  n/a (no sub-agent binding row on this session)"
+                    );
+                }
+                wirken_audit::CrossCheckStatus::ParentRowMissing => {
+                    cross_check_failed = true;
+                    println!(
+                        "  parent cross-check:  NO MATCHING SPAWN ROW on '{}'",
+                        check.parent_session_id.as_deref().unwrap_or("?"),
+                    );
+                    println!("        This session says it was spawned by that parent, and that");
+                    println!("        parent's chain records no spawn of it. Either the parent's");
+                    println!("        chain is absent, or the two do not correspond.");
+                }
+                wirken_audit::CrossCheckStatus::Checked if check.disagreements.is_empty() => {
+                    println!(
+                        "  parent cross-check:  OK (agrees with '{}')",
+                        check.parent_session_id.as_deref().unwrap_or("?"),
+                    );
+                }
+                wirken_audit::CrossCheckStatus::Checked => {
+                    cross_check_failed = true;
+                    println!(
+                        "  parent cross-check:  DISAGREES with '{}'",
+                        check.parent_session_id.as_deref().unwrap_or("?"),
+                    );
+                    for d in &check.disagreements {
+                        println!(
+                            "    {}: parent says {}, child says {}",
+                            d.field,
+                            truncate_for_display(&d.parent_value, 48),
+                            truncate_for_display(&d.child_value, 48),
+                        );
+                    }
+                }
+            },
+            Err(e) => {
+                cross_check_failed = true;
+                println!("  parent cross-check:  FAILED to read: {e}");
+            }
+        }
+    }
+
     println!();
 
     // Determine exit code.
@@ -578,6 +632,12 @@ pub async fn verify(session_id: &str, strict: bool) -> Result<()> {
     }
     if strict && report.events_unverifiable > 0 {
         std::process::exit(2);
+    }
+    // Its own code: a cross-chain disagreement is a different finding
+    // from a divergence inside one chain, and a caller scripting this
+    // should be able to tell them apart.
+    if cross_check_failed {
+        std::process::exit(5);
     }
     Ok(())
 }

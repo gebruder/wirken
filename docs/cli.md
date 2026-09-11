@@ -141,7 +141,20 @@ Rows written before the version field existed read as `v1`, which is what they a
 
 A sub-agent session (`{parent}#sub-N`) verifies on its own. At spawn the child writes a `SubagentSessionBound` row on its own chain, before its first `LlmRequest`, naming the agent it was woken as and the tool set its parent's ceiling narrowed it to. `verify` reads the agent and the clamp from that row and prints which agent it resolved. The parent's chain is never opened; a child session verifies clean even when the parent's session is not present at all.
 
-The parent's `SubagentSpawned` row is unchanged and records the same grant from the parent's side. The two are independent records; comparing them is a separate check that `verify` does not perform.
+The parent's `SubagentSpawned` row is unchanged and records the same grant from the parent's side. The two are independent records, and `--with-parent` compares them:
+
+```
+wirken sessions verify '<agent>/<channel>/<conv>#sub-0' --with-parent
+  parent cross-check:  OK (agrees with '<agent>/<channel>/<conv>')
+```
+
+It reads the parent named on the child's own row, finds that chain's `SubagentSpawned` row for this child session, and compares the agent id and the granted tool set. Granted tools are compared as a set, since order is not meaningful on either side. `offered_tools` is deliberately not compared: it is the granted set after the per-skill profile filter, so it is a subset rather than an equal, and asserting equality would report a disagreement every time a profile did its job.
+
+Without the flag nothing opens the parent's chain, and the single-session checks are identical either way.
+
+What a disagreement means is worth knowing before acting on one. Both rows sit inside per-session hash chains, so neither can be edited after the fact without breaking its own chain, and `verify` checks those chains separately. A disagreement is therefore not a tampered row. It is either the spawn path writing two different values, or two chains that do not belong together being presented as a pair, which is what a spliced audit trail looks like. A missing spawn row on the named parent (`NO MATCHING SPAWN ROW`) is the same class of finding.
+
+Exit codes: `3` broken chain, `1` divergences, `2` unverifiable under `--strict`, `5` cross-check disagreement. The last is its own code because a cross-chain disagreement is a different finding from a divergence inside one chain.
 
 A session whose id has the sub-agent shape but carries no binding row arises two ways: a chain written before the row existed, or one where the row is missing because the write failed or the chain was truncated. Either way the ceiling it ran under is unrecoverable, and the two things you can do with such a session want opposite handling.
 

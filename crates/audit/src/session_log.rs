@@ -3433,6 +3433,141 @@ mod precreate_perms_tests {
     }
 }
 
+/// Outcome of pairing a child session's `SubagentSessionBound` row
+/// with the `SubagentSpawned` row on its parent's chain.
+///
+/// The two record the same grant from the two sides and are written by
+/// different code at different moments. Each verifies inside its own
+/// per-session hash chain, so neither can be edited after the fact
+/// without breaking that chain. A disagreement is therefore not a
+/// tampered row: it is either the spawn path writing two different
+/// values, or two chains that do not belong together being presented
+/// as a pair, which is what a spliced audit trail looks like.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentCrossCheck {
+    pub child_session_id: String,
+    /// The parent the child's own row names. `None` when the child
+    /// carries no binding row.
+    pub parent_session_id: Option<String>,
+    pub status: CrossCheckStatus,
+    /// Fields the two rows disagree on. Empty on agreement.
+    pub disagreements: Vec<CrossCheckDisagreement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrossCheckStatus {
+    /// The session carries no `SubagentSessionBound` row, so there is
+    /// no claim to check. Every ordinary session, and any sub-agent
+    /// session recorded before the row existed.
+    NotASubagentSession,
+    /// The child names a parent, and that parent's chain carries no
+    /// `SubagentSpawned` row for this child session. Either the
+    /// parent's chain is absent, or the pair does not correspond.
+    ParentRowMissing,
+    /// Both rows were found and compared.
+    Checked,
+}
+
+/// One field on which the parent's and child's records disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrossCheckDisagreement {
+    pub field: &'static str,
+    pub parent_value: String,
+    pub child_value: String,
+}
+
+/// Pair a child session's binding row with its parent's spawn row and
+/// report where the two disagree.
+///
+/// `offered_tools` is deliberately not compared. It is `tools_granted`
+/// after the per-skill profile filter, so it is a subset rather than
+/// an equal, and asserting equality would report a disagreement every
+/// time a profile did its job.
+pub fn cross_check_subagent_session(
+    log: &dyn SessionLog,
+    child_session_id: &str,
+) -> Result<SubagentCrossCheck, AuditError> {
+    let child_handle = log.handle_for(SessionId::new(child_session_id.to_string()));
+    let child_rows = log.get_since(&child_handle, 0)?;
+
+    // Last binding wins, matching the replay.
+    let mut binding = None;
+    for stored in child_rows {
+        if let SessionEvent::SubagentSessionBound { .. } = &stored.event {
+            binding = Some(stored.event);
+        }
+    }
+    let Some(SessionEvent::SubagentSessionBound {
+        agent_id: child_agent_id,
+        parent_session_id,
+        tools_granted: child_tools,
+        ..
+    }) = binding
+    else {
+        return Ok(SubagentCrossCheck {
+            child_session_id: child_session_id.to_string(),
+            parent_session_id: None,
+            status: CrossCheckStatus::NotASubagentSession,
+            disagreements: Vec::new(),
+        });
+    };
+
+    let parent_handle = log.handle_for(SessionId::new(parent_session_id.clone()));
+    let parent_rows = log.get_since(&parent_handle, 0)?;
+    let spawn = parent_rows
+        .into_iter()
+        .find_map(|stored| match stored.event {
+            SessionEvent::SubagentSpawned {
+                child_session_id: ref sid,
+                ..
+            } if sid == child_session_id => Some(stored.event),
+            _ => None,
+        });
+    let Some(SessionEvent::SubagentSpawned {
+        child_agent_id: parent_child_agent_id,
+        tools_granted: parent_tools,
+        ..
+    }) = spawn
+    else {
+        return Ok(SubagentCrossCheck {
+            child_session_id: child_session_id.to_string(),
+            parent_session_id: Some(parent_session_id),
+            status: CrossCheckStatus::ParentRowMissing,
+            disagreements: Vec::new(),
+        });
+    };
+
+    let mut disagreements = Vec::new();
+    if parent_child_agent_id != child_agent_id {
+        disagreements.push(CrossCheckDisagreement {
+            field: "agent_id",
+            parent_value: parent_child_agent_id,
+            child_value: child_agent_id,
+        });
+    }
+    // Order is not meaningful on either side; the sets are.
+    let mut p_tools = parent_tools.clone();
+    let mut c_tools = child_tools.clone();
+    p_tools.sort();
+    p_tools.dedup();
+    c_tools.sort();
+    c_tools.dedup();
+    if p_tools != c_tools {
+        disagreements.push(CrossCheckDisagreement {
+            field: "tools_granted",
+            parent_value: p_tools.join(","),
+            child_value: c_tools.join(","),
+        });
+    }
+
+    Ok(SubagentCrossCheck {
+        child_session_id: child_session_id.to_string(),
+        parent_session_id: Some(parent_session_id),
+        status: CrossCheckStatus::Checked,
+        disagreements,
+    })
+}
+
 #[cfg(test)]
 mod audit_legacy_deserialize_tests {
     //! Regression tests for the `actor_kind` deserialization gap
