@@ -5053,7 +5053,10 @@ mod attestation_tests {
                 sessions_unpinned,
                 attestations_unpinned,
             } => {
-                assert_eq!(sessions_checked, 0, "nothing was pinned, so nothing checked");
+                assert_eq!(
+                    sessions_checked, 0,
+                    "nothing was pinned, so nothing checked"
+                );
                 assert_eq!(attestations_verified, 0);
                 assert_eq!(sessions_unpinned, 1);
                 assert_eq!(attestations_unpinned, 1);
