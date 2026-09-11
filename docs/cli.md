@@ -158,6 +158,14 @@ What a disagreement means is worth knowing before acting on one. Both rows sit i
 
 Exit codes: `3` broken chain, `1` divergences, `2` unverifiable under `--strict`, `5` cross-check disagreement. The last is its own code because a cross-chain disagreement is a different finding from a divergence inside one chain.
 
+### Reproducing a disagreement
+
+Worth knowing if you ever need to exercise this, and worth knowing because it is the clearest statement of what the check is for: you cannot produce a cross-check failure by editing a row. Every row sits inside a per-session hash chain. Change one and that session's own chain breaks, `verify` reports `chain: BROKEN` and exits `3`, and the cross-check never runs. An edited row is caught one layer earlier, by the check that was already there.
+
+What `--with-parent` exists for is the case the single-session checks cannot see: two chains that are each internally valid and do not belong together. Producing that takes two real runs rather than an edit. Record one, record a second differing in the ceiling, then move the second run's child-session rows verbatim, hashes included, into the first run's log in place of its own child rows. Both chains still verify, because each was written by a real run; what is false is the pairing.
+
+That is the shape of a spliced audit trail, where a child session from one run is offered as evidence for a spawn in another. Every single-session check passes, because every single-session check is answerable from one chain, and whether two chains belong together is not a question one chain can answer.
+
 A session whose id has the sub-agent shape but carries no binding row arises two ways: a chain written before the row existed, or one where the row is missing because the write failed or the chain was truncated. Either way the ceiling it ran under is unrecoverable, and the two things you can do with such a session want opposite handling.
 
 **Running it.** A live-purpose wake clamps to `tier1` with an empty tool set and logs at `error`. No daemon path re-addresses an existing `#sub-N` session today, so this is reached through `AgentFactory::wake` rather than by a running daemon on its own. That is deliberately unusable: the child cannot be resumed under its original ceiling, because that ceiling is not recorded on it, and running it under a guessed one is worse than not running it. Respawn the child from its parent instead.
