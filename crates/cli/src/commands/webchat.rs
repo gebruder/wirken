@@ -427,7 +427,7 @@ let approvalCurrent = null;
 function tierLabel(tier) {
   const t = String(tier || '');
   if (t === 'tier3') return 'Tier 3 · always asks';
-  if (t === 'tier2') return 'Tier 2 · asks without a grant';
+  if (t === 'tier2') return 'Tier 2 · no live grant';
   return t ? 'Tier ' + t.replace('tier', '') : 'Approval';
 }
 function approvalSentence(ev) {
