@@ -60,6 +60,30 @@ tagged.
   About panel that names what is unknown, and turns the strip into
   the alarm when a tamper record is on disk.
 
+- `GET /api/sessions/{id}/events` on the webchat port: the session
+  log projected to what the page draws, for webchat sessions only.
+  Tool calls with the tier recomputed from their stored arguments,
+  tool results with control sequences stripped and an elapsed time
+  taken from row timestamps, permission decisions with a timeout
+  denial marked as such, grant renewals and lapses, egress verdicts,
+  budget stops, sub-agent spawns and results, attestations and chain
+  heads as fingerprints and ranges, compactions, and the session's
+  head and totals. Withheld: the system prompt, request and tool
+  hashes, raw signatures and keys, and sender ids. `?after=N` returns
+  the rows past a sequence for polling during a turn.
+
+- The webchat page draws tool calls as rows with a glyph for done,
+  failed, awaiting you, queued and running, expandable to the tier,
+  the sandbox posture, the elapsed time and the output. Rows land
+  from the record a moment behind the agent. The approval card shows
+  the command as recorded on the chain, with its row number, once
+  the row is there. A decision says "recorded" only when its row is
+  seen; the acknowledgement alone says "accepted". A timeout denial
+  row turns an undecided card into "expired". A Record panel behind
+  the writer dot shows the chain head, the last signed head, the
+  attestation count as recorded rather than verified, and the
+  session's calls, tokens and cost.
+
 ### Changed
 
 - The webchat chat route runs the prompt-injection detector on each
