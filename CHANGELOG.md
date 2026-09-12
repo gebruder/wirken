@@ -12,6 +12,16 @@ tagged.
 
 ### Changed
 
+- The WebChat status route carries no host: `siem` is the target and
+  pipe kind only, without the ingestion host, and `org` is the pinned
+  key fingerprint and when it was applied, without the config URL's
+  host. A test walks every string in the snapshot for anything shaped
+  like a hostname. The credentials route reports a refused MCP entry as
+  refused and no more; the proxy's reason named the flag that would
+  weaken the check, and the hatch banner already covers the case where
+  it is set. An unreadable alarm log stays unknown rather than zero,
+  with a test. The About footer says that an underlined value opens in
+  place.
 - The WebChat page is rebuilt to Phase 1 of the UX handoff. The
   conversation is one column: user bubbles, assistant text rendered
   from a small markdown grammar (paragraphs, inline code, fenced code
