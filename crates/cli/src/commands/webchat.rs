@@ -443,7 +443,7 @@ function approvalSentence(ev) {
   if (key.startsWith('imported_')) return 'Reads an imported archive.' + tail;
   if (key.startsWith('cross_channel_memory:')) return 'Reads another channel’s memory.' + tail;
   if (key.startsWith('file:')) return 'File access outside the workspace.' + tail;
-  if (ev.tool_name === 'sandbox_egress') return 'Network egress from the sandbox after reading sensitive data.' + tail;
+  if (ev.tool_name === 'sandbox_egress') return 'Network egress from the sandbox, escalated by what this session has read.' + tail;
   return String(ev.tool_name || 'This tool') + ' needs approval.' + tail;
 }
 
