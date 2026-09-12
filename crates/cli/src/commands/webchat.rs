@@ -443,7 +443,13 @@ function approvalSentence(ev) {
   if (key.startsWith('imported_')) return 'Reads an imported archive.' + tail;
   if (key.startsWith('cross_channel_memory:')) return 'Reads another channel’s memory.' + tail;
   if (key.startsWith('file:')) return 'File access outside the workspace.' + tail;
-  if (ev.tool_name === 'sandbox_egress') return 'Network egress from the sandbox, escalated by what this session has read.' + tail;
+  if (ev.tool_name === 'sandbox_egress') {
+    // The gate names its own reason on the event as the trigger text:
+    // sandbox egress to {host}:{port} after reading {basis}. Show that,
+    // not a paraphrase of it.
+    const reason = String(ev.trigger_message || '').replace(/^sandbox egress to /, '');
+    return 'Network egress from the sandbox' + (reason ? ' · escalated: ' + reason + '.' : '.') + tail;
+  }
   return String(ev.tool_name || 'This tool') + ' needs approval.' + tail;
 }
 
@@ -534,7 +540,10 @@ function ackApproval(requestId, result) {
       line = (decision === 'deny' ? 'denied' : 'accepted') + ' · ' + hhmm() + (reason ? ' · ' + reason : '');
       glyph = decision === 'deny' ? '✕' : '✓';
     } else {
-      line = 'expired · ' + hhmm() + ' · decided elsewhere or past the window';
+      // The only evidence here is the gate's reply that the entry is
+      // no longer pending. "Expired" needs the timeout denial row,
+      // which Phase 2 reads.
+      line = 'no longer pending · ' + hhmm() + ' · decided elsewhere';
       glyph = '○';
     }
     card.replaceWith(addDecision(line, glyph));
