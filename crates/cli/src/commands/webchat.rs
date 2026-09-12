@@ -1947,7 +1947,10 @@ mod tests {
     #[test]
     fn the_tier_two_chip_and_sentence_use_one_term() {
         let script = page_script();
-        assert!(script.contains("'Tier 2 · no live grant'"), "the chip names the gate's finding");
+        assert!(
+            script.contains("'Tier 2 · no live grant'"),
+            "the chip names the gate's finding"
+        );
         assert!(
             script.contains("'Read-only shell command with no live grant.'"),
             "the sentence uses the chip's term"
