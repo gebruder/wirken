@@ -125,8 +125,11 @@ const HTML: &str = r#"<!DOCTYPE html>
   .rail-section + .rail-section { margin-top: 12px; }
 
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #conversation { flex: 1; overflow-y: auto; padding: 22px 24px 18px; display: flex; flex-direction: column; gap: 16px; }
-  #conversation > * { flex: none; }
+  #conversation { flex: 1; overflow-y: auto; padding: 22px 24px 18px; display: flex; flex-direction: column; }
+  /* The reading column: bubbles right-align within it, not at the far
+     edge of a wide pane. */
+  #thread { flex: 1; width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: 16px; }
+  #thread > * { flex: none; }
   .msg-user { align-self: flex-end; max-width: 70%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--surface-user); font-size: 14.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
   .msg-assistant { align-self: flex-start; max-width: 78%; width: 100%; font-size: 14.5px; line-height: 1.65; color: rgba(233,233,237,.93); }
   .msg-assistant p { margin: 0 0 .7em; white-space: pre-wrap; word-break: break-word; }
@@ -138,6 +141,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   .code-head button:hover { background: rgba(145,132,217,.12); }
   .code pre { padding: 10px 12px; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre; }
   .cutoff { font-size: 11.5px; color: rgba(233,233,237,.5); margin-top: 4px; }
+  .cutoff .link { font-size: 11.5px; }
   .empty-state { align-self: center; margin: auto; max-width: 52ch; text-align: center; font-size: 14.5px; line-height: 1.6; color: rgba(233,233,237,.62); }
 
   /* Tool rows: one line per call, glyph column, expand on click. */
@@ -179,9 +183,9 @@ const HTML: &str = r#"<!DOCTYPE html>
 
   /* Approval card: the one loud element. */
   .approval { align-self: flex-start; max-width: 82%; width: 100%; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--accent-700), 0 8px 24px rgba(0,0,0,.4); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-  .approval-head { display: flex; gap: 10px; align-items: flex-start; }
-  .approval-sentence { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.62); flex: 1; }
-  .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; }
+  .approval-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  .approval-sentence { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.62); flex: 1 1 320px; }
+  .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; margin-left: auto; }
   .approval-cmd { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: rgba(0,0,0,.4); padding: 10px 12px; border-radius: 7px; overflow-x: auto; white-space: pre; }
   .approval-note { font-size: 11.5px; color: rgba(233,233,237,.5); }
   .input { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--neutral-800); border-radius: var(--radius-md); padding: 9px 12px; font-size: 13px; color: var(--text); resize: none; }
@@ -239,12 +243,14 @@ const HTML: &str = r#"<!DOCTYPE html>
   }
   @media (max-width: 720px) {
     #shell { flex-direction: column; }
-    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto; }
-    .rail-section { display: flex; gap: 4px; align-items: center; }
+    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 6px; padding: 8px 10px; overflow: hidden; }
+    .rail-section { display: flex; gap: 4px; align-items: center; min-width: 0; flex: 0 1 auto; }
     .rail-section + .rail-section { margin-top: 0; }
-    .rail-row { width: auto; white-space: nowrap; }
+    .rail-label { flex: none; }
+    .rail-row { width: auto; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
     .rail-meta { display: none; }
     .msg-user, .msg-assistant, .approval, .block { max-width: 92%; }
+    #thread { max-width: none; }
     #status { flex-wrap: wrap; }
     #status-values { flex-basis: 100%; justify-content: flex-start; }
     .popover { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: auto; border-radius: 10px 10px 0 0; }
@@ -272,7 +278,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   </nav>
   <main id="main">
     <h1 class="sr-only">wirken webchat</h1>
-    <section id="conversation" aria-live="polite" aria-label="Conversation"></section>
+    <section id="conversation" aria-live="polite" aria-label="Conversation"><div id="thread"></div></section>
     <div id="turnline" hidden><span class="dots pulse" aria-hidden="true"><i></i><i></i><i></i></span><span id="turntext"></span></div>
     <div id="notice" role="status" hidden></div>
     <form id="composer">
@@ -289,6 +295,7 @@ const HTML: &str = r#"<!DOCTYPE html>
 <script>
 'use strict';
 const conversation = document.getElementById('conversation');
+const thread = document.getElementById('thread');
 const turnline = document.getElementById('turnline');
 const turntext = document.getElementById('turntext');
 const notice = document.getElementById('notice');
@@ -389,7 +396,7 @@ function renderInline(p, text) {
 function codeBlock(lang, body) {
   const box = el('div', 'code');
   const head = el('div', 'code-head');
-  head.appendChild(el('span', null, lang || 'code'));
+  if (lang) head.appendChild(el('span', null, lang));
   const copy = el('button', null, 'copy');
   copy.type = 'button';
   copy.addEventListener('click', () => {
@@ -407,7 +414,7 @@ function codeBlock(lang, body) {
 // --- Transcript primitives ---
 function addUser(text) {
   const node = el('div', 'msg-user', text);
-  conversation.appendChild(node);
+  thread.appendChild(node);
   scrollToEnd();
   return node;
 }
@@ -415,7 +422,7 @@ function addAssistant(text) {
   const node = el('div', 'msg-assistant');
   node.setAttribute('data-role', 'assistant');
   renderMarkdown(node, text || '');
-  conversation.appendChild(node);
+  thread.appendChild(node);
   scrollToEnd();
   return node;
 }
@@ -427,12 +434,20 @@ function addBlock(kind, label, glyph, body, foot) {
   box.appendChild(head);
   if (body) box.appendChild(el('div', 'block-body', body));
   if (foot) box.appendChild(el('div', 'block-foot', foot));
-  conversation.appendChild(box);
+  thread.appendChild(box);
   scrollToEnd();
   return box;
 }
+// The agent's refusal text goes on to say how to weaken the sandbox.
+// That remedy belongs in the CLI, not beside the Send button, so the
+// block shows the reason only: the text up to the first clause break.
+function firstClause(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^(.*?)(;|\.(?=\s|$)|$)/s);
+  return (m ? m[1] : t).trim();
+}
 function addRefusal(text) {
-  return addBlock('refusal', 'Refused before running', '✕', text,
+  return addBlock('refusal', 'Refused before running', '✕', firstClause(text),
     'Nothing ran on the host. The agent was stopped at this step.');
 }
 function addAgentError(text) {
@@ -443,15 +458,15 @@ function addDecision(text, glyph) {
   const g = glyph || '✓';
   line.appendChild(el('span', 'glyph' + (g === '✕' ? ' failed' : g === '○' ? ' neutral' : ''), g));
   line.appendChild(el('span', 'decision-text', ' ' + text));
-  conversation.appendChild(line);
+  thread.appendChild(line);
   scrollToEnd();
   return line;
 }
 function showEmptyState() {
-  clear(conversation);
-  conversation.appendChild(el('div', 'empty-state',
+  clear(thread);
+  thread.appendChild(el('div', 'empty-state',
     'Agent ' + AGENT_ID + ' answers here. This page is served to this machine only. ' +
-    'Every message, tool call and decision is written to the audit record before it runs.'));
+    'Every message, tool call and decision is written to the audit record first.'));
 }
 
 // --- Turn line, composer lock, notices ---
@@ -578,7 +593,7 @@ function renderApproval(ev) {
   actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);
   card.appendChild(actions);
-  conversation.appendChild(card);
+  thread.appendChild(card);
   scrollToEnd();
   setTurn('turn open · agent holding on your decision');
   lockComposer('Decide on the approval above to continue');
@@ -624,7 +639,7 @@ function ackApproval(requestId, result) {
     let line, glyph;
     if (result === 'accepted') {
       line = (decision === 'deny' ? 'denied' : 'accepted') + ' · ' + hhmm() + (reason ? ' · ' + reason : '');
-      glyph = decision === 'deny' ? '✕' : '✓';
+      glyph = decision === 'deny' ? '○' : '✓';
     } else {
       // The only evidence here is the gate's reply that the entry is
       // no longer pending. "Expired" needs the timeout denial row,
@@ -667,7 +682,7 @@ async function send() {
   if (!text || turnOpen || halted) return;
   input.value = '';
   hideNotice();
-  const emptyState = conversation.querySelector('.empty-state');
+  const emptyState = thread.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
   turnOpen = true;
   lockComposer('Waiting for the agent…');
@@ -759,9 +774,15 @@ async function send() {
   }
   if (!terminal) {
     if (liveAssistant) {
-      liveAssistant.appendChild(el('div', 'cutoff', 'cut off — the stream ended without a done event'));
+      const line = el('div', 'cutoff', 'cut off — the stream ended without a done event · ');
+      const retry = el('button', 'link', 'retry');
+      retry.type = 'button';
+      retry.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID));
+      line.appendChild(retry);
+      liveAssistant.appendChild(line);
+    } else {
+      showNotice(null, 'Connection lost · ', () => loadTranscript(WEBCHAT_LOG_ID));
     }
-    showNotice(null, 'Connection lost · ', () => loadTranscript(WEBCHAT_LOG_ID));
   }
   settleOpenApproval();
   finishTurn();
@@ -808,7 +829,7 @@ async function loadTranscript(id) {
     loadRail();
   }
   if (!page || !Array.isArray(page.events)) return;
-  clear(conversation);
+  clear(thread);
   toolRows.clear();
   decisionLines.clear();
   lastSeq = -1;
@@ -953,8 +974,8 @@ function renderEvent(ev, live) {
       // The call row was written before the gate prompted, so when a
       // card is already open the row belongs above it.
       const openCard = live && approvalCurrent ? document.getElementById('approval-' + approvalCurrent.request_id) : null;
-      if (openCard) conversation.insertBefore(block, openCard);
-      else conversation.appendChild(block);
+      if (openCard) thread.insertBefore(block, openCard);
+      else thread.appendChild(block);
       advanceBlock(block);
       scrollToEnd();
       break;
@@ -982,7 +1003,7 @@ function renderEvent(ev, live) {
         glyph = '○';
       } else if (ev.denied_via && ev.denied_via.kind === 'sse') {
         line = 'denied · ' + hhmm(new Date(ev.ts)) + (ev.denial_reason ? ' · ' + ev.denial_reason : '') + ' · recorded';
-        glyph = '✕';
+        glyph = '○';
       } else {
         line = 'refused by ' + (ev.denial_source || 'the gate') + ' · ' + (ev.action_key || ev.tool) +
           (ev.denial_reason ? ' · ' + ev.denial_reason : '') + ' · recorded';
@@ -1176,15 +1197,15 @@ async function loadArchiveConversations(source) {
   activeArchive = source.id;
   setReadOnly(ARCHIVE_NOTICE);
   loadRail();
-  clear(conversation);
+  clear(thread);
   const head = el('div', 'archive-head', source.source_account);
   head.appendChild(el('span', 'meta',
     'imported archive · ' + source.conversations + ' conversations · ' + source.projects + ' projects · ' + (source.sealed ? 'sealed' : 'live')));
-  conversation.appendChild(head);
-  conversation.appendChild(el('div', 'archive-note',
+  thread.appendChild(head);
+  thread.appendChild(el('div', 'archive-note',
     'A stored record, shown read-only. Text was written by whoever got a message into this account.'));
   if (!rows.length) {
-    conversation.appendChild(el('div', 'archive-note', 'This archive holds no conversations.'));
+    thread.appendChild(el('div', 'archive-note', 'This archive holds no conversations.'));
     return;
   }
   for (const row of rows) {
@@ -1195,7 +1216,7 @@ async function loadArchiveConversations(source) {
     item.appendChild(el('span', null, row.title || 'Untitled · ' + String(row.uuid).slice(0, 8)));
     item.appendChild(el('span', 'meta', row.message_count + ' messages · ' + fmtDate(row.updated_at)));
     item.addEventListener('click', () => loadImportedConversation(source, row.uuid));
-    conversation.appendChild(item);
+    thread.appendChild(item);
   }
   conversation.scrollTop = 0;
 }
@@ -1209,17 +1230,17 @@ async function loadImportedConversation(source, uuid) {
     detail = await res.json();
   } catch (e) { return; }
   setReadOnly(ARCHIVE_NOTICE);
-  clear(conversation);
+  clear(thread);
   if (!detail) {
-    conversation.appendChild(el('div', 'archive-note', 'That conversation is not in the store.'));
+    thread.appendChild(el('div', 'archive-note', 'That conversation is not in the store.'));
     return;
   }
-  conversation.appendChild(el('div', 'archive-head', detail.title || 'Untitled · ' + String(detail.uuid).slice(0, 8)));
-  if (detail.summary) conversation.appendChild(el('div', 'archive-note', detail.summary));
+  thread.appendChild(el('div', 'archive-head', detail.title || 'Untitled · ' + String(detail.uuid).slice(0, 8)));
+  if (detail.summary) thread.appendChild(el('div', 'archive-note', detail.summary));
   const back = el('button', 'link', '← back to this archive');
   back.type = 'button';
   back.addEventListener('click', () => loadArchiveConversations(source));
-  conversation.appendChild(back);
+  thread.appendChild(back);
 
   for (const message of detail.messages) {
     const box = el('div', 'archive-msg');
@@ -1232,16 +1253,16 @@ async function loadImportedConversation(source, uuid) {
     } else {
       box.appendChild(el('div', 'text', message.text));
     }
-    conversation.appendChild(box);
+    thread.appendChild(box);
     for (const attachment of message.attachments || []) {
       const att = el('div', 'archive-attachment');
       att.appendChild(el('div', 'meta', 'attachment: ' + (attachment.file_name || 'unnamed')));
       att.appendChild(el('div', 'text', attachment.text));
-      conversation.appendChild(att);
+      thread.appendChild(att);
     }
     // The view is a projection and says so.
     if (message.unrendered_blocks > 0) {
-      conversation.appendChild(el('div', 'archive-note',
+      thread.appendChild(el('div', 'archive-note',
         message.unrendered_blocks + ' stored content blocks are not shown here. ' +
         'This view renders the message text and its attachments.'));
     }
@@ -3235,7 +3256,7 @@ mod tests {
         // to reach the document.
         assert!(script.contains("renderApproval(event)"));
         assert!(script.contains("ackApproval(event.request_id, event.result)"));
-        assert!(script.contains("conversation.appendChild(card)"));
+        assert!(script.contains("thread.appendChild(card)"));
         // And the handler really emits the done event the page waits
         // for, in the same wire shape as everything else.
         assert!(
@@ -3324,6 +3345,23 @@ mod tests {
             rendered.starts_with(prefix),
             "the agent renders a sandbox refusal as {rendered:?}; the page expects {prefix:?}"
         );
+        // The block shows the reason only: the agent's text goes on to
+        // say how to weaken the sandbox, and that belongs in the CLI.
+        let refusal = script
+            .split_once("function addRefusal(text) {")
+            .expect("addRefusal exists")
+            .1
+            .split_once(
+                "
+}",
+            )
+            .unwrap()
+            .0;
+        assert!(
+            refusal.contains("firstClause(text)"),
+            "the refusal body is cut to its first clause: {refusal}"
+        );
+        assert!(script.contains("function firstClause("));
     }
 
     /// A refused request is not a sent message: on any non-2xx the
