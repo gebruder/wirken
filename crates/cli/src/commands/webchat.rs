@@ -243,10 +243,10 @@ const HTML: &str = r#"<!DOCTYPE html>
   }
   @media (max-width: 720px) {
     #shell { flex-direction: column; }
-    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 6px; padding: 8px 10px; overflow: hidden; }
-    .rail-section { display: flex; gap: 4px; align-items: center; min-width: 0; flex: 0 1 auto; }
+    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 12px; padding: 8px 10px; overflow: hidden; }
+    .rail-section { display: flex; gap: 6px; align-items: center; min-width: 0; flex: 1 1 0; }
     .rail-section + .rail-section { margin-top: 0; }
-    .rail-label { flex: none; }
+    .rail-label { flex: none; padding: 6px 0 4px; }
     .rail-row { width: auto; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
     .rail-meta { display: none; }
     .msg-user, .msg-assistant, .approval, .block { max-width: 92%; }
