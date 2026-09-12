@@ -134,10 +134,6 @@ impl OpenTurns {
             .get(conversation)
             .map(|since| since.elapsed().as_secs())
     }
-
-    pub fn is_open(&self, conversation: &str) -> bool {
-        self.open_age(conversation).is_some()
-    }
 }
 
 /// RAII claim on a conversation's turn; dropping it releases the
@@ -6369,7 +6365,7 @@ mod tests {
         let first = turns
             .try_open("c-0123456789ab")
             .expect("first send claims the turn");
-        assert!(turns.is_open("c-0123456789ab"));
+        assert!(turns.open_age("c-0123456789ab").is_some());
         assert!(
             turns.try_open("c-0123456789ab").is_none(),
             "the second send is refused"
@@ -6379,7 +6375,7 @@ mod tests {
             "another conversation is free"
         );
         drop(first);
-        assert!(!turns.is_open("c-0123456789ab"));
+        assert!(!turns.open_age("c-0123456789ab").is_some());
         assert!(
             turns.try_open("c-0123456789ab").is_some(),
             "released on drop"
