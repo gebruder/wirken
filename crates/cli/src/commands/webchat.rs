@@ -1598,7 +1598,9 @@ function renderAbout() {
   renderVaultRows(grid);
   const siem = status.siem || {};
   if (siem.configured) {
-    const v = el('span', null, siem.target + (siem.endpoint_host ? ' · ' + siem.endpoint_host : '') + ' · last ship ');
+    // The target only: where it ships to is an endpoint, and endpoints
+    // stay in the config file.
+    const v = el('span', null, siem.target + ' · last ship ');
     v.appendChild(unknownNode());
     kvRow(grid, 'SIEM', v);
   } else {
@@ -1623,7 +1625,7 @@ function renderAbout() {
   kvRow(grid, 'audit', av);
   kvRow(grid, 'threats', el('span', null, 'scanned on inbound messages'));
   about.appendChild(grid);
-  about.appendChild(el('div', 'foot', 'Blurple = the gateway does not know. Named here, omitted from the default screen.'));
+  about.appendChild(el('div', 'foot', 'Blurple = the gateway does not know. Named here, omitted from the default screen. Underlined = opens here.'));
 }
 // Capabilities and the vault are fetched when About opens, never on
 // the default screen and never on the status poll: the capabilities
@@ -1786,7 +1788,6 @@ function renderVaultRows(grid) {
         const parts = ['auth ' + (c.auth || 'none')];
         if (c.provider) parts.push('via ' + c.provider);
         if (Array.isArray(c.credentials) && c.credentials.length) parts.push('uses ' + c.credentials.join(', '));
-        if (t && t.verified === false && t.refused_reason) parts.push(t.refused_reason);
         capRow(list, c.name, right, parts.join(' · '));
       }
       kvRow(grid, 'connectors', disclosure(el('span', null, v.connectors.length + ' MCP'), list));
@@ -2497,7 +2498,6 @@ pub struct SiemSummary {
     pub target: String,
     /// Host of the endpoint only. The path of a Sentinel endpoint
     /// embeds the data-collection-rule id, which is topology.
-    pub endpoint_host: Option<String>,
     /// Whether the typed-event pipe is opted in.
     pub typed_pipe: bool,
 }
@@ -2506,21 +2506,8 @@ impl SiemSummary {
     pub fn from_config(cfg: &wirken_audit::siem::SiemConfig) -> Self {
         Self {
             target: format!("{:?}", cfg.target).to_ascii_lowercase(),
-            endpoint_host: url_host(&cfg.endpoint),
             typed_pipe: cfg.typed_forwarding_opted_in(),
         }
-    }
-}
-
-/// Host part of a URL, without scheme, credentials, path or query.
-fn url_host(url: &str) -> Option<String> {
-    let rest = url.split("://").nth(1)?;
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let host = authority.rsplit('@').next()?;
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_string())
     }
 }
 
@@ -2722,7 +2709,6 @@ pub async fn status_snapshot(
     let org_url = wirken_gateway::org::load_org_url(&cfg.data_dir);
     let org = json!({
         "configured": org_url.is_some(),
-        "url_host": org_url.as_deref().and_then(url_host),
         "pubkey_fingerprint": key_file_fingerprint(&cfg.data_dir.join(wirken_gateway::org::ORG_CONFIG_PUBKEY_FILE)),
         "unsigned_allowed": parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG"),
         "stale_allowed": parse_boolean_escape("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
@@ -2767,7 +2753,6 @@ pub async fn status_snapshot(
         Some(s) => json!({
             "configured": true,
             "target": s.target,
-            "endpoint_host": s.endpoint_host,
             "typed_pipe": s.typed_pipe,
             "last_ship": Value::Null,
             "lag": Value::Null,
@@ -3515,14 +3500,11 @@ pub fn credentials_snapshot(cfg: &wirken_gateway::config::GatewayConfig) -> serd
                     } => {
                         trust.insert(server_name, json!({ "verified": true, "signer": signer }));
                     }
-                    SessionEvent::McpEntryRefused {
-                        server_name,
-                        reason,
-                    } => {
-                        trust.insert(
-                            server_name,
-                            json!({ "verified": false, "refused_reason": reason }),
-                        );
+                    // The reason names the flag that would weaken the
+                    // check; the verdict is enough, and the hatch banner
+                    // covers the case where the flag is set.
+                    SessionEvent::McpEntryRefused { server_name, .. } => {
+                        trust.insert(server_name, json!({ "verified": false }));
                     }
                     _ => {}
                 }
@@ -3966,7 +3948,7 @@ mod tests {
         credentials_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
         parse_approval_path, parse_imported_path, parse_session_events_path, parse_session_path,
         percent_decode, session_events, skill_frontmatter, skill_signature_word, status_snapshot,
-        tool_tier_entry, url_host, verify_result_json,
+        tool_tier_entry, verify_result_json,
     };
 
     #[test]
@@ -4469,7 +4451,6 @@ mod tests {
         .unwrap();
         let siem = Some(SiemSummary {
             target: "sentinel".into(),
-            endpoint_host: Some("dce.example".into()),
             typed_pipe: true,
         });
         let cfg = cfg_at(dir.path());
@@ -4510,6 +4491,8 @@ mod tests {
             "sidecar_binary",
             "hmac_secret",
             "endpoint",
+            "endpoint_host",
+            "url_host",
             "hostname",
             "gateway_pid",
         ] {
@@ -4518,10 +4501,74 @@ mod tests {
                 "key {forbidden} present: {all:?}"
             );
         }
+
+        // No value shaped like a hostname either: dot-separated
+        // lowercase labels with a letter somewhere, that is not a
+        // version number or a file name. A host is where something
+        // is, and the page has no use for where anything is.
+        fn strings(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) => m.values().for_each(|v| strings(v, out)),
+                serde_json::Value::Array(a) => a.iter().for_each(|v| strings(v, out)),
+                serde_json::Value::String(s) => out.push(s.clone()),
+                _ => {}
+            }
+        }
+        let mut values = Vec::new();
+        strings(&snap, &mut values);
+        assert!(!values.is_empty());
+        for value in &values {
+            let labels: Vec<&str> = value.split('.').collect();
+            if labels.len() < 2 {
+                continue;
+            }
+            let label_shaped = labels.iter().all(|l| {
+                !l.is_empty()
+                    && l.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            });
+            let last = labels[labels.len() - 1];
+            let file_name = ["json", "db", "toml", "md", "log", "txt"].contains(&last);
+            let version = last.chars().all(|c| c.is_ascii_digit());
+            let has_letter = value.chars().any(|c| c.is_ascii_alphabetic());
+            assert!(
+                !(label_shaped && has_letter && !file_name && !version),
+                "hostname-shaped value in the snapshot: {value}"
+            );
+        }
+        let script = page_script();
+        assert!(
+            !script.contains("endpoint_host") && !script.contains("url_host"),
+            "the page reads no host"
+        );
+    }
+
+    /// A count of alarms is drawn only when the log was read. No file
+    /// is no alarms; a file that cannot be read is unknown, and the
+    /// page draws the null as such rather than as zero.
+    #[tokio::test]
+    async fn an_unreadable_alarm_log_is_unknown_not_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(
+            snap["audit"]["alarms"],
+            serde_json::json!([]),
+            "no file is no alarms"
+        );
+        std::fs::create_dir(dir.path().join("audit-alarms.log")).unwrap();
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert!(
+            snap["audit"]["alarms"].is_null(),
+            "an unreadable log is unknown"
+        );
+        assert!(page_script().contains(
+            "Array.isArray(audit.alarms) ? el('span', null, audit.alarms.length + ' alarms on disk') : unknownNode()"
+        ));
     }
 
     #[test]
-    fn siem_summary_keeps_target_and_host_only() {
+    fn siem_summary_keeps_the_target_only() {
         let cfg = wirken_audit::siem::SiemConfig {
             target: wirken_audit::siem::SiemTarget::Sentinel,
             endpoint: "https://dce-abc.eastus-1.ingest.monitor.azure.com/dataCollectionRules/dcr-secret-id/streams/Custom-X?api-version=2023-01-01".into(),
@@ -4537,30 +4584,13 @@ mod tests {
         };
         let s = SiemSummary::from_config(&cfg);
         assert_eq!(s.target, "sentinel");
-        assert_eq!(
-            s.endpoint_host.as_deref(),
-            Some("dce-abc.eastus-1.ingest.monitor.azure.com")
-        );
         assert!(s.typed_pipe);
+        // Where it ships to is an endpoint: host, path and query all
+        // stay in the config file.
         let debug = format!("{s:?}");
-        assert!(
-            !debug.contains("secret") && !debug.contains("dcr-"),
-            "{debug}"
-        );
-    }
-
-    #[test]
-    fn url_host_strips_scheme_credentials_path_and_query() {
-        assert_eq!(
-            url_host("https://user:pw@host.example:8443/a/b?c=d").as_deref(),
-            Some("host.example:8443")
-        );
-        assert_eq!(
-            url_host("http://localhost:18790").as_deref(),
-            Some("localhost:18790")
-        );
-        assert_eq!(url_host("not a url"), None);
-        assert_eq!(url_host("https:///path"), None);
+        for withheld in ["secret", "dcr-", "azure", "ingest", "eastus"] {
+            assert!(!debug.contains(withheld), "{withheld} in {debug}");
+        }
     }
 
     /// The six boolean hatches the status route reports are the six the
@@ -5604,10 +5634,37 @@ mod tests {
             }}"##,
         )
         .unwrap();
+        {
+            use wirken_audit::{SessionEvent, SessionLog, TrustLevel};
+            let log =
+                wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+            let handle = log.handle_for(wirken_audit::SessionId::new("gateway-mcp".to_string()));
+            log.append(
+                &handle,
+                TrustLevel::System,
+                SessionEvent::McpEntryRefused {
+                    server_name: "files".into(),
+                    reason: "entry is unsigned and WIRKEN_ALLOW_UNSIGNED_MCP is not set".into(),
+                },
+            )
+            .unwrap();
+            log.append(
+                &handle,
+                TrustLevel::System,
+                SessionEvent::McpEntryVerified {
+                    server_name: "github".into(),
+                    signer: "0123456789abcdef0123456789abcdef".into(),
+                },
+            )
+            .unwrap();
+        }
         let snap = credentials_snapshot(&cfg);
         let text = serde_json::to_string(&snap).unwrap();
         for leak in [
             "mcp.example.internal",
+            "WIRKEN_ALLOW",
+            "is not set",
+            "refused_reason",
             "secret-path",
             "/opt/tools",
             "run-files-server",
@@ -5635,15 +5692,26 @@ mod tests {
         assert_eq!(files["auth"], "environment");
         assert_eq!(files["credentials"], serde_json::json!(["files-token"]));
         assert_eq!(files["signed"], false);
+        assert_eq!(
+            files["trust"],
+            serde_json::json!({ "verified": false }),
+            "refused, and no more"
+        );
         let github = &connectors[1];
         assert_eq!(github["transport"], "http");
         assert_eq!(github["auth"], "bearer");
         assert_eq!(github["credentials"], serde_json::json!(["github-token"]));
         assert_eq!(github["signed"], true);
         assert_eq!(github["signer_fingerprint"], "0123456789abcdef");
+        assert_eq!(github["trust"]["verified"], true);
+        assert_eq!(
+            github["trust"]["signer"],
+            "0123456789abcdef0123456789abcdef"
+        );
         assert!(
-            github["trust"].is_null(),
-            "no proxy verdict on disk means none"
+            connectors
+                .iter()
+                .all(|c| c["trust"].get("refused_reason").is_none())
         );
 
         // An unreadable config is unknown, not "none configured".
@@ -5669,6 +5737,7 @@ mod tests {
             ".env",
             "c.created_at",
             "c.expires_at",
+            "refused_reason",
         ] {
             assert!(
                 !vault.contains(field),
