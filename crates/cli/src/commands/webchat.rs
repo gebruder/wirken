@@ -996,7 +996,11 @@ function renderEvent(ev, live) {
     }
     case 'permission_denied': {
       const entry = pendingToolRowFor(ev.tool);
-      if (entry) setGlyph(entry, '✕', 'failed', 'refused');
+      const operatorDecision = !ev.timed_out && ev.denied_via && ev.denied_via.kind === 'sse';
+      // One event, one word: a denial is the operator's, an expiry is
+      // the window's, a refusal is the gate's own (fail-closed).
+      if (entry) setGlyph(entry, ev.timed_out ? '○' : '✕', ev.timed_out ? 'awaiting' : 'failed',
+        ev.timed_out ? 'expired' : operatorDecision ? 'denied' : 'refused');
       let line, glyph;
       if (ev.timed_out) {
         line = 'expired — treated as denied · ' + hhmm(new Date(ev.ts)) + ' · recorded';
@@ -1357,12 +1361,14 @@ function renderStatusValues() {
   // width takes its separator with it.
   const items = [];
   const agent = status.agent || {};
-  if (agent.model) items.push({ node: el('span', null, (agent.id || 'default') + ' · ' + agent.model), optional: false });
+  const ag = el('span', null, agent.id || 'default');
+  if (agent.model) ag.appendChild(el('span', 'optional', ' · ' + agent.model));
+  items.push({ node: ag, optional: false });
   const sandbox = status.sandbox || {};
   if (sandbox.mode) {
     const sb = el('span', null, sandbox.mode + ' ');
     sb.appendChild(el('span', 'hedge', '(configured)'));
-    items.push({ node: sb, optional: false });
+    items.push({ node: sb, optional: true });
   }
   const egress = status.egress || {};
   if (egress.mode) items.push({ node: el('span', null, egress.mode === 'none' ? 'no egress' : 'egress: ' + egress.mode), optional: true });
