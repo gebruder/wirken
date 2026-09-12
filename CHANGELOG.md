@@ -86,6 +86,25 @@ tagged.
 
 ### Changed
 
+- `GET /api/approvals` on the webchat port: this browser's pending
+  approvals with the message that triggered each, the configured
+  window, and no countdown (no deadline is stored), plus a count per
+  channel of everyone else's. Another channel's request id and
+  trigger text never leave the gateway through this route.
+
+- `POST /api/approvals/{id}` refuses a request that belongs to
+  another channel's session. A decision from the webchat page is
+  made as actor `webchat` with no per-operator identity, which is
+  right for this page's own conversation and for nothing else;
+  previously any id, however obtained, could be resolved from here
+  and would have routed around that channel's approver list.
+
+- The webchat page shows a `N on <channel>` badge in its status
+  strip while other channels have pending approvals, and none at
+  zero; a pending card survives a reload, aged from when the gate
+  asked, and is settled from the decision route's reply when no
+  stream is open to acknowledge it.
+
 - The webchat chat route runs the prompt-injection detector on each
   inbound message the way the adapter message loop does, and writes
   `message.threat_flagged` on a hit. Webchat was the one inbound

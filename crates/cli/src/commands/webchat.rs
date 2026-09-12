@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use wirken_agent::sse_approval_gate::resolve_webchat_timeout;
 use wirken_agent::{AgentFactory, session_id_for};
 use wirken_audit::{ActorKind, AlarmLog, AlarmVerifyStatus, AuditEvent, AuditWriter, SessionId};
 use wirken_gateway::adapter_registry::AdapterRegistry;
@@ -545,7 +546,7 @@ function approvalSentence(ev) {
 function renderApproval(ev) {
   if (approvalCurrent) { approvalQueue.push(ev); return; }
   approvalCurrent = ev;
-  const askedAt = Date.now();
+  const askedAt = Date.now() - (isSet(ev.age_seconds) ? Number(ev.age_seconds) * 1000 : 0);
   const card = el('div', 'approval');
   card.id = 'approval-' + ev.request_id;
   card.setAttribute('role', 'group');
@@ -614,11 +615,18 @@ function renderApproval(ev) {
     card.dataset.decision = decision;
     card.dataset.reason = r;
     try {
-      await fetch('/api/approvals/' + encodeURIComponent(ev.request_id), {
+      const res = await fetch('/api/approvals/' + encodeURIComponent(ev.request_id), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      if (!turnOpen) {
+        // No stream will carry the ack; the reply is the ack.
+        let reply = null;
+        try { reply = await res.json(); } catch (e2) { reply = null; }
+        ackApproval(ev.request_id, reply && reply.result ? reply.result : 'unknown_key');
+        pollEventsFor(30000);
+      }
     } catch (e) {
       // The ack will not arrive. Say so and let the operator retry.
       approveBtn.disabled = false;
@@ -661,6 +669,9 @@ function ackApproval(requestId, result) {
     } else if (turnOpen) {
       setTurn('turn open');
       lockComposer('Waiting for the agent…');
+    } else {
+      setTurn(null);
+      unlockComposer();
     }
   }
 }
@@ -861,6 +872,10 @@ function startEventPolling() {
 }
 function stopEventPolling() {
   if (eventsTimer) { clearInterval(eventsTimer); eventsTimer = null; }
+}
+function pollEventsFor(ms) {
+  startEventPolling();
+  setTimeout(() => { if (!turnOpen) stopEventPolling(); }, ms);
 }
 
 function compactArgs(call) {
@@ -1301,6 +1316,7 @@ function isSet(v) { return v !== null && v !== undefined; }
 function unknownNode(text) { return el('span', 'unknown', text || 'unknown'); }
 function valueOrUnknown(v, text) { return isSet(v) ? el('span', null, text) : unknownNode(); }
 
+let approvals = null;
 async function loadStatus() {
   let snapshot;
   try {
@@ -1309,7 +1325,24 @@ async function loadStatus() {
     snapshot = await res.json();
   } catch (e) { return; }
   status = snapshot;
+  try {
+    const res = await fetch('/api/approvals');
+    if (res.ok) approvals = await res.json();
+  } catch (e) { /* the badge and the restore wait for the next poll */ }
   renderStatus();
+  restorePendingCards();
+}
+// A pending decision outlives the stream that carried it: after a
+// reload the card is drawn again from the queue, aged from when the
+// gate asked, not from now. Its decision goes to the same route and
+// is settled from that route's reply, since no stream will ack it.
+function restorePendingCards() {
+  if (!approvals || !Array.isArray(approvals.mine)) return;
+  for (const req of approvals.mine) {
+    if (document.getElementById('approval-' + req.request_id)) continue;
+    if (approvalCurrent && approvalCurrent.request_id === req.request_id) continue;
+    renderApproval(req);
+  }
 }
 function renderStatus() {
   if (!status) return;
@@ -1382,6 +1415,14 @@ function renderStatusValues() {
       (budget.window === 'day' ? 'today' : 'this ' + budget.window));
     b.title = 'agent budget · all channels';
     items.push({ node: b, optional: false });
+  }
+  const others = approvals && approvals.other_channels ? approvals.other_channels : { count: 0, by_channel: {} };
+  if (others.count > 0) {
+    const channels = Object.keys(others.by_channel || {});
+    const where = channels.length === 1 ? channels[0] : 'other channels';
+    const badge = el('span', 'chip chip-neutral', others.count + ' on ' + where);
+    badge.title = 'pending approvals on other channels · decide there';
+    items.push({ node: badge, optional: false });
   }
   const dot = el('button', 'writer-dot' + (audit.writer_halted ? ' halted' : ''));
   dot.type = 'button';
@@ -1632,6 +1673,19 @@ pub async fn serve(
                 }
                 let cfg = super::config();
                 let body = super::import::read_route_json(&cfg, &route);
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
+            } else if first_line.starts_with("GET /api/approvals ") {
+                // GET /api/approvals — this browser's pending decisions
+                // with their trigger text, and a count of everyone
+                // else's. Other channels' request ids and messages stay
+                // on their channel: an id is the only thing standing
+                // between a webchat tab and a Telegram user's approval.
+                if let Some(resp) = api_preflight(&request, port, false) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let body = approvals_snapshot(&pending_approvals);
+                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/status ") {
                 // GET /api/status — one snapshot of the gateway's
@@ -1998,6 +2052,20 @@ pub async fn serve(
                     }
                 };
 
+                // A decision made here is made as actor "webchat" with no
+                // per-operator identity. That is acceptable for this
+                // browser's own conversation and for nothing else: a
+                // request that belongs to another channel's session is
+                // refused, whatever its id, so enumerating ids can never
+                // become a way around that channel's approver list.
+                if approval_belongs_to_webchat(&pending_approvals, &request_id) == Some(false) {
+                    let _ = stream
+                        .write_all(
+                            json_forbidden("approvals are decided on their own channel").as_bytes(),
+                        )
+                        .await;
+                    return;
+                }
                 let resolve = pending_approvals.resolve(&request_id, decision);
                 let ack = match resolve {
                     ResolveResult::Accepted => AckResult::Accepted,
@@ -2396,15 +2464,77 @@ fn parse_session_events_path(first_line: &str) -> Option<(String, Option<u64>)> 
     Some((decoded, after))
 }
 
+/// The channel segment of a `{agent}/{channel}/{conversation}` id,
+/// when the id has that shape.
+fn session_channel(session_id: &str) -> Option<&str> {
+    let mut parts = session_id.splitn(3, '/');
+    let _agent = parts.next()?;
+    let channel = parts.next()?;
+    let conversation = parts.next()?;
+    if conversation.is_empty() {
+        None
+    } else {
+        Some(channel)
+    }
+}
+
 /// The events route serves webchat sessions only. The id is
 /// `{agent}/{channel}/{conversation}`; anything whose channel segment
 /// is not `webchat` is another channel's record.
 fn events_route_allowed(session_id: &str) -> bool {
-    let mut parts = session_id.splitn(3, '/');
-    let _agent = parts.next();
-    let channel = parts.next();
-    let conversation = parts.next();
-    channel == Some("webchat") && conversation.is_some_and(|c| !c.is_empty())
+    session_channel(session_id) == Some("webchat")
+}
+
+/// Whether a pending approval belongs to a webchat session. `None`
+/// when the queue holds no such entry, which the resolve path reports
+/// as an unknown key exactly as before.
+fn approval_belongs_to_webchat(queue: &PendingApprovalQueue, request_id: &str) -> Option<bool> {
+    queue
+        .show(request_id)
+        .map(|d| session_channel(&d.agent_id) == Some("webchat"))
+}
+
+/// This browser's pending approvals, with the message that triggered
+/// each, and a count of every other channel's. The trigger text of a
+/// request from another channel is that channel's user's message and
+/// never leaves the gateway through this route; neither does the
+/// request id.
+///
+/// `remaining_seconds` is null: the queue stores when a request was
+/// made but not the deadline the gate is waiting on, so a countdown
+/// would be a guess. `timeout_seconds` is the window the webchat gate
+/// applies, as configured.
+fn approvals_snapshot(queue: &PendingApprovalQueue) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let timeout = resolve_webchat_timeout().as_secs();
+    let mut mine = Vec::new();
+    let mut by_channel: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for entry in queue.list() {
+        if session_channel(&entry.agent_id) == Some("webchat") {
+            let trigger = queue
+                .show(&entry.request_id)
+                .and_then(|d| d.trigger_message);
+            mine.push(json!({
+                "request_id": entry.request_id,
+                "agent_id": entry.agent_id,
+                "tool_name": entry.tool_name,
+                "action_key": entry.action_key,
+                "requested_tier": entry.requested_tier,
+                "requested_at": entry.requested_at.to_rfc3339(),
+                "age_seconds": entry.age_seconds,
+                "timeout_seconds": timeout,
+                "remaining_seconds": Value::Null,
+                "trigger_message": trigger,
+            }));
+        } else {
+            let channel = session_channel(&entry.agent_id)
+                .unwrap_or("unknown")
+                .to_string();
+            *by_channel.entry(channel).or_insert(0) += 1;
+        }
+    }
+    let count: u64 = by_channel.values().sum();
+    json!({ "mine": mine, "other_channels": { "count": count, "by_channel": by_channel } })
 }
 
 /// First 16 characters of a hex value carried on a row, for a
@@ -2999,12 +3129,13 @@ mod tests {
     use tokio::sync::Mutex;
     use wirken_audit::AlarmLog;
     use wirken_gateway::adapter_registry::AdapterRegistry;
+    use wirken_gateway::pending_approvals::PendingApprovalQueue;
 
     use super::{
-        HTML, ImportedRoute, SiemSummary, StatusInputs, api_preflight, events_route_allowed,
-        is_webchat_host, is_webchat_origin, parse_approval_path, parse_imported_path,
-        parse_session_events_path, parse_session_path, percent_decode, session_events,
-        status_snapshot, url_host,
+        HTML, ImportedRoute, SiemSummary, StatusInputs, api_preflight, approval_belongs_to_webchat,
+        approvals_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
+        parse_approval_path, parse_imported_path, parse_session_events_path, parse_session_path,
+        percent_decode, session_events, status_snapshot, url_host,
     };
 
     #[test]
@@ -4074,6 +4205,98 @@ mod tests {
             "one word per decision"
         );
         assert!(HTML.contains(".tool-row .glyph.neutral { color: var(--accent-300); }"));
+    }
+
+    fn pending(agent_id: &str, trigger: &str) -> wirken_gateway::pending_approvals::PendingRequest {
+        wirken_gateway::pending_approvals::PendingRequest {
+            agent_id: agent_id.into(),
+            tool_name: "exec".into(),
+            action_key: "shell:psql".into(),
+            requested_tier: "tier3".into(),
+            trigger_message: Some(trigger.into()),
+        }
+    }
+
+    /// The list carries this browser's requests with their trigger text
+    /// and only a count for everyone else's. Another channel's request
+    /// id and message never appear.
+    #[test]
+    fn approvals_snapshot_scopes_to_webchat_and_counts_the_rest() {
+        let queue = PendingApprovalQueue::new();
+        let (mine_id, _rx1) =
+            queue.register(pending("default/webchat/webchat-default", "clean up api-2"));
+        let (telegram_id, _rx2) = queue.register(pending(
+            "default/telegram/-1001234",
+            "a telegram user's words",
+        ));
+        let (_signal_id, _rx3) =
+            queue.register(pending("default/signal/+15550100", "a signal user's words"));
+
+        let v = approvals_snapshot(&queue);
+        let mine = v["mine"].as_array().unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["request_id"], mine_id);
+        assert_eq!(mine[0]["trigger_message"], "clean up api-2");
+        assert!(
+            mine[0]["remaining_seconds"].is_null(),
+            "no deadline is stored"
+        );
+        assert!(mine[0]["timeout_seconds"].as_u64().unwrap() > 0);
+        assert_eq!(v["other_channels"]["count"], 2);
+        assert_eq!(v["other_channels"]["by_channel"]["telegram"], 1);
+        assert_eq!(v["other_channels"]["by_channel"]["signal"], 1);
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(
+            !text.contains(&telegram_id),
+            "another channel's request id stays on its channel"
+        );
+        assert!(!text.contains("telegram user's words") && !text.contains("signal user's words"));
+    }
+
+    /// A decision posted here is refused for a request that belongs to
+    /// another channel's session, and an unknown id is still unknown.
+    #[test]
+    fn a_decision_for_another_channel_is_refused() {
+        let queue = PendingApprovalQueue::new();
+        let (mine_id, _rx1) = queue.register(pending("default/webchat/webchat-default", "x"));
+        let (telegram_id, _rx2) = queue.register(pending("default/telegram/-1001234", "y"));
+        assert_eq!(approval_belongs_to_webchat(&queue, &mine_id), Some(true));
+        assert_eq!(
+            approval_belongs_to_webchat(&queue, &telegram_id),
+            Some(false)
+        );
+        assert_eq!(approval_belongs_to_webchat(&queue, "not-a-request"), None);
+        assert!(
+            SERVER_SOURCE.contains(
+                "approval_belongs_to_webchat(&pending_approvals, &request_id) == Some(false)"
+            ),
+            "the decision route consults the guard before resolving"
+        );
+    }
+
+    /// The badge for other channels' pending approvals is drawn only
+    /// when the count is above zero, never as "0 on telegram"; and a
+    /// pending card survives a reload by being restored from the list.
+    #[test]
+    fn the_badge_disappears_at_zero_and_pending_cards_are_restored() {
+        let script = page_script();
+        let strip = script
+            .split_once("function renderStatusValues() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            strip.contains("if (others.count > 0)"),
+            "the badge is gated on a positive count: {strip}"
+        );
+        assert!(strip.contains("' on '"), "the badge names the channel");
+        assert!(script.contains("function restorePendingCards("));
+        assert!(
+            script.contains("age_seconds"),
+            "a restored card's age comes from the queue, not from now"
+        );
     }
 
     #[test]
