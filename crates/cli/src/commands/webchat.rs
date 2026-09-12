@@ -161,6 +161,12 @@ const HTML: &str = r#"<!DOCTYPE html>
   .decision .glyph.neutral { color: var(--accent-300); }
   .decision .glyph.failed { color: var(--danger-text); }
   #record { left: auto; right: 12px; }
+  .verify-box { margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--neutral-800); display: flex; flex-direction: column; gap: 8px; }
+  .verify-head { font-weight: 500; display: flex; gap: 8px; align-items: baseline; }
+  .verify-head .meta { font-weight: 400; color: rgba(233,233,237,.5); font-size: 12px; margin-left: auto; }
+  .verify-caveat { font-size: 12px; color: rgba(233,233,237,.62); line-height: 1.5; }
+  .verify-run { width: 100%; text-align: center; }
+  .verify-note { font-size: 11px; color: rgba(233,233,237,.45); }
 
   /* Own blocks: refusals, errors. Never spliced into the assistant's
      sentence. */
@@ -1078,8 +1084,24 @@ function renderRecord() {
   kvRow(grid, 'context now', unknownNode());
   const lc = r.last_compaction;
   kvRow(grid, 'compaction', lc && isSet(lc.seq) ? el('span', null, 'row ' + lc.seq + ' · ' + (lc.dropped_messages ?? '?') + ' messages dropped') : el('span', null, 'none'));
-  kvRow(grid, 'verify', el('span', null, 'not run from here · wirken audit verify'));
   record.appendChild(grid);
+  // The verify box is on screen in its idle state before the route
+  // that runs it exists, so the caveat is already here when the
+  // button lights up.
+  const box = el('div', 'verify-box');
+  const bh = el('div', 'verify-head', 'Verify chain');
+  bh.appendChild(el('span', 'meta', 'not run yet'));
+  box.appendChild(bh);
+  box.appendChild(el('div', 'verify-caveat',
+    'Report-only: no operator trust anchor was consulted, so a same-UID rewrite is not detected. ' +
+    'Verify against a key kept off this machine for that.'));
+  const run = el('button', 'btn verify-run', 'Run verify');
+  run.type = 'button';
+  run.disabled = true;
+  run.title = 'needs the verify route';
+  box.appendChild(run);
+  box.appendChild(el('div', 'verify-note', 'needs the verify route · until then: wirken audit verify'));
+  record.appendChild(box);
   record.appendChild(el('div', 'foot', 'Counts are from the record. Nothing here is verified until a verify pass says so.'));
 }
 function setRecordOpen(open) {
@@ -3919,6 +3941,61 @@ mod tests {
             "an ack must not say recorded: {ack}"
         );
         assert!(script.contains("' · recorded'"), "a row says recorded");
+    }
+
+    /// The acknowledgement draws "accepted"; only a decision row on the
+    /// poll can turn that into "recorded". Structurally: the ack
+    /// renderer writes the accepted line, the one function that
+    /// replaces a decision line is called only from the two decision
+    /// row cases, and the poll loop never touches decision lines
+    /// itself.
+    #[test]
+    fn accepted_flips_to_recorded_only_when_the_row_arrives() {
+        let script = page_script();
+        let body = |name: &str| {
+            script
+                .split_once(name)
+                .unwrap_or_else(|| panic!("{name} exists"))
+                .1
+                .split_once("\n}")
+                .unwrap()
+                .0
+                .to_string()
+        };
+        let ack = body("function ackApproval(");
+        assert!(ack.contains("'accepted'"), "the ack draws accepted: {ack}");
+        assert!(
+            ack.contains("decisionLines.set("),
+            "the ack line is kept so a row can replace it"
+        );
+        assert!(!ack.contains("recorded"));
+        let settle_calls = script.matches("settleDecision(ev.action_key").count();
+        assert_eq!(
+            settle_calls, 2,
+            "a line is settled from exactly the two decision row cases"
+        );
+        let render = body("function renderEvent(ev, live) {");
+        assert_eq!(
+            render.matches("settleDecision(ev.action_key").count(),
+            2,
+            "both calls live in the row renderer"
+        );
+        assert!(
+            render.contains("case 'permission_approved': {")
+                && render.contains("case 'permission_denied': {")
+        );
+        let poll = body("async function pollEvents() {");
+        assert!(
+            !poll.contains("decisionLines") && !poll.contains("addDecision("),
+            "a poll tick alone changes no decision line: {poll}"
+        );
+        // The verify box is on screen, idle, with its caveat, before the
+        // route that runs it exists.
+        let record_panel = body("function renderRecord() {");
+        assert!(record_panel.contains("'Verify chain'") && record_panel.contains("'not run yet'"));
+        assert!(record_panel.contains("Report-only: no operator trust anchor was consulted"));
+        assert!(record_panel.contains("run.disabled = true;"));
+        assert!(record_panel.contains("kvRow(grid, 'context now', unknownNode())"));
     }
 
     #[test]
