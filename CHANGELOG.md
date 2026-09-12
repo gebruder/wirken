@@ -86,6 +86,22 @@ tagged.
 
 ### Changed
 
+- `POST /api/verify` on the webchat port runs the audit chain
+  verifier and returns its verdict with the anchor caveat attached:
+  a pass from this route says the chain is internally consistent and
+  no more, because no operator trust anchor is consulted. The route
+  requires an `Origin`, is rate-limited to the control-plane limit,
+  runs one verification at a time per process and answers `409` to a
+  second, and runs the pass on the blocking pool. Hashes and key ids
+  come back as fingerprints.
+
+- The webchat page's Record panel carries a Verify chain box with
+  five states: not run yet, verifying, ok, broken, and another verify
+  is running. The caveat is on screen in every state. A pending
+  approval card restored after a reload now waits for history to
+  render first, so it joins its command from the chain row exactly
+  as a live card does.
+
 - `GET /api/approvals` on the webchat port: this browser's pending
   approvals with the message that triggered each, the configured
   window, and no countdown (no deadline is stored), plus a count per
