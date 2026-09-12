@@ -41,6 +41,30 @@ tagged.
 
 ### Added
 
+- The WebChat page has two more read routes for the About panel.
+  `GET /api/capabilities` lists what the default agent is offered:
+  every tool with the tier the gate would compute, except that a tool
+  whose tier depends on the call's arguments (`exec`,
+  `memory_read_channel`, `read_imported_chat`, `search_imported_chats`)
+  is flagged with its rule rather than given one tier, and the
+  intercepted phase tools carry no tier; the persisted grants for the
+  agent with their expiry as a timestamp; and the loaded skills with
+  their permissions, their frontmatter as written, and a signature
+  status in one of three words (`signed` with the signer, `unsigned`,
+  `unverified`). The route wakes the agent and takes its lock only if
+  it is free; during a turn it answers `busy: true` with the
+  agent-held sections null. `GET /api/credentials` lists credential
+  names from the vault without the key, every date null and
+  `metadata_available: false` until the store exposes them, and the MCP
+  connectors reduced to name, transport, auth kind, credential names,
+  whether the entry is signed and the proxy's last verdict; the
+  command, its arguments, environment values and the URL never leave
+  the config file. The About panel draws five rows from them (tools,
+  grants, skills, vault, connectors), each collapsed to a count and
+  opened in place, fetched only when the panel opens and never on the
+  status poll; an unreadable store or a busy agent is named, not drawn
+  as empty. `AgentRuntime::snapshot_tool_defs_for` is public so the
+  route lists the same tools the model is sent.
 - `GET /api/status` on the webchat port: one snapshot of the
   gateway's posture, built from files, config and in-memory lists
   only. It reports the agent's provider and model, the sandbox mode

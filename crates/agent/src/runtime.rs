@@ -4867,7 +4867,9 @@ impl Agent {
     /// the shape the recomputation had when those rows were written.
     /// They are not re-judged under a rule that postdates them; see
     /// `wirken_audit::ToolsHashVersion` for what each covers.
-    pub(crate) async fn snapshot_tool_defs_for(
+    /// Public so the webchat capabilities route can list what the model is
+    /// offered without a second copy of the filter.
+    pub async fn snapshot_tool_defs_for(
         &self,
         version: wirken_audit::ToolsHashVersion,
     ) -> Vec<crate::tool::ToolDef> {

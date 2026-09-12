@@ -17,7 +17,10 @@ use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, ResolveResult};
 use wirken_gateway::rate_limit::ControlPlaneRateLimiter;
 use wirken_gateway::session::SessionStore;
+use wirken_gateway::skill_registry::{VerifyResult as SkillSignature, verify_skill_self_signed};
 use wirken_gateway::sse_approval_registry::{AckResult, SseApprovalRegistry, SseEvent};
+use wirken_mcp_proxy::mcp_config::{McpAuth, McpConfig, McpServerConfig};
+use wirken_vault::CredentialStore;
 
 /// WebChat rate limit. 60 chat POSTs per minute is two orders of
 /// magnitude above any plausible interactive use; sized to bound
@@ -108,13 +111,21 @@ const HTML: &str = r#"<!DOCTYPE html>
   .writer-dot.halted { background: var(--danger-text); box-shadow: none; }
   .unknown { color: var(--accent-300); }
   .banner-hatch { background: rgba(145,132,217,.12); border-bottom: 1px solid rgba(145,132,217,.35); }
-  .popover { position: absolute; top: calc(100% + 6px); left: 12px; width: min(380px, calc(100vw - 24px)); background: var(--surface); border-radius: 10px; box-shadow: 0 0 0 1px #595d6c, 0 16px 40px rgba(0,0,0,.6); padding: 14px 16px; z-index: 10; font-size: 12.5px; line-height: 1.5; }
+  .popover { position: absolute; top: calc(100% + 6px); left: 12px; width: min(380px, calc(100vw - 24px)); max-height: calc(100vh - 70px); overflow-y: auto; background: var(--surface); border-radius: 10px; box-shadow: 0 0 0 1px #595d6c, 0 16px 40px rgba(0,0,0,.6); padding: 14px 16px; z-index: 10; font-size: 12.5px; line-height: 1.5; }
   .popover h2 { font-size: 14px; font-weight: 500; margin-bottom: 10px; display: flex; gap: 8px; align-items: baseline; }
   .popover h2 .meta { font-size: 12px; font-weight: 400; color: rgba(233,233,237,.5); }
   .kv { display: grid; grid-template-columns: 88px 1fr; gap: 6px 12px; }
   .kv .k { color: rgba(233,233,237,.45); }
   .kv .v { text-align: right; overflow-wrap: anywhere; }
   .kv .v .row { display: block; }
+  .kv .v details { display: block; }
+  .kv .v summary { list-style: none; cursor: pointer; text-decoration: underline dotted rgba(233,233,237,.4); text-underline-offset: 3px; }
+  .kv .v summary::-webkit-details-marker { display: none; }
+  .kv .v details[open] summary { text-decoration: none; }
+  .cap-list { display: block; text-align: left; margin: 6px 0 2px; padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,.035); }
+  .cap-list .cap { display: flex; justify-content: space-between; gap: 10px; }
+  .cap-list .cap + .cap { margin-top: 3px; }
+  .cap-list .hedge { display: block; font-size: 11.5px; color: rgba(233,233,237,.5); margin-bottom: 3px; }
   .popover .foot { margin-top: 12px; font-size: 11px; color: rgba(233,233,237,.45); }
 
   #shell { flex: 1; display: flex; min-height: 0; }
@@ -262,7 +273,7 @@ const HTML: &str = r#"<!DOCTYPE html>
     #thread { max-width: none; }
     #status { flex-wrap: wrap; }
     #status-values { flex-basis: 100%; justify-content: flex-start; }
-    .popover { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: auto; border-radius: 10px 10px 0 0; }
+    .popover { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: auto; max-height: 80vh; border-radius: 10px 10px 0 0; }
     #conversation { padding: 16px 14px 12px; }
     #composer, #turnline, #notice { padding-left: 14px; padding-right: 14px; margin-left: 0; margin-right: 0; }
   }
@@ -1583,7 +1594,8 @@ function renderAbout() {
   kvRow(grid, 'egress', egress.mode
     ? el('span', null, egress.mode === 'none' ? 'none' : egress.mode + (egress.domains && egress.domains.length ? ' · ' + egress.domains.join(', ') : ''))
     : unknownNode());
-  kvRow(grid, 'vault', unknownNode());
+  renderCapabilityRows(grid);
+  renderVaultRows(grid);
   const siem = status.siem || {};
   if (siem.configured) {
     const v = el('span', null, siem.target + (siem.endpoint_host ? ' · ' + siem.endpoint_host : '') + ' · last ship ');
@@ -1613,12 +1625,186 @@ function renderAbout() {
   about.appendChild(grid);
   about.appendChild(el('div', 'foot', 'Blurple = the gateway does not know. Named here, omitted from the default screen.'));
 }
+// Capabilities and the vault are fetched when About opens, never on
+// the default screen and never on the status poll: the capabilities
+// route wakes the agent, and the panel is the only place these are
+// drawn.
+let capabilities = null;
+let capabilitiesState = 'idle';
+let vault = null;
+let vaultState = 'idle';
+async function fetchJson(path) {
+  try {
+    const res = await fetch(path);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) { return null; }
+}
+async function loadAboutExtras() {
+  capabilitiesState = 'fetching';
+  vaultState = 'fetching';
+  const [c, v] = await Promise.all([fetchJson('/api/capabilities'), fetchJson('/api/credentials')]);
+  capabilities = c;
+  capabilitiesState = c ? 'loaded' : 'failed';
+  vault = v;
+  vaultState = v ? 'loaded' : 'failed';
+  if (!about.hidden) renderAbout();
+}
+function tierWord(tier) {
+  if (tier === 'tier1') return 'Tier 1';
+  if (tier === 'tier2') return 'Tier 2';
+  if (tier === 'tier3') return 'Tier 3';
+  return null;
+}
+// A date, never a countdown: the page's clock is not the gate's.
+function ymdhm(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function disclosure(summaryNode, list) {
+  const d = el('details');
+  const s = el('summary');
+  s.appendChild(summaryNode);
+  d.appendChild(s);
+  d.appendChild(list);
+  return d;
+}
+function capRow(list, nameText, rightText, hedgeText) {
+  const row = el('span', 'cap');
+  row.appendChild(el('code', null, nameText));
+  row.appendChild(el('span', null, rightText));
+  list.appendChild(row);
+  if (hedgeText) list.appendChild(el('span', 'hedge', hedgeText));
+}
+function pendingNode(state) {
+  if (state === 'fetching') return el('span', 'hedge', 'fetching');
+  return unknownNode();
+}
+function busyOrUnknown(c) {
+  if (c.busy) return unknownNode('busy · a turn holds the agent');
+  if (c.available === false) return unknownNode('agent did not wake');
+  return unknownNode();
+}
+function countWord(v) {
+  if (v === '*') return 'any';
+  if (Array.isArray(v)) return v.length ? String(v.length) : 'none';
+  return 'unknown';
+}
+function renderCapabilityRows(grid) {
+  if (capabilitiesState !== 'loaded') {
+    kvRow(grid, 'tools', pendingNode(capabilitiesState));
+    kvRow(grid, 'grants', pendingNode(capabilitiesState));
+    kvRow(grid, 'skills', pendingNode(capabilitiesState));
+    return;
+  }
+  const c = capabilities;
+  // The agent-held sections are null while a turn holds the lock; the
+  // grants come from the store and are drawn regardless.
+  if (Array.isArray(c.tools)) {
+    const byArg = c.tools.filter((t) => t.tier_depends_on_arguments).length;
+    const list = el('span', 'cap-list');
+    for (const t of c.tools) {
+      // A tool whose tier the gate reads off the arguments is flagged,
+      // not given the tier of one imagined call.
+      let right = t.tier_depends_on_arguments ? 'by argument' : (tierWord(t.tier) || 'no tier');
+      if (t.org_policy === 'blocked') right += ' · blocked by org';
+      else if (t.org_policy === 'not allowed') right += ' · not allowed by org';
+      capRow(list, t.name, right, t.tier_rule);
+    }
+    const summary = el('span', null, c.tools.length + ' offered' + (byArg ? ' · ' + byArg + ' decided per call' : ''));
+    kvRow(grid, 'tools', disclosure(summary, list));
+  } else {
+    kvRow(grid, 'tools', busyOrUnknown(c));
+  }
+  if (Array.isArray(c.grants)) {
+    if (c.grants.length) {
+      const list = el('span', 'cap-list');
+      for (const g of c.grants) {
+        capRow(list, g.action_key, 'until ' + ymdhm(g.expires_at), 'by ' + (g.approved_by || 'unknown') + ' · ' + ymdhm(g.approved_at));
+      }
+      kvRow(grid, 'grants', disclosure(el('span', null, c.grants.length + ' live'), list));
+    } else {
+      kvRow(grid, 'grants', el('span', null, 'none live'));
+    }
+  } else {
+    kvRow(grid, 'grants', unknownNode());
+  }
+  if (Array.isArray(c.skills)) {
+    if (c.skills.length) {
+      const list = el('span', 'cap-list');
+      for (const s of c.skills) {
+        // Three words, never a tick: signed carries who signed it.
+        let right = s.signature;
+        if (s.signature === 'signed' && s.signer) right += ' · ' + String(s.signer).slice(0, 16);
+        if (s.available === false) right += ' · unavailable';
+        const p = s.permissions || {};
+        const eg = p.egress || {};
+        const hedge = 'tools ' + countWord(p.tools) + ' · egress ' + (eg.mode || 'unknown') + ' · credentials ' + countWord(p.credentials) + (s.model_invocable === false ? ' · not model-invocable' : '');
+        capRow(list, s.name, right, hedge);
+      }
+      kvRow(grid, 'skills', disclosure(el('span', null, c.skills.length + ' loaded'), list));
+    } else {
+      kvRow(grid, 'skills', el('span', null, 'none loaded'));
+    }
+  } else {
+    kvRow(grid, 'skills', busyOrUnknown(c));
+  }
+}
+function renderVaultRows(grid) {
+  if (vaultState !== 'loaded') {
+    kvRow(grid, 'vault', pendingNode(vaultState));
+    kvRow(grid, 'connectors', pendingNode(vaultState));
+    return;
+  }
+  const v = vault;
+  if (Array.isArray(v.credentials)) {
+    if (v.credentials.length) {
+      // Names only: the store exposes no dates yet, and the row says so.
+      const list = el('span', 'cap-list');
+      for (const c of v.credentials) capRow(list, c.name, '');
+      const summary = el('span', null, v.credentials.length + ' credentials · dates ');
+      summary.appendChild(unknownNode());
+      kvRow(grid, 'vault', disclosure(summary, list));
+    } else {
+      kvRow(grid, 'vault', el('span', null, 'none stored'));
+    }
+  } else {
+    kvRow(grid, 'vault', unknownNode());
+  }
+  if (Array.isArray(v.connectors)) {
+    if (v.connectors.length) {
+      const list = el('span', 'cap-list');
+      for (const c of v.connectors) {
+        // Name and transport. What it runs or where it connects stays
+        // in the config file.
+        let right = c.transport + ' · ' + (c.signed ? 'signed' : 'unsigned');
+        const t = c.trust;
+        if (t && t.verified === true) right += ' · admitted';
+        else if (t && t.verified === false) right += ' · refused';
+        const parts = ['auth ' + (c.auth || 'none')];
+        if (c.provider) parts.push('via ' + c.provider);
+        if (Array.isArray(c.credentials) && c.credentials.length) parts.push('uses ' + c.credentials.join(', '));
+        if (t && t.verified === false && t.refused_reason) parts.push(t.refused_reason);
+        capRow(list, c.name, right, parts.join(' · '));
+      }
+      kvRow(grid, 'connectors', disclosure(el('span', null, v.connectors.length + ' MCP'), list));
+    } else {
+      kvRow(grid, 'connectors', el('span', null, 'none configured'));
+    }
+  } else {
+    kvRow(grid, 'connectors', unknownNode());
+  }
+}
 function setAboutOpen(open) {
   if (open && !status) return;
   if (open) record.hidden = true;
   about.hidden = !open;
   wordmark.setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (open) renderAbout();
+  // The fetch is started first so the first draw says "fetching", not
+  // unknown, for the rows it is about to fill.
+  if (open) { loadAboutExtras(); renderAbout(); }
 }
 wordmark.addEventListener('click', () => setAboutOpen(about.hidden));
 document.addEventListener('keydown', (e) => {
@@ -1655,7 +1841,8 @@ loadTranscript(WEBCHAT_LOG_ID).then(() => {
 input.focus();
 </script>
 </body>
-</html>"#;
+</html>
+"#;
 
 /// Serve the webchat UI on a TCP port.
 /// Minimal HTTP server — no framework dependency.
@@ -1790,6 +1977,32 @@ pub async fn serve(
                     return;
                 }
                 let body = approvals_snapshot(&pending_approvals);
+                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
+            } else if first_line.starts_with("GET /api/capabilities ") {
+                // GET /api/capabilities — what the default agent is
+                // offered and gated by: tools with their tier rule,
+                // persisted grants, skills with their permissions and
+                // signature status. Wakes the agent and holds its lock
+                // briefly; a turn in flight gets "busy", never a wait.
+                if let Some(resp) = api_preflight(&request, port, false) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let body = capabilities_snapshot(&cfg, &factory).await;
+                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
+            } else if first_line.starts_with("GET /api/credentials ") {
+                // GET /api/credentials — credential names without the
+                // vault key, and MCP connectors reduced to name,
+                // transport, auth kind and credential names.
+                if let Some(resp) = api_preflight(&request, port, false) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let body = credentials_snapshot(&cfg);
                 let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/status ") {
@@ -3048,6 +3261,365 @@ pub fn session_events(
     })
 }
 
+/// Tools whose tier the gate decides from the arguments of each call,
+/// so no single tier is true of the tool. The table says so instead
+/// of picking one.
+const ARGUMENT_DEPENDENT_TOOLS: &[(&str, &str)] = &[
+    (
+        "exec",
+        "Tier 2 for a read-only verb on the allowlist, Tier 3 for anything else",
+    ),
+    (
+        "memory_read_channel",
+        "Tier 3; the action names the channel it reads",
+    ),
+    (
+        "read_imported_chat",
+        "Tier 3; the action names the archive it reads",
+    ),
+    (
+        "search_imported_chats",
+        "Tier 3; the action names the archive it searches",
+    ),
+];
+
+/// Tools the harness intercepts before the tier gate; they never have
+/// a tier.
+const INTERCEPTED_TOOLS: &[&str] = &["spawn_subagent", "wirken_enter_phase", "wirken_exit_phase"];
+
+/// One row of the tool table: the tier the gate would compute for a
+/// call with no arguments, or the rule when the arguments decide it.
+fn tool_tier_entry(name: &str, description: &str) -> serde_json::Value {
+    use serde_json::{Value, json};
+    if let Some((_, rule)) = ARGUMENT_DEPENDENT_TOOLS.iter().find(|(n, _)| *n == name) {
+        return json!({
+            "name": name,
+            "description": description,
+            "tier": Value::Null,
+            "tier_depends_on_arguments": true,
+            "tier_rule": rule,
+            "action_key": Value::Null,
+        });
+    }
+    if INTERCEPTED_TOOLS.contains(&name) {
+        return json!({
+            "name": name,
+            "description": description,
+            "tier": Value::Null,
+            "tier_depends_on_arguments": false,
+            "tier_rule": "intercepted before the tier gate",
+            "action_key": Value::Null,
+        });
+    }
+    match wirken_agent::tool::tool_to_action(name, &Value::Null) {
+        Some(action) => json!({
+            "name": name,
+            "description": description,
+            "tier": action.tier().label(),
+            "tier_depends_on_arguments": false,
+            "tier_rule": Value::Null,
+            "action_key": action.approval_key(),
+        }),
+        None => json!({
+            "name": name,
+            "description": description,
+            "tier": "tier3",
+            "tier_depends_on_arguments": false,
+            "tier_rule": if name.starts_with("wasm_") { "Wasm skill call: Tier 3" } else { "not in the classifier: Tier 3 as an unknown tool" },
+            "action_key": Value::Null,
+        }),
+    }
+}
+
+/// A skill's signature status in one of three words. "signed" carries
+/// the signer; "unsigned" means no signature file; "unverified" means
+/// a signature is present that could not be verified, or the check
+/// itself failed. Never a tick on its own.
+fn skill_signature_word(
+    check: Result<SkillSignature, wirken_gateway::error::GatewayError>,
+) -> (&'static str, Option<String>) {
+    match check {
+        Ok(SkillSignature::Valid { signer }) => ("signed", Some(signer)),
+        Ok(SkillSignature::Unsigned) => ("unsigned", None),
+        Ok(SkillSignature::Invalid) | Err(_) => ("unverified", None),
+    }
+}
+
+fn allow_set_json(set: &wirken_agent::skill_perms::AllowSet) -> serde_json::Value {
+    match set {
+        wirken_agent::skill_perms::AllowSet::Wildcard => serde_json::json!("*"),
+        wirken_agent::skill_perms::AllowSet::Set(s) => {
+            serde_json::json!(s.iter().collect::<Vec<_>>())
+        }
+    }
+}
+
+/// The frontmatter of a SKILL.md as written, between its `---` fences.
+/// The loader keeps only the parsed form, so this is re-read from the
+/// file the skill was loaded from.
+fn skill_frontmatter(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let rest = text.strip_prefix("---")?;
+    let (yaml, _) = rest.split_once("\n---")?;
+    Some(format!("---{yaml}\n---"))
+}
+
+/// What the default agent is offered and gated by. Wakes the agent and
+/// takes its lock only if it is free; a turn in flight answers
+/// `busy: true` with the agent-held sections null rather than waiting
+/// on the lock. Tool descriptions and skill bodies are text written by
+/// skill authors; the page renders them as data.
+pub async fn capabilities_snapshot(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    factory: &AgentFactory,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let session_id = session_id_for("default", "webchat", WEBCHAT_CONVERSATION);
+    let org = wirken_gateway::org::load_tool_policy(&cfg.data_dir)
+        .ok()
+        .flatten();
+    let org_policy_for = |name: &str| -> &'static str {
+        match &org {
+            Some(p) if p.blocked_tools.iter().any(|t| t == name) => "blocked",
+            Some(p)
+                if !p.allowed_tools.is_empty() && !p.allowed_tools.iter().any(|t| t == name) =>
+            {
+                "not allowed"
+            }
+            _ => "allowed",
+        }
+    };
+    let grants: Value = match super::open_permission_store(cfg) {
+        Ok(store) => match store.list("default") {
+            Ok(rows) => json!(
+                rows.iter()
+                    .map(|g| json!({
+                        "action_key": g.action_key,
+                        "approved_at": g.approved_at.to_rfc3339(),
+                        "approved_by": g.approved_by,
+                        "expires_at": g.expires_at.to_rfc3339(),
+                        "scope": serde_json::to_value(&g.scope).unwrap_or(Value::Null),
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+            Err(_) => Value::Null,
+        },
+        Err(_) => Value::Null,
+    };
+
+    let agent = match factory.wake("default", &session_id) {
+        Ok(a) => a,
+        Err(_) => {
+            return json!({ "agent_id": "default", "busy": false, "available": false, "tools": Value::Null, "skills": Value::Null, "grants": grants });
+        }
+    };
+    let guard = match agent.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return json!({ "agent_id": "default", "busy": true, "available": true, "tools": Value::Null, "skills": Value::Null, "grants": grants });
+        }
+    };
+    let tools: Vec<Value> = guard
+        .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V2)
+        .await
+        .into_iter()
+        .map(|t| {
+            let mut entry = tool_tier_entry(&t.name, &t.description);
+            entry["org_policy"] = Value::from(org_policy_for(&t.name));
+            entry
+        })
+        .collect();
+    let skills: Vec<Value> = guard
+        .skills()
+        .iter()
+        .map(|sk| {
+            let dir = sk.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let (signature, signer) = skill_signature_word(verify_skill_self_signed(&dir));
+            let p = &sk.permissions;
+            json!({
+                "name": sk.name,
+                "description": sk.description,
+                "available": sk.available,
+                "required_bins": sk.required_bins,
+                "model_invocable": !sk.disable_model_invocation,
+                "signature": signature,
+                "signer": signer,
+                "permissions": {
+                    "tools": allow_set_json(&p.tools.allow),
+                    "egress": {
+                        "mode": match p.egress.mode { wirken_agent::skill_perms::EgressMode::Allowlist => "allowlist", wirken_agent::skill_perms::EgressMode::Deny => "deny" },
+                        "domains": allow_set_json(&p.egress.domains),
+                    },
+                    "filesystem": { "read_paths": p.filesystem.read_paths.len(), "write_paths": p.filesystem.write_paths.len() },
+                    "inference": allow_set_json(&p.inference.allow),
+                    "credentials": allow_set_json(&p.credentials.allow),
+                    "http_post_paths": p.http.post_paths.len(),
+                },
+                "frontmatter": skill_frontmatter(&sk.path),
+            })
+        })
+        .collect();
+    drop(guard);
+    json!({
+        "agent_id": "default",
+        "busy": false,
+        "available": true,
+        "tools": tools,
+        "grants": grants,
+        "skills": skills,
+        "org_policy": org.and_then(|p| serde_json::to_value(p).ok()),
+    })
+}
+
+/// Credential names without the vault key, and the MCP connectors
+/// reduced to what a panel may say. Withheld: every value in the vault,
+/// connector URLs and commands, environment values, key material.
+pub fn credentials_snapshot(cfg: &wirken_gateway::config::GatewayConfig) -> serde_json::Value {
+    use serde_json::{Value, json};
+    // An absent vault file is an empty store; a vault that cannot be
+    // read is not, and the two are not reported alike.
+    let credentials: Value = match CredentialStore::names(&cfg.vault_db_path()) {
+        Ok(names) => json!(
+            names
+                .iter()
+                .map(|n| {
+                    json!({
+                        "name": n,
+                        "channel": Value::Null,
+                        "created_at": Value::Null,
+                        "expires_at": Value::Null,
+                        "last_used_at": Value::Null,
+                        "rotation_due_at": Value::Null,
+                    })
+                })
+                .collect::<Vec<_>>()
+        ),
+        Err(_) => Value::Null,
+    };
+
+    // Trust verdicts the proxy recorded for each entry, on its own
+    // sentinel session: the last row per server wins.
+    let mut trust: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let audit_path = cfg.audit_db_path();
+    if audit_path.exists()
+        && let Ok(log) = wirken_audit::SqliteSessionLog::open(&audit_path)
+    {
+        use wirken_audit::{SessionEvent, SessionLog};
+        let handle = log.handle_for(SessionId::new("gateway-mcp".to_string()));
+        if let Ok(rows) = log.get_since(&handle, 0) {
+            for row in rows {
+                match row.event {
+                    SessionEvent::McpEntryVerified {
+                        server_name,
+                        signer,
+                    } => {
+                        trust.insert(server_name, json!({ "verified": true, "signer": signer }));
+                    }
+                    SessionEvent::McpEntryRefused {
+                        server_name,
+                        reason,
+                    } => {
+                        trust.insert(
+                            server_name,
+                            json!({ "verified": false, "refused_reason": reason }),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let strip = |c: &str| c.strip_prefix("vault:").unwrap_or(c).to_string();
+    let fp = |k: &Option<String>| k.as_ref().map(|s| s.chars().take(16).collect::<String>());
+    // A missing config file is no connectors; an unreadable one is
+    // unknown.
+    let connectors: Value = match McpConfig::load(&cfg.mcp_config_path("default")) {
+        Ok(config) => {
+            let mut names: Vec<&String> = config.servers.keys().collect();
+            names.sort();
+            names
+                .into_iter()
+                .map(|name| {
+                    let server = &config.servers[name];
+                    let (transport, auth, provider, credentials, signature, signer_key, priced) =
+                        match server {
+                            McpServerConfig::Http {
+                                auth,
+                                signature,
+                                signer_key,
+                                tool_costs,
+                                ..
+                            } => {
+                                let (kind, provider, cred) = match auth {
+                                    Some(McpAuth::Bearer { credential }) => {
+                                        ("bearer", None, vec![strip(credential)])
+                                    }
+                                    Some(McpAuth::Oauth2 {
+                                        provider,
+                                        credential,
+                                    }) => {
+                                        ("oauth2", Some(provider.clone()), vec![strip(credential)])
+                                    }
+                                    None => ("none", None, vec![]),
+                                };
+                                (
+                                    "http",
+                                    kind,
+                                    provider,
+                                    cred,
+                                    signature,
+                                    signer_key,
+                                    tool_costs.len(),
+                                )
+                            }
+                            McpServerConfig::Stdio {
+                                env,
+                                signature,
+                                signer_key,
+                                tool_costs,
+                                ..
+                            } => {
+                                let mut creds: Vec<String> = env
+                                    .values()
+                                    .filter_map(|v| v.strip_prefix("vault:").map(|s| s.to_string()))
+                                    .collect();
+                                creds.sort();
+                                (
+                                    "stdio",
+                                    "environment",
+                                    None,
+                                    creds,
+                                    signature,
+                                    signer_key,
+                                    tool_costs.len(),
+                                )
+                            }
+                        };
+                    json!({
+                        "name": name,
+                        "transport": transport,
+                        "auth": auth,
+                        "provider": provider,
+                        "credentials": credentials,
+                        "signed": signature.is_some(),
+                        "signer_fingerprint": fp(signer_key),
+                        "priced_tools": priced,
+                        "trust": trust.get(name).cloned().unwrap_or(Value::Null),
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into()
+        }
+        Err(_) => Value::Null,
+    };
+    json!({
+        "credentials": credentials,
+        "metadata_available": false,
+        "connectors": connectors,
+    })
+}
+
 /// What a verify result from this route means, in the words the CLI
 /// uses. The route calls the verifier without an operator trust
 /// anchor, so a pass says the chain is internally consistent and no
@@ -3389,11 +3961,12 @@ mod tests {
     use wirken_gateway::pending_approvals::PendingApprovalQueue;
 
     use super::{
-        HTML, ImportedRoute, SiemSummary, StatusInputs, VERIFY_CAVEAT, api_preflight,
-        approval_belongs_to_webchat, approvals_snapshot, events_route_allowed, is_webchat_host,
-        is_webchat_origin, parse_approval_path, parse_imported_path, parse_session_events_path,
-        parse_session_path, percent_decode, session_events, status_snapshot, url_host,
-        verify_result_json,
+        HTML, ImportedRoute, SiemSummary, SkillSignature, StatusInputs, VERIFY_CAVEAT,
+        api_preflight, approval_belongs_to_webchat, approvals_snapshot, capabilities_snapshot,
+        credentials_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
+        parse_approval_path, parse_imported_path, parse_session_events_path, parse_session_path,
+        percent_decode, session_events, skill_frontmatter, skill_signature_word, status_snapshot,
+        tool_tier_entry, url_host, verify_result_json,
     };
 
     #[test]
@@ -4107,7 +4680,6 @@ mod tests {
             "'sandbox'",
             "'egress'",
             "'adapters'",
-            "'vault'",
             "'SIEM'",
             "'org config'",
             "'audit'",
@@ -4122,6 +4694,18 @@ mod tests {
             !panel.contains("el('span', null, 'unknown')"),
             "unknown goes through the one renderer"
         );
+        // The vault and the capabilities are rows of the same panel,
+        // drawn by their own renderers once their routes answer.
+        assert!(
+            panel.contains("renderCapabilityRows(grid)") && panel.contains("renderVaultRows(grid)")
+        );
+        for row in ["'tools'", "'grants'", "'skills'", "'vault'", "'connectors'"] {
+            assert!(
+                script.contains(&format!("kvRow(grid, {row}, pendingNode(")),
+                "{row} is named unknown when its route does not answer"
+            );
+        }
+        assert!(script.contains("if (state === 'fetching') return el('span', 'hedge', 'fetching');\n  return unknownNode();"));
     }
 
     #[test]
@@ -4891,5 +5475,423 @@ mod tests {
     fn preflight_post_with_valid_origin_and_host_passes() {
         let req = "POST /api/chat HTTP/1.1\r\nHost: localhost:18790\r\nOrigin: http://localhost:18790\r\n\r\n";
         assert!(api_preflight(req, 18790, true).is_none());
+    }
+
+    /// The tool table names the rule for a tool whose tier the gate
+    /// reads off the arguments, instead of the tier of one imagined
+    /// call; intercepted tools have no tier; everything else carries
+    /// the tier the classifier computes. The page draws the flag as
+    /// "by argument" and never invents a tier for it.
+    #[test]
+    fn argument_dependent_tools_are_flagged_not_tiered() {
+        for name in [
+            "exec",
+            "memory_read_channel",
+            "read_imported_chat",
+            "search_imported_chats",
+        ] {
+            let row = tool_tier_entry(name, "");
+            assert!(row["tier"].is_null(), "{name} has no single tier");
+            assert_eq!(row["tier_depends_on_arguments"], true, "{name}");
+            assert!(
+                row["tier_rule"].as_str().unwrap().contains("Tier"),
+                "{name} names its rule"
+            );
+        }
+        let read = tool_tier_entry("read_file", "");
+        assert_eq!(read["tier"], "tier1");
+        assert_eq!(read["tier_depends_on_arguments"], false);
+        assert!(read["tier_rule"].is_null());
+        let spawn = tool_tier_entry("spawn_subagent", "");
+        assert!(spawn["tier"].is_null());
+        assert_eq!(spawn["tier_rule"], "intercepted before the tier gate");
+        assert_eq!(tool_tier_entry("mcp_github_issues", "")["tier"], "tier3");
+        assert_eq!(tool_tier_entry("wasm_summarize", "")["tier"], "tier3");
+        let script = page_script();
+        assert!(script.contains("t.tier_depends_on_arguments ? 'by argument'"));
+        assert!(
+            script.contains("capRow(list, t.name, right, t.tier_rule)"),
+            "the rule is drawn with the row"
+        );
+    }
+
+    /// A skill's signature is one of three words. "signed" carries the
+    /// signer, a failed check reads "unverified", and the page never
+    /// draws a tick for any of them.
+    #[test]
+    fn a_skill_signature_is_one_of_three_words_never_a_tick() {
+        assert_eq!(
+            skill_signature_word(Ok(SkillSignature::Valid {
+                signer: "abc".into()
+            })),
+            ("signed", Some("abc".to_string()))
+        );
+        assert_eq!(
+            skill_signature_word(Ok(SkillSignature::Unsigned)),
+            ("unsigned", None)
+        );
+        assert_eq!(
+            skill_signature_word(Ok(SkillSignature::Invalid)),
+            ("unverified", None)
+        );
+        assert_eq!(
+            skill_signature_word(Err(wirken_gateway::error::GatewayError::Config("x".into()))),
+            ("unverified", None)
+        );
+        let script = page_script();
+        let skills = script
+            .split_once("if (Array.isArray(c.skills)) {")
+            .expect("skills renderer")
+            .1
+            .split_once("function renderVaultRows")
+            .unwrap()
+            .0;
+        assert!(
+            skills.contains("let right = s.signature;"),
+            "the word is drawn as sent"
+        );
+        for tick in ["✓", "✔", "✅", "chip-ok", "'ok'"] {
+            assert!(
+                !skills.contains(tick),
+                "no tick stands in for the word: {tick}"
+            );
+        }
+    }
+
+    /// A grant's expiry is drawn as a date from the row, never as a
+    /// countdown computed on the page's clock.
+    #[test]
+    fn a_grant_expires_on_a_date_not_in_a_countdown() {
+        let script = page_script();
+        let grants = script
+            .split_once("if (Array.isArray(c.grants)) {")
+            .expect("grants renderer")
+            .1
+            .split_once("if (Array.isArray(c.skills)) {")
+            .unwrap()
+            .0;
+        assert!(grants.contains("'until ' + ymdhm(g.expires_at)"));
+        for countdown in [
+            "remaining",
+            "expires in",
+            " left",
+            "Date.now()",
+            "setInterval",
+        ] {
+            assert!(!grants.contains(countdown), "no countdown: {countdown}");
+        }
+        assert!(
+            script.contains("function ymdhm(iso) {") && !script.contains("ymdhm(Date.now"),
+            "the formatter takes the row's timestamp"
+        );
+    }
+
+    /// Credential rows are names only, and say so, until the store
+    /// exposes dates. Connectors carry name, transport, auth kind and
+    /// credential names; the command, its arguments, environment
+    /// values and the URL never leave the config file.
+    #[test]
+    fn credentials_are_names_only_and_connectors_carry_no_command_or_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let mcp = cfg.mcp_config_path("default");
+        std::fs::create_dir_all(mcp.parent().unwrap()).unwrap();
+        std::fs::write(
+            &mcp,
+            r##"{"servers":{
+              "github":{"transport":"http","url":"https://mcp.example.internal/secret-path","auth":{"type":"bearer","credential":"vault:github-token"},"signature":"c2lnbg==","signer_key":"0123456789abcdef0123456789abcdef"},
+              "files":{"command":"/opt/tools/run-files-server","args":["--root","/srv/private"],"env":{"TOKEN":"vault:files-token","PLAIN":"hunter2"}}
+            }}"##,
+        )
+        .unwrap();
+        let snap = credentials_snapshot(&cfg);
+        let text = serde_json::to_string(&snap).unwrap();
+        for leak in [
+            "mcp.example.internal",
+            "secret-path",
+            "/opt/tools",
+            "run-files-server",
+            "/srv/private",
+            "hunter2",
+            "\"url\":",
+            "\"command\":",
+            "\"args\":",
+            "\"env\":",
+            "vault:",
+        ] {
+            assert!(!text.contains(leak), "withheld: {leak}");
+        }
+        assert_eq!(snap["metadata_available"], false);
+        assert_eq!(
+            snap["credentials"],
+            serde_json::json!([]),
+            "an absent vault file is an empty store"
+        );
+        let connectors = snap["connectors"].as_array().unwrap();
+        assert_eq!(connectors.len(), 2);
+        let files = &connectors[0];
+        assert_eq!(files["name"], "files");
+        assert_eq!(files["transport"], "stdio");
+        assert_eq!(files["auth"], "environment");
+        assert_eq!(files["credentials"], serde_json::json!(["files-token"]));
+        assert_eq!(files["signed"], false);
+        let github = &connectors[1];
+        assert_eq!(github["transport"], "http");
+        assert_eq!(github["auth"], "bearer");
+        assert_eq!(github["credentials"], serde_json::json!(["github-token"]));
+        assert_eq!(github["signed"], true);
+        assert_eq!(github["signer_fingerprint"], "0123456789abcdef");
+        assert!(
+            github["trust"].is_null(),
+            "no proxy verdict on disk means none"
+        );
+
+        // An unreadable config is unknown, not "none configured".
+        std::fs::write(&mcp, "{not json").unwrap();
+        assert!(credentials_snapshot(&cfg)["connectors"].is_null());
+
+        let script = page_script();
+        let vault = script
+            .split_once("function renderVaultRows(grid) {")
+            .expect("vault renderer")
+            .1
+            .split_once("function setAboutOpen")
+            .unwrap()
+            .0;
+        assert!(
+            vault.contains("' credentials · dates '"),
+            "the row says the dates are missing"
+        );
+        for field in [
+            ".url",
+            ".command",
+            ".args",
+            ".env",
+            "c.created_at",
+            "c.expires_at",
+        ] {
+            assert!(
+                !vault.contains(field),
+                "not read from the connector: {field}"
+            );
+        }
+        assert!(vault.contains("'none stored'") && vault.contains("'none configured'"));
+    }
+
+    /// The default agent's capabilities, drawn from a factory over an
+    /// empty log: the argument-dependent tools are flagged, the skill
+    /// is loaded with its signature word and its frontmatter as
+    /// written, the grant carries its expiry as a timestamp, and no
+    /// absolute path leaves the route.
+    #[tokio::test]
+    async fn capabilities_snapshot_lists_the_default_agent_without_paths() {
+        use std::collections::{BTreeMap, HashMap};
+        use wirken_agent::{AgentFactory, AgentStaticConfig};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let skill_dir = dir.path().join("skills").join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let frontmatter = "---\nname: demo\ndescription: A demo skill for the capabilities route.\npermissions:\n  tools:\n    allow:\n      - \"*\"\n  inference:\n    allow:\n      - ollama\n---";
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("{frontmatter}\nDo the demo thing.\n"),
+        )
+        .unwrap();
+        // The loader refuses an unsigned skill, so this one is signed
+        // with a throwaway key; the route reports the word and the
+        // signer, not the fact of a check.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        wirken_gateway::skill_registry::sign_skill(&skill_dir, &key).expect("signs");
+        let skill = wirken_agent::skill::SkillLoader::load_file(&skill_dir.join("SKILL.md"))
+            .expect("skill loads");
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut configs = HashMap::new();
+        configs.insert(
+            "default".to_string(),
+            AgentStaticConfig {
+                agent_id: "default".into(),
+                workspace,
+                llm_config: wirken_agent::llm::LlmConfig::ollama("local"),
+                channel_overrides: HashMap::new(),
+                api_key: None,
+                api_key_credential: None,
+                skills: vec![skill],
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: BTreeMap::new(),
+                sandbox: Default::default(),
+                channel_egress: Default::default(),
+                extra_interceptors: vec![],
+                zirkel_db_path: None,
+            },
+        );
+        let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+        let factory = AgentFactory::new(configs, Arc::new(log), None);
+        let store = super::super::open_permission_store(&cfg).expect("store opens");
+        store
+            .approve(
+                &wirken_gateway::permissions::Action::ShellExec {
+                    pattern: "ls".into(),
+                },
+                "default",
+                "operator",
+            )
+            .expect("grant persists");
+
+        let snap = capabilities_snapshot(&cfg, &factory).await;
+        assert_eq!(snap["busy"], false);
+        let tools = snap["tools"].as_array().expect("tools listed");
+        let exec = tools
+            .iter()
+            .find(|t| t["name"] == "exec")
+            .expect("exec offered");
+        assert_eq!(exec["tier_depends_on_arguments"], true);
+        assert!(exec["tier"].is_null());
+        let read = tools
+            .iter()
+            .find(|t| t["name"] == "read_file")
+            .expect("read_file offered");
+        assert_eq!(read["tier"], "tier1");
+        assert_eq!(read["org_policy"], "allowed");
+        let grants = snap["grants"].as_array().expect("grants listed");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0]["action_key"], "shell:ls");
+        assert_eq!(grants[0]["approved_by"], "operator");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(grants[0]["expires_at"].as_str().unwrap()).is_ok(),
+            "expiry is a timestamp, not a duration"
+        );
+        let skills = snap["skills"].as_array().expect("skills listed");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0]["name"], "demo");
+        assert_eq!(skills[0]["signature"], "signed");
+        assert_eq!(
+            skills[0]["signer"].as_str().map(str::len),
+            Some(64),
+            "the signer is the key, not a tick"
+        );
+        assert_eq!(skills[0]["frontmatter"], frontmatter);
+        assert_eq!(skills[0]["permissions"]["egress"]["mode"], "deny");
+        assert_eq!(skills[0]["permissions"]["tools"], "*");
+        let text = serde_json::to_string(&snap).unwrap();
+        assert!(
+            !text.contains(dir.path().to_str().unwrap()),
+            "no absolute path leaves the route"
+        );
+
+        // A turn in flight holds the agent: the sections it owns are
+        // null and named busy, the grants still come from the store.
+        let session =
+            wirken_agent::session_id_for("default", "webchat", super::WEBCHAT_CONVERSATION);
+        let agent = factory.wake("default", &session).expect("wake");
+        let held = agent.lock().await;
+        let busy = capabilities_snapshot(&cfg, &factory).await;
+        drop(held);
+        assert_eq!(busy["busy"], true);
+        assert!(busy["tools"].is_null() && busy["skills"].is_null());
+        assert_eq!(busy["grants"].as_array().unwrap().len(), 1);
+    }
+
+    /// Both routes sit behind the preflight, and the page asks for
+    /// them only when About opens: the status poll never touches
+    /// them, and nothing on the default screen draws from them.
+    #[test]
+    fn capabilities_and_the_vault_are_drawn_only_in_about() {
+        for route in ["GET /api/capabilities ", "GET /api/credentials "] {
+            let arm = SERVER_SOURCE
+                .split_once(&format!("first_line.starts_with(\"{route}\")"))
+                .unwrap_or_else(|| panic!("{route} route exists"))
+                .1
+                .split_once("} else if first_line.starts_with(")
+                .unwrap()
+                .0;
+            assert!(
+                arm.contains("api_preflight(&request, port, false)"),
+                "{route} preflighted"
+            );
+        }
+        let script = page_script();
+        assert_eq!(script.matches("'/api/capabilities'").count(), 1);
+        assert_eq!(script.matches("'/api/credentials'").count(), 1);
+        let poll = script
+            .split_once("async function loadStatus() {")
+            .unwrap()
+            .1
+            .split_once("function restorePendingCards")
+            .unwrap()
+            .0;
+        assert!(!poll.contains("capabilities") && !poll.contains("credentials"));
+        let extras = script
+            .split_once("async function loadAboutExtras() {")
+            .expect("one loader")
+            .1
+            .split_once("\nfunction ")
+            .unwrap()
+            .0;
+        assert!(
+            extras.contains("fetchJson('/api/capabilities')")
+                && extras.contains("fetchJson('/api/credentials')")
+        );
+        assert!(
+            script.contains("if (open) { loadAboutExtras(); renderAbout(); }"),
+            "fetched on open, drawn as fetching first"
+        );
+        // Only the About renderers read the two snapshots.
+        let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        for var in ["capabilities", "vault"] {
+            let mut reads = 0;
+            for (at, _) in script.match_indices(var) {
+                let before = &script[..at];
+                let after = &script[at + var.len()..];
+                if before.chars().last().is_some_and(ident)
+                    || after.chars().next().is_some_and(ident)
+                {
+                    continue;
+                }
+                let line = before.rsplit('\n').next().unwrap_or("").trim_start();
+                if line.starts_with("//") || line.starts_with("let ") {
+                    continue;
+                }
+                reads += 1;
+                let fn_start = before
+                    .rfind("\nfunction ")
+                    .max(before.rfind("\nasync function "))
+                    .unwrap();
+                let fn_name = before[fn_start..].lines().nth(1).unwrap_or("");
+                assert!(
+                    fn_name.contains("renderCapabilityRows")
+                        || fn_name.contains("renderVaultRows")
+                        || fn_name.contains("loadAboutExtras"),
+                    "{var} read outside About: {fn_name}"
+                );
+            }
+            assert!(reads > 0, "{var} is read somewhere");
+        }
+        assert!(
+            script.contains("unknownNode('busy · a turn holds the agent')"),
+            "busy is named, not drawn empty"
+        );
+    }
+
+    /// The frontmatter is returned as written, fences included, and
+    /// nothing when the file has none.
+    #[test]
+    fn skill_frontmatter_is_read_between_the_fences() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let p = dir.path().join("SKILL.md");
+        std::fs::write(
+            &p,
+            "---\nname: a\ndescription: b\n---\nbody\n---\nnot frontmatter\n",
+        )
+        .unwrap();
+        assert_eq!(
+            skill_frontmatter(&p).as_deref(),
+            Some("---\nname: a\ndescription: b\n---")
+        );
+        std::fs::write(&p, "no fences here\n").unwrap();
+        assert_eq!(skill_frontmatter(&p), None);
+        assert_eq!(skill_frontmatter(&dir.path().join("missing")), None);
     }
 }
