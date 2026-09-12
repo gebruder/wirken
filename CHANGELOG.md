@@ -51,6 +51,32 @@ tagged.
 
 ### Added
 
+- The WebChat routes take the conversation from the request, the
+  first of two steps toward more than one conversation on the page.
+  A key is `c-` plus twelve hex digits as the page will mint it, or
+  the legacy `webchat-default`, which a request with no key still
+  gets; any other shape is refused with 400 before it can name a
+  session. `POST /api/chat` reads `conversation` from its body and
+  writes it to the store row, the three audit rows and the session it
+  wakes; a second send into a conversation whose turn is running is
+  answered `409 {"error":"turn open","age_seconds":N}` before the
+  inbound row is written or a stream is opened, so nothing queues on
+  the agent lock and two streams never register under one
+  conversation. The claim lasts until the turn ends, not until the tab
+  goes: a closed socket stops the forwarding, the turn and its outbound
+  row still complete, and the age says how long it has been open.
+  `POST /api/approvals/{id}` reads `conversation` too and refuses a
+  request raised in any other conversation with "This approval belongs
+  to another conversation. Open it to decide."; the ack goes to the
+  stream of the conversation named. `GET /api/approvals?c=` scopes
+  `mine` to one conversation and lists each other webchat conversation
+  holding a request under `elsewhere` with its age only, no request id
+  and no trigger text. `GET /api/capabilities?c=` wakes that
+  conversation's session. `GET /api/sessions` rows carry
+  `first_message` (the first user message of a webchat conversation,
+  control sequences stripped, cut at 120 characters; null for other
+  channels), `turn_open` and `turn_open_age_seconds`. The page is unchanged and keeps using the
+  legacy conversation.
 - The WebChat page has two more read routes for the About panel.
   `GET /api/capabilities` lists what the default agent is offered:
   every tool with the tier the gate would compute, except that a tool

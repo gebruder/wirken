@@ -35,6 +35,124 @@ const WEBCHAT_MAX_POSTS_PER_MIN: u32 = 60;
 /// restores it on load. Multi-conversation is its own slice.
 const WEBCHAT_CONVERSATION: &str = "webchat-default";
 
+/// The error the chat route answers with when the conversation already
+/// has a turn in flight. The page keys state 19 on this text; the body
+/// also carries how long the turn has been open, from the claim, so a
+/// stuck one can be told from a busy one.
+const TURN_OPEN_ERROR: &str = "turn open";
+
+/// A decision posted from a page that is not viewing the conversation
+/// the request came from. The link is the whole surface for that.
+const DECISION_WRONG_CONVERSATION: &str =
+    "This approval belongs to another conversation. Open it to decide.";
+
+/// A webchat conversation key as the page mints it (`c-` plus twelve
+/// lowercase hex digits) or the legacy constant. `None` and the empty
+/// string are the legacy conversation, which is what a page with no
+/// `#c=` opens. Anything else is refused before it can become a
+/// session id: the key is a path segment of the audit record.
+fn conversation_key(raw: Option<&str>) -> Result<String, &'static str> {
+    match raw {
+        None | Some("") => Ok(WEBCHAT_CONVERSATION.to_string()),
+        Some(WEBCHAT_CONVERSATION) => Ok(WEBCHAT_CONVERSATION.to_string()),
+        Some(key) => {
+            let hex = key.strip_prefix("c-").ok_or("bad conversation key")?;
+            let shaped = hex.len() == 12
+                && hex
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+            if shaped {
+                Ok(key.to_string())
+            } else {
+                Err("bad conversation key")
+            }
+        }
+    }
+}
+
+/// The session id a webchat conversation is logged under.
+fn webchat_session_id(conversation: &str) -> String {
+    session_id_for("default", "webchat", conversation)
+}
+
+/// The conversation segment of a webchat session id, if it is one.
+fn conversation_of(session_id: &str) -> Option<&str> {
+    let mut parts = session_id.splitn(3, '/');
+    let _agent = parts.next()?;
+    if parts.next()? != "webchat" {
+        return None;
+    }
+    parts.next().filter(|c| !c.is_empty())
+}
+
+/// One query parameter from a request line, undecoded: the only
+/// values read this way are conversation keys, which carry nothing to
+/// decode.
+fn query_param<'a>(first_line: &'a str, name: &str) -> Option<&'a str> {
+    let path = first_line.split_whitespace().nth(1)?;
+    let (_, query) = path.split_once('?')?;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v)
+}
+
+/// The conversations with a chat turn in flight, each with when it
+/// was claimed. A second send into one is refused with "turn open"
+/// before anything is written, so no send ever waits on the agent
+/// lock with its stream already open, and no two streams ever
+/// register under one conversation. The claim outlives the tab: a
+/// closed socket stops the forwarding, not the turn, and the turn's
+/// outbound row still has to land, so the claim is released when the
+/// turn ends, and the age says how long that has been.
+#[derive(Default)]
+pub struct OpenTurns {
+    inner: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
+}
+
+impl OpenTurns {
+    /// Claim the conversation for one turn. `None` when a turn is
+    /// already open; the guard releases it on every exit path.
+    pub fn try_open(self: &Arc<Self>, conversation: &str) -> Option<OpenTurn> {
+        let mut map = self.inner.lock().expect("open turns mutex");
+        if map.contains_key(conversation) {
+            return None;
+        }
+        map.insert(conversation.to_string(), std::time::Instant::now());
+        Some(OpenTurn {
+            turns: self.clone(),
+            conversation: conversation.to_string(),
+        })
+    }
+
+    /// Seconds since the open turn was claimed, or `None` when none is.
+    pub fn open_age(&self, conversation: &str) -> Option<u64> {
+        self.inner
+            .lock()
+            .expect("open turns mutex")
+            .get(conversation)
+            .map(|since| since.elapsed().as_secs())
+    }
+}
+
+/// RAII claim on a conversation's turn; dropping it releases the
+/// conversation whether the turn ended, errored, or was cancelled.
+pub struct OpenTurn {
+    turns: Arc<OpenTurns>,
+    conversation: String,
+}
+
+impl Drop for OpenTurn {
+    fn drop(&mut self) {
+        self.turns
+            .inner
+            .lock()
+            .expect("open turns mutex")
+            .remove(&self.conversation);
+    }
+}
+
 const HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1878,6 +1996,7 @@ pub async fn serve(
         super::config().control_plane_rate_limit.max(1),
     ));
     let verify_running = Arc::new(AtomicBool::new(false));
+    let open_turns = Arc::new(OpenTurns::default());
 
     // Per-process rate limiter on the chat POST path. GCRA from
     // `wirken-gateway::rate_limit`; lock-free hot path. See
@@ -1897,6 +2016,7 @@ pub async fn serve(
         let writer_halted = writer_halted.clone();
         let verify_limit = verify_limit.clone();
         let verify_running = verify_running.clone();
+        let open_turns = open_turns.clone();
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
@@ -1977,7 +2097,23 @@ pub async fn serve(
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
                 }
-                let body = approvals_snapshot(&pending_approvals);
+                let conversation = match query_param(first_line, "c")
+                    .map(|c| conversation_key(Some(c)))
+                {
+                    None => None,
+                    Some(Ok(c)) => Some(c),
+                    Some(Err(_)) => {
+                        let resp = r#"{"error":"bad conversation key"}"#;
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                };
+                let body = approvals_snapshot_for(&pending_approvals, conversation.as_deref());
                 let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/capabilities ") {
@@ -1990,8 +2126,21 @@ pub async fn serve(
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
                 }
+                let conversation = match conversation_key(query_param(first_line, "c")) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let resp = r#"{"error":"bad conversation key"}"#;
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                };
                 let cfg = super::config();
-                let body = capabilities_snapshot(&cfg, &factory).await;
+                let body = capabilities_snapshot(&cfg, &factory, &conversation).await;
                 let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/credentials ") {
@@ -2035,7 +2184,8 @@ pub async fn serve(
                 }
                 let cfg = super::config();
                 let body = match super::session::active_session_rows(&cfg, None) {
-                    Ok(rows) => serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
+                    Ok(rows) => serde_json::to_string(&conversation_rows(&cfg, rows, &open_turns))
+                        .unwrap_or_else(|_| "[]".into()),
                     Err(_) => "[]".to_string(),
                 };
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
@@ -2091,6 +2241,39 @@ pub async fn serve(
                     return;
                 }
 
+                // The conversation comes from the request. A page with
+                // no key sends none and gets the legacy conversation;
+                // a key of the wrong shape is refused before it can
+                // name a session.
+                let conversation = match conversation_key(json["conversation"].as_str()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let resp = r#"{"error":"bad conversation key"}"#;
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                };
+
+                // One turn per conversation. A second send while one
+                // is running is answered now, before the inbound row
+                // is written and before any stream is opened: nothing
+                // waits on the agent lock, and the page can say "turn
+                // open" instead of holding a silent stream.
+                let Some(_open_turn) = open_turns.try_open(&conversation) else {
+                    let body = serde_json::json!({
+                        "error": TURN_OPEN_ERROR,
+                        "age_seconds": open_turns.open_age(&conversation).unwrap_or(0),
+                    })
+                    .to_string();
+                    let _ = stream.write_all(json_conflict(&body).as_bytes()).await;
+                    return;
+                };
+
                 // Audit. Webchat has no platform-assigned message id;
                 // synthesize one so `target` stays a stable resource
                 // handle and the body lives under `detail.content`.
@@ -2121,7 +2304,7 @@ pub async fn serve(
                                 &inbound_target,
                             )
                             .with_channel("webchat")
-                            .with_session(WEBCHAT_CONVERSATION)
+                            .with_session(conversation.as_str())
                             .with_detail(inbound_detail.clone()),
                         )
                         .await;
@@ -2143,7 +2326,7 @@ pub async fn serve(
                             &inbound_target,
                         )
                         .with_channel("webchat")
-                        .with_session(WEBCHAT_CONVERSATION)
+                        .with_session(conversation.as_str())
                         .with_detail(inbound_detail),
                     )
                     .await;
@@ -2173,7 +2356,7 @@ pub async fn serve(
                 // not worth failing a chat turn over.
                 {
                     let store = sessions.lock().await;
-                    match store.get_or_create("webchat", WEBCHAT_CONVERSATION) {
+                    match store.get_or_create("webchat", &conversation) {
                         Ok(session) => {
                             if let Err(e) = store.record_message(&session.id) {
                                 tracing::warn!("webchat message count not recorded: {e}");
@@ -2193,11 +2376,10 @@ pub async fn serve(
                     return;
                 }
 
-                // Wake the default agent for the webchat session.
-                // Webchat has a single canonical conversation
-                // ("webchat-default") and synthesizes a UUID per
-                // inbound message for crash-recovery dedup.
-                let session_id_str = session_id_for("default", "webchat", WEBCHAT_CONVERSATION);
+                // Wake the default agent for this conversation's
+                // session. Webchat synthesizes a UUID per inbound
+                // message for crash-recovery dedup.
+                let session_id_str = webchat_session_id(&conversation);
                 let inbound_id = format!("webchat-{}", uuid::Uuid::new_v4());
 
                 // Register the per-request SSE sender so the
@@ -2287,7 +2469,7 @@ pub async fn serve(
                                             &outbound_target,
                                         )
                                         .with_channel("webchat")
-                                        .with_session(WEBCHAT_CONVERSATION)
+                                        .with_session(conversation.as_str())
                                         .with_detail(
                                             serde_json::json!({ "content": &result.response }),
                                         ),
@@ -2446,18 +2628,42 @@ pub async fn serve(
                         .await;
                     return;
                 }
+                // And it is made for one conversation: the caller names
+                // the conversation it is viewing, and the request must
+                // have come from there. A page showing conversation B
+                // never decides A's request, however it learned the id.
+                let conversation = match conversation_key(json["conversation"].as_str()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        let resp = r#"{"error":"bad conversation key"}"#;
+                        let response = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            resp.len(),
+                            resp
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        return;
+                    }
+                };
+                let viewing = webchat_session_id(&conversation);
+                if approval_belongs_to_conversation(&pending_approvals, &request_id, &viewing)
+                    == Some(false)
+                {
+                    let _ = stream
+                        .write_all(json_forbidden(DECISION_WRONG_CONVERSATION).as_bytes())
+                        .await;
+                    return;
+                }
                 let resolve = pending_approvals.resolve(&request_id, decision);
                 let ack = match resolve {
                     ResolveResult::Accepted => AckResult::Accepted,
                     ResolveResult::UnknownKey => AckResult::UnknownKey,
                 };
 
-                // Push the ack onto the session's SSE stream so the
-                // browser closes the approval card. Webchat is
-                // single-session today; the lookup is by the
-                // canonical session id.
-                let session_id =
-                    SessionId::new(session_id_for("default", "webchat", WEBCHAT_CONVERSATION));
+                // Push the ack onto the stream of the conversation the
+                // request came from, which the guard above has shown is
+                // the one being viewed.
+                let session_id = SessionId::new(viewing);
                 if let Some(sender) = sse_registry.sender_for(&session_id) {
                     let ack_event = SseEvent::ApprovalDecisionAck {
                         request_id: request_id.clone(),
@@ -2858,6 +3064,82 @@ fn approval_belongs_to_webchat(queue: &PendingApprovalQueue, request_id: &str) -
         .map(|d| session_channel(&d.agent_id) == Some("webchat"))
 }
 
+/// Whether a pending approval was raised in the given webchat session.
+/// `None` when the queue holds no such entry.
+fn approval_belongs_to_conversation(
+    queue: &PendingApprovalQueue,
+    request_id: &str,
+    session_id: &str,
+) -> Option<bool> {
+    queue.show(request_id).map(|d| d.agent_id == session_id)
+}
+
+/// The list rows the page draws its rail from: each active session
+/// with, for a webchat conversation, its first user message (the title
+/// the page shows; control sequences stripped and cut at 120
+/// characters, otherwise verbatim) and whether a turn is open in it.
+/// Another channel's first message is that channel's user's words and
+/// stays null here, as it does on the approvals route.
+fn conversation_rows(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    rows: Vec<super::session::SessionRow>,
+    open_turns: &OpenTurns,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    use wirken_audit::{SessionEvent, SessionLog};
+    let audit_path = cfg.audit_db_path();
+    let log = if rows.iter().any(|r| r.channel == "webchat") && audit_path.exists() {
+        wirken_audit::SqliteSessionLog::open(&audit_path).ok()
+    } else {
+        None
+    };
+    json!(
+        rows.into_iter()
+            .map(|row| {
+                let mine = row.channel == "webchat";
+                let first_message = if mine {
+                    log.as_ref().and_then(|log| {
+                        let handle = log.handle_for(SessionId::new(row.log_id.clone()));
+                        log.get_range(&handle, 0..64).ok().and_then(|events| {
+                            events.into_iter().find_map(|ev| match ev.event {
+                                SessionEvent::UserMessage { content, .. } => Some(
+                                    wirken_agent::ansi::strip_control_sequences(&content)
+                                        .chars()
+                                        .take(120)
+                                        .collect::<String>(),
+                                ),
+                                _ => None,
+                            })
+                        })
+                    })
+                } else {
+                    None
+                };
+                let turn_age = if mine {
+                    conversation_of(&row.log_id).and_then(|c| open_turns.open_age(c))
+                } else {
+                    None
+                };
+                let turn_open = if mine {
+                    Value::from(turn_age.is_some())
+                } else {
+                    Value::Null
+                };
+                json!({
+                    "store_id": row.store_id,
+                    "log_id": row.log_id,
+                    "channel": row.channel,
+                    "message_count": row.message_count,
+                    "last_activity": row.last_activity,
+                    "first_message": first_message,
+                    "turn_open": turn_open,
+                    "turn_open_age_seconds": turn_age,
+                })
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
 /// This browser's pending approvals, with the message that triggered
 /// each, and a count of every other channel's. The trigger text of a
 /// request from another channel is that channel's user's message and
@@ -2868,13 +3150,32 @@ fn approval_belongs_to_webchat(queue: &PendingApprovalQueue, request_id: &str) -
 /// made but not the deadline the gate is waiting on, so a countdown
 /// would be a guess. `timeout_seconds` is the window the webchat gate
 /// applies, as configured.
-fn approvals_snapshot(queue: &PendingApprovalQueue) -> serde_json::Value {
+/// The same list scoped to one conversation. `mine` is that
+/// conversation's requests; `elsewhere` names each other webchat
+/// conversation holding one, with when it asked and nothing else: no
+/// request id and no trigger text, since the page navigates to it and
+/// never decides from here. With no conversation given, `mine` is the
+/// whole channel, as before.
+fn approvals_snapshot_for(
+    queue: &PendingApprovalQueue,
+    conversation: Option<&str>,
+) -> serde_json::Value {
     use serde_json::{Value, json};
     let timeout = resolve_webchat_timeout().as_secs();
+    let viewing = conversation.map(webchat_session_id);
     let mut mine = Vec::new();
+    let mut elsewhere = Vec::new();
     let mut by_channel: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for entry in queue.list() {
         if session_channel(&entry.agent_id) == Some("webchat") {
+            if viewing.as_deref().is_some_and(|v| v != entry.agent_id) {
+                elsewhere.push(json!({
+                    "conversation": conversation_of(&entry.agent_id),
+                    "requested_at": entry.requested_at.to_rfc3339(),
+                    "age_seconds": entry.age_seconds,
+                }));
+                continue;
+            }
             let trigger = queue
                 .show(&entry.request_id)
                 .and_then(|d| d.trigger_message);
@@ -2898,7 +3199,12 @@ fn approvals_snapshot(queue: &PendingApprovalQueue) -> serde_json::Value {
         }
     }
     let count: u64 = by_channel.values().sum();
-    json!({ "mine": mine, "other_channels": { "count": count, "by_channel": by_channel } })
+    elsewhere.sort_by_key(|e| e["age_seconds"].as_u64().unwrap_or(u64::MAX));
+    json!({
+        "mine": mine,
+        "elsewhere": elsewhere,
+        "other_channels": { "count": count, "by_channel": by_channel },
+    })
 }
 
 /// First 16 characters of a hex value carried on a row, for a
@@ -3357,9 +3663,10 @@ fn skill_frontmatter(path: &std::path::Path) -> Option<String> {
 pub async fn capabilities_snapshot(
     cfg: &wirken_gateway::config::GatewayConfig,
     factory: &AgentFactory,
+    conversation: &str,
 ) -> serde_json::Value {
     use serde_json::{Value, json};
-    let session_id = session_id_for("default", "webchat", WEBCHAT_CONVERSATION);
+    let session_id = webchat_session_id(conversation);
     let org = wirken_gateway::org::load_tool_policy(&cfg.data_dir)
         .ok()
         .flatten();
@@ -3811,6 +4118,14 @@ fn json_ok(body: &str) -> String {
 
 /// A 403 response carrying `{"error":"<msg>"}`. `msg` is a fixed literal
 /// at every call site, so no escaping is needed.
+fn json_conflict(body: &str) -> String {
+    format!(
+        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
 fn json_forbidden(msg: &str) -> String {
     let body = format!(r#"{{"error":"{msg}"}}"#);
     format!(
@@ -3943,12 +4258,14 @@ mod tests {
     use wirken_gateway::pending_approvals::PendingApprovalQueue;
 
     use super::{
-        HTML, ImportedRoute, SiemSummary, SkillSignature, StatusInputs, VERIFY_CAVEAT,
-        api_preflight, approval_belongs_to_webchat, approvals_snapshot, capabilities_snapshot,
+        DECISION_WRONG_CONVERSATION, HTML, ImportedRoute, OpenTurns, SiemSummary, SkillSignature,
+        StatusInputs, TURN_OPEN_ERROR, VERIFY_CAVEAT, api_preflight,
+        approval_belongs_to_conversation, approval_belongs_to_webchat, approvals_snapshot_for,
+        capabilities_snapshot, conversation_key, conversation_of, conversation_rows,
         credentials_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
         parse_approval_path, parse_imported_path, parse_session_events_path, parse_session_path,
-        percent_decode, session_events, skill_frontmatter, skill_signature_word, status_snapshot,
-        tool_tier_entry, verify_result_json,
+        percent_decode, query_param, session_events, skill_frontmatter, skill_signature_word,
+        status_snapshot, tool_tier_entry, verify_result_json, webchat_session_id,
     };
 
     #[test]
@@ -5105,7 +5422,7 @@ mod tests {
         let (_signal_id, _rx3) =
             queue.register(pending("default/signal/+15550100", "a signal user's words"));
 
-        let v = approvals_snapshot(&queue);
+        let v = approvals_snapshot_for(&queue, None);
         let mine = v["mine"].as_array().unwrap();
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0]["request_id"], mine_id);
@@ -5809,7 +6126,7 @@ mod tests {
             )
             .expect("grant persists");
 
-        let snap = capabilities_snapshot(&cfg, &factory).await;
+        let snap = capabilities_snapshot(&cfg, &factory, super::WEBCHAT_CONVERSATION).await;
         assert_eq!(snap["busy"], false);
         let tools = snap["tools"].as_array().expect("tools listed");
         let exec = tools
@@ -5856,7 +6173,7 @@ mod tests {
             wirken_agent::session_id_for("default", "webchat", super::WEBCHAT_CONVERSATION);
         let agent = factory.wake("default", &session).expect("wake");
         let held = agent.lock().await;
-        let busy = capabilities_snapshot(&cfg, &factory).await;
+        let busy = capabilities_snapshot(&cfg, &factory, super::WEBCHAT_CONVERSATION).await;
         drop(held);
         assert_eq!(busy["busy"], true);
         assert!(busy["tools"].is_null() && busy["skills"].is_null());
@@ -5962,5 +6279,399 @@ mod tests {
         std::fs::write(&p, "no fences here\n").unwrap();
         assert_eq!(skill_frontmatter(&p), None);
         assert_eq!(skill_frontmatter(&dir.path().join("missing")), None);
+    }
+
+    /// (1) The conversation comes from the request. The key is the
+    /// legacy constant or `c-` plus twelve lowercase hex digits, and
+    /// nothing else can become a session id; the chat route, its three
+    /// audit rows, the store row, the decision route and the
+    /// capabilities route all read it from the request.
+    #[test]
+    fn the_conversation_comes_from_the_request() {
+        assert_eq!(conversation_key(None).unwrap(), "webchat-default");
+        assert_eq!(conversation_key(Some("")).unwrap(), "webchat-default");
+        assert_eq!(
+            conversation_key(Some("webchat-default")).unwrap(),
+            "webchat-default"
+        );
+        assert_eq!(
+            conversation_key(Some("c-0123456789ab")).unwrap(),
+            "c-0123456789ab"
+        );
+        for bad in [
+            "c-0123456789AB",
+            "c-0123456789a",
+            "c-0123456789abc",
+            "x-0123456789ab",
+            "../../etc",
+            "default/webchat/c-0123456789ab",
+            "c-0123456789ab#sub-1",
+            "telegram",
+        ] {
+            assert!(conversation_key(Some(bad)).is_err(), "{bad} refused");
+        }
+        assert_eq!(
+            webchat_session_id("c-0123456789ab"),
+            "default/webchat/c-0123456789ab"
+        );
+        assert_eq!(
+            conversation_of("default/webchat/c-0123456789ab"),
+            Some("c-0123456789ab")
+        );
+        assert_eq!(conversation_of("default/telegram/-1001234"), None);
+        assert_eq!(
+            query_param("GET /api/approvals?c=c-0123456789ab HTTP/1.1", "c"),
+            Some("c-0123456789ab")
+        );
+        assert_eq!(query_param("GET /api/approvals HTTP/1.1", "c"), None);
+
+        let chat = SERVER_SOURCE
+            .split_once("first_line.starts_with(\"POST /api/chat\")")
+            .unwrap()
+            .1
+            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
+            .unwrap()
+            .0;
+        assert!(chat.contains("conversation_key(json[\"conversation\"].as_str())"));
+        assert_eq!(
+            chat.matches(".with_session(conversation.as_str())").count(),
+            3,
+            "the threat, inbound and outbound rows carry the request's conversation"
+        );
+        assert!(chat.contains("store.get_or_create(\"webchat\", &conversation)"));
+        assert!(chat.contains("webchat_session_id(&conversation)"));
+        assert!(
+            !chat.contains("WEBCHAT_CONVERSATION"),
+            "the constant is not used inside the chat route"
+        );
+        let capabilities = SERVER_SOURCE
+            .split_once("first_line.starts_with(\"GET /api/capabilities \")")
+            .unwrap()
+            .1
+            .split_once("} else if first_line.starts_with(")
+            .unwrap()
+            .0;
+        assert!(capabilities.contains("conversation_key(query_param(first_line, \"c\"))"));
+        assert!(capabilities.contains("capabilities_snapshot(&cfg, &factory, &conversation)"));
+    }
+
+    /// (2) A send into a conversation whose turn is open is answered
+    /// "turn open" at once. The claim is taken after the body is parsed
+    /// and before the inbound row, the stream headers or the agent
+    /// lock; the guard releases it on every exit.
+    #[test]
+    fn a_send_into_an_open_turn_is_refused_not_queued() {
+        let turns = Arc::new(OpenTurns::default());
+        let first = turns
+            .try_open("c-0123456789ab")
+            .expect("first send claims the turn");
+        assert!(turns.open_age("c-0123456789ab").is_some());
+        assert!(
+            turns.try_open("c-0123456789ab").is_none(),
+            "the second send is refused"
+        );
+        assert!(
+            turns.try_open("c-ba9876543210").is_some(),
+            "another conversation is free"
+        );
+        drop(first);
+        assert!(!turns.open_age("c-0123456789ab").is_some());
+        assert!(
+            turns.try_open("c-0123456789ab").is_some(),
+            "released on drop"
+        );
+
+        assert_eq!(
+            TURN_OPEN_ERROR, "turn open",
+            "the page keys state 19 on this text"
+        );
+        assert_eq!(turns.open_age("c-0123456789ab"), None);
+        let held = turns.try_open("c-0123456789ab").unwrap();
+        assert_eq!(
+            turns.open_age("c-0123456789ab"),
+            Some(0),
+            "aged from the claim"
+        );
+        drop(held);
+        let chat = SERVER_SOURCE
+            .split_once("first_line.starts_with(\"POST /api/chat\")")
+            .unwrap()
+            .1
+            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
+            .unwrap()
+            .0;
+        let claim = chat
+            .find("open_turns.try_open(&conversation)")
+            .expect("the route claims the turn");
+        let refuse = chat
+            .find("\"error\": TURN_OPEN_ERROR,")
+            .expect("and refuses with the body");
+        assert!(
+            chat.contains("\"age_seconds\": open_turns.open_age(&conversation)"),
+            "the refusal carries the turn's age"
+        );
+        assert!(chat.contains("json_conflict(&body)"));
+        let inbound = chat.find("\"message.inbound\"").unwrap();
+        let headers = chat.find("text/event-stream").unwrap();
+        let lock = chat.find("agent_mutex.lock().await").unwrap();
+        assert!(
+            claim < refuse && refuse < inbound,
+            "refused before the inbound row is written"
+        );
+        assert!(claim < headers, "refused before any stream is opened");
+        assert!(claim < lock, "nothing waits on the agent lock");
+        assert!(
+            SERVER_SOURCE.contains("HTTP/1.1 409 Conflict"),
+            "the refusal is a 409"
+        );
+    }
+
+    /// (3) A decision must name the conversation that raised the
+    /// request. The channel guard still refuses other channels; the
+    /// conversation guard refuses a webchat request from any other
+    /// conversation, with the fixed string, and the ack goes to the
+    /// stream of the conversation being viewed.
+    #[test]
+    fn a_decision_must_name_the_conversation_that_raised_it() {
+        let queue = PendingApprovalQueue::new();
+        let (a_id, _rx1) = queue.register(pending("default/webchat/c-0123456789ab", "x"));
+        let (legacy_id, _rx2) = queue.register(pending("default/webchat/webchat-default", "y"));
+        let a = webchat_session_id("c-0123456789ab");
+        let legacy = webchat_session_id("webchat-default");
+        assert_eq!(
+            approval_belongs_to_conversation(&queue, &a_id, &a),
+            Some(true)
+        );
+        assert_eq!(
+            approval_belongs_to_conversation(&queue, &a_id, &legacy),
+            Some(false)
+        );
+        assert_eq!(
+            approval_belongs_to_conversation(&queue, &legacy_id, &legacy),
+            Some(true)
+        );
+        assert_eq!(approval_belongs_to_conversation(&queue, "nope", &a), None);
+        assert_eq!(
+            DECISION_WRONG_CONVERSATION,
+            "This approval belongs to another conversation. Open it to decide."
+        );
+        let route = SERVER_SOURCE
+            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
+            .unwrap()
+            .1
+            .split_once("let resolve = pending_approvals.resolve(&request_id, decision);")
+            .unwrap()
+            .0;
+        assert!(route.contains("conversation_key(json[\"conversation\"].as_str())"));
+        assert!(route.contains(
+            "approval_belongs_to_conversation(&pending_approvals, &request_id, &viewing)"
+        ));
+        assert!(route.contains("json_forbidden(DECISION_WRONG_CONVERSATION)"));
+        assert!(
+            SERVER_SOURCE.contains("let session_id = SessionId::new(viewing);"),
+            "the ack goes to the conversation being viewed"
+        );
+    }
+
+    /// (4) Two live streams never share a conversation. The stream
+    /// registers only after the turn claim, and the claim refuses a
+    /// second holder, so the registry's replace-on-insert is never
+    /// reached for a conversation that already has a stream.
+    #[test]
+    fn two_streams_cannot_share_a_conversation() {
+        let turns = Arc::new(OpenTurns::default());
+        let first = turns.try_open("c-0123456789ab");
+        assert!(first.is_some());
+        assert!(
+            turns.try_open("c-0123456789ab").is_none(),
+            "the second stream is never registered"
+        );
+        let chat = SERVER_SOURCE
+            .split_once("first_line.starts_with(\"POST /api/chat\")")
+            .unwrap()
+            .1
+            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
+            .unwrap()
+            .0;
+        let claim = chat.find("open_turns.try_open(&conversation)").unwrap();
+        let register = chat.find("sse_registry.register_guard(").unwrap();
+        assert!(
+            claim < register,
+            "the claim comes before the stream registers"
+        );
+        drop(first);
+        assert!(turns.try_open("c-0123456789ab").is_some());
+    }
+
+    /// (5) The approvals list is scoped to the conversation the page
+    /// names. `mine` is that conversation's requests with their
+    /// trigger text; `elsewhere` names each other webchat conversation
+    /// holding one, with its age and nothing a page could decide with;
+    /// other channels stay a count. Without a conversation the list is
+    /// the whole channel, as before.
+    #[test]
+    fn approvals_are_listed_per_conversation() {
+        let queue = PendingApprovalQueue::new();
+        let (a_id, _rx1) = queue.register(pending(
+            "default/webchat/c-0123456789ab",
+            "roll staging back",
+        ));
+        let (b_id, _rx2) =
+            queue.register(pending("default/webchat/c-ba9876543210", "summarise slack"));
+        let (_t, _rx3) = queue.register(pending(
+            "default/telegram/-1001234",
+            "a telegram user's words",
+        ));
+
+        let v = approvals_snapshot_for(&queue, Some("c-0123456789ab"));
+        let mine = v["mine"].as_array().unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0]["request_id"], a_id);
+        assert_eq!(mine[0]["trigger_message"], "roll staging back");
+        let elsewhere = v["elsewhere"].as_array().unwrap();
+        assert_eq!(elsewhere.len(), 1);
+        assert_eq!(elsewhere[0]["conversation"], "c-ba9876543210");
+        assert!(elsewhere[0]["age_seconds"].is_u64());
+        assert!(elsewhere[0]["requested_at"].is_string());
+        let text = serde_json::to_string(&elsewhere).unwrap();
+        assert!(
+            !text.contains(&b_id),
+            "no request id leaves for another conversation"
+        );
+        assert!(!text.contains("summarise slack"), "nor its trigger text");
+        assert_eq!(v["other_channels"]["count"], 1);
+
+        let v = approvals_snapshot_for(&queue, Some("c-ba9876543210"));
+        assert_eq!(v["mine"][0]["request_id"], b_id);
+        assert_eq!(v["elsewhere"][0]["conversation"], "c-0123456789ab");
+
+        let v = approvals_snapshot_for(&queue, None);
+        assert_eq!(
+            v["mine"].as_array().unwrap().len(),
+            2,
+            "unscoped is the whole channel"
+        );
+        assert_eq!(v["elsewhere"].as_array().unwrap().len(), 0);
+
+        let route = SERVER_SOURCE
+            .split_once("first_line.starts_with(\"GET /api/approvals \")")
+            .unwrap()
+            .1
+            .split_once("} else if first_line.starts_with(")
+            .unwrap()
+            .0;
+        assert!(
+            route.contains("query_param(first_line, \"c\")")
+                && route.contains("conversation_key(Some(c))")
+        );
+        assert!(
+            route.contains("approvals_snapshot_for(&pending_approvals, conversation.as_deref())")
+        );
+    }
+
+    /// (6) The list route carries each webchat conversation's first
+    /// user message, control sequences stripped and cut at 120
+    /// characters, and whether a turn is open in it. Another channel's
+    /// first message is that channel's user's words and stays null.
+    #[test]
+    fn the_list_carries_each_conversations_first_message_and_turn_state() {
+        use wirken_audit::{SessionEvent, SessionLog, TrustLevel};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let store = wirken_gateway::session::SessionStore::open(
+            &cfg.sessions_db_path(),
+            cfg.session_expiry_secs,
+        )
+        .expect("store opens");
+        let a = store.get_or_create("webchat", "c-0123456789ab").unwrap();
+        store.record_message(&a.id).unwrap();
+        store.get_or_create("webchat", "c-ba9876543210").unwrap();
+        store.get_or_create("telegram", "-1001234").unwrap();
+
+        let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+        let long = format!(
+            "Roll staging \x1b[31mback\x1b[0m to last night's build {}",
+            "x".repeat(200)
+        );
+        let handle = log.handle_for(wirken_audit::SessionId::new(
+            "default/webchat/c-0123456789ab".to_string(),
+        ));
+        log.append(
+            &handle,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: long.clone(),
+                inbound_id: None,
+                adapter_id: Some("webchat".into()),
+                sender_id: None,
+            },
+        )
+        .unwrap();
+        log.append(
+            &handle,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "a second message is not the title".into(),
+                inbound_id: None,
+                adapter_id: Some("webchat".into()),
+                sender_id: None,
+            },
+        )
+        .unwrap();
+        let telegram = log.handle_for(wirken_audit::SessionId::new(
+            "default/telegram/-1001234".to_string(),
+        ));
+        log.append(
+            &telegram,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "a telegram user's words".into(),
+                inbound_id: None,
+                adapter_id: Some("telegram".into()),
+                sender_id: None,
+            },
+        )
+        .unwrap();
+        drop(log);
+
+        let turns = OpenTurns::default();
+        let turns = Arc::new(turns);
+        let _open = turns.try_open("c-ba9876543210").unwrap();
+        let rows = super::super::session::active_session_rows(&cfg, None).expect("rows");
+        let v = conversation_rows(&cfg, rows, &turns);
+        let rows = v.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        let by_id = |id: &str| {
+            rows.iter()
+                .find(|r| r["log_id"] == id)
+                .unwrap_or_else(|| panic!("{id} listed"))
+        };
+        let a = by_id("default/webchat/c-0123456789ab");
+        let title = a["first_message"].as_str().unwrap();
+        assert!(title.starts_with("Roll staging back to last night's build "));
+        assert_eq!(title.chars().count(), 120, "cut at 120 characters");
+        assert!(!title.contains('\x1b'), "control sequences stripped");
+        assert_eq!(a["turn_open"], false);
+        assert!(a["turn_open_age_seconds"].is_null());
+        assert_eq!(a["message_count"], 1);
+        let b = by_id("default/webchat/c-ba9876543210");
+        assert!(b["first_message"].is_null(), "nothing logged yet");
+        assert_eq!(b["turn_open"], true);
+        assert!(
+            b["turn_open_age_seconds"].is_u64(),
+            "aged from the claim, not from now"
+        );
+        let t = by_id("default/telegram/-1001234");
+        assert!(
+            t["first_message"].is_null(),
+            "another channel's words stay there"
+        );
+        assert!(t["turn_open"].is_null() && t["turn_open_age_seconds"].is_null());
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(!text.contains("telegram user's words"));
+        assert!(
+            SERVER_SOURCE.contains("conversation_rows(&cfg, rows, &open_turns)"),
+            "the list route serves these rows"
+        );
     }
 }
