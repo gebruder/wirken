@@ -10,6 +10,35 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- The WebChat page is rebuilt to Phase 1 of the UX handoff. The
+  conversation is one column: user bubbles, assistant text rendered
+  from a small markdown grammar (paragraphs, inline code, fenced code
+  with a copy button) and emitted as DOM nodes, so text written by
+  anyone else stays inert. The approval card shows the tier and the
+  action key the gate computed, an age rather than a countdown, and
+  puts Deny first; a decision leaves a line in the transcript instead
+  of removing the card. A sandbox refusal is its own block rather than
+  red text appended to the answer. The composer is locked while a turn
+  is open, and a request the gateway refused goes back into the
+  composer rather than into the transcript. A left rail exists only
+  when there is somewhere to go (an imported archive); other channels'
+  sessions no longer open as transcripts from this page, though the
+  read routes are unchanged. The page declares its language, landmarks
+  and labels, announces the conversation to assistive technology,
+  keeps a visible focus ring, carries an inline favicon, collapses
+  below 720px, and makes no request outside its own origin.
+
+- The chat stream ends with `{"type":"done"}` before the socket
+  closes, sent once the outbound audit row has been offered to the
+  writer. A stream that closes without it is marked as cut off by the
+  page; previously the two were indistinguishable.
+
+- `POST /api/chat` answers `503 {"error":"audit writer halted"}` when
+  the audit writer refuses the inbound row, instead of running a turn
+  nothing records. The page locks its composer and says why.
+
 ## [1.20.0] - 2026-09-12
 
 Two behaviour changes to read before upgrading, then a note for anyone

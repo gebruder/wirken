@@ -21,209 +21,481 @@ use wirken_gateway::sse_approval_registry::{AckResult, SseApprovalRegistry, SseE
 const WEBCHAT_MAX_POSTS_PER_MIN: u32 = 60;
 
 const HTML: &str = r#"<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>wirken</title>
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iNyIgZmlsbD0iIzE2MTgyNiI+PC9yZWN0PjxjaXJjbGUgY3g9IjE2IiBjeT0iMTYiIHI9IjUiIGZpbGw9IiNiNWFiZmMiPjwvY2lyY2xlPjxjaXJjbGUgY3g9IjE2IiBjeT0iMTYiIHI9IjkiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzkxODRkOSIgc3Ryb2tlLW9wYWNpdHk9Ii40NSIgc3Ryb2tlLXdpZHRoPSIxLjUiPjwvY2lyY2xlPjwvc3ZnPg==">
 <style>
+  /* Tokens. Values from the design handoff; the page owns them so no
+     bundle is fetched. */
+  :root {
+    --bg: #161826;
+    --bg-2: #131523;
+    --surface: #1b1c2c;
+    --surface-2: #1b1d2c;
+    --surface-user: #2b2741;
+    --text: #e9e9ed;
+    --accent: #9184d9;
+    --accent-300: #d2cefd;
+    --accent-400: #b5abfc;
+    --accent-700: #5d5294;
+    --accent-900: #2b2741;
+    --neutral-600: #75798c;
+    --neutral-800: #3f424d;
+    --danger-text: #e8a19d;
+    --hairline: rgba(233,233,237,.09);
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 14px;
+    --mono: ui-monospace, Menlo, monospace;
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   /* The UA's own [hidden] rule loses to any author rule that sets
-     display, and several elements here are laid out with an id
-     selector. Without this, setting .hidden on one of them changes
-     nothing on screen: the composer stayed drawn under an archive,
-     focusable and inviting a send. Author-level and !important so a
-     later layout rule cannot quietly take it back. */
+     display. Author-level and !important so hidden always hides. */
   [hidden] { display: none !important; }
-  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: grid; grid-template-columns: 260px 1fr; overflow: hidden; }
-  #sidebar { border-right: 1px solid #21262d; display: flex; flex-direction: column; min-height: 0; }
-  #sidebar-header { padding: 16px 16px 10px; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #8b949e; }
-  #session-list { flex: 1; overflow-y: auto; }
-  .session-row { padding: 10px 16px; border-top: 1px solid #161b22; cursor: pointer; border-left: 2px solid transparent; }
-  .session-row:hover { background: #161b22; }
-  .session-row.active { background: #161b22; border-left-color: #58a6ff; }
-  .session-row .ch { font-size: 13px; font-weight: 600; color: #c9d1d9; word-break: break-word; }
-  .session-row .meta { font-size: 12px; color: #8b949e; margin-top: 2px; }
-  #session-empty { padding: 12px 16px; font-size: 12px; color: #8b949e; }
-  .empty { padding: 12px 16px; font-size: 12px; color: #8b949e; }
-  .imported-head { padding: 12px 16px; font-size: 13px; font-weight: 600; color: #c9d1d9; border-bottom: 1px solid #21262d; }
-  .imported-note { padding: 8px 16px; font-size: 12px; color: #8b949e; font-style: italic; }
-  .imported-back { padding: 8px 16px; font-size: 12px; color: #58a6ff; cursor: pointer; }
-  .imported-attachment { padding: 4px 16px 10px 40px; font-size: 13px; color: #c9d1d9; }
-  .content.empty { color: #8b949e; font-style: italic; }
-  #archive-bar { padding: 14px 16px; border-top: 1px solid #21262d; display: flex; gap: 12px; align-items: center; }
-  #archive-notice { flex: 1; font-size: 12px; color: #8b949e; font-style: italic; }
-  #back-to-live { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; }
-  #back-to-live:hover { background: #30363d; }
-  #main { display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
-  #header { padding: 16px 24px; border-bottom: 1px solid #21262d; font-size: 14px; color: #8b949e; }
-  #header strong { color: #c9d1d9; }
-  #messages { flex: 1; overflow-y: auto; padding: 16px 24px; }
-  .msg { margin-bottom: 12px; line-height: 1.5; }
-  .msg .role { font-weight: 600; margin-right: 8px; }
-  .msg .role.user { color: #58a6ff; }
-  .msg .role.assistant { color: #7ee787; }
-  .msg .content { white-space: pre-wrap; word-break: break-word; }
-  .msg .content.error { color: #f85149; }
-  #input-area { padding: 16px 24px; border-top: 1px solid #21262d; display: flex; gap: 8px; }
-  #input { flex: 1; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 10px 14px; border-radius: 6px; font-size: 14px; outline: none; }
-  #input:focus { border-color: #58a6ff; }
-  #send { background: #238636; color: #fff; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; }
-  #send:hover { background: #2ea043; }
-  #send:disabled { opacity: 0.5; cursor: default; }
-  .approval { margin: 12px 0; padding: 12px 16px; background: #161b22; border: 1px solid #d29922; border-radius: 6px; }
-  .approval-title { font-weight: 600; color: #d29922; margin-bottom: 8px; }
-  .approval-field { font-size: 13px; margin-bottom: 4px; }
-  .approval-field .k { color: #8b949e; margin-right: 6px; }
-  .approval-field .v { color: #c9d1d9; font-family: ui-monospace, monospace; }
-  .approval-reason { width: 100%; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 8px; border-radius: 4px; font-family: inherit; font-size: 13px; margin: 8px 0; resize: vertical; min-height: 36px; }
-  .approval-buttons { display: flex; gap: 8px; margin-top: 8px; }
-  .approval-btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
-  .approval-btn:disabled { opacity: 0.5; cursor: default; }
-  .approval-approve { background: #238636; color: #fff; }
-  .approval-deny { background: #da3633; color: #fff; }
-  .approval-expired { color: #8b949e; font-size: 12px; font-style: italic; }
+  html, body { height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  button, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; background: none; border: none; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  code, pre, .mono { font-family: var(--mono); }
+
+  /* Banners. Escape hatches arrive with Phase 2; the halted banner is
+     raised from the 503 the chat route returns while the audit writer
+     is down. */
+  .banner { padding: 8px 20px; display: flex; gap: 10px; align-items: center; font-size: 12.5px; line-height: 1.45; }
+  .banner-danger { background: rgba(232,161,157,.10); border-bottom: 1px solid rgba(232,161,157,.35); }
+  .chip { font-size: 11px; padding: 3px 10px; border-radius: 6px; white-space: nowrap; flex: none; line-height: 1.4; }
+  .chip-outline { border: 1px solid var(--accent-400); color: var(--accent-400); }
+  .chip-danger { border: 1px solid var(--danger-text); color: var(--danger-text); }
+  .chip-neutral { background: var(--neutral-800); color: #f3f5fe; }
+
+  /* Status line. Phase 1 carries the wordmark alone at its final height
+     so Phase 2 adds values without a layout shift. */
+  #status { padding: 11px 20px; border-bottom: 1px solid var(--hairline); display: flex; align-items: center; min-height: 42px; flex: none; }
+  #wordmark { font-size: 15px; font-weight: 500; letter-spacing: -0.01em; }
+
+  #shell { flex: 1; display: flex; min-height: 0; }
+  /* Rail: exists only when there is somewhere to go. */
+  #rail { width: 200px; flex: none; background: var(--bg-2); border-right: 1px solid var(--hairline); padding: 14px 10px; overflow-y: auto; }
+  .rail-label { font-size: 10px; text-transform: uppercase; letter-spacing: .11em; color: rgba(233,233,237,.4); padding: 6px 9px 4px; }
+  .rail-row { display: block; width: 100%; text-align: left; padding: 8px 9px; border-radius: 7px; margin-bottom: 2px; }
+  .rail-row:hover { background: rgba(145,132,217,.08); }
+  .rail-row.active { background: rgba(145,132,217,.13); box-shadow: inset 0 0 0 1px rgba(145,132,217,.34); }
+  .rail-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail-meta { font-size: 11px; color: rgba(233,233,237,.45); margin-top: 2px; }
+  .rail-section + .rail-section { margin-top: 12px; }
+
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #conversation { flex: 1; overflow-y: auto; padding: 22px 24px 18px; display: flex; flex-direction: column; gap: 16px; }
+  #conversation > * { flex: none; }
+  .msg-user { align-self: flex-end; max-width: 70%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--surface-user); font-size: 14.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .msg-assistant { align-self: flex-start; max-width: 78%; width: 100%; font-size: 14.5px; line-height: 1.65; color: rgba(233,233,237,.93); }
+  .msg-assistant p { margin: 0 0 .7em; white-space: pre-wrap; word-break: break-word; }
+  .msg-assistant p:last-child { margin-bottom: 0; }
+  .msg-assistant code { font-size: 13px; background: rgba(0,0,0,.35); padding: 1px 5px; border-radius: var(--radius-sm); }
+  .code { margin: 0 0 .7em; border-radius: 7px; background: rgba(0,0,0,.4); overflow: hidden; }
+  .code-head { display: flex; align-items: center; padding: 4px 8px 4px 12px; font-size: 11px; color: rgba(233,233,237,.5); border-bottom: 1px solid rgba(233,233,237,.06); }
+  .code-head button { margin-left: auto; font-size: 11px; color: var(--accent-300); padding: 2px 6px; border-radius: var(--radius-sm); }
+  .code-head button:hover { background: rgba(145,132,217,.12); }
+  .code pre { padding: 10px 12px; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre; }
+  .cutoff { font-size: 11.5px; color: rgba(233,233,237,.5); margin-top: 4px; }
+  .empty-state { align-self: center; margin: auto; max-width: 52ch; text-align: center; font-size: 14.5px; line-height: 1.6; color: rgba(233,233,237,.62); }
+
+  /* Own blocks: refusals, errors. Never spliced into the assistant's
+     sentence. */
+  .block { align-self: flex-start; max-width: 82%; width: 100%; border-radius: var(--radius-md); padding: 10px 14px; background: rgba(0,0,0,.25); box-shadow: inset 0 0 0 1px var(--neutral-800); }
+  .block-head { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; font-weight: 500; }
+  .block-head .glyph { width: 14px; text-align: center; flex: none; }
+  .block-refusal .block-head { color: var(--danger-text); }
+  .block-body { font-size: 12.5px; line-height: 1.5; color: rgba(233,233,237,.72); margin-top: 6px; white-space: pre-wrap; word-break: break-word; }
+  .block-foot { font-size: 11.5px; color: rgba(233,233,237,.5); margin-top: 6px; }
+
+  /* Approval card: the one loud element. */
+  .approval { align-self: flex-start; max-width: 82%; width: 100%; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--accent-700), 0 8px 24px rgba(0,0,0,.4); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .approval-head { display: flex; gap: 10px; align-items: flex-start; }
+  .approval-sentence { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.62); flex: 1; }
+  .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; }
+  .approval-cmd { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: rgba(0,0,0,.4); padding: 10px 12px; border-radius: 7px; overflow-x: auto; white-space: pre; }
+  .approval-note { font-size: 11.5px; color: rgba(233,233,237,.5); }
+  .input { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--neutral-800); border-radius: var(--radius-md); padding: 9px 12px; font-size: 13px; color: var(--text); resize: none; }
+  .input::placeholder { color: rgba(233,233,237,.38); }
+  .input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px rgba(145,132,217,.25); }
+  .approval-reason { min-height: 38px; }
+  .approval-actions { display: flex; gap: 8px; align-items: center; }
+  .btn { padding: 8px 14px; border-radius: var(--radius-md); font-size: 13px; border: 1px solid var(--neutral-800); color: rgba(233,233,237,.85); }
+  .btn:hover { background: rgba(255,255,255,.04); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn-deny { border-color: var(--neutral-600); color: var(--text); font-weight: 500; }
+  .btn-primary { border-color: var(--accent); color: var(--accent-300); }
+  .decision { align-self: flex-start; font-size: 12.5px; color: rgba(233,233,237,.62); padding: 4px 0; }
+  .decision .glyph { display: inline-block; width: 14px; text-align: center; color: var(--accent-400); }
+
+  #turnline { display: flex; gap: 8px; align-items: center; padding: 0 24px 8px; font-size: 12.5px; color: rgba(233,233,237,.5); flex: none; }
+  .dots { display: inline-flex; gap: 3px; }
+  .dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+  .dots i:nth-child(2) { opacity: .5; } .dots i:nth-child(3) { opacity: .25; }
+  @media (prefers-reduced-motion: no-preference) {
+    .dots.pulse i { animation: pulse 1.2s infinite ease-in-out; }
+    .dots.pulse i:nth-child(2) { animation-delay: .2s; } .dots.pulse i:nth-child(3) { animation-delay: .4s; }
+    @keyframes pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+    .approval, .block, #notice, .rail-row { transition: opacity 140ms ease-out; }
+  }
+
+  /* Notices sit directly above the composer: not-sent, connection lost. */
+  #notice { margin: 0 24px 8px; padding: 8px 12px; border-radius: var(--radius-md); background: rgba(0,0,0,.25); box-shadow: inset 0 0 0 1px var(--neutral-800); font-size: 12.5px; display: flex; gap: 10px; align-items: center; flex: none; }
+  #notice a, .link { color: var(--accent-300); text-decoration: none; cursor: pointer; background: none; border: none; font-size: inherit; padding: 0; }
+  #notice a:hover, .link:hover { text-decoration: underline; }
+
+  #composer { display: flex; gap: 10px; padding: 0 24px 18px; flex: none; }
+  #composer.busy { opacity: .6; }
+  #input { flex: 1; height: 42px; min-height: 42px; max-height: 160px; line-height: 1.5; }
+  #send { height: 42px; padding: 0 16px; border-radius: var(--radius-md); border: 1px solid var(--accent); color: var(--accent-300); font-size: 13px; flex: none; }
+  #send:disabled { opacity: .5; cursor: default; }
+  #readonly-bar { display: flex; gap: 12px; align-items: center; padding: 12px 24px 18px; border-top: 1px solid var(--hairline); font-size: 12.5px; color: rgba(233,233,237,.62); flex: none; }
+  #readonly-bar .btn { margin-left: auto; white-space: nowrap; }
+
+  /* Archive browse view, rendered inside the conversation column. */
+  .archive-head { font-size: 17px; font-weight: 500; }
+  .archive-head .meta { font-size: 13px; font-weight: 400; color: rgba(233,233,237,.5); margin-left: 8px; }
+  .archive-note { font-size: 13px; color: rgba(233,233,237,.5); font-style: italic; }
+  .archive-row { display: flex; gap: 12px; align-items: baseline; width: 100%; text-align: left; padding: 10px 0; border-bottom: 1px solid var(--hairline); font-size: 14px; }
+  .archive-row:hover { background: rgba(145,132,217,.06); }
+  .archive-row .meta { margin-left: auto; font-size: 12px; color: rgba(233,233,237,.5); white-space: nowrap; }
+  .archive-msg { max-width: 82%; font-size: 14px; line-height: 1.6; }
+  .archive-msg .sender { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: rgba(233,233,237,.45); margin-bottom: 2px; }
+  .archive-msg .text { white-space: pre-wrap; word-break: break-word; }
+  .archive-msg .text.empty, .archive-attachment .meta { color: rgba(233,233,237,.45); font-style: italic; }
+  .archive-attachment { padding: 4px 0 4px 16px; font-size: 13px; }
+
+  @media (max-width: 720px) {
+    #shell { flex-direction: column; }
+    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto; }
+    .rail-section { display: flex; gap: 4px; align-items: center; }
+    .rail-section + .rail-section { margin-top: 0; }
+    .rail-row { width: auto; white-space: nowrap; }
+    .rail-meta { display: none; }
+    .msg-user, .msg-assistant, .approval, .block { max-width: 92%; }
+    #conversation { padding: 16px 14px 12px; }
+    #composer, #turnline, #notice { padding-left: 14px; padding-right: 14px; margin-left: 0; margin-right: 0; }
+  }
 </style>
 </head>
 <body>
-<div id="sidebar">
-  <div id="sidebar-header">Sessions</div>
-  <div id="session-list"></div>
-  <div id="sidebar-header">Archives</div>
-  <div id="archive-list"></div>
+<div id="halted-banner" class="banner banner-danger" role="alert" hidden>
+  <span class="chip chip-danger">Audit writer halted</span>
+  <span>The audit record stopped accepting rows. New turns are refused until the gateway is restarted and the record verified.</span>
 </div>
-<div id="main">
-  <div id="header"><strong>wirken</strong> &mdash; webchat</div>
-  <div id="messages"></div>
-  <div id="input-area">
-    <input id="input" type="text" placeholder="Send a message..." autofocus>
-    <button id="send">Send</button>
-  </div>
-  <div id="archive-bar" hidden>
-    <span id="archive-notice"></span>
-    <button id="back-to-live">Back to the live session</button>
-  </div>
+<header id="status"><span id="wordmark">wirken</span></header>
+<div id="shell">
+  <nav id="rail" aria-label="Conversations and archives" hidden>
+    <div class="rail-section"><div class="rail-label">Conversations</div><div id="rail-conversations"></div></div>
+    <div class="rail-section"><div class="rail-label">Archives</div><div id="rail-archives"></div></div>
+  </nav>
+  <main id="main">
+    <h1 class="sr-only">wirken webchat</h1>
+    <section id="conversation" aria-live="polite" aria-label="Conversation"></section>
+    <div id="turnline" hidden><span class="dots pulse" aria-hidden="true"><i></i><i></i><i></i></span><span id="turntext"></span></div>
+    <div id="notice" role="status" hidden></div>
+    <form id="composer">
+      <label for="input" class="sr-only">Message</label>
+      <textarea id="input" class="input" rows="1" placeholder="Message your agent"></textarea>
+      <button id="send" type="submit">Send</button>
+    </form>
+    <div id="readonly-bar" hidden>
+      <span id="readonly-text"></span>
+      <button id="back-to-live" type="button" class="btn">Back to the conversation</button>
+    </div>
+  </main>
 </div>
 <script>
-const messages = document.getElementById('messages');
+'use strict';
+const conversation = document.getElementById('conversation');
+const turnline = document.getElementById('turnline');
+const turntext = document.getElementById('turntext');
+const notice = document.getElementById('notice');
+const composer = document.getElementById('composer');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
-const sessionList = document.getElementById('session-list');
-const archiveList = document.getElementById('archive-list');
-const inputArea = document.getElementById('input-area');
-const archiveNotice = document.getElementById('archive-notice');
-const archiveBar = document.getElementById('archive-bar');
+const readonlyBar = document.getElementById('readonly-bar');
+const readonlyText = document.getElementById('readonly-text');
 const backToLive = document.getElementById('back-to-live');
-const WEBCHAT_CHANNEL = 'webchat';
-// The single canonical webchat conversation. POST /api/chat always
-// wakes agent "default" on channel "webchat" with conversation
-// "webchat-default", so its session-log id is fixed and can be
-// restored on page load.
-const WEBCHAT_LOG_ID = 'default/webchat/webchat-default';
-let activeSessionId = null;
+const rail = document.getElementById('rail');
+const railConversations = document.getElementById('rail-conversations');
+const railArchives = document.getElementById('rail-archives');
+const haltedBanner = document.getElementById('halted-banner');
 
-// The sole path from a stored value to the DOM.
-//
-// Everything that came out of a store goes through here, and here
-// assigns textContent. A browser renders textContent as characters: a
-// script tag inside an imported message is text on the page, not a tag
-// the parser acts on. Nothing in this page writes innerHTML,
-// insertAdjacentHTML, outerHTML or document.write with a value; the
-// only innerHTML writes assign an empty literal to clear a container.
-//
-// One helper rather than a convention, because a convention is kept by
-// remembering and a helper is kept by a test. The import surface can
-// hold text from anyone who ever got a message into the imported
-// account, so this is the control that makes that text inert, and it
-// is the only one.
+// One conversation per browser today. POST /api/chat always wakes agent
+// "default" on channel "webchat", conversation "webchat-default".
+const AGENT_ID = 'default';
+const WEBCHAT_LOG_ID = 'default/webchat/webchat-default';
+const REFUSAL_PREFIX = 'sandbox error: ';
+
+// The sole path from a value to the DOM. A browser renders textContent
+// as characters, so text written by anyone else (an archive, a tool, an
+// agent) is inert here. Nothing in this page writes innerHTML with a
+// value; the only innerHTML writes assign an empty literal to clear.
 function setText(el, value) {
   el.textContent = (value === null || value === undefined) ? '' : String(value);
   return el;
 }
-
-// Build an element and fill it through setText. Nothing constructs
-// markup from a value.
 function el(tag, className, value) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (value !== undefined) setText(node, value);
   return node;
 }
+function clear(node) {
+  node.innerHTML = '';
+}
+function hhmm(d) {
+  const t = d || new Date();
+  return String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+}
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}
+function scrollToEnd() { conversation.scrollTop = conversation.scrollHeight; }
 
-function addMsg(role, text, isError) {
-  const div = document.createElement('div');
-  div.className = 'msg';
-  const roleSpan = document.createElement('span');
-  roleSpan.className = 'role ' + role;
-  setText(roleSpan, role);
-  const contentSpan = document.createElement('span');
-  contentSpan.className = 'content' + (isError ? ' error' : '');
-  setText(contentSpan, text || '');
-  div.appendChild(roleSpan);
-  div.appendChild(contentSpan);
-  messages.appendChild(div);
-  messages.scrollTop = messages.scrollHeight;
-  return contentSpan;
+// --- Markdown, a deliberately small grammar rendered to nodes ---
+// Paragraphs (blank-line separated), inline code (single backticks),
+// fenced code (triple backticks, optional label, copy button). Nothing
+// else is markup; it renders as the text it is.
+function renderMarkdown(container, text) {
+  clear(container);
+  const lines = String(text || '').split('\n');
+  let para = [];
+  let fence = null;
+  const flushPara = () => {
+    if (para.length === 0) return;
+    const p = el('p');
+    renderInline(p, para.join('\n'));
+    container.appendChild(p);
+    para = [];
+  };
+  for (const line of lines) {
+    if (fence) {
+      if (line.trim().startsWith('```')) {
+        container.appendChild(codeBlock(fence.lang, fence.lines.join('\n')));
+        fence = null;
+      } else {
+        fence.lines.push(line);
+      }
+      continue;
+    }
+    if (line.trim().startsWith('```')) {
+      flushPara();
+      fence = { lang: line.trim().slice(3).trim(), lines: [] };
+      continue;
+    }
+    if (line.trim() === '') { flushPara(); continue; }
+    para.push(line);
+  }
+  if (fence) container.appendChild(codeBlock(fence.lang, fence.lines.join('\n')));
+  flushPara();
+}
+function renderInline(p, text) {
+  const parts = text.split('`');
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] === '' ) continue;
+    p.appendChild(i % 2 === 1 ? el('code', null, parts[i]) : document.createTextNode(parts[i]));
+  }
+}
+function codeBlock(lang, body) {
+  const box = el('div', 'code');
+  const head = el('div', 'code-head');
+  head.appendChild(el('span', null, lang || 'code'));
+  const copy = el('button', null, 'copy');
+  copy.type = 'button';
+  copy.addEventListener('click', () => {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(body).then(
+      () => { setText(copy, 'copied'); setTimeout(() => setText(copy, 'copy'), 1200); },
+      () => { setText(copy, 'copy failed'); });
+  });
+  head.appendChild(copy);
+  box.appendChild(head);
+  box.appendChild(el('pre', null, body));
+  return box;
 }
 
-// Approval-UI state. Sequential queue: the agent's tool dispatch
-// is serial, so a second approval request shouldn't arrive while
-// one is still rendered. The queue is defensive — if a future
-// agent gains parallel dispatch the UI stays correct.
+// --- Transcript primitives ---
+function addUser(text) {
+  const node = el('div', 'msg-user', text);
+  conversation.appendChild(node);
+  scrollToEnd();
+  return node;
+}
+function addAssistant(text) {
+  const node = el('div', 'msg-assistant');
+  node.setAttribute('data-role', 'assistant');
+  renderMarkdown(node, text || '');
+  conversation.appendChild(node);
+  scrollToEnd();
+  return node;
+}
+function addBlock(kind, label, glyph, body, foot) {
+  const box = el('div', 'block block-' + kind);
+  const head = el('div', 'block-head');
+  head.appendChild(el('span', 'glyph', glyph));
+  head.appendChild(el('span', null, label));
+  box.appendChild(head);
+  if (body) box.appendChild(el('div', 'block-body', body));
+  if (foot) box.appendChild(el('div', 'block-foot', foot));
+  conversation.appendChild(box);
+  scrollToEnd();
+  return box;
+}
+function addRefusal(text) {
+  return addBlock('refusal', 'Refused before running', '✕', text,
+    'Nothing ran on the host. The agent was stopped at this step.');
+}
+function addAgentError(text) {
+  return addBlock('error', 'The agent stopped', '✕', text, null);
+}
+function addDecision(text, glyph) {
+  const line = el('div', 'decision');
+  line.appendChild(el('span', 'glyph', glyph || '✓'));
+  line.appendChild(el('span', null, ' ' + text));
+  conversation.appendChild(line);
+  scrollToEnd();
+  return line;
+}
+function showEmptyState() {
+  clear(conversation);
+  conversation.appendChild(el('div', 'empty-state',
+    'Agent ' + AGENT_ID + ' answers here. This page is served to this machine only. ' +
+    'Every message, tool call and decision is written to the audit record before it runs.'));
+}
+
+// --- Turn line, composer lock, notices ---
+let turnOpen = false;
+let halted = false;
+function setTurn(text) {
+  if (text === null) { turnline.hidden = true; setText(turntext, ''); return; }
+  turnline.hidden = false;
+  setText(turntext, text);
+}
+function lockComposer(placeholder) {
+  input.disabled = true; sendBtn.disabled = true; composer.classList.add('busy');
+  input.placeholder = placeholder;
+}
+function unlockComposer() {
+  if (halted) return;
+  input.disabled = false; sendBtn.disabled = false; composer.classList.remove('busy');
+  input.placeholder = 'Message your agent';
+}
+function setHalted() {
+  halted = true;
+  haltedBanner.hidden = false;
+  lockComposer('Turns are refused while the audit writer is halted');
+}
+function showNotice(chipText, text, retryFn) {
+  clear(notice);
+  if (chipText) notice.appendChild(el('span', 'chip chip-neutral', chipText));
+  notice.appendChild(el('span', null, text));
+  if (retryFn) {
+    const a = el('button', 'link', 'retry');
+    a.type = 'button';
+    a.addEventListener('click', () => { notice.hidden = true; retryFn(); });
+    notice.appendChild(a);
+  }
+  notice.hidden = false;
+}
+function hideNotice() { notice.hidden = true; clear(notice); }
+
+// --- Approval card ---
+// Sequential queue: tool dispatch is serial, so a second request should
+// not arrive while one is rendered; the queue keeps the UI right if it
+// ever does.
 const approvalQueue = [];
 let approvalCurrent = null;
 
+function tierLabel(tier) {
+  const t = String(tier || '');
+  if (t === 'tier3') return 'Tier 3 · always asks';
+  if (t === 'tier2') return 'Tier 2 · asks without a grant';
+  return t ? 'Tier ' + t.replace('tier', '') : 'Approval';
+}
+function approvalSentence(ev) {
+  const key = String(ev.action_key || '');
+  const tail = ' Nothing runs until you decide.';
+  if (key.startsWith('shell:')) {
+    return (ev.requested_tier === 'tier2'
+      ? 'Read-only shell command with no standing grant.'
+      : 'Shell command outside the read-only allowlist.') + tail;
+  }
+  if (key.startsWith('mcp:')) return 'MCP tool call.' + tail;
+  if (key.startsWith('wasm:')) return 'Wasm skill call.' + tail;
+  if (key.startsWith('imported_')) return 'Reads an imported archive.' + tail;
+  if (key.startsWith('cross_channel_memory:')) return 'Reads another channel’s memory.' + tail;
+  if (key.startsWith('file:')) return 'File access outside the workspace.' + tail;
+  if (ev.tool_name === 'sandbox_egress') return 'Network egress from the sandbox after reading sensitive data.' + tail;
+  return String(ev.tool_name || 'This tool') + ' needs approval.' + tail;
+}
+
 function renderApproval(ev) {
-  if (approvalCurrent) {
-    approvalQueue.push(ev);
-    return;
-  }
+  if (approvalCurrent) { approvalQueue.push(ev); return; }
   approvalCurrent = ev;
-  const card = document.createElement('div');
-  card.className = 'approval';
+  const askedAt = Date.now();
+  const card = el('div', 'approval');
   card.id = 'approval-' + ev.request_id;
-  card.innerHTML = '';
-  const title = document.createElement('div');
-  title.className = 'approval-title';
-  setText(title, 'Approval required');
-  card.appendChild(title);
-  const fields = [
-    ['agent', ev.triggering_agent],
-    ['tool', ev.tool_name],
-    ['action', ev.action_key],
-    ['tier', ev.requested_tier],
-  ];
-  if (ev.trigger_message) fields.push(['trigger', ev.trigger_message]);
-  for (const [k, v] of fields) {
-    const row = document.createElement('div');
-    row.className = 'approval-field';
-    const ks = document.createElement('span');
-    ks.className = 'k';
-    setText(ks, k + ':');
-    const vs = document.createElement('span');
-    vs.className = 'v';
-    setText(vs, v);
-    row.appendChild(ks);
-    row.appendChild(vs);
-    card.appendChild(row);
-  }
-  const reason = document.createElement('textarea');
-  reason.className = 'approval-reason';
-  reason.placeholder = 'Optional reason (recorded on deny)';
+  card.setAttribute('role', 'group');
+  card.setAttribute('aria-label', 'Approval required');
+
+  const head = el('div', 'approval-head');
+  head.appendChild(el('span', 'chip chip-outline', tierLabel(ev.requested_tier)));
+  head.appendChild(el('span', 'approval-sentence', approvalSentence(ev)));
+  const age = el('span', 'approval-age', 'asked just now');
+  head.appendChild(age);
+  card.appendChild(head);
+
+  // The approval event carries the action key, not the command line.
+  // The command joins from the chain in Phase 2; until then the key is
+  // what the gate computed, and that is what is shown.
+  card.appendChild(el('div', 'approval-cmd', ev.action_key || ev.tool_name || ''));
+  card.appendChild(el('div', 'approval-note', 'action key as computed by the gate · tool ' + (ev.tool_name || '')));
+
+  const reasonLabel = el('label', 'sr-only', 'Reason (optional)');
+  reasonLabel.htmlFor = 'reason-' + ev.request_id;
+  const reason = el('textarea', 'input approval-reason');
+  reason.id = 'reason-' + ev.request_id;
+  reason.placeholder = 'Reason (optional)';
+  reason.rows = 1;
+  card.appendChild(reasonLabel);
   card.appendChild(reason);
-  const btnRow = document.createElement('div');
-  btnRow.className = 'approval-buttons';
-  const approveBtn = document.createElement('button');
-  approveBtn.className = 'approval-btn approval-approve';
-  setText(approveBtn, 'Approve');
-  const denyBtn = document.createElement('button');
-  denyBtn.className = 'approval-btn approval-deny';
-  setText(denyBtn, 'Deny');
-  btnRow.appendChild(approveBtn);
-  btnRow.appendChild(denyBtn);
-  card.appendChild(btnRow);
-  messages.appendChild(card);
-  messages.scrollTop = messages.scrollHeight;
+
+  const actions = el('div', 'approval-actions');
+  const denyBtn = el('button', 'btn btn-deny', 'Deny');
+  denyBtn.type = 'button';
+  const approveBtn = el('button', 'btn btn-primary', 'Approve once');
+  approveBtn.type = 'button';
+  actions.appendChild(denyBtn);
+  actions.appendChild(approveBtn);
+  card.appendChild(actions);
+  conversation.appendChild(card);
+  scrollToEnd();
+  setTurn('turn open · agent holding on your decision');
+  lockComposer('Decide on the approval above to continue');
+
+  const ticker = setInterval(() => {
+    if (!card.isConnected) { clearInterval(ticker); return; }
+    const s = Math.floor((Date.now() - askedAt) / 1000);
+    setText(age, 'asked ' + (s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's') + ' ago');
+  }, 1000);
 
   const submit = async (decision) => {
     approveBtn.disabled = true;
@@ -231,6 +503,8 @@ function renderApproval(ev) {
     const body = { decision };
     const r = reason.value.trim();
     if (r) body.reason = r;
+    card.dataset.decision = decision;
+    card.dataset.reason = r;
     try {
       await fetch('/api/approvals/' + encodeURIComponent(ev.request_id), {
         method: 'POST',
@@ -238,267 +512,280 @@ function renderApproval(ev) {
         body: JSON.stringify(body),
       });
     } catch (e) {
-      // Network error: the ack event won't arrive. Surface
-      // inline so the operator knows the press didn't land and
-      // can retry. The gate's own timeout will eventually
-      // resolve the queue if the press never reaches us.
+      // The ack will not arrive. Say so and let the operator retry.
       approveBtn.disabled = false;
       denyBtn.disabled = false;
-      const err = document.createElement('div');
-      err.className = 'approval-expired';
-      setText(err, 'Network error submitting decision: ' + e.message);
-      card.appendChild(err);
+      card.appendChild(el('div', 'approval-note', 'Your decision did not reach the gateway: ' + e.message));
     }
   };
   approveBtn.addEventListener('click', () => submit('allow'));
   denyBtn.addEventListener('click', () => submit('deny'));
 }
 
+// The ack means the queue accepted the decision. "Recorded" is said only
+// when the chain row is seen, which Phase 2 polls for.
 function ackApproval(requestId, result) {
   const card = document.getElementById('approval-' + requestId);
   if (card) {
-    if (result === 'expired' || result === 'unknown_key') {
-      const note = document.createElement('div');
-      note.className = 'approval-expired';
-      setText(note, result === 'expired'
-        ? 'Approval expired before your decision was applied.'
-        : 'This approval is no longer pending (timeout, race, or already resolved).');
-      card.appendChild(note);
-      // Leave the note visible briefly, then remove the card so
-      // the chat history shows the decision was acknowledged.
-      setTimeout(() => card.remove(), 4000);
+    const decision = card.dataset.decision || '';
+    const reason = card.dataset.reason || '';
+    let line, glyph;
+    if (result === 'accepted') {
+      line = (decision === 'deny' ? 'denied' : 'accepted') + ' · ' + hhmm() + (reason ? ' · ' + reason : '');
+      glyph = decision === 'deny' ? '✕' : '✓';
     } else {
-      card.remove();
+      line = 'expired · ' + hhmm() + ' · decided elsewhere or past the window';
+      glyph = '○';
     }
+    card.replaceWith(addDecision(line, glyph));
   }
   if (approvalCurrent && approvalCurrent.request_id === requestId) {
     approvalCurrent = null;
     if (approvalQueue.length > 0) {
       renderApproval(approvalQueue.shift());
+    } else if (turnOpen) {
+      setTurn('turn open');
+      lockComposer('Waiting for the agent…');
     }
   }
 }
 
+// A turn that ends with a card still open never received an ack: the
+// gate times out server-side and writes a denial row. The card cannot
+// stay interactive after its stream is gone.
+function settleOpenApproval() {
+  if (!approvalCurrent) return;
+  const card = document.getElementById('approval-' + approvalCurrent.request_id);
+  if (card) card.replaceWith(addDecision('turn ended · no decision was sent from here', '○'));
+  approvalCurrent = null;
+  approvalQueue.length = 0;
+}
+
+// --- Sending a turn ---
+let lastCutNode = null;
 async function send() {
   const text = input.value.trim();
-  if (!text) return;
+  if (!text || turnOpen || halted) return;
   input.value = '';
-  sendBtn.disabled = true;
-  addMsg('user', text);
+  hideNotice();
+  const emptyState = conversation.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+  turnOpen = true;
+  lockComposer('Waiting for the agent…');
+  setTurn('thinking');
+  const userNode = addUser(text);
 
-  const contentSpan = addMsg('assistant', '');
-
+  let assistant = null;
+  let buffer = '';
+  let received = '';
+  let terminal = false;   // a done or error event arrived
+  let res;
   try {
-    const res = await fetch('/api/chat', {
+    res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
     });
+  } catch (e) {
+    userNode.remove();
+    finishTurn();
+    input.value = text;
+    showNotice(null, 'Connection lost · ', () => send());
+    return;
+  }
 
-    if (!res.ok) {
-      const data = await res.json();
-      setText(contentSpan, data.error || 'Request failed');
-      contentSpan.classList.add('error');
-      sendBtn.disabled = false;
-      input.focus();
-      return;
+  if (!res.ok) {
+    // Not sent: the message goes back into the composer, not into the
+    // record.
+    userNode.remove();
+    finishTurn();
+    input.value = text;
+    if (res.status === 503) { setHalted(); return; }
+    let msg;
+    if (res.status === 429) {
+      const ra = parseInt(res.headers.get('Retry-After') || '', 10);
+      msg = 'Too many requests.' + (ra > 0 ? ' Try again in ' + ra + 's.' : ' Try again shortly.');
+    } else if (res.status === 403) {
+      msg = 'This page’s origin was not accepted by the gateway. Reload from ' + location.origin + '.';
+    } else {
+      msg = 'The gateway refused this request (' + res.status + ').';
     }
+    showNotice('Not sent', msg, null);
+    return;
+  }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-
       let boundary;
       while ((boundary = buffer.indexOf('\n\n')) >= 0) {
         const block = buffer.substring(0, boundary);
         buffer = buffer.substring(boundary + 2);
-
         for (const line of block.split('\n')) {
-          if (line.startsWith('data: ')) {
-            const json = line.substring(6);
-            try {
-              const event = JSON.parse(json);
-              if (event.type === 'delta') {
-                setText(contentSpan, contentSpan.textContent + event.text);
-                messages.scrollTop = messages.scrollHeight;
-              } else if (event.type === 'error') {
-                setText(contentSpan, contentSpan.textContent + event.text);
-                contentSpan.classList.add('error');
-              } else if (event.type === 'approval_request') {
-                renderApproval(event);
-              } else if (event.type === 'approval_decision_ack') {
-                ackApproval(event.request_id, event.result);
-              }
-            } catch(e) {}
+          if (!line.startsWith('data: ')) continue;
+          let event;
+          try { event = JSON.parse(line.substring(6)); } catch (e) { continue; }
+          if (event.type === 'delta') {
+            if (!assistant) assistant = addAssistant('');
+            received += event.text;
+            renderMarkdown(assistant, received);
+            setTurn(approvalCurrent ? 'turn open · agent holding on your decision' : 'turn open');
+            scrollToEnd();
+          } else if (event.type === 'error') {
+            terminal = true;
+            const msg = String(event.text || '');
+            if (msg.startsWith(REFUSAL_PREFIX)) addRefusal(msg.slice(REFUSAL_PREFIX.length));
+            else addAgentError(msg);
+          } else if (event.type === 'approval_request') {
+            // What the agent says after the decision is a new paragraph
+            // below the card, not a continuation of the one above it.
+            assistant = null;
+            received = '';
+            renderApproval(event);
+          } else if (event.type === 'approval_decision_ack') {
+            ackApproval(event.request_id, event.result);
+          } else if (event.type === 'done') {
+            terminal = true;
           }
         }
       }
     }
   } catch (e) {
-    setText(contentSpan, 'Connection error: ' + e.message);
-    contentSpan.classList.add('error');
+    // The socket died mid-stream; fall through to the cut-off marking.
   }
-  sendBtn.disabled = false;
-  input.focus();
-  loadSessions();
+  if (!terminal) {
+    if (assistant) {
+      assistant.appendChild(el('div', 'cutoff', 'cut off — the stream ended without a done event'));
+    }
+    showNotice(null, 'Connection lost · ', () => loadTranscript(WEBCHAT_LOG_ID));
+  }
+  settleOpenApproval();
+  finishTurn();
+  loadRail();
+}
+function finishTurn() {
+  turnOpen = false;
+  setTurn(null);
+  unlockComposer();
+  if (!halted) input.focus();
 }
 
-function fmtTime(iso) {
-  if (!iso) return '';
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
-
-async function loadSessions() {
-  let rows;
-  try {
-    const res = await fetch('/api/sessions');
-    if (!res.ok) return;
-    rows = await res.json();
-  } catch (e) { return; }
-  // Most recent first, then pin the current webchat session to the top.
-  rows.sort((a, b) => (b.last_activity || '').localeCompare(a.last_activity || ''));
-  rows.sort((a, b) => (b.channel === WEBCHAT_CHANNEL) - (a.channel === WEBCHAT_CHANNEL));
-  sessionList.innerHTML = '';
-  if (rows.length === 0) {
-    const empty = document.createElement('div');
-    empty.id = 'session-empty';
-    setText(empty, 'No active sessions');
-    sessionList.appendChild(empty);
-    return;
-  }
-  for (const row of rows) {
-    const div = document.createElement('div');
-    div.className = 'session-row' + (row.log_id === activeSessionId ? ' active' : '');
-    const ch = document.createElement('div');
-    ch.className = 'ch';
-    setText(ch, row.channel);
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    setText(meta, row.message_count + ' msg · last ' + fmtTime(row.last_activity));
-    div.appendChild(ch);
-    div.appendChild(meta);
-    div.addEventListener('click', () => loadTranscript(row.log_id));
-    sessionList.appendChild(div);
-  }
-}
-
+// --- History ---
 async function loadTranscript(id) {
-  activeSessionId = id;
-  // The composer posts to /api/chat, which always resolves the one
-  // canonical webchat conversation. Displaying any other session and
-  // leaving the composer up meant a send landed somewhere other than
-  // what was on screen: the reply streamed into the transcript being
-  // read, the message joined a conversation the operator was not
-  // looking at, and nothing said so.
   setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE);
-  let turns;
+  let turns = null;
   try {
     const res = await fetch('/api/sessions/' + encodeURIComponent(id));
-    if (!res.ok) { loadSessions(); return; }
-    turns = await res.json();
-  } catch (e) { loadSessions(); return; }
-  messages.innerHTML = '';
-  for (const t of turns) addMsg(t.role, t.content);
-  loadSessions();
+    if (res.ok) turns = await res.json();
+  } catch (e) {
+    turns = null;
+  } finally {
+    // The rail is refreshed however the load ends.
+    loadRail();
+  }
+  if (!turns) return;
+  clear(conversation);
+  if (turns.length === 0 && id === WEBCHAT_LOG_ID) { showEmptyState(); return; }
+  for (const t of turns) {
+    if (t.role === 'user') addUser(t.content);
+    else addAssistant(t.content);
+  }
+  scrollToEnd();
 }
 
-// The composer belongs to a live session. An imported archive is a
-// stored record, and there is nothing to send to it: the surface has
-// no write route, and the store's rows are read-only after import.
-//
-// Leaving the composer on screen under an archive would afford a send
-// that looks like it annotates the record and in fact starts a live
-// agent turn. The affordance is the defect, so it goes away rather
-// than being explained away, and a notice takes its place.
-const ARCHIVE_NOTICE =
-  'Imported archive: a stored record, shown read-only. There is nothing to send to here.';
-const OTHER_SESSION_NOTICE =
-  'Another session, shown read-only. The composer writes to this browser\'s own ' +
-  'conversation, not to this one.';
-
-// One switch owns whether the composer is on screen, and it takes the
-// reason. Passing null means the pane is showing the conversation the
-// composer writes to; anything else is a record being read, and gets
-// the notice and the way back in the composer's place.
-function setReadOnly(notice) {
-  inputArea.hidden = notice !== null;
-  archiveBar.hidden = notice === null;
-  if (notice !== null) setText(archiveNotice, notice);
+// --- Composer ownership ---
+// The composer belongs to the conversation this browser writes to. Any
+// other view (an imported archive, another session) takes it away and
+// puts a notice and the way back in its place.
+const ARCHIVE_NOTICE = 'Imported archive: nothing to send to here.';
+const OTHER_SESSION_NOTICE = 'Another session, shown read-only. This browser writes to its own conversation.';
+function setReadOnly(text) {
+  composer.hidden = text !== null;
+  readonlyBar.hidden = text === null;
+  if (text !== null) setText(readonlyText, text);
 }
+backToLive.addEventListener('click', () => { activeArchive = null; loadTranscript(WEBCHAT_LOG_ID); });
 
-function setArchiveMode(active) {
-  setReadOnly(active ? ARCHIVE_NOTICE : null);
-}
-
-// Taking the composer away leaves the operator somewhere with no way
-// out: the archive views reach each other, and nothing reaches back to
-// the conversation they were having. Reloading the page was the only
-// exit. The bar that replaces the composer carries the way out, so it
-// is on screen exactly when it is needed and by the same switch.
-backToLive.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID));
-
-// Imported archives. Read-only: these views fetch and render, and
-// there is no route here that writes.
-//
-// Everything below reaches the DOM through setText or el, including
-// every value that came out of an imported archive. That text was
-// written by whoever got a message into the imported account, which
-// may be nobody the operator knows.
-async function loadArchives() {
-  let sources;
+// --- Rail: only when there is somewhere to go ---
+let activeArchive = null;
+let railSources = [];
+async function loadRail() {
+  let sources = [];
+  let rows = [];
   try {
     const res = await fetch('/api/imported/sources');
-    if (!res.ok) return;
-    sources = await res.json();
-  } catch (e) { return; }
-  archiveList.innerHTML = '';
-  if (!sources.length) {
-    archiveList.appendChild(el('div', 'empty', 'No imported archives'));
-    return;
-  }
+    if (res.ok) sources = await res.json();
+  } catch (e) { sources = []; }
+  try {
+    const res = await fetch('/api/sessions');
+    if (res.ok) rows = await res.json();
+  } catch (e) { rows = []; }
+  railSources = sources;
+  if (!sources.length) { rail.hidden = true; return; }
+  rail.hidden = false;
+  clear(railConversations);
+  const mine = rows.find(r => r.log_id === WEBCHAT_LOG_ID);
+  const conv = el('button', 'rail-row' + (activeArchive === null ? ' active' : ''));
+  conv.type = 'button';
+  conv.appendChild(el('div', 'rail-title', 'webchat'));
+  const bits = [];
+  if (mine) bits.push(mine.message_count + ' msg');
+  if (approvalCurrent) bits.push('1 awaiting you');
+  conv.appendChild(el('div', 'rail-meta', bits.join(' · ') || 'no messages yet'));
+  conv.addEventListener('click', () => { activeArchive = null; loadTranscript(WEBCHAT_LOG_ID); });
+  railConversations.appendChild(conv);
+  clear(railArchives);
   for (const source of sources) {
-    const row = el('div', 'session-row');
-    row.appendChild(el('div', 'ch', source.source_account));
-    row.appendChild(el('div', 'meta',
-      source.conversations + ' conversations · ' + source.projects + ' projects · ' +
-      (source.sealed ? 'sealed' : 'live')));
+    const row = el('button', 'rail-row' + (activeArchive === source.id ? ' active' : ''));
+    row.type = 'button';
+    row.appendChild(el('div', 'rail-title', source.source_account));
+    row.appendChild(el('div', 'rail-meta',
+      source.conversations + ' conversations · ' + (source.sealed ? 'sealed' : 'live')));
     row.addEventListener('click', () => loadArchiveConversations(source));
-    archiveList.appendChild(row);
+    railArchives.appendChild(row);
   }
 }
 
+// --- Imported archives: read-only views ---
+// Every value out of an archive reaches the DOM through setText or el.
+// That text was written by whoever got a message into the imported
+// account, which may be nobody the operator knows.
 async function loadArchiveConversations(source) {
   let rows;
   try {
-    const res = await fetch('/api/imported/sources/' +
-      encodeURIComponent(source.id) + '/conversations');
+    const res = await fetch('/api/imported/sources/' + encodeURIComponent(source.id) + '/conversations');
     if (!res.ok) return;
     rows = await res.json();
   } catch (e) { return; }
-  activeSessionId = null;
-  setArchiveMode(true);
-  messages.innerHTML = '';
-  messages.appendChild(el('div', 'imported-head', 'Imported archive: ' + source.source_account));
+  activeArchive = source.id;
+  setReadOnly(ARCHIVE_NOTICE);
+  loadRail();
+  clear(conversation);
+  const head = el('div', 'archive-head', source.source_account);
+  head.appendChild(el('span', 'meta',
+    'imported archive · ' + source.conversations + ' conversations · ' + source.projects + ' projects · ' + (source.sealed ? 'sealed' : 'live')));
+  conversation.appendChild(head);
+  conversation.appendChild(el('div', 'archive-note',
+    'A stored record, shown read-only. Text was written by whoever got a message into this account.'));
   if (!rows.length) {
-    messages.appendChild(el('div', 'imported-note', 'This archive holds no conversations.'));
+    conversation.appendChild(el('div', 'archive-note', 'This archive holds no conversations.'));
     return;
   }
   for (const row of rows) {
-    const item = el('div', 'session-row');
+    const item = el('button', 'archive-row');
+    item.type = 'button';
     // An untitled conversation is a real shape in an archive, so the
     // uuid stands in rather than an empty line.
-    item.appendChild(el('div', 'ch', row.title || row.uuid));
-    item.appendChild(el('div', 'meta',
-      row.message_count + ' messages · ' + fmtTime(row.updated_at)));
+    item.appendChild(el('span', null, row.title || 'Untitled · ' + String(row.uuid).slice(0, 8)));
+    item.appendChild(el('span', 'meta', row.message_count + ' messages · ' + fmtDate(row.updated_at)));
     item.addEventListener('click', () => loadImportedConversation(source, row.uuid));
-    messages.appendChild(item);
+    conversation.appendChild(item);
   }
+  conversation.scrollTop = 0;
 }
 
 async function loadImportedConversation(source, uuid) {
@@ -509,64 +796,60 @@ async function loadImportedConversation(source, uuid) {
     if (!res.ok) return;
     detail = await res.json();
   } catch (e) { return; }
-  setArchiveMode(true);
-  messages.innerHTML = '';
+  setReadOnly(ARCHIVE_NOTICE);
+  clear(conversation);
   if (!detail) {
-    messages.appendChild(el('div', 'imported-note', 'That conversation is not in the store.'));
+    conversation.appendChild(el('div', 'archive-note', 'That conversation is not in the store.'));
     return;
   }
-  messages.appendChild(el('div', 'imported-head', detail.title || detail.uuid));
-  if (detail.summary) {
-    messages.appendChild(el('div', 'imported-note', detail.summary));
-  }
-  const back = el('div', 'imported-back', '← back to this archive');
+  conversation.appendChild(el('div', 'archive-head', detail.title || 'Untitled · ' + String(detail.uuid).slice(0, 8)));
+  if (detail.summary) conversation.appendChild(el('div', 'archive-note', detail.summary));
+  const back = el('button', 'link', '← back to this archive');
+  back.type = 'button';
   back.addEventListener('click', () => loadArchiveConversations(source));
-  messages.appendChild(back);
+  conversation.appendChild(back);
 
   for (const message of detail.messages) {
-    const div = el('div', 'msg');
-    div.appendChild(el('span', 'role ' + message.sender, message.sender));
+    const box = el('div', 'archive-msg');
+    box.appendChild(el('div', 'sender', message.sender));
     // A message the store holds no text for gets a label, not an empty
-    // span. Real archives carry these in quantity, and a blank turn
-    // reads as a message that said nothing rather than as one whose
-    // text was not imported. The claim is about what is stored, which
-    // is the only thing this page can check.
-    if (message.text.trim() === '') {
-      div.appendChild(el('span', 'content empty', 'no text stored for this message'));
+    // span: the claim is about what is stored, which is all this page
+    // can check.
+    if (String(message.text || '').trim() === '') {
+      box.appendChild(el('div', 'text empty', 'no text stored for this message'));
     } else {
-      div.appendChild(el('span', 'content', message.text));
+      box.appendChild(el('div', 'text', message.text));
     }
-    messages.appendChild(div);
-
-    for (const attachment of message.attachments) {
-      const att = el('div', 'imported-attachment');
+    conversation.appendChild(box);
+    for (const attachment of message.attachments || []) {
+      const att = el('div', 'archive-attachment');
       att.appendChild(el('div', 'meta', 'attachment: ' + (attachment.file_name || 'unnamed')));
-      // Attachment text is message content that arrived as a file, so
-      // it renders like any other message text and through the same
-      // helper.
-      att.appendChild(el('div', 'content', attachment.text));
-      messages.appendChild(att);
+      att.appendChild(el('div', 'text', attachment.text));
+      conversation.appendChild(att);
     }
-
-    // The view is a projection and says so. The stored record carries
-    // blocks this does not render, and a reader should not have to
-    // guess whether a short message is short or truncated.
+    // The view is a projection and says so.
     if (message.unrendered_blocks > 0) {
-      messages.appendChild(el('div', 'imported-note',
+      conversation.appendChild(el('div', 'archive-note',
         message.unrendered_blocks + ' stored content blocks are not shown here. ' +
         'This view renders the message text and its attachments.'));
     }
   }
-  messages.scrollTop = 0;
+  conversation.scrollTop = 0;
 }
 
-sendBtn.addEventListener('click', send);
-input.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
-// Restore the canonical webchat conversation on load so a browser
-// refresh keeps the visible history instead of dropping it.
-// loadTranscript's tail call also populates the sidebar.
-loadArchives();
+// --- Wiring ---
+composer.addEventListener('submit', (e) => { e.preventDefault(); send(); });
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(160, input.scrollHeight) + 'px';
+});
+// Restore the conversation on load so a refresh keeps the visible
+// history. loadTranscript's finally also draws the rail.
 loadTranscript(WEBCHAT_LOG_ID);
+input.focus();
 </script>
 </body>
 </html>"#;
@@ -714,7 +997,14 @@ pub async fn serve(
                 // synthesize one so `target` stays a stable resource
                 // handle and the body lives under `detail.content`.
                 let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
-                let _ = audit
+                // A turn is not started unless its inbound row was
+                // accepted. The writer returns an error only once its
+                // flush loop has halted (chain break, alarm-log failure,
+                // or repeated SQLite failure); from then on nothing is
+                // being recorded, so the chat route refuses rather than
+                // running an unrecorded turn. The page raises its
+                // halted banner from this status.
+                let inbound_logged = audit
                     .log(
                         AuditEvent::new(
                             ActorKind::Service,
@@ -726,6 +1016,19 @@ pub async fn serve(
                         .with_detail(serde_json::json!({ "content": &message })),
                     )
                     .await;
+                if let Err(e) = inbound_logged {
+                    tracing::error!(
+                        "webchat: audit writer refused the inbound row; refusing the turn: {e}"
+                    );
+                    let resp = r#"{"error":"audit writer halted"}"#;
+                    let response = format!(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp.len(),
+                        resp
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
 
                 // Session. `get_or_create` moves `last_activity` but
                 // leaves `message_count` alone; `record_message` is the
@@ -857,6 +1160,16 @@ pub async fn serve(
                                         ),
                                     )
                                     .await;
+                                // The turn is finished and its outbound row
+                                // has been offered to the writer. Say so on
+                                // the stream: without this event a socket
+                                // that closed mid-answer and one that closed
+                                // after the last token look the same to the
+                                // page, which now marks the former as cut
+                                // off.
+                                let done = "data: {\"type\":\"done\"}\n\n";
+                                let _ = stream.write_all(done.as_bytes()).await;
+                                let _ = stream.flush().await;
                             }
                             Err(e) => {
                                 let err = format!(
@@ -1368,85 +1681,72 @@ mod tests {
         }
     }
 
+    /// The archive views say what they are. Every value out of an
+    /// archive reaches the DOM through the one helper (the two
+    /// assertions above cover that); these strings are the view's own
+    /// claims about itself, which a redesign must keep.
     #[test]
-    fn the_imported_views_render_through_the_helper() {
-        // Every element the imported views build comes from `el` or is
-        // filled by setText. A view that reached for anything else
-        // would be caught by the two assertions above, but naming the
-        // views here says which code the control is protecting.
+    fn the_imported_views_say_what_they_are() {
         let script = page_script();
-        for view in [
-            "async function loadArchives()",
-            "async function loadArchiveConversations(source)",
-            "async function loadImportedConversation(source, uuid)",
-        ] {
-            assert!(script.contains(view), "missing view: {view}");
-        }
-        // The projection states what it does not show.
+        assert!(
+            script.contains("A stored record, shown read-only."),
+            "an archive view must say it is a stored record"
+        );
         assert!(
             script.contains("stored content blocks are not shown here"),
             "the detail view must say it is a projection"
         );
     }
 
+    /// A composer under a stored record affords a send that in fact
+    /// starts a live agent turn. One switch owns whether the composer
+    /// is on screen; every archive view turns it off; the bar that
+    /// replaces it carries the way back; and `hidden` really hides.
     #[test]
-    fn an_archive_view_takes_the_composer_away() {
-        // A composer under a stored record affords a send that in fact
-        // starts a live agent turn. Every entry into an archive view
-        // turns the mode on, and returning to a live session turns it
-        // off, so the affordance cannot be left behind by one path.
+    fn a_non_writable_view_takes_the_composer_away_and_leaves_a_way_back() {
         let script = page_script();
-        assert!(
-            script.contains("function setArchiveMode(active)"),
-            "the mode switch exists"
+        // One function owns both the composer and its replacement.
+        let composer_writes = assignments_to(script, "composer.hidden");
+        let bar_writes = assignments_to(script, "readonlyBar.hidden");
+        assert_eq!(
+            composer_writes.len(),
+            1,
+            "one place hides the composer: {composer_writes:#?}"
         );
-        let on = script.matches("setArchiveMode(true)").count();
-        assert_eq!(on, 2, "both archive views turn the mode on");
-        // Leaving an archive goes through the transcript loader, which
-        // decides from the session it is about to show. There is no
-        // second way to put the composer back.
-        assert!(
-            script.contains("setReadOnly(active ? ARCHIVE_NOTICE : null)"),
-            "the archive switch delegates to the one that owns the composer",
+        assert_eq!(
+            bar_writes.len(),
+            1,
+            "one place shows the way back: {bar_writes:#?}"
         );
-
-        // The switch hides the composer rather than merely styling it,
-        // so a hidden composer cannot be tabbed into.
-        assert!(script.contains("inputArea.hidden = notice !== null;"));
-
-        // And the property has to reach the screen. `#input-area` is
-        // laid out `display: flex` by an id selector, which outranks
-        // the UA stylesheet's `[hidden] { display: none }`: without an
-        // author rule of its own the composer stayed drawn, and
-        // focusable, under every archive view. The assertion above
-        // passed the whole time.
+        // Toggled together, in opposite directions, by the same value.
+        assert!(
+            composer_writes[0].contains("!== null"),
+            "{}",
+            composer_writes[0]
+        );
+        assert!(bar_writes[0].contains("=== null"), "{}", bar_writes[0]);
+        // Both archive views go through that switch with the notice.
+        assert_eq!(
+            script.matches("setReadOnly(ARCHIVE_NOTICE)").count(),
+            2,
+            "both archive views take the composer away"
+        );
+        // The property has to reach the screen: an id selector lays
+        // the composer out, which outranks the UA's [hidden] rule.
         assert!(
             HTML.contains("[hidden] { display: none !important; }"),
-            "an author-level [hidden] rule must outrank the id selectors \
-             that lay these elements out",
+            "an author-level [hidden] rule must outrank the id selectors"
         );
-        // Its replacement text goes through the one helper like
-        // everything else.
-        assert!(script.contains("setText(archiveNotice,"));
-
-        // Taking the composer away has to leave a way out. The archive
-        // views reach each other and nothing reached back, so a reload
-        // was the only exit from a stored record.
+        // The way back exists and returns to the conversation this
+        // browser writes to.
         assert!(
-            HTML.contains(r#"<button id="back-to-live">"#),
-            "the bar that replaces the composer carries the way back",
+            HTML.contains("Back to the conversation"),
+            "the bar carries the way back"
         );
         assert!(
-            script.contains(
-                "backToLive.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID))"
-            ),
-            "the way back returns to the live webchat conversation",
-        );
-        // And it is shown and hidden by the same switch as the notice,
-        // so no path can leave the operator in a view with no exit.
-        assert!(
-            script.contains("archiveBar.hidden = notice === null;"),
-            "the bar carrying the exit is toggled by the same switch",
+            script.contains("backToLive.addEventListener('click'")
+                && script.contains("loadTranscript(WEBCHAT_LOG_ID)"),
+            "the way back returns to the live conversation"
         );
     }
 
@@ -1469,6 +1769,10 @@ mod tests {
             // SseEvent, on the same stream and read by the same code.
             "delta",
             "error",
+            // Emitted by this handler once the outbound row has been
+            // offered to the writer. Its absence is what the page
+            // reads as a cut-off stream.
+            "done",
         ] {
             assert!(
                 script.contains(&format!("event.type === '{kind}'")),
@@ -1476,45 +1780,26 @@ mod tests {
                  is dropped silently",
             );
         }
-
         // Branching is not handling. The approval branch has to build
-        // the card, and the ack branch has to resolve it.
+        // the card, the ack branch has to resolve it, and the card has
+        // to reach the document.
+        assert!(script.contains("renderApproval(event)"));
+        assert!(script.contains("ackApproval(event.request_id, event.result)"));
+        assert!(script.contains("conversation.appendChild(card)"));
+        // And the handler really emits the done event the page waits
+        // for, in the same wire shape as everything else.
         assert!(
-            script.contains("renderApproval(event)"),
-            "the approval branch must render the card",
-        );
-        assert!(
-            script.contains("ackApproval(event.request_id, event.result)"),
-            "the ack branch must resolve the card it belongs to",
-        );
-        // And the card has to reach the document. Building a detached
-        // node and never appending it would satisfy everything above.
-        assert!(
-            script.contains("messages.appendChild(card)"),
-            "renderApproval must put the card in the transcript",
+            SERVER_SOURCE.contains(r#"data: {\"type\":\"done\"}\n\n"#),
+            "the chat handler must emit a done event before the socket closes"
         );
     }
 
     /// The composer is on screen only for the conversation it writes
-    /// to.
-    ///
-    /// `send` posts to /api/chat, which always resolves the one
-    /// canonical webchat conversation whatever the transcript pane is
-    /// displaying. Clicking another channel's session in the sidebar
-    /// left the composer up: the message joined the webchat
-    /// conversation, the reply streamed into the transcript being
-    /// read, and the two had nothing to do with each other.
+    /// to. `send` posts to /api/chat, which always resolves the one
+    /// canonical webchat conversation whatever the pane is showing.
     #[test]
     fn the_composer_is_absent_for_a_session_it_does_not_write_to() {
         let script = page_script();
-
-        // One switch owns the composer, and it takes the reason rather
-        // than a bare flag, so a caller cannot hide the composer and
-        // forget to say why it is gone.
-        assert!(
-            script.contains("function setReadOnly(notice)"),
-            "one switch owns whether the composer is on screen",
-        );
         assert!(
             script.contains("setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE)"),
             "loading a transcript decides from the session it is showing",
@@ -1525,14 +1810,13 @@ mod tests {
         );
     }
 
-    /// The sidebar is refreshed however the transcript load ends.
+    /// The rail is refreshed however the transcript load ends.
     ///
     /// It used to be refreshed only after a successful fetch, so a
-    /// transcript that failed to load left the sidebar holding
-    /// whatever it had -- including the empty state, under a page that
-    /// had a running session.
+    /// transcript that failed to load left the rail holding whatever
+    /// it had. A `finally` is the one shape that covers every exit.
     #[test]
-    fn a_failed_transcript_load_still_refreshes_the_sidebar() {
+    fn a_failed_transcript_load_still_refreshes_the_rail() {
         let body = page_script()
             .split_once("async function loadTranscript(id) {")
             .expect("loadTranscript exists")
@@ -1540,46 +1824,112 @@ mod tests {
             .split_once("\n}")
             .expect("loadTranscript closes")
             .0;
-        assert_eq!(
-            body.matches("loadSessions()").count(),
-            3,
-            "both early returns and the success path refresh the sidebar",
-        );
+        let finally = body
+            .split_once("finally {")
+            .expect("loadTranscript refreshes in a finally block")
+            .1;
         assert!(
-            body.contains("if (!res.ok) { loadSessions(); return; }"),
-            "a non-ok response refreshes before returning",
-        );
-        assert!(
-            body.contains("catch (e) { loadSessions(); return; }"),
-            "a thrown fetch refreshes before returning",
+            finally.contains("loadRail()"),
+            "the finally block refreshes the rail"
         );
     }
 
     /// A message the store holds no text for is labelled, not drawn
-    /// blank.
-    ///
-    /// Real archives carry these in quantity -- in the store this was
-    /// found in, 15506 of 43807 messages had an empty text field and
-    /// an empty text block, concentrated in untitled conversations.
-    /// Rendering them as an empty span produced turns that looked like
-    /// messages saying nothing.
+    /// blank. Real archives carry these in quantity.
     #[test]
     fn a_message_with_no_stored_text_says_so() {
         let script = page_script();
         assert!(
-            script.contains("message.text.trim() === ''"),
+            script.contains(".trim() === ''"),
             "the detail view must test for a text-less message",
         );
         assert!(
             script.contains("'no text stored for this message'"),
-            "and label it rather than append an empty span",
+            "and label it rather than draw an empty span",
         );
-        // The label goes through the same helper as every other value
-        // out of an archive.
+    }
+
+    /// The handler source, so a test can pin what the server puts on
+    /// the wire next to what the page expects from it.
+    const SERVER_SOURCE: &str = include_str!("webchat.rs");
+
+    /// A refusal is its own block, never red text spliced into the
+    /// assistant's sentence. The page recognises a sandbox refusal by
+    /// the prefix the agent crate puts on that error; if the prefix
+    /// changes upstream, this is what fails.
+    #[test]
+    fn a_sandbox_refusal_is_recognised_by_its_prefix() {
+        let script = page_script();
+        let line = script
+            .lines()
+            .find(|l| l.contains("const REFUSAL_PREFIX ="))
+            .expect("the page names the refusal prefix");
+        let prefix = line
+            .split_once('\'')
+            .and_then(|(_, rest)| rest.split_once('\''))
+            .map(|(p, _)| p)
+            .expect("the prefix is a single-quoted literal");
+        let rendered = wirken_agent::AgentError::Sandbox("x".into()).to_string();
         assert!(
-            script.contains("el('span', 'content empty', 'no text stored for this message')"),
-            "the label is built by el, which encodes at render",
+            rendered.starts_with(prefix),
+            "the agent renders a sandbox refusal as {rendered:?}; the page expects {prefix:?}"
         );
+    }
+
+    /// A refused request is not a sent message: on any non-2xx the
+    /// page takes the bubble back out and returns the text to the
+    /// composer, and a 503 from a halted writer locks the composer.
+    #[test]
+    fn a_refused_request_is_not_a_sent_message() {
+        let script = page_script();
+        let body = script
+            .split_once("if (!res.ok) {")
+            .expect("send handles a non-ok response")
+            .1;
+        let head: String = body.lines().take(8).collect::<Vec<_>>().join("\n");
+        assert!(
+            head.contains("userNode.remove()"),
+            "the bubble comes back out: {head}"
+        );
+        assert!(
+            head.contains("input.value = text"),
+            "the text goes back to the composer: {head}"
+        );
+        assert!(
+            head.contains("res.status === 503"),
+            "a halted writer is its own state: {head}"
+        );
+        assert!(script.contains("function setHalted()"));
+        // And the server really answers 503 when the writer refuses the
+        // inbound row.
+        assert!(SERVER_SOURCE.contains("HTTP/1.1 503 Service Unavailable"));
+    }
+
+    /// The page fetches nothing from anywhere but its own origin: no
+    /// fonts, no CDN, no favicon round-trip. Air-gapped installs are a
+    /// deployment target.
+    #[test]
+    fn the_page_makes_no_external_requests() {
+        assert!(!HTML.contains("https://"), "no external URL in the page");
+        assert!(!HTML.contains("http://"), "no external URL in the page");
+        assert!(
+            HTML.contains("rel=\"icon\" href=\"data:image/svg+xml;base64,"),
+            "the favicon is inline"
+        );
+        assert_eq!(
+            HTML.matches("<script>").count(),
+            1,
+            "one script block; page_script reads the first"
+        );
+        assert_eq!(HTML.matches("<style>").count(), 1, "one style block");
+    }
+
+    /// The literal delimiter is `r#"…"#`, so the page can never contain
+    /// the two-character sequence that would end it. The failure mode
+    /// without this is a compile error somewhere else entirely.
+    #[test]
+    fn the_page_never_contains_the_literal_terminator() {
+        assert!(!HTML.contains("\"#"));
     }
 
     #[test]
