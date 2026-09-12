@@ -1113,6 +1113,9 @@ function renderRecord() {
   const audit = status && status.audit ? status.audit : {};
   const w = el('span', null, audit.writer_halted ? 'halted' : 'live');
   if (Array.isArray(audit.alarms)) w.appendChild(document.createTextNode(audit.alarms.length ? ' · ' + audit.alarms.length + ' alarms on disk' : ' · no alarms on disk'));
+  // Verify is report-only and alarms come from the writer, so both can
+  // be true at once; side by side they must not read as a contradiction.
+  if (lastVerifyBroken()) w.appendChild(document.createTextNode(' · last verify found a break'));
   kvRow(grid, 'writer', w);
   if (isSet(head.seq)) {
     const v = el('span', null, head.seq + ' · ');
@@ -1169,10 +1172,14 @@ function verifyLine(b) {
       return b.error || 'could not run';
   }
 }
-function renderVerifyBox() {
+function lastVerifyBroken() {
   const st = verifyState;
   const verdict = st.body ? st.body.result : null;
-  const broken = st.status === 'done' && verdict && verdict !== 'ok' && verdict !== 'empty' && verdict !== 'error';
+  return st.status === 'done' && !!verdict && verdict !== 'ok' && verdict !== 'empty' && verdict !== 'error';
+}
+function renderVerifyBox() {
+  const st = verifyState;
+  const broken = lastVerifyBroken();
   const box = el('div', 'verify-box' + (broken ? ' verify-broken' : ''));
   const bh = el('div', 'verify-head', 'Verify chain');
   let meta;
@@ -1181,25 +1188,24 @@ function renderVerifyBox() {
   else if (st.status === 'busy') meta = 'another verify is running';
   else if (st.status === 'limited') meta = 'rate limited · try again in ' + st.retryAfter + 's';
   else if (st.status === 'error') meta = 'could not run · ' + st.error;
-  else meta = 'this browser · ' + ago(Date.now() - st.at) + ' · ' + ((st.body.duration_ms || 0) / 1000).toFixed(1) + 's' + (verdict === 'ok' || verdict === 'empty' ? ' · ok' : verdict === 'error' ? ' · error' : ' · broken');
+  else meta = 'this browser · ' + ago(Date.now() - st.at) + ' · ' + ((st.body.duration_ms || 0) / 1000).toFixed(1) + 's' + (broken ? ' · broken' : st.body.result === 'error' ? ' · error' : ' · ok');
   bh.appendChild(el('span', 'meta', meta));
   box.appendChild(bh);
   if (st.status === 'done' && st.body) box.appendChild(el('div', 'verify-line', verifyLine(st.body)));
   // The caveat is on screen in every state, idle included.
   box.appendChild(el('div', 'verify-caveat',
     'Report-only: no operator trust anchor was consulted, so a same-UID rewrite is not detected. ' +
-    'Verify against a key kept off this machine for that.'));
+    'Verify against a key kept off this machine for that: wirken audit verify --require-signed'));
   const run = el('button', 'btn verify-run', st.status === 'idle' ? 'Run verify' : st.status === 'running' ? 'verifying…' : 'Run again');
   run.type = 'button';
   run.disabled = st.status === 'running';
   run.addEventListener('click', (e) => { e.stopPropagation(); runVerify(); });
   box.appendChild(run);
-  box.appendChild(el('div', 'verify-note', 'two full reads of the record · one run at a time · the CLI can verify against a pinned key: wirken audit verify --require-signed'));
+  box.appendChild(el('div', 'verify-note', 'two full reads of the record · one run at a time'));
   return box;
 }
 function refreshVerifyBox() {
-  const old = record.querySelector('.verify-box');
-  if (old) old.replaceWith(renderVerifyBox());
+  if (!record.hidden) renderRecord();
 }
 async function runVerify() {
   if (verifyState.status === 'running') return;
@@ -3048,7 +3054,8 @@ pub fn session_events(
 /// more; the same-UID attacker who can rewrite the chain can re-sign
 /// it. The sentence travels with every verdict the page shows.
 pub const VERIFY_CAVEAT: &str = "Report-only: no operator trust anchor was consulted, so a same-UID \
-     rewrite is not detected. Verify against a key kept off this machine for that.";
+     rewrite is not detected. Verify against a key kept off this machine for that: \
+     wirken audit verify --require-signed";
 
 /// A `VerifyResult` as the page reads it. Hashes and key ids are cut to
 /// fingerprints; the verdict is a word in `result`; the caveat rides
@@ -4681,6 +4688,43 @@ mod tests {
                 .count(),
             1,
             "one caveat, appended outside every state branch"
+        );
+    }
+
+    /// Verify is report-only and alarms come from the writer, so a
+    /// broken verify next to "no alarms on disk" is two truths. The
+    /// writer line carries the verify result so they do not read as a
+    /// contradiction, and the whole panel re-renders on a verify state
+    /// change so the line follows.
+    #[test]
+    fn a_broken_verify_is_carried_on_the_writer_line() {
+        let script = page_script();
+        let panel = script
+            .split_once("function renderRecord() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(panel.contains("if (lastVerifyBroken()) w.appendChild(document.createTextNode(' · last verify found a break'));"));
+        let refresh = script
+            .split_once("function refreshVerifyBox() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            refresh.contains("renderRecord()"),
+            "a verify state change re-renders the panel: {refresh}"
+        );
+        assert!(
+            script.contains("for that: wirken audit verify --require-signed'"),
+            "the CLI pointer lives in the caveat"
+        );
+        assert!(
+            script.contains("'two full reads of the record · one run at a time'"),
+            "the footnote keeps cost and concurrency only"
         );
     }
 
