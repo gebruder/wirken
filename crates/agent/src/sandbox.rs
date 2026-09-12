@@ -20,8 +20,11 @@ use crate::sandbox_egress::SandboxEgressContext;
 use crate::tool::ToolResult;
 
 const DEFAULT_IMAGE: &str = "debian:bookworm-slim";
-const MEMORY_LIMIT: i64 = 512 * 1024 * 1024; // 512 MB
-const PIDS_LIMIT: i64 = 256;
+/// Container memory cap. Public so the webchat status route reports the
+/// value the sandbox actually applies rather than a copy of it.
+pub const MEMORY_LIMIT: i64 = 512 * 1024 * 1024; // 512 MB
+/// Container PID cap; see [`MEMORY_LIMIT`].
+pub const PIDS_LIMIT: i64 = 256;
 
 /// Sandbox mode for tool execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

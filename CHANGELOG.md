@@ -39,6 +39,38 @@ tagged.
   the audit writer refuses the inbound row, instead of running a turn
   nothing records. The page locks its composer and says why.
 
+### Added
+
+- `GET /api/status` on the webchat port: one snapshot of the
+  gateway's posture, built from files, config and in-memory lists
+  only. It reports the agent's provider and model, the sandbox mode
+  as configured on disk, the webchat channel's egress policy, the
+  agent budget and what is left of its window, every escape hatch as
+  read live from the gateway's own environment, org config presence
+  and the pinned key's fingerprint, the audit signing key's
+  fingerprint, alarm records on disk with their verification status,
+  the SIEM target and host, and each adapter's channel, connection
+  state and key fingerprint. A value the gateway does not hold is
+  `null`. Withheld on purpose: provider endpoints and regions, key
+  material, host paths, the SIEM endpoint path, and alarm records'
+  hostname and pid.
+
+- The webchat page draws a status strip from that snapshot, a banner
+  for each engaged escape hatch that says it clears on restart, an
+  About panel that names what is unknown, and turns the strip into
+  the alarm when a tamper record is on disk.
+
+### Changed
+
+- The webchat chat route runs the prompt-injection detector on each
+  inbound message the way the adapter message loop does, and writes
+  `message.threat_flagged` on a hit. Webchat was the one inbound
+  channel that was never scanned.
+
+- Webchat's `message.inbound`, `message.outbound` and
+  `message.threat_flagged` rows carry the conversation id, so they
+  land under the webchat session rather than the system sentinel.
+
 ## [1.20.0] - 2026-09-12
 
 Two behaviour changes to read before upgrading, then a note for anyone

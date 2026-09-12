@@ -210,6 +210,20 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     };
     let siem_config = load_siem_config(&cfg);
 
+    // The webchat status route reads the alarm log with the same key
+    // the writer signs with, so a record it shows is verified rather
+    // than merely present; and it gets the SIEM config reduced to
+    // target and host before the full config, with its tokens, is
+    // moved into the writer.
+    let webchat_alarm_log = Arc::new(match &alarm_log_key {
+        Some(key) => AlarmLog::with_signing_key(&cfg.data_dir, key.clone()),
+        None => AlarmLog::new(&cfg.data_dir),
+    });
+    let webchat_alarm_key_loaded = alarm_log_key.is_some();
+    let webchat_siem = siem_config
+        .as_ref()
+        .map(super::webchat::SiemSummary::from_config);
+
     // Load the gateway's audit chain-head signing key. Distinct
     // from any per-adapter IPC key and from per-agent attestation
     // keys: this one signs ChainHead records over the audit chain
@@ -1431,6 +1445,18 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
     let webchat_port = port.unwrap_or(18790);
     let webchat_factory = factory.clone();
+
+    // --- Injection detector (shared, stateless) ---
+    // Created here so the webchat chat route scans inbound messages
+    // the same way the adapter message loop below does.
+    let detector = Arc::new(InjectionDetector::new());
+    let webchat_detector = detector.clone();
+    let webchat_status_inputs = super::webchat::StatusInputs {
+        registry: registry.clone(),
+        alarm_log: webchat_alarm_log,
+        alarm_key_loaded: webchat_alarm_key_loaded,
+        siem: webchat_siem,
+    };
     let webchat_audit = audit.clone();
     let webchat_sessions = sessions.clone();
 
@@ -1458,6 +1484,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             webchat_sessions,
             webchat_pending,
             webchat_registry,
+            webchat_status_inputs,
+            webchat_detector,
         )
         .await
         {
@@ -1526,9 +1554,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!();
     println!("  Wirken running. Press Ctrl+C to stop.");
     println!();
-
-    // --- Injection detector (shared, stateless) ---
-    let detector = Arc::new(InjectionDetector::new());
 
     // --- Outbound dispatcher (orchestrator push rendezvous) ---
     //
