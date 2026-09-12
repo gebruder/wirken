@@ -100,7 +100,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   #status-values .sep { color: rgba(233,233,237,.25); }
   #status-values .hedge { color: rgba(233,233,237,.38); }
   #status-values .alarm { color: var(--danger-text); }
-  .writer-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-400); box-shadow: 0 0 7px var(--accent); display: inline-block; flex: none; }
+  .writer-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-400); box-shadow: 0 0 7px var(--accent); display: inline-block; flex: none; padding: 0; border: none; }
   .writer-dot.halted { background: var(--danger-text); box-shadow: none; }
   .unknown { color: var(--accent-300); }
   .banner-hatch { background: rgba(145,132,217,.12); border-bottom: 1px solid rgba(145,132,217,.35); }
@@ -125,8 +125,11 @@ const HTML: &str = r#"<!DOCTYPE html>
   .rail-section + .rail-section { margin-top: 12px; }
 
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #conversation { flex: 1; overflow-y: auto; padding: 22px 24px 18px; display: flex; flex-direction: column; gap: 16px; }
-  #conversation > * { flex: none; }
+  #conversation { flex: 1; overflow-y: auto; padding: 22px 24px 18px; display: flex; flex-direction: column; }
+  /* The reading column: bubbles right-align within it, not at the far
+     edge of a wide pane. */
+  #thread { flex: 1; width: 100%; max-width: 880px; display: flex; flex-direction: column; gap: 16px; }
+  #thread > * { flex: none; }
   .msg-user { align-self: flex-end; max-width: 70%; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--surface-user); font-size: 14.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
   .msg-assistant { align-self: flex-start; max-width: 78%; width: 100%; font-size: 14.5px; line-height: 1.65; color: rgba(233,233,237,.93); }
   .msg-assistant p { margin: 0 0 .7em; white-space: pre-wrap; word-break: break-word; }
@@ -138,7 +141,37 @@ const HTML: &str = r#"<!DOCTYPE html>
   .code-head button:hover { background: rgba(145,132,217,.12); }
   .code pre { padding: 10px 12px; font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre; }
   .cutoff { font-size: 11.5px; color: rgba(233,233,237,.5); margin-top: 4px; }
+  .cutoff .link { font-size: 11.5px; }
   .empty-state { align-self: center; margin: auto; max-width: 52ch; text-align: center; font-size: 14.5px; line-height: 1.6; color: rgba(233,233,237,.62); }
+
+  /* Tool rows: one line per call, glyph column, expand on click. */
+  .tools { align-self: flex-start; max-width: 82%; width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .tool-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; font-size: 12.5px; cursor: pointer; border-radius: var(--radius-sm); }
+  .tool-row:hover { background: rgba(145,132,217,.06); }
+  .tool-row .glyph { width: 14px; text-align: center; flex: none; }
+  .tool-row .glyph.done { color: var(--accent-400); }
+  .tool-row .glyph.failed { color: var(--danger-text); }
+  .tool-row .glyph.awaiting { color: var(--accent-300); }
+  .tool-row .glyph.neutral { color: var(--accent-300); }
+  .tool-row .glyph.queued { color: rgba(233,233,237,.45); }
+  .tool-row .glyph.running { color: var(--accent); }
+  .tool-row .name { font-family: var(--mono); font-size: 12px; color: rgba(233,233,237,.75); flex: none; }
+  .tool-row .args { font-family: var(--mono); font-size: 12px; color: rgba(233,233,237,.5); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .tool-row .status { font-size: 12px; color: rgba(233,233,237,.5); flex: none; white-space: nowrap; }
+  .tool-details { margin: 2px 0 6px 24px; font-size: 12px; display: grid; grid-template-columns: 64px 1fr; gap: 4px 10px; }
+  .tool-details .k { color: rgba(233,233,237,.45); }
+  .tool-details .v { color: rgba(233,233,237,.75); overflow-wrap: anywhere; }
+  .tool-details pre { grid-column: 1 / -1; margin-top: 4px; padding: 8px 10px; background: rgba(0,0,0,.4); border-radius: 7px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+  .tool-details .link { font-size: 12px; }
+  .decision .glyph.neutral { color: var(--accent-300); }
+  .decision .glyph.failed { color: var(--danger-text); }
+  #record { left: auto; right: 12px; }
+  .verify-box { margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-md); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--neutral-800); display: flex; flex-direction: column; gap: 8px; }
+  .verify-head { font-weight: 500; display: flex; gap: 8px; align-items: baseline; }
+  .verify-head .meta { font-weight: 400; color: rgba(233,233,237,.5); font-size: 12px; margin-left: auto; }
+  .verify-caveat { font-size: 12px; color: rgba(233,233,237,.62); line-height: 1.5; }
+  .verify-run { width: 100%; text-align: center; }
+  .verify-note { font-size: 11px; color: rgba(233,233,237,.45); }
 
   /* Own blocks: refusals, errors. Never spliced into the assistant's
      sentence. */
@@ -151,9 +184,9 @@ const HTML: &str = r#"<!DOCTYPE html>
 
   /* Approval card: the one loud element. */
   .approval { align-self: flex-start; max-width: 82%; width: 100%; border-radius: 10px; background: var(--surface); box-shadow: 0 0 0 1px var(--accent-700), 0 8px 24px rgba(0,0,0,.4); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-  .approval-head { display: flex; gap: 10px; align-items: flex-start; }
-  .approval-sentence { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.62); flex: 1; }
-  .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; }
+  .approval-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  .approval-sentence { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.62); flex: 1 1 320px; }
+  .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; margin-left: auto; }
   .approval-cmd { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: rgba(0,0,0,.4); padding: 10px 12px; border-radius: 7px; overflow-x: auto; white-space: pre; }
   .approval-note { font-size: 11.5px; color: rgba(233,233,237,.5); }
   .input { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--neutral-800); border-radius: var(--radius-md); padding: 9px 12px; font-size: 13px; color: var(--text); resize: none; }
@@ -211,12 +244,14 @@ const HTML: &str = r#"<!DOCTYPE html>
   }
   @media (max-width: 720px) {
     #shell { flex-direction: column; }
-    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto; }
-    .rail-section { display: flex; gap: 4px; align-items: center; }
+    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 12px; padding: 8px 10px; overflow: hidden; }
+    .rail-section { display: flex; gap: 6px; align-items: center; min-width: 0; flex: 1 1 0; }
     .rail-section + .rail-section { margin-top: 0; }
-    .rail-row { width: auto; white-space: nowrap; }
+    .rail-label { flex: none; padding: 6px 0 4px; }
+    .rail-row { width: auto; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
     .rail-meta { display: none; }
     .msg-user, .msg-assistant, .approval, .block { max-width: 92%; }
+    #thread { max-width: none; }
     #status { flex-wrap: wrap; }
     #status-values { flex-basis: 100%; justify-content: flex-start; }
     .popover { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: auto; border-radius: 10px 10px 0 0; }
@@ -235,6 +270,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   <button id="wordmark" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="about">wirken</button>
   <div id="status-values" hidden></div>
   <div id="about" class="popover" role="dialog" aria-label="About this gateway" hidden></div>
+  <div id="record" class="popover" role="dialog" aria-label="Record of this session" hidden></div>
 </header>
 <div id="shell">
   <nav id="rail" aria-label="Conversations and archives" hidden>
@@ -243,7 +279,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   </nav>
   <main id="main">
     <h1 class="sr-only">wirken webchat</h1>
-    <section id="conversation" aria-live="polite" aria-label="Conversation"></section>
+    <section id="conversation" aria-live="polite" aria-label="Conversation"><div id="thread"></div></section>
     <div id="turnline" hidden><span class="dots pulse" aria-hidden="true"><i></i><i></i><i></i></span><span id="turntext"></span></div>
     <div id="notice" role="status" hidden></div>
     <form id="composer">
@@ -260,6 +296,7 @@ const HTML: &str = r#"<!DOCTYPE html>
 <script>
 'use strict';
 const conversation = document.getElementById('conversation');
+const thread = document.getElementById('thread');
 const turnline = document.getElementById('turnline');
 const turntext = document.getElementById('turntext');
 const notice = document.getElementById('notice');
@@ -277,6 +314,7 @@ const banners = document.getElementById('banners');
 const statusValues = document.getElementById('status-values');
 const wordmark = document.getElementById('wordmark');
 const about = document.getElementById('about');
+const record = document.getElementById('record');
 
 // One conversation per browser today. POST /api/chat always wakes agent
 // "default" on channel "webchat", conversation "webchat-default".
@@ -359,7 +397,7 @@ function renderInline(p, text) {
 function codeBlock(lang, body) {
   const box = el('div', 'code');
   const head = el('div', 'code-head');
-  head.appendChild(el('span', null, lang || 'code'));
+  if (lang) head.appendChild(el('span', null, lang));
   const copy = el('button', null, 'copy');
   copy.type = 'button';
   copy.addEventListener('click', () => {
@@ -377,7 +415,7 @@ function codeBlock(lang, body) {
 // --- Transcript primitives ---
 function addUser(text) {
   const node = el('div', 'msg-user', text);
-  conversation.appendChild(node);
+  thread.appendChild(node);
   scrollToEnd();
   return node;
 }
@@ -385,7 +423,7 @@ function addAssistant(text) {
   const node = el('div', 'msg-assistant');
   node.setAttribute('data-role', 'assistant');
   renderMarkdown(node, text || '');
-  conversation.appendChild(node);
+  thread.appendChild(node);
   scrollToEnd();
   return node;
 }
@@ -397,12 +435,20 @@ function addBlock(kind, label, glyph, body, foot) {
   box.appendChild(head);
   if (body) box.appendChild(el('div', 'block-body', body));
   if (foot) box.appendChild(el('div', 'block-foot', foot));
-  conversation.appendChild(box);
+  thread.appendChild(box);
   scrollToEnd();
   return box;
 }
+// The agent's refusal text goes on to say how to weaken the sandbox.
+// That remedy belongs in the CLI, not beside the Send button, so the
+// block shows the reason only: the text up to the first clause break.
+function firstClause(text) {
+  const t = String(text || '').trim();
+  const m = t.match(/^(.*?)(;|\.(?=\s|$)|$)/s);
+  return (m ? m[1] : t).trim();
+}
 function addRefusal(text) {
-  return addBlock('refusal', 'Refused before running', '✕', text,
+  return addBlock('refusal', 'Refused before running', '✕', firstClause(text),
     'Nothing ran on the host. The agent was stopped at this step.');
 }
 function addAgentError(text) {
@@ -410,17 +456,18 @@ function addAgentError(text) {
 }
 function addDecision(text, glyph) {
   const line = el('div', 'decision');
-  line.appendChild(el('span', 'glyph', glyph || '✓'));
-  line.appendChild(el('span', null, ' ' + text));
-  conversation.appendChild(line);
+  const g = glyph || '✓';
+  line.appendChild(el('span', 'glyph' + (g === '✕' ? ' failed' : g === '○' ? ' neutral' : ''), g));
+  line.appendChild(el('span', 'decision-text', ' ' + text));
+  thread.appendChild(line);
   scrollToEnd();
   return line;
 }
 function showEmptyState() {
-  clear(conversation);
-  conversation.appendChild(el('div', 'empty-state',
+  clear(thread);
+  thread.appendChild(el('div', 'empty-state',
     'Agent ' + AGENT_ID + ' answers here. This page is served to this machine only. ' +
-    'Every message, tool call and decision is written to the audit record before it runs.'));
+    'Every message, tool call and decision is written to the audit record first.'));
 }
 
 // --- Turn line, composer lock, notices ---
@@ -512,10 +559,23 @@ function renderApproval(ev) {
   card.appendChild(head);
 
   // The approval event carries the action key, not the command line.
-  // The command joins from the chain in Phase 2; until then the key is
-  // what the gate computed, and that is what is shown.
-  card.appendChild(el('div', 'approval-cmd', ev.action_key || ev.tool_name || ''));
-  card.appendChild(el('div', 'approval-note', 'action key as computed by the gate · tool ' + (ev.tool_name || '')));
+  // The command is on the chain: the call row was written before the
+  // gate ran. When the poll has it, show it and say where it is from;
+  // until then the key is what the gate computed, and that is shown.
+  const cmd = el('div', 'approval-cmd', ev.action_key || ev.tool_name || '');
+  const note = el('div', 'approval-note', 'action key as computed by the gate · tool ' + (ev.tool_name || ''));
+  card.appendChild(cmd);
+  card.appendChild(note);
+  const join = () => {
+    const entry = pendingToolRowFor(ev.tool_name);
+    if (!entry) return false;
+    setText(cmd, compactArgs(entry.call));
+    setText(note, 'command as recorded in the chain, row ' + entry.seq + ' · action key ' + (ev.action_key || ''));
+    markAwaiting(entry);
+    return true;
+  };
+  if (!join()) pollEvents().then(join);
+  if (turnOpen && !eventsTimer) startEventPolling();
 
   const reasonLabel = el('label', 'sr-only', 'Reason (optional)');
   reasonLabel.htmlFor = 'reason-' + ev.request_id;
@@ -534,7 +594,7 @@ function renderApproval(ev) {
   actions.appendChild(denyBtn);
   actions.appendChild(approveBtn);
   card.appendChild(actions);
-  conversation.appendChild(card);
+  thread.appendChild(card);
   scrollToEnd();
   setTurn('turn open · agent holding on your decision');
   lockComposer('Decide on the approval above to continue');
@@ -580,7 +640,7 @@ function ackApproval(requestId, result) {
     let line, glyph;
     if (result === 'accepted') {
       line = (decision === 'deny' ? 'denied' : 'accepted') + ' · ' + hhmm() + (reason ? ' · ' + reason : '');
-      glyph = decision === 'deny' ? '✕' : '✓';
+      glyph = decision === 'deny' ? '○' : '✓';
     } else {
       // The only evidence here is the gate's reply that the entry is
       // no longer pending. "Expired" needs the timeout denial row,
@@ -588,7 +648,11 @@ function ackApproval(requestId, result) {
       line = 'no longer pending · ' + hhmm() + ' · decided elsewhere';
       glyph = '○';
     }
-    card.replaceWith(addDecision(line, glyph));
+    const drawn = addDecision(line, glyph);
+    card.replaceWith(drawn);
+    if (approvalCurrent && approvalCurrent.request_id === requestId && approvalCurrent.action_key) {
+      decisionLines.set(approvalCurrent.action_key, drawn);
+    }
   }
   if (approvalCurrent && approvalCurrent.request_id === requestId) {
     approvalCurrent = null;
@@ -619,16 +683,17 @@ async function send() {
   if (!text || turnOpen || halted) return;
   input.value = '';
   hideNotice();
-  const emptyState = conversation.querySelector('.empty-state');
+  const emptyState = thread.querySelector('.empty-state');
   if (emptyState) emptyState.remove();
   turnOpen = true;
   lockComposer('Waiting for the agent…');
   setTurn('thinking');
   const userNode = addUser(text);
+  startEventPolling();
 
-  let assistant = null;
+  liveAssistant = null;
+  liveReceived = '';
   let buffer = '';
-  let received = '';
   let terminal = false;   // a done or error event arrived
   let res;
   try {
@@ -681,9 +746,9 @@ async function send() {
           let event;
           try { event = JSON.parse(line.substring(6)); } catch (e) { continue; }
           if (event.type === 'delta') {
-            if (!assistant) assistant = addAssistant('');
-            received += event.text;
-            renderMarkdown(assistant, received);
+            if (!liveAssistant) liveAssistant = addAssistant('');
+            liveReceived += event.text;
+            renderMarkdown(liveAssistant, liveReceived);
             setTurn(approvalCurrent ? 'turn open · agent holding on your decision' : 'turn open');
             scrollToEnd();
           } else if (event.type === 'error') {
@@ -694,8 +759,8 @@ async function send() {
           } else if (event.type === 'approval_request') {
             // What the agent says after the decision is a new paragraph
             // below the card, not a continuation of the one above it.
-            assistant = null;
-            received = '';
+            liveAssistant = null;
+            liveReceived = '';
             renderApproval(event);
           } else if (event.type === 'approval_decision_ack') {
             ackApproval(event.request_id, event.result);
@@ -709,43 +774,368 @@ async function send() {
     // The socket died mid-stream; fall through to the cut-off marking.
   }
   if (!terminal) {
-    if (assistant) {
-      assistant.appendChild(el('div', 'cutoff', 'cut off — the stream ended without a done event'));
+    if (liveAssistant) {
+      const line = el('div', 'cutoff', 'cut off — the stream ended without a done event · ');
+      const retry = el('button', 'link', 'retry');
+      retry.type = 'button';
+      retry.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID));
+      line.appendChild(retry);
+      liveAssistant.appendChild(line);
+    } else {
+      showNotice(null, 'Connection lost · ', () => loadTranscript(WEBCHAT_LOG_ID));
     }
-    showNotice(null, 'Connection lost · ', () => loadTranscript(WEBCHAT_LOG_ID));
   }
   settleOpenApproval();
   finishTurn();
+  // One more poll after the socket closes: the rows for this turn
+  // (results, decisions, the assistant row) are what turn "accepted"
+  // into "recorded".
+  await pollEvents();
   loadRail();
 }
 function finishTurn() {
   turnOpen = false;
+  stopEventPolling();
   setTurn(null);
   unlockComposer();
   if (!halted) input.focus();
 }
 
-// --- History ---
+// --- History: the record, projected ---
+// The events route serves the session log with the rows the old
+// transcript dropped: tool calls and results, decisions, egress
+// verdicts, budget stops, sub-agent spawns. Head and totals feed the
+// Record panel. During a turn the same route is polled with `after`
+// so rows land a moment behind the agent; the live text still comes
+// over the stream.
+let liveAssistant = null;
+let liveReceived = '';
+let lastSeq = -1;
+let recordSummary = null;
+let eventsTimer = null;
+const EVENTS_POLL_MS = 1000;
+const toolRows = new Map();      // call id -> entry
+const decisionLines = new Map(); // action key -> decision line node
+
 async function loadTranscript(id) {
   setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE);
-  let turns = null;
+  let page = null;
   try {
-    const res = await fetch('/api/sessions/' + encodeURIComponent(id));
-    if (res.ok) turns = await res.json();
+    const res = await fetch('/api/sessions/' + encodeURIComponent(id) + '/events');
+    if (res.ok) page = await res.json();
   } catch (e) {
-    turns = null;
+    page = null;
   } finally {
     // The rail is refreshed however the load ends.
     loadRail();
   }
-  if (!turns) return;
-  clear(conversation);
-  if (turns.length === 0 && id === WEBCHAT_LOG_ID) { showEmptyState(); return; }
-  for (const t of turns) {
-    if (t.role === 'user') addUser(t.content);
-    else addAssistant(t.content);
-  }
+  if (!page || !Array.isArray(page.events)) return;
+  clear(thread);
+  toolRows.clear();
+  decisionLines.clear();
+  lastSeq = -1;
+  recordSummary = page;
+  if (page.events.length === 0 && id === WEBCHAT_LOG_ID) { showEmptyState(); return; }
+  for (const ev of page.events) renderEvent(ev, false);
   scrollToEnd();
+}
+
+async function pollEvents() {
+  let page;
+  try {
+    const res = await fetch('/api/sessions/' + encodeURIComponent(WEBCHAT_LOG_ID) + '/events?after=' + Math.max(lastSeq, 0));
+    if (!res.ok) return;
+    page = await res.json();
+  } catch (e) { return; }
+  if (!page || !Array.isArray(page.events)) return;
+  recordSummary = page;
+  for (const ev of page.events) {
+    if (ev.seq <= lastSeq) continue;
+    renderEvent(ev, true);
+  }
+  if (!record.hidden) renderRecord();
+}
+function startEventPolling() {
+  if (eventsTimer) return;
+  eventsTimer = setInterval(pollEvents, EVENTS_POLL_MS);
+}
+function stopEventPolling() {
+  if (eventsTimer) { clearInterval(eventsTimer); eventsTimer = null; }
+}
+
+function compactArgs(call) {
+  try {
+    const a = JSON.parse(call.arguments);
+    if (a && typeof a.command === 'string') return a.command;
+    if (a && typeof a.path === 'string') return a.path;
+  } catch (e) { /* not JSON: show it as it is */ }
+  return String(call.arguments || '');
+}
+function setGlyph(entry, glyph, cls, statusText) {
+  setText(entry.glyph, glyph);
+  entry.glyph.className = 'glyph ' + cls;
+  setText(entry.status, statusText || '');
+}
+function markAwaiting(entry) { setGlyph(entry, '○', 'awaiting', 'awaiting you'); }
+function pendingToolRowFor(name) {
+  let found = null;
+  for (const entry of toolRows.values()) {
+    if (!entry.result && entry.call.name === name) found = entry;
+  }
+  return found;
+}
+function advanceBlock(block) {
+  // The first uncompleted call of a round runs; the rest are queued.
+  let running = false;
+  for (const entry of block.entries) {
+    if (entry.result) continue;
+    if (entry.glyph.classList.contains('awaiting')) { running = true; continue; }
+    if (!running) { setGlyph(entry, '·', 'running', 'running'); running = true; }
+    else setGlyph(entry, '◌', 'queued', 'queued');
+  }
+}
+function toolRow(block, call, seq) {
+  const wrap = el('div', 'tool');
+  const row = el('div', 'tool-row');
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+  row.setAttribute('aria-expanded', 'false');
+  const glyph = el('span', 'glyph queued', '◌');
+  const name = el('span', 'name', call.name);
+  const args = el('span', 'args', compactArgs(call));
+  const status = el('span', 'status', 'queued');
+  row.appendChild(glyph); row.appendChild(name); row.appendChild(args); row.appendChild(status);
+  const details = el('div', 'tool-details');
+  details.hidden = true;
+  wrap.appendChild(row); wrap.appendChild(details);
+  const entry = { wrap, row, glyph, status, details, call, seq, result: null, block };
+  const toggle = () => {
+    details.hidden = !details.hidden;
+    row.setAttribute('aria-expanded', details.hidden ? 'false' : 'true');
+    if (!details.hidden) renderToolDetails(entry);
+  };
+  row.addEventListener('click', toggle);
+  row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  toolRows.set(call.id, entry);
+  return entry;
+}
+function renderToolDetails(entry) {
+  const d = entry.details;
+  clear(d);
+  const kv = (k, v) => { d.appendChild(el('span', 'k', k)); const vv = el('span', 'v'); vv.appendChild(typeof v === 'string' ? document.createTextNode(v) : v); d.appendChild(vv); };
+  kv('tier', entry.call.computed_tier
+    ? entry.call.computed_tier.replace('tier', 'Tier ') + (entry.call.action_key ? ' · ' + entry.call.action_key : '')
+    : 'not classified by the gate');
+  const sb = status && status.sandbox ? status.sandbox : null;
+  const eg = status && status.egress ? status.egress : null;
+  kv('ran in', sb && sb.mode
+    ? (sb.mode === 'off' ? 'on the host, no sandbox' : sb.mode + ' sandbox') + (eg && eg.mode ? (eg.mode === 'none' ? ' · no network' : ' · egress ' + eg.mode) : '') + ' (configured)'
+    : unknownNode());
+  if (entry.result) {
+    const r = entry.result;
+    kv('took', isSet(r.elapsed_ms_approx) ? '~' + (r.elapsed_ms_approx / 1000).toFixed(1) + 's, from row timestamps · exit code not recorded' : unknownNode());
+    const out = el('span');
+    out.appendChild(document.createTextNode((r.output_bytes || 0) + ' bytes' + (r.success ? '' : ' · failed') + ' '));
+    const show = el('button', 'link', 'show');
+    show.type = 'button';
+    let pre = null;
+    show.addEventListener('click', () => {
+      if (pre) { pre.remove(); pre = null; setText(show, 'show'); return; }
+      pre = el('pre', null, r.output || '');
+      d.appendChild(pre);
+      setText(show, 'hide');
+    });
+    out.appendChild(show);
+    kv('output', out);
+  } else {
+    kv('result', 'none yet');
+  }
+}
+
+function renderEvent(ev, live) {
+  if (typeof ev.seq === 'number') lastSeq = Math.max(lastSeq, ev.seq);
+  switch (ev.kind) {
+    case 'user_message':
+      if (!live) addUser(ev.content);
+      break;
+    case 'assistant_message':
+      if (!live) addAssistant(ev.content);
+      break;
+    case 'assistant_tool_calls': {
+      // Rows land before the tool runs; text after the round is a new
+      // paragraph below them.
+      if (live) { liveAssistant = null; liveReceived = ''; }
+      const block = el('div', 'tools');
+      block.entries = [];
+      for (const call of ev.calls || []) {
+        const entry = toolRow(block, call, ev.seq);
+        block.entries.push(entry);
+        block.appendChild(entry.wrap);
+      }
+      // The call row was written before the gate prompted, so when a
+      // card is already open the row belongs above it.
+      const openCard = live && approvalCurrent ? document.getElementById('approval-' + approvalCurrent.request_id) : null;
+      if (openCard) thread.insertBefore(block, openCard);
+      else thread.appendChild(block);
+      advanceBlock(block);
+      scrollToEnd();
+      break;
+    }
+    case 'tool_result': {
+      const entry = toolRows.get(ev.call_id);
+      if (!entry) break;
+      entry.result = ev;
+      setGlyph(entry, ev.success ? '✓' : '✕', ev.success ? 'done' : 'failed', '');
+      advanceBlock(entry.block);
+      if (!entry.details.hidden) renderToolDetails(entry);
+      break;
+    }
+    case 'permission_approved': {
+      const line = 'approved by ' + (ev.approved_by || 'unknown') + ' · ' + hhmm(new Date(ev.ts)) + ' · recorded';
+      settleDecision(ev.action_key, line, '✓', live);
+      break;
+    }
+    case 'permission_denied': {
+      const entry = pendingToolRowFor(ev.tool);
+      const operatorDecision = !ev.timed_out && ev.denied_via && ev.denied_via.kind === 'sse';
+      // One event, one word, one glyph: a denial is the operator's and
+      // an expiry is the window's, so the call was never attempted and
+      // the row takes the neutral glyph; ✕ is for failed and for the
+      // gate's own fail-closed refusal.
+      const notAttempted = ev.timed_out || operatorDecision;
+      if (entry) setGlyph(entry, notAttempted ? '○' : '✕', notAttempted ? 'neutral' : 'failed',
+        ev.timed_out ? 'expired' : operatorDecision ? 'denied' : 'refused');
+      let line, glyph;
+      if (ev.timed_out) {
+        line = 'expired — treated as denied · ' + hhmm(new Date(ev.ts)) + ' · recorded';
+        glyph = '○';
+      } else if (ev.denied_via && ev.denied_via.kind === 'sse') {
+        line = 'denied · ' + hhmm(new Date(ev.ts)) + (ev.denial_reason ? ' · ' + ev.denial_reason : '') + ' · recorded';
+        glyph = '○';
+      } else {
+        line = 'refused by ' + (ev.denial_source || 'the gate') + ' · ' + (ev.action_key || ev.tool) +
+          (ev.denial_reason ? ' · ' + ev.denial_reason : '') + ' · recorded';
+        glyph = '✕';
+      }
+      settleDecision(ev.action_key, line, glyph, live);
+      break;
+    }
+    case 'permission_renewed':
+      if (!live) addDecision('grant renewed · ' + ev.action_key + ' · until ' + fmtDate(ev.expires_at) + ' · recorded', '✓');
+      break;
+    case 'permission_grant_expired':
+      addDecision('grant expired · ' + ev.action_key + ' · recorded', '○');
+      break;
+    case 'permission_grant_pruned':
+      addDecision('grant pruned · ' + ev.action_key + ' · recorded', '○');
+      break;
+    case 'sandbox_egress_verdict':
+      addDecision('egress ' + (ev.allowed ? 'allowed' : 'refused') + ' · ' + ev.host + ':' + ev.port +
+        (ev.reason ? ' · ' + ev.reason : '') + (ev.escalated ? ' · escalated' : '') + ' · recorded', ev.allowed ? '✓' : '✕');
+      break;
+    case 'budget_exceeded':
+      addBlock('refusal', 'Spending limit reached', '✕',
+        usd(ev.window_spend_usd_micros) + ' of ' + usd(ev.ceiling_usd_micros) + ' this ' + ev.window +
+        (ev.tool ? ' · ' + ev.tool + ' not called' : ' · the model was not called'),
+        'From the budget row on the record.');
+      break;
+    case 'subagent_spawned':
+      addDecision('sub-agent ' + ev.child_agent_id + ' spawned · tools ' + ((ev.tools_granted || []).join(', ') || 'none') +
+        (ev.max_permission_tier ? ' · cap ' + ev.max_permission_tier : '') + ' · recorded', '○');
+      break;
+    case 'subagent_result':
+      addDecision('sub-agent finished · ' + (typeof ev.status === 'string' ? ev.status : JSON.stringify(ev.status)) + ' · recorded',
+        ev.status === 'ok' ? '✓' : '✕');
+      break;
+    case 'llm_request':
+    case 'llm_response':
+    case 'attestation':
+    case 'chain_head':
+    case 'compaction':
+    case 'http_request':
+      // Record panel material; the totals come with the page.
+      break;
+    default:
+      break;
+  }
+}
+// A decision row settles whatever stood for it: the open card, the
+// line the ack drew, or nothing yet. The row is what makes it recorded.
+function settleDecision(actionKey, line, glyph, live) {
+  if (live && approvalCurrent && approvalCurrent.action_key === actionKey) {
+    const card = document.getElementById('approval-' + approvalCurrent.request_id);
+    if (card) card.replaceWith(addDecision(line, glyph));
+    approvalCurrent = null;
+    if (turnOpen) { setTurn('turn open'); lockComposer('Waiting for the agent…'); }
+    return;
+  }
+  const existing = decisionLines.get(actionKey);
+  if (existing) {
+    existing.replaceWith(addDecision(line, glyph));
+    decisionLines.delete(actionKey);
+    return;
+  }
+  addDecision(line, glyph);
+}
+
+// --- Record panel: head, totals, what has and has not been verified ---
+function renderRecord() {
+  clear(record);
+  const r = recordSummary || {};
+  const head = r.head || {};
+  const t = r.totals || {};
+  const h2 = el('h2', null, 'Record');
+  h2.appendChild(el('span', 'meta', 'this session' + (isSet(head.seq) ? ' · ' + (head.seq + 1) + ' rows' : '')));
+  record.appendChild(h2);
+  const grid = el('div', 'kv');
+  const audit = status && status.audit ? status.audit : {};
+  const w = el('span', null, audit.writer_halted ? 'halted' : 'live');
+  if (Array.isArray(audit.alarms)) w.appendChild(document.createTextNode(audit.alarms.length ? ' · ' + audit.alarms.length + ' alarms on disk' : ' · no alarms on disk'));
+  kvRow(grid, 'writer', w);
+  if (isSet(head.seq)) {
+    const v = el('span', null, head.seq + ' · ');
+    v.appendChild(el('code', null, head.hash || ''));
+    kvRow(grid, 'head', v);
+  } else {
+    kvRow(grid, 'head', unknownNode());
+  }
+  kvRow(grid, 'signed to', isSet(head.last_signed_head_seq)
+    ? el('span', null, head.last_signed_head_seq + ' · ' + head.unsigned_tail_len + ' unsigned tail')
+    : el('span', null, 'no signed head yet'));
+  kvRow(grid, 'attestations', isSet(t.attestations) ? el('span', null, t.attestations + ' recorded, not verified') : unknownNode());
+  if (isSet(t.llm_calls)) {
+    const n = (count, word) => count + ' ' + word + (count === 1 ? '' : 's');
+    kvRow(grid, 'this session', el('span', null, n(t.llm_calls, 'call') + ' · ' + n(t.tool_calls, 'tool call') + ' · ' +
+      (t.input_tokens / 1000).toFixed(1) + 'k/' + (t.output_tokens / 1000).toFixed(1) + 'k · ' + usd(t.cost_usd_micros) + (t.cost_known ? '' : ' + unpriced calls')));
+  } else {
+    kvRow(grid, 'this session', unknownNode());
+  }
+  kvRow(grid, 'context now', unknownNode());
+  const lc = r.last_compaction;
+  kvRow(grid, 'compaction', lc && isSet(lc.seq) ? el('span', null, 'row ' + lc.seq + ' · ' + (lc.dropped_messages ?? '?') + ' messages dropped') : el('span', null, 'none'));
+  record.appendChild(grid);
+  // The verify box is on screen in its idle state before the route
+  // that runs it exists, so the caveat is already here when the
+  // button lights up.
+  const box = el('div', 'verify-box');
+  const bh = el('div', 'verify-head', 'Verify chain');
+  bh.appendChild(el('span', 'meta', 'not run yet'));
+  box.appendChild(bh);
+  box.appendChild(el('div', 'verify-caveat',
+    'Report-only: no operator trust anchor was consulted, so a same-UID rewrite is not detected. ' +
+    'Verify against a key kept off this machine for that.'));
+  const run = el('button', 'btn verify-run', 'Run verify');
+  run.type = 'button';
+  run.disabled = true;
+  run.title = 'needs the verify route';
+  box.appendChild(run);
+  box.appendChild(el('div', 'verify-note', 'needs the verify route · until then: wirken audit verify'));
+  record.appendChild(box);
+  record.appendChild(el('div', 'foot', 'Counts are from the record. Nothing here is verified until a verify pass says so.'));
+}
+function setRecordOpen(open) {
+  record.hidden = !open;
+  if (open) { setAboutOpen(false); renderRecord(); }
 }
 
 // --- Composer ownership ---
@@ -815,15 +1205,15 @@ async function loadArchiveConversations(source) {
   activeArchive = source.id;
   setReadOnly(ARCHIVE_NOTICE);
   loadRail();
-  clear(conversation);
+  clear(thread);
   const head = el('div', 'archive-head', source.source_account);
   head.appendChild(el('span', 'meta',
     'imported archive · ' + source.conversations + ' conversations · ' + source.projects + ' projects · ' + (source.sealed ? 'sealed' : 'live')));
-  conversation.appendChild(head);
-  conversation.appendChild(el('div', 'archive-note',
+  thread.appendChild(head);
+  thread.appendChild(el('div', 'archive-note',
     'A stored record, shown read-only. Text was written by whoever got a message into this account.'));
   if (!rows.length) {
-    conversation.appendChild(el('div', 'archive-note', 'This archive holds no conversations.'));
+    thread.appendChild(el('div', 'archive-note', 'This archive holds no conversations.'));
     return;
   }
   for (const row of rows) {
@@ -834,7 +1224,7 @@ async function loadArchiveConversations(source) {
     item.appendChild(el('span', null, row.title || 'Untitled · ' + String(row.uuid).slice(0, 8)));
     item.appendChild(el('span', 'meta', row.message_count + ' messages · ' + fmtDate(row.updated_at)));
     item.addEventListener('click', () => loadImportedConversation(source, row.uuid));
-    conversation.appendChild(item);
+    thread.appendChild(item);
   }
   conversation.scrollTop = 0;
 }
@@ -848,17 +1238,17 @@ async function loadImportedConversation(source, uuid) {
     detail = await res.json();
   } catch (e) { return; }
   setReadOnly(ARCHIVE_NOTICE);
-  clear(conversation);
+  clear(thread);
   if (!detail) {
-    conversation.appendChild(el('div', 'archive-note', 'That conversation is not in the store.'));
+    thread.appendChild(el('div', 'archive-note', 'That conversation is not in the store.'));
     return;
   }
-  conversation.appendChild(el('div', 'archive-head', detail.title || 'Untitled · ' + String(detail.uuid).slice(0, 8)));
-  if (detail.summary) conversation.appendChild(el('div', 'archive-note', detail.summary));
+  thread.appendChild(el('div', 'archive-head', detail.title || 'Untitled · ' + String(detail.uuid).slice(0, 8)));
+  if (detail.summary) thread.appendChild(el('div', 'archive-note', detail.summary));
   const back = el('button', 'link', '← back to this archive');
   back.type = 'button';
   back.addEventListener('click', () => loadArchiveConversations(source));
-  conversation.appendChild(back);
+  thread.appendChild(back);
 
   for (const message of detail.messages) {
     const box = el('div', 'archive-msg');
@@ -871,16 +1261,16 @@ async function loadImportedConversation(source, uuid) {
     } else {
       box.appendChild(el('div', 'text', message.text));
     }
-    conversation.appendChild(box);
+    thread.appendChild(box);
     for (const attachment of message.attachments || []) {
       const att = el('div', 'archive-attachment');
       att.appendChild(el('div', 'meta', 'attachment: ' + (attachment.file_name || 'unnamed')));
       att.appendChild(el('div', 'text', attachment.text));
-      conversation.appendChild(att);
+      thread.appendChild(att);
     }
     // The view is a projection and says so.
     if (message.unrendered_blocks > 0) {
-      conversation.appendChild(el('div', 'archive-note',
+      thread.appendChild(el('div', 'archive-note',
         message.unrendered_blocks + ' stored content blocks are not shown here. ' +
         'This view renders the message text and its attachments.'));
     }
@@ -975,12 +1365,14 @@ function renderStatusValues() {
   // width takes its separator with it.
   const items = [];
   const agent = status.agent || {};
-  if (agent.model) items.push({ node: el('span', null, (agent.id || 'default') + ' · ' + agent.model), optional: false });
+  const ag = el('span', null, agent.id || 'default');
+  if (agent.model) ag.appendChild(el('span', 'optional', ' · ' + agent.model));
+  items.push({ node: ag, optional: false });
   const sandbox = status.sandbox || {};
   if (sandbox.mode) {
     const sb = el('span', null, sandbox.mode + ' ');
     sb.appendChild(el('span', 'hedge', '(configured)'));
-    items.push({ node: sb, optional: false });
+    items.push({ node: sb, optional: true });
   }
   const egress = status.egress || {};
   if (egress.mode) items.push({ node: el('span', null, egress.mode === 'none' ? 'no egress' : 'egress: ' + egress.mode), optional: true });
@@ -991,10 +1383,12 @@ function renderStatusValues() {
     b.title = 'agent budget · all channels';
     items.push({ node: b, optional: false });
   }
-  const dot = el('span', 'writer-dot' + (audit.writer_halted ? ' halted' : ''));
-  dot.title = audit.writer_halted ? 'Audit writer halted' : 'Audit writer live';
-  dot.setAttribute('role', 'img');
+  const dot = el('button', 'writer-dot' + (audit.writer_halted ? ' halted' : ''));
+  dot.type = 'button';
+  dot.title = (audit.writer_halted ? 'Audit writer halted' : 'Audit writer live') + ' · open Record';
   dot.setAttribute('aria-label', dot.title);
+  dot.setAttribute('aria-haspopup', 'dialog');
+  dot.addEventListener('click', () => setRecordOpen(record.hidden));
   items.push({ node: dot, optional: false });
   items.forEach((item, i) => {
     const wrap = el('span', 'item' + (item.optional ? ' optional' : ''));
@@ -1093,16 +1487,20 @@ function renderAbout() {
 }
 function setAboutOpen(open) {
   if (open && !status) return;
+  if (open) record.hidden = true;
   about.hidden = !open;
   wordmark.setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) renderAbout();
 }
 wordmark.addEventListener('click', () => setAboutOpen(about.hidden));
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !about.hidden) { setAboutOpen(false); wordmark.focus(); } });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!about.hidden) { setAboutOpen(false); wordmark.focus(); }
+  if (!record.hidden) setRecordOpen(false);
+});
 document.addEventListener('click', (e) => {
-  if (about.hidden) return;
-  if (about.contains(e.target) || wordmark.contains(e.target)) return;
-  setAboutOpen(false);
+  if (!about.hidden && !about.contains(e.target) && !wordmark.contains(e.target)) setAboutOpen(false);
+  if (!record.hidden && !record.contains(e.target) && !(e.target.closest && e.target.closest('.writer-dot'))) setRecordOpen(false);
 });
 
 // --- Wiring ---
@@ -1183,6 +1581,29 @@ pub async fn serve(
                     HTML
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
+            } else if let Some((session_id, after)) = parse_session_events_path(first_line) {
+                // GET /api/sessions/{id}/events[?after=N] — the session
+                // log projected to what the page draws. Webchat
+                // sessions only: this route exposes far more per row
+                // than the transcript does, and other channels' rows
+                // are theirs.
+                if let Some(resp) = api_preflight(&request, port, false) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                if !events_route_allowed(&session_id) {
+                    let _ = stream
+                        .write_all(
+                            json_forbidden("events are served for webchat sessions only")
+                                .as_bytes(),
+                        )
+                        .await;
+                    return;
+                }
+                let cfg = super::config();
+                let body = session_events(&cfg, &session_id, after);
+                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if let Some(session_id) = parse_session_path(first_line) {
                 // GET /api/sessions/{id} — transcript for one session,
                 // rendered into the messages pane. Safe read: the Host
@@ -1941,6 +2362,396 @@ pub async fn status_snapshot(
     })
 }
 
+/// Parse `GET /api/sessions/{id}/events[?after=N]`. The id is one
+/// percent-encoded segment (its `/` separators arrive as `%2F`),
+/// followed by the literal `/events`. Same segment rules as the
+/// transcript route: no empty segment, no `..`, no control byte.
+/// `after` is the last sequence the caller already holds.
+fn parse_session_events_path(first_line: &str) -> Option<(String, Option<u64>)> {
+    let rest = first_line.strip_prefix("GET /api/sessions/")?;
+    let raw = rest.split(' ').next()?;
+    let (path, query) = match raw.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (raw, None),
+    };
+    let encoded_id = path.strip_suffix("/events")?;
+    if encoded_id.is_empty() || encoded_id.contains('/') {
+        return None;
+    }
+    let decoded = percent_decode(encoded_id)?;
+    if decoded.split('/').any(|seg| seg.is_empty() || seg == "..") {
+        return None;
+    }
+    if decoded.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let mut after = None;
+    if let Some(q) = query {
+        for pair in q.split('&') {
+            if let Some(v) = pair.strip_prefix("after=") {
+                after = Some(v.parse::<u64>().ok()?);
+            }
+        }
+    }
+    Some((decoded, after))
+}
+
+/// The events route serves webchat sessions only. The id is
+/// `{agent}/{channel}/{conversation}`; anything whose channel segment
+/// is not `webchat` is another channel's record.
+fn events_route_allowed(session_id: &str) -> bool {
+    let mut parts = session_id.splitn(3, '/');
+    let _agent = parts.next();
+    let channel = parts.next();
+    let conversation = parts.next();
+    channel == Some("webchat") && conversation.is_some_and(|c| !c.is_empty())
+}
+
+/// First 16 characters of a hex value carried on a row, for a
+/// fingerprint the page can show without the full key.
+fn hex_fingerprint<T: serde::Serialize>(v: &T) -> serde_json::Value {
+    match serde_json::to_value(v) {
+        Ok(serde_json::Value::String(s)) => {
+            serde_json::Value::from(s.chars().take(16).collect::<String>())
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// The session log projected to what the page draws: the rows the
+/// transcript used to drop (tool calls and results, decisions, egress
+/// verdicts, budget stops, sub-agent spawns) plus a head and totals.
+///
+/// Whitelisted per variant. Withheld: the system prompt (it embeds
+/// every skill body), request and tool hashes, raw signatures and
+/// keys (a fingerprint stands in), sender ids, and any variant not
+/// named here. Tool arguments and outputs are what the agent recorded,
+/// verbatim, with terminal control sequences stripped from outputs.
+///
+/// `after` filters the rows returned; the head and totals always cover
+/// the whole session so a poll during a turn sees the same figures as
+/// a full load.
+pub fn session_events(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    session_id: &str,
+    after: Option<u64>,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    use std::collections::HashMap;
+    use wirken_audit::{SessionEvent, SessionLog, SqliteSessionLog};
+
+    let log = match SqliteSessionLog::open(&cfg.audit_db_path()) {
+        Ok(l) => l,
+        Err(_) => return json!({ "error": "session log unavailable" }),
+    };
+    let handle = log.handle_for(SessionId::new(session_id.to_string()));
+    let rows = match log.get_since(&handle, 0) {
+        Ok(r) => r,
+        Err(_) => return json!({ "error": "session log unreadable" }),
+    };
+
+    let mut call_started: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    let mut events: Vec<Value> = Vec::new();
+    let (mut input_tokens, mut output_tokens, mut cost_micros) = (0u64, 0u64, 0u64);
+    let mut cost_known = true;
+    let (mut llm_calls, mut tool_calls, mut attestations) = (0u64, 0u64, 0u64);
+    let mut last_signed_head_seq: Option<u64> = None;
+    let mut last_chain_head_row: Option<u64> = None;
+    let mut last_compaction: Value = Value::Null;
+    let mut head_seq: Option<u64> = None;
+    let mut head_hash: Value = Value::Null;
+
+    for row in &rows {
+        head_seq = Some(row.seq);
+        head_hash = hex_fingerprint(&row.hash);
+        let projected: Option<Value> = match &row.event {
+            SessionEvent::UserMessage { content, .. } => {
+                Some(json!({ "kind": "user_message", "content": content }))
+            }
+            SessionEvent::AssistantMessage { content, .. } => {
+                Some(json!({ "kind": "assistant_message", "content": content }))
+            }
+            SessionEvent::AssistantToolCalls { calls, .. } => {
+                tool_calls += calls.len() as u64;
+                let calls: Vec<Value> = calls
+                    .iter()
+                    .map(|c| {
+                        call_started.insert(c.id.clone(), row.ts);
+                        let args: Value = serde_json::from_str(&c.arguments).unwrap_or(Value::Null);
+                        let action = wirken_agent::tool::tool_to_action(&c.name, &args);
+                        json!({
+                            "id": c.id,
+                            "name": c.name,
+                            "arguments": c.arguments,
+                            "computed_tier": action.as_ref().map(|a| a.tier().label()),
+                            "action_key": action.as_ref().map(|a| a.approval_key()),
+                        })
+                    })
+                    .collect();
+                Some(json!({ "kind": "assistant_tool_calls", "calls": calls }))
+            }
+            SessionEvent::ToolResult {
+                call_id,
+                tool_name,
+                output,
+                success,
+                ..
+            } => {
+                let elapsed = call_started
+                    .get(call_id)
+                    .map(|started| (row.ts - *started).num_milliseconds());
+                Some(json!({
+                    "kind": "tool_result",
+                    "call_id": call_id,
+                    "tool_name": tool_name,
+                    "success": success,
+                    "output": wirken_agent::ansi::strip_control_sequences(output),
+                    "output_bytes": output.len(),
+                    "elapsed_ms_approx": elapsed,
+                }))
+            }
+            SessionEvent::LlmRequest {
+                provider,
+                model,
+                request_id,
+                ..
+            } => Some(json!({
+                "kind": "llm_request", "provider": provider, "model": model, "request_id": request_id,
+            })),
+            SessionEvent::LlmResponse {
+                request_id,
+                finish_reason,
+                input_tokens: inp,
+                output_tokens: out,
+                latency_ms,
+                total_cost_usd_micros,
+                ..
+            } => {
+                llm_calls += 1;
+                input_tokens += u64::from(*inp);
+                output_tokens += u64::from(*out);
+                match total_cost_usd_micros {
+                    Some(c) => cost_micros += c,
+                    None => cost_known = false,
+                }
+                Some(json!({
+                    "kind": "llm_response",
+                    "request_id": request_id,
+                    "finish_reason": finish_reason,
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "latency_ms": latency_ms,
+                    "total_cost_usd_micros": total_cost_usd_micros,
+                }))
+            }
+            SessionEvent::BudgetExceeded {
+                window_spend_usd_micros,
+                ceiling_usd_micros,
+                window,
+                action,
+                tool,
+                ..
+            } => Some(json!({
+                "kind": "budget_exceeded",
+                "action": serde_json::to_value(action).unwrap_or(Value::Null),
+                "window": window,
+                "window_spend_usd_micros": window_spend_usd_micros,
+                "ceiling_usd_micros": ceiling_usd_micros,
+                "tool": tool,
+            })),
+            SessionEvent::PermissionDenied {
+                tool,
+                action_key,
+                denial_source,
+                tier,
+                denied_via,
+                denial_reason,
+                ..
+            } => Some(json!({
+                "kind": "permission_denied",
+                "tool": tool,
+                "action_key": action_key,
+                "tier": tier,
+                "denial_source": serde_json::to_value(denial_source).unwrap_or(Value::Null),
+                "denied_via": serde_json::to_value(denied_via).unwrap_or(Value::Null),
+                "denial_reason": denial_reason,
+                "timed_out": denial_reason.as_deref() == Some("approval timeout"),
+            })),
+            SessionEvent::PermissionApproved {
+                action_key,
+                approved_by,
+                scope,
+                approved_via,
+                ..
+            } => Some(json!({
+                "kind": "permission_approved",
+                "action_key": action_key,
+                "approved_by": approved_by,
+                "scope": serde_json::to_value(scope).unwrap_or(Value::Null),
+                "approved_via": serde_json::to_value(approved_via).unwrap_or(Value::Null),
+            })),
+            SessionEvent::PermissionRenewed {
+                action_key,
+                approved_by,
+                previous_expires_at,
+                expires_at,
+                ..
+            } => Some(json!({
+                "kind": "permission_renewed",
+                "action_key": action_key,
+                "approved_by": approved_by,
+                "previous_expires_at": previous_expires_at.to_rfc3339(),
+                "expires_at": expires_at.to_rfc3339(),
+            })),
+            SessionEvent::PermissionGrantExpired {
+                action_key,
+                tool,
+                tier,
+                expired_at,
+                detected_by,
+                ..
+            } => Some(json!({
+                "kind": "permission_grant_expired",
+                "action_key": action_key,
+                "tool": tool,
+                "tier": tier,
+                "expired_at": expired_at.to_rfc3339(),
+                "detected_by": serde_json::to_value(detected_by).unwrap_or(Value::Null),
+            })),
+            SessionEvent::PermissionGrantPruned {
+                action_key,
+                expires_at,
+                ..
+            } => Some(json!({
+                "kind": "permission_grant_pruned",
+                "action_key": action_key,
+                "expires_at": expires_at.to_rfc3339(),
+            })),
+            SessionEvent::SandboxEgressVerdict {
+                host,
+                port,
+                allowed,
+                reason,
+                mode,
+                escalated,
+                ..
+            } => Some(json!({
+                "kind": "sandbox_egress_verdict",
+                "host": host,
+                "port": port,
+                "allowed": allowed,
+                "reason": serde_json::to_value(reason).unwrap_or(Value::Null),
+                "mode": serde_json::to_value(mode).unwrap_or(Value::Null),
+                "escalated": escalated,
+            })),
+            SessionEvent::SubagentSpawned {
+                child_session_id,
+                child_agent_id,
+                tools_granted,
+                max_permission_tier,
+            } => Some(json!({
+                "kind": "subagent_spawned",
+                "child_session_id": child_session_id,
+                "child_agent_id": child_agent_id,
+                "tools_granted": tools_granted,
+                "max_permission_tier": max_permission_tier,
+            })),
+            SessionEvent::SubagentResult {
+                child_session_id,
+                output,
+                status,
+            } => Some(json!({
+                "kind": "subagent_result",
+                "child_session_id": child_session_id,
+                "status": serde_json::to_value(status).unwrap_or(Value::Null),
+                "output": output,
+            })),
+            SessionEvent::Attestation {
+                chain_head_seq,
+                signer_pubkey,
+                ..
+            } => {
+                attestations += 1;
+                Some(json!({
+                    "kind": "attestation",
+                    "chain_head_seq": chain_head_seq,
+                    "signer_pubkey_fingerprint": hex_fingerprint(signer_pubkey),
+                    "verified": Value::Null,
+                }))
+            }
+            SessionEvent::ChainHead {
+                reason,
+                sequence_range_start,
+                sequence_range_end,
+                ..
+            } => {
+                last_signed_head_seq = Some(*sequence_range_end);
+                last_chain_head_row = Some(row.seq);
+                Some(json!({
+                    "kind": "chain_head",
+                    "reason": serde_json::to_value(reason).unwrap_or(Value::Null),
+                    "sequence_range_start": sequence_range_start,
+                    "sequence_range_end": sequence_range_end,
+                }))
+            }
+            SessionEvent::Compaction { extracts, .. } => {
+                let v = json!({
+                    "kind": "compaction",
+                    "trimmed_bytes": extracts.get("trimmed_bytes").cloned().unwrap_or(Value::Null),
+                    "kept_messages": extracts.get("kept_messages").cloned().unwrap_or(Value::Null),
+                    "dropped_messages": extracts.get("dropped_messages").cloned().unwrap_or(Value::Null),
+                });
+                let mut lc = v.clone();
+                lc["seq"] = Value::from(row.seq);
+                last_compaction = lc;
+                Some(v)
+            }
+            SessionEvent::HttpRequest {
+                method,
+                host,
+                status,
+                ..
+            } => Some(json!({
+                "kind": "http_request", "method": method, "host": host, "status": status,
+            })),
+            _ => None,
+        };
+        if let Some(mut v) = projected
+            && after.is_none_or(|a| row.seq > a)
+        {
+            v["seq"] = Value::from(row.seq);
+            v["ts"] = Value::from(row.ts.to_rfc3339());
+            events.push(v);
+        }
+    }
+
+    let unsigned_tail_len = match (head_seq, last_chain_head_row) {
+        (Some(h), Some(c)) => Value::from(h.saturating_sub(c)),
+        (Some(h), None) => Value::from(h + 1),
+        _ => Value::Null,
+    };
+    json!({
+        "session_id": session_id,
+        "head": {
+            "seq": head_seq,
+            "hash": head_hash,
+            "last_signed_head_seq": last_signed_head_seq,
+            "unsigned_tail_len": unsigned_tail_len,
+        },
+        "totals": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost_usd_micros": cost_micros,
+            "cost_known": cost_known,
+            "llm_calls": llm_calls,
+            "tool_calls": tool_calls,
+            "attestations": attestations,
+        },
+        "last_compaction": last_compaction,
+        "events": events,
+    })
+}
+
 /// Parse `POST /api/approvals/{request_id}` and return the
 /// request_id. None for any other request line shape. The path
 /// segment is URL-decoded with `percent_decode` only insofar as the
@@ -2190,9 +3001,10 @@ mod tests {
     use wirken_gateway::adapter_registry::AdapterRegistry;
 
     use super::{
-        HTML, ImportedRoute, SiemSummary, StatusInputs, api_preflight, is_webchat_host,
-        is_webchat_origin, parse_approval_path, parse_imported_path, parse_session_path,
-        percent_decode, status_snapshot, url_host,
+        HTML, ImportedRoute, SiemSummary, StatusInputs, api_preflight, events_route_allowed,
+        is_webchat_host, is_webchat_origin, parse_approval_path, parse_imported_path,
+        parse_session_events_path, parse_session_path, percent_decode, session_events,
+        status_snapshot, url_host,
     };
 
     #[test]
@@ -2454,7 +3266,7 @@ mod tests {
         // to reach the document.
         assert!(script.contains("renderApproval(event)"));
         assert!(script.contains("ackApproval(event.request_id, event.result)"));
-        assert!(script.contains("conversation.appendChild(card)"));
+        assert!(script.contains("thread.appendChild(card)"));
         // And the handler really emits the done event the page waits
         // for, in the same wire shape as everything else.
         assert!(
@@ -2543,6 +3355,23 @@ mod tests {
             rendered.starts_with(prefix),
             "the agent renders a sandbox refusal as {rendered:?}; the page expects {prefix:?}"
         );
+        // The block shows the reason only: the agent's text goes on to
+        // say how to weaken the sandbox, and that belongs in the CLI.
+        let refusal = script
+            .split_once("function addRefusal(text) {")
+            .expect("addRefusal exists")
+            .1
+            .split_once(
+                "
+}",
+            )
+            .unwrap()
+            .0;
+        assert!(
+            refusal.contains("firstClause(text)"),
+            "the refusal body is cut to its first clause: {refusal}"
+        );
+        assert!(script.contains("function firstClause("));
     }
 
     /// A refused request is not a sent message: on any non-2xx the
@@ -2904,6 +3733,347 @@ mod tests {
             !panel.contains("el('span', null, 'unknown')"),
             "unknown goes through the one renderer"
         );
+    }
+
+    #[test]
+    fn session_events_path_parses_id_and_after() {
+        assert_eq!(
+            parse_session_events_path(
+                "GET /api/sessions/default%2Fwebchat%2Fwebchat-default/events HTTP/1.1"
+            ),
+            Some(("default/webchat/webchat-default".into(), None))
+        );
+        assert_eq!(
+            parse_session_events_path(
+                "GET /api/sessions/default%2Fwebchat%2Fc1/events?after=41 HTTP/1.1"
+            ),
+            Some(("default/webchat/c1".into(), Some(41)))
+        );
+        // Not this route: the bare transcript, a malformed after, traversal.
+        assert!(
+            parse_session_events_path("GET /api/sessions/default%2Fwebchat%2Fc1 HTTP/1.1")
+                .is_none()
+        );
+        assert!(
+            parse_session_events_path(
+                "GET /api/sessions/default%2Fwebchat%2Fc1/events?after=x HTTP/1.1"
+            )
+            .is_none()
+        );
+        assert!(
+            parse_session_events_path("GET /api/sessions/..%2Fx%2Fy/events HTTP/1.1").is_none()
+        );
+        assert!(parse_session_events_path("GET /api/sessions//events HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn session_events_are_served_for_webchat_sessions_only() {
+        assert!(events_route_allowed("default/webchat/webchat-default"));
+        assert!(events_route_allowed("other/webchat/c1"));
+        assert!(!events_route_allowed("default/telegram/-1001234"));
+        assert!(!events_route_allowed("default/webchat/"));
+        assert!(!events_route_allowed("__system__"));
+    }
+
+    /// The projection carries the rows the transcript dropped, in order,
+    /// with the tier recomputed from the stored arguments, outputs
+    /// stripped of control sequences, a timeout denial marked as such,
+    /// and totals over the whole session. The system prompt never
+    /// appears.
+    #[test]
+    fn session_events_project_the_whitelisted_kinds() {
+        use wirken_audit::{
+            DenialSource, SessionEvent, SessionId, SessionLog, SqliteSessionLog, ToolCallRecord,
+            TrustLevel,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let log = SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+        let id = "default/webchat/webchat-default";
+        let handle = log.handle_for(SessionId::new(id.to_string()));
+        let agent = || "default".to_string();
+        let rows = vec![
+            (
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: "hi".into(),
+                    inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::SystemPromptSet {
+                    content: "PROMPT BODY".into(),
+                    agent_id: agent(),
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::AssistantToolCalls {
+                    calls: vec![
+                        ToolCallRecord {
+                            id: "c1".into(),
+                            name: "exec".into(),
+                            arguments: r#"{"command":"ls -la /tmp"}"#.into(),
+                        },
+                        ToolCallRecord {
+                            id: "c2".into(),
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"notes.txt"}"#.into(),
+                        },
+                    ],
+                    agent_id: agent(),
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::Tool,
+                SessionEvent::ToolResult {
+                    call_id: "c1".into(),
+                    tool_name: "exec".into(),
+                    output: "\u{1b}[31mred\u{1b}[0m".into(),
+                    success: true,
+                    agent_id: agent(),
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::PermissionDenied {
+                    tool: "exec".into(),
+                    action_key: "shell:rm".into(),
+                    denial_source: DenialSource::Tier,
+                    tier: Some("tier3".into()),
+                    agent_id: agent(),
+                    trigger: None,
+                    denied_via: None,
+                    denial_reason: Some("approval timeout".into()),
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::LlmResponse {
+                    request_id: "r1".into(),
+                    finish_reason: "stop".into(),
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    latency_ms: 500,
+                    agent_id: agent(),
+                    credential_id: None,
+                    input_cost_usd_micros: Some(10),
+                    output_cost_usd_micros: Some(5),
+                    total_cost_usd_micros: Some(15),
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::AssistantMessage {
+                    content: "done".into(),
+                    agent_id: agent(),
+                },
+            ),
+        ];
+        for (trust, ev) in rows {
+            log.append(&handle, trust, ev).expect("append");
+        }
+
+        let v = session_events(&cfg, id, None);
+        let kinds: Vec<&str> = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "user_message",
+                "assistant_tool_calls",
+                "tool_result",
+                "permission_denied",
+                "llm_response",
+                "assistant_message"
+            ]
+        );
+        let calls = &v["events"][1]["calls"];
+        assert_eq!(calls[0]["computed_tier"], "tier2");
+        assert_eq!(calls[0]["action_key"], "shell:ls");
+        assert_eq!(calls[1]["computed_tier"], "tier1");
+        assert_eq!(
+            v["events"][2]["output"], "red",
+            "control sequences are stripped"
+        );
+        assert!(
+            v["events"][2]["elapsed_ms_approx"].is_number(),
+            "elapsed is the row-timestamp delta"
+        );
+        assert_eq!(v["events"][3]["timed_out"], true);
+        assert_eq!(v["totals"]["input_tokens"], 100);
+        assert_eq!(v["totals"]["output_tokens"], 20);
+        assert_eq!(v["totals"]["cost_usd_micros"], 15);
+        assert_eq!(v["totals"]["cost_known"], true);
+        assert_eq!(v["totals"]["tool_calls"], 2);
+        assert_eq!(v["totals"]["llm_calls"], 1);
+        assert_eq!(v["head"]["seq"], 6);
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(
+            !text.contains("PROMPT BODY"),
+            "the system prompt is withheld"
+        );
+        for forbidden in [
+            "messages_hash",
+            "tools_hash",
+            "\"signature\"",
+            "signing_pubkey",
+            "sender_id",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} leaked");
+        }
+
+        // `after` filters rows but not the totals.
+        let tail = session_events(&cfg, id, Some(3));
+        let seqs: Vec<u64> = tail["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, [4, 5, 6]);
+        assert_eq!(tail["totals"]["tool_calls"], 2);
+    }
+
+    /// Every kind the projection emits has a renderer branch on the
+    /// page, and the word "recorded" is said only by the row renderer:
+    /// an ack means accepted, a row means recorded.
+    #[test]
+    fn every_projected_kind_has_a_renderer_and_recorded_needs_a_row() {
+        let script = page_script();
+        let projection = SERVER_SOURCE
+            .split_once("pub fn session_events(")
+            .expect("session_events exists")
+            .1;
+        let mut kinds: Vec<&str> = projection
+            .match_indices("\"kind\": \"")
+            .map(|(i, _)| {
+                let rest = &projection[i + 9..];
+                rest.split('"').next().unwrap()
+            })
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        assert!(kinds.len() >= 15, "found kinds: {kinds:?}");
+        for kind in &kinds {
+            assert!(
+                script.contains(&format!("case '{kind}':")),
+                "the page has no renderer for {kind}"
+            );
+        }
+        let ack = script
+            .split_once("function ackApproval(")
+            .expect("ackApproval exists")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            !ack.contains("recorded"),
+            "an ack must not say recorded: {ack}"
+        );
+        assert!(script.contains("' · recorded'"), "a row says recorded");
+    }
+
+    /// The acknowledgement draws "accepted"; only a decision row on the
+    /// poll can turn that into "recorded". Structurally: the ack
+    /// renderer writes the accepted line, the one function that
+    /// replaces a decision line is called only from the two decision
+    /// row cases, and the poll loop never touches decision lines
+    /// itself.
+    #[test]
+    fn accepted_flips_to_recorded_only_when_the_row_arrives() {
+        let script = page_script();
+        let body = |name: &str| {
+            script
+                .split_once(name)
+                .unwrap_or_else(|| panic!("{name} exists"))
+                .1
+                .split_once("\n}")
+                .unwrap()
+                .0
+                .to_string()
+        };
+        let ack = body("function ackApproval(");
+        assert!(ack.contains("'accepted'"), "the ack draws accepted: {ack}");
+        assert!(
+            ack.contains("decisionLines.set("),
+            "the ack line is kept so a row can replace it"
+        );
+        assert!(!ack.contains("recorded"));
+        let settle_calls = script.matches("settleDecision(ev.action_key").count();
+        assert_eq!(
+            settle_calls, 2,
+            "a line is settled from exactly the two decision row cases"
+        );
+        let render = body("function renderEvent(ev, live) {");
+        assert_eq!(
+            render.matches("settleDecision(ev.action_key").count(),
+            2,
+            "both calls live in the row renderer"
+        );
+        assert!(
+            render.contains("case 'permission_approved': {")
+                && render.contains("case 'permission_denied': {")
+        );
+        let poll = body("async function pollEvents() {");
+        assert!(
+            !poll.contains("decisionLines") && !poll.contains("addDecision("),
+            "a poll tick alone changes no decision line: {poll}"
+        );
+        // The verify box is on screen, idle, with its caveat, before the
+        // route that runs it exists.
+        let record_panel = body("function renderRecord() {");
+        assert!(record_panel.contains("'Verify chain'") && record_panel.contains("'not run yet'"));
+        assert!(record_panel.contains("Report-only: no operator trust anchor was consulted"));
+        assert!(record_panel.contains("run.disabled = true;"));
+        assert!(record_panel.contains("kvRow(grid, 'context now', unknownNode())"));
+    }
+
+    /// One event, one word, one glyph. A call the operator denied or
+    /// that expired was never attempted: its row says so in the
+    /// decision's own word and takes the neutral glyph. ✕ and "refused"
+    /// are the gate's, for a call that failed or that the gate closed
+    /// on by itself.
+    #[test]
+    fn a_denied_call_is_not_drawn_as_a_failure() {
+        let script = page_script();
+        let case = script
+            .split_once("case 'permission_denied': {")
+            .expect("the denial row has a renderer")
+            .1
+            .split_once("break;")
+            .unwrap()
+            .0;
+        assert!(
+            case.contains("notAttempted ? '○' : '✕'"),
+            "neutral glyph unless the gate itself refused: {case}"
+        );
+        assert!(
+            case.contains("notAttempted ? 'neutral' : 'failed'"),
+            "neutral colour to match"
+        );
+        assert!(
+            case.contains("ev.timed_out ? 'expired' : operatorDecision ? 'denied' : 'refused'"),
+            "one word per decision"
+        );
+        assert!(HTML.contains(".tool-row .glyph.neutral { color: var(--accent-300); }"));
     }
 
     #[test]
