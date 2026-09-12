@@ -8,7 +8,10 @@ use tokio::sync::Mutex;
 
 use wirken_agent::sse_approval_gate::resolve_webchat_timeout;
 use wirken_agent::{AgentFactory, session_id_for};
-use wirken_audit::{ActorKind, AlarmLog, AlarmVerifyStatus, AuditEvent, AuditWriter, SessionId};
+use wirken_audit::{
+    ActorKind, AlarmLog, AlarmVerifyStatus, AuditEvent, AuditLog, AuditWriter, SessionId,
+    VerifyResult,
+};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, ResolveResult};
@@ -173,6 +176,10 @@ const HTML: &str = r#"<!DOCTYPE html>
   .verify-caveat { font-size: 12px; color: rgba(233,233,237,.62); line-height: 1.5; }
   .verify-run { width: 100%; text-align: center; }
   .verify-note { font-size: 11px; color: rgba(233,233,237,.45); }
+  .verify-line { font-size: 12px; color: rgba(233,233,237,.75); line-height: 1.5; overflow-wrap: anywhere; }
+  .verify-broken { box-shadow: inset 0 0 0 1px var(--danger-text); }
+  .verify-broken .verify-head { color: var(--danger-text); }
+  .verify-run:disabled { opacity: .5; cursor: default; }
 
   /* Own blocks: refusals, errors. Never spliced into the assistant's
      sentence. */
@@ -1129,24 +1136,98 @@ function renderRecord() {
   const lc = r.last_compaction;
   kvRow(grid, 'compaction', lc && isSet(lc.seq) ? el('span', null, 'row ' + lc.seq + ' · ' + (lc.dropped_messages ?? '?') + ' messages dropped') : el('span', null, 'none'));
   record.appendChild(grid);
-  // The verify box is on screen in its idle state before the route
-  // that runs it exists, so the caveat is already here when the
-  // button lights up.
-  const box = el('div', 'verify-box');
+  record.appendChild(renderVerifyBox());
+  record.appendChild(el('div', 'foot', 'Counts are from the record. Nothing here is verified until a verify pass says so.'));
+}
+// --- Verify chain: five states, one caveat ---
+// idle, running, ok, broken, busy (plus the two ways a run can fail
+// to start). The verdict is the gateway's; "this browser" says whose
+// run it was, because the gateway keeps no record of its own passes.
+let verifyState = { status: 'idle', at: null, body: null, retryAfter: null, error: null };
+function ago(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return s + 's ago';
+  const m = Math.floor(s / 60);
+  return m < 60 ? m + ' min ago' : Math.floor(m / 60) + ' h ago';
+}
+function verifyLine(b) {
+  switch (b.result) {
+    case 'ok':
+      return (b.rows_verified || 0).toLocaleString() + ' rows · ' + b.sessions_total + ' sessions · ' +
+        b.signed_heads_count + ' signed heads · ' + b.invalid_signatures_count + ' invalid · chain heads only' +
+        (b.sessions_with_no_signed_heads ? ' · ' + b.sessions_with_no_signed_heads + ' sessions without a signed head' : '') +
+        (b.schema_drift ? ' · ' + b.schema_drift + ' rows not readable' : '');
+    case 'broken':
+      return 'chain broken at session ' + b.session_id + ' row ' + b.seq + ' — expected ' + b.expected_hash + ', found ' + b.actual_hash;
+    case 'signature_invalid':
+      return 'signature invalid at session ' + b.session_id + ' row ' + b.seq + ' — ' + b.reason + ' · key ' + b.signing_key_fingerprint;
+    case 'missing_chain_head':
+      return 'session ' + b.session_id + ' has no signed head (' + b.rows + ' rows)';
+    case 'empty':
+      return 'no session events to verify';
+    default:
+      return b.error || 'could not run';
+  }
+}
+function renderVerifyBox() {
+  const st = verifyState;
+  const verdict = st.body ? st.body.result : null;
+  const broken = st.status === 'done' && verdict && verdict !== 'ok' && verdict !== 'empty' && verdict !== 'error';
+  const box = el('div', 'verify-box' + (broken ? ' verify-broken' : ''));
   const bh = el('div', 'verify-head', 'Verify chain');
-  bh.appendChild(el('span', 'meta', 'not run yet'));
+  let meta;
+  if (st.status === 'idle') meta = 'not run yet';
+  else if (st.status === 'running') meta = 'verifying…';
+  else if (st.status === 'busy') meta = 'another verify is running';
+  else if (st.status === 'limited') meta = 'rate limited · try again in ' + st.retryAfter + 's';
+  else if (st.status === 'error') meta = 'could not run · ' + st.error;
+  else meta = 'this browser · ' + ago(Date.now() - st.at) + ' · ' + ((st.body.duration_ms || 0) / 1000).toFixed(1) + 's' + (verdict === 'ok' || verdict === 'empty' ? ' · ok' : verdict === 'error' ? ' · error' : ' · broken');
+  bh.appendChild(el('span', 'meta', meta));
   box.appendChild(bh);
+  if (st.status === 'done' && st.body) box.appendChild(el('div', 'verify-line', verifyLine(st.body)));
+  // The caveat is on screen in every state, idle included.
   box.appendChild(el('div', 'verify-caveat',
     'Report-only: no operator trust anchor was consulted, so a same-UID rewrite is not detected. ' +
     'Verify against a key kept off this machine for that.'));
-  const run = el('button', 'btn verify-run', 'Run verify');
+  const run = el('button', 'btn verify-run', st.status === 'idle' ? 'Run verify' : st.status === 'running' ? 'verifying…' : 'Run again');
   run.type = 'button';
-  run.disabled = true;
-  run.title = 'needs the verify route';
+  run.disabled = st.status === 'running';
+  run.addEventListener('click', (e) => { e.stopPropagation(); runVerify(); });
   box.appendChild(run);
-  box.appendChild(el('div', 'verify-note', 'needs the verify route · until then: wirken audit verify'));
-  record.appendChild(box);
-  record.appendChild(el('div', 'foot', 'Counts are from the record. Nothing here is verified until a verify pass says so.'));
+  box.appendChild(el('div', 'verify-note', 'two full reads of the record · one run at a time · the CLI can verify against a pinned key: wirken audit verify --require-signed'));
+  return box;
+}
+function refreshVerifyBox() {
+  const old = record.querySelector('.verify-box');
+  if (old) old.replaceWith(renderVerifyBox());
+}
+async function runVerify() {
+  if (verifyState.status === 'running') return;
+  verifyState = { status: 'running', at: Date.now(), body: null, retryAfter: null, error: null };
+  refreshVerifyBox();
+  let res;
+  try {
+    res = await fetch('/api/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  } catch (e) {
+    verifyState = { status: 'error', at: Date.now(), body: null, retryAfter: null, error: 'connection lost' };
+    refreshVerifyBox();
+    return;
+  }
+  if (res.status === 409) {
+    verifyState = { status: 'busy', at: Date.now(), body: null, retryAfter: null, error: null };
+  } else if (res.status === 429) {
+    const ra = parseInt(res.headers.get('Retry-After') || '60', 10);
+    verifyState = { status: 'limited', at: Date.now(), body: null, retryAfter: ra > 0 ? ra : 60, error: null };
+  } else if (!res.ok) {
+    verifyState = { status: 'error', at: Date.now(), body: null, retryAfter: null, error: 'the gateway refused this request (' + res.status + ')' };
+  } else {
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    if (!body || !body.result) verifyState = { status: 'error', at: Date.now(), body: null, retryAfter: null, error: 'no verdict in the reply' };
+    else if (body.result === 'error') verifyState = { status: 'error', at: Date.now(), body, retryAfter: null, error: body.error || 'verify failed' };
+    else verifyState = { status: 'done', at: Date.now(), body, retryAfter: null, error: null };
+  }
+  refreshVerifyBox();
 }
 function setRecordOpen(open) {
   record.hidden = !open;
@@ -1540,6 +1621,9 @@ document.addEventListener('keydown', (e) => {
   if (!record.hidden) setRecordOpen(false);
 });
 document.addEventListener('click', (e) => {
+  // A click whose target was re-rendered away mid-click (the verify
+  // button replaces its box) is not a click outside.
+  if (!e.target.isConnected) return;
   if (!about.hidden && !about.contains(e.target) && !wordmark.contains(e.target)) setAboutOpen(false);
   if (!record.hidden && !record.contains(e.target) && !(e.target.closest && e.target.closest('.writer-dot'))) setRecordOpen(false);
 });
@@ -1555,9 +1639,13 @@ input.addEventListener('input', () => {
 });
 // Restore the conversation on load so a refresh keeps the visible
 // history. loadTranscript's finally also draws the rail.
-loadTranscript(WEBCHAT_LOG_ID);
-loadStatus();
-setInterval(loadStatus, STATUS_POLL_MS);
+// History first, then the status poll that may restore a pending
+// card: the card's command joins from a call row, and that row has to
+// be on screen before the join looks for it.
+loadTranscript(WEBCHAT_LOG_ID).then(() => {
+  loadStatus();
+  setInterval(loadStatus, STATUS_POLL_MS);
+});
 input.focus();
 </script>
 </body>
@@ -1588,6 +1676,15 @@ pub async fn serve(
     // it; the chat route refuses turns while it is set.
     let writer_halted = Arc::new(AtomicBool::new(false));
 
+    // Chain verification is two full scans of the audit log with a hash
+    // per row, run on the blocking pool. One at a time per process, and
+    // no more often than the control-plane limit: a browser must not be
+    // able to keep the gateway verifying.
+    let verify_limit = Arc::new(ControlPlaneRateLimiter::new(
+        super::config().control_plane_rate_limit.max(1),
+    ));
+    let verify_running = Arc::new(AtomicBool::new(false));
+
     // Per-process rate limiter on the chat POST path. GCRA from
     // `wirken-gateway::rate_limit`; lock-free hot path. See
     // `WEBCHAT_MAX_POSTS_PER_MIN` for the cap rationale.
@@ -1604,6 +1701,8 @@ pub async fn serve(
         let status_inputs = status_inputs.clone();
         let detector = detector.clone();
         let writer_halted = writer_halted.clone();
+        let verify_limit = verify_limit.clone();
+        let verify_running = verify_running.clone();
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
@@ -2006,6 +2105,67 @@ pub async fn serve(
                         let _ = stream.write_all(err.as_bytes()).await;
                     }
                 }
+            } else if first_line.starts_with("POST /api/verify") {
+                // POST /api/verify — run the audit chain verifier and
+                // return its verdict with the anchor caveat attached.
+                // State-changing in cost if not in effect: Origin
+                // required, rate-limited, single-flight, blocking pool.
+                if let Some(resp) = api_preflight(&request, port, true) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                if let Err(retry_after) = verify_limit.check() {
+                    let resp = r#"{"result":"rate_limited"}"#;
+                    let response = format!(
+                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        retry_after.as_secs().max(1),
+                        resp.len(),
+                        resp
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
+                if verify_running
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_err()
+                {
+                    let resp = r#"{"result":"busy"}"#;
+                    let response = format!(
+                        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        resp.len(),
+                        resp
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let started_at = chrono::Utc::now();
+                let started = std::time::Instant::now();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    AuditLog::open(&cfg.audit_db_path()).and_then(|log| log.verify())
+                })
+                .await;
+                verify_running.store(false, Ordering::Release);
+                let duration_ms = started.elapsed().as_millis() as u64;
+                let body = match outcome {
+                    Ok(Ok(result)) => verify_result_json(&result, started_at, duration_ms),
+                    Ok(Err(e)) => serde_json::json!({
+                        "result": "error",
+                        "error": e.to_string(),
+                        "started_at": started_at.to_rfc3339(),
+                        "duration_ms": duration_ms,
+                        "caveat": VERIFY_CAVEAT,
+                    }),
+                    Err(_) => serde_json::json!({
+                        "result": "error",
+                        "error": "the verify task did not complete",
+                        "started_at": started_at.to_rfc3339(),
+                        "duration_ms": duration_ms,
+                        "caveat": VERIFY_CAVEAT,
+                    }),
+                };
+                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if let Some(request_id) = parse_approval_path(first_line) {
                 // POST /api/approvals/{request_id}
                 //
@@ -2882,6 +3042,96 @@ pub fn session_events(
     })
 }
 
+/// What a verify result from this route means, in the words the CLI
+/// uses. The route calls the verifier without an operator trust
+/// anchor, so a pass says the chain is internally consistent and no
+/// more; the same-UID attacker who can rewrite the chain can re-sign
+/// it. The sentence travels with every verdict the page shows.
+pub const VERIFY_CAVEAT: &str = "Report-only: no operator trust anchor was consulted, so a same-UID \
+     rewrite is not detected. Verify against a key kept off this machine for that.";
+
+/// A `VerifyResult` as the page reads it. Hashes and key ids are cut to
+/// fingerprints; the verdict is a word in `result`; the caveat rides
+/// along whatever the verdict.
+pub fn verify_result_json(
+    result: &VerifyResult,
+    started_at: chrono::DateTime<chrono::Utc>,
+    duration_ms: u64,
+) -> serde_json::Value {
+    use serde_json::json;
+    let fp = |s: &str| s.chars().take(16).collect::<String>();
+    let mut v = match result {
+        VerifyResult::Ok {
+            rows_verified,
+            sessions_total,
+            signed_heads_count,
+            unsigned_heads_count,
+            invalid_signatures_count,
+            sessions_with_no_signed_heads,
+            signing_key_ids_seen,
+            unsigned_tail_max_len,
+            schema_drift_records,
+        } => json!({
+            "result": "ok",
+            "rows_verified": rows_verified,
+            "sessions_total": sessions_total,
+            "signed_heads_count": signed_heads_count,
+            "unsigned_heads_count": unsigned_heads_count,
+            "invalid_signatures_count": invalid_signatures_count,
+            "sessions_with_no_signed_heads": sessions_with_no_signed_heads,
+            "signing_key_fingerprints": signing_key_ids_seen.iter().map(|k| fp(k)).collect::<Vec<_>>(),
+            "unsigned_tail_max_len": unsigned_tail_max_len,
+            "schema_drift": schema_drift_records.len(),
+        }),
+        VerifyResult::Broken {
+            session_id,
+            seq,
+            expected_hash,
+            actual_hash,
+            verified_count,
+        } => json!({
+            "result": "broken",
+            "session_id": session_id.as_str(),
+            "seq": seq,
+            "expected_hash": fp(expected_hash),
+            "actual_hash": fp(actual_hash),
+            "verified_count": verified_count,
+        }),
+        VerifyResult::SignatureInvalid {
+            session_id,
+            seq,
+            signing_key_id,
+            reason,
+            verified_count,
+            invalid_signatures_count,
+        } => json!({
+            "result": "signature_invalid",
+            "session_id": session_id.as_str(),
+            "seq": seq,
+            "signing_key_fingerprint": fp(signing_key_id),
+            "reason": reason,
+            "verified_count": verified_count,
+            "invalid_signatures_count": invalid_signatures_count,
+        }),
+        VerifyResult::MissingChainHead {
+            session_id,
+            rows,
+            verified_count,
+        } => json!({
+            "result": "missing_chain_head",
+            "session_id": session_id.as_str(),
+            "rows": rows,
+            "verified_count": verified_count,
+        }),
+        VerifyResult::Empty => json!({ "result": "empty" }),
+    };
+    v["started_at"] = serde_json::Value::from(started_at.to_rfc3339());
+    v["duration_ms"] = serde_json::Value::from(duration_ms);
+    v["anchor"] = serde_json::Value::from("none");
+    v["caveat"] = serde_json::Value::from(VERIFY_CAVEAT);
+    v
+}
+
 /// Parse `POST /api/approvals/{request_id}` and return the
 /// request_id. None for any other request line shape. The path
 /// segment is URL-decoded with `percent_decode` only insofar as the
@@ -3132,10 +3382,11 @@ mod tests {
     use wirken_gateway::pending_approvals::PendingApprovalQueue;
 
     use super::{
-        HTML, ImportedRoute, SiemSummary, StatusInputs, api_preflight, approval_belongs_to_webchat,
-        approvals_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
-        parse_approval_path, parse_imported_path, parse_session_events_path, parse_session_path,
-        percent_decode, session_events, status_snapshot, url_host,
+        HTML, ImportedRoute, SiemSummary, StatusInputs, VERIFY_CAVEAT, api_preflight,
+        approval_belongs_to_webchat, approvals_snapshot, events_route_allowed, is_webchat_host,
+        is_webchat_origin, parse_approval_path, parse_imported_path, parse_session_events_path,
+        parse_session_path, percent_decode, session_events, status_snapshot, url_host,
+        verify_result_json,
     };
 
     #[test]
@@ -4168,13 +4419,14 @@ mod tests {
             !poll.contains("decisionLines") && !poll.contains("addDecision("),
             "a poll tick alone changes no decision line: {poll}"
         );
-        // The verify box is on screen, idle, with its caveat, before the
-        // route that runs it exists.
+        // The verify box is on screen with its caveat in every state, and
+        // the panel names context as unknown.
         let record_panel = body("function renderRecord() {");
-        assert!(record_panel.contains("'Verify chain'") && record_panel.contains("'not run yet'"));
-        assert!(record_panel.contains("Report-only: no operator trust anchor was consulted"));
-        assert!(record_panel.contains("run.disabled = true;"));
         assert!(record_panel.contains("kvRow(grid, 'context now', unknownNode())"));
+        let verify_box = body("function renderVerifyBox() {");
+        assert!(verify_box.contains("'Verify chain'") && verify_box.contains("'not run yet'"));
+        assert!(verify_box.contains("Report-only: no operator trust anchor was consulted"));
+        assert!(verify_box.contains("run.disabled = st.status === 'running';"));
     }
 
     /// One event, one word, one glyph. A call the operator denied or
@@ -4296,6 +4548,139 @@ mod tests {
         assert!(
             script.contains("age_seconds"),
             "a restored card's age comes from the queue, not from now"
+        );
+    }
+
+    /// Every verdict the verifier can return maps to a word, carries
+    /// the caveat, and shows hashes and key ids as fingerprints only.
+    #[test]
+    fn every_verify_verdict_maps_with_its_caveat() {
+        use wirken_audit::{SessionId, VerifyResult};
+        let at = chrono::Utc::now();
+        let sid = SessionId::new("default/webchat/webchat-default".to_string());
+        let cases = vec![
+            (
+                VerifyResult::Ok {
+                    rows_verified: 184_223,
+                    sessions_total: 41,
+                    signed_heads_count: 210,
+                    unsigned_heads_count: 0,
+                    invalid_signatures_count: 0,
+                    sessions_with_no_signed_heads: 3,
+                    signing_key_ids_seen: vec!["8c1d4e2f9a0b7c63deadbeefcafef00d".into()],
+                    unsigned_tail_max_len: 12,
+                    schema_drift_records: vec![],
+                },
+                "ok",
+            ),
+            (
+                VerifyResult::Broken {
+                    session_id: sid.clone(),
+                    seq: 512,
+                    expected_hash: "9f3c1a7be02d44c1ffffffffffffffff".into(),
+                    actual_hash: "0000000000000000aaaaaaaaaaaaaaaa".into(),
+                    verified_count: 184_000,
+                },
+                "broken",
+            ),
+            (
+                VerifyResult::SignatureInvalid {
+                    session_id: sid.clone(),
+                    seq: 500,
+                    signing_key_id: "8c1d4e2f9a0b7c63deadbeefcafef00d".into(),
+                    reason: "bad signature".into(),
+                    verified_count: 10,
+                    invalid_signatures_count: 1,
+                },
+                "signature_invalid",
+            ),
+            (
+                VerifyResult::MissingChainHead {
+                    session_id: sid,
+                    rows: 7,
+                    verified_count: 7,
+                },
+                "missing_chain_head",
+            ),
+            (VerifyResult::Empty, "empty"),
+        ];
+        for (result, word) in cases {
+            let v = verify_result_json(&result, at, 4180);
+            assert_eq!(v["result"], word);
+            assert_eq!(
+                v["caveat"], VERIFY_CAVEAT,
+                "the caveat travels with every verdict"
+            );
+            assert_eq!(v["anchor"], "none");
+            assert_eq!(v["duration_ms"], 4180);
+            let text = serde_json::to_string(&v).unwrap();
+            assert!(
+                !text.contains("deadbeef"),
+                "key ids are fingerprints: {text}"
+            );
+            assert!(
+                !text.contains("ffffffff") && !text.contains("aaaaaaaa"),
+                "hashes are fingerprints: {text}"
+            );
+        }
+        let ok = verify_result_json(
+            &VerifyResult::Ok {
+                rows_verified: 1,
+                sessions_total: 1,
+                signed_heads_count: 1,
+                unsigned_heads_count: 0,
+                invalid_signatures_count: 0,
+                sessions_with_no_signed_heads: 0,
+                signing_key_ids_seen: vec!["8c1d4e2f9a0b7c63deadbeef".into()],
+                unsigned_tail_max_len: 0,
+                schema_drift_records: vec![],
+            },
+            at,
+            1,
+        );
+        assert_eq!(ok["signing_key_fingerprints"][0], "8c1d4e2f9a0b7c63");
+    }
+
+    /// The verify route is guarded three ways before it touches the
+    /// log: Origin required, the control-plane rate limit, and one run
+    /// at a time. The page draws five states for it and the caveat is
+    /// appended once, outside every state branch.
+    #[test]
+    fn verify_is_guarded_and_the_page_draws_its_states() {
+        let route = SERVER_SOURCE
+            .split_once("first_line.starts_with(\"POST /api/verify\")")
+            .expect("verify route exists")
+            .1
+            .split_once("parse_approval_path(first_line)")
+            .unwrap()
+            .0;
+        assert!(
+            route.contains("api_preflight(&request, port, true)"),
+            "Origin required"
+        );
+        assert!(route.contains("verify_limit.check()"), "rate limited");
+        assert!(
+            route.contains("compare_exchange(false, true"),
+            "single flight"
+        );
+        assert!(route.contains("spawn_blocking"), "off the async runtime");
+        let script = page_script();
+        for state in [
+            "'not run yet'",
+            "'verifying…'",
+            "'another verify is running'",
+            "' · ok'",
+            "' · broken'",
+        ] {
+            assert!(script.contains(state), "the page draws {state}");
+        }
+        assert!(script.contains("fetch('/api/verify'"));
+        assert_eq!(
+            script
+                .matches("Report-only: no operator trust anchor was consulted")
+                .count(),
+            1,
+            "one caveat, appended outside every state branch"
         );
     }
 
