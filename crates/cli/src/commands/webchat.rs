@@ -435,7 +435,7 @@ function approvalSentence(ev) {
   const tail = ' Nothing runs until you decide.';
   if (key.startsWith('shell:')) {
     return (ev.requested_tier === 'tier2'
-      ? 'Read-only shell command with no standing grant.'
+      ? 'Read-only shell command with no live grant.'
       : 'Shell command outside the read-only allowlist.') + tail;
   }
   if (key.startsWith('mcp:')) return 'MCP tool call.' + tail;
@@ -1939,6 +1939,20 @@ mod tests {
     #[test]
     fn the_page_never_contains_the_literal_terminator() {
         assert!(!HTML.contains("\"#"));
+    }
+
+    /// The Tier 2 chip and the Tier 2 shell sentence describe one fact,
+    /// the absence of a live grant, and use one term for it. The chip's
+    /// wording is the gate's own.
+    #[test]
+    fn the_tier_two_chip_and_sentence_use_one_term() {
+        let script = page_script();
+        assert!(script.contains("'Tier 2 · no live grant'"), "the chip names the gate's finding");
+        assert!(
+            script.contains("'Read-only shell command with no live grant.'"),
+            "the sentence uses the chip's term"
+        );
+        assert!(!script.contains("standing grant"), "one term for one fact");
     }
 
     #[test]
