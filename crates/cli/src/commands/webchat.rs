@@ -152,6 +152,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   .tool-row .glyph.done { color: var(--accent-400); }
   .tool-row .glyph.failed { color: var(--danger-text); }
   .tool-row .glyph.awaiting { color: var(--accent-300); }
+  .tool-row .glyph.neutral { color: var(--accent-300); }
   .tool-row .glyph.queued { color: rgba(233,233,237,.45); }
   .tool-row .glyph.running { color: var(--accent); }
   .tool-row .name { font-family: var(--mono); font-size: 12px; color: rgba(233,233,237,.75); flex: none; }
@@ -997,9 +998,12 @@ function renderEvent(ev, live) {
     case 'permission_denied': {
       const entry = pendingToolRowFor(ev.tool);
       const operatorDecision = !ev.timed_out && ev.denied_via && ev.denied_via.kind === 'sse';
-      // One event, one word: a denial is the operator's, an expiry is
-      // the window's, a refusal is the gate's own (fail-closed).
-      if (entry) setGlyph(entry, ev.timed_out ? '○' : '✕', ev.timed_out ? 'awaiting' : 'failed',
+      // One event, one word, one glyph: a denial is the operator's and
+      // an expiry is the window's, so the call was never attempted and
+      // the row takes the neutral glyph; ✕ is for failed and for the
+      // gate's own fail-closed refusal.
+      const notAttempted = ev.timed_out || operatorDecision;
+      if (entry) setGlyph(entry, notAttempted ? '○' : '✕', notAttempted ? 'neutral' : 'failed',
         ev.timed_out ? 'expired' : operatorDecision ? 'denied' : 'refused');
       let line, glyph;
       if (ev.timed_out) {
@@ -4040,6 +4044,36 @@ mod tests {
         assert!(record_panel.contains("Report-only: no operator trust anchor was consulted"));
         assert!(record_panel.contains("run.disabled = true;"));
         assert!(record_panel.contains("kvRow(grid, 'context now', unknownNode())"));
+    }
+
+    /// One event, one word, one glyph. A call the operator denied or
+    /// that expired was never attempted: its row says so in the
+    /// decision's own word and takes the neutral glyph. ✕ and "refused"
+    /// are the gate's, for a call that failed or that the gate closed
+    /// on by itself.
+    #[test]
+    fn a_denied_call_is_not_drawn_as_a_failure() {
+        let script = page_script();
+        let case = script
+            .split_once("case 'permission_denied': {")
+            .expect("the denial row has a renderer")
+            .1
+            .split_once("break;")
+            .unwrap()
+            .0;
+        assert!(
+            case.contains("notAttempted ? '○' : '✕'"),
+            "neutral glyph unless the gate itself refused: {case}"
+        );
+        assert!(
+            case.contains("notAttempted ? 'neutral' : 'failed'"),
+            "neutral colour to match"
+        );
+        assert!(
+            case.contains("ev.timed_out ? 'expired' : operatorDecision ? 'denied' : 'refused'"),
+            "one word per decision"
+        );
+        assert!(HTML.contains(".tool-row .glyph.neutral { color: var(--accent-300); }"));
     }
 
     #[test]
