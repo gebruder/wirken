@@ -35,9 +35,11 @@ const WEBCHAT_MAX_POSTS_PER_MIN: u32 = 60;
 /// restores it on load. Multi-conversation is its own slice.
 const WEBCHAT_CONVERSATION: &str = "webchat-default";
 
-/// The body the chat route answers with when the conversation already
-/// has a turn in flight. The page reads it as state 19.
-const TURN_OPEN_BODY: &str = r#"{"error":"turn open"}"#;
+/// The error the chat route answers with when the conversation already
+/// has a turn in flight. The page keys state 19 on this text; the body
+/// also carries how long the turn has been open, from the claim, so a
+/// stuck one can be told from a busy one.
+const TURN_OPEN_ERROR: &str = "turn open";
 
 /// A decision posted from a page that is not viewing the conversation
 /// the request came from. The link is the whole surface for that.
@@ -96,34 +98,45 @@ fn query_param<'a>(first_line: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v)
 }
 
-/// The conversations with a chat turn in flight. A second send into
-/// one is refused with "turn open" before anything is written, so no
-/// send ever waits on the agent lock with its stream already open, and
-/// no two streams ever register under one conversation.
+/// The conversations with a chat turn in flight, each with when it
+/// was claimed. A second send into one is refused with "turn open"
+/// before anything is written, so no send ever waits on the agent
+/// lock with its stream already open, and no two streams ever
+/// register under one conversation. The claim outlives the tab: a
+/// closed socket stops the forwarding, not the turn, and the turn's
+/// outbound row still has to land, so the claim is released when the
+/// turn ends, and the age says how long that has been.
 #[derive(Default)]
 pub struct OpenTurns {
-    inner: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    inner: std::sync::Mutex<std::collections::BTreeMap<String, std::time::Instant>>,
 }
 
 impl OpenTurns {
     /// Claim the conversation for one turn. `None` when a turn is
     /// already open; the guard releases it on every exit path.
     pub fn try_open(self: &Arc<Self>, conversation: &str) -> Option<OpenTurn> {
-        let mut set = self.inner.lock().expect("open turns mutex");
-        if !set.insert(conversation.to_string()) {
+        let mut map = self.inner.lock().expect("open turns mutex");
+        if map.contains_key(conversation) {
             return None;
         }
+        map.insert(conversation.to_string(), std::time::Instant::now());
         Some(OpenTurn {
             turns: self.clone(),
             conversation: conversation.to_string(),
         })
     }
 
-    pub fn is_open(&self, conversation: &str) -> bool {
+    /// Seconds since the open turn was claimed, or `None` when none is.
+    pub fn open_age(&self, conversation: &str) -> Option<u64> {
         self.inner
             .lock()
             .expect("open turns mutex")
-            .contains(conversation)
+            .get(conversation)
+            .map(|since| since.elapsed().as_secs())
+    }
+
+    pub fn is_open(&self, conversation: &str) -> bool {
+        self.open_age(conversation).is_some()
     }
 }
 
@@ -2256,9 +2269,12 @@ pub async fn serve(
                 // waits on the agent lock, and the page can say "turn
                 // open" instead of holding a silent stream.
                 let Some(_open_turn) = open_turns.try_open(&conversation) else {
-                    let _ = stream
-                        .write_all(json_conflict(TURN_OPEN_BODY).as_bytes())
-                        .await;
+                    let body = serde_json::json!({
+                        "error": TURN_OPEN_ERROR,
+                        "age_seconds": open_turns.open_age(&conversation).unwrap_or(0),
+                    })
+                    .to_string();
+                    let _ = stream.write_all(json_conflict(&body).as_bytes()).await;
                     return;
                 };
 
@@ -3103,8 +3119,13 @@ fn conversation_rows(
                 } else {
                     None
                 };
+                let turn_age = if mine {
+                    conversation_of(&row.log_id).and_then(|c| open_turns.open_age(c))
+                } else {
+                    None
+                };
                 let turn_open = if mine {
-                    Value::from(conversation_of(&row.log_id).is_some_and(|c| open_turns.is_open(c)))
+                    Value::from(turn_age.is_some())
                 } else {
                     Value::Null
                 };
@@ -3116,6 +3137,7 @@ fn conversation_rows(
                     "last_activity": row.last_activity,
                     "first_message": first_message,
                     "turn_open": turn_open,
+                    "turn_open_age_seconds": turn_age,
                 })
             })
             .collect::<Vec<_>>()
@@ -4241,7 +4263,7 @@ mod tests {
 
     use super::{
         DECISION_WRONG_CONVERSATION, HTML, ImportedRoute, OpenTurns, SiemSummary, SkillSignature,
-        StatusInputs, TURN_OPEN_BODY, VERIFY_CAVEAT, api_preflight,
+        StatusInputs, TURN_OPEN_ERROR, VERIFY_CAVEAT, api_preflight,
         approval_belongs_to_conversation, approval_belongs_to_webchat, approvals_snapshot_for,
         capabilities_snapshot, conversation_key, conversation_of, conversation_rows,
         credentials_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
@@ -6363,7 +6385,18 @@ mod tests {
             "released on drop"
         );
 
-        assert_eq!(TURN_OPEN_BODY, r#"{"error":"turn open"}"#);
+        assert_eq!(
+            TURN_OPEN_ERROR, "turn open",
+            "the page keys state 19 on this text"
+        );
+        assert_eq!(turns.open_age("c-0123456789ab"), None);
+        let held = turns.try_open("c-0123456789ab").unwrap();
+        assert_eq!(
+            turns.open_age("c-0123456789ab"),
+            Some(0),
+            "aged from the claim"
+        );
+        drop(held);
         let chat = SERVER_SOURCE
             .split_once("first_line.starts_with(\"POST /api/chat\")")
             .unwrap()
@@ -6375,8 +6408,13 @@ mod tests {
             .find("open_turns.try_open(&conversation)")
             .expect("the route claims the turn");
         let refuse = chat
-            .find("json_conflict(TURN_OPEN_BODY)")
+            .find("\"error\": TURN_OPEN_ERROR,")
             .expect("and refuses with the body");
+        assert!(
+            chat.contains("\"age_seconds\": open_turns.open_age(&conversation)"),
+            "the refusal carries the turn's age"
+        );
+        assert!(chat.contains("json_conflict(&body)"));
         let inbound = chat.find("\"message.inbound\"").unwrap();
         let headers = chat.find("text/event-stream").unwrap();
         let lock = chat.find("agent_mutex.lock().await").unwrap();
@@ -6618,16 +6656,21 @@ mod tests {
         assert_eq!(title.chars().count(), 120, "cut at 120 characters");
         assert!(!title.contains('\x1b'), "control sequences stripped");
         assert_eq!(a["turn_open"], false);
+        assert!(a["turn_open_age_seconds"].is_null());
         assert_eq!(a["message_count"], 1);
         let b = by_id("default/webchat/c-ba9876543210");
         assert!(b["first_message"].is_null(), "nothing logged yet");
         assert_eq!(b["turn_open"], true);
+        assert!(
+            b["turn_open_age_seconds"].is_u64(),
+            "aged from the claim, not from now"
+        );
         let t = by_id("default/telegram/-1001234");
         assert!(
             t["first_message"].is_null(),
             "another channel's words stay there"
         );
-        assert!(t["turn_open"].is_null());
+        assert!(t["turn_open"].is_null() && t["turn_open_age_seconds"].is_null());
         let text = serde_json::to_string(&v).unwrap();
         assert!(!text.contains("telegram user's words"));
         assert!(
