@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6,7 +7,9 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
 use wirken_agent::{AgentFactory, session_id_for};
-use wirken_audit::{ActorKind, AuditEvent, AuditWriter, SessionId};
+use wirken_audit::{ActorKind, AlarmLog, AlarmVerifyStatus, AuditEvent, AuditWriter, SessionId};
+use wirken_gateway::adapter_registry::AdapterRegistry;
+use wirken_gateway::injection_detect::InjectionDetector;
 use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision, ResolveResult};
 use wirken_gateway::rate_limit::ControlPlaneRateLimiter;
 use wirken_gateway::session::SessionStore;
@@ -19,6 +22,11 @@ use wirken_gateway::sse_approval_registry::{AckResult, SseApprovalRegistry, SseE
 /// authenticated-but-malicious browser tab if H-1's Origin check is
 /// somehow bypassed (defence in depth).
 const WEBCHAT_MAX_POSTS_PER_MIN: u32 = 60;
+
+/// The one webchat conversation. `POST /api/chat` always wakes agent
+/// `default` on channel `webchat` with this conversation id; the page
+/// restores it on load. Multi-conversation is its own slice.
+const WEBCHAT_CONVERSATION: &str = "webchat-default";
 
 const HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -81,10 +89,29 @@ const HTML: &str = r#"<!DOCTYPE html>
   .chip-danger { border: 1px solid var(--danger-text); color: var(--danger-text); }
   .chip-neutral { background: var(--neutral-800); color: #f3f5fe; }
 
-  /* Status line. Phase 1 carries the wordmark alone at its final height
-     so Phase 2 adds values without a layout shift. */
-  #status { padding: 11px 20px; border-bottom: 1px solid var(--hairline); display: flex; align-items: center; min-height: 42px; flex: none; }
-  #wordmark { font-size: 15px; font-weight: 500; letter-spacing: -0.01em; }
+  /* Status line: the wordmark, then values from the status route once
+     they arrive. Nothing is drawn for a value the gateway does not
+     hold; unknowns are named in the About panel instead. */
+  #status { position: relative; padding: 11px 20px; border-bottom: 1px solid var(--hairline); display: flex; align-items: center; gap: 12px; min-height: 42px; flex: none; }
+  #wordmark { font-size: 15px; font-weight: 500; letter-spacing: -0.01em; padding: 2px 4px; margin-left: -4px; border-radius: var(--radius-sm); }
+  #wordmark:hover { background: rgba(145,132,217,.08); }
+  #status-values { margin-left: auto; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; justify-content: flex-end; font-size: 12px; color: rgba(233,233,237,.62); }
+  #status-values .item { display: inline-flex; gap: 10px; align-items: center; }
+  #status-values .sep { color: rgba(233,233,237,.25); }
+  #status-values .hedge { color: rgba(233,233,237,.38); }
+  #status-values .alarm { color: var(--danger-text); }
+  .writer-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-400); box-shadow: 0 0 7px var(--accent); display: inline-block; flex: none; }
+  .writer-dot.halted { background: var(--danger-text); box-shadow: none; }
+  .unknown { color: var(--accent-300); }
+  .banner-hatch { background: rgba(145,132,217,.12); border-bottom: 1px solid rgba(145,132,217,.35); }
+  .popover { position: absolute; top: calc(100% + 6px); left: 12px; width: min(380px, calc(100vw - 24px)); background: var(--surface); border-radius: 10px; box-shadow: 0 0 0 1px #595d6c, 0 16px 40px rgba(0,0,0,.6); padding: 14px 16px; z-index: 10; font-size: 12.5px; line-height: 1.5; }
+  .popover h2 { font-size: 14px; font-weight: 500; margin-bottom: 10px; display: flex; gap: 8px; align-items: baseline; }
+  .popover h2 .meta { font-size: 12px; font-weight: 400; color: rgba(233,233,237,.5); }
+  .kv { display: grid; grid-template-columns: 88px 1fr; gap: 6px 12px; }
+  .kv .k { color: rgba(233,233,237,.45); }
+  .kv .v { text-align: right; overflow-wrap: anywhere; }
+  .kv .v .row { display: block; }
+  .popover .foot { margin-top: 12px; font-size: 11px; color: rgba(233,233,237,.45); }
 
   #shell { flex: 1; display: flex; min-height: 0; }
   /* Rail: exists only when there is somewhere to go. */
@@ -179,6 +206,9 @@ const HTML: &str = r#"<!DOCTYPE html>
   .archive-msg .text.empty, .archive-attachment .meta { color: rgba(233,233,237,.45); font-style: italic; }
   .archive-attachment { padding: 4px 0 4px 16px; font-size: 13px; }
 
+  @media (max-width: 420px) {
+    #status-values .optional { display: none; }
+  }
   @media (max-width: 720px) {
     #shell { flex-direction: column; }
     #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto; }
@@ -187,6 +217,9 @@ const HTML: &str = r#"<!DOCTYPE html>
     .rail-row { width: auto; white-space: nowrap; }
     .rail-meta { display: none; }
     .msg-user, .msg-assistant, .approval, .block { max-width: 92%; }
+    #status { flex-wrap: wrap; }
+    #status-values { flex-basis: 100%; justify-content: flex-start; }
+    .popover { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: auto; border-radius: 10px 10px 0 0; }
     #conversation { padding: 16px 14px 12px; }
     #composer, #turnline, #notice { padding-left: 14px; padding-right: 14px; margin-left: 0; margin-right: 0; }
   }
@@ -197,7 +230,12 @@ const HTML: &str = r#"<!DOCTYPE html>
   <span class="chip chip-danger">Audit writer halted</span>
   <span>The audit record stopped accepting rows. New turns are refused until the gateway is restarted and the record verified.</span>
 </div>
-<header id="status"><span id="wordmark">wirken</span></header>
+<div id="banners"></div>
+<header id="status">
+  <button id="wordmark" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="about">wirken</button>
+  <div id="status-values" hidden></div>
+  <div id="about" class="popover" role="dialog" aria-label="About this gateway" hidden></div>
+</header>
 <div id="shell">
   <nav id="rail" aria-label="Conversations and archives" hidden>
     <div class="rail-section"><div class="rail-label">Conversations</div><div id="rail-conversations"></div></div>
@@ -235,6 +273,10 @@ const rail = document.getElementById('rail');
 const railConversations = document.getElementById('rail-conversations');
 const railArchives = document.getElementById('rail-archives');
 const haltedBanner = document.getElementById('halted-banner');
+const banners = document.getElementById('banners');
+const statusValues = document.getElementById('status-values');
+const wordmark = document.getElementById('wordmark');
+const about = document.getElementById('about');
 
 // One conversation per browser today. POST /api/chat always wakes agent
 // "default" on channel "webchat", conversation "webchat-default".
@@ -846,6 +888,223 @@ async function loadImportedConversation(source, uuid) {
   conversation.scrollTop = 0;
 }
 
+// --- Status: the posture strip, the banners, the About panel ---
+// Everything here comes from one snapshot the gateway builds from
+// files, config and in-memory lists. A null is a value the gateway
+// does not hold. It is omitted from the strip and named as unknown
+// inside the panel; it is never drawn as zero, false, or green.
+const STATUS_POLL_MS = 15000;
+let status = null;
+const HATCH_COPY = {
+  WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG: 'org config would be accepted unsigned.',
+  WIRKEN_ALLOW_UNSIGNED_SKILLS: 'unsigned skills would load unverified.',
+  WIRKEN_ALLOW_UNSIGNED_MCP: 'unsigned MCP entries would spawn.',
+  WIRKEN_ALLOW_STALE_ORG_CONFIG: 'a stale org config bundle would be accepted.',
+  WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN: 'the chat route accepts requests without an Origin header.',
+  WIRKEN_ALLOW_UNREGISTERED_HOOKS: 'unregistered hook processes are admitted with veto power.',
+};
+// The variable is read from the gateway's own environment, so nothing
+// outside the process changes it.
+const HATCH_CLEARS = ' Clears when the gateway restarts without it.';
+function usd(micros) { return '$' + (Number(micros) / 1e6).toFixed(2); }
+function isSet(v) { return v !== null && v !== undefined; }
+function unknownNode(text) { return el('span', 'unknown', text || 'unknown'); }
+function valueOrUnknown(v, text) { return isSet(v) ? el('span', null, text) : unknownNode(); }
+
+async function loadStatus() {
+  let snapshot;
+  try {
+    const res = await fetch('/api/status');
+    if (!res.ok) return;
+    snapshot = await res.json();
+  } catch (e) { return; }
+  status = snapshot;
+  renderStatus();
+}
+function renderStatus() {
+  if (!status) return;
+  renderBanners();
+  renderStatusValues();
+  if (!about.hidden) renderAbout();
+  if (status.audit && status.audit.writer_halted && !halted) setHalted();
+}
+function hatchBanner(name, copy) {
+  const b = el('div', 'banner banner-hatch');
+  b.setAttribute('role', 'status');
+  b.appendChild(el('span', 'chip chip-outline', 'Escape hatch engaged'));
+  const text = el('span');
+  if (name) text.appendChild(el('code', null, name + '=1'));
+  text.appendChild(document.createTextNode((name ? ' — ' : '') + copy));
+  b.appendChild(text);
+  return b;
+}
+function renderBanners() {
+  clear(banners);
+  const h = status.escape_hatches || {};
+  for (const name of Object.keys(HATCH_COPY)) {
+    if (!h[name]) continue;
+    // With a skill registry root pinned the loader is strict and the
+    // flag does nothing; a banner would announce a hatch that is shut.
+    if (name === 'WIRKEN_ALLOW_UNSIGNED_SKILLS' && h.skill_registry_root_pinned) continue;
+    banners.appendChild(hatchBanner(name, HATCH_COPY[name] + HATCH_CLEARS));
+  }
+  if (h.sandbox_mode_off) {
+    banners.appendChild(hatchBanner(null,
+      'sandbox.json mode is off: exec runs on the host as the gateway user. ' +
+      'Set in sandbox.json; clears when the file changes and the gateway restarts.'));
+  }
+}
+function renderStatusValues() {
+  clear(statusValues);
+  const audit = status.audit || {};
+  const alarms = Array.isArray(audit.alarms) ? audit.alarms : [];
+  if (alarms.length) {
+    // The strip becomes the alarm. It stays until the record is
+    // acknowledged from the CLI; the page cannot clear it.
+    const r = alarms[0];
+    const parts = ['Tamper alarm', r.alarm_type];
+    if (r.session_id) parts.push('session ' + r.session_id);
+    if (isSet(r.seq)) parts.push('row ' + r.seq);
+    if (alarms.length > 1) parts.push('+' + (alarms.length - 1) + ' more');
+    parts.push('acknowledge with wirken audit acknowledge --all');
+    statusValues.appendChild(el('span', 'alarm', parts.join(' · ')));
+    statusValues.hidden = false;
+    return;
+  }
+  // Each item carries its own separator so an item hidden at a narrow
+  // width takes its separator with it.
+  const items = [];
+  const agent = status.agent || {};
+  if (agent.model) items.push({ node: el('span', null, (agent.id || 'default') + ' · ' + agent.model), optional: false });
+  const sandbox = status.sandbox || {};
+  if (sandbox.mode) {
+    const sb = el('span', null, sandbox.mode + ' ');
+    sb.appendChild(el('span', 'hedge', '(configured)'));
+    items.push({ node: sb, optional: false });
+  }
+  const egress = status.egress || {};
+  if (egress.mode) items.push({ node: el('span', null, egress.mode === 'none' ? 'no egress' : 'egress: ' + egress.mode), optional: true });
+  const budget = status.budget || {};
+  if (budget.mode && budget.mode !== 'off' && isSet(budget.remaining_usd_micros)) {
+    const b = el('span', 'mono', usd(budget.remaining_usd_micros) + ' left ' +
+      (budget.window === 'day' ? 'today' : 'this ' + budget.window));
+    b.title = 'agent budget · all channels';
+    items.push({ node: b, optional: false });
+  }
+  const dot = el('span', 'writer-dot' + (audit.writer_halted ? ' halted' : ''));
+  dot.title = audit.writer_halted ? 'Audit writer halted' : 'Audit writer live';
+  dot.setAttribute('role', 'img');
+  dot.setAttribute('aria-label', dot.title);
+  items.push({ node: dot, optional: false });
+  items.forEach((item, i) => {
+    const wrap = el('span', 'item' + (item.optional ? ' optional' : ''));
+    if (i) wrap.appendChild(el('span', 'sep', '· '));
+    wrap.appendChild(item.node);
+    statusValues.appendChild(wrap);
+  });
+  statusValues.hidden = false;
+}
+function kvRow(grid, key, valueNode) {
+  grid.appendChild(el('span', 'k', key));
+  const v = el('span', 'v');
+  v.appendChild(valueNode);
+  grid.appendChild(v);
+}
+function renderAbout() {
+  clear(about);
+  const gw = status.gateway || {};
+  const head = el('h2', null, 'About');
+  head.appendChild(el('span', 'meta', 'wirken ' + (gw.version || '') + ' · loopback only'));
+  about.appendChild(head);
+  const grid = el('div', 'kv');
+  // Every value the strip may omit is named here, unknown included.
+  const agent = status.agent || {};
+  if (agent.model) {
+    const v = el('span', null, (agent.id || 'default') + ' · ' + agent.model);
+    if (agent.source) v.appendChild(el('span', 'hedge', ' · from ' + agent.source));
+    kvRow(grid, 'agent', v);
+  } else {
+    const v = el('span', null, (agent.id || 'default') + ' · model ');
+    v.appendChild(unknownNode());
+    kvRow(grid, 'agent', v);
+  }
+  const budget = status.budget || {};
+  if (budget.mode === 'off') {
+    kvRow(grid, 'budget', el('span', null, 'off'));
+  } else if (budget.mode && isSet(budget.ceiling_usd_micros)) {
+    kvRow(grid, 'budget', el('span', null, usd(budget.ceiling_usd_micros) + ' / ' + budget.window + ' · agent, all channels'));
+  } else {
+    kvRow(grid, 'budget', unknownNode());
+  }
+  const sandbox = status.sandbox || {};
+  if (sandbox.mode) {
+    const v = el('span', null, sandbox.mode + (sandbox.runtime ? ' · ' + sandbox.runtime : '') + ' · configured, reachability ');
+    v.appendChild(unknownNode());
+    kvRow(grid, 'sandbox', v);
+  } else {
+    kvRow(grid, 'sandbox', unknownNode());
+  }
+  const adapters = Array.isArray(status.adapters) ? status.adapters : [];
+  if (adapters.length) {
+    const v = el('span');
+    for (const a of adapters) {
+      const row = el('span', 'row', a.channel + ' ');
+      row.appendChild(el('code', null, a.pubkey_fingerprint || ''));
+      row.appendChild(document.createTextNode(a.connected ? ' · connected' : ' · not connected'));
+      v.appendChild(row);
+    }
+    kvRow(grid, 'adapters', v);
+  } else {
+    kvRow(grid, 'adapters', el('span', null, 'none registered'));
+  }
+  const egress = status.egress || {};
+  kvRow(grid, 'egress', egress.mode
+    ? el('span', null, egress.mode === 'none' ? 'none' : egress.mode + (egress.domains && egress.domains.length ? ' · ' + egress.domains.join(', ') : ''))
+    : unknownNode());
+  kvRow(grid, 'vault', unknownNode());
+  const siem = status.siem || {};
+  if (siem.configured) {
+    const v = el('span', null, siem.target + (siem.endpoint_host ? ' · ' + siem.endpoint_host : '') + ' · last ship ');
+    v.appendChild(unknownNode());
+    kvRow(grid, 'SIEM', v);
+  } else {
+    kvRow(grid, 'SIEM', el('span', null, 'not configured'));
+  }
+  const org = status.org || {};
+  if (org.configured) {
+    const v = el('span', null, 'verifies against ');
+    v.appendChild(org.pubkey_fingerprint ? el('code', null, org.pubkey_fingerprint) : unknownNode('no key pinned'));
+    v.appendChild(document.createTextNode(' · ' + (org.applied || 'unknown')));
+    kvRow(grid, 'org config', v);
+  } else {
+    kvRow(grid, 'org config', el('span', null, 'not configured'));
+  }
+  const audit = status.audit || {};
+  const av = el('span', null, 'signing key ');
+  av.appendChild(audit.signing_pubkey_fingerprint ? el('code', null, audit.signing_pubkey_fingerprint) : unknownNode('none'));
+  av.appendChild(document.createTextNode(' · '));
+  av.appendChild(valueOrUnknown(audit.sessions_total, audit.sessions_total + ' sessions'));
+  av.appendChild(document.createTextNode(' · '));
+  av.appendChild(Array.isArray(audit.alarms) ? el('span', null, audit.alarms.length + ' alarms on disk') : unknownNode());
+  kvRow(grid, 'audit', av);
+  kvRow(grid, 'threats', el('span', null, 'scanned on inbound messages'));
+  about.appendChild(grid);
+  about.appendChild(el('div', 'foot', 'Blurple = the gateway does not know. Named here, omitted from the default screen.'));
+}
+function setAboutOpen(open) {
+  if (open && !status) return;
+  about.hidden = !open;
+  wordmark.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) renderAbout();
+}
+wordmark.addEventListener('click', () => setAboutOpen(about.hidden));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !about.hidden) { setAboutOpen(false); wordmark.focus(); } });
+document.addEventListener('click', (e) => {
+  if (about.hidden) return;
+  if (about.contains(e.target) || wordmark.contains(e.target)) return;
+  setAboutOpen(false);
+});
+
 // --- Wiring ---
 composer.addEventListener('submit', (e) => { e.preventDefault(); send(); });
 input.addEventListener('keydown', (e) => {
@@ -858,6 +1117,8 @@ input.addEventListener('input', () => {
 // Restore the conversation on load so a refresh keeps the visible
 // history. loadTranscript's finally also draws the rail.
 loadTranscript(WEBCHAT_LOG_ID);
+loadStatus();
+setInterval(loadStatus, STATUS_POLL_MS);
 input.focus();
 </script>
 </body>
@@ -865,6 +1126,10 @@ input.focus();
 
 /// Serve the webchat UI on a TCP port.
 /// Minimal HTTP server — no framework dependency.
+///
+/// One construction site (`run.rs`) hands over every shared handle the
+/// routes read; bundling them further would only move the list.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     port: u16,
     factory: Arc<AgentFactory>,
@@ -872,9 +1137,17 @@ pub async fn serve(
     sessions: Arc<Mutex<SessionStore>>,
     pending_approvals: Arc<PendingApprovalQueue>,
     sse_registry: Arc<SseApprovalRegistry>,
+    status_inputs: StatusInputs,
+    detector: Arc<InjectionDetector>,
 ) -> Result<()> {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     tracing::info!("WebChat listening on http://127.0.0.1:{port}");
+
+    // Set once the audit writer refuses a row. The writer never
+    // recovers inside a process (its flush loop has exited), so the
+    // flag only ever goes from false to true. The status route reports
+    // it; the chat route refuses turns while it is set.
+    let writer_halted = Arc::new(AtomicBool::new(false));
 
     // Per-process rate limiter on the chat POST path. GCRA from
     // `wirken-gateway::rate_limit`; lock-free hot path. See
@@ -889,6 +1162,9 @@ pub async fn serve(
         let rate_limit = rate_limit.clone();
         let pending_approvals = pending_approvals.clone();
         let sse_registry = sse_registry.clone();
+        let status_inputs = status_inputs.clone();
+        let detector = detector.clone();
+        let writer_halted = writer_halted.clone();
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
@@ -935,6 +1211,25 @@ pub async fn serve(
                 }
                 let cfg = super::config();
                 let body = super::import::read_route_json(&cfg, &route);
+                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
+            } else if first_line.starts_with("GET /api/status ") {
+                // GET /api/status — one snapshot of the gateway's
+                // posture for the status line, the banners and the
+                // About panel. Safe read: Host checked, Origin
+                // validated only when present.
+                if let Some(resp) = api_preflight(&request, port, false) {
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let cfg = super::config();
+                let snapshot = status_snapshot(
+                    &cfg,
+                    port,
+                    &status_inputs,
+                    writer_halted.load(Ordering::Relaxed),
+                )
+                .await;
+                let body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into());
                 let _ = stream.write_all(json_ok(&body).as_bytes()).await;
             } else if first_line.starts_with("GET /api/sessions ") {
                 // GET /api/sessions — active-session list backing the
@@ -1006,6 +1301,38 @@ pub async fn serve(
                 // synthesize one so `target` stays a stable resource
                 // handle and the body lives under `detail.content`.
                 let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
+
+                // Scan for prompt-injection signatures, the same way
+                // the adapter message loop does. The detector tags; it
+                // never blocks. A hit merges into the inbound row's
+                // detail and also lands as its own
+                // `message.threat_flagged` row for SIEM visibility.
+                let mut inbound_detail = serde_json::json!({ "content": &message });
+                let threat_detail = detector.scan(&message).map(|t| t.to_detail_json());
+                if let Some(ref threat) = threat_detail
+                    && let (Some(obj), Some(threat_obj)) =
+                        (inbound_detail.as_object_mut(), threat.as_object())
+                {
+                    for (k, v) in threat_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+                if threat_detail.is_some() {
+                    let _ = audit
+                        .log(
+                            AuditEvent::new(
+                                ActorKind::Service,
+                                "webchat-user",
+                                "message.threat_flagged",
+                                &inbound_target,
+                            )
+                            .with_channel("webchat")
+                            .with_session(WEBCHAT_CONVERSATION)
+                            .with_detail(inbound_detail.clone()),
+                        )
+                        .await;
+                }
+
                 // A turn is not started unless its inbound row was
                 // accepted. The writer returns an error only once its
                 // flush loop has halted (chain break, alarm-log failure,
@@ -1022,10 +1349,12 @@ pub async fn serve(
                             &inbound_target,
                         )
                         .with_channel("webchat")
-                        .with_detail(serde_json::json!({ "content": &message })),
+                        .with_session(WEBCHAT_CONVERSATION)
+                        .with_detail(inbound_detail),
                     )
                     .await;
                 if let Err(e) = inbound_logged {
+                    writer_halted.store(true, Ordering::Relaxed);
                     tracing::error!(
                         "webchat: audit writer refused the inbound row; refusing the turn: {e}"
                     );
@@ -1050,7 +1379,7 @@ pub async fn serve(
                 // not worth failing a chat turn over.
                 {
                     let store = sessions.lock().await;
-                    match store.get_or_create("webchat", "webchat-default") {
+                    match store.get_or_create("webchat", WEBCHAT_CONVERSATION) {
                         Ok(session) => {
                             if let Err(e) = store.record_message(&session.id) {
                                 tracing::warn!("webchat message count not recorded: {e}");
@@ -1074,7 +1403,7 @@ pub async fn serve(
                 // Webchat has a single canonical conversation
                 // ("webchat-default") and synthesizes a UUID per
                 // inbound message for crash-recovery dedup.
-                let session_id_str = session_id_for("default", "webchat", "webchat-default");
+                let session_id_str = session_id_for("default", "webchat", WEBCHAT_CONVERSATION);
                 let inbound_id = format!("webchat-{}", uuid::Uuid::new_v4());
 
                 // Register the per-request SSE sender so the
@@ -1164,6 +1493,7 @@ pub async fn serve(
                                             &outbound_target,
                                         )
                                         .with_channel("webchat")
+                                        .with_session(WEBCHAT_CONVERSATION)
                                         .with_detail(
                                             serde_json::json!({ "content": &result.response }),
                                         ),
@@ -1258,7 +1588,7 @@ pub async fn serve(
                 // single-session today; the lookup is by the
                 // canonical session id.
                 let session_id =
-                    SessionId::new(session_id_for("default", "webchat", "webchat-default"));
+                    SessionId::new(session_id_for("default", "webchat", WEBCHAT_CONVERSATION));
                 if let Some(sender) = sse_registry.sender_for(&session_id) {
                     let ack_event = SseEvent::ApprovalDecisionAck {
                         request_id: request_id.clone(),
@@ -1286,6 +1616,329 @@ pub async fn serve(
             }
         });
     }
+}
+
+/// What the SIEM forwarder is pointed at, reduced to what a status
+/// panel may say. Built in `run.rs` next to the full config, which
+/// carries bearer tokens and an HMAC secret that must never reach a
+/// route; this struct cannot carry them.
+#[derive(Debug, Clone)]
+pub struct SiemSummary {
+    /// Target kind in lowercase: `datadog`, `splunk`, `sentinel`,
+    /// `webhook`.
+    pub target: String,
+    /// Host of the endpoint only. The path of a Sentinel endpoint
+    /// embeds the data-collection-rule id, which is topology.
+    pub endpoint_host: Option<String>,
+    /// Whether the typed-event pipe is opted in.
+    pub typed_pipe: bool,
+}
+
+impl SiemSummary {
+    pub fn from_config(cfg: &wirken_audit::siem::SiemConfig) -> Self {
+        Self {
+            target: format!("{:?}", cfg.target).to_ascii_lowercase(),
+            endpoint_host: url_host(&cfg.endpoint),
+            typed_pipe: cfg.typed_forwarding_opted_in(),
+        }
+    }
+}
+
+/// Host part of a URL, without scheme, credentials, path or query.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split("://").nth(1)?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit('@').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Live state the status route reads that is not reachable from a
+/// config path: the adapter registry (the only source of "connected"),
+/// the alarm log with whatever HMAC key the gateway loaded, and the
+/// SIEM summary. Everything else in the snapshot is re-read from the
+/// data directory on each call.
+#[derive(Clone)]
+pub struct StatusInputs {
+    pub registry: Arc<Mutex<AdapterRegistry>>,
+    pub alarm_log: Arc<AlarmLog>,
+    pub alarm_key_loaded: bool,
+    pub siem: Option<SiemSummary>,
+}
+
+/// First 8 bytes of an Ed25519 public key as 16 hex characters. The
+/// same shape the audit rows for adapter connect/disconnect carry.
+fn pubkey_fingerprint(pubkey: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(16);
+    for b in pubkey.iter().take(8) {
+        write!(&mut s, "{b:02x}").expect("write to String");
+    }
+    s
+}
+
+/// First 16 characters of a hex public-key file, or None when the file
+/// is absent or empty.
+fn key_file_fingerprint(path: &std::path::Path) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let fp: String = body.trim().chars().take(16).collect();
+    if fp.is_empty() { None } else { Some(fp) }
+}
+
+fn micros_to_json(v: Option<u64>) -> serde_json::Value {
+    match v {
+        Some(n) => serde_json::Value::from(n),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// One snapshot of the gateway's posture. Every value is a field read,
+/// a file read, an environment read, or an in-memory list: nothing
+/// here wakes an agent, scans the chain, or probes Docker. A value the
+/// gateway does not hold is `null`, which the page renders as unknown
+/// and never as zero, false, or green.
+///
+/// Withheld on purpose: provider base URLs and regions, key material of
+/// any kind, host filesystem paths, the SIEM endpoint path, and the
+/// alarm records' hostname and pid.
+pub async fn status_snapshot(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    port: u16,
+    inputs: &StatusInputs,
+    writer_halted: bool,
+) -> serde_json::Value {
+    use serde_json::{Value, json};
+    use wirken_agent::sandbox::SandboxMode;
+    use wirken_gateway::org::parse_boolean_escape;
+
+    // --- agent: the registered `default` row, else provider.json ---
+    let registered =
+        wirken_gateway::agent_config::AgentConfigStore::open(&cfg.agent_config_db_path())
+            .ok()
+            .and_then(|store| store.get("default").ok());
+    let (agent, egress) = match registered {
+        Some(a) => {
+            let llm =
+                wirken_agent::llm::LlmConfig::from_provider(&a.provider, &a.base_url, &a.model);
+            let webchat_egress = a.channel_egress.get("webchat");
+            let mode = webchat_egress
+                .map(|e| {
+                    if e.mode.is_empty() {
+                        "none".to_string()
+                    } else {
+                        e.mode.clone()
+                    }
+                })
+                .unwrap_or_else(|| "none".to_string());
+            let domains = webchat_egress
+                .map(|e| e.domains.clone())
+                .unwrap_or_default();
+            (
+                json!({
+                    "id": "default",
+                    "provider": a.provider,
+                    "model": a.model,
+                    "api_key_credential": a.api_key_credential,
+                    "context_window": llm.context_window,
+                    "effective_context_budget": wirken_agent::context::effective_budget(llm.context_window),
+                    "tools_enabled": a.tools_enabled,
+                    "source": "agent_config.db",
+                }),
+                json!({
+                    "channel": "webchat",
+                    "mode": mode,
+                    "domains": domains,
+                    "effective_network_mode": if mode == "allowlist" || mode == "open" { "proxied" } else { "none" },
+                }),
+            )
+        }
+        None => {
+            let provider_json: Option<Value> =
+                std::fs::read_to_string(cfg.data_dir.join("provider.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok());
+            match provider_json {
+                Some(pj) => {
+                    let provider = pj["provider"].as_str().unwrap_or("ollama").to_string();
+                    let model = pj["model"].as_str().unwrap_or("llama3").to_string();
+                    let base_url = pj["base_url"].as_str().unwrap_or("").to_string();
+                    let llm =
+                        wirken_agent::llm::LlmConfig::from_provider(&provider, &base_url, &model);
+                    (
+                        json!({
+                            "id": "default",
+                            "provider": provider,
+                            "model": model,
+                            "api_key_credential": pj["api_key_name"].as_str(),
+                            "context_window": llm.context_window,
+                            "effective_context_budget": wirken_agent::context::effective_budget(llm.context_window),
+                            "tools_enabled": Value::Null,
+                            "source": "provider.json",
+                        }),
+                        // The implicit default agent carries no egress
+                        // policy: sandboxed exec runs with no network.
+                        json!({ "channel": "webchat", "mode": "none", "domains": [], "effective_network_mode": "none" }),
+                    )
+                }
+                None => (
+                    json!({ "id": "default", "provider": Value::Null, "model": Value::Null, "api_key_credential": Value::Null,
+                            "context_window": Value::Null, "effective_context_budget": Value::Null, "tools_enabled": Value::Null, "source": Value::Null }),
+                    json!({ "channel": "webchat", "mode": Value::Null, "domains": [], "effective_network_mode": Value::Null }),
+                ),
+            }
+        }
+    };
+
+    // --- sandbox: the file as it is on disk right now ---
+    let sb = super::load_sandbox_config(&cfg.data_dir);
+    let (mode, runtime) = match sb.mode {
+        SandboxMode::Off => ("off", Value::Null),
+        SandboxMode::ExecOnly => ("exec-only", Value::from("runc")),
+        SandboxMode::GVisor => ("gvisor", Value::from("runsc")),
+    };
+    let sandbox = json!({
+        "mode": mode,
+        "runtime": runtime,
+        "image": sb.image,
+        "legacy_network_flag": sb.network,
+        "limits": {
+            "memory_mb": wirken_agent::sandbox::MEMORY_LIMIT / (1024 * 1024),
+            "pids": wirken_agent::sandbox::PIDS_LIMIT,
+            "timeout_secs": sb.timeout_secs,
+        },
+        "workspace_mount": "/workspace (rw)",
+        "docker_reachable": Value::Null,
+        "exec_refused": Value::Null,
+    });
+
+    // --- budget: config + ledger, keyed by the base agent id ---
+    let budget = match wirken_gateway::budget::load_budget_config(&cfg.budget_config_path())
+        .ok()
+        .and_then(|c| c.resolve("default"))
+    {
+        Some(b) => {
+            let now = chrono::Utc::now().timestamp();
+            let window_start = b.window.window_start(now);
+            let spent = wirken_gateway::budget::BudgetStore::open(&cfg.budget_db_path())
+                .ok()
+                .and_then(|store| store.window_spend("default", window_start).ok());
+            json!({
+                "mode": format!("{:?}", b.mode).to_ascii_lowercase(),
+                "window": b.window.label(),
+                "window_start": chrono::DateTime::from_timestamp(window_start, 0).map(|d| d.to_rfc3339()),
+                "ceiling_usd_micros": b.ceiling_usd_micros,
+                "spent_usd_micros": micros_to_json(spent),
+                "remaining_usd_micros": micros_to_json(spent.map(|s| b.ceiling_usd_micros.saturating_sub(s))),
+            })
+        }
+        None => json!({ "mode": "off" }),
+    };
+
+    // --- escape hatches: live reads of the gateway's own environment ---
+    let escape_hatches = json!({
+        "WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG": parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG"),
+        "WIRKEN_ALLOW_UNSIGNED_SKILLS": parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_SKILLS"),
+        "WIRKEN_ALLOW_UNSIGNED_MCP": parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_MCP"),
+        "WIRKEN_ALLOW_STALE_ORG_CONFIG": parse_boolean_escape("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
+        "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN": parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN"),
+        "WIRKEN_ALLOW_UNREGISTERED_HOOKS": parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS"),
+        "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES": std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES").ok(),
+        "sandbox_mode_off": sb.mode == SandboxMode::Off,
+        "skill_registry_root_pinned": wirken_gateway::skill_registry::load_registry_root(&cfg.data_dir).ok().flatten().is_some(),
+    });
+
+    // --- org config: what is on disk; applied once per gateway start ---
+    let org_url = wirken_gateway::org::load_org_url(&cfg.data_dir);
+    let org = json!({
+        "configured": org_url.is_some(),
+        "url_host": org_url.as_deref().and_then(url_host),
+        "pubkey_fingerprint": key_file_fingerprint(&cfg.data_dir.join(wirken_gateway::org::ORG_CONFIG_PUBKEY_FILE)),
+        "unsigned_allowed": parse_boolean_escape("WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG"),
+        "stale_allowed": parse_boolean_escape("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
+        "tool_policy": wirken_gateway::org::load_tool_policy(&cfg.data_dir).ok().flatten()
+            .and_then(|p| serde_json::to_value(p).ok()),
+        "applied": if org_url.is_some() { Value::from("at gateway start") } else { Value::Null },
+    });
+
+    // --- audit: alarms on disk, key id, session count, writer state ---
+    let alarms = inputs.alarm_log.read_all().ok().map(|records| {
+        records
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "timestamp": r.record.timestamp,
+                    "alarm_type": r.record.alarm_type,
+                    "session_id": r.record.session_id,
+                    "seq": r.record.seq,
+                    "status": match r.status {
+                        AlarmVerifyStatus::Verified => "verified",
+                        AlarmVerifyStatus::NoKey => "no_key",
+                        AlarmVerifyStatus::Unsigned => "unsigned",
+                        AlarmVerifyStatus::Tampered => "tampered",
+                    },
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    let sessions_total = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+        .ok()
+        .and_then(|log| log.list_session_ids().ok())
+        .map(|ids| ids.len());
+    let audit = json!({
+        "writer_halted": writer_halted,
+        "signing_pubkey_fingerprint": key_file_fingerprint(&wirken_audit::audit_public_key_path(&cfg.data_dir)),
+        "sessions_total": sessions_total,
+        "alarms": alarms,
+        "alarm_hmac_key_loaded": inputs.alarm_key_loaded,
+    });
+
+    let siem = match &inputs.siem {
+        Some(s) => json!({
+            "configured": true,
+            "target": s.target,
+            "endpoint_host": s.endpoint_host,
+            "typed_pipe": s.typed_pipe,
+            "last_ship": Value::Null,
+            "lag": Value::Null,
+        }),
+        None => json!({ "configured": false }),
+    };
+
+    let adapters: Vec<Value> = inputs
+        .registry
+        .lock()
+        .await
+        .list()
+        .into_iter()
+        .map(|a| {
+            json!({
+                "adapter_id": a.adapter_id,
+                "channel": a.channel,
+                "connected": a.connected,
+                "pubkey_fingerprint": pubkey_fingerprint(&a.public_key),
+                "pid": Value::Null,
+                "restarts": Value::Null,
+            })
+        })
+        .collect();
+
+    json!({
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "gateway": { "version": env!("CARGO_PKG_VERSION"), "loopback_only": true, "port": port },
+        "agent": agent,
+        "egress": egress,
+        "sandbox": sandbox,
+        "budget": budget,
+        "escape_hatches": escape_hatches,
+        "org": org,
+        "audit": audit,
+        "siem": siem,
+        "hooks": Value::Null,
+        "adapters": adapters,
+    })
 }
 
 /// Parse `POST /api/approvals/{request_id}` and return the
@@ -1530,9 +2183,16 @@ fn hex_val(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+    use wirken_audit::AlarmLog;
+    use wirken_gateway::adapter_registry::AdapterRegistry;
+
     use super::{
-        HTML, ImportedRoute, api_preflight, is_webchat_host, is_webchat_origin,
-        parse_approval_path, parse_imported_path, parse_session_path, percent_decode,
+        HTML, ImportedRoute, SiemSummary, StatusInputs, api_preflight, is_webchat_host,
+        is_webchat_origin, parse_approval_path, parse_imported_path, parse_session_path,
+        percent_decode, status_snapshot, url_host,
     };
 
     #[test]
@@ -1941,6 +2601,233 @@ mod tests {
         assert!(!HTML.contains("\"#"));
     }
 
+    fn status_inputs_for(dir: &std::path::Path, siem: Option<SiemSummary>) -> StatusInputs {
+        StatusInputs {
+            registry: Arc::new(Mutex::new(
+                AdapterRegistry::open(&dir.join("adapters.db")).expect("registry opens"),
+            )),
+            alarm_log: Arc::new(AlarmLog::new(dir)),
+            alarm_key_loaded: false,
+            siem,
+        }
+    }
+
+    fn cfg_at(dir: &std::path::Path) -> wirken_gateway::config::GatewayConfig {
+        wirken_gateway::config::GatewayConfig {
+            data_dir: dir.to_path_buf(),
+            ..wirken_gateway::config::GatewayConfig::default()
+        }
+    }
+
+    /// A value the gateway does not hold is null, never a default that
+    /// reads as an answer. On an empty data directory the snapshot
+    /// says exactly what is there: a sandbox file, and nothing else.
+    #[tokio::test]
+    async fn status_snapshot_reports_only_what_the_gateway_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("sandbox.json"), r#"{"mode":"off"}"#).unwrap();
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+
+        assert_eq!(snap["gateway"]["port"], 18790);
+        assert_eq!(snap["sandbox"]["mode"], "off");
+        assert!(
+            snap["sandbox"]["runtime"].is_null(),
+            "no runtime when exec runs on the host"
+        );
+        assert!(
+            snap["sandbox"]["docker_reachable"].is_null(),
+            "never probed here"
+        );
+        assert_eq!(snap["escape_hatches"]["sandbox_mode_off"], true);
+        assert!(
+            snap["agent"]["provider"].is_null(),
+            "no agent row and no provider.json"
+        );
+        assert!(snap["agent"]["source"].is_null());
+        assert_eq!(snap["egress"]["channel"], "webchat");
+        assert_eq!(snap["adapters"], serde_json::json!([]));
+        assert_eq!(snap["siem"]["configured"], false);
+        assert_eq!(snap["org"]["configured"], false);
+        assert_eq!(snap["audit"]["writer_halted"], false);
+        assert!(snap["audit"]["signing_pubkey_fingerprint"].is_null());
+        let alarms = &snap["audit"]["alarms"];
+        assert!(
+            alarms.is_null() || alarms.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "no alarm records on a fresh directory: {alarms}"
+        );
+        assert!(snap["hooks"].is_null(), "hook counts are not plumbed yet");
+    }
+
+    /// The snapshot never carries key material, provider endpoints,
+    /// regions, host paths, or a SIEM endpoint path. Checked on the
+    /// serialized text and on every key name in the tree.
+    #[tokio::test]
+    async fn status_snapshot_carries_no_secrets_or_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("provider.json"),
+            r#"{"provider":"custom","model":"m-1","base_url":"https://internal.example:8443/v1",
+                "api_key":"sk-live-secret","api_key_name":"provider-key","region":"eu-west-9"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("sandbox.json"),
+            r#"{"mode":"exec-only","sidecar_binary":"/opt/secret/path/wirken"}"#,
+        )
+        .unwrap();
+        let siem = Some(SiemSummary {
+            target: "sentinel".into(),
+            endpoint_host: Some("dce.example".into()),
+            typed_pipe: true,
+        });
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), siem), false).await;
+        let text = serde_json::to_string(&snap).unwrap();
+        for forbidden in [
+            "sk-live-secret",
+            "internal.example",
+            "eu-west-9",
+            "/opt/secret",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+        }
+        assert_eq!(
+            snap["agent"]["api_key_credential"], "provider-key",
+            "the slot name is fine"
+        );
+        assert_eq!(snap["agent"]["source"], "provider.json");
+
+        fn keys(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, v) in m {
+                        out.push(k.clone());
+                        keys(v, out);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|v| keys(v, out)),
+                _ => {}
+            }
+        }
+        let mut all = Vec::new();
+        keys(&snap, &mut all);
+        for forbidden in [
+            "api_key",
+            "base_url",
+            "region",
+            "sidecar_binary",
+            "hmac_secret",
+            "endpoint",
+            "hostname",
+            "gateway_pid",
+        ] {
+            assert!(
+                !all.iter().any(|k| k == forbidden),
+                "key {forbidden} present: {all:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn siem_summary_keeps_target_and_host_only() {
+        let cfg = wirken_audit::siem::SiemConfig {
+            target: wirken_audit::siem::SiemTarget::Sentinel,
+            endpoint: "https://dce-abc.eastus-1.ingest.monitor.azure.com/dataCollectionRules/dcr-secret-id/streams/Custom-X?api-version=2023-01-01".into(),
+            api_key: "bearer-secret".into(),
+            service: "wirken".into(),
+            environment: "prod".into(),
+            hmac_secret: Some("hmac-secret".into()),
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: Some(true),
+            typed_poll_interval_ms: None,
+        };
+        let s = SiemSummary::from_config(&cfg);
+        assert_eq!(s.target, "sentinel");
+        assert_eq!(
+            s.endpoint_host.as_deref(),
+            Some("dce-abc.eastus-1.ingest.monitor.azure.com")
+        );
+        assert!(s.typed_pipe);
+        let debug = format!("{s:?}");
+        assert!(
+            !debug.contains("secret") && !debug.contains("dcr-"),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn url_host_strips_scheme_credentials_path_and_query() {
+        assert_eq!(
+            url_host("https://user:pw@host.example:8443/a/b?c=d").as_deref(),
+            Some("host.example:8443")
+        );
+        assert_eq!(
+            url_host("http://localhost:18790").as_deref(),
+            Some("localhost:18790")
+        );
+        assert_eq!(url_host("not a url"), None);
+        assert_eq!(url_host("https:///path"), None);
+    }
+
+    /// The six boolean hatches the status route reports are the six the
+    /// page has copy for; a hatch added on one side without the other
+    /// would be engaged and invisible.
+    #[test]
+    fn every_reported_escape_hatch_has_copy_on_the_page() {
+        let script = page_script();
+        let snapshot_fn = SERVER_SOURCE
+            .split_once("pub async fn status_snapshot(")
+            .expect("status_snapshot exists")
+            .1;
+        for name in [
+            "WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG",
+            "WIRKEN_ALLOW_UNSIGNED_SKILLS",
+            "WIRKEN_ALLOW_UNSIGNED_MCP",
+            "WIRKEN_ALLOW_STALE_ORG_CONFIG",
+            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN",
+            "WIRKEN_ALLOW_UNREGISTERED_HOOKS",
+        ] {
+            assert!(
+                snapshot_fn.contains(&format!("\"{name}\": parse_boolean_escape(\"{name}\")")),
+                "route reports {name}"
+            );
+            assert!(
+                script.contains(&format!("{name}: '")),
+                "page has copy for {name}"
+            );
+        }
+        assert!(
+            script.contains("h.sandbox_mode_off"),
+            "the sandbox-off hatch has its own banner"
+        );
+        assert!(
+            script.contains("skill_registry_root_pinned"),
+            "the unsigned-skills banner is suppressed under a pinned root"
+        );
+        assert!(script.contains("Clears when the gateway restarts without it."));
+    }
+
+    /// Unknown is one renderer, one colour, and the strip is empty until
+    /// a snapshot arrives rather than drawn with defaults.
+    #[test]
+    fn unknown_is_one_renderer_and_the_strip_waits_for_a_snapshot() {
+        let script = page_script();
+        assert!(script.contains("function unknownNode("));
+        assert!(HTML.contains(".unknown { color: var(--accent-300); }"));
+        assert!(HTML.contains(r#"<div id="status-values" hidden>"#));
+        assert!(
+            script.contains("acknowledge with wirken audit acknowledge --all"),
+            "the alarm strip names the CLI verb"
+        );
+        assert!(
+            script.contains("agent budget · all channels"),
+            "the budget figure says whose it is"
+        );
+    }
+
     /// The Tier 2 chip and the Tier 2 shell sentence describe one fact,
     /// the absence of a live grant, and use one term for it. The chip's
     /// wording is the gate's own.
@@ -1956,6 +2843,67 @@ mod tests {
             "the sentence uses the chip's term"
         );
         assert!(!script.contains("standing grant"), "one term for one fact");
+    }
+
+    /// Rule 1: a value the gateway does not hold is omitted from the
+    /// strip and named as unknown in the panel. The strip's renderer
+    /// never reaches for the unknown node; the panel's does, and it
+    /// has a row for every value the strip may leave out.
+    #[test]
+    fn nulls_leave_a_gap_in_the_strip_and_are_named_in_the_panel() {
+        let script = page_script();
+        let strip = script
+            .split_once("function renderStatusValues() {")
+            .expect("strip renderer exists")
+            .1
+            .split_once("\n}")
+            .expect("strip renderer closes")
+            .0;
+        assert!(
+            !strip.contains("unknownNode("),
+            "the strip never draws unknown: {strip}"
+        );
+        assert!(
+            !strip.contains("'unknown'"),
+            "the strip never writes the word: {strip}"
+        );
+        for gate in [
+            "if (agent.model)",
+            "if (sandbox.mode)",
+            "if (egress.mode)",
+            "isSet(budget.remaining_usd_micros)",
+        ] {
+            assert!(strip.contains(gate), "the strip omits on {gate}");
+        }
+        let panel = script
+            .split_once("function renderAbout() {")
+            .expect("panel renderer exists")
+            .1
+            .split_once("\n}")
+            .expect("panel renderer closes")
+            .0;
+        assert!(panel.contains("unknownNode("), "the panel names unknowns");
+        for row in [
+            "'agent'",
+            "'budget'",
+            "'sandbox'",
+            "'egress'",
+            "'adapters'",
+            "'vault'",
+            "'SIEM'",
+            "'org config'",
+            "'audit'",
+            "'threats'",
+        ] {
+            assert!(
+                panel.contains(&format!("kvRow(grid, {row}")),
+                "the panel has a row for {row}"
+            );
+        }
+        assert!(
+            !panel.contains("el('span', null, 'unknown')"),
+            "unknown goes through the one renderer"
+        );
     }
 
     #[test]
