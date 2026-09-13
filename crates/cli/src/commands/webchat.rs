@@ -689,14 +689,26 @@ function setTurn(text) {
   turnline.hidden = false;
   setText(turntext, text);
 }
+// The field is sized to what it shows, the placeholder included: a
+// locked sentence that does not fit one line gets a second, never a
+// clip.
+function fitComposer() {
+  const held = input.value;
+  if (!held) input.value = input.placeholder;
+  input.style.height = 'auto';
+  input.style.height = Math.min(160, input.scrollHeight) + 'px';
+  if (!held) input.value = '';
+}
 function lockComposer(placeholder) {
   input.disabled = true; sendBtn.disabled = true; composer.classList.add('busy');
   input.placeholder = placeholder;
+  fitComposer();
 }
 function unlockComposer() {
   if (halted || elsewhereTurn) return;
   input.disabled = false; sendBtn.disabled = false; composer.classList.remove('busy');
   input.placeholder = 'Message your agent';
+  fitComposer();
 }
 function setHalted() {
   halted = true;
@@ -1590,6 +1602,7 @@ function renderRail() {
     railConversations.appendChild(row);
   }
   setText(railFoot, railFootnote());
+  revealActiveRow();
   clear(railArchives);
   for (const source of railSources) {
     const row = el('button', 'rail-row' + (activeArchive === source.id ? ' active' : ''));
@@ -1600,6 +1613,17 @@ function renderRail() {
     row.addEventListener('click', () => loadArchiveConversations(source));
     railArchives.appendChild(row);
   }
+}
+
+// On the narrow layout the strip scrolls sideways; "you are here" has
+// to be on screen after a switch. Only the strip moves, never the page.
+function revealActiveRow() {
+  const active = railConversations.querySelector('.rail-row.active');
+  const strip = active ? active.closest('.rail-section') : null;
+  if (!active || !strip || strip.scrollWidth <= strip.clientWidth) return;
+  const r = active.getBoundingClientRect();
+  const s = strip.getBoundingClientRect();
+  if (r.left < s.left + 8 || r.right > s.right - 8) strip.scrollLeft += (r.left - s.left) - 8;
 }
 
 // --- Switching conversations ---
