@@ -12,6 +12,16 @@ tagged.
 
 ### Changed
 
+- Five small follow-ups on the WebChat page from the multi-conversation
+  review. A wrapped status line no longer starts a row with a
+  separator; the separators are measured after layout. One approval's
+  age is one number: the card and the rail tick from one anchor set
+  from the gateway's age when the request is first seen. Text sitting
+  in a composer locked by a turn open in another tab is named `held —
+  not sent`, and nothing promises to send it. On the narrow layout the
+  conversations strip fades at its right edge while more tabs lie past
+  it, and the `Conversations` label with `+ new` stays put as a sticky
+  left cell while the tabs scroll under it.
 - The WebChat status route carries no host: `siem` is the target and
   pipe kind only, without the ingestion host, and `org` is the pinned
   key fingerprint and when it was applied, without the config URL's
