@@ -398,7 +398,8 @@ const HTML: &str = r#"<!DOCTYPE html>
     #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; overflow: hidden; }
     .rail-section { display: flex; gap: 6px; align-items: center; flex: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
     .rail-section + .rail-section { margin-top: 0; }
-    .rail-label { flex: none; padding: 4px 0; gap: 6px; }
+    .rail-label { flex: none; padding: 4px 8px 4px 0; gap: 6px; position: sticky; left: 0; z-index: 1; background: var(--bg-2); }
+    .rail-section.fade-right { mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent); }
     #rail-conversations, #rail-archives { display: flex; gap: 6px; flex: none; }
     .rail-row { width: auto; flex: none; white-space: nowrap; padding: 6px 9px; margin-bottom: 0; }
     .rail-title { max-width: 18ch; }
@@ -729,6 +730,21 @@ function showNotice(chipText, text, retryFn) {
 }
 function hideNotice() { notice.hidden = true; clear(notice); }
 
+// One anchor per request, set from the gateway's age the first time the
+// request is seen; every surface that shows the age ticks from it, so
+// the card and the rail never disagree by a second.
+const askedAtByRequest = new Map();
+function askedAtFor(id, ageSeconds) {
+  if (!askedAtByRequest.has(id)) {
+    askedAtByRequest.set(id, Date.now() - (isSet(ageSeconds) ? Number(ageSeconds) * 1000 : 0));
+  }
+  return askedAtByRequest.get(id);
+}
+function askedWords(askedAt) {
+  const s = Math.max(0, Math.floor((Date.now() - askedAt) / 1000));
+  return 'asked ' + (s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's') + ' ago';
+}
+
 // --- Approval card ---
 // Sequential queue: tool dispatch is serial, so a second request should
 // not arrive while one is rendered; the queue keeps the UI right if it
@@ -768,7 +784,7 @@ function approvalSentence(ev) {
 function renderApproval(ev) {
   if (approvalCurrent) { approvalQueue.push(ev); return; }
   approvalCurrent = ev;
-  const askedAt = Date.now() - (isSet(ev.age_seconds) ? Number(ev.age_seconds) * 1000 : 0);
+  const askedAt = askedAtFor(ev.request_id, ev.age_seconds);
   const card = el('div', 'approval');
   card.id = 'approval-' + ev.request_id;
   card.setAttribute('role', 'group');
@@ -777,7 +793,7 @@ function renderApproval(ev) {
   const head = el('div', 'approval-head');
   head.appendChild(el('span', 'chip chip-outline', tierLabel(ev.requested_tier)));
   head.appendChild(el('span', 'approval-sentence', approvalSentence(ev)));
-  const age = el('span', 'approval-age', 'asked just now');
+  const age = el('span', 'approval-age', askedWords(askedAt));
   head.appendChild(age);
   card.appendChild(head);
 
@@ -824,8 +840,7 @@ function renderApproval(ev) {
 
   const ticker = setInterval(() => {
     if (!card.isConnected) { clearInterval(ticker); return; }
-    const s = Math.floor((Date.now() - askedAt) / 1000);
-    setText(age, 'asked ' + (s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's') + ' ago');
+    setText(age, askedWords(askedAt));
   }, 1000);
 
   const submit = async (decision) => {
@@ -1566,12 +1581,22 @@ function pendingByKey() {
   if (!approvals) return pending;
   for (const m of approvals.mine || []) {
     const k = keyOf(m.agent_id);
-    if (k && !pending.has(k)) pending.set(k, m.age_seconds);
+    if (k && !pending.has(k)) pending.set(k, askedAtFor(m.request_id, m.age_seconds));
   }
   for (const e of approvals.elsewhere || []) {
-    if (e.conversation && !pending.has(e.conversation)) pending.set(e.conversation, e.age_seconds);
+    if (e.conversation && !pending.has(e.conversation)) {
+      pending.set(e.conversation, askedAtFor('elsewhere:' + e.conversation + ':' + e.requested_at, e.age_seconds));
+    }
   }
   return pending;
+}
+// The awaiting rows tick with the card, from the same anchors.
+let railTicker = null;
+function tickRail() {
+  for (const row of railConversations.querySelectorAll('.rail-row.awaiting')) {
+    const meta = row.querySelector('.rail-meta');
+    if (meta && isSet(row.dataset.askedAt)) setText(meta, '○ awaiting you · ' + askedWords(Number(row.dataset.askedAt)) + (row.dataset.suffix || ''));
+  }
 }
 function railFootnote() {
   const w = status && status.gateway ? windowWords(status.gateway.session_expiry_secs) : null;
@@ -1593,15 +1618,19 @@ function renderRail() {
     row.appendChild(el('div', 'rail-title', e.draft ? DRAFT_TITLE : (e.title || e.key)));
     let meta;
     if (e.draft) meta = 'unsent';
-    else if (pending.has(e.key)) meta = '○ awaiting you · asked ' + ageWords(pending.get(e.key)) + ' ago';
+    else if (pending.has(e.key)) meta = '○ awaiting you · ' + askedWords(pending.get(e.key));
     else meta = (isSet(e.count) ? e.count + ' msg' : 'no messages yet') + (e.last ? ' · ' + sinceWords(e.last) : '');
-    if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) meta += ' · turn open';
-    if (e.resumed) meta += ' · resumed';
-    row.appendChild(el('div', 'rail-meta', meta));
+    let suffix = '';
+    if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) suffix += ' · turn open';
+    if (e.resumed) suffix += ' · resumed';
+    if (pending.has(e.key)) { row.dataset.askedAt = String(pending.get(e.key)); row.dataset.suffix = suffix; }
+    row.appendChild(el('div', 'rail-meta', meta + suffix));
     row.addEventListener('click', () => openConversation(e.key));
     railConversations.appendChild(row);
   }
   setText(railFoot, railFootnote());
+  if (pending.size && !railTicker) railTicker = setInterval(tickRail, 1000);
+  if (!pending.size && railTicker) { clearInterval(railTicker); railTicker = null; }
   revealActiveRow();
   clear(railArchives);
   for (const source of railSources) {
@@ -1620,10 +1649,20 @@ function renderRail() {
 function revealActiveRow() {
   const active = railConversations.querySelector('.rail-row.active');
   const strip = active ? active.closest('.rail-section') : null;
-  if (!active || !strip || strip.scrollWidth <= strip.clientWidth) return;
-  const r = active.getBoundingClientRect();
-  const s = strip.getBoundingClientRect();
-  if (r.left < s.left + 8 || r.right > s.right - 8) strip.scrollLeft += (r.left - s.left) - 8;
+  if (active && strip && strip.scrollWidth > strip.clientWidth) {
+    const r = active.getBoundingClientRect();
+    const s = strip.getBoundingClientRect();
+    if (r.left < s.left + 8 || r.right > s.right - 8) strip.scrollLeft += (r.left - s.left) - 8;
+  }
+  for (const section of rail.querySelectorAll('.rail-section')) updateStripFade(section);
+}
+// A strip with more tabs past its right edge fades out there, so the
+// edge reads as "more", not as the end.
+function updateStripFade(strip) {
+  strip.classList.toggle('fade-right', strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 4);
+}
+for (const section of rail.querySelectorAll('.rail-section')) {
+  section.addEventListener('scroll', () => updateStripFade(section), { passive: true });
 }
 
 // --- Switching conversations ---
@@ -1681,6 +1720,9 @@ function renderElsewhereTurn() {
   lockComposer(ELSEWHERE_PLACEHOLDER);
   const age = elsewhereTurn.age + Math.floor((Date.now() - elsewhereTurn.seenAt) / 1000);
   setTurn('turn open · elsewhere · ' + ageWords(age));
+  // Text already in the composer stays there. Nothing sends it: the
+  // line says only that.
+  if (input.value.trim()) showNotice(null, 'held — not sent', null);
 }
 // The list is the gateway's claim; the latest fetch wins, and a list
 // fetched before the last switch says nothing about this conversation.
@@ -1725,6 +1767,7 @@ async function checkElsewhereTurn() {
   elsewhereTurn = null;
   stopElsewherePolling();
   setTurn(null);
+  hideNotice();
   unlockComposer();
   loadTranscript(currentLogId());
 }
@@ -2005,7 +2048,21 @@ function renderStatusValues() {
     statusValues.appendChild(wrap);
   });
   statusValues.hidden = false;
+  fixSeparators();
 }
+// A separator sits between two items on one row. When the strip wraps,
+// the first item of the new row drops its separator: measured after
+// layout, not guessed from a width.
+function fixSeparators() {
+  let rowTop = null;
+  for (const wrap of statusValues.querySelectorAll('.item')) {
+    if (wrap.offsetParent === null) continue;
+    const sep = wrap.querySelector('.sep');
+    if (sep) sep.hidden = rowTop !== null && wrap.offsetTop !== rowTop;
+    rowTop = wrap.offsetTop;
+  }
+}
+window.addEventListener('resize', () => requestAnimationFrame(() => { fixSeparators(); revealActiveRow(); }));
 function kvRow(grid, key, valueNode) {
   grid.appendChild(el('span', 'k', key));
   const v = el('span', 'v');
@@ -7157,7 +7214,7 @@ mod tests {
             .find("'cut off — the stream ended without a done event · '")
             .unwrap();
         assert!(aborted < cut);
-        assert!(script.contains("if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) meta += ' · turn open';"));
+        assert!(script.contains("if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) suffix += ' · turn open';"));
         assert!(
             script.contains("turnOpen: r.turn_open === true,"),
             "from the list, not a guess"
@@ -7236,7 +7293,7 @@ mod tests {
             .split_once("\n}")
             .unwrap()
             .0;
-        assert!(rail.contains("'○ awaiting you · asked ' + ageWords(pending.get(e.key)) + ' ago'"));
+        assert!(rail.contains("'○ awaiting you · ' + askedWords(pending.get(e.key))"));
         assert!(
             !rail.contains("/api/approvals/"),
             "the rail decides nothing"
@@ -7250,8 +7307,8 @@ mod tests {
         assert!(HTML.contains(">+ new</button>"));
         assert!(script.contains("const DRAFT_TITLE = 'New conversation';"));
         assert!(script.contains("if (e.draft) meta = 'unsent';"));
-        assert!(script.contains("meta += ' · turn open';"));
-        assert!(script.contains("meta += ' · resumed';"));
+        assert!(script.contains("suffix += ' · turn open';"));
+        assert!(script.contains("suffix += ' · resumed';"));
         assert!(
             script.contains("' approval is waiting in \"'")
                 && script.contains("'\". It can only be decided there.'")
@@ -7301,5 +7358,70 @@ mod tests {
             script.contains("if (draft && draft !== key) draft = null;"),
             "leaving a draft discards it"
         );
+    }
+
+    /// The five follow-ups from the turn-4 check: separators are
+    /// measured after layout so a wrapped row never starts with one;
+    /// the card and the rail tick one request's age from one anchor
+    /// set from the gateway's age; text held in a locked composer is
+    /// named as held and not sent; the mobile strip fades where more
+    /// tabs lie past its edge; the label and "+ new" stay put while the
+    /// tabs scroll.
+    #[test]
+    fn the_turn_four_follow_ups_hold() {
+        let script = page_script();
+        let seps = script
+            .split_once("function fixSeparators() {")
+            .expect("separators are measured")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(seps.contains("sep.hidden = rowTop !== null && wrap.offsetTop !== rowTop;"));
+        assert!(script.contains("statusValues.hidden = false;\n  fixSeparators();"));
+        assert!(
+            script.contains("requestAnimationFrame(() => { fixSeparators(); revealActiveRow(); })"),
+            "re-measured on resize"
+        );
+
+        assert!(
+            script.contains("const askedAt = askedAtFor(ev.request_id, ev.age_seconds);"),
+            "the card's anchor"
+        );
+        assert!(
+            script.contains("pending.set(k, askedAtFor(m.request_id, m.age_seconds));"),
+            "the rail's anchor is the same"
+        );
+        assert!(script.contains(
+            "askedAtFor('elsewhere:' + e.conversation + ':' + e.requested_at, e.age_seconds)"
+        ));
+        assert_eq!(
+            script.matches("function askedWords(askedAt) {").count(),
+            1,
+            "one formatter"
+        );
+        assert!(
+            script.contains("setText(age, askedWords(askedAt));")
+                && script.contains("'○ awaiting you · ' + askedWords(pending.get(e.key))")
+        );
+        assert!(
+            script.contains("railTicker = setInterval(tickRail, 1000);"),
+            "the rail ticks with the card"
+        );
+
+        assert!(
+            script.contains("if (input.value.trim()) showNotice(null, 'held — not sent', null);")
+        );
+        assert!(
+            !script.contains("will be sent when"),
+            "no promise the page cannot keep"
+        );
+
+        assert!(HTML.contains(".rail-label { flex: none; padding: 4px 8px 4px 0; gap: 6px; position: sticky; left: 0; z-index: 1; background: var(--bg-2); }"));
+        assert!(HTML.contains(".rail-section.fade-right { mask-image: linear-gradient(to right, #000 calc(100% - 36px), transparent);"));
+        assert!(script.contains("strip.classList.toggle('fade-right', strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 4);"));
+        assert!(script.contains(
+            "section.addEventListener('scroll', () => updateStripFade(section), { passive: true });"
+        ));
     }
 }
