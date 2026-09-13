@@ -256,6 +256,16 @@ const HTML: &str = r#"<!DOCTYPE html>
   .rail-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .rail-meta { font-size: 11px; color: rgba(233,233,237,.45); margin-top: 2px; }
   .rail-section + .rail-section { margin-top: 12px; }
+  .rail-label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .rail-label .link { font-size: 11px; text-transform: none; letter-spacing: 0; }
+  .rail-row.awaiting .rail-meta { color: #d2cefd; }
+  .rail-foot { font-size: 10.5px; line-height: 1.5; color: rgba(233,233,237,.38); padding: 8px 9px 4px; }
+  .elsewhere { display: flex; gap: 10px; align-items: center; border: 1px solid rgba(233,233,237,.14); border-radius: 8px; padding: 10px 14px; font-size: 13px; line-height: 1.45; margin-top: 12px; }
+  .elsewhere .glyph { color: var(--accent-300); flex: none; }
+  .elsewhere .title { font-weight: 500; }
+  .elsewhere .link { margin-left: auto; white-space: nowrap; flex: none; }
+  .empty-state:has(+ .elsewhere) { margin-bottom: 0; }
+  .elsewhere.under-empty { margin: 12px auto auto; max-width: 52ch; align-self: center; }
 
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #conversation { flex: 1; overflow-y: auto; padding: 22px 24px 18px; display: flex; flex-direction: column; }
@@ -376,17 +386,25 @@ const HTML: &str = r#"<!DOCTYPE html>
   .archive-msg .text.empty, .archive-attachment .meta { color: rgba(233,233,237,.45); font-style: italic; }
   .archive-attachment { padding: 4px 0 4px 16px; font-size: 13px; }
 
-  @media (max-width: 420px) {
-    #status-values .optional { display: none; }
-  }
+  /* When the strip is tight, values yield in this order: egress, then
+     the sandbox, then the model. Chips and the writer dot never yield. */
+  @media (max-width: 1040px) { #status-values .yield-1 { display: none; } }
+  @media (max-width: 860px) { #status-values .yield-2 { display: none; } }
+  @media (max-width: 560px) { #status-values .yield-3 { display: none; } }
   @media (max-width: 720px) {
     #shell { flex-direction: column; }
-    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; gap: 12px; padding: 8px 10px; overflow: hidden; }
-    .rail-section { display: flex; gap: 6px; align-items: center; min-width: 0; flex: 1 1 0; }
+    /* Two strips: conversations, then archives. Each scrolls sideways;
+       one tab per row, titles cut at 18 characters; nothing overlaps. */
+    #rail { width: auto; border-right: none; border-bottom: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; overflow: hidden; }
+    .rail-section { display: flex; gap: 6px; align-items: center; flex: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
     .rail-section + .rail-section { margin-top: 0; }
-    .rail-label { flex: none; padding: 6px 0 4px; }
-    .rail-row { width: auto; min-width: 0; flex: 0 1 auto; white-space: nowrap; }
+    .rail-label { flex: none; padding: 4px 0; gap: 6px; }
+    #rail-conversations, #rail-archives { display: flex; gap: 6px; flex: none; }
+    .rail-row { width: auto; flex: none; white-space: nowrap; padding: 6px 9px; margin-bottom: 0; }
+    .rail-title { max-width: 18ch; }
     .rail-meta { display: none; }
+    .rail-foot { display: none; }
+    .rail-row.awaiting .rail-title::before { content: '○ '; color: #d2cefd; }
     .msg-user, .msg-assistant, .approval, .block { max-width: 92%; }
     #thread { max-width: none; }
     #status { flex-wrap: wrap; }
@@ -411,7 +429,7 @@ const HTML: &str = r#"<!DOCTYPE html>
 </header>
 <div id="shell">
   <nav id="rail" aria-label="Conversations and archives" hidden>
-    <div class="rail-section"><div class="rail-label">Conversations</div><div id="rail-conversations"></div></div>
+    <div class="rail-section"><div class="rail-label"><span>Conversations</span><button id="rail-new" class="link" type="button">+ new</button></div><div id="rail-conversations"></div><div id="rail-foot" class="rail-foot"></div></div>
     <div class="rail-section"><div class="rail-label">Archives</div><div id="rail-archives"></div></div>
   </nav>
   <main id="main">
@@ -446,6 +464,8 @@ const backToLive = document.getElementById('back-to-live');
 const rail = document.getElementById('rail');
 const railConversations = document.getElementById('rail-conversations');
 const railArchives = document.getElementById('rail-archives');
+const railNew = document.getElementById('rail-new');
+const railFoot = document.getElementById('rail-foot');
 const haltedBanner = document.getElementById('halted-banner');
 const banners = document.getElementById('banners');
 const statusValues = document.getElementById('status-values');
@@ -456,7 +476,61 @@ const record = document.getElementById('record');
 // One conversation per browser today. POST /api/chat always wakes agent
 // "default" on channel "webchat", conversation "webchat-default".
 const AGENT_ID = 'default';
-const WEBCHAT_LOG_ID = 'default/webchat/webchat-default';
+// --- Conversations ---
+// A conversation is its key. The page mints one on "+ new"; the record
+// knows it only once the first message is logged. A page with no #c=
+// opens the legacy key. Two tabs on one key are one conversation.
+const LEGACY_CONVERSATION = 'webchat-default';
+const KEY_SHAPE = /^c-[0-9a-f]{12}$/;
+const TURN_OPEN_ERROR = 'turn open';
+const ELSEWHERE_PLACEHOLDER = 'A turn is open in another tab — it will appear here when it ends';
+const DECISION_ELSEWHERE = 'This approval belongs to another conversation. Open it to decide.';
+const DRAFT_TITLE = 'New conversation';
+const ELSEWHERE_POLL_MS = 3000;
+let currentKey = LEGACY_CONVERSATION;   // the conversation this page writes to
+let draft = null;                       // a minted key nothing has been sent to yet
+let resumed = null;                     // { key, title, count }: opened by URL, not on the list
+let elsewhereTurn = null;               // { age, seenAt }: the viewed conversation's turn runs in another tab
+let elsewhereTimer = null;
+let currentTurn = null;                 // { key, controller } while this page streams a turn
+let railRows = [];                      // webchat rows from /api/sessions
+let railRowsAt = 0;                     // when railRows were fetched
+let switchedAt = 0;                     // when the page last changed conversation
+function logIdFor(key) { return AGENT_ID + '/webchat/' + key; }
+function currentLogId() { return logIdFor(currentKey); }
+function keyOf(logId) { return String(logId || '').split('/')[2] || ''; }
+function conversationFromHash() {
+  const m = /^#c=([^&]+)$/.exec(location.hash);
+  if (!m) return null;
+  const key = m[1];
+  return key === LEGACY_CONVERSATION || KEY_SHAPE.test(key) ? key : null;
+}
+function mintKey() {
+  const bytes = new Uint8Array(6);
+  crypto.getRandomValues(bytes);
+  return 'c-' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+function ageWords(seconds) {
+  const s = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' min';
+  const h = Math.floor(m / 60);
+  return h < 48 ? h + ' h' : Math.floor(h / 24) + ' d';
+}
+function sinceWords(iso) {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const s = Math.floor((Date.now() - t) / 1000);
+  return s < 60 ? 'just now' : ageWords(s);
+}
+function windowWords(seconds) {
+  if (!isSet(seconds)) return null;
+  const s = Number(seconds);
+  if (s % 3600 === 0) return (s / 3600) + ' h';
+  if (s % 60 === 0) return (s / 60) + ' min';
+  return s + ' s';
+}
 const REFUSAL_PREFIX = 'sandbox error: ';
 
 // The sole path from a value to the DOM. A browser renders textContent
@@ -615,14 +689,26 @@ function setTurn(text) {
   turnline.hidden = false;
   setText(turntext, text);
 }
+// The field is sized to what it shows, the placeholder included: a
+// locked sentence that does not fit one line gets a second, never a
+// clip.
+function fitComposer() {
+  const held = input.value;
+  if (!held) input.value = input.placeholder;
+  input.style.height = 'auto';
+  input.style.height = Math.min(160, input.scrollHeight) + 'px';
+  if (!held) input.value = '';
+}
 function lockComposer(placeholder) {
   input.disabled = true; sendBtn.disabled = true; composer.classList.add('busy');
   input.placeholder = placeholder;
+  fitComposer();
 }
 function unlockComposer() {
-  if (halted) return;
+  if (halted || elsewhereTurn) return;
   input.disabled = false; sendBtn.disabled = false; composer.classList.remove('busy');
   input.placeholder = 'Message your agent';
+  fitComposer();
 }
 function setHalted() {
   halted = true;
@@ -745,7 +831,7 @@ function renderApproval(ev) {
   const submit = async (decision) => {
     approveBtn.disabled = true;
     denyBtn.disabled = true;
-    const body = { decision };
+    const body = { decision, conversation: currentKey };
     const r = reason.value.trim();
     if (r) body.reason = r;
     card.dataset.decision = decision;
@@ -756,6 +842,14 @@ function renderApproval(ev) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
+      if (res.status === 403) {
+        // The gateway says this request was raised elsewhere. The card
+        // should not have been here; the link is the way to it.
+        approveBtn.disabled = false;
+        denyBtn.disabled = false;
+        card.appendChild(el('div', 'approval-note', DECISION_ELSEWHERE));
+        return;
+      }
       if (!turnOpen) {
         // No stream will carry the ack; the reply is the ack.
         let reply = null;
@@ -837,6 +931,9 @@ async function send() {
   setTurn('thinking');
   const userNode = addUser(text);
   startEventPolling();
+  const key = currentKey;
+  const controller = new AbortController();
+  currentTurn = { key, controller };
 
   liveAssistant = null;
   liveReceived = '';
@@ -847,9 +944,11 @@ async function send() {
     res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, conversation: key }),
+      signal: controller.signal,
     });
   } catch (e) {
+    if (controller.signal.aborted) return;
     userNode.remove();
     finishTurn();
     input.value = text;
@@ -864,6 +963,13 @@ async function send() {
     finishTurn();
     input.value = text;
     if (res.status === 503) { setHalted(); return; }
+    if (res.status === 409) {
+      // The gateway says a turn is already open in this conversation:
+      // another tab's, not a guess. The text waits in the composer.
+      let body = null;
+      try { body = await res.json(); } catch (e) { body = null; }
+      if (body && body.error === TURN_OPEN_ERROR) { setElsewhereTurn(body.age_seconds); return; }
+    }
     let msg;
     if (res.status === 429) {
       const ra = parseInt(res.headers.get('Retry-After') || '', 10);
@@ -877,6 +983,8 @@ async function send() {
     return;
   }
 
+  // The record knows this conversation now.
+  if (draft === key) { draft = null; renderRail(); }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   try {
@@ -920,16 +1028,19 @@ async function send() {
   } catch (e) {
     // The socket died mid-stream; fall through to the cut-off marking.
   }
+  // Switched away mid-turn: the stream was abandoned, not the turn. The
+  // gateway runs it to its end and the record holds what it produced.
+  if (controller.signal.aborted) return;
   if (!terminal) {
     if (liveAssistant) {
       const line = el('div', 'cutoff', 'cut off — the stream ended without a done event · ');
       const retry = el('button', 'link', 'retry');
       retry.type = 'button';
-      retry.addEventListener('click', () => loadTranscript(WEBCHAT_LOG_ID));
+      retry.addEventListener('click', () => loadTranscript(currentLogId()));
       line.appendChild(retry);
       liveAssistant.appendChild(line);
     } else {
-      showNotice(null, 'Connection lost · ', () => loadTranscript(WEBCHAT_LOG_ID));
+      showNotice(null, 'Connection lost · ', () => loadTranscript(currentLogId()));
     }
   }
   settleOpenApproval();
@@ -942,6 +1053,7 @@ async function send() {
 }
 function finishTurn() {
   turnOpen = false;
+  currentTurn = null;
   stopEventPolling();
   setTurn(null);
   unlockComposer();
@@ -965,7 +1077,7 @@ const toolRows = new Map();      // call id -> entry
 const decisionLines = new Map(); // action key -> decision line node
 
 async function loadTranscript(id) {
-  setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE);
+  setReadOnly(id === currentLogId() ? null : OTHER_SESSION_NOTICE);
   let page = null;
   try {
     const res = await fetch('/api/sessions/' + encodeURIComponent(id) + '/events');
@@ -982,18 +1094,34 @@ async function loadTranscript(id) {
   decisionLines.clear();
   lastSeq = -1;
   recordSummary = page;
-  if (page.events.length === 0 && id === WEBCHAT_LOG_ID) { showEmptyState(); return; }
+  if (id === currentLogId()) {
+    if (page.events.length === 0) {
+      // A key with no record is a draft, not an error.
+      if (currentKey !== LEGACY_CONVERSATION) draft = currentKey;
+      resumed = null;
+    } else {
+      // Opened by key and not on the list: the row is drawn from what
+      // the record holds, and says so.
+      const first = page.events.find((ev) => ev.kind === 'user_message');
+      resumed = { key: currentKey, title: first ? String(first.content || '') : '', count: page.events.filter((ev) => ev.kind === 'user_message').length };
+    }
+  }
+  if (page.events.length === 0 && id === currentLogId()) { showEmptyState(); renderRail(); renderElsewhereLine(); return; }
   for (const ev of page.events) renderEvent(ev, false);
+  renderRail();
+  renderElsewhereLine();
   scrollToEnd();
 }
 
 async function pollEvents() {
   let page;
+  const key = currentKey;
   try {
-    const res = await fetch('/api/sessions/' + encodeURIComponent(WEBCHAT_LOG_ID) + '/events?after=' + Math.max(lastSeq, 0));
+    const res = await fetch('/api/sessions/' + encodeURIComponent(logIdFor(key)) + '/events?after=' + Math.max(lastSeq, 0));
     if (!res.ok) return;
     page = await res.json();
   } catch (e) { return; }
+  if (key !== currentKey) return;
   if (!page || !Array.isArray(page.events)) return;
   recordSummary = page;
   for (const ev of page.events) {
@@ -1380,7 +1508,7 @@ function setReadOnly(text) {
   readonlyBar.hidden = text === null;
   if (text !== null) setText(readonlyText, text);
 }
-backToLive.addEventListener('click', () => { activeArchive = null; loadTranscript(WEBCHAT_LOG_ID); });
+backToLive.addEventListener('click', () => { activeArchive = null; loadTranscript(currentLogId()); });
 
 // --- Rail: only when there is somewhere to go ---
 let activeArchive = null;
@@ -1396,22 +1524,87 @@ async function loadRail() {
     const res = await fetch('/api/sessions');
     if (res.ok) rows = await res.json();
   } catch (e) { rows = []; }
-  railSources = sources;
-  if (!sources.length) { rail.hidden = true; return; }
-  rail.hidden = false;
+  railSources = Array.isArray(sources) ? sources : [];
+  railRows = Array.isArray(rows) ? rows.filter((r) => r && r.channel === 'webchat') : [];
+  railRowsAt = Date.now();
+  renderRail();
+  renderElsewhereLine();
+  syncElsewhereTurn();
+}
+// The rows the rail draws: a draft first, then the list newest first,
+// then a key opened by URL that the list does not hold.
+function railEntries() {
+  const entries = [];
+  if (draft) entries.push({ key: draft, draft: true });
+  for (const r of railRows) {
+    if (r.log_id === logIdFor(draft)) continue;
+    entries.push({
+      key: keyOf(r.log_id),
+      title: isSet(r.first_message) ? String(r.first_message) : '',
+      count: r.message_count,
+      last: r.last_activity,
+      turnOpen: r.turn_open === true,
+    });
+  }
+  if (resumed && !entries.some((e) => e.key === resumed.key)) {
+    entries.push({ key: resumed.key, title: resumed.title, count: resumed.count, resumed: true });
+  }
+  return entries;
+}
+// The title of a conversation as the rail shows it: its first message
+// as written, or its key when there is none.
+function titleFor(key) {
+  const entry = railEntries().find((e) => e.key === key);
+  if (!entry) return key;
+  if (entry.draft) return DRAFT_TITLE;
+  return entry.title || entry.key;
+}
+// Every conversation holding a pending request, with how long ago it
+// asked: this one's from `mine`, the others' from `elsewhere`.
+function pendingByKey() {
+  const pending = new Map();
+  if (!approvals) return pending;
+  for (const m of approvals.mine || []) {
+    const k = keyOf(m.agent_id);
+    if (k && !pending.has(k)) pending.set(k, m.age_seconds);
+  }
+  for (const e of approvals.elsewhere || []) {
+    if (e.conversation && !pending.has(e.conversation)) pending.set(e.conversation, e.age_seconds);
+  }
+  return pending;
+}
+function railFootnote() {
+  const w = status && status.gateway ? windowWords(status.gateway.session_expiry_secs) : null;
+  return 'titles are each conversation\'s first message · quiet for ' +
+    (w || 'the gateway\'s window') + ' drops off this list, not out of the record';
+}
+function renderRail() {
+  const entries = railEntries();
+  // The rail exists when there is more than one destination: a second
+  // conversation, a draft, or an archive.
+  rail.hidden = entries.length + railSources.length < 2;
+  if (rail.hidden) return;
   clear(railConversations);
-  const mine = rows.find(r => r.log_id === WEBCHAT_LOG_ID);
-  const conv = el('button', 'rail-row' + (activeArchive === null ? ' active' : ''));
-  conv.type = 'button';
-  conv.appendChild(el('div', 'rail-title', 'webchat'));
-  const bits = [];
-  if (mine) bits.push(mine.message_count + ' msg');
-  if (approvalCurrent) bits.push('1 awaiting you');
-  conv.appendChild(el('div', 'rail-meta', bits.join(' · ') || 'no messages yet'));
-  conv.addEventListener('click', () => { activeArchive = null; loadTranscript(WEBCHAT_LOG_ID); });
-  railConversations.appendChild(conv);
+  const pending = pendingByKey();
+  for (const e of entries) {
+    const here = e.key === currentKey && activeArchive === null;
+    const row = el('button', 'rail-row' + (here ? ' active' : '') + (pending.has(e.key) ? ' awaiting' : ''));
+    row.type = 'button';
+    row.appendChild(el('div', 'rail-title', e.draft ? DRAFT_TITLE : (e.title || e.key)));
+    let meta;
+    if (e.draft) meta = 'unsent';
+    else if (pending.has(e.key)) meta = '○ awaiting you · asked ' + ageWords(pending.get(e.key)) + ' ago';
+    else meta = (isSet(e.count) ? e.count + ' msg' : 'no messages yet') + (e.last ? ' · ' + sinceWords(e.last) : '');
+    if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) meta += ' · turn open';
+    if (e.resumed) meta += ' · resumed';
+    row.appendChild(el('div', 'rail-meta', meta));
+    row.addEventListener('click', () => openConversation(e.key));
+    railConversations.appendChild(row);
+  }
+  setText(railFoot, railFootnote());
+  revealActiveRow();
   clear(railArchives);
-  for (const source of sources) {
+  for (const source of railSources) {
     const row = el('button', 'rail-row' + (activeArchive === source.id ? ' active' : ''));
     row.type = 'button';
     row.appendChild(el('div', 'rail-title', source.source_account));
@@ -1420,6 +1613,147 @@ async function loadRail() {
     row.addEventListener('click', () => loadArchiveConversations(source));
     railArchives.appendChild(row);
   }
+}
+
+// On the narrow layout the strip scrolls sideways; "you are here" has
+// to be on screen after a switch. Only the strip moves, never the page.
+function revealActiveRow() {
+  const active = railConversations.querySelector('.rail-row.active');
+  const strip = active ? active.closest('.rail-section') : null;
+  if (!active || !strip || strip.scrollWidth <= strip.clientWidth) return;
+  const r = active.getBoundingClientRect();
+  const s = strip.getBoundingClientRect();
+  if (r.left < s.left + 8 || r.right > s.right - 8) strip.scrollLeft += (r.left - s.left) - 8;
+}
+
+// --- Switching conversations ---
+function startDraft() {
+  draft = mintKey();
+  openConversation(draft);
+}
+// The URL carries the key, so a conversation can be reopened by link.
+// Navigation goes through the hash; the hashchange handler switches.
+function openConversation(key) {
+  activeArchive = null;
+  if (conversationFromHash() !== key) { location.hash = 'c=' + key; return; }
+  switchTo(key);
+}
+function switchTo(key) {
+  // Leaving mid-turn abandons the stream, not the turn: the gateway
+  // runs it to its end and writes its rows, and the rail row says
+  // "turn open" from the list until then. No stream is held for a
+  // conversation not being viewed.
+  if (currentTurn && currentTurn.key !== key) abortTurn();
+  // Leaving a draft discards it: nothing was recorded, so nothing is lost.
+  if (draft && draft !== key) draft = null;
+  currentKey = key;
+  switchedAt = Date.now();
+  resumed = null;
+  elsewhereTurn = null;
+  stopElsewherePolling();
+  approvalCurrent = null;
+  approvalQueue.length = 0;
+  liveAssistant = null;
+  liveReceived = '';
+  hideNotice();
+  setTurn(null);
+  unlockComposer();
+  loadTranscript(currentLogId()).then(() => loadStatus());
+}
+function abortTurn() {
+  if (currentTurn) currentTurn.controller.abort();
+  currentTurn = null;
+  turnOpen = false;
+  stopEventPolling();
+}
+
+// --- A turn open in another tab (state 19) ---
+// Learned from the gateway: the chat route's "turn open" reply, or the
+// list row's turn_open. Aged from the gateway's claim, not from now.
+function setElsewhereTurn(ageSeconds) {
+  elsewhereTurn = { age: Number(ageSeconds) || 0, seenAt: Date.now() };
+  renderElsewhereTurn();
+  renderRail();
+  startElsewherePolling();
+}
+function renderElsewhereTurn() {
+  if (!elsewhereTurn) return;
+  lockComposer(ELSEWHERE_PLACEHOLDER);
+  const age = elsewhereTurn.age + Math.floor((Date.now() - elsewhereTurn.seenAt) / 1000);
+  setTurn('turn open · elsewhere · ' + ageWords(age));
+}
+// The list is the gateway's claim; the latest fetch wins, and a list
+// fetched before the last switch says nothing about this conversation.
+function syncElsewhereTurn() {
+  if (turnOpen || railRowsAt < switchedAt) return;
+  const row = railRows.find((r) => keyOf(r.log_id) === currentKey);
+  if (row && row.turn_open === true) {
+    const first = !elsewhereTurn;
+    elsewhereTurn = { age: Number(row.turn_open_age_seconds) || 0, seenAt: Date.now() };
+    renderElsewhereTurn();
+    if (first) { renderRail(); startElsewherePolling(); }
+  }
+}
+function startElsewherePolling() {
+  if (elsewhereTimer) return;
+  startEventPolling();
+  elsewhereTimer = setInterval(checkElsewhereTurn, ELSEWHERE_POLL_MS);
+}
+function stopElsewherePolling() {
+  if (elsewhereTimer) { clearInterval(elsewhereTimer); elsewhereTimer = null; }
+  if (!turnOpen) stopEventPolling();
+}
+async function checkElsewhereTurn() {
+  const key = currentKey;
+  let rows;
+  try {
+    const res = await fetch('/api/sessions');
+    if (!res.ok) return;
+    rows = await res.json();
+  } catch (e) { return; }
+  if (key !== currentKey || !Array.isArray(rows)) return;
+  railRows = rows.filter((r) => r && r.channel === 'webchat');
+  railRowsAt = Date.now();
+  const row = railRows.find((r) => keyOf(r.log_id) === key);
+  if (row && row.turn_open === true) {
+    elsewhereTurn = { age: Number(row.turn_open_age_seconds) || 0, seenAt: Date.now() };
+    renderElsewhereTurn();
+    renderRail();
+    return;
+  }
+  // The turn ended. What it produced is in the record; draw it from there.
+  elsewhereTurn = null;
+  stopElsewherePolling();
+  setTurn(null);
+  unlockComposer();
+  loadTranscript(currentLogId());
+}
+
+// --- An approval waiting in another conversation (state 18) ---
+// One line in the thread that names the conversation and links to it.
+// It carries no decision: the card is drawn only where it was raised.
+function renderElsewhereLine() {
+  const existing = document.getElementById('elsewhere-line');
+  const elsewhere = approvals && Array.isArray(approvals.elsewhere) ? approvals.elsewhere : [];
+  if (!elsewhere.length || activeArchive !== null) { if (existing) existing.remove(); return; }
+  const target = elsewhere[0];
+  const line = el('div', 'elsewhere');
+  line.id = 'elsewhere-line';
+  line.setAttribute('role', 'status');
+  line.appendChild(el('span', 'glyph', '○'));
+  const text = el('span');
+  const tier = tierWord(target.requested_tier);
+  text.appendChild(document.createTextNode((tier ? 'A ' + tier : 'An') + ' approval is waiting in "'));
+  text.appendChild(el('span', 'title', titleFor(target.conversation)));
+  text.appendChild(document.createTextNode('". It can only be decided there.'));
+  line.appendChild(text);
+  const link = el('button', 'link', 'open it →');
+  link.type = 'button';
+  link.addEventListener('click', () => openConversation(target.conversation));
+  line.appendChild(link);
+  if (thread.querySelector('.empty-state')) line.classList.add('under-empty');
+  if (existing) existing.replaceWith(line);
+  else thread.appendChild(line);
 }
 
 // --- Imported archives: read-only views ---
@@ -1541,11 +1875,16 @@ async function loadStatus() {
     snapshot = await res.json();
   } catch (e) { return; }
   status = snapshot;
+  const key = currentKey;
   try {
-    const res = await fetch('/api/approvals');
+    const res = await fetch('/api/approvals?c=' + encodeURIComponent(key));
     if (res.ok) approvals = await res.json();
   } catch (e) { /* the badge and the restore wait for the next poll */ }
+  if (key !== currentKey) return;
   renderStatus();
+  renderRail();
+  renderElsewhereLine();
+  syncElsewhereTurn();
   restorePendingCards();
 }
 // A pending decision outlives the stream that carried it: after a
@@ -1555,6 +1894,8 @@ async function loadStatus() {
 function restorePendingCards() {
   if (!approvals || !Array.isArray(approvals.mine)) return;
   for (const req of approvals.mine) {
+    // Only this conversation's: a card is drawn where it was raised.
+    if (keyOf(req.agent_id) !== currentKey) continue;
     if (document.getElementById('approval-' + req.request_id)) continue;
     if (approvalCurrent && approvalCurrent.request_id === req.request_id) continue;
     renderApproval(req);
@@ -1615,22 +1956,32 @@ function renderStatusValues() {
   const items = [];
   const agent = status.agent || {};
   const ag = el('span', null, agent.id || 'default');
-  if (agent.model) ag.appendChild(el('span', 'optional', ' · ' + agent.model));
-  items.push({ node: ag, optional: false });
+  if (agent.model) ag.appendChild(el('span', 'yield-3', ' · ' + agent.model));
+  items.push({ node: ag, yield: 0 });
   const sandbox = status.sandbox || {};
   if (sandbox.mode) {
     const sb = el('span', null, sandbox.mode + ' ');
     sb.appendChild(el('span', 'hedge', '(configured)'));
-    items.push({ node: sb, optional: true });
+    items.push({ node: sb, yield: 2 });
   }
   const egress = status.egress || {};
-  if (egress.mode) items.push({ node: el('span', null, egress.mode === 'none' ? 'no egress' : 'egress: ' + egress.mode), optional: true });
+  if (egress.mode) items.push({ node: el('span', null, egress.mode === 'none' ? 'no egress' : 'egress: ' + egress.mode), yield: 1 });
   const budget = status.budget || {};
   if (budget.mode && budget.mode !== 'off' && isSet(budget.remaining_usd_micros)) {
     const b = el('span', 'mono', usd(budget.remaining_usd_micros) + ' left ' +
       (budget.window === 'day' ? 'today' : 'this ' + budget.window));
     b.title = 'agent budget · all channels';
-    items.push({ node: b, optional: false });
+    items.push({ node: b, yield: 0 });
+  }
+  // An approval waiting in another conversation of this page's own.
+  // Absent at zero; never "0 awaiting you elsewhere".
+  const elsewhere = approvals && Array.isArray(approvals.elsewhere) ? approvals.elsewhere : [];
+  if (elsewhere.length > 0) {
+    const chip = el('button', 'chip chip-outline', elsewhere.length + ' awaiting you elsewhere');
+    chip.type = 'button';
+    chip.title = 'Open the conversation holding the approval';
+    chip.addEventListener('click', () => openConversation(elsewhere[0].conversation));
+    items.push({ node: chip, yield: 0 });
   }
   const others = approvals && approvals.other_channels ? approvals.other_channels : { count: 0, by_channel: {} };
   if (others.count > 0) {
@@ -1638,7 +1989,7 @@ function renderStatusValues() {
     const where = channels.length === 1 ? channels[0] : 'other channels';
     const badge = el('span', 'chip chip-neutral', others.count + ' on ' + where);
     badge.title = 'pending approvals on other channels · decide there';
-    items.push({ node: badge, optional: false });
+    items.push({ node: badge, yield: 0 });
   }
   const dot = el('button', 'writer-dot' + (audit.writer_halted ? ' halted' : ''));
   dot.type = 'button';
@@ -1646,9 +1997,9 @@ function renderStatusValues() {
   dot.setAttribute('aria-label', dot.title);
   dot.setAttribute('aria-haspopup', 'dialog');
   dot.addEventListener('click', () => setRecordOpen(record.hidden));
-  items.push({ node: dot, optional: false });
+  items.push({ node: dot, yield: 0 });
   items.forEach((item, i) => {
-    const wrap = el('span', 'item' + (item.optional ? ' optional' : ''));
+    const wrap = el('span', 'item' + (item.yield ? ' yield-' + item.yield : ''));
     if (i) wrap.appendChild(el('span', 'sep', '· '));
     wrap.appendChild(item.node);
     statusValues.appendChild(wrap);
@@ -1953,7 +2304,10 @@ input.addEventListener('input', () => {
 // History first, then the status poll that may restore a pending
 // card: the card's command joins from a call row, and that row has to
 // be on screen before the join looks for it.
-loadTranscript(WEBCHAT_LOG_ID).then(() => {
+currentKey = conversationFromHash() || LEGACY_CONVERSATION;
+window.addEventListener('hashchange', () => switchTo(conversationFromHash() || LEGACY_CONVERSATION));
+railNew.addEventListener('click', startDraft);
+loadTranscript(currentLogId()).then(() => {
   loadStatus();
   setInterval(loadStatus, STATUS_POLL_MS);
 });
@@ -2986,7 +3340,8 @@ pub async fn status_snapshot(
 
     json!({
         "generated_at": chrono::Utc::now().to_rfc3339(),
-        "gateway": { "version": env!("CARGO_PKG_VERSION"), "loopback_only": true, "port": port },
+        "gateway": { "version": env!("CARGO_PKG_VERSION"), "loopback_only": true,
+        "session_expiry_secs": cfg.session_expiry_secs, "port": port },
         "agent": agent,
         "egress": egress,
         "sandbox": sandbox,
@@ -3171,6 +3526,7 @@ fn approvals_snapshot_for(
             if viewing.as_deref().is_some_and(|v| v != entry.agent_id) {
                 elsewhere.push(json!({
                     "conversation": conversation_of(&entry.agent_id),
+                    "requested_tier": entry.requested_tier,
                     "requested_at": entry.requested_at.to_rfc3339(),
                     "age_seconds": entry.age_seconds,
                 }));
@@ -4487,8 +4843,8 @@ mod tests {
         );
         assert!(
             script.contains("backToLive.addEventListener('click'")
-                && script.contains("loadTranscript(WEBCHAT_LOG_ID)"),
-            "the way back returns to the live conversation"
+                && script.contains("loadTranscript(currentLogId())"),
+            "the way back returns to the conversation this page writes to"
         );
     }
 
@@ -4543,7 +4899,7 @@ mod tests {
     fn the_composer_is_absent_for_a_session_it_does_not_write_to() {
         let script = page_script();
         assert!(
-            script.contains("setReadOnly(id === WEBCHAT_LOG_ID ? null : OTHER_SESSION_NOTICE)"),
+            script.contains("setReadOnly(id === currentLogId() ? null : OTHER_SESSION_NOTICE)"),
             "loading a transcript decides from the session it is showing",
         );
         assert!(
@@ -6531,6 +6887,10 @@ mod tests {
         let elsewhere = v["elsewhere"].as_array().unwrap();
         assert_eq!(elsewhere.len(), 1);
         assert_eq!(elsewhere[0]["conversation"], "c-ba9876543210");
+        assert_eq!(
+            elsewhere[0]["requested_tier"], "tier3",
+            "the tier, so the line can name it"
+        );
         assert!(elsewhere[0]["age_seconds"].is_u64());
         assert!(elsewhere[0]["requested_at"].is_string());
         let text = serde_json::to_string(&elsewhere).unwrap();
@@ -6586,6 +6946,7 @@ mod tests {
         let a = store.get_or_create("webchat", "c-0123456789ab").unwrap();
         store.record_message(&a.id).unwrap();
         store.get_or_create("webchat", "c-ba9876543210").unwrap();
+        store.get_or_create("webchat", "webchat-default").unwrap();
         store.get_or_create("telegram", "-1001234").unwrap();
 
         let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
@@ -6618,6 +6979,20 @@ mod tests {
             },
         )
         .unwrap();
+        let legacy = log.handle_for(wirken_audit::SessionId::new(
+            "default/webchat/webchat-default".to_string(),
+        ));
+        log.append(
+            &legacy,
+            TrustLevel::User,
+            SessionEvent::UserMessage {
+                content: "What's in the deploy log from last night?".into(),
+                inbound_id: None,
+                adapter_id: Some("webchat".into()),
+                sender_id: None,
+            },
+        )
+        .unwrap();
         let telegram = log.handle_for(wirken_audit::SessionId::new(
             "default/telegram/-1001234".to_string(),
         ));
@@ -6640,7 +7015,7 @@ mod tests {
         let rows = super::super::session::active_session_rows(&cfg, None).expect("rows");
         let v = conversation_rows(&cfg, rows, &turns);
         let rows = v.as_array().unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         let by_id = |id: &str| {
             rows.iter()
                 .find(|r| r["log_id"] == id)
@@ -6661,6 +7036,11 @@ mod tests {
             b["turn_open_age_seconds"].is_u64(),
             "aged from the claim, not from now"
         );
+        let legacy = by_id("default/webchat/webchat-default");
+        assert_eq!(
+            legacy["first_message"], "What's in the deploy log from last night?",
+            "the legacy conversation is titled like any other"
+        );
         let t = by_id("default/telegram/-1001234");
         assert!(
             t["first_message"].is_null(),
@@ -6672,6 +7052,254 @@ mod tests {
         assert!(
             SERVER_SOURCE.contains("conversation_rows(&cfg, rows, &open_turns)"),
             "the list route serves these rows"
+        );
+    }
+
+    /// The status snapshot carries the quiet window so the rail footnote
+    /// can name it instead of assuming a day.
+    #[tokio::test]
+    async fn the_status_carries_the_quiet_window_for_the_rail_footnote() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        assert_eq!(
+            snap["gateway"]["session_expiry_secs"],
+            cfg.session_expiry_secs
+        );
+        assert!(page_script().contains("windowWords(status.gateway.session_expiry_secs)"));
+    }
+
+    /// The rail exists when there is more than one destination: a
+    /// second conversation, a draft, or an archive. One conversation
+    /// and nothing else is the default screen.
+    #[test]
+    fn the_rail_appears_only_with_a_second_destination() {
+        let script = page_script();
+        assert!(script.contains("rail.hidden = entries.length + railSources.length < 2;"));
+        let entries = script
+            .split_once("function railEntries() {")
+            .expect("rail entries")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            entries.contains("if (draft) entries.push({ key: draft, draft: true });"),
+            "a draft is a destination"
+        );
+        assert!(
+            entries.contains("resumed: true"),
+            "a key opened by URL is a destination"
+        );
+        assert!(
+            entries.contains("r.channel === 'webchat'")
+                || script.contains("r.channel === 'webchat'"),
+            "other channels are not destinations"
+        );
+    }
+
+    /// A send names its conversation. A 409 whose error is exactly
+    /// "turn open" is state 19: the text stays in the composer, the
+    /// composer locks with the fixed placeholder, and the turn line
+    /// ages from the gateway's claim, never from the page's clock alone.
+    #[test]
+    fn a_send_names_its_conversation_and_reads_turn_open() {
+        let script = page_script();
+        assert!(script.contains("body: JSON.stringify({ message: text, conversation: key }),"));
+        assert!(script.contains("const TURN_OPEN_ERROR = 'turn open';"));
+        assert!(script.contains("if (body && body.error === TURN_OPEN_ERROR) { setElsewhereTurn(body.age_seconds); return; }"));
+        assert!(script.contains("const ELSEWHERE_PLACEHOLDER = 'A turn is open in another tab — it will appear here when it ends';"));
+        assert!(script.contains("setTurn('turn open · elsewhere · ' + ageWords(age));"));
+        let render = script
+            .split_once("function renderElsewhereTurn() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            render.contains(
+                "elsewhereTurn.age + Math.floor((Date.now() - elsewhereTurn.seenAt) / 1000)"
+            ),
+            "aged from the claim"
+        );
+        assert!(render.contains("lockComposer(ELSEWHERE_PLACEHOLDER)"));
+        assert!(
+            script.contains("if (halted || elsewhereTurn) return;"),
+            "the composer stays locked while the turn runs elsewhere"
+        );
+        assert!(
+            script.contains("elsewhereTurn = { age: Number(row.turn_open_age_seconds) || 0, seenAt: Date.now() };"),
+            "the list row is the other source"
+        );
+    }
+
+    /// Leaving a conversation mid-turn abandons the stream, not the
+    /// turn: the reader is aborted, nothing is marked cut off, and the
+    /// rail row says "turn open" from the list until the record has
+    /// the turn's end.
+    #[test]
+    fn leaving_mid_turn_abandons_the_stream_not_the_turn() {
+        let script = page_script();
+        assert!(script.contains("if (currentTurn && currentTurn.key !== key) abortTurn();"));
+        assert!(script.contains("if (currentTurn) currentTurn.controller.abort();"));
+        let send = script
+            .split_once("async function send() {")
+            .unwrap()
+            .1
+            .split_once("\nfunction finishTurn()")
+            .unwrap()
+            .0;
+        let aborted = send
+            .find("if (controller.signal.aborted) return;\n  if (!terminal) {")
+            .expect("abort is checked before the cut-off marking");
+        let cut = send
+            .find("'cut off — the stream ended without a done event · '")
+            .unwrap();
+        assert!(aborted < cut);
+        assert!(script.contains("if (e.turnOpen || (e.key === currentKey && (turnOpen || elsewhereTurn))) meta += ' · turn open';"));
+        assert!(
+            script.contains("turnOpen: r.turn_open === true,"),
+            "from the list, not a guess"
+        );
+    }
+
+    /// A card is drawn only in the conversation that raised it. The
+    /// list is asked per conversation, the restore filters on the key,
+    /// the decision names the key, and the three other surfaces (chip,
+    /// rail marker, linking line) navigate and carry no decision.
+    #[test]
+    fn approvals_are_drawn_only_where_they_were_raised() {
+        let script = page_script();
+        assert!(script.contains("fetch('/api/approvals?c=' + encodeURIComponent(key))"));
+        assert!(script.contains("if (keyOf(req.agent_id) !== currentKey) continue;"));
+        assert!(script.contains("const body = { decision, conversation: currentKey };"));
+        assert!(
+            script.contains("card.appendChild(el('div', 'approval-note', DECISION_ELSEWHERE));"),
+            "a refusal is shown in the fixed words"
+        );
+        let line = script
+            .split_once("function renderElsewhereLine() {")
+            .expect("linking line")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        for decision in [
+            "btn-deny",
+            "btn-allow",
+            "submit(",
+            "'Deny'",
+            "'Approve'",
+            "/api/approvals/",
+        ] {
+            assert!(
+                !line.contains(decision),
+                "the line decides nothing: {decision}"
+            );
+        }
+        assert!(
+            line.contains("openConversation(target.conversation)"),
+            "the line navigates"
+        );
+        assert!(
+            line.contains("titleFor(target.conversation)"),
+            "the title comes from the rail, not the approvals route"
+        );
+        let strip = script
+            .split_once("function renderStatusValues() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            strip.contains("if (elsewhere.length > 0) {"),
+            "the chip is absent at zero"
+        );
+        assert!(strip.contains("elsewhere.length + ' awaiting you elsewhere'"));
+        assert!(strip.contains("chip.title = 'Open the conversation holding the approval';"));
+        assert!(
+            strip.contains("openConversation(elsewhere[0].conversation)"),
+            "the chip navigates"
+        );
+        assert!(
+            strip.contains("yield: 1 })")
+                && strip.contains("yield: 2 })")
+                && strip.contains("'yield-3'"),
+            "egress yields first, then the sandbox, then the model"
+        );
+        let rail = script
+            .split_once("function renderRail() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(rail.contains("'○ awaiting you · asked ' + ageWords(pending.get(e.key)) + ' ago'"));
+        assert!(
+            !rail.contains("/api/approvals/"),
+            "the rail decides nothing"
+        );
+    }
+
+    /// The fixed strings for states 17 to 21, verbatim.
+    #[test]
+    fn the_fixed_strings_for_states_17_to_21_are_verbatim() {
+        let script = page_script();
+        assert!(HTML.contains(">+ new</button>"));
+        assert!(script.contains("const DRAFT_TITLE = 'New conversation';"));
+        assert!(script.contains("if (e.draft) meta = 'unsent';"));
+        assert!(script.contains("meta += ' · turn open';"));
+        assert!(script.contains("meta += ' · resumed';"));
+        assert!(
+            script.contains("' approval is waiting in \"'")
+                && script.contains("'\". It can only be decided there.'")
+        );
+        assert!(script.contains("el('button', 'link', 'open it →')"));
+        assert!(script.contains("'titles are each conversation\\'s first message · quiet for '"));
+        assert!(script.contains("' drops off this list, not out of the record'"));
+        assert_eq!(
+            script
+                .split_once("const DECISION_ELSEWHERE = '")
+                .unwrap()
+                .1
+                .split_once("';")
+                .unwrap()
+                .0,
+            super::DECISION_WRONG_CONVERSATION,
+            "the page's refusal text is the gateway's"
+        );
+    }
+
+    /// A key is minted on the page from random bytes, carried in the
+    /// URL hash, and validated on the way back in; a page with no key
+    /// opens the legacy conversation, and every title reaches the DOM
+    /// through the one text sink, falling back to the key.
+    #[test]
+    fn a_key_is_minted_locally_and_carried_in_the_hash() {
+        let script = page_script();
+        assert!(script.contains("crypto.getRandomValues(bytes);"));
+        assert!(script.contains("const KEY_SHAPE = /^c-[0-9a-f]{12}$/;"));
+        assert!(script.contains("const m = /^#c=([^&]+)$/.exec(location.hash);"));
+        assert!(
+            script.contains(
+                "return key === LEGACY_CONVERSATION || KEY_SHAPE.test(key) ? key : null;"
+            )
+        );
+        assert!(script.contains("currentKey = conversationFromHash() || LEGACY_CONVERSATION;"));
+        assert!(script.contains("window.addEventListener('hashchange'"));
+        assert!(script.contains("location.hash = 'c=' + key;"));
+        assert!(script.contains(
+            "row.appendChild(el('div', 'rail-title', e.draft ? DRAFT_TITLE : (e.title || e.key)));"
+        ));
+        assert!(
+            script.contains("if (currentKey !== LEGACY_CONVERSATION) draft = currentKey;"),
+            "a key with no record is a draft"
+        );
+        assert!(
+            script.contains("if (draft && draft !== key) draft = null;"),
+            "leaving a draft discards it"
         );
     }
 }

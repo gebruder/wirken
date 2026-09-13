@@ -51,6 +51,28 @@ tagged.
 
 ### Added
 
+- The WebChat page holds more than one conversation. A conversation
+  is its key; `+ new` on the rail mints one (`c-` plus twelve hex
+  digits) and the record knows it once the first message is logged.
+  The URL carries the key as `#c=` so a conversation can be reopened
+  by link; a page with no key opens the legacy conversation, and a key
+  with no record is a draft, not an error. The rail appears when there
+  is more than one destination and lists each conversation by its
+  first message (or its key when the record holds none), with its
+  message count and age, `unsent` for a draft, `turn open` when the
+  gateway says a turn is running, `resumed` for a conversation
+  reached by link that the list does not hold, and a footnote naming
+  the quiet window after which a conversation leaves the list but not
+  the record. An approval card is drawn only in the conversation that
+  raised it; elsewhere it is an outline chip on the status line
+  (`N awaiting you elsewhere`), an `awaiting you` rail row, and one
+  linking line in the thread, all of which navigate and none of which
+  decide. A send into a conversation whose turn is open in another tab
+  locks the composer with the gateway's own "turn open" and ages the
+  turn line from the gateway's claim; leaving a conversation mid-turn
+  abandons this page's stream, not the turn. The status snapshot
+  carries `gateway.session_expiry_secs` and an approval waiting
+  elsewhere carries its tier.
 - The WebChat routes take the conversation from the request, the
   first of two steps toward more than one conversation on the page.
   A key is `c-` plus twelve hex digits as the page will mint it, or
