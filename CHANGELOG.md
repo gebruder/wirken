@@ -10,72 +10,33 @@ tagged.
 
 ## [Unreleased]
 
-### Changed
+## [1.21.0] - 2026-09-15
 
-- `wirken audit verify` prints its trust-anchor caveat once. The
-  human output carried it twice, on stderr before the report and again
-  at the top of the report; now the report says it once, and only the
-  JSON format keeps the stderr line so the caveat still reaches a
-  person while stdout stays machine-readable.
-- An audit alarm on the WebChat page is a chip and a panel, not a
-  sentence that replaces the status line. The chip reads `N audit
-  alarms` and never yields; the panel lists each record with its
-  class from the audit crate's own registry (an older gateway's
-  `verify_error` is proceed-class and is said not to be evidence of
-  tampering; a chain break blocks the next start until acknowledged),
-  its time, session, row and record-signature status, hashes as
-  fingerprints, and the copyable `wirken audit acknowledge --all`
-  with one sentence on what that does. The page still cannot
-  acknowledge. The status snapshot carries `blocking`,
-  fingerprinted `expected_hash`/`actual_hash`, and `detail` for a
-  message an old gateway wrote into the hash field; host name and
-  pid stay on disk.
-- Five small follow-ups on the WebChat page from the multi-conversation
-  review. A wrapped status line no longer starts a row with a
-  separator; the separators are measured after layout. One approval's
-  age is one number: the card and the rail tick from one anchor set
-  from the gateway's age when the request is first seen. Text sitting
-  in a composer locked by a turn open in another tab is named `held —
-  not sent`, and nothing promises to send it. On the narrow layout the
-  conversations strip fades at its right edge while more tabs lie past
-  it, and the `Conversations` label with `+ new` stays put as a sticky
-  left cell while the tabs scroll under it.
-- The WebChat status route carries no host: `siem` is the target and
-  pipe kind only, without the ingestion host, and `org` is the pinned
-  key fingerprint and when it was applied, without the config URL's
-  host. A test walks every string in the snapshot for anything shaped
-  like a hostname. The credentials route reports a refused MCP entry as
-  refused and no more; the proxy's reason named the flag that would
-  weaken the check, and the hatch banner already covers the case where
-  it is set. An unreadable alarm log stays unknown rather than zero,
-  with a test. The About footer says that an underlined value opens in
-  place.
-- The WebChat page is rebuilt to Phase 1 of the UX handoff. The
-  conversation is one column: user bubbles, assistant text rendered
-  from a small markdown grammar (paragraphs, inline code, fenced code
-  with a copy button) and emitted as DOM nodes, so text written by
-  anyone else stays inert. The approval card shows the tier and the
-  action key the gate computed, an age rather than a countdown, and
-  puts Deny first; a decision leaves a line in the transcript instead
-  of removing the card. A sandbox refusal is its own block rather than
-  red text appended to the answer. The composer is locked while a turn
-  is open, and a request the gateway refused goes back into the
-  composer rather than into the transcript. A left rail exists only
-  when there is somewhere to go (an imported archive); other channels'
-  sessions no longer open as transcripts from this page, though the
-  read routes are unchanged. The page declares its language, landmarks
-  and labels, announces the conversation to assistive technology,
-  keeps a visible focus ring, carries an inline favicon, collapses
-  below 720px, and makes no request outside its own origin.
+The WebChat page is new in this release, rebuilt against a design
+handoff with a set of honesty rules the page's tests now pin: nothing
+is drawn before its row is on the record, nothing unknown is drawn as
+zero or green, and nothing the page shows comes from anywhere but the
+gateway. Every route it reads is new or changed; the notes below list
+them. One CLI fix rides along.
 
-- The chat stream ends with `{"type":"done"}` before the socket
-  closes, sent once the outbound audit row has been offered to the
-  writer. A stream that closes without it is marked as cut off by the
-  page; previously the two were indistinguishable.
+### For upgraders
 
-- `POST /api/chat` answers `503 {"error":"audit writer halted"}` when
-  the audit writer refuses the inbound row, instead of running a turn
-  nothing records. The page locks its composer and says why.
+- A browser tab left open on the old WebChat page keeps posting to
+  `/api/chat` without a `conversation` and is served the legacy
+  conversation, so it keeps working; reload it to get the new page.
+- `POST /api/chat` answers `409 {"error":"turn open","age_seconds":N}`
+  when the conversation already has a turn in flight, and
+  `503 {"error":"audit writer halted"}` when the audit writer has
+  stopped. Anything scripted against the old always-200 stream should
+  read both.
+- `POST /api/approvals/{id}` refuses a decision that does not name the
+  conversation the request was raised in (a missing `conversation` is
+  the legacy one), and refuses any request from another channel.
+- `GET /api/status` on the webchat port never carries a host: the
+  SIEM ingestion host and the org config host are withheld, and a
+  refused MCP entry on `GET /api/credentials` carries no reason text.
+- `wirken audit verify` prints its trust-anchor caveat once in the
+  human report; only `--format json` keeps the stderr line.
 
 ### Added
 
@@ -101,6 +62,7 @@ tagged.
   abandons this page's stream, not the turn. The status snapshot
   carries `gateway.session_expiry_secs` and an approval waiting
   elsewhere carries its tier.
+
 - The WebChat routes take the conversation from the request, the
   first of two steps toward more than one conversation on the page.
   A key is `c-` plus twelve hex digits as the page will mint it, or
@@ -127,6 +89,7 @@ tagged.
   control sequences stripped, cut at 120 characters; null for other
   channels), `turn_open` and `turn_open_age_seconds`. The page is unchanged and keeps using the
   legacy conversation.
+
 - The WebChat page has two more read routes for the About panel.
   `GET /api/capabilities` lists what the default agent is offered:
   every tool with the tier the gate would compute, except that a tool
@@ -151,6 +114,7 @@ tagged.
   status poll; an unreadable store or a busy agent is named, not drawn
   as empty. `AgentRuntime::snapshot_tool_defs_for` is public so the
   route lists the same tools the model is sent.
+
 - `GET /api/status` on the webchat port: one snapshot of the
   gateway's posture, built from files, config and in-memory lists
   only. It reports the agent's provider and model, the sandbox mode
@@ -195,6 +159,75 @@ tagged.
   session's calls, tokens and cost.
 
 ### Changed
+
+- `wirken audit verify` prints its trust-anchor caveat once. The
+  human output carried it twice, on stderr before the report and again
+  at the top of the report; now the report says it once, and only the
+  JSON format keeps the stderr line so the caveat still reaches a
+  person while stdout stays machine-readable.
+
+- An audit alarm on the WebChat page is a chip and a panel, not a
+  sentence that replaces the status line. The chip reads `N audit
+  alarms` and never yields; the panel lists each record with its
+  class from the audit crate's own registry (an older gateway's
+  `verify_error` is proceed-class and is said not to be evidence of
+  tampering; a chain break blocks the next start until acknowledged),
+  its time, session, row and record-signature status, hashes as
+  fingerprints, and the copyable `wirken audit acknowledge --all`
+  with one sentence on what that does. The page still cannot
+  acknowledge. The status snapshot carries `blocking`,
+  fingerprinted `expected_hash`/`actual_hash`, and `detail` for a
+  message an old gateway wrote into the hash field; host name and
+  pid stay on disk.
+
+- Five small follow-ups on the WebChat page from the multi-conversation
+  review. A wrapped status line no longer starts a row with a
+  separator; the separators are measured after layout. One approval's
+  age is one number: the card and the rail tick from one anchor set
+  from the gateway's age when the request is first seen. Text sitting
+  in a composer locked by a turn open in another tab is named `held —
+  not sent`, and nothing promises to send it. On the narrow layout the
+  conversations strip fades at its right edge while more tabs lie past
+  it, and the `Conversations` label with `+ new` stays put as a sticky
+  left cell while the tabs scroll under it.
+
+- The WebChat status route carries no host: `siem` is the target and
+  pipe kind only, without the ingestion host, and `org` is the pinned
+  key fingerprint and when it was applied, without the config URL's
+  host. A test walks every string in the snapshot for anything shaped
+  like a hostname. The credentials route reports a refused MCP entry as
+  refused and no more; the proxy's reason named the flag that would
+  weaken the check, and the hatch banner already covers the case where
+  it is set. An unreadable alarm log stays unknown rather than zero,
+  with a test. The About footer says that an underlined value opens in
+  place.
+
+- The WebChat page is rebuilt to Phase 1 of the UX handoff. The
+  conversation is one column: user bubbles, assistant text rendered
+  from a small markdown grammar (paragraphs, inline code, fenced code
+  with a copy button) and emitted as DOM nodes, so text written by
+  anyone else stays inert. The approval card shows the tier and the
+  action key the gate computed, an age rather than a countdown, and
+  puts Deny first; a decision leaves a line in the transcript instead
+  of removing the card. A sandbox refusal is its own block rather than
+  red text appended to the answer. The composer is locked while a turn
+  is open, and a request the gateway refused goes back into the
+  composer rather than into the transcript. A left rail exists only
+  when there is somewhere to go (an imported archive); other channels'
+  sessions no longer open as transcripts from this page, though the
+  read routes are unchanged. The page declares its language, landmarks
+  and labels, announces the conversation to assistive technology,
+  keeps a visible focus ring, carries an inline favicon, collapses
+  below 720px, and makes no request outside its own origin.
+
+- The chat stream ends with `{"type":"done"}` before the socket
+  closes, sent once the outbound audit row has been offered to the
+  writer. A stream that closes without it is marked as cut off by the
+  page; previously the two were indistinguishable.
+
+- `POST /api/chat` answers `503 {"error":"audit writer halted"}` when
+  the audit writer refuses the inbound row, instead of running a turn
+  nothing records. The page locks its composer and says why.
 
 - `POST /api/verify` on the webchat port runs the audit chain
   verifier and returns its verdict with the anchor caveat attached:
