@@ -12,6 +12,19 @@ tagged.
 
 ### Changed
 
+- An audit alarm on the WebChat page is a chip and a panel, not a
+  sentence that replaces the status line. The chip reads `N audit
+  alarms` and never yields; the panel lists each record with its
+  class from the audit crate's own registry (an older gateway's
+  `verify_error` is proceed-class and is said not to be evidence of
+  tampering; a chain break blocks the next start until acknowledged),
+  its time, session, row and record-signature status, hashes as
+  fingerprints, and the copyable `wirken audit acknowledge --all`
+  with one sentence on what that does. The page still cannot
+  acknowledge. The status snapshot carries `blocking`,
+  fingerprinted `expected_hash`/`actual_hash`, and `detail` for a
+  message an old gateway wrote into the hash field; host name and
+  pid stay on disk.
 - Five small follow-ups on the WebChat page from the multi-conversation
   review. A wrapped status line no longer starts a row with a
   separator; the separators are measured after layout. One approval's

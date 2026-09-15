@@ -245,6 +245,13 @@ const HTML: &str = r#"<!DOCTYPE html>
   .cap-list .cap + .cap { margin-top: 3px; }
   .cap-list .hedge { display: block; font-size: 11.5px; color: rgba(233,233,237,.5); margin-bottom: 3px; }
   .popover .foot { margin-top: 12px; font-size: 11px; color: rgba(233,233,237,.45); }
+  .alarm-entry { padding: 8px 0; border-top: 1px solid rgba(233,233,237,.08); }
+  .alarm-entry:first-of-type { border-top: none; padding-top: 0; }
+  .alarm-entry .type { font-weight: 500; color: var(--danger-text); }
+  .alarm-entry .class { color: rgba(233,233,237,.75); }
+  .alarm-entry .hedge { display: block; font-size: 11.5px; color: rgba(233,233,237,.5); margin-top: 2px; overflow-wrap: anywhere; }
+  .alarm-entry .hedge.bad { color: var(--danger-text); }
+  #alarms .code { margin-top: 10px; }
 
   #shell { flex: 1; display: flex; min-height: 0; }
   /* Rail: exists only when there is somewhere to go. */
@@ -427,6 +434,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   <div id="status-values" hidden></div>
   <div id="about" class="popover" role="dialog" aria-label="About this gateway" hidden></div>
   <div id="record" class="popover" role="dialog" aria-label="Record of this session" hidden></div>
+  <div id="alarms" class="popover" role="dialog" aria-label="Audit alarms" hidden></div>
 </header>
 <div id="shell">
   <nav id="rail" aria-label="Conversations and archives" hidden>
@@ -473,6 +481,7 @@ const statusValues = document.getElementById('status-values');
 const wordmark = document.getElementById('wordmark');
 const about = document.getElementById('about');
 const record = document.getElementById('record');
+const alarmsPanel = document.getElementById('alarms');
 
 // One conversation per browser today. POST /api/chat always wakes agent
 // "default" on channel "webchat", conversation "webchat-default".
@@ -1509,7 +1518,71 @@ async function runVerify() {
 }
 function setRecordOpen(open) {
   record.hidden = !open;
-  if (open) { setAboutOpen(false); renderRecord(); }
+  if (open) { setAboutOpen(false); alarmsPanel.hidden = true; renderRecord(); }
+}
+
+// --- Audit alarms ---
+// One row per record on disk, each named by its own class: the route
+// says whether a record blocks the next gateway start (tamper-class)
+// or is proceed-class, and the only proceed-class type today is an
+// older gateway's verify error. The command to acknowledge is here to
+// copy; the page never runs it, since acknowledging archives the
+// alarm file and is an operator action with audit consequences.
+const ACKNOWLEDGE_COMMAND = 'wirken audit acknowledge --all';
+function alarmClass(r) {
+  if (r.blocking === true) return 'blocks the next gateway start until acknowledged';
+  if (r.blocking === false) {
+    return r.alarm_type === 'verify_error'
+      ? 'from an older gateway\'s verify pass · not evidence of tampering by this gateway'
+      : 'proceed-class · does not block the gateway';
+  }
+  return null;
+}
+function signatureWords(status) {
+  if (status === 'verified') return 'record signature verified';
+  if (status === 'no_key') return 'record signed · no key loaded to check it';
+  if (status === 'unsigned') return 'record unsigned';
+  if (status === 'tampered') return 'record signature invalid';
+  return null;
+}
+function renderAlarms() {
+  clear(alarmsPanel);
+  const audit = status && status.audit ? status.audit : {};
+  const alarms = Array.isArray(audit.alarms) ? audit.alarms : null;
+  const head = el('h2', null, 'Audit alarms');
+  head.appendChild(alarms ? el('span', 'meta', alarms.length + ' on disk') : unknownNode());
+  alarmsPanel.appendChild(head);
+  if (!alarms) { alarmsPanel.appendChild(el('div', 'foot', 'The alarm log could not be read.')); return; }
+  if (!alarms.length) { alarmsPanel.appendChild(el('div', 'foot', 'None on disk.')); return; }
+  for (const r of alarms) {
+    const entry = el('div', 'alarm-entry');
+    const line = el('div');
+    line.appendChild(el('span', 'type', r.alarm_type || 'unknown'));
+    const cls = alarmClass(r);
+    if (cls) line.appendChild(el('span', 'class', ' · ' + cls));
+    else { line.appendChild(document.createTextNode(' · class ')); line.appendChild(unknownNode()); }
+    entry.appendChild(line);
+    const where = [];
+    if (r.timestamp) where.push(ymdhm(r.timestamp));
+    if (r.session_id) where.push('session ' + r.session_id);
+    if (isSet(r.seq)) where.push('row ' + r.seq);
+    const sig = signatureWords(r.status);
+    if (sig) where.push(sig);
+    if (where.length) entry.appendChild(el('span', 'hedge' + (r.status === 'tampered' ? ' bad' : ''), where.join(' · ')));
+    if (r.expected_hash || r.actual_hash) {
+      entry.appendChild(el('span', 'hedge', 'expected ' + (r.expected_hash || 'unknown') + ' · found ' + (r.actual_hash || 'unknown')));
+    }
+    if (r.detail) entry.appendChild(el('span', 'hedge', 'recorded: ' + r.detail));
+    alarmsPanel.appendChild(entry);
+  }
+  alarmsPanel.appendChild(codeBlock(null, ACKNOWLEDGE_COMMAND));
+  alarmsPanel.appendChild(el('div', 'foot',
+    'Acknowledging archives the alarm file under a timestamp. It verifies and repairs nothing. The page cannot acknowledge; the chip stays until the CLI has.'));
+}
+function setAlarmsOpen(open) {
+  if (open && !status) return;
+  alarmsPanel.hidden = !open;
+  if (open) { setAboutOpen(false); record.hidden = true; renderAlarms(); }
 }
 
 // --- Composer ownership ---
@@ -1949,6 +2022,7 @@ function renderStatus() {
   renderBanners();
   renderStatusValues();
   if (!about.hidden) renderAbout();
+  if (!alarmsPanel.hidden) renderAlarms();
   if (status.audit && status.audit.writer_halted && !halted) setHalted();
 }
 function hatchBanner(name, copy) {
@@ -1981,19 +2055,6 @@ function renderStatusValues() {
   clear(statusValues);
   const audit = status.audit || {};
   const alarms = Array.isArray(audit.alarms) ? audit.alarms : [];
-  if (alarms.length) {
-    // The strip becomes the alarm. It stays until the record is
-    // acknowledged from the CLI; the page cannot clear it.
-    const r = alarms[0];
-    const parts = ['Tamper alarm', r.alarm_type];
-    if (r.session_id) parts.push('session ' + r.session_id);
-    if (isSet(r.seq)) parts.push('row ' + r.seq);
-    if (alarms.length > 1) parts.push('+' + (alarms.length - 1) + ' more');
-    parts.push('acknowledge with wirken audit acknowledge --all');
-    statusValues.appendChild(el('span', 'alarm', parts.join(' · ')));
-    statusValues.hidden = false;
-    return;
-  }
   // Each item carries its own separator so an item hidden at a narrow
   // width takes its separator with it.
   const items = [];
@@ -2015,6 +2076,18 @@ function renderStatusValues() {
       (budget.window === 'day' ? 'today' : 'this ' + budget.window));
     b.title = 'agent budget · all channels';
     items.push({ node: b, yield: 0 });
+  }
+  // Alarm records on disk. A chip that opens the panel; it stays until
+  // the record is acknowledged from the CLI, which the page cannot do.
+  // Absent at zero. What each record is, the panel says from the
+  // record's own class, never from the word "tamper" alone.
+  if (alarms.length) {
+    const chip = el('button', 'chip chip-danger alarm-chip', alarms.length + (alarms.length === 1 ? ' audit alarm' : ' audit alarms'));
+    chip.type = 'button';
+    chip.title = 'Audit alarms on disk · open';
+    chip.setAttribute('aria-haspopup', 'dialog');
+    chip.addEventListener('click', () => setAlarmsOpen(alarmsPanel.hidden));
+    items.push({ node: chip, yield: 0 });
   }
   // An approval waiting in another conversation of this page's own.
   // Absent at zero; never "0 awaiting you elsewhere".
@@ -2326,7 +2399,7 @@ function renderVaultRows(grid) {
 }
 function setAboutOpen(open) {
   if (open && !status) return;
-  if (open) record.hidden = true;
+  if (open) { record.hidden = true; alarmsPanel.hidden = true; }
   about.hidden = !open;
   wordmark.setAttribute('aria-expanded', open ? 'true' : 'false');
   // The fetch is started first so the first draw says "fetching", not
@@ -2338,6 +2411,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!about.hidden) { setAboutOpen(false); wordmark.focus(); }
   if (!record.hidden) setRecordOpen(false);
+  if (!alarmsPanel.hidden) setAlarmsOpen(false);
 });
 document.addEventListener('click', (e) => {
   // A click whose target was re-rendered away mid-click (the verify
@@ -2345,6 +2419,7 @@ document.addEventListener('click', (e) => {
   if (!e.target.isConnected) return;
   if (!about.hidden && !about.contains(e.target) && !wordmark.contains(e.target)) setAboutOpen(false);
   if (!record.hidden && !record.contains(e.target) && !(e.target.closest && e.target.closest('.writer-dot'))) setRecordOpen(false);
+  if (!alarmsPanel.hidden && !alarmsPanel.contains(e.target) && !(e.target.closest && e.target.closest('.alarm-chip'))) setAlarmsOpen(false);
 });
 
 // --- Wiring ---
@@ -3335,15 +3410,28 @@ pub async fn status_snapshot(
     });
 
     // --- audit: alarms on disk, key id, session count, writer state ---
+    // Each record with its class from the crate's own registry: a
+    // proceed-class type (today only an older gateway's verify error)
+    // does not block the next start and is not evidence of tampering;
+    // everything else blocks until acknowledged. Hashes are cut to a
+    // fingerprint; an old record that wrote a message into the hash
+    // field is carried as `detail`. Host name and pid stay on disk.
     let alarms = inputs.alarm_log.read_all().ok().map(|records| {
         records
             .into_iter()
             .map(|r| {
+                let (expected, _) = alarm_hash_field(&r.record.expected_hash);
+                let (actual, detail) = alarm_hash_field(&r.record.actual_hash);
                 json!({
                     "timestamp": r.record.timestamp,
                     "alarm_type": r.record.alarm_type,
+                    "blocking": !wirken_audit::ACKNOWLEDGE_PROCEED_TYPES
+                        .contains(&r.record.alarm_type.as_str()),
                     "session_id": r.record.session_id,
                     "seq": r.record.seq,
+                    "expected_hash": expected,
+                    "actual_hash": actual,
+                    "detail": detail,
                     "status": match r.status {
                         AlarmVerifyStatus::Verified => "verified",
                         AlarmVerifyStatus::NoKey => "no_key",
@@ -4320,6 +4408,28 @@ pub fn credentials_snapshot(cfg: &wirken_gateway::config::GatewayConfig) -> serd
         "metadata_available": false,
         "connectors": connectors,
     })
+}
+
+/// An alarm record's hash field, split into what it holds: a hash,
+/// returned as a 16-character fingerprint, or a message an older
+/// gateway wrote there in place of one, returned as detail with
+/// control sequences stripped and cut at 160 characters.
+fn alarm_hash_field(v: &Option<String>) -> (Option<String>, Option<String>) {
+    match v {
+        None => (None, None),
+        Some(s) if s.len() >= 16 && s.chars().all(|c| c.is_ascii_hexdigit()) => {
+            (Some(s.chars().take(16).collect()), None)
+        }
+        Some(s) => (
+            None,
+            Some(
+                wirken_agent::ansi::strip_control_sequences(s)
+                    .chars()
+                    .take(160)
+                    .collect(),
+            ),
+        ),
+    }
 }
 
 /// What a verify result from this route means, in the words the CLI
@@ -5370,8 +5480,8 @@ mod tests {
         assert!(HTML.contains(".unknown { color: var(--accent-300); }"));
         assert!(HTML.contains(r#"<div id="status-values" hidden>"#));
         assert!(
-            script.contains("acknowledge with wirken audit acknowledge --all"),
-            "the alarm strip names the CLI verb"
+            script.contains("const ACKNOWLEDGE_COMMAND = 'wirken audit acknowledge --all';"),
+            "the alarm panel names the CLI verb"
         );
         assert!(
             script.contains("agent budget · all channels"),
@@ -7423,5 +7533,125 @@ mod tests {
         assert!(script.contains(
             "section.addEventListener('scroll', () => updateStripFade(section), { passive: true });"
         ));
+    }
+
+    /// An alarm on disk is a chip on the status line and a panel, not a
+    /// sentence that replaces the strip. Each record is named by its
+    /// own class from the crate's registry: an older gateway's verify
+    /// error is proceed-class and said not to be evidence of tampering;
+    /// a chain break blocks the next start. The command to acknowledge
+    /// is there to copy; the page never runs it, and host name and pid
+    /// never leave the disk.
+    #[tokio::test]
+    async fn an_alarm_is_a_chip_and_a_panel_the_page_cannot_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let log = AlarmLog::new(dir.path());
+        let record = |alarm_type: &str,
+                      session: Option<&str>,
+                      seq: Option<u64>,
+                      expected: Option<&str>,
+                      actual: Option<&str>| {
+            wirken_audit::AlarmRecord {
+                timestamp: "2026-05-15T15:33:37Z".into(),
+                alarm_type: alarm_type.into(),
+                session_id: session.map(str::to_string),
+                seq,
+                expected_hash: expected.map(str::to_string),
+                actual_hash: actual.map(str::to_string),
+                hostname: "strawberrymilk".into(),
+                gateway_pid: 165881,
+                hmac: None,
+            }
+        };
+        log.append(&record(
+            "verify_error",
+            None,
+            None,
+            None,
+            Some("serialization error: missing field `actor_kind`\x1b[0m"),
+        ))
+        .unwrap();
+        log.append(&record(
+            "chain_broken",
+            Some("default/telegram/-1001234"),
+            Some(512),
+            Some("9f3c1a7be02d44c1aaaaaaaaaaaaaaaa"),
+            Some("0000000000000000bbbbbbbbbbbbbbbb"),
+        ))
+        .unwrap();
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        let alarms = snap["audit"]["alarms"].as_array().expect("alarms listed");
+        assert_eq!(alarms.len(), 2);
+        let old = &alarms[0];
+        assert_eq!(old["alarm_type"], "verify_error");
+        assert_eq!(
+            old["blocking"], false,
+            "proceed-class, from the crate's registry"
+        );
+        assert_eq!(
+            old["detail"],
+            "serialization error: missing field `actor_kind`"
+        );
+        assert!(old["actual_hash"].is_null() && old["expected_hash"].is_null());
+        let broken = &alarms[1];
+        assert_eq!(broken["blocking"], true);
+        assert_eq!(broken["expected_hash"], "9f3c1a7be02d44c1");
+        assert_eq!(broken["actual_hash"], "0000000000000000");
+        assert!(broken["detail"].is_null());
+        assert_eq!(broken["seq"], 512);
+        let text = serde_json::to_string(&snap).unwrap();
+        assert!(
+            !text.contains("strawberrymilk") && !text.contains("165881"),
+            "host and pid stay on disk"
+        );
+
+        let script = page_script();
+        let strip = script
+            .split_once("function renderStatusValues() {")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(
+            !strip.contains("Tamper alarm"),
+            "the strip does not call every record tampering"
+        );
+        assert!(
+            strip.contains("if (alarms.length) {") && strip.contains("' audit alarm'"),
+            "a chip, absent at zero"
+        );
+        assert!(strip.contains("yield: 0 });"), "the chip never yields");
+        let panel = script
+            .split_once("function renderAlarms() {")
+            .expect("the panel renderer")
+            .1
+            .split_once("\nfunction setAlarmsOpen")
+            .unwrap()
+            .0;
+        assert!(
+            !panel.contains("fetch(") && !panel.contains("POST"),
+            "the page never acknowledges"
+        );
+        assert!(
+            panel.contains("codeBlock(null, ACKNOWLEDGE_COMMAND)"),
+            "the command is there to copy"
+        );
+        assert!(script.contains(
+            "if (r.blocking === true) return 'blocks the next gateway start until acknowledged';"
+        ));
+        assert!(script.contains(
+            "'from an older gateway\\'s verify pass · not evidence of tampering by this gateway'"
+        ));
+        assert!(
+            script.contains("line.appendChild(unknownNode());"),
+            "a record of unknown class is named unknown"
+        );
+        assert!(
+            panel.contains("'The alarm log could not be read.'"),
+            "an unreadable log is named, not drawn empty"
+        );
+        assert!(script.contains("'Acknowledging archives the alarm file under a timestamp. It verifies and repairs nothing. The page cannot acknowledge; the chip stays until the CLI has.'"));
     }
 }
