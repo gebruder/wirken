@@ -311,12 +311,16 @@ pub async fn verify(format: &str, require_signed: bool, anchors: &[String]) -> R
         );
     }
 
-    if let Some(note) = &anchor_note {
-        eprintln!("  warning (audit anchor): {note}");
-    }
-
     match format {
-        "json" => print_verify_json(&result, require_signed, anchor_note.as_deref()),
+        "json" => {
+            // The note rides in the JSON body as well; this line is for
+            // the person at the terminal, kept off the machine-readable
+            // stream. The human printer says it once itself.
+            if let Some(note) = &anchor_note {
+                eprintln!("  warning (audit anchor): {note}");
+            }
+            print_verify_json(&result, require_signed, anchor_note.as_deref())
+        }
         "human" | "" => print_verify_human(&result, require_signed, anchor_note.as_deref()),
         other => anyhow::bail!("--format must be 'human' or 'json', got '{other}'"),
     }
