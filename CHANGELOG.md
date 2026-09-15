@@ -12,6 +12,11 @@ tagged.
 
 ### Changed
 
+- `wirken audit verify` prints its trust-anchor caveat once. The
+  human output carried it twice, on stderr before the report and again
+  at the top of the report; now the report says it once, and only the
+  JSON format keeps the stderr line so the caveat still reaches a
+  person while stdout stays machine-readable.
 - An audit alarm on the WebChat page is a chip and a panel, not a
   sentence that replaces the status line. The chip reads `N audit
   alarms` and never yields; the panel lists each record with its
