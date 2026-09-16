@@ -265,9 +265,18 @@ Run top to bottom. Replace `0.7.4` with the target version.
     binaries + signed checksums, and the provenance can be regenerated
     by re-running that job. See [release-signing.md](release-signing.md#build-provenance-slsa).
 
-11. **Publish.** Flip from draft to published.
+11. **Publish.** The draft's body opens with the "draft until signed"
+    placeholder the workflow wrote for you in step 6, followed by the
+    generated notes. Strip the placeholder so the published notes start
+    at the generated list, then flip from draft to published in the
+    same call. Every release through v1.21.0 went out with the
+    placeholder still on top and was cleaned up afterwards.
     ```bash
-    gh release edit v0.7.4 -R gebruder/wirken --draft=false
+    gh release view v0.7.4 -R gebruder/wirken --json body --jq .body \
+        | sed '1,/^See `docs\/release-signing.md` for the full procedure\.$/d' \
+        | sed '/./,$!d' > notes.md
+    head -1 notes.md   # must be "## What's Changed" (or the compare link on a release with no PRs)
+    gh release edit v0.7.4 -R gebruder/wirken --draft=false --notes-file notes.md
     ```
 
 12. **Smoke test.** On a fresh shell, with a scratch install dir so you
@@ -282,8 +291,9 @@ Run top to bottom. Replace `0.7.4` with the target version.
     `Checksum verified: ...`. If either is missing the release is
     broken. Go to [Recovery](#recovery-during-a-release).
 
-Post-release housekeeping: update the README Status section counts if
-any shifted (adapters, providers, skills, tests). If
+Post-release housekeeping: re-read `README.md` for any count or
+version that shifted; the gateway banner example carries the version,
+and step 2 should already have moved it. If
 `crates/audit/src/session_log.rs` changed since the previous release,
 sync the `wirken-siem` repo's compatibility table and field index in
 the same sitting. Clean up `/tmp/wirken-release` and
