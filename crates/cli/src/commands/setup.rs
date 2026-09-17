@@ -881,9 +881,17 @@ async fn setup_slack_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
-    let bot_token = super::read_secret("  Slack bot token (xoxb-...): ")?;
+    let bot_token = super::channel::prompt_with_validation(
+        "Slack bot token (xoxb-...)",
+        true,
+        super::channel::validate_slack_bot_token,
+    )?;
 
-    let app_token = super::read_secret("  Slack app token (xapp-...): ")?;
+    let app_token = super::channel::prompt_with_validation(
+        "Slack app token (xapp-...)",
+        true,
+        super::channel::validate_slack_app_token,
+    )?;
 
     // Register with the bot token as the primary
     register_channel("slack", &bot_token, cfg, data).await?;

@@ -539,6 +539,19 @@ fn resolve_with_validation(
             return Ok(v);
         }
     }
+    prompt_with_validation(label, secret, validate)
+}
+
+/// Prompt until `validate` accepts, printing the rejection and asking
+/// again. Shared by `wirken channel add` and `wirken setup` so a
+/// mistyped value re-prompts in both rather than ending the flow: a
+/// bail partway through setup leaves the operator to restart a wizard
+/// that has already written earlier answers.
+pub fn prompt_with_validation(
+    label: &str,
+    secret: bool,
+    validate: fn(&str) -> Result<()>,
+) -> Result<String> {
     loop {
         let prompt_label = format!("  {label}");
         let value = if secret {
