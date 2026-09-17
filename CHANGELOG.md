@@ -10,6 +10,99 @@ tagged.
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-09-17
+
+An outbound message now has a record of what the platform did with it.
+Until this release the id a platform assigned to a delivered message
+reached only a debug log line, and a failed send left an audit row
+indistinguishable from a delivered one. Three other recorded values
+stop disagreeing with the thing they describe.
+
+### Behaviour changes
+
+- An approval granted through the operator gate records
+  `scope: "one_shot"` on its `permission_approved` row. It recorded
+  `"persisted"`, which disagreed with the permission store, with
+  `wirken permissions list`, and with the `one-shot bypass` the runtime
+  logs on the same approval. The runtime arms a bypass that the retry
+  consumes and writes nothing to the store, so the next call of the
+  same action prompts again. A reader pinned to the two prior values
+  will not parse `one_shot`; the field is defaulted, which covers an
+  absent field rather than an unknown value.
+- Every outbound message is followed by a `delivery_confirmed` row
+  carrying the platform's own id for it, or a `delivery_failed` row
+  carrying the adapter's error. The `message.outbound` row is
+  unchanged: its target stays a gateway handle minted before the
+  adapter has sent anything, and the delivery row repeats that target,
+  which is the join between them. `OutboundMessage` and
+  `OutboundResult` carry a `correlationId` for this; the gateway mints
+  it, and all nine adapters echo it back without reading it: discord,
+  google-chat, imessage, matrix, signal, slack, teams, telegram,
+  whatsapp. The handle carries a MAC keyed per gateway process, and
+  the gateway checks the channel on it against the channel the adapter
+  authenticated as, so an adapter cannot name a session chain of its
+  own choosing. A handle failing either check is dropped with a
+  warning and nothing is appended.
+- A WhatsApp inbound message reports its platform timestamp in
+  milliseconds. The Cloud API sends unix seconds and the value went
+  into a field documented as milliseconds unscaled, three orders of
+  magnitude out. Nothing in production read that field before this
+  release, so no shipped behaviour depended on the wrong value; its
+  only readers were tests, one of which pinned it. `message.inbound`
+  now records the field as `platform_ts_millis`, omitted when the
+  adapter set none.
+- `RUST_LOG` is used as written. A `wirken=warn` directive was appended
+  after it on every path, and a later directive on the same target
+  wins while `wirken` prefix-matches every workspace crate, so any
+  operator filter naming one of them was discarded, including the
+  `RUST_LOG=wirken=info` the code recommended. The directive is now
+  the default only when `RUST_LOG` is unset or blank.
+
+### For upgraders
+
+- The `audit_events` view is recreated on every open rather than only
+  when absent, so an existing database picks up the new definition on
+  the first start after upgrading. `CREATE VIEW` does not redefine an
+  existing view, so without this the change below would have reached
+  only databases created after it. Nothing is rewritten and no row is
+  touched; only the view definition changes.
+- `wirken audit log --format json` projects a native session-log
+  event's payload into `detail`. The view extracted `$.detail`, a key
+  only a legacy-wrapped row carries, so every native event reported a
+  null: `permission_approved` with no `approved_by`, `tool_result`
+  with no output. Anything reading that field and treating null as
+  "no detail recorded" will start seeing content.
+
+### Added
+
+- `wirken permissions pending list` prints the whole request id, and
+  `show`, `approve` and `deny` accept either a full id or a prefix
+  unique to one row. An ambiguous prefix is refused with every match
+  listed.
+- `docs/release-process.md` carries release-specific tag gates, with
+  the 1.21 slack-morphism 2.28.0 live round-trip as the first entry.
+
+### Fixed
+
+- `wirken permissions pending list` printed an eight-character
+  truncation of the request id while `show`, `approve` and `deny`
+  matched on the full one, and no surface printed the full one. A
+  queued approval could be listed and never acted on, so in daemon
+  mode it could only time out.
+- Both Slack token prompts in `wirken channel add slack` and
+  `wirken setup` name the prefix they expect and reject a value
+  carrying the other one. The two tokens come from different pages of
+  the Slack console and either stored cleanly in the other's slot,
+  surfacing as an auth failure at connect time rather than at entry.
+- `cargo clippy --workspace --all-targets --all-features` passes. The
+  vault's `keychain-linux` feature left zbus with neither runtime
+  selected and no crypto backend, and `keychain-macos` was gated on
+  the feature alone rather than the target, so enabling it off an
+  Apple target compiled the macOS backend.
+- The workspace requires `slack-morphism` 2.28, the version already
+  locked. 2.28 moves the crate's datetime types from chrono to jiff;
+  no adapter-slack path reads one.
+
 ## [1.21.0] - 2026-09-15
 
 The WebChat page is new in this release, rebuilt against a design
