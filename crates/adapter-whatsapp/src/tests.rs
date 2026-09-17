@@ -37,7 +37,10 @@ fn parse_whatsapp_text_message() {
     assert_eq!(messages[0].text, "Hello wirken!");
     assert_eq!(messages[0].message_id, "wamid.abc123");
     assert_eq!(messages[0].phone_number_id, "987654");
-    assert_eq!(messages[0].timestamp, 1711900000);
+    // Cloud API sends unix seconds as a string; the IPC field is
+    // milliseconds, so the fixture's "1711900000" has to arrive
+    // scaled, not verbatim.
+    assert_eq!(messages[0].timestamp, 1_711_900_000_000);
 }
 
 #[test]

@@ -2991,11 +2991,19 @@ async fn message_loop(
                         .map_err(|e| anyhow::anyhow!("reply_to_id not utf8: {e}"))?
                         .to_string();
 
+                    // The platform's own time for this message, in
+                    // epoch millis. Zero means the adapter set none;
+                    // the field defaults to zero on the wire and no
+                    // real message predates the epoch, so the two are
+                    // not worth distinguishing.
+                    let platform_ts_millis = m.get_timestamp();
+
                     InboundAction::Message {
                         id: msg_id,
                         text,
                         sender_id,
                         sender_name,
+                        platform_ts_millis,
                         channel,
                         conversation_id,
                         reply_to_id,
@@ -3088,6 +3096,7 @@ async fn message_loop(
                 text,
                 sender_id,
                 sender_name,
+                platform_ts_millis,
                 channel,
                 conversation_id,
                 reply_to_id,
@@ -3137,6 +3146,19 @@ async fn message_loop(
                 // can correlate without parsing a free-text field.
                 let inbound_target = format!("{channel}:{id}");
                 let mut inbound_detail = serde_json::json!({ "content": &text });
+                // Recorded beside the raw platform id already on the
+                // target, so a reader can compare the two without
+                // knowing how a given platform spells a timestamp.
+                // Omitted rather than written as zero when the adapter
+                // set none.
+                if platform_ts_millis > 0
+                    && let Some(obj) = inbound_detail.as_object_mut()
+                {
+                    obj.insert(
+                        "platform_ts_millis".into(),
+                        serde_json::Value::from(platform_ts_millis),
+                    );
+                }
 
                 // Scan for prompt injection patterns
                 let threat_detail = detector.scan(&text).map(|threat| threat.to_detail_json());
@@ -3493,6 +3515,9 @@ enum InboundAction {
         text: String,
         sender_id: String,
         sender_name: String,
+        /// The platform's own time for this message in epoch millis,
+        /// or zero when the adapter set none.
+        platform_ts_millis: i64,
         channel: String,
         conversation_id: String,
         /// Thread root carried from the inbound (Slack thread_ts,

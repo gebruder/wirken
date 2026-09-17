@@ -291,10 +291,15 @@ pub(crate) fn extract_messages(json: &serde_json::Value) -> Option<Vec<WhatsAppI
                     .unwrap_or("")
                     .to_string();
 
+                // Cloud API sends this as a decimal string of unix
+                // SECONDS. The IPC field it feeds is milliseconds, so
+                // it is scaled here rather than shipping a value three
+                // orders of magnitude off.
                 let timestamp = msg
                     .get("timestamp")
                     .and_then(|t| t.as_str())
                     .and_then(|t| t.parse::<i64>().ok())
+                    .map(|secs| secs * 1000)
                     .unwrap_or(0);
 
                 messages.push(WhatsAppInbound {
