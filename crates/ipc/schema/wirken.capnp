@@ -75,6 +75,10 @@ struct OutboundMessage {
   # ID of the message to reply to (empty for new message).
   metadata @3 :Text;
   # JSON-encoded platform-specific metadata.
+  correlationId @4 :Text;
+  # Opaque handle the gateway uses to tie the OutboundResult back to
+  # the audit row it already wrote for this send. Adapters treat it as
+  # bytes and echo it; only the gateway reads it.
 }
 
 struct OutboundResult {
@@ -84,6 +88,11 @@ struct OutboundResult {
   # Platform-assigned message ID if successful.
   error @2 :Text;
   # Error description if failed.
+  correlationId @3 :Text;
+  # Echoed verbatim from the OutboundMessage that produced this
+  # result. Empty from an adapter built before the field existed,
+  # which the gateway records as an uncorrelated delivery rather than
+  # attaching it to the wrong row.
 }
 
 # --- Session ---

@@ -213,7 +213,7 @@ fn build_heartbeat() {
 #[test]
 fn build_outbound_result() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut msg, true, "wamid.123", "");
+    convert::build_outbound_result(&mut msg, true, "wamid.123", "", "");
     // Should not panic
 }
 

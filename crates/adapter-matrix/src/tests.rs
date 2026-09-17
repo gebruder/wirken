@@ -211,7 +211,7 @@ fn parse_outbound_no_reply() {
 #[test]
 fn build_outbound_result() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut msg, true, "$sent:example.org", "");
+    convert::build_outbound_result(&mut msg, true, "$sent:example.org", "", "");
 
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
@@ -349,7 +349,7 @@ async fn full_message_flow_simulation() {
 
     // Phase 4: Delivery result
     let mut result = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut result, true, "$sent:example.org", "");
+    convert::build_outbound_result(&mut result, true, "$sent:example.org", "", "");
     aw.write_message(&result).await.unwrap();
 
     let received: capnp::message::Reader<capnp::serialize::OwnedSegments> =

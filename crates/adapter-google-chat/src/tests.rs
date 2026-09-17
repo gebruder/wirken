@@ -265,7 +265,7 @@ fn build_heartbeat() {
 #[test]
 fn build_outbound_result() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut msg, true, "spaces/S/messages/M", "");
+    convert::build_outbound_result(&mut msg, true, "spaces/S/messages/M", "", "");
 
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
@@ -401,7 +401,7 @@ async fn full_message_flow_simulation() {
 
     // Phase 4: Adapter sends delivery result
     let mut result = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut result, true, "spaces/S/messages/REPLY_1", "");
+    convert::build_outbound_result(&mut result, true, "spaces/S/messages/REPLY_1", "", "");
     aw.write_message(&result).await.unwrap();
 
     // Gateway reads result

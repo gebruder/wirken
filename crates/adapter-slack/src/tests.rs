@@ -192,7 +192,7 @@ fn mention_gate_channel_with_mention_passes() {
 #[test]
 fn build_outbound_result_success() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut msg, true, "1711234567.890456", "");
+    convert::build_outbound_result(&mut msg, true, "1711234567.890456", "", "");
 
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
@@ -387,6 +387,7 @@ async fn full_message_flow_simulation() {
         m.set_text("It's 3:14 PM.");
         m.set_reply_to_id("1711234567.890123");
         m.set_metadata("{}");
+        m.set_correlation_id("agent/slack/C98765\u{1f}slack:out:7d431598");
     }
     gw.write_message(&outbound).await.unwrap();
 
@@ -397,10 +398,21 @@ async fn full_message_flow_simulation() {
     assert_eq!(fields.channel_id, "C98765");
     assert_eq!(fields.text, "It's 3:14 PM.");
     assert_eq!(fields.thread_ts.unwrap(), "1711234567.890123");
+    // Carried through untouched: the adapter never interprets it.
+    assert_eq!(
+        fields.correlation_id,
+        "agent/slack/C98765\u{1f}slack:out:7d431598"
+    );
 
-    // Phase 4: Adapter sends delivery result
+    // Phase 4: Adapter sends delivery result, echoing the handle
     let mut result = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut result, true, "1711234568.000001", "");
+    convert::build_outbound_result(
+        &mut result,
+        true,
+        "1711234568.000001",
+        "",
+        &fields.correlation_id,
+    );
     aw.write_message(&result).await.unwrap();
 
     // Gateway reads result
@@ -411,6 +423,12 @@ async fn full_message_flow_simulation() {
         frame::OutboundResult(r) => {
             let r = r.unwrap();
             assert!(r.get_success());
+            // Back at the gateway unchanged, which is what lets the
+            // delivery row name the outbound row it belongs to.
+            assert_eq!(
+                r.get_correlation_id().unwrap().to_str().unwrap(),
+                "agent/slack/C98765\u{1f}slack:out:7d431598",
+            );
             assert_eq!(
                 r.get_message_id().unwrap().to_str().unwrap(),
                 "1711234568.000001"

@@ -1310,6 +1310,45 @@ pub enum SessionEvent {
         output: String,
         status: SubagentStatus,
     },
+    /// An adapter reported that it delivered an outbound message,
+    /// carrying the id the platform assigned to it.
+    ///
+    /// Appended beside the `message.outbound` row rather than
+    /// changing it. That row's `target` is minted before the adapter
+    /// has sent anything, so it is a gateway handle and never the
+    /// platform's id; `target` here repeats it so the two rows join,
+    /// and `message_id` carries what the platform actually called the
+    /// message. Without this the platform id existed only in a debug
+    /// log line and nothing tied an audit row to the message a reader
+    /// can open.
+    DeliveryConfirmed {
+        /// The `message.outbound` row's target, echoed back by the
+        /// adapter through `OutboundMessage.correlationId`. Empty
+        /// when the adapter did not echo one, which leaves the
+        /// delivery recorded but unjoined rather than guessed.
+        target: String,
+        /// The platform's own id for the delivered message. For
+        /// Slack this is the `ts`, which is also the permalink
+        /// component and the thread root.
+        message_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+    },
+    /// An adapter reported that it could not deliver an outbound
+    /// message. Counterpart to [`SessionEvent::DeliveryConfirmed`];
+    /// see there for why the original row is left alone.
+    ///
+    /// Before this existed a failed send left a `message.outbound`
+    /// row indistinguishable from a delivered one, and the error text
+    /// the adapter returned was dropped.
+    DeliveryFailed {
+        /// As [`SessionEvent::DeliveryConfirmed::target`].
+        target: String,
+        /// The adapter's error text, verbatim.
+        error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+    },
     /// Backward-compatibility wrapper for the pre-slice-2 audit
     /// log. The 1.2.0 schema splits `actor` into
     /// `actor_kind` + `actor_id` and makes `channel` an

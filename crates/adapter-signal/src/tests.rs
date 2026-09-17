@@ -733,7 +733,7 @@ fn build_heartbeat() {
 #[test]
 fn build_outbound_result() {
     let mut builder = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut builder, true, "sig-123", "");
+    convert::build_outbound_result(&mut builder, true, "sig-123", "", "");
     let mut bytes = Vec::new();
     capnp::serialize::write_message(&mut bytes, &builder).unwrap();
     let reader =

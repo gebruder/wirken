@@ -201,6 +201,8 @@ pub struct OutboundFields {
     pub conversation_id: String,
     pub text: String,
     pub reply_to_id: Option<String>,
+    /// Gateway handle for this send, echoed back on the result.
+    pub correlation_id: String,
 }
 
 pub fn parse_outbound(
@@ -231,10 +233,21 @@ pub fn parse_outbound(
                 Some(reply_to_str.to_string())
             };
 
+            // Opaque to the adapter: carried through, echoed on the
+            // result, never interpreted. Empty rather than fatal on
+            // bad utf8, so a malformed handle costs the join and not
+            // the delivery.
+            let correlation_id = o
+                .get_correlation_id()?
+                .to_str()
+                .unwrap_or_default()
+                .to_string();
+
             Ok(OutboundFields {
                 conversation_id,
                 text,
                 reply_to_id,
+                correlation_id,
             })
         }
         _ => Err(capnp::Error::failed("expected Outbound frame".to_string())),
@@ -246,12 +259,17 @@ pub fn build_outbound_result(
     success: bool,
     message_id: &str,
     error: &str,
+    correlation_id: &str,
 ) {
     let frame_builder = builder.init_root::<frame::Builder<'_>>();
     let mut result = frame_builder.init_outbound_result();
     result.set_success(success);
     result.set_message_id(message_id);
     result.set_error(error);
+    // Echoed verbatim. The gateway minted it and is the only reader;
+    // an adapter that inspected it would be guessing at a handle
+    // whose shape is not part of this contract.
+    result.set_correlation_id(correlation_id);
 }
 
 pub fn build_heartbeat(

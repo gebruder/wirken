@@ -2830,6 +2830,9 @@ async fn handle_orchestrator_push(
 
     let resp = match dispatcher.writer_for(&req.channel) {
         Some(w) => {
+            // Minted before the send, not after, so the frame can
+            // carry the handle the adapter echoes back.
+            let outbound_target = format!("{}:out:{}", req.channel, uuid::Uuid::new_v4());
             let mut reply = capnp::message::Builder::new_default();
             {
                 let fb = reply.init_root::<frame::Builder<'_>>();
@@ -2838,11 +2841,14 @@ async fn handle_orchestrator_push(
                 outbound.set_text(&req.text);
                 outbound.set_reply_to_id(&req.reply_to_id);
                 outbound.set_metadata("{}");
+                outbound.set_correlation_id(delivery_correlation_id(
+                    &req.conversation_id,
+                    &outbound_target,
+                ));
             }
             let mut w = w.lock().await;
             match w.write_message(&reply).await {
                 Ok(()) => {
-                    let outbound_target = format!("{}:out:{}", req.channel, uuid::Uuid::new_v4());
                     let _ = audit
                         .log(
                             AuditEvent::new(
@@ -3001,7 +3007,18 @@ async fn message_loop(
                     let r = r?;
                     let success = r.get_success();
                     let msg_id = r.get_message_id()?.to_str().unwrap_or_default().to_string();
-                    InboundAction::DeliveryResult { success, msg_id }
+                    let error = r.get_error()?.to_str().unwrap_or_default().to_string();
+                    let correlation_id = r
+                        .get_correlation_id()?
+                        .to_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    InboundAction::DeliveryResult {
+                        success,
+                        msg_id,
+                        error,
+                        correlation_id,
+                    }
                 }
                 frame::ApprovalDecision(d) => {
                     let d = d?;
@@ -3293,6 +3310,14 @@ async fn message_loop(
                     outbound.set_text(&response);
                     outbound.set_reply_to_id(&reply_to_id);
                     outbound.set_metadata("{}");
+                    // The audit row's own target. The adapter echoes
+                    // it on `OutboundResult`, which is what lets the
+                    // delivery row name the row it belongs to without
+                    // the gateway holding per-send state.
+                    outbound.set_correlation_id(delivery_correlation_id(
+                        &conversation_id,
+                        &outbound_target,
+                    ));
                 }
 
                 let mut w = writer.lock().await;
@@ -3313,11 +3338,45 @@ async fn message_loop(
                 let _ = w.write_message(&hb).await;
             }
 
-            InboundAction::DeliveryResult { success, msg_id } => {
-                if success {
+            InboundAction::DeliveryResult {
+                success,
+                msg_id,
+                error,
+                correlation_id,
+            } => {
+                // Appended beside the `message.outbound` row, never
+                // over it: that row records what the gateway sent,
+                // this one what the platform did with it.
+                // Minted by `delivery_correlation_id`, so an
+                // unparseable handle came from an adapter that did not
+                // echo it, or from one echoing a handle this gateway
+                // never sent.
+                let Some((session, target)) = parse_delivery_correlation_id(&correlation_id) else {
+                    tracing::warn!(
+                        adapter_id,
+                        "delivery result carried no usable correlation id; not recorded",
+                    );
+                    continue;
+                };
+                let event = if success {
                     tracing::debug!("Delivery confirmed: {msg_id}");
+                    wirken_audit::SessionEvent::DeliveryConfirmed {
+                        target: target.clone(),
+                        message_id: msg_id,
+                        adapter_id: Some(adapter_id.to_string()),
+                    }
                 } else {
-                    tracing::warn!("Delivery failed for adapter '{adapter_id}'");
+                    tracing::warn!("Delivery failed for adapter '{adapter_id}': {error}");
+                    wirken_audit::SessionEvent::DeliveryFailed {
+                        target: target.clone(),
+                        error,
+                        adapter_id: Some(adapter_id.to_string()),
+                    }
+                };
+                let log = factory.session_log();
+                let handle = log.handle_for(wirken_audit::SessionId::new(session));
+                if let Err(e) = log.append(&handle, wirken_audit::TrustLevel::System, event) {
+                    tracing::warn!(error = %e, "failed to append delivery row");
                 }
             }
 
@@ -3437,6 +3496,8 @@ enum InboundAction {
     DeliveryResult {
         success: bool,
         msg_id: String,
+        error: String,
+        correlation_id: String,
     },
     /// Channel-adapter approval decision. The adapter forwards the
     /// actor's `(user_id, display)` plus the `request_id` and
@@ -3470,6 +3531,37 @@ enum InboundAction {
 enum ApprovalDecisionKind {
     Allow,
     Deny { reason: Option<String> },
+}
+
+/// Separator between the two halves of a delivery correlation id.
+///
+/// Unit Separator: not legal in a session id or in the uuid half, and
+/// not something an adapter would introduce, so a split on it either
+/// finds the shape the gateway minted or finds nothing.
+const DELIVERY_CORRELATION_SEP: char = '\u{1f}';
+
+/// Mint the handle an adapter echoes back on `OutboundResult`.
+///
+/// It carries both halves the delivery row needs: the session the
+/// `message.outbound` row went to, and that row's target. Encoding
+/// them means the gateway holds no per-send state, so a send and its
+/// result need not pass through the same task and an adapter that
+/// never answers leaks nothing. Adapters treat it as bytes.
+fn delivery_correlation_id(session_id: &str, outbound_target: &str) -> String {
+    format!("{session_id}{DELIVERY_CORRELATION_SEP}{outbound_target}")
+}
+
+/// Split a correlation id back into `(session_id, outbound_target)`.
+///
+/// `None` when the handle is absent or not the shape
+/// [`delivery_correlation_id`] mints, which keeps a delivery row off a
+/// chain it does not belong to rather than guessing one.
+fn parse_delivery_correlation_id(raw: &str) -> Option<(String, String)> {
+    let (session, target) = raw.split_once(DELIVERY_CORRELATION_SEP)?;
+    if session.is_empty() || target.is_empty() {
+        return None;
+    }
+    Some((session.to_string(), target.to_string()))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -4111,5 +4203,49 @@ mod truncate_tests {
         let t = truncate(&s, 50);
         assert!(t.ends_with("..."));
         assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod delivery_correlation_tests {
+    use super::{delivery_correlation_id, parse_delivery_correlation_id};
+
+    #[test]
+    fn round_trips() {
+        let id = delivery_correlation_id("agent/slack/D0AQ", "slack:out:7d431598-5e2c");
+        assert_eq!(
+            parse_delivery_correlation_id(&id),
+            Some((
+                "agent/slack/D0AQ".to_string(),
+                "slack:out:7d431598-5e2c".to_string()
+            )),
+        );
+    }
+
+    /// Session ids carry `/` and `:`, targets carry `:`, so neither
+    /// can serve as the separator. The split survives both.
+    #[test]
+    fn survives_colons_and_slashes() {
+        let id = delivery_correlation_id("a/b/c:d", "slack:out:u-u-u");
+        let (session, target) = parse_delivery_correlation_id(&id).expect("parses");
+        assert_eq!(session, "a/b/c:d");
+        assert_eq!(target, "slack:out:u-u-u");
+    }
+
+    /// An adapter built before the field existed echoes nothing, and
+    /// a half-empty handle names no row. Either way the delivery goes
+    /// unrecorded rather than onto a guessed chain.
+    #[test]
+    fn rejects_handles_it_did_not_mint() {
+        assert_eq!(parse_delivery_correlation_id(""), None);
+        assert_eq!(
+            parse_delivery_correlation_id("slack:out:no-separator"),
+            None
+        );
+        assert_eq!(parse_delivery_correlation_id("\u{1f}slack:out:x"), None);
+        assert_eq!(
+            parse_delivery_correlation_id("agent/slack/D0AQ\u{1f}"),
+            None
+        );
     }
 }

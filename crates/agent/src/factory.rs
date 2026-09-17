@@ -319,6 +319,15 @@ pub struct AgentFactory {
 }
 
 impl AgentFactory {
+    /// Borrow the session log every waked agent appends to.
+    ///
+    /// The gateway needs it for rows that belong to a conversation
+    /// but are not produced by an agent turn, such as the delivery
+    /// result an adapter returns after the turn has finished.
+    pub fn session_log(&self) -> Arc<dyn SessionLog> {
+        self.session_log.clone()
+    }
+
     /// Create a new factory with the given static configs and
     /// session log, in cached mode with the default capacity.
     /// Convenience for tests and the common production path; the

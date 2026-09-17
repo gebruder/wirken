@@ -361,6 +361,7 @@ async fn handle_outbound(
                                 false,
                                 "",
                                 &e.to_string(),
+                                &fields.correlation_id,
                             );
                             let mut w = writer.lock().await;
                             let _ = w.write_message(&result_msg).await;
@@ -418,7 +419,13 @@ async fn handle_outbound(
                 };
 
                 let mut result_msg = capnp::message::Builder::new_default();
-                convert::build_outbound_result(&mut result_msg, success, &msg_id, &error);
+                convert::build_outbound_result(
+                    &mut result_msg,
+                    success,
+                    &msg_id,
+                    &error,
+                    &fields.correlation_id,
+                );
                 let mut w: tokio::sync::MutexGuard<'_, IpcFrameWriter> = writer.lock().await;
                 if let Err(e) = w.write_message(&result_msg).await {
                     tracing::error!("Failed to send outbound result: {e}");

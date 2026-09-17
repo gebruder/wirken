@@ -243,7 +243,7 @@ fn parse_outbound_message() {
 #[test]
 fn build_outbound_result_success() {
     let mut msg = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut msg, true, "teams-msg-42", "");
+    convert::build_outbound_result(&mut msg, true, "teams-msg-42", "", "");
 
     let reader = msg.get_root_as_reader::<frame::Reader<'_>>().unwrap();
     match reader.which().unwrap() {
@@ -379,7 +379,7 @@ async fn full_message_flow_simulation() {
 
     // Phase 4: Adapter sends delivery result
     let mut result = capnp::message::Builder::new_default();
-    convert::build_outbound_result(&mut result, true, "teams-reply-99", "");
+    convert::build_outbound_result(&mut result, true, "teams-reply-99", "", "");
     aw.write_message(&result).await.unwrap();
 
     // Gateway reads result

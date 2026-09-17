@@ -200,6 +200,8 @@ fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::SubagentSpawned { .. } => "subagent_spawned",
         SessionEvent::SubagentSessionBound { .. } => "subagent_session_bound",
         SessionEvent::SubagentResult { .. } => "subagent_result",
+        SessionEvent::DeliveryConfirmed { .. } => "delivery_confirmed",
+        SessionEvent::DeliveryFailed { .. } => "delivery_failed",
         SessionEvent::AuditLegacy { .. } => "audit_legacy",
         SessionEvent::HookRegistered { .. } => "hook_registered",
         SessionEvent::HookDispatched { .. } => "hook_dispatched",
