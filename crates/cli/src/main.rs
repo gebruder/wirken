@@ -425,21 +425,21 @@ enum PendingCommands {
     /// Print full context for one pending request (tool, action,
     /// agent, trigger message).
     Show {
-        /// Request id from `pending list` (full UUID).
+        /// Request id from `pending list`, or a prefix unique to one row.
         request_id: String,
     },
     /// Approve a pending request. The awaiting agent task resumes
     /// and the tool dispatches. Audit row records
     /// `approved_via: cli` with the OS username as `approved_by`.
     Approve {
-        /// Request id from `pending list` (full UUID).
+        /// Request id from `pending list`, or a prefix unique to one row.
         request_id: String,
     },
     /// Deny a pending request. The awaiting agent task resumes
     /// with the tool call refused; the reason (if supplied)
     /// surfaces to the LLM as the failed result's output.
     Deny {
-        /// Request id from `pending list` (full UUID).
+        /// Request id from `pending list`, or a prefix unique to one row.
         request_id: String,
         /// Operator-supplied reason. Surfaces to the LLM as the
         /// tool failure message and lands on the audit row's

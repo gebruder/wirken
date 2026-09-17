@@ -69,22 +69,22 @@ pub async fn pending_list() -> Result<()> {
                 return Ok(());
             }
             println!(
-                "{:<10}  {:<14}  {:<18}  {:<6}  AGE",
+                "{:<36}  {:<14}  {:<18}  {:<6}  AGE",
                 "REQUEST", "AGENT", "TOOL", "TIER"
             );
             for e in entries {
-                // First 8 chars of the UUID is the operator's
-                // copy-paste handle. The full UUID still has to be
-                // supplied to approve / deny; truncation is for
-                // visual scan only.
-                let short = e.request_id.chars().take(8).collect::<String>();
+                // The whole id. `show`, `approve` and `deny` match on
+                // it, and it appears nowhere else, so printing a
+                // truncation left the queue unreachable: the short
+                // form was refused and the long form had no surface
+                // that would show it.
                 println!(
-                    "{:<10}  {:<14}  {:<18}  {:<6}  {}s",
-                    short, e.agent_id, e.tool_name, e.requested_tier, e.age_seconds,
+                    "{:<36}  {:<14}  {:<18}  {:<6}  {}s",
+                    e.request_id, e.agent_id, e.tool_name, e.requested_tier, e.age_seconds,
                 );
             }
             println!();
-            println!("Use the full request id from `pending show` for approve/deny.");
+            println!("approve / deny / show take the id above, or any prefix unique to one row.");
             Ok(())
         }
         PermissionsResponse::Error { message } => anyhow::bail!("gateway error: {message}"),
@@ -92,10 +92,81 @@ pub async fn pending_list() -> Result<()> {
     }
 }
 
+/// Outcome of matching an operator-supplied id against the queue.
+#[derive(Debug, PartialEq)]
+enum IdMatch {
+    /// The input is a request id verbatim.
+    Exact(String),
+    /// The input is a prefix of exactly one request id.
+    Unique(String),
+    /// The input names nothing in the queue.
+    NoMatch,
+    /// The input is a prefix of more than one request id.
+    Ambiguous(Vec<String>),
+}
+
+/// Match an operator-supplied id against the ids the gateway holds.
+///
+/// An exact match wins outright, so a full id never depends on what
+/// else is queued. Otherwise a prefix naming exactly one entry
+/// resolves to it. An ambiguous prefix resolves to nothing: picking
+/// one of several would approve a tool call the operator has not
+/// read.
+fn resolve_request_id<'a>(input: &str, ids: impl IntoIterator<Item = &'a str>) -> IdMatch {
+    // Every id starts with the empty string, so an empty argument
+    // would otherwise resolve whenever exactly one entry is queued.
+    if input.is_empty() {
+        return IdMatch::NoMatch;
+    }
+    let mut prefix_hits: Vec<String> = Vec::new();
+    for id in ids {
+        if id == input {
+            return IdMatch::Exact(id.to_string());
+        }
+        if id.starts_with(input) {
+            prefix_hits.push(id.to_string());
+        }
+    }
+    match prefix_hits.len() {
+        0 => IdMatch::NoMatch,
+        1 => IdMatch::Unique(prefix_hits.remove(0)),
+        _ => IdMatch::Ambiguous(prefix_hits),
+    }
+}
+
+/// Expand an operator-supplied id to the full request id by reading
+/// the live queue first.
+///
+/// An id that names nothing is passed through untouched so the
+/// gateway answers for it: its reply separates "already resolved by
+/// someone else, or timed out" from "never existed", which this side
+/// cannot tell apart.
+async fn resolved_request_id(input: &str) -> Result<String> {
+    let entries = match permissions_rpc(&PermissionsRequest::PendingList).await? {
+        PermissionsResponse::PendingList { entries } => entries,
+        PermissionsResponse::Error { message } => anyhow::bail!("gateway error: {message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    };
+    let ids: Vec<&str> = entries.iter().map(|e| e.request_id.as_str()).collect();
+    match resolve_request_id(input, ids.iter().copied()) {
+        IdMatch::Exact(id) | IdMatch::Unique(id) => Ok(id),
+        IdMatch::NoMatch => Ok(input.to_string()),
+        IdMatch::Ambiguous(hits) => {
+            let mut msg = format!("'{input}' matches {} pending requests:", hits.len());
+            for id in hits {
+                msg.push_str(&format!("\n  {id}"));
+            }
+            msg.push_str("\nSupply enough characters to name one.");
+            anyhow::bail!(msg)
+        }
+    }
+}
+
 /// `wirken permissions pending show <request_id>`: render the
 /// full context for one pending entry including the trigger
 /// message.
 pub async fn pending_show(request_id: &str) -> Result<()> {
+    let request_id = &resolved_request_id(request_id).await?;
     let resp = permissions_rpc(&PermissionsRequest::PendingShow {
         request_id: request_id.to_string(),
     })
@@ -129,6 +200,7 @@ pub async fn pending_show(request_id: &str) -> Result<()> {
 /// `$USER` (falling back to the literal `"cli"`) so the audit
 /// row records who approved on the CLI surface.
 pub async fn pending_approve(request_id: &str) -> Result<()> {
+    let request_id = &resolved_request_id(request_id).await?;
     let approved_by = std::env::var("USER").unwrap_or_else(|_| "cli".to_string());
     let resp = permissions_rpc(&PermissionsRequest::PendingApprove {
         request_id: request_id.to_string(),
@@ -143,6 +215,7 @@ pub async fn pending_approve(request_id: &str) -> Result<()> {
 /// to the LLM as the failed tool result's output and lands on the
 /// audit row's `denial_reason`.
 pub async fn pending_deny(request_id: &str, reason: Option<String>) -> Result<()> {
+    let request_id = &resolved_request_id(request_id).await?;
     let denied_by = std::env::var("USER").unwrap_or_else(|_| "cli".to_string());
     let resp = permissions_rpc(&PermissionsRequest::PendingDeny {
         request_id: request_id.to_string(),
@@ -392,4 +465,64 @@ pub async fn list_pending(agent: &str) -> Result<()> {
     println!();
     println!("  Approve one with: wirken permissions approve <ACTION KEY> --agent {agent}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IdMatch, resolve_request_id};
+
+    const A: &str = "5a6255fd-1111-4000-8000-000000000001";
+    const B: &str = "5a6255fd-2222-4000-8000-000000000002";
+    const C: &str = "9f0e1d2c-3333-4000-8000-000000000003";
+
+    #[test]
+    fn full_id_matches_exactly() {
+        assert_eq!(
+            resolve_request_id(A, [A, B, C]),
+            IdMatch::Exact(A.to_string())
+        );
+    }
+
+    /// An id that is also a prefix of another resolves to itself
+    /// rather than being reported ambiguous.
+    #[test]
+    fn exact_match_wins_over_prefix_of_another() {
+        let short = "5a6255fd-1111";
+        let longer = "5a6255fd-1111-4000-8000-000000000001";
+        assert_eq!(
+            resolve_request_id(short, [short, longer]),
+            IdMatch::Exact(short.to_string())
+        );
+    }
+
+    #[test]
+    fn unique_prefix_resolves() {
+        assert_eq!(
+            resolve_request_id("9f0e", [A, B, C]),
+            IdMatch::Unique(C.to_string())
+        );
+    }
+
+    /// The truncation `pending list` used to print. It names two
+    /// rows here, so it has to be refused rather than guessed.
+    #[test]
+    fn ambiguous_prefix_lists_every_match() {
+        let IdMatch::Ambiguous(hits) = resolve_request_id("5a6255fd", [A, B, C]) else {
+            panic!("expected an ambiguous match");
+        };
+        assert_eq!(hits, vec![A.to_string(), B.to_string()]);
+    }
+
+    #[test]
+    fn unknown_prefix_does_not_match() {
+        assert_eq!(resolve_request_id("dead", [A, B, C]), IdMatch::NoMatch);
+    }
+
+    /// Every id starts with "", so an empty argument must not
+    /// resolve to the only queued entry.
+    #[test]
+    fn empty_input_never_resolves() {
+        assert_eq!(resolve_request_id("", [A]), IdMatch::NoMatch);
+        assert_eq!(resolve_request_id("", [A, B, C]), IdMatch::NoMatch);
+    }
 }
