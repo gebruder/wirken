@@ -179,7 +179,7 @@ graph TD
     subgraph Wirken
         Registry --> Detect[Injection Detection]
         Detect --> Router
-        Router --> Factory[AgentFactory]
+        Router -- "resolve" --> Factory[AgentFactory]
         Factory --> Agent[Agent Runtime]
         Agent --> Context[Context Engine]
         Agent --> Skills
@@ -196,7 +196,8 @@ graph TD
     Budget -- "UDS" --> McpProxy["MCP Proxy · separate process"]
     McpProxy -- "stdio · HTTP · OAuth2" --> McpServers[MCP Servers]
 
-    Router -- "OutboundMessage · correlation handle" --> Channels
+    Agent --> Outbound["Outbound Dispatch · message_loop writer, OutboundDispatcher"]
+    Outbound -- "OutboundMessage · correlation handle" --> Channels
 ```
 
 Who approves, who holds secrets, and what reaches the record:
@@ -212,7 +213,7 @@ graph TD
     Detect[Injection Detection] -.-> SessionLog
     Permissions -.-> SessionLog
     Tools -.-> SessionLog
-    Router -. "delivery_confirmed · delivery_failed" .-> SessionLog
+    Outbound["Outbound Dispatch"] -. "delivery_confirmed · delivery_failed" .-> SessionLog
     SessionLog["Session Log · per-session hash chain, attested"] -.-> SIEM[SIEM / Webhook]
 ```
 
