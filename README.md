@@ -169,39 +169,51 @@ Windows uses different paths and a smaller feature set (no service installer or 
 
 Each channel runs as its own isolated process. The gateway is the only component that holds credentials and writes the audit log. The agent is stateless: it is woken for each message and rebuilt from its session log.
 
+The message path, inbound to outbound:
+
 ```mermaid
 graph TD
     Channels["Telegram · Discord · Slack · Teams · Matrix · WhatsApp · Signal · Google Chat · iMessage"]
-    Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry
+    Channels -- "UDS · Ed25519 · Cap'n Proto" --> Registry[Adapter Registry]
 
     subgraph Wirken
-        Registry[Adapter Registry] --> Router
-        Router --> Detect[Injection Detection]
-        Detect --> Factory[AgentFactory]
+        Registry --> Detect[Injection Detection]
+        Detect --> Router
+        Router --> Factory[AgentFactory]
         Factory --> Agent[Agent Runtime]
         Agent --> Context[Context Engine]
-        Agent --> Permissions
         Agent --> Skills
         Agent --> Tools
-        Agent --> Vault --> Keychain
 
         subgraph Execution
             Tools --> Sandbox[Docker / gVisor / Wasm]
         end
-
-        SessionLog["Session Log\n(per-session hash chain, attested)"]
     end
 
-    Agent -- "UDS" --> McpProxy["MCP Proxy\n(separate process)"]
+    Agent -- "spawn_subagent" --> Factory
+    Agent -- HTTPS --> LLM[LLM Providers]
+    Agent -- "declared cost" --> Budget[Budget Gate]
+    Budget -- "UDS" --> McpProxy["MCP Proxy · separate process"]
     McpProxy -- "stdio · HTTP · OAuth2" --> McpServers[MCP Servers]
 
-    Agent -- HTTPS --> LLM[LLM Providers]
-    Agent -- "spawn_subagent" --> Factory
+    Router -- "OutboundMessage · correlation handle" --> Channels
+```
 
-    Detect -.-> SessionLog
+Who approves, who holds secrets, and what reaches the record:
+
+```mermaid
+graph TD
+    Operator["Operator · CLI"] -- "approve · deny · expiry" --> Permissions
+    Permissions --> PermsDb[("permissions.db")]
+    Operator --> Vault --> Keychain
+    Agent[Agent Runtime] --> Permissions
+    McpProxy[MCP Proxy] --> Vault
+
+    Detect[Injection Detection] -.-> SessionLog
     Permissions -.-> SessionLog
     Tools -.-> SessionLog
-    SessionLog -.-> SIEM[SIEM / Webhook]
+    Router -. "delivery_confirmed · delivery_failed" .-> SessionLog
+    SessionLog["Session Log · per-session hash chain, attested"] -.-> SIEM[SIEM / Webhook]
 ```
 
 - **Channel adapters.** Each channel runs as its own OS process. It authenticates to the gateway with a per-adapter Ed25519 challenge-response handshake over a Unix domain socket, and messages cross as Cap'n Proto (zero-copy, traversal-limited). An adapter can only send and receive for its own channel; it cannot invoke tools, read another channel's sessions, or reach another channel's credentials. Compromise one adapter and the blast radius is exactly that one channel, because the gateway's IPC boundary runs in a separate memory-safe process and blocks lateral movement.
