@@ -1521,9 +1521,13 @@ pub fn approve_and_log_by_key_with_expiry(
 /// The audit row carries `approved_via: Some(source)` so a SIEM
 /// detection can pivot per-surface, and `approved_by` for the actor
 /// label (operator username when available, surface name otherwise).
-/// `scope` is recorded as `Persisted` for wire-compat with prior
-/// approval rows; the absence of a store row is the truth and the
-/// audit chain is its only durable record.
+/// `scope` is `OneShot`. The runtime arms a bypass that the retry
+/// consumes, and nothing reaches the permission store, so the next
+/// call of the same action prompts again. The row said `Persisted`
+/// for wire-compat with prior approval rows, which made it disagree
+/// with both the store and the `one-shot bypass` the runtime logs on
+/// the same approval; the audit chain is this approval's only durable
+/// record, so it is the one place the scope has to be right.
 ///
 /// Naming: sits alongside `approve_and_log` (Persisted) and a
 /// future `approve_and_log_with_scope(Session)` so the family is
@@ -1548,7 +1552,7 @@ pub fn emit_operator_approval(
             action_key: action_key.to_string(),
             agent_id: agent_id.to_string(),
             approved_by: approved_by.to_string(),
-            scope: wirken_audit::ApprovalScopeKind::Persisted,
+            scope: wirken_audit::ApprovalScopeKind::OneShot,
             session_id: None,
             approved_via: Some(approved_via),
             adapter_id: adapter_id.map(str::to_string),
@@ -2248,6 +2252,59 @@ mod tier_tests {
             }
             other => panic!("unexpected event variant: {other:?}"),
         }
+    }
+
+    /// The operator gate arms a one-shot bypass and writes nothing
+    /// to the store, so the row has to say so. It said `Persisted`,
+    /// which disagreed with the store, with `wirken permissions
+    /// list`, and with the `one-shot bypass` the runtime logs on the
+    /// same approval.
+    #[test]
+    fn emit_operator_approval_records_one_shot_and_stores_nothing() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let perms_tmp = tempfile::NamedTempFile::new().unwrap();
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(perms_tmp.path()).unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let session = "slackbot/slack/D0AQ1PPAGEP";
+        let handle = log.handle_for(SessionId::new(session.to_string()));
+
+        super::emit_operator_approval(
+            "shell:date",
+            "slackbot",
+            "davi",
+            wirken_audit::ApprovalSource::Cli,
+            &log,
+            &handle,
+            Some("slack"),
+            Some("U07P53Y41FF"),
+        )
+        .unwrap();
+
+        let events = log.get_since(&handle, 0).unwrap();
+        let approved = events
+            .iter()
+            .find(|e| matches!(e.event, SessionEvent::PermissionApproved { .. }))
+            .expect("one PermissionApproved emitted");
+        match &approved.event {
+            SessionEvent::PermissionApproved {
+                scope, session_id, ..
+            } => {
+                assert_eq!(*scope, wirken_audit::ApprovalScopeKind::OneShot);
+                assert!(session_id.is_none());
+            }
+            other => panic!("unexpected event variant: {other:?}"),
+        }
+
+        // Nothing durable: the next call of the same action prompts
+        // again, and neither grant listing shows it.
+        assert!(store.list("slackbot").unwrap().is_empty());
+        assert!(
+            super::list_active_session_scoped_grants_in_session(&log, session)
+                .unwrap()
+                .is_empty(),
+            "a one-shot approval must not read as a session-scoped grant",
+        );
     }
 
     #[test]

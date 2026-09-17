@@ -337,6 +337,15 @@ pub enum ApprovalScopeKind {
     /// In-memory only, cleared on session end. `session_id` on the
     /// same event names the session.
     Session,
+    /// Good for the one call that prompted it. The runtime arms a
+    /// bypass, the retry consumes it, and nothing is written to the
+    /// permission store, so the next call of the same action prompts
+    /// again and `wirken permissions list` never shows it.
+    ///
+    /// No `ApprovalScope` counterpart on the gateway side: that enum
+    /// models the scopes a grant can be *stored* under, and this one
+    /// is never stored.
+    OneShot,
 }
 
 /// Wire-stable content of a phase deny overlay as recorded on
