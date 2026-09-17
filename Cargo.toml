@@ -135,7 +135,7 @@ base64 = "0.23"
 # Channel SDKs
 teloxide = { version = "0.17", features = ["macros"] }
 serenity = "0.12"
-slack-morphism = { version = "2.23", features = ["hyper"] }
+slack-morphism = { version = "2.28", features = ["hyper"] }
 
 
 # Serialization
