@@ -2903,3 +2903,89 @@ fn cross_check_marks_the_tier_not_comparable_on_an_older_parent_row() {
         "and the caller is told the tier was not checked",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Legacy view: native session-log payloads project into `detail`
+// ---------------------------------------------------------------------------
+
+/// A native session-log event carries its fields in the payload
+/// itself, not under a `detail` key. Extracting only `$.detail` gave
+/// every one of them a null, so `wirken audit log --format json`
+/// reported a `permission_approved` with no `approved_by` and a
+/// `tool_result` with no output.
+#[test]
+fn legacy_view_projects_native_session_payloads_into_detail() {
+    use crate::{SessionEvent, SessionId, SessionLog, TrustLevel};
+
+    let log = AuditLog::open_in_memory().unwrap();
+    let inner = log.session_log();
+    let handle = inner.handle_for(SessionId::new("agent/slack/C1".to_string()));
+    inner
+        .append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::PermissionApproved {
+                action_key: "shell:date".into(),
+                agent_id: "slackbot".into(),
+                approved_by: "davi".into(),
+                scope: crate::session_log::ApprovalScopeKind::OneShot,
+                session_id: None,
+                approved_via: Some(crate::ApprovalSource::Cli),
+                adapter_id: Some("slack".into()),
+                sender_id: Some("U07P53Y41FF".into()),
+            },
+        )
+        .unwrap();
+
+    let rows = log
+        .query(&AuditQuery {
+            action: Some("permission_approved".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    let detail = &rows[0].event.detail;
+
+    assert_eq!(detail["approved_by"], "davi");
+    assert_eq!(detail["action_key"], "shell:date");
+    assert_eq!(detail["scope"], "one_shot");
+    assert_eq!(detail["approved_via"]["kind"], "cli");
+    // `kind` is already the `action` column, so it is not repeated.
+    assert!(detail.get("kind").is_none(), "detail: {detail}");
+}
+
+/// An `AuditLegacy` row keeps projecting its own `detail`, and a row
+/// whose `detail` is JSON null still reads as null rather than
+/// falling through to the payload.
+#[test]
+fn legacy_view_still_projects_audit_legacy_detail() {
+    let log = AuditLog::open_in_memory().unwrap();
+    log.write_batch(&[
+        AuditEvent::new(
+            ActorKind::Agent,
+            "slackbot",
+            "message.outbound",
+            "slack:out:1",
+        )
+        .with_detail(serde_json::json!({ "content": "hello" })),
+        AuditEvent::new(ActorKind::User, "u1", "gateway.start", "daemon"),
+    ])
+    .unwrap();
+
+    let rows = log.query(&AuditQuery::default()).unwrap();
+    let outbound = rows
+        .iter()
+        .find(|r| r.event.action == "message.outbound")
+        .expect("outbound row");
+    assert_eq!(outbound.event.detail["content"], "hello");
+
+    let start = rows
+        .iter()
+        .find(|r| r.event.action == "gateway.start")
+        .expect("start row");
+    assert!(
+        start.event.detail.is_null(),
+        "detail: {}",
+        start.event.detail
+    );
+}

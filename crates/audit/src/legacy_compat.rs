@@ -79,7 +79,13 @@ pub(crate) fn migrate_legacy_audit_events(log: &SqliteSessionLog) -> Result<usiz
 
         match kind.as_deref() {
             Some("view") => {
-                // Migration already ran. Nothing to do.
+                // Migration already ran, but `CREATE VIEW` does not
+                // redefine an existing view, so a definition that
+                // changed between releases would never reach a
+                // database created by an older one. Recreate it, so
+                // the binary always reads through the definition it
+                // was built with.
+                create_legacy_view(conn)?;
                 Ok(0)
             }
             Some("table") => {
@@ -106,6 +112,16 @@ fn create_legacy_view(conn: &Connection) -> Result<(), AuditError> {
     // through the same view see a non-empty `actor` column for both.
     // `actor_kind` is exposed alongside so callers that want the
     // typed dimension can group on it without re-parsing the payload.
+    //
+    // `detail` carries an `AuditLegacy` row's own `detail` when the
+    // payload has that key, and otherwise the rest of a native
+    // session-log payload with the fields this view already exposes
+    // as columns removed. Extracting only `$.detail` left every
+    // native event with a null: `permission_approved` reported no
+    // `approved_by`, `tool_result` no output. `json_type` rather
+    // than `json_extract` decides which branch applies, so a row
+    // whose `detail` is JSON null keeps reading as null instead of
+    // falling through to the payload.
     conn.execute_batch(
         "DROP VIEW IF EXISTS audit_events;
          CREATE VIEW audit_events AS
@@ -126,7 +142,23 @@ fn create_legacy_view(conn: &Connection) -> Result<(), AuditError> {
              COALESCE(json_extract(payload, '$.target'), '') AS target,
              COALESCE(json_extract(payload, '$.channel'), '') AS channel,
              session_id AS session,
-             COALESCE(json_extract(payload, '$.detail'), 'null') AS detail,
+             COALESCE(
+                 CASE
+                     WHEN json_type(payload, '$.detail') IS NOT NULL
+                         THEN json_extract(payload, '$.detail')
+                     ELSE json_remove(
+                         payload,
+                         '$.kind',
+                         '$.actor_id',
+                         '$.actor',
+                         '$.actor_kind',
+                         '$.action',
+                         '$.target',
+                         '$.channel'
+                     )
+                 END,
+                 'null'
+             ) AS detail,
              hash
          FROM session_events;",
     )?;
