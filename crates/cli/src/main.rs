@@ -1050,6 +1050,27 @@ enum McpCommands {
     },
 }
 
+/// Build the tracing filter from the operator's `RUST_LOG`, falling
+/// back to `wirken=warn` when there is none.
+///
+/// The fallback directive used to be appended to `from_default_env()`
+/// unconditionally. A directive added later wins over an earlier one
+/// on the same target, and `wirken` prefix-matches every workspace
+/// crate, so any operator filter naming one of them was discarded,
+/// `RUST_LOG=wirken=info` included: the opt-in the comment in `main`
+/// recommends could not take effect.
+fn build_env_filter(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
+    match rust_log {
+        // Take the operator's filter exactly as written. Anything
+        // they left unspecified keeps EnvFilter's own default.
+        Some(v) if !v.trim().is_empty() => tracing_subscriber::EnvFilter::new(v),
+        // No filter set. `EnvFilter::new("")` is what
+        // `from_default_env()` yields for an unset `RUST_LOG`, so the
+        // default path is unchanged.
+        _ => tracing_subscriber::EnvFilter::new("").add_directive("wirken=warn".parse().unwrap()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider()
@@ -1067,11 +1088,11 @@ async fn main() -> Result<()> {
     // default) produced ~15 timestamped lines per boot mixed in
     // with the banner; see 1.5.1's first-run regression and step 4
     // of the install-experience overhaul for the failure mode.
+    //
+    // It is a default, not a floor applied over the operator's
+    // filter. See `build_env_filter`.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("wirken=warn".parse().unwrap()),
-        )
+        .with_env_filter(build_env_filter(std::env::var("RUST_LOG").ok().as_deref()))
         .init();
 
     let cli = Cli::parse();
@@ -1474,6 +1495,62 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Is an INFO event on a `wirken` target enabled under `filter`?
+    ///
+    /// This asks the filter the question the runtime asks. A level
+    /// hint does not: it reports the most permissive directive
+    /// present, so a filter carrying both `wirken=info` and a later
+    /// `wirken=warn` still hints INFO while suppressing INFO.
+    fn wirken_info_enabled(filter: tracing_subscriber::EnvFilter) -> bool {
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = tracing_subscriber::registry().with(filter);
+        tracing::subscriber::with_default(
+            subscriber,
+            || tracing::enabled!(target: "wirken", tracing::Level::INFO),
+        )
+    }
+
+    /// `RUST_LOG=wirken=info` is the opt-in the filter comment in
+    /// `main` recommends. The default directive used to be appended
+    /// after the operator's filter, and a later directive on the same
+    /// target wins, so every wirken crate stayed clamped at warn and
+    /// this opt-in did nothing.
+    #[test]
+    fn operator_filter_is_not_overridden_by_the_default() {
+        assert!(wirken_info_enabled(super::build_env_filter(Some(
+            "wirken=info"
+        ))));
+    }
+
+    /// The shape that regressed: the operator's filter with the
+    /// default appended after it. Pinned here so the difference the
+    /// test above is asserting stays visible.
+    #[test]
+    fn appending_the_default_after_the_operator_filter_suppresses_it() {
+        let clamped = tracing_subscriber::EnvFilter::new("wirken=info")
+            .add_directive("wirken=warn".parse().unwrap());
+        assert!(!wirken_info_enabled(clamped));
+    }
+
+    /// With no `RUST_LOG`, wirken crates stay at warn so the boot
+    /// banner is not buried in timestamped lines.
+    #[test]
+    fn unset_rust_log_keeps_wirken_at_warn() {
+        assert!(!wirken_info_enabled(super::build_env_filter(None)));
+    }
+
+    /// An empty or whitespace `RUST_LOG` is not a filter, so it takes
+    /// the default rather than parsing to one that selects nothing.
+    #[test]
+    fn blank_rust_log_takes_the_default() {
+        for blank in ["", "   "] {
+            assert!(
+                !wirken_info_enabled(super::build_env_filter(Some(blank))),
+                "blank RUST_LOG {blank:?} did not take the default",
+            );
+        }
+    }
     use super::*;
     use clap::Parser;
 
