@@ -127,6 +127,16 @@ Run top to bottom. Replace `0.7.4` with the target version.
      reason in the `ignore` entry naming the reachable path and what
      would make it revisitable.
 
+   **Release-specific gates.**
+
+   - **1.21: slack-morphism 2.28.0 live round-trip.** Record a live
+     exchange against a real Slack workspace before tagging: an inbound
+     message to a wirken agent, a reply out, and the session's audit rows
+     showing the inbound ts parsed to epoch millis and the outbound ts
+     recorded, each compared against the value Slack shows in the UI.
+     2.28.0 moves the crate's datetime types from chrono to jiff; the
+     test suite exercises fixtures, not what Slack sends.
+
    **Scorecard findings are reviewed and recorded, not gating.** They
    score repository posture (branch protection, review requirements,
    pinned actions), not defects in the code or its dependencies, and

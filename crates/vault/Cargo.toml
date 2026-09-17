@@ -9,7 +9,15 @@ description = "Encrypted credential vault for Wirken: XChaCha20-Poly1305 at rest
 [features]
 default = ["keychain-age"]
 keychain-macos = ["dep:security-framework"]
-keychain-linux = ["dep:secret-service"]
+# secret-service pulls zbus with default-features = false, so the zbus
+# runtime and the crypto backend are both selected here. The workspace
+# runs on tokio; crypto-rust keeps the backend in-tree rather than
+# linking system OpenSSL.
+keychain-linux = [
+    "dep:secret-service",
+    "secret-service/rt-tokio",
+    "secret-service/crypto-rust",
+]
 keychain-age = []
 
 [dependencies]
@@ -27,8 +35,12 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 # Platform-specific keychain backends
-security-framework = { workspace = true, optional = true }
 secret-service = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# security-framework builds only for Apple targets, so the optional dep is
+# target-gated: enabling keychain-macos elsewhere selects nothing.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { workspace = true, optional = true }

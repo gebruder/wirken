@@ -148,7 +148,7 @@ pub fn load_or_create_alarm_log_key(keychain: &dyn Keychain) -> Result<Vec<u8>, 
 // macOS Keychain backend
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "keychain-macos")]
+#[cfg(all(feature = "keychain-macos", target_os = "macos"))]
 mod macos {
     use super::*;
     use security_framework::passwords::{
@@ -285,7 +285,7 @@ mod macos {
     }
 }
 
-#[cfg(feature = "keychain-macos")]
+#[cfg(all(feature = "keychain-macos", target_os = "macos"))]
 pub use macos::MacOsKeychain;
 
 // ---------------------------------------------------------------------------
@@ -741,7 +741,7 @@ pub fn probe_keychain(
     data_dir: &std::path::Path,
     passphrase_fn: impl FnOnce() -> String,
 ) -> Box<dyn Keychain> {
-    #[cfg(feature = "keychain-macos")]
+    #[cfg(all(feature = "keychain-macos", target_os = "macos"))]
     {
         let kc = MacOsKeychain;
         // Test if we can access the keychain
