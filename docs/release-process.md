@@ -131,11 +131,24 @@ Run top to bottom. Replace `0.7.4` with the target version.
 
    - **1.21: slack-morphism 2.28.0 live round-trip.** Record a live
      exchange against a real Slack workspace before tagging: an inbound
-     message to a wirken agent, a reply out, and the session's audit rows
-     showing the inbound ts parsed to epoch millis and the outbound ts
-     recorded, each compared against the value Slack shows in the UI.
-     2.28.0 moves the crate's datetime types from chrono to jiff; the
-     test suite exercises fixtures, not what Slack sends.
+     message to a wirken agent and a reply out, with the daemon run at
+     `RUST_LOG=debug`. Two values are observable, and both are compared
+     against what Slack shows in the UI:
+
+     - **Inbound ts**, from the `message.inbound` audit target. That
+       field is `<channel>:<platform message id>`, and for Slack the
+       platform message id is the `ts` string verbatim.
+     - **Outbound ts**, from the `Delivery confirmed: <ts>` line the
+       gateway logs on `OutboundResult`. It is not in the audit log:
+       the outbound row's target is a synthesized
+       `<channel>:out:<uuid>` assigned before the adapter has sent
+       anything, and the platform-assigned id that comes back is
+       logged and dropped.
+
+     The epoch-millis value `parse_slack_ts` computes is written to the
+     IPC frame and read by no production code, so it is not observable
+     at this gate. 2.28.0 moves the crate's datetime types from chrono
+     to jiff; the test suite exercises fixtures, not what Slack sends.
 
    **Scorecard findings are reviewed and recorded, not gating.** They
    score repository posture (branch protection, review requirements,
