@@ -2841,7 +2841,9 @@ async fn handle_orchestrator_push(
                 outbound.set_text(&req.text);
                 outbound.set_reply_to_id(&req.reply_to_id);
                 outbound.set_metadata("{}");
-                outbound.set_correlation_id(delivery_correlation_id(
+                outbound.set_correlation_id(mint_delivery_handle(
+                    delivery_mac_key(),
+                    &req.channel,
                     &req.conversation_id,
                     &outbound_target,
                 ));
@@ -3313,8 +3315,11 @@ async fn message_loop(
                     // The audit row's own target. The adapter echoes
                     // it on `OutboundResult`, which is what lets the
                     // delivery row name the row it belongs to without
-                    // the gateway holding per-send state.
-                    outbound.set_correlation_id(delivery_correlation_id(
+                    // the gateway holding per-send state, and the MAC
+                    // is what stops an adapter naming a row itself.
+                    outbound.set_correlation_id(mint_delivery_handle(
+                        delivery_mac_key(),
+                        authenticated_channel.as_str(),
                         &conversation_id,
                         &outbound_target,
                     ));
@@ -3347,14 +3352,19 @@ async fn message_loop(
                 // Appended beside the `message.outbound` row, never
                 // over it: that row records what the gateway sent,
                 // this one what the platform did with it.
-                // Minted by `delivery_correlation_id`, so an
-                // unparseable handle came from an adapter that did not
-                // echo it, or from one echoing a handle this gateway
-                // never sent.
-                let Some((session, target)) = parse_delivery_correlation_id(&correlation_id) else {
+                // Shape, MAC and channel all have to hold. A handle
+                // failing any of them is one this gateway did not
+                // mint, or one minted for a different adapter, so the
+                // delivery goes unrecorded rather than onto a chain
+                // chosen by the process that returned it.
+                let Some((session, target)) = verify_delivery_handle(
+                    delivery_mac_key(),
+                    &correlation_id,
+                    authenticated_channel.as_str(),
+                ) else {
                     tracing::warn!(
                         adapter_id,
-                        "delivery result carried no usable correlation id; not recorded",
+                        "delivery result carried an unverifiable correlation handle; not recorded",
                     );
                     continue;
                 };
@@ -3533,35 +3543,119 @@ enum ApprovalDecisionKind {
     Deny { reason: Option<String> },
 }
 
-/// Separator between the two halves of a delivery correlation id.
+/// Separator between the fields of a delivery correlation handle.
 ///
-/// Unit Separator: not legal in a session id or in the uuid half, and
-/// not something an adapter would introduce, so a split on it either
-/// finds the shape the gateway minted or finds nothing.
+/// Unit Separator: not legal in a channel name, a session id, or the
+/// uuid half of a target, so a split on it either finds the shape the
+/// gateway minted or finds nothing.
 const DELIVERY_CORRELATION_SEP: char = '\u{1f}';
+
+/// Bytes of the MAC tag kept on a handle. 128 bits of a SHA-256 tag,
+/// which is the usual truncation floor and keeps the handle short.
+const DELIVERY_MAC_BYTES: usize = 16;
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+/// Key for the delivery-handle MAC.
+///
+/// Random per gateway process and never persisted. A handle is only
+/// meaningful between a send and the result that answers it, so it
+/// need not survive a restart, and not persisting it means a handle
+/// captured from an earlier process cannot be replayed into a later
+/// one.
+fn delivery_mac_key() -> &'static [u8; 32] {
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut k = [0u8; 32];
+        rand::fill(&mut k);
+        k
+    })
+}
+
+fn delivery_mac_hex(key: &[u8], channel: &str, session_id: &str, outbound_target: &str) -> String {
+    use hmac::{KeyInit, Mac};
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(
+        format!(
+            "{channel}{DELIVERY_CORRELATION_SEP}{session_id}{DELIVERY_CORRELATION_SEP}{outbound_target}"
+        )
+        .as_bytes(),
+    );
+    mac.finalize().into_bytes()[..DELIVERY_MAC_BYTES]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 /// Mint the handle an adapter echoes back on `OutboundResult`.
 ///
-/// It carries both halves the delivery row needs: the session the
-/// `message.outbound` row went to, and that row's target. Encoding
-/// them means the gateway holds no per-send state, so a send and its
-/// result need not pass through the same task and an adapter that
-/// never answers leaks nothing. Adapters treat it as bytes.
-fn delivery_correlation_id(session_id: &str, outbound_target: &str) -> String {
-    format!("{session_id}{DELIVERY_CORRELATION_SEP}{outbound_target}")
+/// Carries what the delivery row needs, the channel, the session the
+/// `message.outbound` row went to and that row's target, plus a MAC
+/// over all three. Encoding them means the gateway holds no per-send
+/// state, so a send and its result need not pass through the same
+/// task and an adapter that never answers leaks nothing.
+///
+/// The MAC is what makes that safe. An adapter is a separate process
+/// and the handle passes through its hands, so without one any
+/// adapter could return a handle it composed and have the gateway
+/// append a delivery row to a session chain of the adapter's
+/// choosing. Adapters treat the whole string as bytes.
+fn mint_delivery_handle(
+    key: &[u8],
+    channel: &str,
+    session_id: &str,
+    outbound_target: &str,
+) -> String {
+    let tag = delivery_mac_hex(key, channel, session_id, outbound_target);
+    format!(
+        "{channel}{DELIVERY_CORRELATION_SEP}{session_id}{DELIVERY_CORRELATION_SEP}{outbound_target}{DELIVERY_CORRELATION_SEP}{tag}"
+    )
 }
 
-/// Split a correlation id back into `(session_id, outbound_target)`.
+/// Check a returned handle and split it into `(session_id, target)`.
 ///
-/// `None` when the handle is absent or not the shape
-/// [`delivery_correlation_id`] mints, which keeps a delivery row off a
-/// chain it does not belong to rather than guessing one.
-fn parse_delivery_correlation_id(raw: &str) -> Option<(String, String)> {
-    let (session, target) = raw.split_once(DELIVERY_CORRELATION_SEP)?;
-    if session.is_empty() || target.is_empty() {
+/// `None`, meaning warn and drop, when the handle is not the shape
+/// [`mint_delivery_handle`] produces, when the MAC does not verify,
+/// or when the channel on it is not `expected_channel`.
+///
+/// The channel check is not redundant with the MAC. The MAC proves
+/// this gateway minted the handle; it does not prove the adapter
+/// returning it is the one it was issued to. Without the check, an
+/// adapter that observed a handle for another channel could replay it
+/// and attach a delivery row to that channel's session.
+fn verify_delivery_handle(
+    key: &[u8],
+    raw: &str,
+    expected_channel: &str,
+) -> Option<(String, String)> {
+    let parts: Vec<&str> = raw.split(DELIVERY_CORRELATION_SEP).collect();
+    let [channel, session, target, tag] = parts.as_slice() else {
+        return None;
+    };
+    if channel.is_empty() || session.is_empty() || target.is_empty() {
+        return None;
+    }
+    let expected = delivery_mac_hex(key, channel, session, target);
+    if !constant_time_eq(expected.as_bytes(), tag.as_bytes()) {
+        return None;
+    }
+    if *channel != expected_channel {
         return None;
     }
     Some((session.to_string(), target.to_string()))
+}
+
+/// Length-checked, branch-free byte comparison. The tag is hex, so
+/// this compares the rendered form rather than decoding first.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -4208,17 +4302,26 @@ mod truncate_tests {
 
 #[cfg(test)]
 mod delivery_correlation_tests {
-    use super::{delivery_correlation_id, parse_delivery_correlation_id};
+    use super::{DELIVERY_CORRELATION_SEP as SEP, mint_delivery_handle, verify_delivery_handle};
+
+    const KEY: &[u8] = b"test key, not the process key000";
+
+    /// Assemble a handle field by field, for shapes the minter would
+    /// never produce.
+    fn handle(channel: &str, session: &str, target: &str, tag: &str) -> String {
+        format!("{channel}{SEP}{session}{SEP}{target}{SEP}{tag}")
+    }
+
+    fn tag_of(h: &str) -> String {
+        h.rsplit(SEP).next().unwrap().to_string()
+    }
 
     #[test]
-    fn round_trips() {
-        let id = delivery_correlation_id("agent/slack/D0AQ", "slack:out:7d431598-5e2c");
+    fn round_trips_for_the_channel_it_was_minted_for() {
+        let h = mint_delivery_handle(KEY, "slack", "D0AQ1PPAGEP", "slack:out:7d431598");
         assert_eq!(
-            parse_delivery_correlation_id(&id),
-            Some((
-                "agent/slack/D0AQ".to_string(),
-                "slack:out:7d431598-5e2c".to_string()
-            )),
+            verify_delivery_handle(KEY, &h, "slack"),
+            Some(("D0AQ1PPAGEP".to_string(), "slack:out:7d431598".to_string())),
         );
     }
 
@@ -4226,26 +4329,79 @@ mod delivery_correlation_tests {
     /// can serve as the separator. The split survives both.
     #[test]
     fn survives_colons_and_slashes() {
-        let id = delivery_correlation_id("a/b/c:d", "slack:out:u-u-u");
-        let (session, target) = parse_delivery_correlation_id(&id).expect("parses");
+        let h = mint_delivery_handle(KEY, "slack", "a/b/c:d", "slack:out:u-u-u");
+        let (session, target) = verify_delivery_handle(KEY, &h, "slack").expect("verifies");
         assert_eq!(session, "a/b/c:d");
         assert_eq!(target, "slack:out:u-u-u");
     }
 
-    /// An adapter built before the field existed echoes nothing, and
-    /// a half-empty handle names no row. Either way the delivery goes
-    /// unrecorded rather than onto a guessed chain.
+    /// The attack the MAC exists for. An adapter is a separate
+    /// process and the handle passes through its hands, so it can
+    /// return whatever it likes. A handle it composed rather than
+    /// received names a session of its choosing and must not verify.
     #[test]
-    fn rejects_handles_it_did_not_mint() {
-        assert_eq!(parse_delivery_correlation_id(""), None);
-        assert_eq!(
-            parse_delivery_correlation_id("slack:out:no-separator"),
-            None
-        );
-        assert_eq!(parse_delivery_correlation_id("\u{1f}slack:out:x"), None);
-        assert_eq!(
-            parse_delivery_correlation_id("agent/slack/D0AQ\u{1f}"),
-            None
-        );
+    fn a_handle_the_gateway_never_minted_is_rejected() {
+        let forged = handle("slack", "victim-session", "slack:out:x", &"0".repeat(32));
+        assert_eq!(verify_delivery_handle(KEY, &forged, "slack"), None);
+    }
+
+    /// The attack the channel check exists for, which the MAC alone
+    /// does not stop: a genuine handle, minted by this gateway, for
+    /// another channel's session, returned by the Slack adapter. The
+    /// MAC verifies. The delivery is dropped anyway.
+    #[test]
+    fn a_valid_handle_naming_another_channels_session_is_rejected() {
+        let other = mint_delivery_handle(KEY, "telegram", "tg-conversation", "telegram:out:abc");
+        // Genuine: this gateway minted it, and it verifies for the
+        // adapter it was issued to.
+        assert!(verify_delivery_handle(KEY, &other, "telegram").is_some());
+        // Returned by the Slack adapter, it names a session Slack has
+        // no business appending to.
+        assert_eq!(verify_delivery_handle(KEY, &other, "slack"), None);
+    }
+
+    /// A handle minted under a different key, which is what a handle
+    /// captured from an earlier gateway process is.
+    #[test]
+    fn a_handle_from_another_key_is_rejected() {
+        let h = mint_delivery_handle(b"a different key00000000000000000", "slack", "s", "t");
+        assert_eq!(verify_delivery_handle(KEY, &h, "slack"), None);
+    }
+
+    /// An adapter built before the field existed echoes nothing, and
+    /// a half-formed handle names no row.
+    #[test]
+    fn malformed_handles_are_rejected() {
+        let empty_tag = handle("slack", "s", "t", "");
+        let empty_session = handle("slack", "", "t", &"0".repeat(32));
+        let three_fields = format!("slack{SEP}session{SEP}target");
+        for raw in [
+            "",
+            "slack:out:no-separators",
+            &three_fields,
+            &empty_tag,
+            &empty_session,
+        ] {
+            assert_eq!(
+                verify_delivery_handle(KEY, raw, "slack"),
+                None,
+                "accepted malformed handle {raw:?}",
+            );
+        }
+    }
+
+    /// The MAC covers all three fields, so moving the tag onto a
+    /// different session or target invalidates it.
+    #[test]
+    fn tampering_with_any_field_is_rejected() {
+        let h = mint_delivery_handle(KEY, "slack", "session-a", "slack:out:a");
+        let tag = tag_of(&h);
+        for forged in [
+            handle("slack", "session-b", "slack:out:a", &tag),
+            handle("slack", "session-a", "slack:out:b", &tag),
+            handle("telegram", "session-a", "slack:out:a", &tag),
+        ] {
+            assert_eq!(verify_delivery_handle(KEY, &forged, "slack"), None);
+        }
     }
 }

@@ -44,6 +44,8 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
 tracing = { workspace = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tracing-subscriber = { workspace = true }
