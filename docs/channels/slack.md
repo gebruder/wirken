@@ -1,33 +1,40 @@
 # Slack
 
+Wirken connects to Slack over Socket Mode. No public URL, no webhook.
+
+## Connect
+
 ```bash
 wirken channel add slack
 ```
 
-You need two tokens: a bot token (`xoxb-...`) and an app token (`xapp-...`).
+It asks for two tokens. Both are in your app at [api.slack.com/apps](https://api.slack.com/apps).
 
-1. Create a new app at [api.slack.com/apps](https://api.slack.com/apps) (choose "From scratch")
-2. Go to **Socket Mode** and enable it (must be done before configuring Event Subscriptions)
-3. Go to **OAuth & Permissions**, add bot scopes:
-   - `chat:write`, `app_mentions:read`
-   - `im:history`, `im:read`, `im:write`
-   - `channels:history`, `channels:read` (for public channels)
-   - `users:read`
-4. Go to **Event Subscriptions**, enable events, and subscribe to bot events:
-   - `message.im` (DMs)
-   - `message.channels` (public channels)
-   - `app_mention` (mentions)
-   - Socket Mode must be on first or this page will require a Request URL and won't save.
-5. Go to **App Home** > **Messages Tab**, check "Allow users to send Slash commands and messages from the messages tab" (required for DMs)
-6. Go to **Basic Information** > **App-Level Tokens**, create a token with `connections:write` scope, copy it (`xapp-...`)
-7. Install the app to your workspace, copy the **Bot User OAuth Token** from OAuth & Permissions (`xoxb-...`)
-8. Run `wirken channel add slack` and paste both tokens when prompted
+| Prompt | Where to get it |
+|--------|-----------------|
+| `Slack bot token (xoxb-...)` | Left menu **OAuth & Permissions**. Copy **Bot User OAuth Token**. |
+| `Slack app token (xapp-...)` | Left menu **Basic Information**, scroll to **App-Level Tokens**, click the token name. Copy it. |
 
-The adapter uses Socket Mode (WebSocket). No public URL or webhook endpoint needed.
+Nothing under **App Credentials** (Client ID, Client Secret, Signing Secret, Verification Token) is used.
 
-In channels, the bot only responds when mentioned. In DMs, it responds to all messages.
+## Create the app
 
-When a message is posted inside a thread, the bot's reply lands in the same thread. When a message is posted at the channel root, the reply also lands at the root — root messages are not auto-threaded. The bot's own outbound messages are filtered out of the inbound stream by `user_id` and `bot_id`, so DM channels do not echo-loop on the bot's own replies.
+Skip this if the app already exists.
+
+1. [api.slack.com/apps](https://api.slack.com/apps), **Create New App**, **From scratch**.
+2. **Socket Mode**: enable it. Slack asks you to generate an app-level token with `connections:write`. Generate it. This is the `xapp-` token.
+3. **OAuth & Permissions**, Bot Token Scopes: `chat:write`, `app_mentions:read`, `im:history`, `im:read`, `im:write`, `channels:history`, `channels:read`, `users:read`.
+4. **Event Subscriptions**: enable, subscribe to bot events `message.im`, `message.channels`, `app_mention`.
+5. **App Home**, **Messages Tab**: check "Allow users to send Slash commands and messages from the messages tab".
+6. **OAuth & Permissions**: **Install to Workspace**. The **Bot User OAuth Token** appears. This is the `xoxb-` token.
+
+Then run `wirken channel add slack` as above.
+
+## Behaviour
+
+In channels the bot answers when mentioned. In DMs it answers every message.
+
+Replies land in the thread the message came from; root messages stay at the root. The bot's own messages are filtered from the inbound stream by `user_id` and `bot_id`, so DMs do not echo-loop.
 
 ## Team deployment notes
 

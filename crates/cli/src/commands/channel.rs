@@ -228,11 +228,20 @@ async fn add_google_chat(
 }
 
 async fn add_slack(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
-    let token = resolve_token("slack", flags.token.as_deref(), true)?;
-    let app_token = match std::env::var("WIRKEN_SLACK_APP_TOKEN") {
-        Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => super::read_secret("  Slack app token (xapp-...): ")?,
-    };
+    let token = resolve_with_validation(
+        "Slack bot token (xoxb-...)",
+        flags.token.clone(),
+        "WIRKEN_SLACK_TOKEN",
+        true,
+        validate_slack_bot_token,
+    )?;
+    let app_token = resolve_with_validation(
+        "Slack app token (xapp-...)",
+        None,
+        "WIRKEN_SLACK_APP_TOKEN",
+        true,
+        validate_slack_app_token,
+    )?;
 
     let pp = super::cached_vault_passphrase()?;
     let keychain = probe_keychain(data, move || pp);
@@ -561,6 +570,36 @@ pub fn validate_non_empty(s: &str) -> Result<()> {
     Ok(())
 }
 
+/// Slack issues two tokens with different prefixes and the pair is easy
+/// to transpose: `xoxb-` is the bot user token under OAuth &
+/// Permissions, `xapp-` the app-level token under Basic Information.
+/// Either one stores cleanly in the other's slot and the mismatch only
+/// surfaces later, as an auth failure at connect time, so each prompt
+/// rejects the other's token and names the prompt it belongs to.
+pub fn validate_slack_bot_token(s: &str) -> Result<()> {
+    validate_non_empty(s)?;
+    if s.trim().starts_with("xapp-") {
+        anyhow::bail!(
+            "that is an app-level token; it belongs at the \
+             'Slack app token (xapp-...)' prompt"
+        );
+    }
+    Ok(())
+}
+
+/// Counterpart to [`validate_slack_bot_token`]; see there for why the
+/// two prompts cross-check each other.
+pub fn validate_slack_app_token(s: &str) -> Result<()> {
+    validate_non_empty(s)?;
+    if s.trim().starts_with("xoxb-") {
+        anyhow::bail!(
+            "that is a bot user token; it belongs at the \
+             'Slack bot token (xoxb-...)' prompt"
+        );
+    }
+    Ok(())
+}
+
 /// WhatsApp Cloud API phone-number-id: numeric, 15 or 16 digits.
 /// Meta's IDs are 64-bit-ish integers rendered decimal; we range-
 /// check length rather than parsing into u64 to keep the rejection
@@ -711,6 +750,36 @@ mod tests {
     use super::*;
 
     // -- Validators ---------------------------------------------------
+
+    // Low-entropy fixtures, as above: the validators read the prefix
+    // and nothing else.
+    #[test]
+    fn slack_bot_token_rejects_the_app_token() {
+        let e = validate_slack_bot_token("xapp-aaaa")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("Slack app token (xapp-...)"), "{e}");
+    }
+
+    #[test]
+    fn slack_app_token_rejects_the_bot_token() {
+        let e = validate_slack_app_token("xoxb-aaaa")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("Slack bot token (xoxb-...)"), "{e}");
+    }
+
+    #[test]
+    fn slack_tokens_accept_their_own_prefix() {
+        assert!(validate_slack_bot_token("xoxb-aaaa").is_ok());
+        assert!(validate_slack_app_token("xapp-aaaa").is_ok());
+    }
+
+    #[test]
+    fn slack_tokens_reject_empty() {
+        assert!(validate_slack_bot_token("").is_err());
+        assert!(validate_slack_app_token("   ").is_err());
+    }
 
     #[test]
     fn phone_number_id_accepts_15_and_16_digits() {
