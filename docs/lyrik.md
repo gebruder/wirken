@@ -32,8 +32,8 @@ whose every step is recorded against a scoring guide the team owns.
 ## What it is not
 
 - Not a vulnerability scanner. Lyrik runs scanners; it is not one.
-- Not a compliance tool. It does not score against MITRE ATLAS, OWASP or NIST
-  unless the team's scoring guide chooses to.
+- Not a compliance tool. It scores against the team's own guide, not against
+  an external framework, unless the guide chooses to anchor on one.
 - Not a continuous monitor. It audits source on demand and does not watch
   running systems.
 - Not a single-number tool. There is no PASS/FAIL and no aggregate severity

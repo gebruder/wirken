@@ -81,22 +81,28 @@ durable across reboots, so the practical forms are a systemd
 
 ## NIST AI Risk Management Framework
 
-The [NIST AI RMF (AI 100-1)](https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf)
-takes the complementary view: how an organization governs, maps, measures and
-manages AI risk across its lifecycle. Only subcategories where Wirken ships a
-code-verifiable capability are listed. Subcategory text is defined in the
-companion [Playbook](https://airc.nist.gov/AI_RMF_Knowledge_Base/Playbook).
+Subcategory text is quoted verbatim from
+[NIST AI 100-1](https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf),
+Tables 1 to 4. Only subcategories whose text a shipped mechanism actually
+satisfies are listed; most of the framework addresses organizational process
+that a tool cannot discharge, and those are absent rather than mapped to
+something adjacent.
 
-| Subcategory | Capability | Owner |
-|-------------|------------|-------|
-| GOVERN 1.1, policies and procedures | Three-tier model with first-use approval, expiry and revocation, plus a sweep of stored grants the gate cannot act on | [permissions-and-identity.md](permissions-and-identity.md) |
-| GOVERN 1.6, inventory and lifecycle | Per-credential `created_at`, `expires_at`, `last_used_at`, `rotation_due_at`, and a `rotate` API | [credentials.md](credentials.md) |
-| GOVERN 2.1, roles and responsibilities | Centralized org policy: provider, SIEM, MCP servers and sandbox mode pulled from a company URL and applied locally | [enterprise.md](enterprise.md) |
-| MAP 1.1, context and use cases | Provider-agnostic routing across OpenAI, Anthropic, Gemini, Bedrock, Ollama, Tinfoil, Privatemode, Infomaniak, Hetzner and any OpenAI-compatible endpoint | [configuration.md](configuration.md#providerjson) |
-| MAP 5.1, impact and blast radius | One OS process per channel adapter; a sealed `Channel` marker makes cross-channel access a type error in the API that carries it | [enforcement-model.md](enforcement-model.md#channel-isolation) |
-| MEASURE 2.5, output monitoring | Real-time forwarding to Datadog, Splunk HEC, Microsoft Sentinel or a generic webhook, alongside the local session log | [siem-forwarder.md](siem-forwarder.md) |
-| MEASURE 2.6, security and resilience | Prompt-injection detector flags role-switching, instruction overrides, base64 commands and tool-call injection; events are tagged in audit, not blocked | [enforcement-model.md](enforcement-model.md#prompt-injection-detection) |
-| MEASURE 2.7, system logging | Append-only per-session hash chain with per-agent Ed25519 attestation and offline replay | [audit-cli.md](audit-cli.md) |
-| MANAGE 1.3, risk mitigation | Docker and gVisor confine `exec` (no network, 512 MB, 256 PIDs, non-root, 300s); Wasmtime runs Wasm skills under a fuel limit with no filesystem and no network | [sandbox-properties.md](sandbox-properties.md) |
-| MANAGE 2.2, input validation | Tool inputs declared as JSON Schema; filesystem tools constrained by `cap_std::Dir` rooted at the workspace | [sandbox-properties.md](sandbox-properties.md) |
-| MANAGE 2.4, abuse and overuse limits | Auth rate limiter with no loopback exemption (5 failures / 60s / 10-minute lockout) and a control-plane GCRA limiter via `governor` | [enforcement-model.md](enforcement-model.md#rate-limits) |
+A row is a claim about the mechanism, not a claim that an adopting
+organization satisfies the subcategory. Four of the MEASURE entries below
+qualify their scope with "as identified in the MAP function"; wirken does not
+perform an organization's MAP function, so that qualifier stays the adopter's
+to satisfy.
+
+| Subcategory | Verbatim text | Mechanism | What it does not cover |
+|---|---|---|---|
+| GOVERN 1.7 | "Processes and procedures are in place for decommissioning and phasing out AI systems safely and in a manner that does not increase risks or decrease the organization's trustworthiness." | An ordered uninstall procedure that exports the audit chain before anything is destroyed, removes the service and scheduled entries before the binary they depend on, and enumerates the platform-side registrations and tokens that local deletion does not touch. [README](../README.md#uninstall), [channels.md](channels.md#platform-side-state) | Nothing automates it; the operator runs the steps. |
+| MAP 4.2 | "Internal risk controls for components of the AI system, including third-party AI technologies, are identified and documented." | Signature verification on third-party skill bundles and `mcp.json` entries, applied at install and again at every load, with an optional operator registry root. [signing.md](signing.md) | Both gates have a documented opt-out, and MCP server children run at the wirken UID with no process sandbox once spawned. |
+| MEASURE 2.4 | "The functionality and behavior of the AI system and its components – as identified in the MAP function – are monitored when in production." | Every tool call, gate decision, model call and refusal is written as a typed event before it executes, and forwarded in real time to Datadog, Splunk HEC, Microsoft Sentinel or a webhook. [audit-cli.md](audit-cli.md), [siem-forwarder.md](siem-forwarder.md) | Forwarding is best-effort with no retry; the local chain is the durable record. |
+| MEASURE 2.6 | "The AI system is evaluated regularly for safety risks – as identified in the MAP function. The AI system to be deployed is demonstrated to be safe, its residual negative risk does not exceed the risk tolerance, and it can fail safely, particularly if made to operate beyond its knowledge limits. Safety metrics reflect system reliability and robustness, real-time monitoring, and response times for AI system failures." | The "fail safely" clause, on the dispatch path. `exec` is refused rather than run on the host when the sandbox is unavailable; an unregistered tool name resolves to Tier 3; a present-but-unparseable registry root refuses every skill; a ledger error under a block-mode budget refuses the call; a sidecar that cannot start refuses the `exec`. [sandbox-properties.md](sandbox-properties.md#no-silent-fallback), [permissions-and-identity.md](permissions-and-identity.md) | The rest of the subcategory. There is no regular safety evaluation, no residual-risk determination against a stated tolerance, and no safety metrics for reliability or failure response times. |
+| MEASURE 2.7 | "AI system security and resilience – as identified in the MAP function – are evaluated and documented." | This document and [sandbox-properties.md](sandbox-properties.md), which pair each control with its gap and cite the symbol that implements it, plus the verification commands an operator can run to confirm the sandbox behaves as described. | Evaluation is by the maintainers against the code. No third party has assessed it. |
+| MEASURE 2.8 | "Risks associated with transparency and accountability – as identified in the MAP function – are examined and documented." | A per-session hash chain with per-agent attestation, plus the documented limits of what it proves: that the signing key is held by the process that writes the chain, and that the default anchor is co-resident, so verification emits a warning naming what it does not establish. [audit-cli.md](audit-cli.md) | Tamper-evidence against a same-UID attacker needs an anchor held off the machine, which is the operator's to arrange. |
+| MANAGE 2.4 | "Mechanisms are in place and applied, and responsibilities are assigned and understood, to supersede, disengage, or deactivate AI systems that demonstrate performance or outcomes inconsistent with intended use." | Org policy `blocked_tools` fails a named tool before dispatch; `wirken permissions revoke` drops a grant with immediate effect; `wirken sessions close` ends a session; `wirken preset unschedule` stops a scheduled agent. The operator is the approver, and every denial is recorded with the surface it came from. [enterprise.md](enterprise.md), [permissions-and-identity.md](permissions-and-identity.md) | Org-policy changes take effect at the next gateway start, so deactivation through that path is not immediate. There is no central registry or live revocation across instances. |
+
+Subcategories wirken ships no mechanism for, including the whole of the
+GOVERN function beyond 1.7, are deliberately absent.
