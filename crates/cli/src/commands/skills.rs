@@ -209,7 +209,7 @@ pub async fn trust_root(pubkey_hex: &str) -> Result<()> {
     println!();
     println!("  Re-sign bundled and local skills as delegates of this root, using");
     println!("  the root private key in your offline signing environment:");
-    println!("    wirken skills sign --delegate --root-key <offline-root-secret> <dir>");
+    println!("    wirken skills sign --root-key <offline-root-seed> <dir>");
     Ok(())
 }
 
