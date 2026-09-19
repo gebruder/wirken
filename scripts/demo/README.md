@@ -29,26 +29,19 @@ configured registry root.
 Everything runs against a scratch data directory under this folder. Nothing
 touches `~/.wirken`.
 
-Set `HOME` as well as `WIRKEN_DATA_DIR`. The gateway and the CLI resolve
-their own data directory from `HOME` (`$HOME/.wirken`); `WIRKEN_DATA_DIR` is
-what `wirken run` exports to the child processes it spawns, and is set here
-so a demo that grows an adapter keeps pointing at the same place. Setting
-only `WIRKEN_DATA_DIR` would leave `wirken ask` and `wirken audit` reading
-your real `~/.wirken`.
-
-Resolve the binary path before overriding `HOME`, because `~` moves:
+`WIRKEN_DATA_DIR` is the whole mechanism. The gateway, the CLI and the child
+processes the gateway spawns all resolve the data directory through one
+function, so setting it once moves every process at once.
 
 ```bash
 cd ~/code/wirken
 
 export WIRKEN="$PWD/target/debug/wirken"
 export DEMO="$PWD/scripts/demo"
-export DEMO_HOME="$DEMO/state"
-
-mkdir -p "$DEMO_HOME/.wirken"
-export HOME="$DEMO_HOME"
-export WIRKEN_DATA_DIR="$DEMO_HOME/.wirken"
+export WIRKEN_DATA_DIR="$DEMO/state"
 export WIRKEN_VAULT_PASSPHRASE="demo-passphrase"
+
+mkdir -p "$WIRKEN_DATA_DIR"
 ```
 
 `scripts/demo/state/` is gitignored. Everything else in this folder is a
@@ -139,8 +132,8 @@ Meanwhile the server has logged the whole script:
 ```
       ID  TIMESTAMP             ACTOR             ACTION                TARGET
   ──────  ────────────────────  ────────────────  ────────────────────  ──────────────────────────────
-      16  2026-09-19 14:05:20                     permission_denied     
-      11  2026-09-19 14:05:18                     permission_denied     
+      16  2026-09-19 14:19:04                     permission_denied     
+      11  2026-09-19 14:19:04                     permission_denied     
 
   2 events shown.
 ```
@@ -245,7 +238,7 @@ consistency is all a self-signature proves. Now anchor identity:
 ```
 
 ```
-  Registry root installed: .../state/.wirken/registry-root.pub
+  Registry root installed: .../state/registry-root.pub
   Skill loading now requires delegation by this root (strict mode);
   self-signed-only bundles will no longer load.
 ```
@@ -321,10 +314,11 @@ anchor warning in step 5 is about. Pinning that claim needs
 ## Teardown
 
 ```bash
-rm -rf "$DEMO_HOME"
+rm -rf "$WIRKEN_DATA_DIR"
 ```
 
-Then stop the server in the second terminal with Ctrl+C. Your real
+Then stop the server in the second terminal with Ctrl+C, and
+`unset WIRKEN_DATA_DIR WIRKEN_VAULT_PASSPHRASE` in the first. Your real
 `~/.wirken` was never opened.
 
 ## What is committed here
@@ -335,7 +329,7 @@ registry-root.pub           Ed25519 root public key; private half does not exist
 skills/demo-tampered/       signed, then edited: refused at the floor
 skills/demo-selfsigned/     intact self-signature: refused once a root is set
 README.md                   this runbook
-state/                      scratch data dir, gitignored, created by step 1
+state/                      scratch data dir, gitignored, created above
 ```
 
 To rebuild the fixtures from scratch, sign both directories with

@@ -150,7 +150,7 @@ The `vault:` prefix resolves values from the encrypted credential vault at runti
 
 | Variable | Purpose |
 |----------|---------|
-| `WIRKEN_DATA_DIR` | Data directory for the child processes the gateway spawns (MCP proxy, channel adapters). `wirken run` exports it to them; the gateway and the CLI do not read it for their own data directory, which is always `$HOME/.wirken` (`USERPROFILE` on Windows). Relocating the gateway's own state means changing `HOME`. |
+| `WIRKEN_DATA_DIR` | Override the data directory (default: `~/.wirken`) |
 | `WIRKEN_SKILLS_INDEX` | Override the skill registry URL |
 | `WIRKEN_CACHE_MODE` | `drop` bypasses the agent LRU cache — every inbound message wakes a fresh agent from the session log. Used in CI to assert cache equivalence. Default: `cached`. |
 | `WIRKEN_AGENT_CACHE_SIZE` | LRU cache capacity (number of hot sessions). Default: `64`. |

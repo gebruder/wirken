@@ -19,9 +19,10 @@ use wirken_vault::{CredentialStore, probe_keychain};
 
 /// Run an adapter process. Called by the gateway daemon.
 pub async fn run(channel: &str) -> Result<()> {
-    let data_dir = std::env::var("WIRKEN_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| GatewayConfig::default().data_dir);
+    // Same resolver the gateway that spawned this process uses, so
+    // `WIRKEN_DATA_DIR` cannot point the adapter at one directory and
+    // the gateway at another.
+    let data_dir = GatewayConfig::default().data_dir;
 
     let socket_path = std::env::var("WIRKEN_SOCKET")
         .map(PathBuf::from)

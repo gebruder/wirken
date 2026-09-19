@@ -34,7 +34,7 @@ The frontmatter fields:
 
 Wirken ships with 16 bundled skills. They are installed to `~/.wirken/skills/` on first setup.
 
-The skills directory is always under `$HOME/.wirken` (from `HOME`, or `USERPROFILE` on Windows), not `WIRKEN_DATA_DIR`. The gateway exports `WIRKEN_DATA_DIR` to the child processes it spawns (MCP proxy, channel adapters) but does not read it for its own data directory, so skill discovery follows `HOME`. Relocating skill discovery means changing `HOME`.
+The skills directory is `<data_dir>/skills/`, where the data directory is `WIRKEN_DATA_DIR` when set and `~/.wirken` otherwise. The gateway, the CLI and the child processes the gateway spawns all resolve it the same way, so skill discovery and the load-time signature gate never look in different places.
 
 ### Auto-invocation vs explicit invocation
 

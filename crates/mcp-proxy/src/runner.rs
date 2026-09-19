@@ -23,14 +23,15 @@ use crate::server;
 ///
 /// Environment variables:
 ///
-/// - `WIRKEN_DATA_DIR` — base data directory (defaults to ~/.wirken)
+/// - `WIRKEN_DATA_DIR` — base data directory (defaults to ~/.wirken).
+///   Read through `GatewayConfig::default`, the same resolver the
+///   gateway uses, so parent and child cannot disagree about where
+///   the vault and the audit log live.
 /// - `WIRKEN_MCP_SOCKET` — override for the listen socket path
 /// - `WIRKEN_VAULT_PASSPHRASE` — passphrase used by the keychain
 ///   fallback when the OS keychain is unavailable
 pub async fn run() -> Result<(), ProxyError> {
-    let data_dir = std::env::var("WIRKEN_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| GatewayConfig::default().data_dir);
+    let data_dir = GatewayConfig::default().data_dir;
 
     let socket_path = std::env::var("WIRKEN_MCP_SOCKET")
         .map(PathBuf::from)

@@ -161,8 +161,22 @@ fn create_dir_owner_only(path: &std::path::Path) -> std::io::Result<()> {
 /// call this same function. `GatewayConfig` is only ever constructed
 /// via `default()`, so for the process that loads skills `data_dir`
 /// and this function cannot diverge.
+///
+/// `WIRKEN_DATA_DIR` overrides the default when set to a non-empty
+/// value. The gateway exports it to the adapter and MCP-proxy
+/// processes it spawns, and those resolve their own data dir through
+/// this same function, so one host cannot end up with a gateway
+/// writing `audit.db` in one directory while a child reads
+/// credentials from another. An empty value is treated as unset
+/// rather than as the relative path `""`: an exported-but-blank
+/// variable is a misconfiguration, and resolving it to the process's
+/// working directory would scatter vault and audit state wherever the
+/// operator happened to be standing.
 pub fn default_data_dir() -> PathBuf {
-    dirs_home().join(".wirken")
+    match std::env::var_os("WIRKEN_DATA_DIR") {
+        Some(v) if !v.is_empty() => PathBuf::from(v),
+        _ => dirs_home().join(".wirken"),
+    }
 }
 
 fn dirs_home() -> PathBuf {
@@ -170,6 +184,73 @@ fn dirs_home() -> PathBuf {
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+
+/// Env-var resolution for the data directory. Separate from the
+/// unix-only permissions tests below because the behaviour is
+/// cross-platform.
+///
+/// These tests write a process-global variable, and cargo runs a
+/// crate's tests on parallel threads, so they serialise on one lock
+/// and restore the prior value before releasing it.
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Set `WIRKEN_DATA_DIR` to `value` (or remove it for `None`),
+    /// run `f`, then put the variable back the way it was.
+    fn with_data_dir_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _serial = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var_os("WIRKEN_DATA_DIR");
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("WIRKEN_DATA_DIR", v),
+                None => std::env::remove_var("WIRKEN_DATA_DIR"),
+            }
+        }
+        let out = f();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("WIRKEN_DATA_DIR", v),
+                None => std::env::remove_var("WIRKEN_DATA_DIR"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn env_override_wins_over_home() {
+        let dir = with_data_dir_env(Some("/srv/wirken-state"), default_data_dir);
+        assert_eq!(dir, PathBuf::from("/srv/wirken-state"));
+    }
+
+    #[test]
+    fn unset_falls_back_to_home_dot_wirken() {
+        let dir = with_data_dir_env(None, default_data_dir);
+        assert_eq!(dir, dirs_home().join(".wirken"));
+    }
+
+    #[test]
+    fn empty_value_is_treated_as_unset() {
+        // An exported-but-blank variable must not resolve to the
+        // working directory; that would scatter vault and audit state.
+        let dir = with_data_dir_env(Some(""), default_data_dir);
+        assert_eq!(dir, dirs_home().join(".wirken"));
+    }
+
+    #[test]
+    fn gateway_config_default_follows_the_override() {
+        // The gate that loads skills calls `default_data_dir` and the
+        // running gateway carries `GatewayConfig::data_dir`. This is
+        // the assertion that the two cannot diverge.
+        let (cfg_dir, fn_dir) = with_data_dir_env(Some("/srv/wirken-state"), || {
+            (GatewayConfig::default().data_dir, default_data_dir())
+        });
+        assert_eq!(cfg_dir, fn_dir);
+        assert_eq!(cfg_dir, PathBuf::from("/srv/wirken-state"));
+    }
 }
 
 #[cfg(all(test, unix))]
