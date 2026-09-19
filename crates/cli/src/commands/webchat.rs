@@ -2798,7 +2798,48 @@ pub async fn serve(
                 // handle and the body lives under `detail.content`.
                 let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
 
-                let inbound_detail = serde_json::json!({ "content": &message });
+                let mut inbound_detail = serde_json::json!({ "content": &message });
+
+                // Scan for prompt-injection signatures, the same way
+                // the adapter message loop does and through the same
+                // helper. The detector tags; it never blocks; a
+                // failure in it is named on the chain rather than
+                // being taken for a clean scan. See
+                // `super::inbound_scan`.
+                //
+                // The scan runs before the row is written, which is
+                // only safe because it is caught: a detector panic
+                // used to unwind past this write and leave no trace of
+                // the message that caused it. It returns now, so the
+                // row is written either way and carries the verdict.
+                let threat_detail = super::inbound_scan::scan_catching_panics(
+                    &detector,
+                    &message,
+                    &format!("webchat conversation '{}'", conversation.as_str()),
+                );
+                if let Some(ref threat) = threat_detail
+                    && let (Some(obj), Some(threat_obj)) =
+                        (inbound_detail.as_object_mut(), threat.as_object())
+                {
+                    for (k, v) in threat_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+                if threat_detail.is_some() {
+                    let _ = audit
+                        .log(
+                            AuditEvent::new(
+                                ActorKind::Service,
+                                "webchat-user",
+                                "message.threat_flagged",
+                                &inbound_target,
+                            )
+                            .with_channel("webchat")
+                            .with_session(conversation.as_str())
+                            .with_detail(inbound_detail.clone()),
+                        )
+                        .await;
+                }
 
                 // A turn is not started unless its inbound row was
                 // accepted. The writer returns an error only once its
@@ -2807,10 +2848,6 @@ pub async fn serve(
                 // being recorded, so the chat route refuses rather than
                 // running an unrecorded turn. The page raises its
                 // halted banner from this status.
-                //
-                // Written before the scan, as in the adapter message
-                // loop: a message that breaks the detector has to be
-                // on the chain before the detector sees it.
                 let inbound_logged = audit
                     .log(
                         AuditEvent::new(
@@ -2821,7 +2858,7 @@ pub async fn serve(
                         )
                         .with_channel("webchat")
                         .with_session(conversation.as_str())
-                        .with_detail(inbound_detail.clone()),
+                        .with_detail(inbound_detail),
                     )
                     .await;
                 if let Err(e) = inbound_logged {
@@ -2837,40 +2874,6 @@ pub async fn serve(
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                     return;
-                }
-
-                // Scan for prompt-injection signatures, the same way
-                // the adapter message loop does and through the same
-                // helper. The detector tags; it never blocks; a
-                // failure in it is named on the chain rather than
-                // being taken for a clean scan. See
-                // `super::inbound_scan`.
-                if let Some(threat) = super::inbound_scan::scan_catching_panics(
-                    &detector,
-                    &message,
-                    &format!("webchat conversation '{}'", conversation.as_str()),
-                ) {
-                    let mut detail = inbound_detail;
-                    if let (Some(obj), Some(threat_obj)) =
-                        (detail.as_object_mut(), threat.as_object())
-                    {
-                        for (k, v) in threat_obj {
-                            obj.insert(k.clone(), v.clone());
-                        }
-                    }
-                    let _ = audit
-                        .log(
-                            AuditEvent::new(
-                                ActorKind::Service,
-                                "webchat-user",
-                                "message.threat_flagged",
-                                &inbound_target,
-                            )
-                            .with_channel("webchat")
-                            .with_session(conversation.as_str())
-                            .with_detail(detail),
-                        )
-                        .await;
                 }
 
                 // Session. `get_or_create` moves `last_activity` but
@@ -7747,17 +7750,18 @@ mod tests {
         );
     }
 
-    /// The chat route records the message before it scans it, and
-    /// scans it through the shared helper.
+    /// The chat route scans through the shared helper and writes its
+    /// inbound row after the scan, so the row carries the verdict.
     ///
-    /// The detector is pattern matching over attacker-chosen text and
-    /// can break on a message; the row that says what arrived has to
-    /// be on the chain before that can happen. `inbound_scan`
-    /// documents the ordering and cannot enforce it, because it is a
-    /// property of the caller, so it is pinned here against the
-    /// route's own source.
+    /// The ordering is only safe because the scan is caught: the
+    /// detector is pattern matching over attacker-chosen text and can
+    /// break on a message, and a panic here used to unwind past the
+    /// write and leave no trace of what arrived. Both halves are
+    /// pinned against the route's own source, because the direct call
+    /// is what would reintroduce the unwind and `inbound_scan` cannot
+    /// see its callers.
     #[test]
-    fn the_chat_route_records_the_message_before_it_scans_it() {
+    fn the_chat_route_writes_its_inbound_row_after_the_caught_scan() {
         let route = SERVER_SOURCE
             .split_once(r#"first_line.starts_with("POST /api/chat")"#)
             .expect("chat route exists")
@@ -7766,16 +7770,15 @@ mod tests {
             .expect("the verify route follows it")
             .0;
 
-        let inbound = route
-            .find(r#""message.inbound","#)
-            .expect("the chat route writes an inbound row");
         let scan = route
             .find("inbound_scan::scan_catching_panics")
             .expect("the chat route scans through the shared helper");
+        let inbound = route
+            .find(r#""message.inbound","#)
+            .expect("the chat route writes an inbound row");
         assert!(
-            inbound < scan,
-            "the inbound row must be written before the scan, or a message that \
-             breaks the detector leaves no trace of itself"
+            scan < inbound,
+            "the inbound row is written after the scan so it carries the verdict"
         );
 
         let flagged = route
@@ -7786,6 +7789,9 @@ mod tests {
             "the threat row follows the scan that produced it"
         );
 
+        // The half that makes the ordering safe. A direct call is
+        // uncaught, and an uncaught panic here unwinds past the
+        // inbound write.
         assert!(
             !route.contains("detector.scan("),
             "the detector is reached through the shared helper, not called directly"

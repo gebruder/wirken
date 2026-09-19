@@ -16,10 +16,12 @@
 //! - A failure is still worth a row. Silently treating a panic as a
 //!   clean scan would leave a message that defeated the detector
 //!   indistinguishable from one it cleared.
-//! - The caller writes its own `message.inbound` row *before* calling
-//!   in here. That is the ordering this module cannot enforce and the
-//!   reason it says so: a message that breaks the detector has to be
-//!   on the chain before the detector sees it.
+//! - This function returns. That is what lets the caller scan first
+//!   and then write one `message.inbound` row carrying the verdict,
+//!   the shape every consumer of that row already reads. Before the
+//!   catch, a detector panic unwound past the write and the message
+//!   that caused it left no trace at all; the fix for that is the
+//!   catch, not writing the row earlier and losing its shape.
 
 use wirken_gateway::injection_detect::InjectionDetector;
 
@@ -45,7 +47,11 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 ///
 /// The detector is pattern matching over attacker-chosen text, which
 /// is why it is caught rather than trusted: when it did panic, the
-/// cost was not a missed detection but the whole connection.
+/// cost was not a missed detection but the whole connection and every
+/// trace of the message that caused it.
+///
+/// It returns on every path, so a caller may write its inbound row
+/// after this call and still be certain of writing it.
 pub fn scan_catching_panics(
     detector: &InjectionDetector,
     text: &str,

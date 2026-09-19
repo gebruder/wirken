@@ -22,22 +22,28 @@
 //! 4. Nothing else. Other adapters are separate tasks and were not
 //!    affected, which is what made this quiet.
 //!
-//! Three changes close the first three. The `message.inbound` row is
-//! written before the scan, so a message that breaks the detector is
-//! on the chain. The scan is wrapped, so a panic becomes a
-//! `message.threat_flagged` row naming it and the message carries on
+//! Two changes close the first three. The scan is wrapped, so it
+//! returns whatever the detector does: the loop carries on (1), the
+//! `message.inbound` row written after it is written either way and
+//! carries the verdict (2), and a panic becomes a
+//! `message.threat_flagged` row naming it while the message proceeds
 //! as detection-only always did. The teardown moved into a drop guard,
-//! so it runs on both paths. The fourth stays true and is asserted so
-//! that the containment is a fact rather than a leftover.
+//! so it runs on both paths (3). The fourth stays true and is asserted
+//! so that the containment is a fact rather than a leftover.
+//!
+//! Note which change closes (2). Writing the row first would also have
+//! done it, and would have cost the row its shape: `detail.threat` is
+//! what every consumer of `message.inbound` reads. The catch keeps
+//! both.
 //!
 //! The harness is the shape of `message_loop`, not the function
 //! itself: that one is private to the CLI binary and needs an IPC
 //! channel, an agent factory, an audit writer and a session store. The
 //! shape is what the panic interacted with, and it is reproduced here
-//! exactly: one spawned task per connection, the inbound row before
-//! the scan, the scan caught, a threat row on a finding or a failure,
-//! and the teardown owned by a guard rather than by the code after the
-//! loop.
+//! exactly: one spawned task per connection, the scan caught, the
+//! inbound row written after it carrying the verdict, a threat row on
+//! a finding or a failure, and the teardown owned by a guard rather
+//! than by the code after the loop.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -84,22 +90,26 @@ impl ConnectionLog {
         self.rows().into_iter().map(|r| r.action).collect()
     }
 
+    /// The message bodies of the inbound rows, with the verdict each
+    /// row carries beside its body stripped off.
     fn inbound_bodies(&self) -> Vec<String> {
         self.rows()
             .into_iter()
             .filter(|r| r.action == "message.inbound")
-            .map(|r| r.detail)
+            .map(|r| match r.detail.split_once("|threat=") {
+                Some((body, _)) => body.to_string(),
+                None => r.detail,
+            })
             .collect()
     }
 
-    /// Whether the chain already holds the inbound row for `text`.
-    /// Asked from inside the scan, which is the only place the answer
-    /// distinguishes recording before the scan from recording after
-    /// it.
+    /// Whether the chain holds an inbound row for `text`. The row
+    /// carries the scan's verdict beside the body, so a flagged
+    /// message's row is the body followed by the finding.
     fn has_inbound(&self, text: &str) -> bool {
         self.rows()
             .iter()
-            .any(|r| r.action == "message.inbound" && r.detail == text)
+            .any(|r| r.action == "message.inbound" && r.detail.starts_with(text))
     }
 }
 
@@ -128,12 +138,11 @@ where
     tokio::spawn(async move {
         let _teardown = Teardown(log.clone());
         for text in inbound {
-            // The inbound row, before anything reads the message.
-            log.push("message.inbound", &text);
-
             // Detection is advisory, so a scanner that fails is the
             // same non-event as one that finds nothing, except that
-            // the failure is named on the chain.
+            // the failure is named on the chain. Catching it is also
+            // what lets the inbound row below be written after the
+            // scan rather than before it.
             let finding = match std::panic::catch_unwind(AssertUnwindSafe(|| scan(&text))) {
                 Ok(finding) => finding,
                 Err(panic) => Some(
@@ -144,9 +153,18 @@ where
                         .unwrap_or_else(|| "panic payload was not a string".to_string()),
                 ),
             };
-            if let Some(detail) = finding {
-                log.push("message.threat_flagged", &detail);
+            if let Some(detail) = &finding {
+                log.push("message.threat_flagged", detail);
             }
+
+            // The inbound row, carrying the verdict the scan produced.
+            log.push(
+                "message.inbound",
+                &match &finding {
+                    Some(detail) => format!("{text}|threat={detail}"),
+                    None => text.clone(),
+                },
+            );
 
             // The rest of the loop body: routing, session lookup, the
             // agent wake. Nothing here is caught, which is what the
@@ -238,13 +256,13 @@ async fn a_panicking_scan_costs_nothing_but_the_detection() {
         signal.clone(),
         vec![weather(), hostile.clone(), next_message()],
         move |text| {
-            // Asked from inside the scan, so it distinguishes
-            // recording before from recording after. This is the
-            // assertion that a message which never returns from here
-            // is still on the chain.
+            // Asked from inside the scan, where the answer pins the
+            // ordering: the row is written after this returns, so it
+            // cannot be down yet. What makes that safe is that this
+            // call always returns, which the panic below exercises.
             assert!(
-                scan_log.has_inbound(text),
-                "the inbound row must be written before the scan is called"
+                !scan_log.has_inbound(text),
+                "the inbound row is written after the scan, so it cannot exist yet"
             );
             if text == trigger {
                 panic!("end byte index is not a char boundary");
@@ -271,14 +289,20 @@ async fn a_panicking_scan_costs_nothing_but_the_detection() {
         "the loop must carry on past a panicking scan"
     );
 
-    // 2. The message that broke the detector is on the chain. The
-    //    assertion inside the scan above is what pins the ordering;
-    //    this pins that the row survived.
+    // 2. The message that broke the detector is on the chain. Its row
+    //    is written after the scan, and the scan returns, so the write
+    //    is reached. The row carries the failure beside the body, just
+    //    as it would carry a finding.
     let rows = signal.rows();
     let hostile_row = rows
         .iter()
-        .position(|r| r.action == "message.inbound" && r.detail == hostile)
+        .position(|r| r.action == "message.inbound" && r.detail.starts_with(&hostile))
         .expect("the message that broke the detector must be recorded");
+    assert!(
+        rows[hostile_row].detail.contains("char boundary"),
+        "the inbound row must carry the verdict, got {:?}",
+        rows[hostile_row].detail
+    );
 
     // 3. The teardown ran, so nothing is left registered. Its
     //    independence from the catch is covered by
@@ -292,11 +316,11 @@ async fn a_panicking_scan_costs_nothing_but_the_detection() {
         "the adapter must not be left registered as connected"
     );
 
-    // The failure is named on the chain, right after the message that
-    // caused it, rather than being swallowed as a clean scan.
+    // The failure also raises its own row for SIEM visibility, beside
+    // the inbound row rather than instead of it.
     let flagged = rows
-        .get(hostile_row + 1)
-        .expect("a row must follow the message that broke the detector");
+        .get(hostile_row - 1)
+        .expect("a row must precede the message that broke the detector");
     assert_eq!(flagged.action, "message.threat_flagged");
     assert!(
         flagged.detail.contains("char boundary"),

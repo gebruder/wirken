@@ -3221,52 +3221,46 @@ async fn message_loop(
                     );
                 }
 
-                // The inbound row goes down before the message is
-                // handed to anything that reads it. The detector used
-                // to run first, so a message that broke the detector
-                // took the connection with it and left no trace of
-                // itself in the chain: the one row that would have
-                // said what arrived was written after the scan that
-                // never returned. Recording first costs a row for a
-                // message that is about to be rejected downstream, and
-                // buys the guarantee that every message the gateway
-                // saw is on the chain.
-                audit
-                    .log(
-                        AuditEvent::new(
-                            ActorKind::User,
-                            &sender_id,
-                            "message.inbound",
-                            &inbound_target,
-                        )
-                        .with_channel(&channel)
-                        .with_session(&conversation_id)
-                        .with_detail(inbound_detail.clone()),
-                    )
-                    .await?;
-
-                // Scan for prompt injection patterns. The ordering
-                // above and the catch below are one rule, shared with
-                // the webchat chat route; see `super::inbound_scan`
-                // for why it is a rule and not two call sites.
+                // Scan for prompt injection patterns. Caught, so
+                // this returns whatever the detector does; the rule
+                // and its reasoning are shared with the webchat chat
+                // route in `super::inbound_scan`.
                 let threat_detail = super::inbound_scan::scan_catching_panics(
                     &detector,
                     &text,
                     &format!("'{sender_id}' on '{channel}'"),
                 );
 
-                if let Some(threat) = threat_detail {
-                    // Separate row for SIEM visibility, carrying the
-                    // message beside the finding so a reader does not
-                    // have to join it back to the inbound row.
-                    let mut detail = inbound_detail;
-                    if let (Some(obj), Some(threat_obj)) =
-                        (detail.as_object_mut(), threat.as_object())
-                    {
-                        for (k, v) in threat_obj {
-                            obj.insert(k.clone(), v.clone());
-                        }
+                // A finding, or a scanner that failed, merges into the
+                // inbound row's detail and also lands as its own
+                // `message.threat_flagged` row for SIEM visibility.
+                //
+                // The scan runs before the row is written, which is
+                // only safe because it is caught: a detector panic
+                // used to unwind past this write and leave no trace of
+                // the message that caused it. It returns now, so the
+                // row is written either way and carries the verdict
+                // rather than having to be joined to a sibling row.
+                if let Some(ref threat) = threat_detail
+                    && let (Some(obj), Some(threat_obj)) =
+                        (inbound_detail.as_object_mut(), threat.as_object())
+                {
+                    for (k, v) in threat_obj {
+                        obj.insert(k.clone(), v.clone());
                     }
+                }
+
+                let inbound_event = AuditEvent::new(
+                    ActorKind::User,
+                    &sender_id,
+                    "message.inbound",
+                    &inbound_target,
+                )
+                .with_channel(&channel)
+                .with_session(&conversation_id)
+                .with_detail(inbound_detail.clone());
+
+                if threat_detail.is_some() {
                     let _ = audit
                         .log(
                             AuditEvent::new(
@@ -3277,10 +3271,12 @@ async fn message_loop(
                             )
                             .with_channel(&channel)
                             .with_session(&conversation_id)
-                            .with_detail(detail),
+                            .with_detail(inbound_detail),
                         )
                         .await;
                 }
+
+                audit.log(inbound_event).await?;
 
                 // Resolve session
                 let session = {
