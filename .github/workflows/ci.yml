@@ -118,6 +118,48 @@ jobs:
       - name: Replay tests/hostile/corpus.jsonl
         run: cargo test -p wirken-agent --test hostile_corpus -- --nocapture
 
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # cargo-fuzz needs nightly: libFuzzer arrives through
+      # `-Z sanitizer`, which is not on stable.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly
+        with:
+          toolchain: nightly
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            ~/.cargo/bin/cargo-fuzz
+            fuzz/target/
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # Sixty seconds per target on every push. That is not a fuzzing
+      # campaign; it is a tripwire that the committed corpus still
+      # passes and that a change did not open a shallow crash. Long
+      # runs happen off CI.
+      #
+      # A crash is a finding about the code under test. The fix is
+      # never to relax the target's assertions or drop the input from
+      # the corpus: `fuzz/artifacts/` keeps the reproducer and the job
+      # stays red until the code is fixed.
+      - name: Fuzz each target for 60 seconds
+        run: |
+          set -e
+          for target in exec_classifier skill_frontmatter injection_scan ipc_frame_decode; do
+            echo "::group::$target"
+            cargo fuzz run "$target" -- -max_total_time=60 -print_final_stats=1
+            echo "::endgroup::"
+          done
+        working-directory: fuzz
+
   scripts:
     name: Scripts
     runs-on: ubuntu-latest

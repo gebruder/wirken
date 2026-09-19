@@ -47,20 +47,27 @@ pub struct Skill {
 
 /// YAML frontmatter parsed from SKILL.md files.
 /// Matches OpenClaw's format for compatibility.
+///
+/// Public, with [`parse_frontmatter`] and [`envelope_collision_check`],
+/// so the fuzz targets under `fuzz/` can drive the content half of the
+/// loader on arbitrary bytes. A `SKILL.md` is operator-supplied and
+/// third-party, so the parser is a trust boundary; reaching it through
+/// `load_file` would mean staging a signed bundle on disk for every
+/// fuzz iteration and would test the signature gate instead.
 #[derive(Debug, Deserialize)]
-struct SkillFrontmatter {
-    name: Option<String>,
-    description: Option<String>,
+pub struct SkillFrontmatter {
+    pub name: Option<String>,
+    pub description: Option<String>,
     #[serde(default)]
-    metadata: Option<serde_json::Value>,
+    pub metadata: Option<serde_json::Value>,
     #[serde(default)]
-    permissions: Option<PermissionsBlock>,
+    pub permissions: Option<PermissionsBlock>,
     /// Default `true` (when omitted, skill is explicit-invocation only).
     /// Mirrors OpenClaw's `disable-model-invocation` semantic. Skills
     /// must explicitly declare `disable-model-invocation: false` to
     /// become auto-invocable.
     #[serde(rename = "disable-model-invocation", default)]
-    disable_model_invocation: Option<bool>,
+    pub disable_model_invocation: Option<bool>,
 }
 
 /// Loads SKILL.md files from a directory.
@@ -314,7 +321,10 @@ impl SkillLoader {
 
 /// Parse YAML frontmatter from a SKILL.md file.
 /// Expects the format: --- <YAML> --- <body>
-fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentError> {
+///
+/// Content only: no filesystem, no environment, no subprocess. See
+/// [`SkillFrontmatter`] for why this is public.
+pub fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), AgentError> {
     let content = content.trim();
 
     if !content.starts_with("---") {
@@ -441,7 +451,7 @@ fn validate_description(desc: &str, path: &Path) -> Result<(), AgentError> {
 /// of the name and description format gates, so an envelope-forging
 /// name surfaces as [`AgentError::EnvelopeCollision`] rather than a
 /// less-specific format error.
-fn envelope_collision_check(
+pub fn envelope_collision_check(
     name: &str,
     description: &str,
     body: &str,
