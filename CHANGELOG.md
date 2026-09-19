@@ -10,6 +10,129 @@ tagged.
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-09-19
+
+A fuzz target found a message anyone could send that took down the
+adapter connection carrying it. The fix is here, with the two changes
+that stop the next one from costing as much, and with the tooling that
+found it. Four other surfaces that were trusting something they should
+have been checking are fixed alongside it.
+
+### Security
+
+- Every evidence window in `InjectionDetector::scan` is clipped to a
+  character boundary. The windows are byte arithmetic on the message
+  (`pos + pat.len() + 40`, `pos + 200`, `[..60]`), and slicing a `str`
+  at an offset inside a multi-byte character panics. `scan` runs on
+  every inbound channel message before the agent sees it, so a message
+  containing a pattern the detector looks for followed by a non-ASCII
+  character at the right offset unwound the per-connection task: the
+  connection died mid-loop, the message was never recorded, and the
+  teardown after the loop was skipped, leaving the adapter registered
+  as connected and the orchestrator's push dispatcher holding a writer
+  for a dead socket. No account, approval or tool call was needed. The
+  teardown now runs from a drop guard, and the scan is caught: a
+  detector panic emits `message.threat_flagged` with
+  `threat.scanner.panicked` and the reason rather than being taken for
+  a clean scan, and the message proceeds as detection-only always did.
+  Case-insensitive patterns also took their offset from
+  `text.to_lowercase()`, whose byte length differs wherever a
+  character does not lowercase one-for-one, so the offset and the
+  evidence named bytes next to the match rather than the match.
+- The vault passphrase is no longer written into the process
+  environment. `cached_vault_passphrase` prompted once and cached by
+  calling `std::env::set_var`, which left the passphrase in
+  `/proc/self/environ` for anything at the same uid to read, and which
+  is undefined behaviour while another thread reads the environment,
+  from an async command handler on a multi-threaded runtime behind a
+  prompt that blocks on a TTY. It caches in process memory now, and
+  every reader goes through one accessor that checks the cache and
+  then the environment. Children are unaffected: they are given the
+  passphrase through an explicit `Command::env`, never by inheriting
+  this process's environ.
+- Tier 3 actions are refused by the session-scoped approval cache.
+  `approve_with_scope` accepted any key, and `PermissionStore::check`
+  short-circuited on a session-cache hit before consulting the tier,
+  so a session-scoped grant for a Tier 3 key silenced the prompt for
+  the rest of the session. Tier 3 prompts on every use by definition;
+  both halves of the gate now hold that, the write side by refusing
+  the key and the read side by checking the tier first.
+- The bundled skills ship with signatures. Each of the sixteen
+  directories carries `SKILL.sig`, `SKILL.pub` and `SKILL.deleg`
+  produced offline by the project skill-signing key under the project
+  registry root, published at `skills/REGISTRY-ROOT.pub`. First-run
+  install writes those files rather than minting a signature on the
+  host, so the bundle you run carries the signature the project
+  published rather than one your machine made for itself, and
+  `wirken skills trust-root 81afdc96...` makes strict mode accept the
+  set. A registry root is singular: installing the project's root
+  anchors every skill to it, and an operator running their own root
+  re-signs the bundle as delegates of it.
+- `wirken sessions verify` resolves a chain head's claimed hashes from
+  the stored hash column rather than from the parsed rows. A row whose
+  payload the running binary cannot deserialize was dropped from that
+  list, so a head covering one compared against an empty string and
+  reported `SignatureInvalid`: a schema mismatch reading as tampering.
+  A drift row inside a signed range is reported as drift.
+
+### Changed
+
+- `WIRKEN_DATA_DIR` is honoured by every process. The adapters and the
+  MCP proxy read it; the gateway did not, so two processes on one host
+  could disagree about where the data directory was. `default_data_dir`
+  reads it now, and an exported-but-empty value is treated as unset
+  rather than as the working directory.
+- `wirken ask` sessions mint signed chain heads. The command opened
+  the session log without a signer, so an ask session's rows were
+  chained but never covered by a `ChainHead`. It opens with the signer
+  and seals a `session_end` head when the ask completes, on the error
+  path as well.
+- `POST /api/verify` holds its single-flight claim for the whole
+  request. The latch was set with a compare-exchange and cleared with a
+  store after the work, so an unwind between them left it set and every
+  later verify on that process answered `busy`. It is claimed by an
+  RAII value now and released on drop.
+
+### Documentation
+
+- `docs/` is 25 files, from 53. Every mechanism has one owning page and
+  every other mention is a link: tiers on `permissions-and-identity.md`,
+  the audit chain and `verify` on `audit-cli.md`, the sandbox on
+  `sandbox-properties.md`. The hash chain was described in 21 files.
+- The OWASP and NIST tables in `security-properties.md` are rebuilt
+  from the primary sources with each threat's own definition quoted
+  verbatim, verified programmatically against the published PDFs. A row
+  survives only where a shipped mechanism addresses the threat as the
+  text defines it, which is why the tables are shorter: the previous
+  NIST table carried subcategory ids beside labels that were not NIST's,
+  mapping controls to subcategories whose text says something else.
+
+### Tooling
+
+- `tests/hostile/corpus.jsonl` holds 80 tool calls a hostile model
+  might emit, each with the outcome it should reach and the approval
+  key it should take. A test replays every line through
+  `tool_to_action` and `PermissionStore::check`, stopping at the first
+  mismatch with the call and both outcomes, and fails when an `Action`
+  variant or a `ToolRegistry` entry has no lines. Its own CI job.
+- Four `cargo-fuzz` targets under `fuzz/`, one per parser at a trust
+  boundary: the Cap'n Proto frame decoder, the exec classifier, skill
+  frontmatter, and the injection detector. Each asserts no panic plus
+  its own invariants; the exec target asserts that a shell
+  metacharacter resolves to the sentinel and that a lead token off the
+  Tier 2 allowlist is Tier 3. CI runs each for 60 seconds.
+- Miri runs over `wirken-ipc` and `wirken-mcp-proxy`, the crates
+  carrying `unsafe` that it can execute. Tests needing real I/O are
+  ignored under it with a reason.
+- Every `unsafe` block carries a `SAFETY:` comment stating the
+  invariant that makes it sound, enforced by
+  `clippy::undocumented_unsafe_blocks` in CI, including for the Windows
+  target where the only `cfg(windows)` blocks live. Most of what was
+  there could not state a true one: it was `std::env::set_var` in tests
+  serialised by a mutex, which orders the writers and does nothing
+  about the readers. Those are gone, replaced by functions taking the
+  value as an argument.
+
 ## [1.22.0] - 2026-09-17
 
 An outbound message now has a record of what the platform did with it.
