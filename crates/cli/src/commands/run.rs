@@ -2149,18 +2149,6 @@ where
     result
 }
 
-/// The message out of a caught panic payload, or a stand-in when it is
-/// neither of the two shapes `panic!` produces.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "panic payload was not a string".to_string()
-    }
-}
-
 /// Per-connection teardown that runs whether [`message_loop`] returns
 /// or unwinds.
 ///
@@ -3257,35 +3245,15 @@ async fn message_loop(
                     )
                     .await?;
 
-                // Scan for prompt injection patterns.
-                //
-                // The scan is detection-only: it tags the chain and
-                // never blocks, so a scanner that fails has to be the
-                // same non-event as a scanner that finds nothing. It
-                // is caught rather than trusted because it is pattern
-                // matching over attacker-chosen text, and the one time
-                // it panicked the cost was not a missed detection but
-                // the whole connection. A panic here now reads on the
-                // chain as a flagged message naming the failure, and
-                // the message carries on exactly as it would have.
-                let scanned =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detector.scan(&text)));
-                let threat_detail = match scanned {
-                    Ok(threat) => threat.map(|t| t.to_detail_json()),
-                    Err(panic) => {
-                        let reason = panic_message(&panic);
-                        tracing::error!(
-                            "injection detector panicked on a message from '{sender_id}' on \
-                             '{channel}': {reason}"
-                        );
-                        Some(serde_json::json!({
-                            "threat": {
-                                "detected": false,
-                                "scanner": { "panicked": true, "reason": reason },
-                            }
-                        }))
-                    }
-                };
+                // Scan for prompt injection patterns. The ordering
+                // above and the catch below are one rule, shared with
+                // the webchat chat route; see `super::inbound_scan`
+                // for why it is a rule and not two call sites.
+                let threat_detail = super::inbound_scan::scan_catching_panics(
+                    &detector,
+                    &text,
+                    &format!("'{sender_id}' on '{channel}'"),
+                );
 
                 if let Some(threat) = threat_detail {
                     // Separate row for SIEM visibility, carrying the

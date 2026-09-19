@@ -9,6 +9,7 @@ pub mod cron;
 pub mod doctor;
 pub mod hooks;
 pub mod import;
+pub mod inbound_scan;
 pub mod lyrik;
 pub mod lyrik_citation;
 pub mod lyrik_preflight;

@@ -153,6 +153,39 @@ impl Drop for OpenTurn {
     }
 }
 
+/// RAII claim on the single in-flight `POST /api/verify`.
+///
+/// `verify_running` is a one-at-a-time latch: a second request while
+/// one is running is answered `busy`. Setting it and clearing it as
+/// two statements around the work means an unwind between them leaves
+/// it set, and every later verify on that process answers `busy`
+/// forever. The same shape as `ConnectionTeardown` in `run.rs`, for
+/// the same reason: cleanup that only runs on the value path is
+/// cleanup that does not run.
+///
+/// [`Self::claim`] returns `None` when a verify is already running,
+/// so holding this value *is* the claim.
+struct VerifyClaim {
+    running: Arc<AtomicBool>,
+}
+
+impl VerifyClaim {
+    fn claim(running: &Arc<AtomicBool>) -> Option<Self> {
+        running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self {
+                running: running.clone(),
+            })
+    }
+}
+
+impl Drop for VerifyClaim {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
+
 const HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2765,36 +2798,7 @@ pub async fn serve(
                 // handle and the body lives under `detail.content`.
                 let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
 
-                // Scan for prompt-injection signatures, the same way
-                // the adapter message loop does. The detector tags; it
-                // never blocks. A hit merges into the inbound row's
-                // detail and also lands as its own
-                // `message.threat_flagged` row for SIEM visibility.
-                let mut inbound_detail = serde_json::json!({ "content": &message });
-                let threat_detail = detector.scan(&message).map(|t| t.to_detail_json());
-                if let Some(ref threat) = threat_detail
-                    && let (Some(obj), Some(threat_obj)) =
-                        (inbound_detail.as_object_mut(), threat.as_object())
-                {
-                    for (k, v) in threat_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-                if threat_detail.is_some() {
-                    let _ = audit
-                        .log(
-                            AuditEvent::new(
-                                ActorKind::Service,
-                                "webchat-user",
-                                "message.threat_flagged",
-                                &inbound_target,
-                            )
-                            .with_channel("webchat")
-                            .with_session(conversation.as_str())
-                            .with_detail(inbound_detail.clone()),
-                        )
-                        .await;
-                }
+                let inbound_detail = serde_json::json!({ "content": &message });
 
                 // A turn is not started unless its inbound row was
                 // accepted. The writer returns an error only once its
@@ -2803,6 +2807,10 @@ pub async fn serve(
                 // being recorded, so the chat route refuses rather than
                 // running an unrecorded turn. The page raises its
                 // halted banner from this status.
+                //
+                // Written before the scan, as in the adapter message
+                // loop: a message that breaks the detector has to be
+                // on the chain before the detector sees it.
                 let inbound_logged = audit
                     .log(
                         AuditEvent::new(
@@ -2813,7 +2821,7 @@ pub async fn serve(
                         )
                         .with_channel("webchat")
                         .with_session(conversation.as_str())
-                        .with_detail(inbound_detail),
+                        .with_detail(inbound_detail.clone()),
                     )
                     .await;
                 if let Err(e) = inbound_logged {
@@ -2829,6 +2837,40 @@ pub async fn serve(
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                     return;
+                }
+
+                // Scan for prompt-injection signatures, the same way
+                // the adapter message loop does and through the same
+                // helper. The detector tags; it never blocks; a
+                // failure in it is named on the chain rather than
+                // being taken for a clean scan. See
+                // `super::inbound_scan`.
+                if let Some(threat) = super::inbound_scan::scan_catching_panics(
+                    &detector,
+                    &message,
+                    &format!("webchat conversation '{}'", conversation.as_str()),
+                ) {
+                    let mut detail = inbound_detail;
+                    if let (Some(obj), Some(threat_obj)) =
+                        (detail.as_object_mut(), threat.as_object())
+                    {
+                        for (k, v) in threat_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
+                    let _ = audit
+                        .log(
+                            AuditEvent::new(
+                                ActorKind::Service,
+                                "webchat-user",
+                                "message.threat_flagged",
+                                &inbound_target,
+                            )
+                            .with_channel("webchat")
+                            .with_session(conversation.as_str())
+                            .with_detail(detail),
+                        )
+                        .await;
                 }
 
                 // Session. `get_or_create` moves `last_activity` but
@@ -3013,10 +3055,7 @@ pub async fn serve(
                     let _ = stream.write_all(response.as_bytes()).await;
                     return;
                 }
-                if verify_running
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_err()
-                {
+                let Some(_verify_claim) = VerifyClaim::claim(&verify_running) else {
                     let resp = r#"{"result":"busy"}"#;
                     let response = format!(
                         "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -3025,7 +3064,7 @@ pub async fn serve(
                     );
                     let _ = stream.write_all(response.as_bytes()).await;
                     return;
-                }
+                };
                 let cfg = super::config();
                 let started_at = chrono::Utc::now();
                 let started = std::time::Instant::now();
@@ -3033,7 +3072,9 @@ pub async fn serve(
                     AuditLog::open(&cfg.audit_db_path()).and_then(|log| log.verify())
                 })
                 .await;
-                verify_running.store(false, Ordering::Release);
+                // The claim is released by `_verify_claim` going out
+                // of scope at the end of this branch, on every path
+                // through it.
                 let duration_ms = started.elapsed().as_millis() as u64;
                 let body = match outcome {
                     Ok(Ok(result)) => verify_result_json(&result, started_at, duration_ms),
@@ -4774,6 +4815,7 @@ fn hex_val(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use tokio::sync::Mutex;
     use wirken_audit::AlarmLog;
@@ -4782,7 +4824,7 @@ mod tests {
 
     use super::{
         DECISION_WRONG_CONVERSATION, HTML, ImportedRoute, OpenTurns, SiemSummary, SkillSignature,
-        StatusInputs, TURN_OPEN_ERROR, VERIFY_CAVEAT, api_preflight,
+        StatusInputs, TURN_OPEN_ERROR, VERIFY_CAVEAT, VerifyClaim, api_preflight,
         approval_belongs_to_conversation, approval_belongs_to_webchat, approvals_snapshot_for,
         capabilities_snapshot, conversation_key, conversation_of, conversation_rows,
         credentials_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
@@ -6120,9 +6162,19 @@ mod tests {
             "Origin required"
         );
         assert!(route.contains("verify_limit.check()"), "rate limited");
+        // Single flight, and held as a claim rather than set and
+        // cleared around the work: an unwind between two statements
+        // used to leave the latch set and answer `busy` for the life
+        // of the process. `VerifyClaim`'s own release is covered by
+        // `a_panic_while_holding_the_claim_still_releases_it`.
         assert!(
-            route.contains("compare_exchange(false, true"),
+            route.contains("VerifyClaim::claim(&verify_running)"),
             "single flight"
+        );
+        assert!(
+            !route.contains("verify_running.store("),
+            "the latch is released by the claim going out of scope, not by a statement \
+             the next early return can skip"
         );
         assert!(route.contains("spawn_blocking"), "off the async runtime");
         let script = page_script();
@@ -7653,5 +7705,90 @@ mod tests {
             "an unreadable log is named, not drawn empty"
         );
         assert!(script.contains("'Acknowledging archives the alarm file under a timestamp. It verifies and repairs nothing. The page cannot acknowledge; the chip stays until the CLI has.'"));
+    }
+
+    // --- The verify claim ---
+
+    #[test]
+    fn a_verify_claim_is_exclusive_while_it_is_held() {
+        let running = Arc::new(AtomicBool::new(false));
+        let first = VerifyClaim::claim(&running).expect("the first claim succeeds");
+        assert!(
+            VerifyClaim::claim(&running).is_none(),
+            "a second verify must be answered busy while one is running"
+        );
+        drop(first);
+        assert!(
+            VerifyClaim::claim(&running).is_some(),
+            "releasing the claim must let the next verify run"
+        );
+    }
+
+    /// The reason it is a guard and not two statements. A panic
+    /// anywhere between claiming and releasing used to leave the latch
+    /// set, and every later verify on that process answered busy for
+    /// the life of the process.
+    #[test]
+    fn a_panic_while_holding_the_claim_still_releases_it() {
+        let running = Arc::new(AtomicBool::new(false));
+        let for_closure = running.clone();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _claim = VerifyClaim::claim(&for_closure).expect("claimed");
+            panic!("the verify task blew up");
+        }));
+        assert!(caught.is_err(), "the closure panics");
+        assert!(
+            !running.load(Ordering::Acquire),
+            "the latch must be clear after an unwind"
+        );
+        assert!(
+            VerifyClaim::claim(&running).is_some(),
+            "a later verify must still be able to run"
+        );
+    }
+
+    /// The chat route records the message before it scans it, and
+    /// scans it through the shared helper.
+    ///
+    /// The detector is pattern matching over attacker-chosen text and
+    /// can break on a message; the row that says what arrived has to
+    /// be on the chain before that can happen. `inbound_scan`
+    /// documents the ordering and cannot enforce it, because it is a
+    /// property of the caller, so it is pinned here against the
+    /// route's own source.
+    #[test]
+    fn the_chat_route_records_the_message_before_it_scans_it() {
+        let route = SERVER_SOURCE
+            .split_once(r#"first_line.starts_with("POST /api/chat")"#)
+            .expect("chat route exists")
+            .1
+            .split_once(r#"first_line.starts_with("POST /api/verify")"#)
+            .expect("the verify route follows it")
+            .0;
+
+        let inbound = route
+            .find(r#""message.inbound","#)
+            .expect("the chat route writes an inbound row");
+        let scan = route
+            .find("inbound_scan::scan_catching_panics")
+            .expect("the chat route scans through the shared helper");
+        assert!(
+            inbound < scan,
+            "the inbound row must be written before the scan, or a message that \
+             breaks the detector leaves no trace of itself"
+        );
+
+        let flagged = route
+            .find(r#""message.threat_flagged","#)
+            .expect("a finding raises its own row");
+        assert!(
+            scan < flagged,
+            "the threat row follows the scan that produced it"
+        );
+
+        assert!(
+            !route.contains("detector.scan("),
+            "the detector is reached through the shared helper, not called directly"
+        );
     }
 }
