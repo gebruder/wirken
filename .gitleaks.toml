@@ -46,6 +46,15 @@ regexes = [
   # published algorithm identifier, not a secret.
   '''XChaCha20-Poly1305''',
 
+  # Audit chain-head signing key id pasted into the hostile-model
+  # demo runbook at commit bc4884d. The Ed25519 PUBLIC half, minted
+  # by a scratch instance under `scripts/demo/state/` (gitignored,
+  # since deleted); the private half never existed outside that
+  # directory. Superseded in the working tree by a `<signing-key-id>`
+  # placeholder, because one machine's per-run value is noise to
+  # every other reader, but still present in history.
+  '''d04a20c5e604938a8fa7a4918f81c1d451c1efe54d091be714ba7787a7f1a20e''',
+
   # Release signing key PUBLIC fingerprint shown as example
   # output in docs/release-signing.md. The fingerprint is
   # intentionally public — it's what readers verify releases

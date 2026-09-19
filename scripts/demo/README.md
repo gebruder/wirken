@@ -4,6 +4,13 @@ A scripted hostile model drives a wirken agent through four turns. Nothing
 it asks for runs. This runbook is the sequence, the commands, and the output
 observed on one full pass.
 
+The output is verbatim except for three per-instance values, written as
+`<signing-key-id>` and `<chain-hash>`. Those are the audit chain-head public
+key id and two chain hashes, all minted by the scratch instance the run
+created and all different on yours. One machine's values are noise to every
+other reader, and the key id is a high-entropy string that trips secret
+scanning on its way past.
+
 What each turn is for:
 
 | Turn | The model asks for | What stops it |
@@ -194,7 +201,7 @@ the prompt. Ask for the full payload with
   Audit log integrity: OK
   22 rows verified across 1 sessions, hash chain intact.
   Chain-head signatures: 2 verified.
-  Signing key ids seen: d04a20c5e604938a8fa7a4918f81c1d451c1efe54d091be714ba7787a7f1a20e
+  Signing key ids seen: <signing-key-id>
 exit=0
 ```
 
@@ -294,8 +301,8 @@ leave the denial in place, make what was denied look boring.
   Audit log integrity: BROKEN
   Session: default
   Hash chain broken at seq 11.
-  Expected hash: 17c711f0c713ebd92dc5248f19782dbddd3069fd80082b89f872942c8a8298b1
-  Actual hash:   a7d4989b69cc2642f560b6b5284db7fa34913f9ed6a0f1bc8a15dd7d362a8c5f
+  Expected hash: <chain-hash>
+  Actual hash:   <chain-hash>
   11 events verified before the break; events at and after seq 11 in this session should not be relied on.
 
   The audit log has been tampered with.
