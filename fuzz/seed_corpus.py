@@ -104,6 +104,13 @@ def injection_scan() -> int:
     ]:
         write("injection_scan", name, payload)
         n += 1
+    # The inputs libFuzzer found for the evidence-window panic. They
+    # are fixed and covered by unit tests now, and they are still the
+    # hardest inputs anyone has for this target, so a run starts from
+    # them rather than rediscovering the shape.
+    for artifact in sorted((ROOT / "fuzz/artifacts/injection_scan").glob("crash-*")):
+        write("injection_scan", f"regression-{artifact.name[6:14]}", artifact.read_bytes())
+        n += 1
     return n
 
 
