@@ -55,3 +55,6 @@ private/
 # Python bytecode from the scripts/ test module
 __pycache__/
 *.pyc
+
+# Hostile-model demo scratch data dir
+scripts/demo/state/
