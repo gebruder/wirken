@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Gateway configuration.
@@ -173,9 +174,25 @@ fn create_dir_owner_only(path: &std::path::Path) -> std::io::Result<()> {
 /// working directory would scatter vault and audit state wherever the
 /// operator happened to be standing.
 pub fn default_data_dir() -> PathBuf {
-    match std::env::var_os("WIRKEN_DATA_DIR") {
+    data_dir_from(std::env::var_os("WIRKEN_DATA_DIR"), dirs_home())
+}
+
+/// The resolution rule on its own, with the environment read and the
+/// home lookup lifted out to the caller.
+///
+/// Split out so the tests below can exercise every case without
+/// writing a process-global variable. `std::env::set_var` is `unsafe`
+/// in the 2024 edition because it is undefined behaviour when another
+/// thread reads or writes the environment at the same time, and cargo
+/// runs a crate's tests on parallel threads that do exactly that
+/// (`tempfile` reads `TMPDIR`, this function reads `WIRKEN_DATA_DIR`).
+/// A serializing mutex orders the writers and does nothing about the
+/// readers, so the only honest fix is to not write the environment at
+/// all.
+fn data_dir_from(configured: Option<OsString>, home: PathBuf) -> PathBuf {
+    match configured {
         Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => dirs_home().join(".wirken"),
+        _ => home.join(".wirken"),
     }
 }
 
@@ -190,66 +207,56 @@ fn dirs_home() -> PathBuf {
 /// unix-only permissions tests below because the behaviour is
 /// cross-platform.
 ///
-/// These tests write a process-global variable, and cargo runs a
-/// crate's tests on parallel threads, so they serialise on one lock
-/// and restore the prior value before releasing it.
+/// Nothing here writes the environment. The rule lives in
+/// [`data_dir_from`], which takes the configured value as an
+/// argument, so every case is exercised by passing it in rather than
+/// by mutating process-global state that the rest of the test binary
+/// is reading at the same time.
 #[cfg(test)]
 mod data_dir_tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Set `WIRKEN_DATA_DIR` to `value` (or remove it for `None`),
-    /// run `f`, then put the variable back the way it was.
-    fn with_data_dir_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _serial = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var_os("WIRKEN_DATA_DIR");
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var("WIRKEN_DATA_DIR", v),
-                None => std::env::remove_var("WIRKEN_DATA_DIR"),
-            }
-        }
-        let out = f();
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("WIRKEN_DATA_DIR", v),
-                None => std::env::remove_var("WIRKEN_DATA_DIR"),
-            }
-        }
-        out
+    fn home() -> PathBuf {
+        PathBuf::from("/home/operator")
     }
 
     #[test]
     fn env_override_wins_over_home() {
-        let dir = with_data_dir_env(Some("/srv/wirken-state"), default_data_dir);
+        let dir = data_dir_from(Some(OsString::from("/srv/wirken-state")), home());
         assert_eq!(dir, PathBuf::from("/srv/wirken-state"));
     }
 
     #[test]
     fn unset_falls_back_to_home_dot_wirken() {
-        let dir = with_data_dir_env(None, default_data_dir);
-        assert_eq!(dir, dirs_home().join(".wirken"));
+        let dir = data_dir_from(None, home());
+        assert_eq!(dir, home().join(".wirken"));
     }
 
     #[test]
     fn empty_value_is_treated_as_unset() {
         // An exported-but-blank variable must not resolve to the
         // working directory; that would scatter vault and audit state.
-        let dir = with_data_dir_env(Some(""), default_data_dir);
-        assert_eq!(dir, dirs_home().join(".wirken"));
+        let dir = data_dir_from(Some(OsString::new()), home());
+        assert_eq!(dir, home().join(".wirken"));
     }
 
     #[test]
-    fn gateway_config_default_follows_the_override() {
+    fn a_relative_override_is_taken_as_given() {
+        // Not a case anyone should configure, but the rule is "use the
+        // value", and pinning it says the emptiness check above is a
+        // check for empty rather than a general sanity filter.
+        let dir = data_dir_from(Some(OsString::from("state")), home());
+        assert_eq!(dir, PathBuf::from("state"));
+    }
+
+    #[test]
+    fn gateway_config_default_follows_the_same_resolution() {
         // The gate that loads skills calls `default_data_dir` and the
         // running gateway carries `GatewayConfig::data_dir`. This is
-        // the assertion that the two cannot diverge.
-        let (cfg_dir, fn_dir) = with_data_dir_env(Some("/srv/wirken-state"), || {
-            (GatewayConfig::default().data_dir, default_data_dir())
-        });
-        assert_eq!(cfg_dir, fn_dir);
-        assert_eq!(cfg_dir, PathBuf::from("/srv/wirken-state"));
+        // the assertion that the two cannot diverge, and it holds for
+        // whatever the ambient environment happens to be, so it needs
+        // no override to be meaningful.
+        assert_eq!(GatewayConfig::default().data_dir, default_data_dir());
     }
 }
 

@@ -215,6 +215,13 @@ fn response_error_round_trip() {
 // without depending on a real MCP subprocess.
 // ---------------------------------------------------------------------------
 
+// Miri interprets Rust and has no sockets, so the transport tests
+// below are ignored under it. This crate is run under Miri for the
+// `env::remove_var` in `runner.rs`, which scrubs the vault passphrase
+// out of this process's environ; what Miri covers here is the pure
+// half, the wire encoding and the signing and registry logic.
+
+#[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
 #[tokio::test]
 async fn server_round_trip_empty_registry_with_auth() {
     let tmp = TempDir::new().unwrap();
@@ -281,6 +288,7 @@ async fn server_round_trip_empty_registry_with_auth() {
     server_handle.abort();
 }
 
+#[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
 #[tokio::test]
 async fn server_rejects_unknown_agent_id() {
     let tmp = TempDir::new().unwrap();
@@ -316,6 +324,7 @@ async fn server_rejects_unknown_agent_id() {
     server_handle.abort();
 }
 
+#[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
 #[tokio::test]
 async fn server_rejects_wrong_signing_key_for_registered_agent() {
     let tmp = TempDir::new().unwrap();
@@ -351,6 +360,7 @@ async fn server_rejects_wrong_signing_key_for_registered_agent() {
     server_handle.abort();
 }
 
+#[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
 #[tokio::test]
 async fn server_rejects_tampered_signature() {
     let tmp = TempDir::new().unwrap();
@@ -462,6 +472,7 @@ mod http_transport_test {
         (url, handle)
     }
 
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
     #[tokio::test]
     async fn http_transport_no_auth_round_trip() {
         let response = serde_json::json!({
@@ -483,6 +494,7 @@ mod http_transport_test {
         server.await.unwrap().unwrap();
     }
 
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
     #[tokio::test]
     async fn http_transport_bearer_sends_authorization_header() {
         let response = serde_json::json!({
@@ -521,6 +533,7 @@ mod http_transport_test {
         server.await.unwrap().unwrap();
     }
 
+    #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
     #[tokio::test]
     async fn http_transport_rejects_non_localhost_http() {
         // Plain http:// to a non-localhost host must be rejected at
@@ -541,6 +554,7 @@ mod oauth_test {
         assert!(lookup_provider("nonexistent").is_none());
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn oauth_credential_round_trips_through_vault() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -564,6 +578,7 @@ mod oauth_test {
         assert_eq!(loaded.provider, "linear");
     }
 
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
     #[test]
     fn store_oauth_replaces_existing_entry() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -595,6 +610,7 @@ mod oauth_test {
     }
 }
 
+#[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
 #[tokio::test]
 async fn server_rejects_garbage_first_frame() {
     // In version 2 the server speaks first (AuthChallenge), then

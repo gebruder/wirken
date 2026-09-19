@@ -47,12 +47,25 @@ use crate::error::PermissionDenialContext;
 pub const DEFAULT_TELEGRAM_TIMEOUT_SECS: u64 = 300;
 
 pub fn resolve_telegram_timeout() -> Duration {
-    match std::env::var("WIRKEN_TELEGRAM_APPROVAL_TIMEOUT_S") {
-        Ok(s) => match s.trim().parse::<u64>() {
-            Ok(secs) if secs > 0 => Duration::from_secs(secs),
-            _ => Duration::from_secs(DEFAULT_TELEGRAM_TIMEOUT_SECS),
-        },
-        Err(_) => Duration::from_secs(DEFAULT_TELEGRAM_TIMEOUT_SECS),
+    telegram_timeout_from(
+        std::env::var("WIRKEN_TELEGRAM_APPROVAL_TIMEOUT_S")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The rule on its own, with the environment read lifted out.
+///
+/// Split out so the tests cover the value without writing a
+/// process-global variable. `std::env::set_var` is `unsafe` in the
+/// 2024 edition because it is undefined behaviour while another
+/// thread reads or writes the environment, and cargo runs a crate's
+/// tests on parallel threads that do exactly that. A serializing
+/// mutex orders the writers and leaves every reader alone.
+fn telegram_timeout_from(raw: Option<&str>) -> Duration {
+    match raw.map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs),
+        _ => Duration::from_secs(DEFAULT_TELEGRAM_TIMEOUT_SECS),
     }
 }
 
@@ -68,6 +81,11 @@ pub struct TelegramApprovalGate {
     queue: Arc<PendingApprovalQueue>,
     approvers: Arc<ApproverRegistry>,
     outbound: Arc<OutboundDispatcher>,
+    /// Captured once at construction. The gate is built at
+    /// startup and lives for the process, so reading the override
+    /// here rather than on every request is the same value and one
+    /// fewer environment read on the approval path.
+    timeout: Duration,
 }
 
 impl TelegramApprovalGate {
@@ -76,10 +94,24 @@ impl TelegramApprovalGate {
         approvers: Arc<ApproverRegistry>,
         outbound: Arc<OutboundDispatcher>,
     ) -> Self {
+        Self::with_timeout(queue, approvers, outbound, resolve_telegram_timeout())
+    }
+
+    /// Construct with an explicit timeout instead of the value
+    /// [`resolve_telegram_timeout`] reads from the environment. Lets a test drive
+    /// the deadline directly rather than writing a process-global
+    /// variable other threads are reading.
+    pub fn with_timeout(
+        queue: Arc<PendingApprovalQueue>,
+        approvers: Arc<ApproverRegistry>,
+        outbound: Arc<OutboundDispatcher>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             queue,
             approvers,
             outbound,
+            timeout,
         }
     }
 }
@@ -160,7 +192,7 @@ impl ApprovalGate for TelegramApprovalGate {
             "telegram approval pending; awaiting operator decision via inline keyboard"
         );
 
-        let timeout = resolve_telegram_timeout();
+        let timeout = self.timeout;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => match decision {
                 PendingDecision::Allow { actor } => ApprovalOutcome::Approved { actor },
@@ -315,26 +347,19 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_path_forgets_queue_entry() {
-        // SAFETY: cargo test parallelism; this test sets a unique
-        // env var, reads via request_approval, removes. The env var
-        // is read once at the start of request_approval; subsequent
-        // tests setting their own value race with each other on
-        // this var but each test that touches it sets+removes
-        // within its own scope.
-        unsafe {
-            std::env::set_var("WIRKEN_TELEGRAM_APPROVAL_TIMEOUT_S", "1");
-        }
         let queue = Arc::new(PendingApprovalQueue::new());
         let (_tmp, approvers) = setup_approvers("telegram", Some(-100123));
         let outbound = Arc::new(OutboundDispatcher::new());
         let (writer, _reader) = writer_pair().await;
         outbound.register("telegram", writer);
-        let gate = TelegramApprovalGate::new(queue.clone(), approvers, outbound);
+        let gate = TelegramApprovalGate::with_timeout(
+            queue.clone(),
+            approvers,
+            outbound,
+            Duration::from_millis(50),
+        );
 
         let outcome = gate.request_approval(&ctx("exec")).await;
-        unsafe {
-            std::env::remove_var("WIRKEN_TELEGRAM_APPROVAL_TIMEOUT_S");
-        }
         assert_eq!(outcome, ApprovalOutcome::Timeout);
         assert!(queue.is_empty(), "timed-out entry must be forgotten");
     }

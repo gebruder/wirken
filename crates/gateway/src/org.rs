@@ -109,9 +109,24 @@ fn verify_org_config_signature(
 /// so an operator who typo'd `"yEs!"` or `"enable"` sees their
 /// intent did not engage rather than discovering it months later.
 pub fn parse_boolean_escape(name: &str) -> bool {
-    let raw = match std::env::var(name) {
-        Ok(v) => v,
-        Err(_) => return false,
+    boolean_escape_from(name, std::env::var(name).ok().as_deref())
+}
+
+/// The rule on its own, with the environment read lifted out.
+///
+/// Split out so the tests can cover every spelling without writing a
+/// process-global variable. `std::env::set_var` is `unsafe` in the
+/// 2024 edition because it is undefined behaviour while another
+/// thread reads or writes the environment, and cargo runs a crate's
+/// tests on parallel threads that do exactly that. A serializing
+/// mutex orders the writers and leaves the readers alone, so the only
+/// honest fix is to stop writing the environment.
+///
+/// `name` is still taken because it appears in the warning.
+fn boolean_escape_from(name: &str, raw: Option<&str>) -> bool {
+    let raw = match raw {
+        Some(v) => v,
+        None => return false,
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -148,6 +163,14 @@ fn stale_allowed() -> bool {
 /// acceptance via `WIRKEN_ALLOW_STALE_ORG_CONFIG=1` (which logs a
 /// warn). Errors otherwise with a structured message.
 fn check_org_config_freshness(config: &OrgConfig) -> Result<(), String> {
+    check_org_config_freshness_with(config, stale_allowed())
+}
+
+/// The freshness rule with the escape hatch passed in rather than
+/// read from the environment, so the tests below cover both sides of
+/// it without mutating process-global state. See
+/// [`boolean_escape_from`] for why that matters.
+fn check_org_config_freshness_with(config: &OrgConfig, stale_allowed: bool) -> Result<(), String> {
     let (signed_at, max_age) = match (config.signed_at, config.max_age_seconds) {
         (Some(ts), Some(age)) => (ts, age),
         _ => return Ok(()),
@@ -158,7 +181,7 @@ fn check_org_config_freshness(config: &OrgConfig) -> Result<(), String> {
         // Clock skew: bundle claims to be from the future. Reject
         // unless the operator opted into stale-mode (which we treat
         // as "trust the bundle", same as the past-stale case).
-        if stale_allowed() {
+        if stale_allowed {
             tracing::warn!(
                 signed_at = %signed_at,
                 now = %now,
@@ -173,7 +196,7 @@ fn check_org_config_freshness(config: &OrgConfig) -> Result<(), String> {
         ));
     }
     if (age_seconds as u64) > max_age {
-        if stale_allowed() {
+        if stale_allowed {
             tracing::warn!(
                 age_seconds,
                 max_age_seconds = max_age,
@@ -543,114 +566,54 @@ mod tests {
         }
     }
 
-    /// Reset both stale-related env vars between tests so default
-    /// behavior is deterministic. The escape hatches are process-wide
-    /// `std::env::var` reads; we run tests serially via a Mutex to
-    /// avoid clobbering each other.
-    fn with_no_stale_env<F: FnOnce()>(f: F) {
-        // Save and clear.
-        let prior = std::env::var("WIRKEN_ALLOW_STALE_ORG_CONFIG").ok();
-        // SAFETY: tests use this only in a serialized harness; see
-        // STALE_ENV_LOCK below.
-        unsafe {
-            std::env::remove_var("WIRKEN_ALLOW_STALE_ORG_CONFIG");
-        }
-        f();
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("WIRKEN_ALLOW_STALE_ORG_CONFIG", v),
-                None => std::env::remove_var("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
-            }
-        }
-    }
-
-    fn with_stale_env<F: FnOnce()>(f: F) {
-        let prior = std::env::var("WIRKEN_ALLOW_STALE_ORG_CONFIG").ok();
-        unsafe {
-            std::env::set_var("WIRKEN_ALLOW_STALE_ORG_CONFIG", "1");
-        }
-        f();
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var("WIRKEN_ALLOW_STALE_ORG_CONFIG", v),
-                None => std::env::remove_var("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
-            }
-        }
-    }
-
-    /// Serialize tests that mutate WIRKEN_ALLOW_STALE_ORG_CONFIG so
-    /// they don't race against each other under `cargo test`'s default
-    /// multi-threaded harness.
-    static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Same idea as STALE_ENV_LOCK but for the boolean-escape parser
-    /// tests, which set and read a dedicated env var name.
-    static BOOL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_test_env<F: FnOnce()>(name: &str, value: Option<&str>, f: F) {
-        let prior = std::env::var(name).ok();
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
-        f();
-        unsafe {
-            match prior {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
-    }
-
     #[test]
     fn parse_boolean_escape_unset_is_false() {
-        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        with_test_env("WIRKEN_TEST_PARSE_BOOL", None, || {
-            assert!(!parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"));
-        });
+        assert!(!boolean_escape_from("WIRKEN_TEST_PARSE_BOOL", None));
     }
 
     #[test]
     fn parse_boolean_escape_recognizes_truthy_variants() {
-        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         for value in [
             "1", "true", "TRUE", "True", "yes", "Yes", "on", "ON", "  on  ",
         ] {
-            with_test_env("WIRKEN_TEST_PARSE_BOOL", Some(value), || {
-                assert!(
-                    parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"),
-                    "value {value:?} should be truthy"
-                );
-            });
+            assert!(
+                boolean_escape_from("WIRKEN_TEST_PARSE_BOOL", Some(value)),
+                "value {value:?} should be truthy"
+            );
         }
     }
 
     #[test]
     fn parse_boolean_escape_recognizes_falsy_variants() {
-        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         for value in ["0", "false", "FALSE", "no", "off", "Off", ""] {
-            with_test_env("WIRKEN_TEST_PARSE_BOOL", Some(value), || {
-                assert!(
-                    !parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"),
-                    "value {value:?} should be falsy"
-                );
-            });
+            assert!(
+                !boolean_escape_from("WIRKEN_TEST_PARSE_BOOL", Some(value)),
+                "value {value:?} should be falsy"
+            );
         }
     }
 
     #[test]
     fn parse_boolean_escape_unrecognized_treated_as_false() {
-        let _g = BOOL_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         for value in ["enable", "y", "n", "yEs!", "garbage", "2"] {
-            with_test_env("WIRKEN_TEST_PARSE_BOOL", Some(value), || {
-                assert!(
-                    !parse_boolean_escape("WIRKEN_TEST_PARSE_BOOL"),
-                    "value {value:?} should not engage the gate"
-                );
-            });
+            assert!(
+                !boolean_escape_from("WIRKEN_TEST_PARSE_BOOL", Some(value)),
+                "value {value:?} should not engage the gate"
+            );
         }
+    }
+
+    /// The env read and the rule are separate functions, so this is
+    /// the assertion that the escape hatch is wired to the rule at
+    /// all. It reads whatever the ambient environment holds and
+    /// checks the two agree, which needs no write.
+    #[test]
+    fn parse_boolean_escape_reads_the_named_variable() {
+        let name = "WIRKEN_ALLOW_STALE_ORG_CONFIG";
+        assert_eq!(
+            parse_boolean_escape(name),
+            boolean_escape_from(name, std::env::var(name).ok().as_deref())
+        );
     }
 
     #[test]
@@ -661,44 +624,37 @@ mod tests {
 
     #[test]
     fn freshness_check_passes_within_window() {
-        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        with_no_stale_env(|| {
-            let cfg =
-                fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(60), 3600);
-            assert!(check_org_config_freshness(&cfg).is_ok());
-        });
+        let cfg = fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(60), 3600);
+        assert!(check_org_config_freshness_with(&cfg, false).is_ok());
     }
 
     #[test]
     fn freshness_check_rejects_stale_without_escape() {
-        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        with_no_stale_env(|| {
-            let cfg =
-                fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
-            let err = check_org_config_freshness(&cfg).unwrap_err();
-            assert!(err.contains("stale"), "got {err}");
-        });
+        let cfg = fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
+        let err = check_org_config_freshness_with(&cfg, false).unwrap_err();
+        assert!(err.contains("stale"), "got {err}");
     }
 
     #[test]
     fn freshness_check_accepts_stale_with_escape_hatch() {
-        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        with_stale_env(|| {
-            let cfg =
-                fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
-            assert!(check_org_config_freshness(&cfg).is_ok());
-        });
+        let cfg = fresh_config_with_age(chrono::Utc::now() - chrono::Duration::seconds(7200), 3600);
+        assert!(check_org_config_freshness_with(&cfg, true).is_ok());
     }
 
     #[test]
     fn freshness_check_rejects_future_signed_at() {
-        let _g = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        with_no_stale_env(|| {
-            let cfg =
-                fresh_config_with_age(chrono::Utc::now() + chrono::Duration::seconds(7200), 3600);
-            let err = check_org_config_freshness(&cfg).unwrap_err();
-            assert!(err.contains("future"), "got {err}");
-        });
+        let cfg = fresh_config_with_age(chrono::Utc::now() + chrono::Duration::seconds(7200), 3600);
+        let err = check_org_config_freshness_with(&cfg, false).unwrap_err();
+        assert!(err.contains("future"), "got {err}");
+    }
+
+    /// A future `signed_at` is accepted under the same escape hatch as
+    /// a past-stale one, which the prose above the function claims and
+    /// nothing asserted before.
+    #[test]
+    fn freshness_check_accepts_future_signed_at_with_escape_hatch() {
+        let cfg = fresh_config_with_age(chrono::Utc::now() + chrono::Duration::seconds(7200), 3600);
+        assert!(check_org_config_freshness_with(&cfg, true).is_ok());
     }
 
     #[test]

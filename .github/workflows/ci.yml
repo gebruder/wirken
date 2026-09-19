@@ -51,6 +51,25 @@ jobs:
           key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Every `unsafe` block carries a SAFETY comment stating the
+      # invariant that makes it sound. Run as its own step so the
+      # failure names itself: clippy points at the block and the fix
+      # is either the comment or safe code, never a suppression.
+      - name: SAFETY comment on every unsafe block
+        run: cargo clippy --workspace --all-targets -- -D clippy::undocumented_unsafe_blocks
+
+      # The Win32 peer-credential path in crates/ipc is behind
+      # `cfg(windows)`, so the Linux run above never sees its unsafe
+      # blocks. wirken-ipc is the only crate with `cfg(windows)`
+      # unsafe, and it is small enough to check for that target here.
+      - name: Install the Windows target
+        run: rustup target add x86_64-pc-windows-gnu
+      - name: SAFETY comment on the Windows-gated unsafe blocks
+        run: |
+          cargo clippy -p wirken-ipc --all-targets \
+            --target x86_64-pc-windows-gnu \
+            -- -D clippy::undocumented_unsafe_blocks
+
   test:
     name: Test
     runs-on: ubuntu-latest

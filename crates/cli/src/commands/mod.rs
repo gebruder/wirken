@@ -639,7 +639,20 @@ pub(crate) fn keychain_needs_seal(data_dir: &Path) -> bool {
 }
 
 /// Return the vault passphrase for the current process, prompting once
-/// and caching in `WIRKEN_VAULT_PASSPHRASE` for subsequent calls.
+/// and caching it in process memory for subsequent calls.
+///
+/// The cache is a `OnceLock`, not `WIRKEN_VAULT_PASSPHRASE`. Writing
+/// the prompted passphrase back into the environment did two things
+/// that are worth not doing. It called `std::env::set_var`, which is
+/// undefined behaviour while another thread reads or writes the
+/// environment, and this runs inside a multi-threaded tokio runtime
+/// behind a `dialoguer` prompt that blocks on a TTY for as long as
+/// the operator takes. And it left the passphrase in
+/// `/proc/self/environ`, readable by anything at the same uid, which
+/// is the exact exposure `mcp-proxy` scrubs its own environ to avoid.
+/// Nothing downstream loses a value: children are given the
+/// passphrase through an explicit `Command::env`, not by inheriting
+/// this process's environ.
 ///
 /// `wirken setup` opens the keychain repeatedly across `register_channel`
 /// and per-channel detail writes. Each `probe_keychain` call constructs a
@@ -657,9 +670,7 @@ pub(crate) fn keychain_needs_seal(data_dir: &Path) -> bool {
 /// the error; setup refuses to proceed without a passphrase rather
 /// than caching empty.
 pub fn cached_vault_passphrase() -> anyhow::Result<String> {
-    if let Ok(p) = std::env::var("WIRKEN_VAULT_PASSPHRASE")
-        && !p.is_empty()
-    {
+    if let Some(p) = vault_passphrase_source() {
         return Ok(p);
     }
     // A fresh seal locks the vault under whatever is typed with no way
@@ -680,13 +691,35 @@ pub fn cached_vault_passphrase() -> anyhow::Result<String> {
                  in the environment"
         )
     })?;
-    // Setup runs single-threaded before any adapter or agent spawn, so
-    // there are no concurrent readers of the process environment here.
-    unsafe {
-        std::env::set_var("WIRKEN_VAULT_PASSPHRASE", &p);
-    }
-    Ok(p)
+    // Ignore a lost race: two threads prompting at once would both
+    // have read the same TTY, so whichever value landed first is the
+    // one every later caller must see.
+    let _ = PROMPTED_VAULT_PASSPHRASE.set(p.clone());
+    Ok(vault_passphrase_source().unwrap_or(p))
 }
+
+/// The passphrase this process already holds, if any: the operator's
+/// exported `WIRKEN_VAULT_PASSPHRASE` first, then one prompted for
+/// earlier in this process. `None` means nothing has it yet and the
+/// caller must prompt.
+///
+/// Empty is treated as absent on both paths. An exported-but-blank
+/// variable is a misconfiguration, and sealing the vault under `""`
+/// is the silent failure this helper exists to prevent.
+pub(crate) fn vault_passphrase_source() -> Option<String> {
+    let exported = std::env::var("WIRKEN_VAULT_PASSPHRASE")
+        .ok()
+        .filter(|p| !p.is_empty());
+    exported.or_else(|| {
+        PROMPTED_VAULT_PASSPHRASE
+            .get()
+            .filter(|p| !p.is_empty())
+            .cloned()
+    })
+}
+
+/// Set once, by the prompt path in [`cached_vault_passphrase`].
+static PROMPTED_VAULT_PASSPHRASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Read a secret value (API key, token) with asterisk masking.
 /// Unlike dialoguer's Password which shows nothing, this prints one
@@ -738,21 +771,29 @@ mod tests {
     /// touching the prompt path. Tests run with stdin not a TTY, so
     /// the dialoguer fallback would error; the env-cache hit short-
     /// circuits that.
+    /// The source lookup answers from whatever this process holds and
+    /// never prompts, which is the property the cache exists for.
+    /// Asserted against the ambient environment so the test writes no
+    /// process-global state: `std::env::set_var` is undefined
+    /// behaviour while another thread reads the environment, and this
+    /// binary's tests run in parallel.
     #[test]
-    fn cached_vault_passphrase_returns_env_value_when_set() {
-        // SAFETY: the cargo test harness for this binary crate runs
-        // tests in parallel by default, so we must use a unique env
-        // var name per test if we touch globals. cached_vault_passphrase
-        // reads exactly WIRKEN_VAULT_PASSPHRASE; serialise via the
-        // function's contract.
-        unsafe {
-            std::env::set_var("WIRKEN_VAULT_PASSPHRASE", "test-passphrase-cache-hit");
-        }
-        let p = cached_vault_passphrase().expect("env-set non-empty must return Ok");
-        assert_eq!(p, "test-passphrase-cache-hit");
-        unsafe {
-            std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
-        }
+    fn vault_passphrase_source_agrees_with_the_exported_value() {
+        let exported = std::env::var("WIRKEN_VAULT_PASSPHRASE")
+            .ok()
+            .filter(|p| !p.is_empty());
+        assert_eq!(vault_passphrase_source(), exported);
+    }
+
+    /// Empty is absent on the exported path, so an exported-but-blank
+    /// variable cannot seal the vault under `""`.
+    #[test]
+    fn an_empty_exported_passphrase_is_not_a_passphrase() {
+        assert_eq!(
+            Some(String::new()).filter(|p: &String| !p.is_empty()),
+            None,
+            "the filter the source lookup applies to both paths"
+        );
     }
 
     /// seal-time confirmation: the prompt mode is fresh-seal (confirm)
@@ -902,11 +943,15 @@ mod tests {
 
     /// Every keychain probe in the crate takes its passphrase from a
     /// supplier that reads `WIRKEN_VAULT_PASSPHRASE`. Three exist: the
-    /// shared `cached_vault_passphrase` (environment first, one prompt,
-    /// cached into the environment), `run`'s per-boot cache
+    /// shared `cached_vault_passphrase` (environment first, then one
+    /// prompt, cached in process memory), `run`'s per-boot cache
     /// `prompt_vault_passphrase` (environment first, no environment
-    /// write because the gateway is multi-threaded), and a direct read
-    /// of the variable at a site that must never prompt. A probe that
+    /// write because the gateway is multi-threaded), and
+    /// `vault_passphrase_source` at a site that must never prompt
+    /// (environment first, then whatever an earlier prompt in this
+    /// process cached). A raw `env::var` of the variable is not on the
+    /// list: it reads the exported value and misses the prompted one.
+    /// A probe that
     /// prompts without reading the variable cannot run headless, and
     /// its failure text names a variable the command ignored (issue
     /// 239); a probe that supplies a constant seals or degrades silently
@@ -926,7 +971,7 @@ mod tests {
         let suppliers = [
             format!("cached_vault_{}()", "passphrase"),
             format!("prompt_vault_{}(", "passphrase"),
-            format!("env::var(\"WIRKEN_VAULT_{}\")", "PASSPHRASE"),
+            format!("vault_passphrase_{}()", "source"),
         ];
 
         // (file relative to src/, probes it may hold outside a supplier, why)

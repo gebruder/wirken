@@ -671,9 +671,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     super::ui::step(3, "Credentials");
     let stored_creds: Vec<String> = if cfg.vault_db_path().exists() {
-        std::env::var("WIRKEN_VAULT_PASSPHRASE")
-            .ok()
-            .filter(|p| !p.is_empty())
+        super::vault_passphrase_source()
             .and_then(|p| {
                 let keychain = probe_keychain(&data, move || p);
                 CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()

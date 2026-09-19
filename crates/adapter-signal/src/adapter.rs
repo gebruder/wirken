@@ -54,12 +54,26 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 pub const DEFAULT_RECONNECT_WAIT_SECS: u64 = 30;
 
 pub fn resolve_reconnect_wait() -> Duration {
-    match std::env::var("WIRKEN_SIGNAL_RECONNECT_WAIT_S") {
-        Ok(s) => match s.trim().parse::<u64>() {
-            Ok(secs) if secs > 0 => Duration::from_secs(secs),
-            _ => Duration::from_secs(DEFAULT_RECONNECT_WAIT_SECS),
-        },
-        Err(_) => Duration::from_secs(DEFAULT_RECONNECT_WAIT_SECS),
+    reconnect_wait_from(
+        std::env::var("WIRKEN_SIGNAL_RECONNECT_WAIT_S")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The rule on its own, with the environment read lifted out.
+///
+/// Split out so a test can pick a cap without writing a
+/// process-global variable. `std::env::set_var` is `unsafe` in the
+/// 2024 edition because it is undefined behaviour while another
+/// thread reads or writes the environment, and this adapter reads
+/// the variable from a spawned task on a multi-threaded runtime
+/// while the rest of the test binary runs. The mutex the tests held
+/// ordered the two writers and did nothing about that read.
+fn reconnect_wait_from(raw: Option<&str>) -> Duration {
+    match raw.map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs),
+        _ => Duration::from_secs(DEFAULT_RECONNECT_WAIT_SECS),
     }
 }
 
@@ -87,6 +101,12 @@ pub struct SignalAdapter {
     /// self-echo cache but otherwise forwarded so tests-to-self work.
     /// Controlled by `WIRKEN_SIGNAL_FORWARD_LINKED_DEVICE_SENDS=1`.
     forward_linked_device_sends: bool,
+    /// Cap on how long `send_message` waits for reconnect. Read once
+    /// here rather than on every send, for the same reason
+    /// `forward_linked_device_sends` is: the value cannot change
+    /// under a running adapter, and reading it from a spawned task
+    /// races every other thread in the process.
+    reconnect_wait: Duration,
     /// Timestamps of messages this adapter sent successfully via the
     /// socket. Signal echoes our own sends back as syncMessage.sentMessage
     /// notifications; matching on the returned timestamp suppresses the
@@ -161,6 +181,17 @@ impl SignalAdapter {
     /// Construct an adapter. `endpoint` accepts a bare filesystem path
     /// (e.g. `/tmp/signal-cli.sock`) or the `unix://` scheme. HTTP URLs
     /// are rejected with a migration error message.
+    /// Override the reconnect cap this adapter was constructed with.
+    ///
+    /// For tests that need the cap to fire inside a short window.
+    /// Production reads it from `WIRKEN_SIGNAL_RECONNECT_WAIT_S` in
+    /// [`Self::new`]; this takes the value directly so no test has to
+    /// write the environment.
+    pub fn with_reconnect_wait(mut self, wait: Duration) -> Self {
+        self.reconnect_wait = wait;
+        self
+    }
+
     pub fn new(
         identity: AdapterIdentity,
         endpoint: String,
@@ -181,6 +212,7 @@ impl SignalAdapter {
             phone_number,
             allowlist,
             forward_linked_device_sends,
+            reconnect_wait: resolve_reconnect_wait(),
             echoed_timestamps: Mutex::new(LruCache::new(echo_cap)),
             next_req_id: AtomicU64::new(1),
             inner: Mutex::new(None),
@@ -710,7 +742,7 @@ impl SignalAdapter {
         };
         let conn = match inner_clone {
             Some(c) => c,
-            None => self.wait_for_connection(resolve_reconnect_wait()).await?,
+            None => self.wait_for_connection(self.reconnect_wait).await?,
         };
 
         // Agents emit markdown; Signal renders almost none of it.

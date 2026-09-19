@@ -207,12 +207,19 @@ fn open_vault(data_dir: &Path) -> Option<CredentialStore> {
         // turn up the passphrase as a plaintext null-separated
         // string in mcp-proxy's environ for the proxy's lifetime.
         //
-        // Safety: this fires from `run()` synchronously, before any
-        // `.await` that could yield to a tokio worker thread that
-        // reads or writes env. No other code in mcp-proxy reads
-        // `WIRKEN_VAULT_PASSPHRASE`. Single-threaded guarantee
-        // matches the `env::set_var` site in
-        // `crates/cli/src/commands/mod.rs::cached_vault_passphrase`.
+        // SAFETY: `remove_var` is undefined behaviour while another
+        // thread reads or writes the environment. The `#[tokio::main]`
+        // runtime has worker threads by now, but nothing has been
+        // spawned onto them: `wirken mcp-proxy` dispatches straight
+        // into `run()`, and this closure is called by `probe_keychain`
+        // from `open_vault`, which `run()` reaches before its first
+        // `.await` and before any `tokio::spawn`. The workers are
+        // parked with no task to run, so the main thread is the only
+        // one executing. mcp-proxy reads `WIRKEN_VAULT_PASSPHRASE`
+        // nowhere else, and this call is the only writer.
+        //
+        // Anything spawned earlier in `run()` in a later change
+        // breaks this, which is why the scrub stays first.
         unsafe {
             std::env::remove_var("WIRKEN_VAULT_PASSPHRASE");
         }

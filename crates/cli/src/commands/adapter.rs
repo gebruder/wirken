@@ -35,7 +35,7 @@ pub async fn run(channel: &str) -> Result<()> {
 
     // Load credentials from vault
     let keychain = probe_keychain(&data_dir, || {
-        std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default()
+        super::vault_passphrase_source().unwrap_or_default()
     });
     let store = CredentialStore::open(&data_dir.join("vault.db"), keychain.as_ref())
         .context("Failed to open credential store")?;

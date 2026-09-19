@@ -590,8 +590,9 @@ fn keyed_source_posture(data_dir: &std::path::Path) -> Vec<(&'static str, KeyedS
     if configured.is_empty() {
         return out;
     }
-    // Headless: the environment supplies the passphrase or nothing does.
-    let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
+    // Never prompts: the environment supplies the passphrase, or an
+    // earlier prompt in this process did, or nothing does.
+    let pp = super::vault_passphrase_source().unwrap_or_default();
     let keychain = probe_keychain(data_dir, move || pp);
     let store = CredentialStore::open(&vault_db, keychain.as_ref());
     for (src, slot) in configured {

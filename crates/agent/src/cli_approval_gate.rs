@@ -19,6 +19,7 @@
 //! on gateway).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -37,11 +38,24 @@ use crate::error::PermissionDenialContext;
 /// `request_approval`.
 pub struct CliApprovalGate {
     queue: Arc<PendingApprovalQueue>,
+    /// Captured once at construction. The gate is built at
+    /// startup and lives for the process, so reading the override
+    /// here rather than on every request is the same value and one
+    /// fewer environment read on the approval path.
+    timeout: Duration,
 }
 
 impl CliApprovalGate {
     pub fn new(queue: Arc<PendingApprovalQueue>) -> Self {
-        Self { queue }
+        Self::with_timeout(queue, resolve_cli_timeout())
+    }
+
+    /// Construct with an explicit timeout instead of the value
+    /// [`resolve_cli_timeout`] reads from the environment. Lets a test drive
+    /// the deadline directly rather than writing a process-global
+    /// variable other threads are reading.
+    pub fn with_timeout(queue: Arc<PendingApprovalQueue>, timeout: Duration) -> Self {
+        Self { queue, timeout }
     }
 }
 
@@ -63,7 +77,7 @@ impl ApprovalGate for CliApprovalGate {
             "approval pending; awaiting operator decision via `wirken permissions pending approve`",
         );
 
-        let timeout = resolve_cli_timeout();
+        let timeout = self.timeout;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => match decision {
                 PendingDecision::Allow { actor } => ApprovalOutcome::Approved { actor },
@@ -194,26 +208,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unresolved_entry_times_out_after_env_override() {
-        // Set the env var to a sub-second value to make the test
-        // tight. The gate reads the var inside request_approval, so
-        // setting it BEFORE the call is what matters.
-        // SAFETY: cargo test parallelism — this test sets and clears
-        // its own env var; no other test reads this var concurrently.
-        unsafe {
-            std::env::set_var("WIRKEN_CLI_APPROVAL_TIMEOUT_S", "1");
-        }
+    async fn unresolved_entry_times_out() {
+        // A sub-second deadline handed to the gate directly, so the
+        // test drives the timeout without writing a variable the
+        // rest of the test binary is reading.
         let queue = Arc::new(PendingApprovalQueue::new());
-        let gate = CliApprovalGate::new(queue.clone());
+        let gate = CliApprovalGate::with_timeout(queue.clone(), Duration::from_millis(50));
 
         // Don't resolve. The gate's deadline fires; outcome is
         // Timeout; the entry is cleared from the queue.
         let outcome = gate.request_approval(&ctx("exec")).await;
-        unsafe {
-            std::env::remove_var("WIRKEN_CLI_APPROVAL_TIMEOUT_S");
-        }
         assert_eq!(outcome, ApprovalOutcome::Timeout);
         assert!(queue.is_empty(), "timed-out entry should be forgotten");
+    }
+
+    /// `new` takes its deadline from the documented variable. Asserted
+    /// against the ambient environment, so it needs no write.
+    #[tokio::test]
+    async fn new_takes_its_deadline_from_the_environment() {
+        let queue = Arc::new(PendingApprovalQueue::new());
+        assert_eq!(
+            CliApprovalGate::new(queue).timeout,
+            resolve_cli_timeout(),
+            "the env-reading constructor and the resolver must agree"
+        );
     }
 
     #[tokio::test]

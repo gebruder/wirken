@@ -34,12 +34,27 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// the env var is operator-tuning, not an integrity-critical
 /// surface.
 pub fn resolve_timeout() -> Duration {
-    match std::env::var("WIRKEN_ASK_APPROVAL_TIMEOUT_S") {
-        Ok(s) => match s.trim().parse::<u64>() {
-            Ok(secs) if secs > 0 => Duration::from_secs(secs),
-            _ => Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-        },
-        Err(_) => Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+    timeout_from(
+        std::env::var("WIRKEN_ASK_APPROVAL_TIMEOUT_S")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The rule on its own, with the environment read lifted out.
+///
+/// Split out so the tests cover every case without writing a
+/// process-global variable. `std::env::set_var` is `unsafe` in the
+/// 2024 edition because it is undefined behaviour while another
+/// thread reads or writes the environment, and cargo runs a binary's
+/// tests on parallel threads that do exactly that. The mutex this
+/// module used to hold ordered the writers and left every reader
+/// alone; one interleaving was observed in a full workspace run,
+/// which is what a lock cannot fix.
+fn timeout_from(raw: Option<&str>) -> Duration {
+    match raw.map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs),
+        _ => Duration::from_secs(DEFAULT_TIMEOUT_SECS),
     }
 }
 
@@ -242,39 +257,30 @@ mod tests {
         assert_eq!(outcome, ApprovalOutcome::Timeout);
     }
 
-    /// The three tests below write the same process-global variable.
-    /// cargo runs a binary's tests on parallel threads, so without a
-    /// lock one test's set can land between another's set and read:
-    /// that interleaving was observed once in a full workspace run,
-    /// where the zero-fallback test read 5s. Serialised here; the
-    /// helper reads once, so the critical section is the set, the
-    /// read and the remove together.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn resolve_timeout_uses_env_when_set() {
-        let _serial = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S", "5");
-        }
-        let d = resolve_timeout();
-        unsafe {
-            std::env::remove_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S");
-        }
-        assert_eq!(d, Duration::from_secs(5));
+        assert_eq!(timeout_from(Some("5")), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn resolve_timeout_tolerates_surrounding_space() {
+        assert_eq!(timeout_from(Some("  5  ")), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn resolve_timeout_falls_back_when_unset() {
+        assert_eq!(
+            timeout_from(None),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
     }
 
     #[test]
     fn resolve_timeout_falls_back_on_malformed() {
-        let _serial = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S", "not-a-number");
-        }
-        let d = resolve_timeout();
-        unsafe {
-            std::env::remove_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S");
-        }
-        assert_eq!(d, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(
+            timeout_from(Some("not-a-number")),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
     }
 
     #[test]
@@ -282,14 +288,24 @@ mod tests {
         // Zero would mean "never wait"; not what an operator means
         // when they configure a timeout. Fall back to the default
         // so a misconfiguration doesn't auto-deny every prompt.
-        let _serial = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S", "0");
-        }
-        let d = resolve_timeout();
-        unsafe {
-            std::env::remove_var("WIRKEN_ASK_APPROVAL_TIMEOUT_S");
-        }
-        assert_eq!(d, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(
+            timeout_from(Some("0")),
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS)
+        );
+    }
+
+    /// The env read and the rule are separate functions, so this is
+    /// what asserts they are wired together. It reads whatever the
+    /// ambient environment holds, so it needs no write.
+    #[test]
+    fn resolve_timeout_reads_the_documented_variable() {
+        assert_eq!(
+            resolve_timeout(),
+            timeout_from(
+                std::env::var("WIRKEN_ASK_APPROVAL_TIMEOUT_S")
+                    .ok()
+                    .as_deref()
+            )
+        );
     }
 }

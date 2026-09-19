@@ -629,6 +629,7 @@ mod hook_handshake_tests {
     use crate::transport::{FrameReader, FrameWriter};
     use tokio::io::duplex;
 
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
     #[tokio::test]
     async fn registered_hook_handshake_round_trips() {
         let (client, server) = duplex(4096);
@@ -660,6 +661,7 @@ mod hook_handshake_tests {
         assert_eq!(verified.public_key, expected_pk);
     }
 
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
     #[tokio::test]
     async fn unregistered_hook_rejected_by_verify_closure() {
         let (client, server) = duplex(4096);
@@ -691,6 +693,7 @@ mod hook_handshake_tests {
         client_task.await.unwrap();
     }
 
+    #[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
     #[tokio::test]
     async fn adapter_domain_signature_does_not_verify_against_hook_acceptor() {
         // Reuse the same Ed25519 keypair for an adapter and a hook

@@ -660,7 +660,7 @@ fn resolve_api_key(
     // Never prompts: this is a listing convenience, and a command that
     // blocks on a passphrase to offer a menu is worse than one that
     // asks for the model id.
-    let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
+    let pp = super::vault_passphrase_source().unwrap_or_default();
     let keychain = probe_keychain(&cfg.data_dir, move || pp);
     let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()).ok()?;
     let (secret, _) = store.retrieve(credential).ok()?;

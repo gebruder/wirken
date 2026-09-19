@@ -33,7 +33,17 @@ use wirken_ipc::{AuthenticatedChannel, ChannelMismatch};
 
 const SCHEMA_PATH: &str = "schema/wirken.capnp";
 
+// Every test here reads `schema/wirken.capnp` and asserts something
+// about its text, so all of them are ignored under Miri, which has no
+// filesystem. They are the schema's shape tests, not the unsafe
+// code's; Miri covers this crate for the `cfg(windows)` blocks in
+// `src/stream.rs`.
+
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads the .capnp schema from disk; miri has no filesystem"
+)]
 fn schema_has_no_routing_override_fields() {
     // Read the schema text and assert no field name in the banned
     // list appears. Picks up any future `host @N :Text;` or
@@ -83,6 +93,10 @@ fn schema_has_no_routing_override_fields() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads the .capnp schema from disk; miri has no filesystem"
+)]
 fn inbound_message_has_only_channel_as_routing_field() {
     // Pin the InboundMessage field set so a future schema edit that
     // adds a routing-relevant payload field has to update this test
@@ -143,6 +157,10 @@ fn inbound_message_has_only_channel_as_routing_field() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads the .capnp schema from disk; miri has no filesystem"
+)]
 fn forged_channel_field_is_rejected_against_authenticated_channel() {
     // Build a real Cap'n Proto Frame as an adapter would, but with
     // `channel = "slack"` while the connection was authenticated as
@@ -217,6 +235,10 @@ fn forged_channel_field_is_rejected_against_authenticated_channel() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads the .capnp schema from disk; miri has no filesystem"
+)]
 fn matching_channel_field_passes_authenticated_check() {
     // Companion to the forged-channel test: the same frame shape
     // with a matching `channel` field passes. Pinning this prevents

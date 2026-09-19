@@ -1914,6 +1914,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let permissions_audit = audit.clone();
     #[cfg(unix)]
     let permissions_session_log = session_log.clone();
+    // SAFETY: `geteuid` is always-safe FFI; documented as never
+    // failing and never invoking user-space callbacks.
     #[cfg(unix)]
     let permissions_expected_principal = Principal::Uid(unsafe { libc::geteuid() });
     #[cfg(unix)]

@@ -2068,12 +2068,6 @@ async fn approval_round_trip_via_text_command() {
     );
 }
 
-/// Serializes tests that touch `WIRKEN_SIGNAL_RECONNECT_WAIT_S`.
-/// cargo test parallelizes within a binary; without this lock,
-/// the two reconnect-cap tests below would race on env-var
-/// reads/writes and intermittently observe each other's value.
-static RECONNECT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 // ---------------------------------------------------------------------------
 // Mid-session reconnect window. signal-cli disconnects, gateway pushes a
 // frame, adapter parks in `wait_for_connection`, fake-signal-cli accepts the
@@ -2097,16 +2091,11 @@ async fn mid_session_reconnect_delivers_queued_frame() {
 
     use crate::SignalAdapter;
 
-    // SAFETY: the static RECONNECT_ENV_LOCK serializes this
-    // test against the reconnect-cap test below so they don't
-    // interleave on WIRKEN_SIGNAL_RECONNECT_WAIT_S. Generous
-    // cap value so the reconnect window is the test's only
-    // timing variable. Held across the entire test scope
-    // because env reads happen anywhere inside adapter.run().
-    let _env_guard = RECONNECT_ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S", "10");
-    }
+    // Generous cap so the reconnect window is the test's only
+    // timing variable. Handed to the adapter directly: the adapter
+    // reads the variable from a spawned task on a multi-threaded
+    // runtime, which no lock between test writers can make safe.
+    let reconnect_wait = Duration::from_secs(10);
 
     let tmp = tempfile::tempdir().unwrap();
     let signal_socket = tmp.path().join("signal-cli.sock");
@@ -2241,7 +2230,8 @@ async fn mid_session_reconnect_delivers_queued_frame() {
         fixtures::FIXTURE_ACCOUNT.into(),
         allowlist,
     )
-    .expect("adapter construction");
+    .expect("adapter construction")
+    .with_reconnect_wait(reconnect_wait);
     let gw_socket_for_adapter = gw_socket.clone();
     let adapter_task = tokio::spawn(async move {
         std::sync::Arc::new(adapter)
@@ -2256,10 +2246,6 @@ async fn mid_session_reconnect_delivers_queued_frame() {
 
     adapter_task.abort();
     fake_signal.abort();
-
-    unsafe {
-        std::env::remove_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S");
-    }
 
     let send_call = captured_send
         .lock()
@@ -2295,16 +2281,11 @@ async fn reconnect_cap_emits_approval_request_failed_with_reason() {
 
     use crate::SignalAdapter;
 
-    // SAFETY: the static RECONNECT_ENV_LOCK serializes this
-    // test against the reconnect-happy test above so they don't
-    // interleave on WIRKEN_SIGNAL_RECONNECT_WAIT_S. Short cap so
-    // the test completes quickly; the adapter's reconnect inner
-    // loop sleeps 500ms before its first attempt, so 1s leaves
-    // room for the cap to fire after one failed attempt.
-    let _env_guard = RECONNECT_ENV_LOCK.lock().unwrap();
-    unsafe {
-        std::env::set_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S", "1");
-    }
+    // Short cap so the test completes quickly; the adapter's
+    // reconnect inner loop sleeps 500ms before its first attempt,
+    // so 1s leaves room for the cap to fire after one failed
+    // attempt.
+    let reconnect_wait = Duration::from_secs(1);
 
     let tmp = tempfile::tempdir().unwrap();
     let signal_socket = tmp.path().join("signal-cli.sock");
@@ -2399,7 +2380,8 @@ async fn reconnect_cap_emits_approval_request_failed_with_reason() {
         fixtures::FIXTURE_ACCOUNT.into(),
         allowlist,
     )
-    .expect("adapter construction");
+    .expect("adapter construction")
+    .with_reconnect_wait(reconnect_wait);
     let gw_socket_for_adapter = gw_socket.clone();
     let adapter_task =
         tokio::spawn(async move { Arc::new(adapter).run(&gw_socket_for_adapter).await });
@@ -2411,8 +2393,4 @@ async fn reconnect_cap_emits_approval_request_failed_with_reason() {
 
     adapter_task.abort();
     fake_signal.abort();
-
-    unsafe {
-        std::env::remove_var("WIRKEN_SIGNAL_RECONNECT_WAIT_S");
-    }
 }

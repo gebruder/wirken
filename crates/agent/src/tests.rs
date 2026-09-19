@@ -541,29 +541,6 @@ fn c2_description_over_1024_chars_is_rejected() {
 }
 
 #[test]
-fn c3_unsigned_skill_fails_to_load_without_bypass() {
-    // Serialize against c3_unsigned_skill_loads_with_bypass_env_var
-    // so the env-var leakage between parallel tests cannot make this
-    // one observe a `1` value left behind by the other.
-    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    // SAFETY: serialized via ENV_LOCK.
-    unsafe { std::env::remove_var("WIRKEN_ALLOW_UNSIGNED_SKILLS") };
-
-    let tmp = TempDir::new().unwrap();
-    let skill_dir = tmp.path().join("unsigned");
-    write_unsigned_skill(
-        &skill_dir,
-        "---\nname: unsigned\ndescription: x\n---\nbody\n",
-    );
-    let err = SkillLoader::load_file(&skill_dir.join("SKILL.md")).unwrap_err();
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("unsigned") && msg.contains("WIRKEN_ALLOW_UNSIGNED_SKILLS"),
-        "expected unsigned-with-bypass-hint error, got {msg}"
-    );
-}
-
-#[test]
 fn c3_forged_signature_fails_to_load() {
     // Sign with one keypair, then rewrite SKILL.md so the stored
     // signature no longer matches the bundle's content. The loader
@@ -590,31 +567,12 @@ fn c3_forged_signature_fails_to_load() {
     );
 }
 
-/// Global mutex serializing env-var-touching tests. Tests run in
-/// parallel by default; this gate makes the `WIRKEN_ALLOW_UNSIGNED_SKILLS`
-/// dance safe against neighbours.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[test]
-fn c3_unsigned_skill_loads_with_bypass_env_var() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    // SAFETY: serialized via ENV_LOCK so no other test reads/writes
-    // this var while we are.
-    unsafe { std::env::set_var("WIRKEN_ALLOW_UNSIGNED_SKILLS", "1") };
-
-    let tmp = TempDir::new().unwrap();
-    let skill_dir = tmp.path().join("bypass-test");
-    write_unsigned_skill(
-        &skill_dir,
-        "---\nname: bypass-test\ndescription: loaded via bypass\n---\nbody\n",
-    );
-    let result = SkillLoader::load_file(&skill_dir.join("SKILL.md"));
-
-    unsafe { std::env::remove_var("WIRKEN_ALLOW_UNSIGNED_SKILLS") };
-
-    let skill = result.expect("WIRKEN_ALLOW_UNSIGNED_SKILLS=1 must allow load");
-    assert_eq!(skill.name, "bypass-test");
-}
+// Both directions of `WIRKEN_ALLOW_UNSIGNED_SKILLS` are covered by
+// `tests/unsigned_skill_bypass.rs`, one test alone in its own binary.
+// Setting an environment variable is only sound when no other thread
+// is reading the environment, which is not true of a test binary that
+// runs its tests in parallel, so the cases that need the variable set
+// do not live here.
 
 #[test]
 fn c5_ansi_strip_at_print_boundary_defangs_fake_sudo() {

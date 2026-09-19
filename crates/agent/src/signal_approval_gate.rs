@@ -34,12 +34,25 @@ use crate::error::PermissionDenialContext;
 pub const DEFAULT_SIGNAL_TIMEOUT_SECS: u64 = 300;
 
 pub fn resolve_signal_timeout() -> Duration {
-    match std::env::var("WIRKEN_SIGNAL_APPROVAL_TIMEOUT_S") {
-        Ok(s) => match s.trim().parse::<u64>() {
-            Ok(secs) if secs > 0 => Duration::from_secs(secs),
-            _ => Duration::from_secs(DEFAULT_SIGNAL_TIMEOUT_SECS),
-        },
-        Err(_) => Duration::from_secs(DEFAULT_SIGNAL_TIMEOUT_SECS),
+    signal_timeout_from(
+        std::env::var("WIRKEN_SIGNAL_APPROVAL_TIMEOUT_S")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The rule on its own, with the environment read lifted out.
+///
+/// Split out so the tests cover the value without writing a
+/// process-global variable. `std::env::set_var` is `unsafe` in the
+/// 2024 edition because it is undefined behaviour while another
+/// thread reads or writes the environment, and cargo runs a crate's
+/// tests on parallel threads that do exactly that. A serializing
+/// mutex orders the writers and leaves every reader alone.
+fn signal_timeout_from(raw: Option<&str>) -> Duration {
+    match raw.map(|s| s.trim().parse::<u64>()) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs),
+        _ => Duration::from_secs(DEFAULT_SIGNAL_TIMEOUT_SECS),
     }
 }
 
@@ -49,6 +62,11 @@ pub struct SignalApprovalGate {
     queue: Arc<PendingApprovalQueue>,
     approvers: Arc<ApproverRegistry>,
     outbound: Arc<OutboundDispatcher>,
+    /// Captured once at construction. The gate is built at
+    /// startup and lives for the process, so reading the override
+    /// here rather than on every request is the same value and one
+    /// fewer environment read on the approval path.
+    timeout: Duration,
 }
 
 impl SignalApprovalGate {
@@ -57,10 +75,24 @@ impl SignalApprovalGate {
         approvers: Arc<ApproverRegistry>,
         outbound: Arc<OutboundDispatcher>,
     ) -> Self {
+        Self::with_timeout(queue, approvers, outbound, resolve_signal_timeout())
+    }
+
+    /// Construct with an explicit timeout instead of the value
+    /// [`resolve_signal_timeout`] reads from the environment. Lets a test drive
+    /// the deadline directly rather than writing a process-global
+    /// variable other threads are reading.
+    pub fn with_timeout(
+        queue: Arc<PendingApprovalQueue>,
+        approvers: Arc<ApproverRegistry>,
+        outbound: Arc<OutboundDispatcher>,
+        timeout: Duration,
+    ) -> Self {
         Self {
             queue,
             approvers,
             outbound,
+            timeout,
         }
     }
 }
@@ -132,7 +164,7 @@ impl ApprovalGate for SignalApprovalGate {
             "signal approval pending; awaiting operator decision via text command"
         );
 
-        let timeout = resolve_signal_timeout();
+        let timeout = self.timeout;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(decision)) => match decision {
                 PendingDecision::Allow { actor } => ApprovalOutcome::Approved { actor },
@@ -313,22 +345,19 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_path_forgets_queue_entry() {
-        // SAFETY: parallel tests; this env var is set/read/removed
-        // within this test's scope only.
-        unsafe {
-            std::env::set_var("WIRKEN_SIGNAL_APPROVAL_TIMEOUT_S", "1");
-        }
         let queue = Arc::new(PendingApprovalQueue::new());
         let (_tmp, approvers) = setup_approvers("signal", Some("group-abc=="));
         let outbound = Arc::new(OutboundDispatcher::new());
         let (writer, _reader) = writer_pair().await;
         outbound.register("signal", writer);
-        let gate = SignalApprovalGate::new(queue.clone(), approvers, outbound);
+        let gate = SignalApprovalGate::with_timeout(
+            queue.clone(),
+            approvers,
+            outbound,
+            Duration::from_millis(50),
+        );
 
         let outcome = gate.request_approval(&ctx("exec")).await;
-        unsafe {
-            std::env::remove_var("WIRKEN_SIGNAL_APPROVAL_TIMEOUT_S");
-        }
         assert_eq!(outcome, ApprovalOutcome::Timeout);
         assert!(queue.is_empty(), "timed-out entry must be forgotten");
     }

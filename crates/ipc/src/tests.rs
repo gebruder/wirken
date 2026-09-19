@@ -120,6 +120,13 @@ fn different_identities_have_different_keys() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
+// Miri interprets Rust; it has no unix sockets, no epoll and no
+// real filesystem. This crate is run under it for the `cfg(windows)`
+// peer-credential path's unsafe blocks, so the tests that open a
+// socket are ignored there rather than deleted: what Miri covers is
+// the pure half, the framing arithmetic and the principal and
+// channel state machines.
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn frame_roundtrip_inbound_message() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -165,6 +172,7 @@ async fn frame_roundtrip_inbound_message() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn frame_roundtrip_outbound_message() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -200,6 +208,7 @@ async fn frame_roundtrip_outbound_message() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn frame_roundtrip_heartbeat() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -226,6 +235,7 @@ async fn frame_roundtrip_heartbeat() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn multiple_frames_sequential() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -254,6 +264,7 @@ async fn multiple_frames_sequential() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn connection_closed_detected() {
     let (client, server) = tokio::net::UnixStream::pair().unwrap();
@@ -271,6 +282,7 @@ async fn connection_closed_detected() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn handshake_success() {
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -307,6 +319,7 @@ async fn handshake_success() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn handshake_rejected_unknown_adapter() {
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -345,6 +358,7 @@ async fn handshake_rejected_unknown_adapter() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn handshake_wrong_key_rejected() {
     let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
@@ -528,6 +542,7 @@ fn principal_deserialize_rejects_malformed() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn test_pair_round_trips_bytes_through_trait_objects() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -550,6 +565,7 @@ async fn test_pair_round_trips_bytes_through_trait_objects() {
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn test_pair_peer_principal_is_uid_variant() {
     let (a, b) = crate::test_pair().expect("test_pair");
@@ -566,6 +582,7 @@ async fn test_pair_peer_principal_is_uid_variant() {
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn windows_named_pipe_round_trip() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -628,6 +645,7 @@ async fn windows_named_pipe_round_trip() {
 }
 
 #[cfg(windows)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn windows_named_pipe_peer_principal_errors_when_no_client() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -656,6 +674,7 @@ async fn windows_named_pipe_peer_principal_errors_when_no_client() {
 // Listener trait: bind/connect round-trip
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn listener_round_trip_through_trait_objects() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -687,6 +706,7 @@ async fn listener_round_trip_through_trait_objects() {
 }
 
 #[cfg(windows)]
+#[cfg_attr(miri, ignore = "needs a real socket; miri has no I/O")]
 #[tokio::test]
 async fn windows_named_pipe_client_peer_principal_is_unsupported() {
     use std::sync::atomic::{AtomicU64, Ordering};
