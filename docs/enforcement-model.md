@@ -119,8 +119,8 @@ The three-tier permission model is backed by SQLite:
 
 | Tier | Behavior | Example Actions |
 |---|---|---|
-| Tier 1 | Always allowed | Workspace file access, web search |
-| Tier 2 | First-use approval, 30-day expiry | A curated allowlist of shell-inspection verbs (ls / cat / grep / stat / pwd / whoami / ...), external file access. See AG01 in [security-properties.md](security-properties.md) for the canonical list. There is no documented Tier-2 exec escape hatch -- shell wrappers, language interpreters with `-c`/`-e` eval, and build/deploy tools default to Tier 3. |
+| Tier 1 | Always allowed | Workspace file access, channel converse, web search, `http_request` |
+| Tier 2 | First-use approval, 30-day expiry | A curated allowlist of shell-inspection verbs (ls / cat / grep / stat / pwd / whoami / ...), external file access. See T3 in [security-properties.md](security-properties.md) for the canonical list. There is no documented Tier-2 exec escape hatch -- shell wrappers, language interpreters with `-c`/`-e` eval, and build/deploy tools default to Tier 3. |
 | Tier 3 | Always prompt | Credential access, destructive ops, cron creation, every shell verb outside the Tier 2 inspection-verb allowlist |
 
 **Live update:** `PermissionStore::approve()` and `PermissionStore::revoke()` take effect immediately -- they are SQLite writes checked on every permission query. No restart required.

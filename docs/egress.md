@@ -134,10 +134,10 @@ Every refusal emits `SessionEvent::SandboxEgressDenied` on the agent's hash-chai
 
 ## Cross-reference
 
-The same gap appears in [security-properties.md](security-properties.md) under AG02 (Code execution), where it is described as a code-execution surface rather than a configuration-side scope. The two pages describe the same constraint from different angles; if you are reading this page to evaluate a deployment, the AG02 row carries the threat-model context.
+The same gap appears in [security-properties.md](security-properties.md) under T11 (Unexpected RCE and code attacks), where it is described as a code-execution surface rather than a configuration-side scope. The two pages describe the same constraint from different angles; if you are reading this page to evaluate a deployment, the T11 row carries the threat-model context.
 
 ## Source references
 
 - `EgressClient` scope and host check: `crates/agent/src/egress.rs:167-318`.
 - Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:964-1010`, matching at `crates/agent/src/skill_perms.rs:583-599`.
-- Threat-model row: [security-properties.md](security-properties.md), row `AG02` (Code execution).
+- Threat-model row: [security-properties.md](security-properties.md), row `T11` (Unexpected RCE and code attacks).

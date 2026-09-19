@@ -64,12 +64,15 @@ pub trait Adapter<C: Channel> {
     fn read_session(&self, handle: &SessionHandle<C>) -> Result<SessionView>;
 }
 
-/// Gateway dispatch: the match arm for a Telegram IPC frame
-/// can only produce InboundMessage<Telegram>. The compiler
-/// rejects any attempt to route it to a Discord session.
+/// Gateway dispatch, as the typed API is designed to be used:
+/// a match arm for a Telegram IPC frame produces only
+/// InboundMessage<Telegram>. See the status note below for how
+/// much of this is on the production path today.
 ```
 
-This is not a runtime permission check that can be bypassed — it is a type constraint that the compiler enforces. A Telegram adapter binary physically cannot construct a `SessionHandle<Discord>` because the type parameter is sealed.
+Within code that uses `SessionHandle<C>`, this is a type constraint the compiler enforces rather than a runtime check: the `Channel` trait is sealed, so a Telegram adapter cannot construct a `SessionHandle<Discord>`.
+
+**Status of the production message path.** The typed API and its negative-test scaffolding (`crates/ipc/src/tests.rs:20-30`) are not yet threaded through production gateway routing. Production frames carry a `String`-typed channel discriminator on the `AuthenticatedChannel` value resolved at handshake time, and a cross-channel frame is rejected at runtime, emitting an `adapter.channel_mismatch` audit event, not at compile time. The live cross-channel control is therefore the runtime match, and the compile-time guarantee covers the type-level API rather than the shipped dispatch path. Retiring the `String` discriminator in favour of the phantom-typed handle is not implemented.
 
 > For a complete mapping of which guarantees are compile-time vs. runtime, see [Enforcement Model](enforcement-model.md).
 
@@ -131,7 +134,7 @@ impl VaultEntry {
 
 ## 3. Agent Permission Model
 
-**Threat (OWASP AG01, Excessive Agency):** Without a granular permission model, authenticated agents have unrestricted access to all tools and resources. Session IDs used as routing controls rather than authorization boundaries.
+**Threat (OWASP Agentic Threats T3, Privilege Compromise; the "excessive agency" framing is LLM03 in the 2026 OWASP LLM Top 10, LLM06 in 2025):** Without a granular permission model, authenticated agents have unrestricted access to all tools and resources. Session IDs used as routing controls rather than authorization boundaries.
 
 **Fix:**
 
@@ -141,6 +144,7 @@ Agents operate under a **capability-based permission model** with three tiers:
 - Read/write files within agent workspace
 - Converse on bound channels
 - Web search (read-only)
+- `http_request` (Tier 1 adds no prompt; the skill's own permissions block and `EgressClient` refuse a non-allowlisted request outright rather than escalating it)
 
 **Tier 2 — First-use approval, then remembered:**
 - Shell command execution (by command prefix pattern)
@@ -152,7 +156,11 @@ Agents operate under a **capability-based permission model** with three tiers:
 - Network requests to new domains
 - Credential access
 - Cron job creation
-- Skill installation
+- MCP tool calls and Wasm skill dispatch
+- Cross-channel memory reads, imported-archive reads and searches
+- Any tool name matching no built-in, MCP, or known Wasm skill (default-deny)
+
+Skill installation is not on this list and is not tier-gated. `Action::SkillInstall` was removed because the CLI install path never reached it; installs gate on signature verification against the registry's expected key in `crates/cli/src/commands/skills.rs::install`, with load-time re-verification in `crates/agent/src/skill.rs::verify_skill_signature`.
 
 Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `approved_at`, `approved_by` (channel the approval came from), and `expires_at` (30 days by default, set by `default_expiry_days` in `permissions.json` or per grant by `--expires-in-days`, re-promptable). Only Tier 2 keys are storable.
 
@@ -162,7 +170,7 @@ Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `a
 
 ## 4. Audit System
 
-**Threat (OWASP AG09, Insufficient Logging and Monitoring):** Without a persistent audit trail for agent actions, there is no way to detect, investigate, or respond to incidents. Logging only control-plane commands misses tool invocations, credential access, and file operations.
+**Threat (OWASP Agentic Threats T8, Repudiation & Untraceability):** Without a persistent audit trail for agent actions, there is no way to detect, investigate, or respond to incidents. Logging only control-plane commands misses tool invocations, credential access, and file operations.
 
 **Fix:**
 
@@ -193,7 +201,7 @@ wirken sessions verify <session-id> # replay and verify a session
 
 ## 5. Skill Execution
 
-**Threat (OWASP AG02, Unexpected Code Execution):** Skills running in-process with full OS privileges and no sandbox. A malicious or compromised skill has complete access to the host filesystem, network, and credentials.
+**Threat (OWASP Agentic Threats T11, Unexpected RCE and Code Attacks):** Skills running in-process with full OS privileges and no sandbox. A malicious or compromised skill has complete access to the host filesystem, network, and credentials.
 
 **Fix:**
 
@@ -426,9 +434,9 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Single token controls all channels | CWE-250 | Per-adapter Ed25519 identity, per-channel credentials |
 | Plaintext credentials on disk | CWE-256, CWE-312 | XChaCha20-Poly1305 vault, OS keychain for master key |
 | No per-channel isolation | CWE-653 | Separate adapter processes with compile-time type-safe scoping |
-| Excessive agent privileges | OWASP AG01 | Three-tier permission model with expiring approvals |
-| Unsandboxed code execution | OWASP AG02 | Docker sandbox, Wasm sandbox (Wasmtime), workspace confinement |
-| No audit trail | OWASP AG09 | Append-only hash-chained audit log, SIEM forwarding |
+| Excessive agent privileges | OWASP T3 (LLM03) | Three-tier permission model with expiring approvals |
+| Unsandboxed code execution | OWASP T11 | Docker sandbox, Wasm sandbox (Wasmtime), workspace confinement |
+| No audit trail | OWASP T8 | Append-only hash-chained audit log, SIEM forwarding |
 | Localhost rate limit exemption | CWE-307 | Uniform rate limiting, no loopback exemption |
 | No session expiry | CWE-613 | 24h inactivity expiry on the SQLite session store |
 | Runtime memory unsafety | CWE-119 | Rust: memory safety at compile time |
