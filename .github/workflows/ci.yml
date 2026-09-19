@@ -74,6 +74,31 @@ jobs:
           key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo test --workspace
 
+  corpus:
+    name: Hostile corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+      - name: Install Cap'n Proto
+        run: sudo apt-get install -y capnproto
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-corpus-${{ hashFiles('**/Cargo.lock') }}
+      # The test job above already runs this binary as part of the
+      # workspace. It runs again here on its own because a corpus
+      # mismatch prints the call and both outcomes, and that report is
+      # worth having in a job of its own rather than three thousand
+      # test lines deep in another one. A red check named "Hostile
+      # corpus" also says what broke before anyone opens the log.
+      - name: Replay tests/hostile/corpus.jsonl
+        run: cargo test -p wirken-agent --test hostile_corpus -- --nocapture
+
   scripts:
     name: Scripts
     runs-on: ubuntu-latest

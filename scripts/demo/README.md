@@ -17,6 +17,13 @@ Two more refusals sit beside the agent turn, on the skill-loading path: a
 bundle edited after signing, and an intact bundle with no delegation to a
 configured registry root.
 
+These four turns are also the seed of
+[`tests/hostile/corpus.jsonl`](../../tests/hostile/corpus.jsonl), which
+carries every variant of them the classifier has a rule for and replays each
+one through `tool_to_action` and `PermissionStore::check` with no network, no
+model and no sandbox. This runbook shows the gate holding once; the corpus
+holds it to that on every push.
+
 ## Prerequisites
 
 - A built `wirken` binary. `cargo build -p wirken-cli` gives you
