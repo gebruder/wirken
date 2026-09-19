@@ -1965,6 +1965,16 @@ pub struct SchemaDriftRecord {
     pub reason: String,
 }
 
+/// One session's rows as the reader sees them: the events that
+/// parsed, a record per row whose payload this binary could not
+/// deserialize, and every row's stored chain hash keyed by seq
+/// (including the drift rows, which carry a hash regardless).
+type SessionRows = (
+    Vec<StoredSessionEvent>,
+    Vec<SchemaDriftRecord>,
+    BTreeMap<u64, String>,
+);
+
 /// Details of the first invalid `ChainHead` signature in a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidSignatureDetail {
@@ -2609,17 +2619,7 @@ impl SqliteSessionLog {
     /// deserialize must report drift, and a lookup that missed the row
     /// would instead compare against an empty string and read as a bad
     /// signature.
-    fn session_rows(
-        &self,
-        handle: &SessionHandle<OwnSession>,
-    ) -> Result<
-        (
-            Vec<StoredSessionEvent>,
-            Vec<SchemaDriftRecord>,
-            BTreeMap<u64, String>,
-        ),
-        AuditError,
-    > {
+    fn session_rows(&self, handle: &SessionHandle<OwnSession>) -> Result<SessionRows, AuditError> {
         let conn = self.conn.lock().expect("session log mutex");
         let raw = collect_rows(
             &conn,
