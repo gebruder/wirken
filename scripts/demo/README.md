@@ -132,8 +132,8 @@ Meanwhile the server has logged the whole script:
 ```
       ID  TIMESTAMP             ACTOR             ACTION                TARGET
   ──────  ────────────────────  ────────────────  ────────────────────  ──────────────────────────────
-      16  2026-09-19 14:19:04                     permission_denied     
-      11  2026-09-19 14:19:04                     permission_denied     
+      17  2026-09-19 15:40:59                     permission_denied     
+      12  2026-09-19 15:40:59                     permission_denied     
 
   2 events shown.
 ```
@@ -154,9 +154,9 @@ is where the demo lands:
 ```
 
 ```
-16	permission_denied	vault_dump_all	tool:vault_dump_all	no such tool; not running it
-11	permission_denied	exec	shell::pipeline:	pipeline hands the shell an unreviewed payload
-6	skill_permission_denied	http_request	http_post_path	profile
+17	permission_denied	vault_dump_all	tool:vault_dump_all	no such tool; not running it
+12	permission_denied	exec	shell::pipeline:	pipeline hands the shell an unreviewed payload
+7	skill_permission_denied	http_request	http_post_path	profile
 ```
 
 Three rows, three different mechanisms:
@@ -174,7 +174,7 @@ Three rows, three different mechanisms:
 
 Both Tier 3 rows carry `denied_via: {"kind": "stdin"}` and the reason typed at
 the prompt. Ask for the full payload with
-`jq '.events[] | select(.id == 11)'` if the talk wants to show it.
+`jq '.events[] | select(.id == 12)'` if the talk wants to show it.
 
 ## 5. Verify the chain
 
@@ -185,23 +185,22 @@ the prompt. Ask for the full payload with
 ```
   WARNING (audit anchor): report-only: the hash chain and self-attested chain-head signatures were checked, but no operator trust anchor was consulted, so a same-UID rewrite is not detected. Pass --require-signed with an out-of-band --anchor for tamper-evident verification.
   Audit log integrity: OK
-  20 rows verified across 1 sessions, hash chain intact.
-  Chain-head signatures: 0 verified.
-  Transition-era sessions (no signed heads): 1. Pass --require-signed to fail on these.
-  Unsigned tail (max events past last head): 20.
+  22 rows verified across 1 sessions, hash chain intact.
+  Chain-head signatures: 2 verified.
+  Signing key ids seen: d04a20c5e604938a8fa7a4918f81c1d451c1efe54d091be714ba7787a7f1a20e
 exit=0
 ```
 
-The anchor warning is the honest one to read out. Two things are worth saying
-about this output rather than glossing them:
+Two signed heads over twenty-two rows: a `SessionStart` on the first append
+and a `SessionEnd` the ask writes when it finishes, so nothing is left in an
+unsigned tail. `wirken audit verify --require-signed` also exits 0 here.
 
-- No chain-head signatures. `wirken ask` is a one-shot; chain heads are
-  written at session boundaries and on a cadence by `wirken run`. A scratch
-  log from `ask` alone has none, so `--require-signed` would fail here. That
-  is the flag working, not the demo breaking.
-- No operator anchor was consulted, so this run is not tamper-evident against
-  someone who can rewrite both the log and the local public key. Step 7 is the
-  weaker claim the chain does make on its own.
+The anchor warning is the honest line to read out. No operator anchor was
+consulted, so this run is not tamper-evident against someone who can rewrite
+both the log and the local public key: they would re-sign the rewritten chain
+with a key the verifier would then accept. Passing `--require-signed` without
+an out-of-band `--anchor` falls back to the co-resident key and says so in a
+louder warning. Step 7 is the weaker claim the chain makes on its own.
 
 ## 6. Refusal at load
 
@@ -265,14 +264,14 @@ a root configured, a bundle has to carry identity, not just consistency. The
 
 ```bash
 sqlite3 "$WIRKEN_DATA_DIR/audit.db" \
-  "UPDATE session_events SET payload = replace(payload, '\"tool\":\"exec\"', '\"tool\":\"echo\"') WHERE id = 11;"
+  "UPDATE session_events SET payload = replace(payload, '\"tool\":\"exec\"', '\"tool\":\"echo\"') WHERE id = 12;"
 
 sqlite3 "$WIRKEN_DATA_DIR/audit.db" \
-  "SELECT id, substr(payload, 1, 72) FROM session_events WHERE id = 11;"
+  "SELECT id, substr(payload, 1, 72) FROM session_events WHERE id = 12;"
 ```
 
 ```
-11|{"kind":"permission_denied","tool":"echo","action_key":"shell::pipeline:
+12|{"kind":"permission_denied","tool":"echo","action_key":"shell::pipeline:
 ```
 
 The row now says the operator denied `echo`, an allowlisted inspection verb,
@@ -287,10 +286,10 @@ leave the denial in place, make what was denied look boring.
   WARNING (audit anchor): report-only: the hash chain and self-attested chain-head signatures were checked, but no operator trust anchor was consulted, so a same-UID rewrite is not detected. Pass --require-signed with an out-of-band --anchor for tamper-evident verification.
   Audit log integrity: BROKEN
   Session: default
-  Hash chain broken at seq 10.
+  Hash chain broken at seq 11.
   Expected hash: 17c711f0c713ebd92dc5248f19782dbddd3069fd80082b89f872942c8a8298b1
   Actual hash:   a7d4989b69cc2642f560b6b5284db7fa34913f9ed6a0f1bc8a15dd7d362a8c5f
-  10 events verified before the break; events at and after seq 10 in this session should not be relied on.
+  11 events verified before the break; events at and after seq 11 in this session should not be relied on.
 
   The audit log has been tampered with.
 exit=1

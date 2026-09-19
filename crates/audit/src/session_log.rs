@@ -38,7 +38,7 @@
 //!
 //! [`AuditWriter`]: crate::AuditWriter
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::path::Path;
@@ -2426,7 +2426,7 @@ impl SqliteSessionLog {
         handle: &SessionHandle<OwnSession>,
     ) -> Result<SessionSignatureVerifyResult, AuditError> {
         use ed25519_dalek::{Signature, VerifyingKey};
-        let (rows, schema_drift_records) = self.session_rows(handle)?;
+        let (rows, schema_drift_records, stored_hashes) = self.session_rows(handle)?;
         // `session_total_events` counts parsed rows; unparseable rows
         // are surfaced separately in `schema_drift_records` so the
         // signed-tail accounting is not skewed by rows the verifier
@@ -2474,10 +2474,9 @@ impl SqliteSessionLog {
 
             // current_chain_hash must match stored hash at sequence_range_end
             // (or be empty when the session was empty at head time).
-            let actual_current = rows
-                .iter()
-                .find(|r| r.seq == *sequence_range_end)
-                .map(|r| r.hash.0.clone())
+            let actual_current = stored_hashes
+                .get(sequence_range_end)
+                .cloned()
                 .unwrap_or_default();
             if !current_chain_hash.0.is_empty() && current_chain_hash.0 != actual_current {
                 result.first_invalid = Some(InvalidSignatureDetail {
@@ -2505,11 +2504,7 @@ impl SqliteSessionLog {
                 }
             } else {
                 let prev_seq = sequence_range_start - 1;
-                let actual_prev = rows
-                    .iter()
-                    .find(|r| r.seq == prev_seq)
-                    .map(|r| r.hash.0.clone())
-                    .unwrap_or_default();
+                let actual_prev = stored_hashes.get(&prev_seq).cloned().unwrap_or_default();
                 if prev_chain_hash.0 != actual_prev {
                     result.first_invalid = Some(InvalidSignatureDetail {
                         seq: row.seq,
@@ -2605,10 +2600,26 @@ impl SqliteSessionLog {
     /// abort the parse: chain hashes ride on raw payload bytes and
     /// verify independently in [`Self::verify`], so an unparseable
     /// row is not chain-breaking. Database errors still propagate.
+    ///
+    /// The third return is every row's stored chain hash keyed by seq,
+    /// built from the raw rows before parsing and therefore covering
+    /// drift rows too. [`Self::verify_signatures`] resolves a chain
+    /// head's claimed hashes through this map rather than through the
+    /// parsed list: a head covering a row this binary cannot
+    /// deserialize must report drift, and a lookup that missed the row
+    /// would instead compare against an empty string and read as a bad
+    /// signature.
     fn session_rows(
         &self,
         handle: &SessionHandle<OwnSession>,
-    ) -> Result<(Vec<StoredSessionEvent>, Vec<SchemaDriftRecord>), AuditError> {
+    ) -> Result<
+        (
+            Vec<StoredSessionEvent>,
+            Vec<SchemaDriftRecord>,
+            BTreeMap<u64, String>,
+        ),
+        AuditError,
+    > {
         let conn = self.conn.lock().expect("session log mutex");
         let raw = collect_rows(
             &conn,
@@ -2620,7 +2631,12 @@ impl SqliteSessionLog {
         )?;
         let mut parsed = Vec::with_capacity(raw.len());
         let mut drift = Vec::new();
+        let mut hashes: BTreeMap<u64, String> = BTreeMap::new();
         for row in raw {
+            // Record the stored hash before parsing, so the map covers
+            // every row the query returned and not only the ones this
+            // binary understands.
+            hashes.insert(row.2 as u64, row.8.clone());
             match parse_row(row) {
                 Ok(event) => parsed.push(event),
                 Err(AuditError::SchemaDrift {
@@ -2635,7 +2651,7 @@ impl SqliteSessionLog {
                 Err(e) => return Err(e),
             }
         }
-        Ok((parsed, drift))
+        Ok((parsed, drift, hashes))
     }
 
     /// Scan every session for `PermissionDenied` events belonging to

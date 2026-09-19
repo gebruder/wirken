@@ -9,6 +9,63 @@ use wirken_vault::{CredentialStore, probe_keychain};
 
 use super::{config, open_permission_store};
 
+/// Open the session log with the gateway's audit signing key when one
+/// is available, so an `ask` session carries signed chain heads the
+/// way a `wirken run` session does. Falls back to an unsigned log with
+/// a warning rather than refusing to answer: losing the signature is
+/// worse than losing the turn only if the operator is relying on it,
+/// and the warning is what tells them.
+///
+/// Returns the concrete type because emitting a head needs it; callers
+/// clone it into the `dyn SessionLog` the runtime takes.
+fn open_signed_session_log(
+    cfg: &wirken_gateway::config::GatewayConfig,
+) -> Result<Arc<wirken_audit::SqliteSessionLog>> {
+    let signer = match wirken_audit::AuditSigningKey::load_or_create(&cfg.data_dir) {
+        Ok(k) => Some(Arc::new(k)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "this ask will write to an unsigned audit chain: could not load or \
+                 generate the gateway audit signing key"
+            );
+            None
+        }
+    };
+    Ok(Arc::new(match signer {
+        Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
+            .context("Failed to open session log with signer")?,
+        None => wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("Failed to open session log")?,
+    }))
+}
+
+/// Close the ask's range with a `SessionEnd` head.
+///
+/// `wirken ask` is a one-shot. The `SessionStart` head fires on the
+/// first append inside the runtime, and nothing else ever closes the
+/// range, so without this every row the ask wrote stays in the
+/// unsigned tail and `wirken audit verify --require-signed` reports
+/// the session as having no signed heads. Consecutive asks share one
+/// session id, so each terminal head chains onto the last.
+///
+/// Best-effort by construction: the turn has already happened and its
+/// rows are already on the chain, so a failure to seal is logged and
+/// not propagated. A missing signer returns `Ok(None)` and is not an
+/// error.
+fn seal_session(log: &Arc<wirken_audit::SqliteSessionLog>, session_id: &str) {
+    use wirken_audit::SessionLog as _;
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    if let Err(e) = log.emit_chain_head(&handle, wirken_audit::ChainHeadReason::SessionEnd) {
+        tracing::warn!(
+            error = %e,
+            session_id,
+            "could not write the terminal chain head for this ask; the rows it \
+             wrote stay in the unsigned tail"
+        );
+    }
+}
+
 pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     let cfg = config();
 
@@ -90,10 +147,8 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     let workspace = cfg.data_dir.join("workspace");
     std::fs::create_dir_all(&workspace)?;
 
-    let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = std::sync::Arc::new(
-        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
-            .context("Failed to open session log")?,
-    );
+    let session_log_concrete = open_signed_session_log(&cfg)?;
+    let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
 
     let mut agent = Agent::new_with_sandbox(
         "default".into(),
@@ -134,7 +189,12 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
 
     println!();
     let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
-    match agent.process_message(message, inbound_id).await {
+    let outcome = agent.process_message(message, inbound_id).await;
+    // Seal before reporting, and on the error path too: the rows the
+    // turn already wrote are real, and a failed turn is exactly the one
+    // an operator will want to verify.
+    seal_session(&session_log_concrete, "default");
+    match outcome {
         // B2: strip ANSI / C1 control sequences at the print
         // boundary. The model's response is shaped by skill bodies
         // in the system prompt and by tool output the model echoes
@@ -195,10 +255,8 @@ async fn send_with_agent_config(
     let workspace = cfg.agent_workspace(&agent_cfg.id);
     std::fs::create_dir_all(&workspace)?;
 
-    let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = std::sync::Arc::new(
-        wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
-            .context("Failed to open session log")?,
-    );
+    let session_log_concrete = open_signed_session_log(cfg)?;
+    let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
 
     let mut agent = Agent::new_with_sandbox(
         agent_cfg.id.clone(),
@@ -250,7 +308,12 @@ async fn send_with_agent_config(
 
     println!();
     let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
-    match agent.process_message(message, inbound_id).await {
+    let outcome = agent.process_message(message, inbound_id).await;
+    // Seal before reporting, and on the error path too: the rows the
+    // turn already wrote are real, and a failed turn is exactly the one
+    // an operator will want to verify.
+    seal_session(&session_log_concrete, &agent_cfg.id);
+    match outcome {
         // B2: strip ANSI / C1 control sequences at the print
         // boundary. The model's response is shaped by skill bodies
         // in the system prompt and by tool output the model echoes
@@ -270,4 +333,117 @@ async fn send_with_agent_config(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wirken_audit::{SessionId, SessionLog as _, TrustLevel};
+
+    fn cfg_in(dir: &std::path::Path) -> wirken_gateway::config::GatewayConfig {
+        wirken_gateway::config::GatewayConfig {
+            data_dir: dir.to_path_buf(),
+            ..Default::default()
+        }
+    }
+
+    fn user_row(text: &str) -> wirken_audit::SessionEvent {
+        wirken_audit::SessionEvent::UserMessage {
+            content: text.into(),
+            adapter_id: None,
+            sender_id: None,
+            inbound_id: None,
+        }
+    }
+
+    /// An ask session must end up with a signed chain head. Before the
+    /// log was opened with the signer, `wirken ask` wrote its rows to
+    /// an unsigned log, so every ask session reported zero signed heads
+    /// and `--require-signed` failed on it.
+    #[test]
+    fn ask_session_is_sealed_with_a_signed_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let log = open_signed_session_log(&cfg).expect("open");
+
+        let handle = log.handle_for(SessionId::new("default".to_string()));
+        // The first append fires an implicit SessionStart head, which
+        // covers that row. Everything the turn writes after it is what
+        // would otherwise never be covered.
+        log.append(&handle, TrustLevel::User, user_row("hello"))
+            .unwrap();
+        log.append(&handle, TrustLevel::User, user_row("and again"))
+            .unwrap();
+
+        let before = log.verify_signatures(&handle).unwrap();
+        assert!(
+            before.unsigned_tail_len > 0,
+            "rows written after the SessionStart head sit in the unsigned tail \
+             until the ask seals them, got {before:?}"
+        );
+
+        seal_session(&log, "default");
+
+        let after = log.verify_signatures(&handle).unwrap();
+        assert!(
+            after.signed_heads_count >= 1,
+            "seal must write a signed head, got {after:?}"
+        );
+        assert_eq!(
+            after.unsigned_tail_len, 0,
+            "the terminal head must cover every row the ask wrote"
+        );
+        assert!(
+            after.first_invalid.is_none(),
+            "the sealed head must verify, got {:?}",
+            after.first_invalid
+        );
+    }
+
+    /// Consecutive asks share one session id, so each seal chains onto
+    /// the last rather than restarting the range.
+    #[test]
+    fn consecutive_asks_chain_their_heads() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_in(dir.path());
+        let log = open_signed_session_log(&cfg).expect("open");
+        let handle = log.handle_for(SessionId::new("default".to_string()));
+
+        for turn in 0..3 {
+            log.append(&handle, TrustLevel::User, user_row(&format!("turn {turn}")))
+                .unwrap();
+            seal_session(&log, "default");
+        }
+
+        let result = log.verify_signatures(&handle).unwrap();
+        // One SessionStart on the very first append, plus one
+        // SessionEnd per ask. Each head's range starts where the last
+        // one ended, which is what makes them a chain rather than three
+        // independent claims.
+        assert_eq!(
+            result.signed_heads_count, 4,
+            "a SessionStart head plus one terminal head per ask, got {result:?}"
+        );
+        assert_eq!(result.unsigned_tail_len, 0);
+        assert!(result.first_invalid.is_none(), "{:?}", result.first_invalid);
+    }
+
+    /// Sealing is best-effort and must not panic when the log carries
+    /// no signer, which is the degraded path taken when the signing key
+    /// cannot be loaded.
+    #[test]
+    fn seal_without_a_signer_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let log =
+            Arc::new(wirken_audit::SqliteSessionLog::open(&dir.path().join("audit.db")).unwrap());
+        let handle = log.handle_for(SessionId::new("default".to_string()));
+        log.append(&handle, TrustLevel::User, user_row("hi"))
+            .unwrap();
+
+        seal_session(&log, "default");
+
+        let result = log.verify_signatures(&handle).unwrap();
+        assert_eq!(result.signed_heads_count, 0);
+        assert!(result.first_invalid.is_none());
+    }
 }

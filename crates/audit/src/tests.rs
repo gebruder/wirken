@@ -2338,6 +2338,89 @@ mod chain_head_signing {
         assert!(sig.first_invalid.is_none());
     }
 
+    /// A row inside a signed range whose payload this binary cannot
+    /// deserialize is schema drift, not a bad signature. The verifier
+    /// resolves `current_chain_hash` and `prev_chain_hash` from the
+    /// stored `hash` column, which rides on raw bytes and is
+    /// independent of whether the payload parses, so an older binary
+    /// reading a newer row reports drift and leaves the signature
+    /// verdict alone.
+    ///
+    /// Observed on a real log: session D0AQ1PPAGEP, seq 21, verified
+    /// with an older binary on PATH, failed as
+    /// `SignatureInvalid` with an empty stored hash because the
+    /// drifted row had been dropped from the list the hash lookup
+    /// searched.
+    #[test]
+    fn drift_row_inside_a_signed_range_is_drift_not_invalid_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("drift-sig.db");
+        let signer = std::sync::Arc::new(AuditSigningKey::generate());
+        let log = SqliteSessionLog::open_with_signer(&db, signer.clone()).unwrap();
+        let h = log.handle_for(SessionId::new("drift-sig-sess"));
+
+        log.append(&h, TrustLevel::User, user_msg("one")).unwrap();
+        log.append(&h, TrustLevel::User, user_msg("two")).unwrap();
+        let head_seq = log
+            .emit_chain_head(&h, ChainHeadReason::SessionEnd)
+            .unwrap()
+            .expect("signer present");
+
+        // Clean baseline: the head verifies before anything drifts.
+        let before = log.verify_signatures(&h).unwrap();
+        assert!(
+            before.first_invalid.is_none(),
+            "baseline must verify, got {:?}",
+            before.first_invalid
+        );
+        assert!(before.signed_heads_count >= 1);
+
+        // The seq the head claims a hash for.
+        let covered = log
+            .get_since(&h, 0)
+            .unwrap()
+            .into_iter()
+            .find_map(|r| match r.event {
+                SessionEvent::ChainHead {
+                    sequence_range_end, ..
+                } if r.seq == head_seq => Some(sequence_range_end),
+                _ => None,
+            })
+            .expect("head row carries its covered range");
+
+        // Make that row undeserializable without touching its hash,
+        // which is what a newer writer's unknown variant looks like to
+        // this binary.
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE session_events SET payload = ?1
+             WHERE session_id = 'drift-sig-sess' AND seq = ?2",
+            rusqlite::params![
+                r#"{"kind":"from_a_newer_binary","field":1}"#,
+                covered as i64
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let after = log.verify_signatures(&h).unwrap();
+        assert!(
+            after.schema_drift_records.iter().any(|d| d.seq == covered),
+            "the unparseable row must be reported as drift, got {:?}",
+            after.schema_drift_records
+        );
+        assert!(
+            after.first_invalid.is_none(),
+            "a drift row inside a signed range must not read as a bad \
+             signature, got {:?}",
+            after.first_invalid
+        );
+        assert_eq!(
+            after.signed_heads_count, before.signed_heads_count,
+            "the head still verifies; only the covered row drifted"
+        );
+    }
+
     /// Build_signed_message round-trip used by tampering tests:
     /// confirms the verifier's canonical layout matches signing.
     #[test]

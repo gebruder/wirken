@@ -208,6 +208,13 @@ claimed `prev_chain_hash` does not match the stored hash at
 `sequence_range_start - 1`; malformed `signing_key_id`; the signature did not
 verify; the embedded `schema_version` differs from the verifier's.
 
+Both stored hashes are read from the row's `hash` column, which rides on raw
+bytes and does not depend on the payload parsing. A row inside a signed range
+that this binary cannot deserialize, because a newer one wrote a variant it
+does not know, is therefore reported as schema drift and leaves the head's
+signature verdict alone. Drift inside a signed range is never
+`SignatureInvalid`.
+
 ```sh
 wirken audit verify --require-signed --anchor /etc/wirken/audit-signing.pub && publish-results.sh
 ```
