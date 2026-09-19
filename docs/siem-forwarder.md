@@ -10,7 +10,7 @@ The webhook target documented here is one of two subscription surfaces for exter
 
 The `AuditWriter`'s flush loop batches `AuditEvent` rows every 50 ms or every 100 events and forwards each batch to the configured target. Always on when any endpoint is configured in `siem.json`. Carries gateway-level events (`gateway.start`, adapter handshake records, MCP proxy registration, permission denials, `audit.chain_broken`, etc.).
 
-Source: `crates/audit/src/writer.rs:588-704` (flush loop), `crates/audit/src/siem.rs:178-261` (per-target forward).
+Source: `crates/audit/src/writer.rs:591-704` (`flush_loop`), `crates/audit/src/siem.rs:178-261` (per-target forward).
 
 ### Typed pipe
 
@@ -40,19 +40,19 @@ Source: `crates/audit/src/siem_typed.rs` (`spawn`, `run_one_pass`, `get_events_a
 
 The Sentinel split is a Sentinel DCR constraint, not a wirken design choice: the legacy stream's DCR pins specific columns and rejects rows that don't match. The typed pipe needs its own stream with its own column schema.
 
-Source: `crates/audit/src/siem_typed.rs:437-452` (`TypedTransport::for_config` selecting Shared vs SentinelSeparate).
+Source: `crates/audit/src/siem_typed.rs:476-520` (`TypedTransport` and `TypedTransport::for_config` at `:490`, selecting Shared vs SentinelSeparate).
 
 ## Variant include/exclude policy
 
 The default forwardable variant set covers the audit events most useful for detection without leaking PII or token-accounting noise:
 
-**Default forward:** `AssistantToolCalls`, `ToolResult`, `HttpFetch`, `PermissionDenied`, `SkillPermissionDenied`, `SubagentSpawned`, `SubagentResult`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`, `EgressHookDispatched`, `ToolOutputRedacted`, `BudgetExceeded`.
+**Default forward:** `AssistantToolCalls`, `ToolResult`, `HttpFetch`, `PermissionDenied`, `PermissionGrantExpired`, `PermissionGrantPruned`, `SkillPermissionDenied`, `SubagentSpawned`, `SubagentSessionBound`, `SubagentResult`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`, `EgressHookDispatched`, `ToolOutputRedacted`, `BudgetExceeded`, `SandboxEgressVerdict`, `SandboxEgressUnsupported`, `MemoryEntryWritten`, `CrossChannelMemoryRead`, `ImportStarted`, `ImportCompleted`, `ImportedChatRead`, `ImportedChatSearched`.
 
 **Default exclude (opt-in via `typed_include_variants`):** `UserMessage`, `AssistantMessage` (carry message bodies, PII), `LlmRequest`, `LlmResponse` (token accounting), `SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`, `AuditLegacy` (already on the legacy pipe), and the Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`, `CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`, `PerspectiveExpansion`, `PerspectiveSkipped`).
 
 `typed_include_variants` wins over `typed_exclude_variants` when both are set; the include list is treated as the canonical allowset and the exclude list is ignored.
 
-Source: `crates/audit/src/siem_typed.rs:89-119` (`should_forward`).
+Source: `crates/audit/src/siem_typed.rs:105-135` (`should_forward`).
 
 ## Per-target envelope shapes
 
@@ -71,7 +71,7 @@ Receivers verify by recomputing `HMAC-SHA-256(hmac_secret, raw_request_body)` an
 
 A shared `hmac_secret` produces distinct signatures on the legacy and typed pipes because the body shapes differ. Operators verifying both pipes must run the recompute per pipe.
 
-Source: `crates/audit/src/siem.rs:360-392` (legacy webhook + HMAC), `crates/audit/src/siem.rs:503-534` (typed webhook + HMAC), `crates/audit/src/siem.rs:637-647` (`compute_webhook_signature`).
+Source: `crates/audit/src/siem.rs:360-392` (legacy webhook + HMAC), `crates/audit/src/siem.rs:503-534` (typed webhook + HMAC), `crates/audit/src/siem.rs:745-752` (`compute_webhook_signature`).
 
 ## Retries
 
@@ -83,9 +83,9 @@ Source: `crates/audit/src/siem_typed.rs` (`run_one_pass` cursor advance gated on
 
 ## Source references
 
-- Two-pipe topology: `crates/audit/src/writer.rs:588-704` (legacy), `crates/audit/src/siem_typed.rs:284-334` (typed).
-- Variant policy: `crates/audit/src/siem_typed.rs:89-119`.
+- Two-pipe topology: `crates/audit/src/writer.rs:591-704` (legacy `flush_loop`), `crates/audit/src/siem_typed.rs:349` (`spawn`) and `:415` (`run_one_pass`) (typed).
+- Variant policy: `crates/audit/src/siem_typed.rs:105-135` (`should_forward`).
 - Per-target builders: `crates/audit/src/siem.rs:267-534`.
-- HMAC: `crates/audit/src/siem.rs:637-647` (`compute_webhook_signature`).
-- Spawn-guard: `crates/audit/src/siem.rs:97-105` (`SiemConfig::typed_forwarding_opted_in`).
+- HMAC: `crates/audit/src/siem.rs:745-752` (`compute_webhook_signature`).
+- Spawn-guard: `crates/audit/src/siem.rs:97-110` (`SiemConfig::typed_forwarding_opted_in`).
 - Operational issues: [gebruder/wirken#105](https://github.com/gebruder/wirken/issues/105), [gebruder/wirken#106](https://github.com/gebruder/wirken/issues/106).

@@ -33,7 +33,7 @@ One channel in Wirken maps to one platform workspace. A Slack deployment coverin
 
 ## Credential setup
 
-Credentials live in `~/.wirken/vault.db` (or `%APPDATA%\wirken\vault.db` on Windows), encrypted with XChaCha20-Poly1305. The device key is retrieved from the OS keychain on Linux (Secret Service) and macOS (Keychain), or from an age-encrypted key file with a passphrase-derived wrapping key (Argon2id). Windows uses the age-file backend by default; native Credential Manager integration is on the roadmap.
+Credentials live in `~/.wirken/vault.db` (or `%USERPROFILE%\.wirken\vault.db` on Windows), encrypted with XChaCha20-Poly1305. The device key is retrieved from the OS keychain on Linux (Secret Service) and macOS (Keychain), or from an age-encrypted key file with a passphrase-derived wrapping key (Argon2id). Windows uses the age-file backend by default; native Credential Manager integration is on the roadmap.
 
 Each channel stores its platform credentials under a well-known set of vault names:
 

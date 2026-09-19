@@ -12,6 +12,8 @@ All configuration lives in `~/.wirken/`. There are no hidden config files or env
 | `sessions.db` | Session metadata (id, channel, conversation_id, timestamps, message count) | `wirken run` |
 | `agent_config.db` | Registered agent configs, channel bindings, subagent ceilings | `wirken agents add` |
 | `permissions.db` | Tool approval records | `wirken run` |
+| `permissions.json` | Default grant window (`default_expiry_days`, 30 when absent) (optional) | Manual |
+| `sandbox.json` | Sandbox settings (optional). Keys read: `mode` (`exec-only`, `gvisor`, `off`), `image`, `network`, `shell`, `sidecar_binary`; any other key is named in a startup warning and ignored | `wirken setup` or manual |
 | `adapters.db` | Registered channel adapters and Ed25519 keys | `wirken channel add` |
 | `cron.db` | Scheduled cron jobs | `wirken cron create` |
 | `siem.json` | SIEM forwarding config (optional) | Manual or org config |
@@ -33,7 +35,7 @@ All configuration lives in `~/.wirken/`. There are no hidden config files or env
 }
 ```
 
-Supported providers: `openai`, `anthropic`, `gemini`, `bedrock`, `ollama`, `custom`.
+Supported providers: `openai`, `anthropic`, `gemini`, `bedrock`, `ollama`, `tinfoil`, `infomaniak`, `hetzner`, `custom`. `wirken setup` writes one of these; `custom` covers any OpenAI-compatible endpoint, including NIM and Privatemode.
 
 For Bedrock, add a `region` field:
 
@@ -148,7 +150,7 @@ The `vault:` prefix resolves values from the encrypted credential vault at runti
 
 | Variable | Purpose |
 |----------|---------|
-| `WIRKEN_DATA_DIR` | Override the data directory (default: `~/.wirken`) |
+| `WIRKEN_DATA_DIR` | Data directory for the child processes the gateway spawns (MCP proxy, channel adapters). `wirken run` exports it to them; the gateway and the CLI do not read it for their own data directory, which is always `$HOME/.wirken` (`USERPROFILE` on Windows). Relocating the gateway's own state means changing `HOME`. |
 | `WIRKEN_SKILLS_INDEX` | Override the skill registry URL |
 | `WIRKEN_CACHE_MODE` | `drop` bypasses the agent LRU cache — every inbound message wakes a fresh agent from the session log. Used in CI to assert cache equivalence. Default: `cached`. |
 | `WIRKEN_AGENT_CACHE_SIZE` | LRU cache capacity (number of hot sessions). Default: `64`. |

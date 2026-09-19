@@ -1,6 +1,6 @@
 # Design: the `http_request` built-in tool
 
-Status: implemented on branch `http-tool`. This note is the spec; the
+Status: shipped on `main`. This note is the spec; the
 tests in `crates/agent/src/http_tool_tests.rs` encode every decision
 below. Where a claim here is not yet enforced in code it is written as
 a **Limitation**, not a feature.
@@ -83,7 +83,7 @@ permitted hosts **in the vault, by the operator**, and the binding is
 enforced host-side at injection:
 
 ```bash
-wirken credential add records-api --host records.example.org
+wirken credentials add records-api --host records.example.org
 ```
 
 `http_request` resolves the credential through the `CredentialResolver`,
@@ -129,7 +129,7 @@ permissions:
 
 Each entry is an absolute `https://` URL; the match is host + path
 exact, query string ignored. This is enforced at the gate layer
-(`check_http_request_or_deny` in `runtime.rs`), so a POST to any
+(`crate::http_tool::gate`, called from `runtime.rs:2876`), so a POST to any
 undeclared path on an allowlisted host is refused, not merely
 un-routed. Some REST APIs expose search as a POST; this is the only
 write-shaped verb the tool permits, and only to a pre-declared endpoint.

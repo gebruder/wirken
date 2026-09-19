@@ -33,7 +33,7 @@ The hook id is operator-chosen and visible on every audit row the hook produces.
 
 The hook connects to `<data_dir>/sockets/gateway-hooks.sock` (Linux/macOS) or the equivalent named pipe on Windows. Path is derived in `crates/gateway/src/config.rs::socket_dir`.
 
-The gateway sends an `AuthChallenge` frame. The hook responds with `HookAuthResponse { publicKey, signature, hookId, hookType: "observe" }`. The signature is Ed25519 over `HOOK_HANDSHAKE_DOMAIN || hookId || 0x00 || nonce`, where `HOOK_HANDSHAKE_DOMAIN = b"wirken-ipc-hook-handshake-v1\x00"`. The gateway looks `hookId` up in its `hook_registry` SQLite table, verifies the signature with `verify_strict`, and accepts or rejects.
+The gateway sends an `AuthChallenge` frame. The hook responds with `HookAuthResponse { publicKey, signature, hookId, hookType: "observe" }`. The signature is Ed25519 over `HOOK_HANDSHAKE_DOMAIN || hookId || 0x00 || nonce`, where `HOOK_HANDSHAKE_DOMAIN = b"wirken-ipc-hook-handshake-v1\x00"`. The gateway looks `hookId` up in the `hooks` table of `<data_dir>/hooks.db`, verifies the signature with `verify_strict`, and accepts or rejects.
 
 The domain separator means an adapter signature can never replay against the hooks acceptor and vice versa. Source: `crates/ipc/src/auth.rs` (`HOOK_HANDSHAKE_DOMAIN`, `perform_hook_handshake`, `perform_gateway_hook_handshake`).
 

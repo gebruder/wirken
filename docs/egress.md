@@ -8,7 +8,7 @@ The skill-set `egress.domains` allowlist is a defense-in-depth control on a spec
 
 - `web_search`: the agent's web-search tool.
 - `generate_image`: the agent's image-generation tool.
-- `http_request`: the agent's general HTTP tool. The runtime applies the skill-side `tools.allow`, `credentials.allow`, and `http.post_paths` gates first (`crates/agent/src/runtime.rs:2565`, `crates/agent/src/http_tool.rs::gate`); requests that clear those still go out through `EgressClient`, so the host allowset applies on top.
+- `http_request`: the agent's general HTTP tool. The runtime applies the skill-side `tools.allow`, `credentials.allow`, and `http.post_paths` gates first (`crates/agent/src/runtime.rs:2876`, `crates/agent/src/http_tool.rs::gate`); requests that clear those still go out through `EgressClient`, so the host allowset applies on top.
 - The Zirkel daily-fetch transport: `wirken zirkel run` uses an `EgressClient` constructed with an explicit `RateLimitConfig` so per-source daily budgets apply.
 
 Each call resolves the request host against the agent's effective `egress.domains` allowset (the union of every loaded skill's `egress.domains` declaration). Hosts not in the allowset are denied pre-flight, before any TCP connection and without consuming the rate-limit budget. Wildcard `"*"` is supported on the allowset; `"*.example.com"` style suffix patterns are also supported.
@@ -118,7 +118,7 @@ The sandbox has no working resolver: DNS is pinned to an address with nothing be
 
 ### Platform
 
-The decision broker listens on a Unix socket, so `allowlist` and `open` are unix-only. On other platforms `provision_egress` refuses the `exec` rather than running it unproxied, and records the refusal on the hash chain with reason `platform_unsupported`. Tier `none` is unaffected and works everywhere.
+The decision broker listens on a Unix socket, so `allowlist` and `open` are unix-only. On other platforms `provision_egress` refuses the `exec` rather than running it unproxied, and records the refusal on the hash chain as `SessionEvent::SandboxEgressUnsupported`. Tier `none` is unaffected and works everywhere.
 
 ### Runtime requirement
 
@@ -130,7 +130,11 @@ Verified on rootful Docker, on a host with a default-deny inbound firewall. If t
 
 ### Audit
 
-Every refusal emits `SessionEvent::SandboxEgressDenied` on the agent's hash-chained session log, carrying the host, port, the mode in force, a closed-set reason (`mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, `platform_unsupported`), and the structural attribution. The variant is forwarded to a typed SIEM by default. Allowed requests do not emit a row on this axis; the tool call itself is already on the chain.
+Every request that reaches the proxy emits `SessionEvent::SandboxEgressVerdict` on the agent's hash-chained session log, allowed or not. The row carries the host, the port, `allowed`, the mode in force, the confidentiality labels the session had observed, whether a label changed the verdict, and the structural attribution. On a refusal it also carries a closed-set `reason`: `mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, or `sensitivity_refused`.
+
+The platform refusal is a separate variant rather than a reason on this one, because nothing reached a proxy to have a verdict taken on it: `SessionEvent::SandboxEgressUnsupported` carries the mode and the attribution and no host.
+
+Both variants are forwarded to a typed SIEM by default.
 
 ## Cross-reference
 

@@ -16,7 +16,9 @@ No compilation step. No conversion. The files are identical.
 
 ### Code skills
 
-A minority of skills on ClawHub are actual JavaScript/TypeScript that runs as a custom tool. These run in sandboxed Docker or gVisor containers with the same JSON-RPC interface. Set `sandbox_mode` to `"exec-only"` or `"gvisor"` in the org config to enable.
+A minority of skills on ClawHub are actual JavaScript/TypeScript that runs as a custom tool. Wirken has no JavaScript or TypeScript skill runtime, so these do not port as-is. Wirken's equivalent is a Wasm skill: a `skill.wasm` module beside the `SKILL.md`, run in a Wasmtime sandbox with no filesystem, no network, a 64 MB memory cap, and a fuel-based CPU limit. Arguments go in on stdin as a JSON line and the result comes back on stdout. See [Wasm skills](skills.md#wasm-skills).
+
+`sandbox_mode` is a separate axis and does not enable any of this: it governs where the agent's `exec` tool runs, not how skills execute. A markdown skill that shells out through `exec` is what `exec-only` and `gvisor` confine.
 
 ## Credentials
 

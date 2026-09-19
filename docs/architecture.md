@@ -93,9 +93,9 @@ Within code that uses `SessionHandle<C>`, this is a type constraint the compiler
 All secrets encrypted at rest using a **device key** derived from the OS keychain.
 
 - **macOS:** `security-framework` 3.7 (Keychain Services bindings). Device key stored in Keychain via `SecItemAdd`/`SecItemCopyMatching`, never on filesystem.
-- **Linux:** `secret-service` 5.1 (D-Bus to GNOME Keyring / KDE Wallet). Called from a dedicated blocking thread to avoid tokio deadlocks (known `secret-service` + tokio issue). Fallback for headless: `age`-encrypted file with passphrase derived via `argon2` 0.5 (Argon2id, 64MB memory cost, 3 iterations).
+- **Linux:** `secret-service` 5.1 (D-Bus to GNOME Keyring / KDE Wallet). Called from a dedicated blocking thread to avoid tokio deadlocks (known `secret-service` + tokio issue). Fallback for headless: `age`-encrypted file with passphrase derived via `argon2` 0.6 (Argon2id, 64MB memory cost, 3 iterations).
 - **Windows:** `age`-encrypted file with passphrase-derived key (same Argon2id parameters as the Linux headless fallback). Native Credential Manager / DPAPI integration is on the roadmap; the file backend is portable across machines if the operator keeps the passphrase. See [Windows install guide](windows.md#install) for the trade-off.
-- **Credential store:** SQLite database at `~/.wirken/vault.db` via `rusqlite` 0.39 (bundled feature). All secret values encrypted with XChaCha20-Poly1305 via `chacha20poly1305` 0.10 keyed from the device key.
+- **Credential store:** SQLite database at `~/.wirken/vault.db` via `rusqlite` 0.40 (bundled feature). All secret values encrypted with XChaCha20-Poly1305 via `chacha20poly1305` 0.11 keyed from the device key.
 - **Per-credential metadata:** `created_at`, `expires_at`, `last_used_at`, `rotation_due_at`.
 - **Rotation policy:** API keys flagged for rotation every 90 days. Gateway emits a warning 7 days before expiry. CLI command: `wirken credentials rotate <channel>`.
 - **No plaintext export.** Credentials can be re-entered but never displayed after initial storage.
@@ -162,9 +162,9 @@ Agents operate under a **capability-based permission model** with three tiers:
 
 Skill installation is not on this list and is not tier-gated. `Action::SkillInstall` was removed because the CLI install path never reached it; installs gate on signature verification against the registry's expected key in `crates/cli/src/commands/skills.rs::install`, with load-time re-verification in `crates/agent/src/skill.rs::verify_skill_signature`.
 
-Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `approved_at`, `approved_by` (channel the approval came from), and `expires_at` (30 days by default, set by `default_expiry_days` in `permissions.json` or per grant by `--expires-in-days`, re-promptable). Only Tier 2 keys are storable.
+Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.40) with `approved_at`, `approved_by` (channel the approval came from), and `expires_at` (30 days by default, set by `default_expiry_days` in `permissions.json` or per grant by `--expires-in-days`, re-promptable). Only Tier 2 keys are storable.
 
-**Multi-agent isolation:** Each agent gets its own workspace directory, session store, permission set, and bound channels. Agent A cannot invoke Agent B's tools or read Agent B's sessions. The gateway enforces this at the IPC boundary using the same channel-typed generic pattern as adapters — agent handles are parameterized by agent ID at the type level.
+**Multi-agent isolation:** Each agent gets its own workspace directory, session store, permission set, and bound channels. Agent A cannot invoke Agent B's tools or read Agent B's sessions. Enforcement is runtime, not type-level: permission lookups key on `(action_key, agent_id)`, session ids are prefixed by agent id, and the factory names each agent before attaching a permission store. There is no agent-parameterized handle type; the phantom-typed handles in the tree are `SessionHandle<C: Channel>` (`crates/ipc/src/channel.rs`) and `SessionHandle<S: SessionScope>` (`crates/audit/src/session_log.rs`).
 
 ---
 
@@ -177,7 +177,7 @@ Approvals stored in `~/.wirken/permissions.db` (SQLite, `rusqlite` 0.39) with `a
 Append-only structured audit log.
 
 **Implementation:**
-- SQLite WAL-mode database at `~/.wirken/audit.db` via `rusqlite` 0.39 (bundled).
+- SQLite WAL-mode database at `~/.wirken/audit.db` via `rusqlite` 0.40 (bundled).
 - Every agent turn writes typed session events (UserMessage, AssistantMessage, AssistantToolCalls, ToolResult, LlmRequest, LlmResponse, PermissionDenied, SystemPromptSet, Compaction, Attestation, SubagentSpawned, SubagentResult) to a `session_events` table before each action executes.
 - Each session has its own per-session SHA-256 hash chain: every row carries a leaf hash, a previous hash, and a chain hash. Tampering with any row breaks the chain for that session.
 - Per-agent Ed25519 attestation signs the chain head after every turn. `wirken sessions verify` replays the session offline and re-checks message hashes, deterministic tool results, and chain integrity.
@@ -243,7 +243,7 @@ The agent's `exec` tool can run in a Docker container instead of directly on the
 
 - Runtime: Docker via `bollard` 0.21. The OCI runtime is the default `runc`, or `runsc` (gVisor) when `permissions.sandbox_mode = "gvisor"` is set in the org config.
 - Default image: `debian:bookworm-slim`. The workspace is bind-mounted read-write at `/workspace`; nothing else from the host is mounted.
-- Container runs as UID 1000:1000 with `auto_remove`, a 512 MB memory limit, a 256-PID limit, and a configurable command timeout (default 300 s).
+- Container runs as UID 1000:1000 with a 512 MB memory limit, a 256-PID limit, and a configurable command timeout (default 300 s). `auto_remove` is deliberately off: teardown on exit races the post-wait log collection, so the container is removed explicitly after its output is read.
 - **Network:** Off by default (`network_mode = "none"`). Per-channel egress policy on `AgentConfig::channel_egress` grants bounded reach: in `allowlist` or `open` mode the container joins a per-exec two-member internal network and reaches the network only through a sidecar proxy container, with policy, DNS, and audit held in the gateway behind a Unix socket. There is still no per-skill or per-call network policy; the channel is the unit. See [egress.md](egress.md).
 - **gVisor:** When `runsc` is selected, syscalls from the container are intercepted by gVisor's Sentry rather than reaching the host kernel. Other resource constraints are unchanged.
 
@@ -263,9 +263,11 @@ For skills compiled to WebAssembly. A Wasm skill is a directory containing a `SK
 Wasm skills are exposed to the LLM as tools named `wasm_<skill_name>`. Gateway-proxied filesystem and network access for Wasm skills is on the roadmap.
 
 **Signing:**
-- Skills from the official registry are signed with Ed25519 (`ed25519-dalek` 2.2). The gateway verifies signatures before loading.
-- Local/workspace skills are unsigned but sandboxed. The user sees a one-time "trust this skill?" prompt on first load.
-- No unsigned skill can request network access without explicit approval.
+- Skills from the official registry are signed with Ed25519 (`ed25519-dalek` 2.2). The gateway verifies signatures at install and again at every load.
+- Every load runs the signature gate, so a local or copied skill is refused unless it is signed. `wirken skills sign <dir>` self-signs one; `WIRKEN_ALLOW_UNSIGNED_SKILLS=1` is the documented opt-out for bundles with no `SKILL.sig` / `SKILL.pub`. A present-but-invalid signature is always a hard fail, bypass or not.
+- With an operator registry root installed (`wirken skills trust-root`), the bypass no longer applies and every signer must be delegated by that root.
+
+See [skill-authoring.md](skill-authoring.md) and [signing.md](signing.md) for the full gate.
 
 **Why three categories:** Because the skill ecosystem is not one thing. The majority of skills are markdown (system prompt instructions) that need no sandbox, no compilation, and no migration. Some are code that needs containerization. And Wasm provides a deterministic, fast, cross-platform alternative. The three-category model matches these realities.
 
@@ -299,7 +301,7 @@ The agent's `LlmClient` (`crates/agent/src/llm.rs`) calls providers directly ove
 - Ollama (local, no key needed)
 - Any OpenAI-compatible endpoint (custom URL + key)
 
-**Usage tracking:** Every LLM call logged to audit with token counts, model ID, and cost estimate. No prompt content in audit log (privacy).
+**Usage tracking:** Every LLM call logs an `LlmRequest` / `LlmResponse` pair carrying token counts, model ID, latency, and cost estimate. Neither row carries prompt or completion text: `LlmRequest` records SHA-256 hashes of the messages and tools sent, which is what makes offline replay verifiable. Message bodies do reach the chain, on the separate `UserMessage` and `AssistantMessage` rows, which is why the typed SIEM pipe excludes those two by default.
 
 ---
 
@@ -313,10 +315,11 @@ No loopback exemption. Rate limiting applies uniformly.
 
 - **Auth rate limit:** 5 failed attempts per 60 seconds per source, then 10-minute lockout. Applies to all sources including 127.0.0.1.
 - **Control plane write limit:** 10 mutations per minute per client.
-- **LLM proxy limit:** Configurable per-provider (default: 60 requests/minute for OpenAI, matches their tier-1 rate limit).
-- **Implementation:** `governor` 0.10 (GCRA algorithm, lock-free 64-bit atomic state). Thread-safe, zero-allocation on the hot path. One `RateLimiter` per scope (auth, control-plane, per-provider LLM).
+- **Implementation:** `governor` 0.10 (GCRA algorithm, lock-free 64-bit atomic state). Thread-safe, zero-allocation on the hot path. One `RateLimiter` per scope (auth, control-plane).
 
-**CLI sessions:** Authenticated via the device key (Section 2), not a bearer token. The CLI unlocks the vault, proves device identity, and gets a short-lived session token (1 hour). No static token to brute-force.
+There is no per-provider LLM rate limiter. Outbound model calls are bounded by the per-turn tool-round cap, the per-agent spend budget (see [cost-monitoring.md](cost-monitoring.md)), and the provider's own limits, not by a wirken-side requests-per-minute scope.
+
+**CLI sessions:** The CLI is not a network client and holds no session token. It runs at the operator's UID, unlocks the vault through the OS keychain or the passphrase, and reaches the gateway over the local IPC sockets, whose 0o600 permissions are the boundary. There is no static token to brute-force because there is no token.
 
 ---
 
@@ -340,11 +343,11 @@ No loopback exemption. Rate limiting applies uniformly.
 
 | Protocol | Zero-copy | Schema evolution | Traversal limits | Rust maturity |
 |----------|-----------|-----------------|-------------------|---------------|
-| Cap'n Proto | Yes | Yes (additive fields) | Yes (built-in) | `capnp` 0.26, 10M downloads |
+| Cap'n Proto | Yes | Yes (additive fields) | Yes (built-in) | `capnp` 0.27, 10M downloads |
 | MessagePack | No (deserialization copies) | Weak (field ordering) | No | `rmp-serde` mature |
 | FlatBuffers | Yes | Yes | No built-in | `flatbuffers` less mature |
 
-**Decision: Cap'n Proto** via `capnp` 0.26.
+**Decision: Cap'n Proto** via `capnp` 0.27.
 
 Reasons:
 1. **Zero-copy deserialization.** Reader types traverse binary data in-place without allocation. For high-frequency IPC (streaming LLM tokens), this eliminates per-message allocation entirely.
@@ -369,9 +372,9 @@ The install script downloads a precompiled binary for the user's platform (Linux
 
 `wirken setup` is a single interactive flow powered by `dialoguer` 0.12:
 
-1. **"Pick your AI"** — select provider (OpenAI / Anthropic / Google Gemini / AWS Bedrock / Ollama / custom). Enter API key (or AWS credentials for Bedrock). Key immediately encrypted into vault.
-2. **"Pick your channels"** — select from Telegram / Discord / Slack / Microsoft Teams / Matrix. Enter bot token per channel. Each token encrypted separately.
-3. **Done.** Gateway starts as a system service. User gets a message on their chosen channel: "I'm ready. Send me a message."
+1. **"Pick your AI"** — select provider (Ollama / NIM / Anthropic / OpenAI / Google Gemini / AWS Bedrock / Tinfoil / Privatemode / Infomaniak / Hetzner / custom endpoint). Enter API key (or AWS credentials for Bedrock). Key immediately encrypted into vault.
+2. **"Pick your channels"** — select from Telegram / Discord / Slack / Microsoft Teams / Matrix / Signal / Google Chat / iMessage / WhatsApp. Enter bot token per channel. Each token encrypted separately.
+3. **Credentials, service, sandbox, audit** — a recap of what is in the vault, an optional service install (systemd on Linux, launchd on macOS; declined by default), the sandbox mode, and where the audit log will be written. Setup prints the next commands and the WebChat URL; it does not send a message on any channel.
 
 **What the user never has to see or decide:**
 - Credential encryption (automatic via OS keychain)
@@ -399,17 +402,17 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Async runtime | `tokio` | 1.52 | De facto standard. Full-featured (timers, IO, process, signal). |
 | HTTP client | `reqwest` | 0.13 | Built on hyper. UDS support. SSE via `reqwest-eventsource`. |
 | SSE streaming | `reqwest-eventsource` | 0.6 | Async SSE event iterator over reqwest responses. |
-| SQLite | `rusqlite` | 0.39 | `bundled` feature compiles SQLite from source. No system dependency. |
+| SQLite | `rusqlite` | 0.40 | `bundled` feature compiles SQLite from source. No system dependency. |
 | macOS Keychain | `security-framework` | 3.7 | Direct bindings to Apple Security.framework. |
 | Linux keychain | `secret-service` | 5.1 | D-Bus to GNOME Keyring / KDE Wallet. |
-| Windows-side Win32 | `windows-sys` | 0.52 | Named-pipe peer-SID extraction (`GetNamedPipeClientProcessId` + token user) for the orchestrator-push trust boundary. Vault uses the age-file backend on Windows; native Credential Manager integration is on the roadmap. |
-| AEAD encryption | `chacha20poly1305` | 0.10 | RustCrypto. XChaCha20-Poly1305. Pure Rust, audited. |
+| Windows-side Win32 | `windows-sys` | 0.61 | Named-pipe peer-SID extraction (`GetNamedPipeClientProcessId` + token user) for the orchestrator-push trust boundary. Vault uses the age-file backend on Windows; native Credential Manager integration is on the roadmap. |
+| AEAD encryption | `chacha20poly1305` | 0.11 | RustCrypto. XChaCha20-Poly1305. Pure Rust, audited. |
 | Secret management | `secrecy` | 0.10 | Prevents accidental logging/serialization of secrets. |
 | Memory zeroing | `zeroize` | 1.8 | Zeroes secret memory on drop. |
 | Ed25519 signatures | `ed25519-dalek` | 2.2 | Pure Rust. Audited by Quarkslab. |
-| Password hashing | `argon2` | 0.5 | Argon2id for age-file passphrase derivation. |
-| SHA-256 | `sha2` | 0.10 | Hash chain for audit log. |
-| IPC serialization | `capnp` | 0.26 | Zero-copy, traversal limits, schema evolution. |
+| Password hashing | `argon2` | 0.6 | Argon2id for age-file passphrase derivation. |
+| SHA-256 | `sha2` | 0.11 | Hash chain for audit log. |
+| IPC serialization | `capnp` | 0.27 | Zero-copy, traversal limits, schema evolution. |
 | Wasm sandbox | `wasmtime` | see `Cargo.toml` | WASI preview 1. Fuel metering. Resource limits. |
 | Container API | `bollard` | 0.21 | Async Docker/gVisor integration for native-binary skills. |
 | CLI parser | `clap` | 4.6 | Derive + builder APIs. |
@@ -418,7 +421,7 @@ The install script downloads a precompiled binary for the user's platform (Linux
 | Structured logging | `tracing` | 0.1 | Span-based, async-aware. Subscribers via `tracing-subscriber` 0.3. |
 | Telegram Bot API | `teloxide` | 0.17 | Full Bot API v9.1. Long polling + webhooks. Media support. |
 | Discord Bot API | `serenity` | 0.12 | Gateway + REST. Guilds, DMs, threads, slash commands. |
-| Slack API | `slack-morphism` | 2.22 | Socket Mode + Events API. Block Kit typed models. |
+| Slack API | `slack-morphism` | 2.28 | Socket Mode + Events API. Block Kit typed models. |
 | Serialization | `serde` / `serde_json` | 1.x | JSON for config, skill manifest, LLM payloads. |
 
 **TLS via `rustls`.** Outbound HTTPS uses `rustls` (pulled in by `reqwest` with the `rustls` feature). OpenSSL is also present in the build as a transitive dependency of some channel SDKs, configured with the `vendored` feature so it compiles from source — no system OpenSSL headers are needed at build time and no dynamic linking against the host OpenSSL.

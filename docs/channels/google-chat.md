@@ -4,7 +4,7 @@
 wirken channel add google-chat
 ```
 
-Google Chat requires a GCP project with the Chat API enabled and two things configured: a bearer token (so Wirken can send replies) and a webhook endpoint (so Google Chat can deliver inbound messages to Wirken).
+Google Chat requires a GCP project with the Chat API enabled and three things configured: a bearer token (so Wirken can send replies), your Cloud project number (the audience the adapter verifies on inbound webhook JWTs), and a webhook endpoint (so Google Chat can deliver inbound messages to Wirken).
 
 ## Create a Chat app
 
@@ -35,6 +35,8 @@ wirken channel add google-chat
 ```
 
 Paste the bearer token when prompted. It is encrypted into the vault immediately.
+
+You are also asked for the Cloud project number. It is the audience the adapter checks on every inbound webhook JWT, so the adapter refuses to start without it. Supply it non-interactively with `--project-number`, or set `WIRKEN_GOOGLE_CHAT_PROJECT_NUMBER`. Find it on the project's **Cloud overview** page in the console (the numeric **Project number**, not the project ID).
 
 ## Expose the webhook
 

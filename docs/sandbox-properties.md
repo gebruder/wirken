@@ -12,7 +12,7 @@ adapters (one OS process per channel) and IPC boundary properties live in
 ## Modes
 
 `SandboxMode` is the operator-facing knob. Three values, one default
-([`crates/agent/src/sandbox.rs:25-43`](../crates/agent/src/sandbox.rs)):
+([`crates/agent/src/sandbox.rs:29-49`](../crates/agent/src/sandbox.rs)):
 
 | Mode | Default | Runtime | Meaning |
 |---|---|---|---|
@@ -22,11 +22,11 @@ adapters (one OS process per channel) and IPC boundary properties live in
 
 Unknown mode strings fall back to `ExecOnly`, not `Off` — a config typo gets
 the secure default with a warning, never the bypass
-([`sandbox.rs:50-64`](../crates/agent/src/sandbox.rs)).
+([`sandbox.rs:56-71`](../crates/agent/src/sandbox.rs)).
 
 ## No silent fallback
 
-[`crates/agent/src/tool.rs:533-553`](../crates/agent/src/tool.rs):
+[`crates/agent/src/tool.rs:708-733`](../crates/agent/src/tool.rs):
 
 ```rust
 if let Some(sandbox) = self.sandbox().await {
@@ -50,24 +50,26 @@ on the host. Operators who want host execution must opt in by writing
 
 ## Container hardening (applies to ExecOnly and GVisor)
 
-[`crates/agent/src/sandbox.rs:644-687`](../crates/agent/src/sandbox.rs)
-constructs the `HostConfig` for every sandboxed exec:
+[`crates/agent/src/sandbox.rs:994-1045`](../crates/agent/src/sandbox.rs)
+(`build_host_config`) constructs the `HostConfig` for every sandboxed exec.
+The separate `HostConfig` at `sandbox.rs:671-685` belongs to the egress
+sidecar container, not to the exec sandbox:
 
 | Property | Value | Source line |
 |---|---|---|
-| `cap_drop` | `ALL` | `:678` - every Linux capability stripped. No `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, etc. |
-| `cap_add` | `[]` | `:679` - no capabilities re-added. |
-| `security_opt` | `no-new-privileges:true` | `:680-683` - `setuid`/`setgid` binaries cannot elevate. |
-| `readonly_rootfs` | `true` | `:684` - container `/` is read-only. |
-| `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `:661-665, 685` - the only writable filesystem outside `/workspace`. |
-| `network_mode` | `none` (configurable) | `:653-659, 668` - default is no network namespace; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
-| `dns` | unset, or `127.0.0.1` on the egress path | `:660, 669` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |
-| `binds` | `<workspace>:/workspace:rw` | `:667` - only the agent workspace is mounted, RW. |
-| `memory` | 512 MB | `:20, 670` - `MEMORY_LIMIT` constant. |
-| `pids_limit` | 256 | `:21, 671` - `PIDS_LIMIT` constant; fork-bomb cap. |
-| `user` | `1000:1000` | `:327` - non-root UID/GID inside the container. |
-| `auto_remove` | `false` | `:676` - explicit `kill_and_remove` after log collection so output is never lost to a teardown race. |
-| timeout | 300 s | `:251, 377` - wall-clock cap; container is killed and removed on timeout. |
+| `cap_drop` | `ALL` | `:1035` - every Linux capability stripped. No `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, `CAP_SYS_ADMIN`, etc. |
+| `cap_add` | `[]` | `:1036` - no capabilities re-added. |
+| `security_opt` | `no-new-privileges:true` | `:1037-1040` - `setuid`/`setgid` binaries cannot elevate. |
+| `readonly_rootfs` | `true` | `:1041` - container `/` is read-only. |
+| `tmpfs` | `/tmp` mounted at 64MB, mode `1777` | `:1018-1021, 1042` - the only writable filesystem outside `/workspace`. |
+| `network_mode` | `none` (configurable) | `:1006-1013, 1025` - default is no network namespace; outbound DNS/HTTP fail. A channel configured for sandbox egress joins a policed internal network instead; see below. |
+| `dns` | unset, or `127.0.0.1` on the egress path | `:1014-1017, 1026` - pinned to an address with no resolver behind it when an egress network is in use, so names are resolved by the proxy rather than in the container. |
+| `binds` | `<workspace>:/workspace:rw` | `:1024` - only the agent workspace is mounted, RW. |
+| `memory` | 512 MB | `:25, 1027` - `MEMORY_LIMIT` constant. |
+| `pids_limit` | 256 | `:27, 1028` - `PIDS_LIMIT` constant; fork-bomb cap. |
+| `user` | `1000:1000` | `:409` - non-root UID/GID inside the container. |
+| `auto_remove` | `false` | `:1033` - explicit `kill_and_remove` after log collection so output is never lost to a teardown race. |
+| timeout | 300 s | `:265, 457` - wall-clock cap; container is killed and removed on timeout. |
 
 ### Sandbox egress
 
@@ -145,12 +147,12 @@ profile blocks ~44 syscalls including:
 The full list is the Docker daemon's responsibility, not Wirken's. Setting
 `security_opt: ["seccomp=default"]` is rejected by the Docker API as an
 invalid token; the absence of a seccomp `SecurityOpt` is what activates the
-default profile ([`sandbox.rs:680-683`](../crates/agent/src/sandbox.rs)).
+default profile ([`sandbox.rs:1037-1040`](../crates/agent/src/sandbox.rs)).
 
 ## gVisor delta (`SandboxMode::GVisor`)
 
 When mode is `GVisor`, `runtime_name()` returns `Some("runsc")`
-([`sandbox.rs:67-72`](../crates/agent/src/sandbox.rs)) and Docker
+([`sandbox.rs:73-78`](../crates/agent/src/sandbox.rs)) and Docker
 launches the container under gVisor instead of `runc`.
 
 gVisor changes the threat model. Under `runc`, the guest's syscalls reach
@@ -173,7 +175,7 @@ Practical consequences:
 
 Wirken does not require gVisor; `ExecOnly` is the default. `GVisor` is the
 opt-in for operators who want kernel attack surface reduction. Detection
-([`sandbox.rs:714-726`](../crates/agent/src/sandbox.rs)) is automatic;
+([`sandbox.rs:1071-1083`](../crates/agent/src/sandbox.rs)) is automatic;
 the wizard refuses to enable `GVisor` mode if `runsc` is not registered as
 a Docker runtime.
 
@@ -193,7 +195,7 @@ the WebAssembly + WASI boundary:
 - **No network.** No network handles are exposed via WASI.
 - **CPU bound.** `Config::consume_fuel(true)` and `store.set_fuel(DEFAULT_FUEL)`
   give a hard fuel cap. An infinite loop trips fuel exhaustion (caught at
-  [`wasm_sandbox.rs:158-160`](../crates/agent/src/wasm_sandbox.rs)) and
+  [`wasm_sandbox.rs:163-167`](../crates/agent/src/wasm_sandbox.rs)) and
   returns a tool error rather than hanging the agent.
 - **Memory bound.** Output pipe sizes are constants (`MAX_MEMORY_BYTES`
   for stdout, 4096 for stderr); a runaway producer caps at the pipe

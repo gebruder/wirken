@@ -6,7 +6,7 @@ Wirken records the cost of every large language model (LLM) call on the audit ch
 
 Every LLM call appends an `llm_response` row (`SessionEvent::LlmResponse`) to the session's audit chain. The row carries token counts, latency, and per-call cost, keyed by the agent and the credential that made the call. No prompt or completion text is on the row; cost monitoring reads accounting fields only.
 
-Fields on each `llm_response` row (`crates/audit/src/session_log.rs:541-583`):
+Fields on each `llm_response` row (`crates/audit/src/session_log.rs:630-677`):
 
 | Field | Meaning |
 |-------|---------|
@@ -24,9 +24,9 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
 
 ## Forwarding cost rows to a SIEM
 
-`LlmResponse` is excluded from typed SIEM forwarding by default, along with `LlmRequest`, because token accounting is noise for most detections (`crates/audit/src/siem_typed.rs:74-83`). To forward it, set `typed_include_variants` in `siem.json`.
+`LlmResponse` is excluded from typed SIEM forwarding by default, along with `LlmRequest`, because token accounting is noise for most detections (`crates/audit/src/siem_typed.rs:105-135`, `should_forward`). To forward it, set `typed_include_variants` in `siem.json`.
 
-`typed_include_variants` is a full allowset, not an addition to the defaults: when it is set, only the variants it lists are forwarded and the default set is ignored (`crates/audit/src/siem_typed.rs:92-94`). To keep the default detection feed and add cost rows, list the default-forward set plus `llm_response`:
+`typed_include_variants` is a full allowset, not an addition to the defaults: when it is set, only the variants it lists are forwarded and the default set is ignored (`crates/audit/src/siem_typed.rs:107-110`). To keep the default detection feed and add cost rows, list the default-forward set plus `llm_response`:
 
 ```json
 {
@@ -40,20 +40,32 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "tool_result",
         "http_fetch",
         "permission_denied",
+        "permission_grant_expired",
+        "permission_grant_pruned",
         "skill_permission_denied",
         "subagent_spawned",
+        "subagent_session_bound",
         "subagent_result",
         "chain_head",
         "mcp_entry_verified",
         "mcp_entry_refused",
         "egress_hook_dispatched",
         "tool_output_redacted",
+        "budget_exceeded",
+        "sandbox_egress_verdict",
+        "sandbox_egress_unsupported",
+        "memory_entry_written",
+        "cross_channel_memory_read",
+        "import_started",
+        "import_completed",
+        "imported_chat_read",
+        "imported_chat_searched",
         "llm_response"
     ]
 }
 ```
 
-The twelve entries above `llm_response` are the default-forward set (`crates/audit/src/siem_typed.rs:95-109`); drop any you do not want, and dropping one stops forwarding it. `LlmResponse` rows carry no message bodies, so forwarding them adds per-call token and cost accounting to the feed, not personally identifiable information (PII).
+The twenty-four entries above `llm_response` are the default-forward set (`crates/audit/src/siem_typed.rs:106-129`); drop any you do not want, and dropping one stops forwarding it. `LlmResponse` rows carry no message bodies, so forwarding them adds per-call token and cost accounting to the feed, not personally identifiable information (PII).
 
 ## Per-agent daily spend queries
 

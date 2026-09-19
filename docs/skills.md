@@ -1,6 +1,6 @@
 # Skills Guide
 
-Skills are instructions and tools that extend what the agent can do. There are three types:
+Skills are instructions and tools that extend what the agent can do. There are two kinds, plus a mechanism either kind can use:
 
 ## Markdown skills
 

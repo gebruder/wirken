@@ -21,7 +21,7 @@ pub struct SessionHandle<C: Channel> {
 }
 ```
 
-Channel markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`, `Teams`) that implement the sealed `Channel` trait. The trait is defined with `Send + Sync + 'static` bounds and can only be implemented within the `wirken-ipc` crate.
+Channel markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`, `Teams`, `Signal`, `IMessage`, `GoogleChat`, and `Generic`) that implement the sealed `Channel` trait. The trait is defined with `Send + Sync + 'static` bounds and can only be implemented within the `wirken-ipc` crate.
 
 **What the compiler prevents:**
 - A Telegram adapter cannot construct `SessionHandle<Discord>` -- the type parameter is wrong.
@@ -83,7 +83,7 @@ Each adapter holds an `AdapterIdentity` containing an Ed25519 `SigningKey`. The 
 
 **Crate:** `wirken-ipc` | **File:** `crates/ipc/src/transport.rs`
 
-`FrameReader` enforces a 16MB frame size limit and passes Cap'n Proto reader options with a 512MB word traversal limit and 64-level nesting limit. These are compile-time constants in the transport layer:
+`FrameReader` enforces a 16MB frame size limit and passes Cap'n Proto reader options with a 64M word traversal limit (512 MB) and 64-level nesting limit. These are compile-time constants in the transport layer:
 
 ```rust
 // Frame too large -- rejected before allocation
@@ -245,7 +245,7 @@ Each non-skipped outcome emits one `EgressHookDispatched` row carrying the opera
 
 **Sandbox egress.** A channel with no egress policy, which is the default, gets `--network none`. A channel configured for `allowlist` or `open` egress instead gets two per-exec networks: an `Internal` bridge the sandbox joins, and an ordinary bridge only the sidecar proxy container joins. The isolation invariant on the internal network is that it is `Internal`, per exec, and has exactly two members, the sandbox and its own sidecar; it is destroyed when the exec ends. Inter-container communication stays enabled on it because the sandbox reaching its sidecar is the only flow it carries.
 
-The sidecar holds no policy. It asks the gateway over a per-exec Unix socket and receives either already-resolved addresses or a refusal, so policy, DNS resolution, the global-unicast filter, and the `SandboxEgressDenied` audit row all stay in the gateway process. No host port is bound at any point. A sidecar that cannot start, never reports ready, or is not running when the sandbox is about to start refuses the `exec`. See [egress.md](egress.md).
+The sidecar holds no policy. It asks the gateway over a per-exec Unix socket and receives either already-resolved addresses or a refusal, so policy, DNS resolution, the global-unicast filter, and the `SandboxEgressVerdict` audit row all stay in the gateway process. No host port is bound at any point. A sidecar that cannot start, never reports ready, or is not running when the sandbox is about to start refuses the `exec`. See [egress.md](egress.md).
 
 If Docker is not reachable when the first sandboxed tool runs, the `ToolRegistry` logs a warning naming `Docker` specifically and refuses `exec` (fail-closed) for the agent's lifetime; it does not fall back to host execution. If `gvisor` mode is configured but `runsc` is not registered with Docker, the warning names `runsc` specifically. Host execution happens only under `sandbox.json` `mode: off`, the documented opt-out. Provisioning failures are sticky for the lifetime of the registry; a fresh `wirken run` retries.
 
@@ -271,7 +271,7 @@ When a `PermissionStore` is configured on an agent, tool calls are checked again
 
 **Crate:** `wirken-cli` | **File:** `crates/cli/src/commands/run.rs` (accept loop), `crates/ipc/src/stream.rs` (peer-identity extraction)
 
-The gateway exposes an orchestrator push socket (`~/.wirken/sockets/orchestrator.sock` on unix, a named pipe on windows) used by `wirken zirkel push` and similar tools to deliver outbound messages without going through the per-adapter Ed25519 handshake. Because the socket bypasses adapter authentication, every accepted connection has its peer credentials checked against the gateway's own identity:
+The gateway exposes an orchestrator push socket (`~/.wirken/sockets/orchestrator.sock` on unix, a named pipe on windows) used by `wirken zirkel run`'s digest push and similar callers to deliver outbound messages without going through the per-adapter Ed25519 handshake. Because the socket bypasses adapter authentication, every accepted connection has its peer credentials checked against the gateway's own identity:
 
 - **Unix:** `SO_PEERCRED` returns the connecting process's EUID at accept time (`tokio::net::UnixStream::peer_cred()`). The EUID is wrapped in a `Principal::Uid` and compared with the gateway's own `Principal::Uid(geteuid())`.
 - **Windows:** the named-pipe handle is queried via `GetNamedPipeClientProcessId`, then the client process's user SID is extracted via `OpenProcessToken` + `GetTokenInformation(TokenUser)` + `ConvertSidToStringSidW`. The SID is wrapped in a `Principal::Sid` and compared with the gateway's own user SID. The check happens in gateway code, not at the named-pipe DACL level, so the audit log witnesses the refusal in the same shape as on unix.
@@ -370,7 +370,7 @@ These are naturally dynamic. An operator granting shell access to an agent at 2 
 | Credential memory zeroing | Compile-time | `wirken-vault` | `SecretString` + `zeroize` 1.8 |
 | Adapter identity proof | Compile-time | `wirken-ipc` | `AdapterIdentity`, Ed25519 challenge-response |
 | IPC frame size bound | Compile-time | `wirken-ipc` | `FrameReader` (16MB constant) |
-| IPC traversal limits | Compile-time | `wirken-ipc` | Cap'n Proto reader options (512MB words, 64 nesting) |
+| IPC traversal limits | Compile-time | `wirken-ipc` | Cap'n Proto reader options (64M words / 512 MB, 64 nesting) |
 | Schema wire format | Compile-time | `wirken-ipc` | `.capnp` schema, generated `Reader<'a>` / `Builder` |
 | Permission tiers | Runtime | `wirken-gateway` | `PermissionStore::check()` |
 | Permission approvals | Runtime | `wirken-gateway` | `PermissionStore::approve()` / `revoke()` |

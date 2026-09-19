@@ -10,9 +10,9 @@ If you are deploying Wirken for a team, read both sections before designing your
 
 Every tool action falls into one of three tiers:
 
-- **Tier 1, always allowed.** Workspace file access, channel converse, web search.
+- **Tier 1, always allowed.** Workspace file access, channel converse, web search, and the `http_request` built-in. Tier 1 on `http_request` means it adds no prompt; authorization is the skill's own `permissions` block, enforced as hard refusals at the gate and by `EgressClient`.
 - **Tier 2, first-use approval with a 30-day expiry.** External file access (per path), cross-conversation message, and a small curated allowlist of shell-inspection verbs (see below). Everything else that would have been Tier 2 under a denylist model is Tier 3 instead.
-- **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, skill install, and every shell verb outside the Tier 2 allowlist.
+- **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, MCP tool calls, Wasm skill dispatch, cross-channel memory reads, imported-archive reads and searches, any unregistered tool name, and every shell verb outside the Tier 2 allowlist. Skill installation is not on this list and is not tier-gated: `Action::SkillInstall` was removed because the CLI install path never reached it, and installs gate on signature verification instead.
 
 ### Shell exec allowlist
 
@@ -40,15 +40,15 @@ Edge case not handled here: a bare shell binary as argv (`bash` alone, no metach
 
 Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix — `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation until its window closes.
 
-On upgrade from pre-allowlist versions, `PermissionStore::open` prunes any stored `shell:<prefix>` rows whose prefix is no longer Tier 2 eligible (e.g., `shell:git`, `shell:kubectl`, `shell:make`). Operators see a single log line at startup enumerating what was dropped. The gate would have ignored those rows anyway; the prune keeps `wirken permission list` honest.
+On open, `PermissionStore::sweep_stale_grants` removes every row the gate cannot act on: keys that are not storable under the current tier model (including `shell:<prefix>` rows whose prefix is no longer Tier 2 eligible, such as `shell:git`, `shell:kubectl`, `shell:make`) and grants whose window has closed. Operators see a single log line at startup counting each kind. The gate would have ignored those rows anyway; the sweep keeps `wirken permissions list` honest. See "Rows an upgrade leaves behind" below.
 
-`wirken permission list --agent work` prints all approvals for an agent. `wirken permission revoke <key> --agent work` removes one.
+`wirken permissions list --agent work` prints all approvals for an agent. `wirken permissions revoke <key> --agent work` removes one.
 
 ### Only Tier 2 keys can be stored
 
 `permissions.db` accepts a grant only for an action key that is Tier 2: a shell verb on the Tier 2 allowlist, `file:<path>`, or `cross-conversation`. Every other key is refused at write time.
 
-Tier 3 keys are refused because the gate answers Tier 3 without consulting storage at all, so a stored row would never be read while still listing in `wirken permission list` as though the operator had pre-approved something. Tier 1 keys are refused for the mirror reason: Tier 1 is allowed without a lookup, so the row is equally inert.
+Tier 3 keys are refused because the gate answers Tier 3 without consulting storage at all, so a stored row would never be read while still listing in `wirken permissions list` as though the operator had pre-approved something. Tier 1 keys are refused for the mirror reason: Tier 1 is allowed without a lookup, so the row is equally inert.
 
 The rule is an allowlist of storable shapes rather than a denylist of unstorable ones. A key namespace added later is refused until it is named here deliberately.
 

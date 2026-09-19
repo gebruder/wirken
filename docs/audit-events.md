@@ -43,7 +43,7 @@ Every row carries three hashes:
 
 Construction is per-session: a fresh `session_id` starts with empty `prev_hash`, and each subsequent append's `prev_hash` is the prior row's `hash`. Two sessions on the same database never share chain state.
 
-Source: `chain_hex()` at `crates/audit/src/session_log.rs:2653-2658`.
+Source: `chain_hex()` at `crates/audit/src/session_log.rs:3258-3263`.
 
 ## Chain-head signing
 
@@ -78,8 +78,8 @@ The dispatch is best-effort because the rest of the chain is already compromised
 
 ## Source references
 
-- Variants and serde shape: `crates/audit/src/session_log.rs:263-720`.
-- Hash chain: `crates/audit/src/session_log.rs:2653-2658` (`chain_hex`).
+- Variants and serde shape: `crates/audit/src/session_log.rs:480-1701` (`SessionEvent`).
+- Hash chain: `crates/audit/src/session_log.rs:3258-3263` (`chain_hex`).
 - Chain-head signing: `crates/audit/src/signing.rs:38-208` (domain separator, schema version, key load, message build).
 - Alarm log: `crates/audit/src/alarm_log.rs:78-205` (record, log, append).
 - Halt-boundary gap: [gebruder/wirken#107](https://github.com/gebruder/wirken/issues/107).

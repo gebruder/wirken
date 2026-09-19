@@ -8,7 +8,7 @@ Lyrik draws a hard line between operator-level state and per-repo state. Operato
 
 | Lives at | What | Updated by |
 |---|---|---|
-| Wirken vault | provider API keys, channel adapter credentials | `wirken setup`, `wirken channel add`, `wirken credential add` |
+| Wirken vault | provider API keys, channel adapter credentials | `wirken setup`, `wirken channel add`, `wirken credentials add` |
 | `~/.wirken/sandbox.json` | sandbox mode (`off` / `exec-only` / `gvisor`) | `wirken setup`, manual edit |
 | `<repo>/.lyrik/config.json` | scope, model pins per phase, gate destinations, prior-findings path, memory path | committed to repo |
 | `<repo>/.lyrik/rubric.md` | severity rubric approved at Phase 0 | committed to repo |

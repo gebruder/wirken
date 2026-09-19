@@ -124,7 +124,7 @@ There is no per-sender auth in Signal; anyone who has your linked number can sen
 
 ### Pre-existing Tier 2 approvals apply to Signal messages too
 
-A Tier 2 approval is recorded per-agent, not per-channel. If you have already approved `exec` of, say, `bash` for the default agent (perhaps through an earlier Telegram or CLI session), then a message from an allowlisted Signal sender that triggers `exec bash ...` will run without prompting. Before putting the Signal adapter in front of an agent, review `wirken permission list <agent_id>` and revoke grants you are not comfortable exposing to Signal traffic.
+A Tier 2 approval is recorded per-agent, not per-channel. If you have already approved `exec` of, say, `bash` for the default agent (perhaps through an earlier Telegram or CLI session), then a message from an allowlisted Signal sender that triggers `exec bash ...` will run without prompting. Before putting the Signal adapter in front of an agent, review `wirken permissions list --agent <agent_id>` and revoke grants you are not comfortable exposing to Signal traffic.
 
 ### Prompt-injection detection is monitoring, not prevention
 

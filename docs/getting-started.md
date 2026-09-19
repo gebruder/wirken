@@ -34,11 +34,14 @@ Run the setup wizard:
 wirken setup
 ```
 
-This walks you through:
+This walks you through six steps:
 
-1. **Pick a provider.** OpenAI, Anthropic, Gemini, Bedrock, Tinfoil, Privatemode, Ollama, or a custom endpoint. Your API key is encrypted immediately.
+1. **Pick a provider.** Ollama, NIM, Anthropic, OpenAI, Gemini, Bedrock, Tinfoil, Privatemode, Infomaniak, Hetzner, or a custom endpoint. Your API key is encrypted immediately.
 2. **Pick your channels.** Telegram, Discord, Slack, Teams, Matrix, Signal, Google Chat, iMessage, or WhatsApp. Each bot token is encrypted into the vault.
-3. **Service install.** Optionally install as a systemd/launchd service so wirken starts on login.
+3. **Credentials recap.** What is now in the vault.
+4. **Service install.** Optionally install as a systemd/launchd service so wirken starts on login.
+5. **Sandbox mode.** `exec-only` by default; `gvisor` when `runsc` is registered with Docker.
+6. **Audit log.** Where the hash-chained log lives and when it is created.
 
 16 bundled skills (weather, github, git, tmux, docker, etc.) are installed automatically.
 
