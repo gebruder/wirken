@@ -75,7 +75,7 @@ pub fn outro(provider: &str, channels: &[&str], webchat_url: &str, service: Serv
     println!("    wirken channel add <channel>      Add another messaging channel");
     println!("    wirken credentials add <name>     Add or rotate a key");
     println!("    wirken doctor                     Verify the install");
-    println!("    wirken session list               See active conversations");
+    println!("    wirken sessions list              See active conversations");
     println!();
     println!("  WebChat: {webchat_url}");
     println!();
