@@ -723,8 +723,10 @@ impl PermissionStore {
     /// lookup and there is nothing to look up either way.
     ///
     /// Returns:
-    /// - `Allowed` for Tier 1, an approved Tier 2, or a session-scoped grant
-    /// - `NeedsApproval` for unapproved Tier 2 or any Tier 3
+    /// - `Allowed` for Tier 1, or a Tier 2 with a persisted or
+    ///   session-scoped grant
+    /// - `NeedsApproval` for unapproved Tier 2 or any Tier 3, which is
+    ///   never served from either grant store
     /// - `Err` for database errors
     pub fn check(
         &self,
@@ -732,31 +734,35 @@ impl PermissionStore {
         session_id: &str,
         agent_id: Option<&str>,
     ) -> Result<PermissionCheck, GatewayError> {
-        // Session-cache short-circuit. Applies to every tier so a
-        // Tier 3 action could in principle be session-granted in a
-        // future slice; for now the only emitters target Tier 2, but
-        // gating the lookup on tier here would make session-scoped
-        // semantics tier-coupled in a way the data model is not.
+        let tier = action.tier();
+
+        // Session-cache short-circuit, Tier 2 only. The write side
+        // already refuses to session-scope anything else, and this is
+        // the second half of the same rule: "Tier 3 always prompts" is
+        // a property of the gate, so it holds here by structure rather
+        // than by every caller choosing to emit the right scope. A
+        // cache entry for a Tier 3 key, however it arrived, allows
+        // nothing.
         //
         // Keyed on the session id exactly as recorded, so a child's
         // `#sub-N` session is a different key from its parent's and
         // sees none of the parent's session grants.
-        let session_hit = {
-            let cache = self.session_cache.borrow();
-            cache
-                .get(session_id)
-                .and_then(|per_session| {
-                    per_session
-                        .contains_key(&action.approval_key())
-                        .then_some(())
-                })
-                .is_some()
-        };
-        if session_hit {
-            return Ok(PermissionCheck::Allowed);
+        if tier == PermissionTier::Tier2 {
+            let session_hit = {
+                let cache = self.session_cache.borrow();
+                cache
+                    .get(session_id)
+                    .and_then(|per_session| {
+                        per_session
+                            .contains_key(&action.approval_key())
+                            .then_some(())
+                    })
+                    .is_some()
+            };
+            if session_hit {
+                return Ok(PermissionCheck::Allowed);
+            }
         }
-
-        let tier = action.tier();
         let Some(agent_id) = agent_id else {
             return Ok(match tier {
                 PermissionTier::Tier1 => PermissionCheck::Allowed,
@@ -898,12 +904,17 @@ impl PermissionStore {
 
     /// In-memory session-scoped insert. Internal helper for
     /// [`Self::approve_with_scope_by_key`]. Never writes to SQLite.
-    /// Unlike [`Self::approve_by_key`] this does NOT refuse Tier-3
-    /// shell verbs: session-scoped grants are bounded by session
-    /// lifetime, not the 30-day window that motivated the persisted
-    /// refusal (a "dead row in `wirken permission list`" is the
-    /// failure mode the persisted refusal exists to prevent, and
-    /// the in-memory cache has no such surface).
+    ///
+    /// Refuses exactly what [`Self::approve_by_key`] refuses, through
+    /// the same [`is_storable_approval_key`] predicate. The earlier
+    /// reasoning here was that a session grant is bounded by session
+    /// lifetime rather than by the 30-day window, so the dead-row
+    /// failure mode did not apply. That is true and beside the point:
+    /// [`Self::check`] treats a session hit as `Allowed`, so a
+    /// session-scoped Tier 3 key is not an inert row, it is a
+    /// pre-approval for an action whose whole definition is that it
+    /// prompts on every use. Tier 1 is refused for the original
+    /// reason, being allowed without a lookup either way.
     fn approve_session_scoped_by_key(
         &self,
         action_key: &str,
@@ -911,6 +922,15 @@ impl PermissionStore {
         approved_by: &str,
         session_id: String,
     ) -> Result<Approval, GatewayError> {
+        if !is_storable_approval_key(action_key) {
+            return Err(GatewayError::Config(format!(
+                "refusing to session-scope approval for '{action_key}': only Tier 2 action \
+                 keys can be pre-approved (shell verbs on the Tier 2 allowlist, \
+                 'file:<path>', and 'cross-conversation'). Tier 3 prompts on every use by \
+                 design, and a session-scoped grant would silence that prompt for the rest \
+                 of the session; Tier 1 is allowed without a grant."
+            )));
+        }
         let now = Utc::now();
         let approval = Approval {
             action_key: action_key.to_string(),
@@ -1993,6 +2013,105 @@ mod tier_tests {
         ApprovalScope::Session {
             session_id: id.to_string(),
         }
+    }
+
+    /// Tier 3 prompts on every use by definition. A session-scoped
+    /// grant would silence that for the rest of the session, so the
+    /// write side refuses it exactly as the persisted path does.
+    #[test]
+    fn session_scoped_grant_for_a_tier3_key_is_refused() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let sess = "default/webchat/conv-1";
+
+        // `curl` is off the Tier 2 inspection allowlist, so Tier 3.
+        assert_eq!(shell("curl").tier(), PermissionTier::Tier3);
+        let err = store
+            .approve_with_scope(&shell("curl"), "default", "operator", session_scope(sess))
+            .expect_err("a Tier 3 key must not be session-scopable");
+        assert!(
+            format!("{err}").contains("only Tier 2 action keys"),
+            "refusal should name the rule, got: {err}"
+        );
+
+        // And the gate is unchanged by the attempt.
+        assert_eq!(
+            store.check(&shell("curl"), sess, Some("default")).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier3,
+                lapsed_at: None,
+            },
+        );
+    }
+
+    /// A shell command carrying a metacharacter resolves to the
+    /// pipeline sentinel, which is Tier 3, so it is not session-
+    /// scopable either. This is the shape an operator would most
+    /// plausibly try to pre-approve for convenience.
+    #[test]
+    fn session_scoped_grant_for_the_pipeline_sentinel_is_refused() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let err = store
+            .approve_with_scope_by_key(
+                "shell::pipeline:",
+                "default",
+                "operator",
+                session_scope("default/webchat/conv-1"),
+            )
+            .expect_err("the pipeline sentinel must not be session-scopable");
+        assert!(
+            format!("{err}").contains("only Tier 2 action keys"),
+            "{err}"
+        );
+    }
+
+    /// Defence in depth for the same rule, independent of the write
+    /// side. Planting a Tier 3 key straight into the cache, which is
+    /// what a future caller reaching past `approve_with_scope` would
+    /// amount to, still must not allow the action: the gate decides on
+    /// tier, not on the presence of a cache entry.
+    #[test]
+    fn a_tier3_key_in_the_session_cache_allows_nothing() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let store = PermissionStore::open(tmp.path()).unwrap();
+        let sess = "default/webchat/conv-1";
+
+        store
+            .session_cache
+            .borrow_mut()
+            .entry(sess.to_string())
+            .or_default()
+            .insert(
+                shell("curl").approval_key(),
+                Approval {
+                    action_key: shell("curl").approval_key(),
+                    agent_id: "default".into(),
+                    approved_at: Utc::now(),
+                    approved_by: "planted".into(),
+                    expires_at: DateTime::<Utc>::MAX_UTC,
+                    scope: session_scope(sess),
+                },
+            );
+
+        assert_eq!(
+            store.check(&shell("curl"), sess, Some("default")).unwrap(),
+            PermissionCheck::NeedsApproval {
+                tier: PermissionTier::Tier3,
+                lapsed_at: None,
+            },
+            "a cache entry must not turn Tier 3 into Allowed"
+        );
+
+        // The Tier 2 path through the same cache still works, so the
+        // gate narrowed rather than broke session scoping.
+        store
+            .approve_with_scope(&shell("ls"), "default", "operator", session_scope(sess))
+            .unwrap();
+        assert_eq!(
+            store.check(&shell("ls"), sess, Some("default")).unwrap(),
+            PermissionCheck::Allowed,
+        );
     }
 
     #[test]

@@ -52,6 +52,8 @@ Tier 3 keys are refused because the gate answers Tier 3 without consulting stora
 
 The rule is an allowlist of storable shapes rather than a denylist of unstorable ones. A key namespace added later is refused until it is named here deliberately.
 
+The same allowlist governs session-scoped grants. A session grant is bounded by session lifetime rather than by a window, so it leaves no stale row to mislead `wirken permissions list`, but the gate treats a session hit as allowed, which would make a session-scoped Tier 3 key a standing pre-approval for an action whose whole definition is that it prompts every time. So the write refuses it, and the gate consults the session cache only for Tier 2. "Tier 3 always prompts" therefore holds at both ends: nothing can record such a grant, and a grant recorded some other way would allow nothing.
+
 ### Grant expiry
 
 A persisted grant carries an `expires_at`. When the gate reads a grant whose window has closed it drops the row and falls back to prompting, and the action stays at prompt-on-every-call until the operator grants it again.
