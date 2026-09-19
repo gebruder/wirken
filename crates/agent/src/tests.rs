@@ -294,6 +294,53 @@ fn load_nonexistent_dir() {
     assert!(skills.is_empty());
 }
 
+/// Every bundled skill's committed signature must verify, and must be
+/// delegated by the published project registry root.
+///
+/// This is the guard rail on the repo rather than on a running
+/// install: signatures are produced offline, so editing a bundled
+/// `SKILL.md` here invalidates its `SKILL.sig` until a maintainer
+/// re-signs it with the project key. Without this test that shows up
+/// only at runtime, as a skill that silently stops loading on the next
+/// install.
+#[test]
+fn every_bundled_skill_ships_a_valid_delegated_signature() {
+    use wirken_gateway::skill_registry::{VerifyResult, verify_skill_delegated};
+
+    let repo_skills = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("skills");
+    let root_hex = std::fs::read_to_string(repo_skills.join("REGISTRY-ROOT.pub")).unwrap();
+    let root_bytes = wirken_gateway::skill_registry::hex_decode_public(root_hex.trim()).unwrap();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&root_bytes);
+    let root = ed25519_dalek::VerifyingKey::from_bytes(&arr).unwrap();
+
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&repo_skills).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() || !dir.join("SKILL.md").exists() {
+            continue;
+        }
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        match verify_skill_delegated(&dir, &root).unwrap() {
+            VerifyResult::Valid { .. } => checked += 1,
+            other => panic!(
+                "bundled skill '{name}' does not carry a valid signature delegated by the \
+                 project registry root: {other:?}. If you edited its SKILL.md, re-sign it \
+                 offline: WIRKEN_DATA_DIR=<offline-dir> wirken skills sign \
+                 --root-key <offline-root-seed> skills/{name}"
+            ),
+        }
+    }
+    assert_eq!(
+        checked,
+        crate::bundled_skills::bundled_count(),
+        "every bundled skill must be signed, and every signed skill directory must be bundled"
+    );
+}
+
 /// Every bundled SKILL.md must load successfully. Post-migration-flip
 /// (#76 follow-up), a missing `permissions:` block is a hard load
 /// error rather than a deprecation warning, so this test also catches

@@ -44,6 +44,12 @@ the signer key to an operator registry root, writing `SKILL.deleg`, the root's
 signature over the signer's public key. The root seed is read from the given
 path in the operator's offline signing environment and is never written back.
 
+This is how the bundled set is signed. Each skill directory in the repo
+carries a `SKILL.sig`, `SKILL.pub` and `SKILL.deleg` produced this way by the
+project skill-signing key under the project registry root, both held offline
+like the release key, and the installer writes those files rather than minting
+a signature on the host. See [skills.md](skills.md) for the operator side.
+
 **Verification at install.** `wirken skills install` calls
 `verify_skill_with_expected_key_and_delegation` against the registry-supplied
 `signer_key`. When the binary embeds a non-empty `wirken-registry-pubkey.pub`

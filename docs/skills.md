@@ -51,9 +51,32 @@ and every tool call passes the tier gate
 ([permissions-and-identity.md](permissions-and-identity.md)).
 
 Wirken ships 16 bundled skills, installed to `<data_dir>/skills/` on first
-setup. Each is self-signed at install so the loader's gate accepts it without
-operator action; skills already on disk are left untouched, since re-signing
-them would mask operator edits.
+setup. Each arrives with the `SKILL.sig`, `SKILL.pub` and `SKILL.deleg`
+committed alongside it in the repo, produced offline by the project
+skill-signing key and delegated under the project registry root. Nothing is
+signed at install time, so no signing key is needed on the gateway host, and
+the bundle you run carries the same signature the project published rather
+than one your machine minted for itself.
+
+Skills already on disk are left untouched, since writing a fresh signature
+over them would make an edited bundle look authentic.
+
+**To run the bundled set in strict mode**, install the project root:
+
+```bash
+wirken skills trust-root 81afdc96e2fde6a371fd114bc6486c7f26a9af4737862de63af97205b02f8f30
+```
+
+The same value is in [`skills/REGISTRY-ROOT.pub`](../skills/REGISTRY-ROOT.pub).
+Installing it means trusting the project's offline root as the identity anchor
+for every skill you load, bundled or not: a root is singular, so this is not a
+way to add the project alongside a root of your own. Operators who run their
+own root re-sign the bundled set as delegates of it, which is what the
+`trust-root` output tells you to do.
+
+Editing a bundled `SKILL.md` invalidates its committed signature until a
+maintainer re-signs it offline. A test in the repo fails when that happens, so
+it surfaces at build time rather than as a skill that quietly stops loading.
 
 **Wasm skills** are compiled modules that run as a custom tool inside a
 Wasmtime sandbox. Place `skill.wasm` beside `SKILL.md` and add a `parameters`
