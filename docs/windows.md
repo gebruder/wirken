@@ -52,7 +52,7 @@ The `exec` tool runs commands through a shell. On Windows, three shells are supp
 
 | Shell        | Default invocation        | Cross-platform skill compatibility               |
 |--------------|---------------------------|--------------------------------------------------|
-| `sh`         | `sh.exe -c <command>`     | Yes — same as Linux/macOS                        |
+| `sh`         | `sh.exe -c <command>`     | Yes, same as Linux/macOS                        |
 | `powershell` | `pwsh.exe -Command ...`   | PowerShell only (`&&` requires PowerShell 7+)    |
 | `cmd`        | `cmd.exe /C <command>`    | Windows-only, different escaping than sh         |
 

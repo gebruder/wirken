@@ -38,7 +38,7 @@ Edge case not handled here: a bare shell binary as argv (`bash` alone, no metach
 
 ### Where approvals live
 
-Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix — `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation until its window closes.
+Approvals are stored in `~/.wirken/permissions.db` keyed on `(action_key, agent_id)`. The `action_key` for a shell exec is the canonicalized prefix, so `ShellExec { pattern: "ls -la /" }` stores `shell:ls`. The argument tail is not part of the key; a single `shell:ls` approval applies to every later `ls`-prefixed invocation until its window closes.
 
 On open, `PermissionStore::sweep_stale_grants` removes every row the gate cannot act on: keys that are not storable under the current tier model (including `shell:<prefix>` rows whose prefix is no longer Tier 2 eligible, such as `shell:git`, `shell:kubectl`, `shell:make`) and grants whose window has closed. Operators see a single log line at startup counting each kind. The gate would have ignored those rows anyway; the sweep keeps `wirken permissions list` honest. See "Rows an upgrade leaves behind" below.
 

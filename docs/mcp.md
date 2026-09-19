@@ -117,7 +117,10 @@ At risk, which is the operator's blast radius:
 **This is not a sandbox.** There is no `cap_drop`, seccomp filter, namespace,
 gVisor or Wasm runtime around the MCP child. The `exec` tool runs in a
 container ([sandbox-properties.md](sandbox-properties.md)); MCP servers do
-not. For a server that does not need the operator's network reach, run
+not. Closing that asymmetry is design work that depends on whether agents
+themselves run as subprocesses (#267, #269).
+
+For a server that does not need the operator's network reach, run
 `wirken-mcp-proxy`, or the whole gateway, inside a network-namespaced
 container or a `firejail` profile.
 
@@ -146,10 +149,6 @@ across several.
 **CLI.** `wirken mcp sign <server>` signs one entry against `~/.wirken/signing-key.hex` (shared with `wirken skills sign`; generated on first use). `wirken mcp verify [<server>]` reports `valid` / `invalid` / `unsigned` per entry, applying the delegation gate when an anchor is configured.
 
 **Audit.** Every load attempt lands on the `gateway-mcp` sentinel session as `SessionEvent::McpEntryVerified { server_name, signer }` or `SessionEvent::McpEntryRefused { server_name, reason }`. Both variants are on the default typed-SIEM forwarded set; consumers can pivot on `kind == "mcp_entry_refused"` without an opt-in.
-
-### What this is not
-
-This is not a sandbox. There is no `cap_drop`, seccomp filter, namespace, gVisor, or Wasm runtime around the MCP child. The `exec` tool runs in a Docker / gVisor sandbox per `docs/sandbox-properties.md`; MCP servers do not. Closing that asymmetry is design work that lands together with — or after — the broader decision about whether agents themselves should run as subprocesses (see `docs/architecture.md` §6 "Direct LLM calls"). Doing it before that decision would lock in container-isolation shapes around a process boundary the project hasn't yet committed to.
 
 ## Supported transports
 

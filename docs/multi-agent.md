@@ -110,12 +110,12 @@ A parent agent delegates a bounded subtask through the built-in
 `spawn_subagent` tool. The operator configures which children each parent may
 spawn, with a per-child capability ceiling:
 
-- **`tool_allowlist`** — the child sees only tools in this list, intersected
+- **`tool_allowlist`**: the child sees only tools in this list, intersected
   with whatever the LLM passes in the spawn call. Anything outside is dropped.
-- **`max_permission_tier`** — tools above this tier are auto-denied with no
+- **`max_permission_tier`**: tools above this tier are auto-denied with no
   interactive prompt, because children run headless.
-- **`max_rounds`** — LLM rounds before the parent reports `rounds_exceeded`.
-- **`max_runtime_secs`** — wall-clock timeout for the whole invocation.
+- **`max_rounds`**: LLM rounds before the parent reports `rounds_exceeded`.
+- **`max_runtime_secs`**: wall-clock timeout for the whole invocation.
 
 ```bash
 wirken agents allow-subagent parent child \

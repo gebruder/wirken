@@ -133,11 +133,11 @@ never sees a credential.
 
 A sample is at [`lyrik.example.json`](lyrik.example.json).
 
-**`scope`** — `include` globs (default `["**/*"]`) and `exclude` globs
+**`scope`**: `include` globs (default `["**/*"]`) and `exclude` globs
 (default `["target/**", "node_modules/**", ".git/**"]`). A user request like
 "assess only `src/`" overrides this for the run.
 
-**`phases`** — one entry per phase that makes a model call, pinning provider
+**`phases`**: one entry per phase that makes a model call, pinning provider
 and model. Phases: `articulate` (Phase 0 context generation), `rubric` (Phase
 0 rubric derivation), `recon` (entry-point and trust-boundary mapping),
 `framing` (the nine framing classes and their sub-passes, the largest token
@@ -157,7 +157,7 @@ distinct trust model from classical SQL or shell injection: sanitization
 shapes from those domains do not apply, and in-context content inherits trust
 from the surrounding prompt by default.
 
-**`gates`** — one entry per human gate, each naming an `adapter` and an
+**`gates`**: one entry per human gate, each naming an `adapter` and an
 adapter-native `target`.
 
 | Gate | Fires when |
@@ -174,7 +174,7 @@ conversation ids.
 **`prior_findings_path`** and **`memory_path`** default to `./.lyrik/prior`
 and `./.lyrik/memory`.
 
-**`walks` and `max_concurrent_walks`** — opt into per-walk dispatch: one agent
+**`walks` and `max_concurrent_walks`**: opt into per-walk dispatch: one agent
 turn per named walk, run concurrently against the same target, producing a
 single deduped `findings.json`.
 
@@ -209,7 +209,7 @@ non-zero when any walk hit a permission denial, which is operator intent and
 never silently merged into partial success, or when every selected walk failed
 transiently. Either way a partial `findings.json` is produced.
 
-**`bench_mode`** — defaults false. When true, `phase_0_signoff` and
+**`bench_mode`**: defaults false. When true, `phase_0_signoff` and
 `high_severity_review` auto-approve so a run completes without an interactive
 reviewer. `scoring_disagreement` is **not** short-circuited; three-way
 disagreement still routes, to a benchmark-side log file rather than a channel.

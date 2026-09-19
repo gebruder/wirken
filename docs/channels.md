@@ -325,12 +325,12 @@ Targets the [Meta Cloud API](https://developers.facebook.com/docs/whatsapp/cloud
 Both `wirken setup` and `wirken channel add whatsapp` collect four
 credentials into the vault:
 
-- `whatsapp-token` — system-user access token with
+- `whatsapp-token`: system-user access token with
   `whatsapp_business_messaging`
-- `whatsapp-phone-number-id` — phone number ID assigned by Meta
-- `whatsapp-verify-token` — webhook verify token, any string you choose,
+- `whatsapp-phone-number-id`: phone number ID assigned by Meta
+- `whatsapp-verify-token`: webhook verify token, any string you choose,
   matching the Meta dashboard
-- `whatsapp-app-secret` — Meta app secret, used for HMAC validation of
+- `whatsapp-app-secret`: Meta app secret, used for HMAC validation of
   inbound webhooks
 
 The adapter listens on `127.0.0.1:3979` for webhook POSTs and replies through

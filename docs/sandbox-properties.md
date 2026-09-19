@@ -20,7 +20,7 @@ adapters (one OS process per channel) and IPC boundary properties live in
 | `GVisor` | no | Docker `runsc` | Same container hardening; the OCI runtime is gVisor. Every guest syscall is intercepted by gVisor's userspace kernel (`Sentry`) instead of reaching the host kernel directly. |
 | `Off` | no | none | No sandboxing. Opt-in via `"mode":"off"` in `~/.wirken/sandbox.json`. The shell process runs as the agent's UID with the agent's privileges. |
 
-Unknown mode strings fall back to `ExecOnly`, not `Off` — a config typo gets
+Unknown mode strings fall back to `ExecOnly`, not `Off`: a config typo gets
 the secure default with a warning, never the bypass
 ([`sandbox.rs:56-71`](../crates/agent/src/sandbox.rs)).
 
@@ -143,7 +143,7 @@ launches the container under gVisor instead of `runc`.
 gVisor changes the threat model. Under `runc`, the guest's syscalls reach
 the host kernel directly, filtered by Docker's seccomp profile. Under
 gVisor, **every** guest syscall is trapped by `runsc` and serviced by the
-Sentry — gVisor's userspace re-implementation of the Linux syscall surface
+Sentry, gVisor's userspace re-implementation of the Linux syscall surface
 in Go. The host kernel sees only a small, fixed set of syscalls from
 `runsc` itself.
 
@@ -235,7 +235,7 @@ wirken run &
 # 3. ExecOnly: the container has no network
 # (Holds when the serving channel has no egress policy, which is the default.)
 # Send: "run `curl -m 5 https://example.com`"
-# Expected: curl fails with "Could not resolve host" — DNS is not reachable
+# Expected: curl fails with "Could not resolve host", because DNS is not reachable
 # from `network_mode: none`.
 
 # 4. ExecOnly: the rootfs is read-only
@@ -254,5 +254,5 @@ wirken run                      # next exec request
 ```
 
 If any of these checks return a different result, file an issue against
-[wirken](https://github.com/gebruder/wirken/issues) — the divergence is
+[wirken](https://github.com/gebruder/wirken/issues): the divergence is
 either a documentation bug here or a code bug in `sandbox.rs`.
