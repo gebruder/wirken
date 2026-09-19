@@ -142,10 +142,22 @@ messages for role-switching attempts, instruction-override markers,
 base64-encoded commands, tool-call injection structures and system-prompt
 extraction attempts.
 
-**Detection does not block.** It tags the audit event with a `threat` detail
-object and emits a separate `message.threat_flagged` event for SIEM
-visibility. The permission tiers and the sandbox are what limit what an
-injected agent can actually do.
+**Detection does not block.** A finding emits a `message.threat_flagged`
+event carrying a `threat` detail object beside the message body, on the same
+`<channel>:<message-id>` target as the `message.inbound` row it follows. The
+permission tiers and the sandbox are what limit what an injected agent can
+actually do.
+
+**The message is recorded before it is scanned**, and the scan is caught. The
+detector is pattern matching over attacker-chosen text, so a message can break
+it; when one did, the panic unwound the per-connection task and the message
+that caused it was never written, because the inbound row used to come after
+the scan. A scanner panic now emits `message.threat_flagged` with
+`threat.scanner.panicked` and the reason, `threat.detected` stays false, and
+the message proceeds exactly as an unflagged one does. The per-connection
+teardown runs from a drop guard, so an unwind anywhere in the loop still
+unregisters the writer, marks the adapter disconnected and writes the
+`adapter.disconnect` row.
 
 Patterns are compiled into the binary, so adding one requires recompilation.
 The detector is stateless and shared across all adapter connections.

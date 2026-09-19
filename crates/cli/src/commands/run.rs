@@ -2149,6 +2149,86 @@ where
     result
 }
 
+/// The message out of a caught panic payload, or a stand-in when it is
+/// neither of the two shapes `panic!` produces.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic payload was not a string".to_string()
+    }
+}
+
+/// Per-connection teardown that runs whether [`message_loop`] returns
+/// or unwinds.
+///
+/// The three actions used to sit after the `message_loop().await` in
+/// [`handle_adapter_connection`]. A panic anywhere in the loop unwound
+/// past all of them, and the adapter stayed registered as connected
+/// while the orchestrator's push dispatcher went on holding a writer
+/// for a socket nobody was reading. Neither is visible from outside:
+/// the audit chain just shows an `adapter.connect` with no matching
+/// disconnect. Moving them into a `Drop` makes both paths the same
+/// path.
+///
+/// `Drop` cannot await, so only the writer unregister, which is
+/// synchronous, happens inline. The registry update and the
+/// `adapter.disconnect` row go onto a task, in that order. The guard
+/// only ever drops inside the connection task, so a runtime is always
+/// current for the spawn; a runtime already shutting down may drop the
+/// task, which is the one case where the row is lost, and the process
+/// is exiting then anyway.
+struct ConnectionTeardown {
+    adapter_id: String,
+    channel: String,
+    pubkey_fingerprint: String,
+    registry: Arc<Mutex<AdapterRegistry>>,
+    dispatcher: Arc<OutboundDispatcher>,
+    audit: Arc<AuditWriter>,
+}
+
+impl Drop for ConnectionTeardown {
+    fn drop(&mut self) {
+        // First, and synchronously: nothing should be able to route a
+        // message to this connection after the loop has left it.
+        self.dispatcher.unregister(&self.channel);
+
+        let adapter_id = std::mem::take(&mut self.adapter_id);
+        let channel = std::mem::take(&mut self.channel);
+        let fingerprint = std::mem::take(&mut self.pubkey_fingerprint);
+        let registry = self.registry.clone();
+        let audit = self.audit.clone();
+
+        tokio::spawn(async move {
+            registry.lock().await.set_connected(&adapter_id, false);
+            // Logged rather than propagated: a `Drop` has nowhere to
+            // return an error to. The previous code propagated it out
+            // of `handle_adapter_connection`, where the spawn site
+            // turned it into exactly this tracing line.
+            if let Err(e) = audit
+                .log(
+                    AuditEvent::new(
+                        ActorKind::Service,
+                        "gateway",
+                        "adapter.disconnect",
+                        &adapter_id,
+                    )
+                    .with_channel(&channel)
+                    .with_detail(serde_json::json!({
+                        "adapter_pubkey_fingerprint": fingerprint,
+                    })),
+                )
+                .await
+            {
+                tracing::error!("adapter.disconnect audit write failed for '{adapter_id}': {e}");
+            }
+            tracing::info!("Adapter '{adapter_id}' disconnected");
+        });
+    }
+}
+
 /// Handle a single adapter connection: handshake, then message loop.
 #[allow(clippy::too_many_arguments)]
 async fn handle_adapter_connection(
@@ -2225,8 +2305,19 @@ async fn handle_adapter_connection(
     // orchestrator) can find this adapter by channel name.
     dispatcher.register(authenticated_channel.as_str(), writer.clone());
 
-    // Message loop
-    let result = message_loop(
+    // From here on the teardown is the guard's, on every exit path.
+    let _teardown = ConnectionTeardown {
+        adapter_id: adapter_id.clone(),
+        channel: authenticated_channel.as_str().to_string(),
+        pubkey_fingerprint: pubkey_fingerprint.clone(),
+        registry: registry.clone(),
+        dispatcher: dispatcher.clone(),
+        audit: audit.clone(),
+    };
+
+    // Message loop. `_teardown` drops as this returns, on the value
+    // path and on an unwind alike.
+    message_loop(
         &adapter_id,
         &authenticated_channel,
         &mut reader,
@@ -2239,27 +2330,7 @@ async fn handle_adapter_connection(
         pending_approvals,
         approver_registry,
     )
-    .await;
-
-    dispatcher.unregister(authenticated_channel.as_str());
-    registry.lock().await.set_connected(&adapter_id, false);
-    audit
-        .log(
-            AuditEvent::new(
-                ActorKind::Service,
-                "gateway",
-                "adapter.disconnect",
-                &adapter_id,
-            )
-            .with_channel(authenticated_channel.as_str())
-            .with_detail(serde_json::json!({
-                "adapter_pubkey_fingerprint": pubkey_fingerprint,
-            })),
-        )
-        .await?;
-
-    tracing::info!("Adapter '{adapter_id}' disconnected");
-    result
+    .await
 }
 
 /// Handle one inbound hook connection. Snapshot-then-verify the
@@ -3162,29 +3233,72 @@ async fn message_loop(
                     );
                 }
 
-                // Scan for prompt injection patterns
-                let threat_detail = detector.scan(&text).map(|threat| threat.to_detail_json());
-                if let Some(ref threat) = threat_detail
-                    && let (Some(obj), Some(threat_obj)) =
-                        (inbound_detail.as_object_mut(), threat.as_object())
-                {
-                    for (k, v) in threat_obj {
-                        obj.insert(k.clone(), v.clone());
+                // The inbound row goes down before the message is
+                // handed to anything that reads it. The detector used
+                // to run first, so a message that broke the detector
+                // took the connection with it and left no trace of
+                // itself in the chain: the one row that would have
+                // said what arrived was written after the scan that
+                // never returned. Recording first costs a row for a
+                // message that is about to be rejected downstream, and
+                // buys the guarantee that every message the gateway
+                // saw is on the chain.
+                audit
+                    .log(
+                        AuditEvent::new(
+                            ActorKind::User,
+                            &sender_id,
+                            "message.inbound",
+                            &inbound_target,
+                        )
+                        .with_channel(&channel)
+                        .with_session(&conversation_id)
+                        .with_detail(inbound_detail.clone()),
+                    )
+                    .await?;
+
+                // Scan for prompt injection patterns.
+                //
+                // The scan is detection-only: it tags the chain and
+                // never blocks, so a scanner that fails has to be the
+                // same non-event as a scanner that finds nothing. It
+                // is caught rather than trusted because it is pattern
+                // matching over attacker-chosen text, and the one time
+                // it panicked the cost was not a missed detection but
+                // the whole connection. A panic here now reads on the
+                // chain as a flagged message naming the failure, and
+                // the message carries on exactly as it would have.
+                let scanned =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| detector.scan(&text)));
+                let threat_detail = match scanned {
+                    Ok(threat) => threat.map(|t| t.to_detail_json()),
+                    Err(panic) => {
+                        let reason = panic_message(&panic);
+                        tracing::error!(
+                            "injection detector panicked on a message from '{sender_id}' on \
+                             '{channel}': {reason}"
+                        );
+                        Some(serde_json::json!({
+                            "threat": {
+                                "detected": false,
+                                "scanner": { "panicked": true, "reason": reason },
+                            }
+                        }))
                     }
-                }
+                };
 
-                let inbound_event = AuditEvent::new(
-                    ActorKind::User,
-                    &sender_id,
-                    "message.inbound",
-                    &inbound_target,
-                )
-                .with_channel(&channel)
-                .with_session(&conversation_id)
-                .with_detail(inbound_detail.clone());
-
-                if threat_detail.is_some() {
-                    // Emit a separate threat event for SIEM visibility
+                if let Some(threat) = threat_detail {
+                    // Separate row for SIEM visibility, carrying the
+                    // message beside the finding so a reader does not
+                    // have to join it back to the inbound row.
+                    let mut detail = inbound_detail;
+                    if let (Some(obj), Some(threat_obj)) =
+                        (detail.as_object_mut(), threat.as_object())
+                    {
+                        for (k, v) in threat_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                    }
                     let _ = audit
                         .log(
                             AuditEvent::new(
@@ -3195,12 +3309,10 @@ async fn message_loop(
                             )
                             .with_channel(&channel)
                             .with_session(&conversation_id)
-                            .with_detail(inbound_detail),
+                            .with_detail(detail),
                         )
                         .await;
                 }
-
-                audit.log(inbound_event).await?;
 
                 // Resolve session
                 let session = {
