@@ -1,439 +1,336 @@
 # Release process
 
-Step-by-step maintainer runbook. Follow top to bottom. Signing crypto
-details live in [release-signing.md](release-signing.md).
+Maintainer runbook. Follow top to bottom. The crypto reference and the
+end-user verification snippet are in [signing.md](signing.md#release-signing).
 
-> **Audience.** This document is for maintainers who hold the offline
-> release signing key. Contributors and users do not run these steps;
-> they consume published releases. To verify a release you downloaded,
-> see the manual verification snippet in
-> [release-signing.md](release-signing.md#verify-a-release-manually).
+> **Audience.** Maintainers who hold the offline release signing key.
+> Contributors and users consume published releases.
 
-## Prerequisites (one-time)
+## Prerequisites
 
-- `gh` authenticated to github.com with write access to `gebruder/wirken`.
-- Offline Ed25519 signing key stored outside the repo tree. Examples in
-  this document assume `~/.ssh/wirken-release-signing`; substitute your
-  actual path.
-- OpenSSH 8.1+ (`ssh-keygen -Y` support).
-- `cargo`, `rustfmt`, `clippy`.
-- `cargo-sweep` (`cargo install cargo-sweep`), for the reclaim step below.
-- `REPO` environment variable pointing at your local `wirken` checkout:
-  ```bash
-  export REPO=~/code/wirken   # wherever you cloned it
-  ```
-  Commands below reference `"$REPO"/scripts/sign-release.sh` and
-  `"$REPO"/KEYS`.
-
-Sanity check:
+- `gh` authenticated with write access to `gebruder/wirken`.
+- The offline Ed25519 signing key stored outside the repo tree. Examples below
+  assume `~/.ssh/wirken-release-signing`.
+- OpenSSH 8.1+, `cargo`, `rustfmt`, `clippy`, `cargo-sweep`.
+- `REPO` pointing at your checkout:
 
 ```bash
+export REPO=~/code/wirken
 gh auth status
 ssh-keygen -lf "$REPO"/KEYS   # must match the fingerprint in SECURITY.md
 ```
 
 ## Version scheme
 
-Semver on `X.Y.Z`, currently in the `1.x` series:
+Semver on `X.Y.Z`, currently in the `1.x` series. Patch for bug fixes and
+docs; minor for features, new adapters and breaking config changes. Every
+workspace crate shares `workspace.package.version`; the git tag is
+`v<version>`.
 
-- Bump `Z` (patch) for bug fixes and docs.
-- Bump `Y` (minor) for features, new adapters, breaking config changes.
+## Sequence
 
-Every workspace crate shares `workspace.package.version` in the root
-`Cargo.toml`. The git tag is `v<version>`.
+Replace `1.22.0` with the target version throughout.
 
-## Release sequence
+### 1. Clean main, run pre-flight
 
-Run top to bottom. Replace `0.7.4` with the target version.
+Reclaim build-cache space first. The pre-flight compiles the whole workspace
+twice over and a shared target directory only grows, since cargo never removes
+artifacts a build no longer references. `--installed` removes artifacts from
+toolchains that are no longer installed, which is the large reclaim after any
+`rustup update`:
 
-1. **Clean main, run pre-flight.** All must pass; fix on a branch and
-   merge before tagging.
+```bash
+cargo sweep --installed --dry-run   # inspect, then drop --dry-run
+cargo sweep --time 7                # optional, on top
+```
 
-   Reclaim build-cache space first. The pre-flight below compiles the
-   whole workspace twice over (`clippy --all-targets`, then `test`),
-   and a target directory shared across projects only grows: cargo
-   never removes artifacts a build no longer references.
+```bash
+git checkout main && git pull --ff-only && git status   # clean
+cargo fmt --check
+cargo clippy --workspace -- -D warnings
+shellcheck install.sh
+[ "$(sha256sum install.sh | awk '{print $1}')" = "$(grep -o '[0-9a-f]\{64\}' README.md | head -1)" ] \
+    && echo "install.sh SHA matches README pin" \
+    || { echo "install.sh SHA drift"; exit 1; }
+cargo test --workspace
+cargo deny check
+./scripts/test-install.sh
+gh api repos/gebruder/wirken/dependabot/alerts \
+    --jq '.[] | select(.state == "open") | {num: .number, sev: .security_advisory.severity, pkg: .dependency.package.name, ghsa: .security_advisory.ghsa_id}'
+gh api repos/gebruder/wirken/code-scanning/alerts \
+    --jq '.[] | select(.state == "open") | {num: .number, sev: .rule.security_severity_level, rule: .rule.id, tool: .tool.name, path: .most_recent_instance.location.path}'
+if secrets=$(gh api repos/gebruder/wirken/secret-scanning/alerts \
+        --jq '.[] | select(.state == "open") | {num: .number, type: .secret_type_display_name}' 2>&1); then
+    echo "${secrets:-no open secret-scanning alerts}"
+else
+    echo "UNVERIFIED: secret scanning not enabled, or this account cannot read it."
+    echo "  Check with: gh api repos/gebruder/wirken --jq .permissions"
+    echo "  Do not record this as clean."
+fi
+gh pr list --label dependencies --state open
+```
 
-   ```bash
-   cargo sweep --installed --dry-run   # inspect, then drop --dry-run
-   cargo sweep --time 7                # optional, on top of the above
-   ```
+The secret-scanning branch is spelled out because the API answers `404` both
+when the feature is off and when the caller lacks permission to read it, so a
+swallowed error is indistinguishable from a clean surface. On this repo it is
+the permission case: the release account has push and triage, not admin. An
+unverified surface is recorded as unverified, never as clean.
 
-   `--installed` removes artifacts built by toolchains that are no
-   longer installed, which is the large reclaim after any `rustup
-   update` and typically dwarfs `--time`. Run it whenever the
-   toolchain has moved since the last release.
+The `shellcheck` and SHA checks exist because a locally modified `install.sh`
+that has not been pushed is not caught by the `installer-pin` CI workflow
+until push, and a release tagged before push ships with a mismatched pin.
+`cargo fmt`, `clippy` and `deny` are redundant with CI and serve as a local
+fast-fail.
 
-   ```bash
-   git checkout main && git pull --ff-only && git status   # clean
-   cargo fmt --check
-   cargo clippy --workspace -- -D warnings
-   shellcheck install.sh
-   [ "$(sha256sum install.sh | awk '{print $1}')" = "$(grep -o '[0-9a-f]\{64\}' README.md | head -1)" ] \
-       && echo "install.sh SHA matches README pin" \
-       || { echo "install.sh SHA drift"; exit 1; }
-   cargo test --workspace
-   cargo deny check
-   ./scripts/test-install.sh
-   gh api repos/gebruder/wirken/dependabot/alerts \
-       --jq '.[] | select(.state == "open") | {num: .number, sev: .security_advisory.severity, pkg: .dependency.package.name, ghsa: .security_advisory.ghsa_id}'
-   gh api repos/gebruder/wirken/code-scanning/alerts \
-       --jq '.[] | select(.state == "open") | {num: .number, sev: .rule.security_severity_level, rule: .rule.id, tool: .tool.name, path: .most_recent_instance.location.path}'
-   if secrets=$(gh api repos/gebruder/wirken/secret-scanning/alerts \
-           --jq '.[] | select(.state == "open") | {num: .number, type: .secret_type_display_name}' 2>&1); then
-       echo "${secrets:-no open secret-scanning alerts}"
-   else
-       echo "UNVERIFIED: secret scanning not enabled, or this account cannot read it."
-       echo "  Reading these alerts needs admin or security-manager on the repo;"
-       echo "  push/triage is not enough and the API answers 404 either way."
-       echo "  Check with: gh api repos/gebruder/wirken --jq .permissions"
-       echo "  Do not record this as clean."
-   fi
-   gh pr list --label dependencies --state open
-   ```
+The security-surface queries and the dependency-PR list are non-empty by
+default. Read every open row on every surface, and for each either fold the
+fix into this release or defer it explicitly in the CHANGELOG. Patch and
+non-0.x-minor dependabot bumps fold cleanly; 0.x-minor and major bumps take a
+soak cycle.
 
-   The secret-scanning branch is spelled out because the original line
-   ended in `|| true`, which turned every failure into a silent pass.
-   The API answers `404` both when the feature is off and when the
-   caller lacks the permission to read it, so a swallowed error was
-   indistinguishable from a clean surface — and on this repo it is the
-   permission case: the release account has push and triage, not admin.
-   An unverified surface is recorded as unverified.
+**What gates a tag.** Three surfaces, not interchangeable:
 
-   The `shellcheck` and SHA checks exist because a locally modified
-   `install.sh` that has not been pushed will not be caught by the
-   `installer-pin` CI workflow until push, and a release tagged before
-   push will ship with a mismatched pin. `cargo fmt`, `cargo clippy`,
-   and `cargo deny check` are redundant with CI but serve as a local
-   fast-fail.
+- **Code-scanning findings (CodeQL).** A critical or high finding blocks until
+  fixed or dismissed per the policy below.
+- **Dependabot advisories.** Any open alert blocks.
+- **`cargo deny check advisories`**, with `unsound` and `yanked` enforced.
+  `deny.toml` sets `unsound = "all"`, `yanked = "deny"` and
+  `[graph] all-features = true`; do not relax any of the three to get a green
+  run. An advisory ignored there needs a written reason in the `ignore` entry
+  naming the reachable path and what would make it revisitable.
 
-   The security-surface queries and the dependency-PR list are
-   non-empty by default. Read every open row on every surface. For
-   each, fold the fix into this release or defer it explicitly in
-   the CHANGELOG. Patch and non-0.x-minor dependabot bumps fold
-   cleanly; 0.x-minor and major bumps take a soak cycle.
+**Scorecard findings are reviewed and recorded, not gating.** They score
+repository posture (branch protection, review requirements, pinned actions),
+not defects in the code or its dependencies. The one exception is
+`VulnerabilitiesID`, whose body lists OSV ids: treat that list as a
+cross-check against `cargo deny check advisories`, not as its own gate. The
+two disagreeing is itself the finding. Scorecard reads `Cargo.lock` directly
+and so reports advisories against crates that are locked but in no shipped
+build graph; cargo-deny reads the build graph. When Scorecard names an id
+cargo-deny does not, establish which is right before deciding anything. Both
+failure directions have happened.
 
-   **What gates a tag.** Three surfaces, and they are not
-   interchangeable:
+**Per-alert dismissal policy (code scanning).** Dismiss individually, never in
+bulk and never by rule. Before dismissing, record for each alert: `file:line`,
+what the flagged value actually is, what it is used for, and a verdict of
+*not a secret* (domain string, test vector, public constant) or *real
+finding*. A real finding is fixed in its own commit, not dismissed. Use the
+narrowest reason GitHub offers and put the evidence in the dismissal comment,
+including what makes the site test-only. A dismissal with no reason recorded
+is indistinguishable later from one nobody read.
 
-   - **Code-scanning code findings** (CodeQL). A critical or high
-     finding blocks the tag until it is fixed or dismissed per the
-     policy below.
-   - **Dependabot advisories.** Any open alert blocks the tag.
-   - **`cargo deny check advisories`**, with `unsound` and `yanked`
-     enforced. `deny.toml` sets `unsound = "all"`, `yanked = "deny"`,
-     and `[graph] all-features = true`; do not relax any of the three
-     to get a green run. An advisory ignored there needs a written
-     reason in the `ignore` entry naming the reachable path and what
-     would make it revisitable.
+Do not suppress a rule repository-wide to clear test-path noise. CodeQL's
+config cannot scope a single rule to a path: `query-filters` selects on query
+metadata with no path dimension and `paths-ignore` selects on path with no
+rule dimension, so the first would drop the rule from production `src` and the
+second would drop every rule from the test paths. Per-alert dismissal is the
+mechanism, and it persists while the fingerprint does.
 
-   **Release-specific gates.**
+### 2. Bump the workspace version
 
-   - **1.21: slack-morphism 2.28.0 live round-trip.** Record a live
-     exchange against a real Slack workspace before tagging: an inbound
-     message to a wirken agent and a reply out, with the daemon run at
-     `RUST_LOG=debug`. Two values are observable, and both are compared
-     against what Slack shows in the UI:
+```toml
+[workspace.package]
+version = "1.22.0"
+```
 
-     - **Inbound ts**, from the `message.inbound` audit target. That
-       field is `<channel>:<platform message id>`, and for Slack the
-       platform message id is the `ts` string verbatim.
-     - **Outbound ts**, from the `Delivery confirmed: <ts>` line the
-       gateway logs on `OutboundResult`. It is not in the audit log:
-       the outbound row's target is a synthesized
-       `<channel>:out:<uuid>` assigned before the adapter has sent
-       anything, and the platform-assigned id that comes back is
-       logged and dropped.
+```bash
+cargo update -w
+```
 
-     The epoch-millis value `parse_slack_ts` computes is written to the
-     IPC frame and read by no production code, so it is not observable
-     at this gate. 2.28.0 moves the crate's datetime types from chrono
-     to jiff; the test suite exercises fixtures, not what Slack sends.
+Scan published docs for prose hardcoded to the previous series; skip for patch
+bumps, and replace `1.21` with the prior minor:
 
-   **Scorecard findings are reviewed and recorded, not gating.** They
-   score repository posture (branch protection, review requirements,
-   pinned actions), not defects in the code or its dependencies, and
-   they have been open across prior releases. Read them; do not block
-   on them. The one exception is `VulnerabilitiesID`, whose body lists
-   OSV ids: treat that list as a **cross-check** against
-   `cargo deny check advisories`, not as its own gate. The two
-   disagreeing is itself the finding. Scorecard reads `Cargo.lock`
-   directly, so it reports advisories against crates that are locked
-   but not in any shipped build graph; cargo-deny reads the build
-   graph. When Scorecard names an id cargo-deny does not, establish
-   which of the two is right before deciding anything, because both
-   failure directions have happened:
+```bash
+git grep -nE "1\.21\.[0-9x]+|1\.21 " -- README.md SECURITY.md docs/ \
+    | grep -vE 'docs/release-process\.md|docs/signing\.md|CHANGELOG\.md' \
+    || true
+```
 
-   - v1.20.0 pre-flight: Scorecard named RUSTSEC-2026-0221 against
-     `event-listener`. cargo-deny was silent for two independent
-     reasons, either sufficient alone — the crate reached the tree only
-     through an optional feature and so was outside a default-feature
-     graph, and the advisory is `informational = "unsound"`, a class the
-     default config does not deny. Both are now closed in `deny.toml`.
-     The crate was genuinely outside every shipped binary, so Scorecard
-     was right that the lockfile carried it and wrong that releases were
-     exposed.
+Common offenders: the `SECURITY.md` supported-versions table, and the
+`README.md` status section and gateway banner example. Stage edits alongside
+the bump.
 
-   **Per-alert dismissal policy (code scanning).** Dismiss individually,
-   never in bulk, and never by rule. Before dismissing, record for each
-   alert: `file:line`, what the flagged value actually is, what it is
-   used for, and a verdict of *not a secret* (domain string, test
-   vector, public constant) or *real finding*. A real finding is fixed
-   in its own commit, not dismissed. Use the narrowest reason GitHub
-   offers — `used in tests` where the value is a test vector, `false
-   positive` where the rule misread the value — and put the evidence in
-   the dismissal comment, including what makes the site test-only (the
-   `#[cfg(test)]` line, or the `tests/` directory). A dismissal with no
-   reason recorded is indistinguishable later from one nobody read.
+### 3. Commit, push, wait for green
 
-   Do not suppress a rule repository-wide to clear test-path noise.
-   CodeQL's config cannot scope a single rule to a path: `query-filters`
-   selects on query metadata with no path dimension, and `paths-ignore`
-   selects on path with no rule dimension, so the first would drop the
-   rule from production `src` and the second would drop every rule from
-   the test paths. Per-alert dismissal is the mechanism; it persists
-   while the fingerprint does.
+```bash
+git add Cargo.toml Cargo.lock
+git commit -m "chore: bump version to 1.22.0"
+git push
+gh run watch -R gebruder/wirken
+```
 
-2. **Bump the workspace version.** Edit `Cargo.toml`:
-   ```toml
-   [workspace.package]
-   version = "0.7.4"
-   ```
-   Regenerate the lockfile:
-   ```bash
-   cargo update -w
-   ```
-   Scan published docs for prose hardcoded to the previous series. Skip
-   for patch bumps. Replace `0.6` with the prior minor.
-   ```bash
-   git grep -nE "0\.6\.[0-9x]+|0\.6 " -- README.md SECURITY.md docs/ \
-       | grep -vE 'docs/release-process\.md|docs/release-signing\.md|CHANGELOG\.md' \
-       || true
-   ```
-   Eyeball the hits and fix any prose still hardcoded to the prior
-   series. Common offenders: `SECURITY.md` supported-versions table,
-   `README.md` status section and gateway banner example. Stage edits
-   alongside the bump.
+### 4. Tag
 
-3. **Commit and push the bump. Wait for CI green on main.**
-   ```bash
-   git add Cargo.toml Cargo.lock
-   git commit -m "chore: bump version to 0.7.4"
-   git push
-   gh run watch -R gebruder/wirken   # wait for main CI
-   ```
+```bash
+git tag -a v1.22.0 -m "v1.22.0"
+git push origin v1.22.0
+```
 
-4. **Annotated tag, push.** CI triggers on the `v*` tag.
-   ```bash
-   git tag -a v0.7.4 -m "v0.7.4"
-   git push origin v0.7.4
-   ```
+### 5. Watch the release build
 
-5. **Watch the release build.** Produces five binaries, `checksums.sha256`,
-   and creates a **draft** release.
-   ```bash
-   gh run watch -R gebruder/wirken
-   ```
+Produces five binaries and `checksums.sha256`, and creates a **draft**
+release.
 
-   This job is the only one that compiles the whole workspace for
-   Windows, and it runs on a tag, so a Windows-only break used to
-   become visible only after the version was public. The Windows Smoke
-   `cargo check --workspace` step exists to convert that into a
-   branch-time failure; it looks redundant with this job precisely
-   because it is the same compile moved earlier, and removing it puts
-   the first signal back on the tag.
+```bash
+gh run watch -R gebruder/wirken
+```
 
-6. **Download `checksums.sha256` from the draft.** Work in a scratch
-   directory outside the repo tree (`scripts/sign-release.sh` refuses to
-   run if the private key is inside the tree).
-   ```bash
-   mkdir -p /tmp/wirken-release && cd /tmp/wirken-release
-   gh release download v0.7.4 -R gebruder/wirken --pattern checksums.sha256
-   cat checksums.sha256   # sanity: five lines, one per binary
-   ```
+This is the only job that compiles the whole workspace for Windows, and it
+runs on a tag, so a Windows-only break would otherwise become visible only
+after the version is public. The Windows Smoke `cargo check --workspace` step
+converts that into a branch-time failure; it looks redundant with this job
+precisely because it is the same compile moved earlier, and removing it puts
+the first signal back on the tag.
 
-7. **Sign.** You will be prompted for the passphrase.
-   ```bash
-   WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing \
-       "$REPO"/scripts/sign-release.sh v0.7.4
-   ```
+### 6-9. Download, sign, self-verify, upload
 
-8. **Self-verify before upload.** Must print `Good "file" signature for
-   releases@gebruder.ottenheimer.app`. If it fails, do not upload. See
-   [Recovery](#recovery-during-a-release).
-   ```bash
-   ssh-keygen -Y verify \
-       -f "$REPO"/KEYS \
-       -I releases@gebruder.ottenheimer.app \
-       -n file \
-       -s checksums.sha256.sig \
-       < checksums.sha256
-   ```
+Work in a scratch directory outside the repo tree; `sign-release.sh` refuses
+to run if the private key is inside it.
 
-9. **Upload the signature to the draft.**
-   ```bash
-   gh release upload v0.7.4 checksums.sha256.sig -R gebruder/wirken
-   ```
+```bash
+mkdir -p /tmp/wirken-release && cd /tmp/wirken-release
+gh release download v1.22.0 -R gebruder/wirken --pattern checksums.sha256
+cat checksums.sha256   # five lines, one per binary
 
-10. **Confirm all assets are attached.** You should see the five
-    binaries, `checksums.sha256`, `checksums.sha256.sig`, and
-    `wirken.intoto.jsonl` (the SLSA provenance; generated automatically
-    by the `provenance` workflow job, not signed with the offline key).
-    ```bash
-    gh release view v0.7.4 -R gebruder/wirken
-    ```
-    The provenance attaches on its own once the build matrix completes;
-    no maintainer action is needed for it. If it is missing, the
-    `provenance` job failed — the draft is still publishable from the
-    binaries + signed checksums, and the provenance can be regenerated
-    by re-running that job. See [release-signing.md](release-signing.md#build-provenance-slsa).
+WIRKEN_SIGNING_KEY=~/.ssh/wirken-release-signing "$REPO"/scripts/sign-release.sh v1.22.0
 
-11. **Publish.** The draft's body opens with the "draft until signed"
-    placeholder the workflow wrote for you in step 6, followed by the
-    generated notes. Strip the placeholder so the published notes start
-    at the generated list, then flip from draft to published in the
-    same call. Every release through v1.21.0 went out with the
-    placeholder still on top and was cleaned up afterwards.
-    ```bash
-    gh release view v0.7.4 -R gebruder/wirken --json body --jq .body \
-        | sed '1,/^See `docs\/release-signing.md` for the full procedure\.$/d' \
-        | sed '/./,$!d' > notes.md
-    head -1 notes.md   # must be "## What's Changed" (or the compare link on a release with no PRs)
-    gh release edit v0.7.4 -R gebruder/wirken --draft=false --notes-file notes.md
-    ```
+ssh-keygen -Y verify -f "$REPO"/KEYS -I releases@gebruder.ottenheimer.app \
+    -n file -s checksums.sha256.sig < checksums.sha256
 
-12. **Smoke test.** On a fresh shell, with a scratch install dir so you
-    do not overwrite your local binary.
-    ```bash
-    WIRKEN_INSTALL_DIR=/tmp/wirken-smoke \
-        sh -c 'curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh'
-    /tmp/wirken-smoke/wirken --version
-    ```
-    The installer output must contain both
-    `Signature verified: releases@gebruder.ottenheimer.app` and
-    `Checksum verified: ...`. If either is missing the release is
-    broken. Go to [Recovery](#recovery-during-a-release).
+gh release upload v1.22.0 checksums.sha256.sig -R gebruder/wirken
+```
 
-Post-release housekeeping: re-read `README.md` for any count or
-version that shifted; the gateway banner example carries the version,
-and step 2 should already have moved it. If
-`crates/audit/src/session_log.rs` changed since the previous release,
-sync the `wirken-siem` repo's compatibility table and field index in
-the same sitting. Clean up `/tmp/wirken-release` and
-`/tmp/wirken-smoke`.
+The verify must print
+`Good "file" signature for releases@gebruder.ottenheimer.app`. If it fails, do
+not upload; see [Recovery](#recovery-during-a-release).
+
+### 10. Confirm assets
+
+```bash
+gh release view v1.22.0 -R gebruder/wirken
+```
+
+Five binaries, `checksums.sha256`, `checksums.sha256.sig`, and
+`wirken.intoto.jsonl`. The provenance attaches on its own once the build
+matrix completes and needs no maintainer action; it is generated by the
+`provenance` job and is not signed with the offline key. If it is missing that
+job failed, the draft is still publishable from the binaries plus signed
+checksums, and the provenance can be regenerated by re-running the job.
+
+### 11. Publish
+
+The draft body opens with a "draft until signed" placeholder followed by the
+generated notes. Strip the placeholder and flip to published in one call:
+
+```bash
+gh release view v1.22.0 -R gebruder/wirken --json body --jq .body \
+    | sed '1,/^See `docs\/signing.md` for the full procedure\.$/d' \
+    | sed '/./,$!d' > notes.md
+head -1 notes.md   # must be "## What's Changed", or the compare link if no PRs
+gh release edit v1.22.0 -R gebruder/wirken --draft=false --notes-file notes.md
+```
+
+### 12. Smoke test
+
+Fresh shell, scratch install dir so your local binary survives:
+
+```bash
+WIRKEN_INSTALL_DIR=/tmp/wirken-smoke \
+    sh -c 'curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh'
+/tmp/wirken-smoke/wirken --version
+```
+
+The installer output must contain both
+`Signature verified: releases@gebruder.ottenheimer.app` and
+`Checksum verified: ...`. If either is missing the release is broken.
+
+**Housekeeping.** Re-read `README.md` for any count or version that shifted.
+If `crates/audit/src/session_log.rs` changed since the previous release, sync
+the `wirken-siem` repo's compatibility table and field index in the same
+sitting. Clean up `/tmp/wirken-release` and `/tmp/wirken-smoke`.
 
 ## Recovery during a release
 
-**CI failed on the tag push.** The tag exists on GitHub but no draft
-was created.
+**CI failed on the tag push.** The tag exists but no draft was created.
+
 ```bash
-git tag -d v0.7.4
-git push --delete origin v0.7.4
-# fix on main, then restart from step 4
+git tag -d v1.22.0
+git push --delete origin v1.22.0
+# fix on main, then restart from the tag step
 ```
 
-**Signature verification failed in step 8.** The key you signed with
-does not match the key pinned in the repo. Check `WIRKEN_SIGNING_KEY`
-points at the right file. Do not upload an unverified signature.
+**Signature verification failed.** The key you signed with does not match the
+one pinned in the repo. Check `WIRKEN_SIGNING_KEY`. Do not upload an
+unverified signature.
 
-**You uploaded the wrong signature.**
+**Wrong signature uploaded.**
+
 ```bash
-gh release delete-asset v0.7.4 checksums.sha256.sig -R gebruder/wirken --yes
-gh release upload v0.7.4 checksums.sha256.sig -R gebruder/wirken
+gh release delete-asset v1.22.0 checksums.sha256.sig -R gebruder/wirken --yes
+gh release upload v1.22.0 checksums.sha256.sig -R gebruder/wirken
 ```
 
-**You already published a bad release.** Do not delete it; users may
-have already downloaded. Publish a patch (`v0.7.5`) with the fix, then
-edit the bad release body to prepend `**Broken — use v0.7.5.**`. If
-the bad release is actively harmful (wrong binary, leaked credential),
-delete the binaries and signature from the release but leave the page
-with an explanatory note so the installer fails cleanly rather than
-silently installing stale content.
+**A bad release is already published.** Do not delete it; users may have
+downloaded. Publish a patch with the fix, then edit the bad release body to
+prepend `**Broken, use vX.Y.Z.**`. If it is actively harmful (wrong binary,
+leaked credential), delete the binaries and signature but leave the page with
+an explanatory note, so the installer fails cleanly rather than silently
+installing stale content.
 
 ## Key rotation
 
-Three-step dependency. Do not reorder.
+Three steps with a hard dependency order.
 
-1. **Generate the new key offline.** Record the fingerprint and issue
-   date.
-   ```bash
-   ssh-keygen -t ed25519 -C releases@gebruder.ottenheimer.app \
-       -f wirken-release-signing-NEW
-   ssh-keygen -lf wirken-release-signing-NEW.pub
-   ```
-   Store the private key outside the repo tree. Do not overwrite the
-   old private key until step 3 publishes.
+**1. Generate offline.** Record the fingerprint and issue date. Store the
+private key outside the repo tree and do not overwrite the old one until step
+3 publishes.
 
-2. **In one commit on main, swap the trust anchor.** Every file that
-   pins the public key updates together:
-   - `KEYS`: add the new key as the active entry; mark the old key
-     with a `# Retired YYYY-MM-DD` comment (keep it in the file for
-     verifying pre-rotation releases).
-   - `install.sh`: replace `ALLOWED_SIGNERS` with the new public key
-     line. Update the `# Current active key` header fingerprint.
-   - `README.md`: bump the pinned install.sh SHA-256 (the value is
-     whatever `sha256sum install.sh` prints after the edit).
-   - `SECURITY.md`: update the active fingerprint and issue date.
+```bash
+ssh-keygen -t ed25519 -C releases@gebruder.ottenheimer.app -f wirken-release-signing-NEW
+ssh-keygen -lf wirken-release-signing-NEW.pub
+```
 
-   Merge the commit.
+**2. Swap the trust anchor in one commit.** Every file pinning the public key
+updates together: `KEYS` gains the new key as active and marks the old with
+`# Retired YYYY-MM-DD`, keeping it for verifying pre-rotation releases;
+`install.sh` replaces `ALLOWED_SIGNERS` and its header fingerprint;
+`README.md` bumps the pinned `install.sh` SHA-256; `SECURITY.md` updates the
+active fingerprint and issue date.
 
-3. **Immediately tag and cut the next release with the new key.** Run
-   [the release sequence](#release-sequence) from step 4 onward using
-   the new private key for signing.
+**3. Tag and cut the next release with the new key immediately.**
 
-**Ordering trap.** Between merging step 2 and publishing step 3, the
-installer on `main` trusts the new key but the latest release is still
-signed with the old key. `curl | sh` from the install URL exits 5
-during that window. Keep the window as short as possible: merge the
-rotation commit and tag the release in the same sitting, not days
-apart. Users with a pinned older `install.sh` are unaffected.
+**Ordering trap.** Between merging step 2 and publishing step 3, the installer
+on `main` trusts the new key but the latest release is still signed with the
+old one, so `curl | sh` exits 5 during that window. Merge the rotation commit
+and tag the release in the same sitting. Users with a pinned older
+`install.sh` are unaffected.
 
-## Key loss or compromise recovery
+## Key loss or compromise
 
-Same shape as rotation, but with the caveats below. Severity depends
-on whether the old private key was lost (no one has it) or compromised
-(someone else might).
+Same shape as rotation, with the differences below. Severity depends on
+whether the old private key was lost (nobody has it) or compromised (someone
+might).
 
-**Users with an already-installed binary are unaffected.** The binary
-they run has no trust path to the release key. Signature verification
-only runs at install time.
+Users with an already-installed binary are unaffected: the binary has no trust
+path to the release key, and signature verification runs only at install time.
+Users with a pinned older `install.sh` keep working against existing releases
+as long as those signatures verify under the old public key. New installs from
+`main` break until a new signed release is cut, and that is the only
+user-visible cost.
 
-**Users with a pinned older `install.sh` keep working** against
-existing releases as long as those releases' signatures still verify
-under the old public key. The old public key stays in their pinned
-`install.sh` either way.
+1. **Generate a new key offline.**
+2. **Swap the anchor in one commit**, with two differences from rotation. If
+   **compromised**, remove the old key from `KEYS` entirely rather than
+   retiring it, because any binary signed by it must no longer be treated as
+   trustworthy, and edit each existing release to prepend
+   `**Revoked, key compromised. Upgrade to vX.Y.Z.**`. If **only lost**, keep
+   the old key with `# Retired YYYY-MM-DD, private key lost, no further
+   signatures will be produced`, so old releases stay verifiable.
+3. **Tag and publish a new signed release immediately.** On a compromise, bump
+   a patch with no code changes purely to restore the trust path.
+4. **If compromised, publish an advisory**: which fingerprint is revoked,
+   which releases are affected, which version to upgrade to. Rotate any other
+   credentials that shared storage with the compromised key.
 
-**New installs from `main` break until you cut a new signed release.**
-That is the only user-visible cost. Worst case is a few hours to a few
-days of broken `curl | sh`, not catastrophic.
-
-Procedure:
-
-1. **Generate a new key offline.** Same command as rotation step 1.
-
-2. **Swap the trust anchor in one commit.** Same edits as rotation
-   step 2 with two differences:
-   - **If compromised (not just lost):** remove the old key from `KEYS`
-     entirely instead of retiring it. Any binary signed by the
-     compromised key must no longer be treated as trustworthy.
-     Explicitly yank the old releases: edit each existing release to
-     prepend `**Revoked — key compromised. Upgrade to vX.Y.Z.**`.
-   - **If only lost:** keep the old key in `KEYS` with
-     `# Retired YYYY-MM-DD — private key lost, no further signatures
-     will be produced`. Old releases stay verifiable.
-
-3. **Tag and publish a new signed release immediately.** If the loss
-   is an emergency (compromise), bump a patch version with no code
-   changes just to get a release signed under the new key out to
-   `main`-following users. The release's only purpose is to restore
-   the trust path.
-
-4. **If compromised, publish an advisory.** Post to
-   `security@gebruder.ottenheimer.app` and a GitHub security advisory:
-   which key fingerprint is revoked, which releases are affected, and
-   which version to upgrade to. Rotate any other credentials that
-   shared the same storage as the compromised private key.
-
-No recovery option short of this: there is no global revocation
-mechanism for ssh-keygen signatures. Trust anchor swap + new signed
-release is the whole fix.
+There is no global revocation mechanism for `ssh-keygen` signatures. Trust
+anchor swap plus a new signed release is the whole fix.

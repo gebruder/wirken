@@ -8,12 +8,66 @@ The skill-set `egress.domains` allowlist is a defense-in-depth control on a spec
 
 - `web_search`: the agent's web-search tool.
 - `generate_image`: the agent's image-generation tool.
-- `http_request`: the agent's general HTTP tool. The runtime applies the skill-side `tools.allow`, `credentials.allow`, and `http.post_paths` gates first (`crates/agent/src/runtime.rs:2876`, `crates/agent/src/http_tool.rs::gate`); requests that clear those still go out through `EgressClient`, so the host allowset applies on top.
+- `http_request`: the agent's general HTTP tool. See [The `http_request` gate](#the-http_request-gate) below.
 - The Zirkel daily-fetch transport: `wirken zirkel run` uses an `EgressClient` constructed with an explicit `RateLimitConfig` so per-source daily budgets apply.
 
 Each call resolves the request host against the agent's effective `egress.domains` allowset (the union of every loaded skill's `egress.domains` declaration). Hosts not in the allowset are denied pre-flight, before any TCP connection and without consuming the rate-limit budget. Wildcard `"*"` is supported on the allowset; `"*.example.com"` style suffix patterns are also supported.
 
 Source: `crates/agent/src/egress.rs:281-317` (host-based check), `crates/agent/src/skill_perms.rs:964-1010` (allowset resolution).
+
+## The `http_request` gate
+
+`http_request` is Tier 1, so the interactive approval flow adds no prompt.
+Authorization is the skill's own permissions block plus an operator-set
+credential binding, and every failure is a refusal recorded as
+`SkillPermissionDenied`, never an escalation to a prompt. Four checks run
+before the request is built (`crates/agent/src/http_tool.rs::gate`, called
+from `crates/agent/src/runtime.rs:2876`):
+
+- **Method.** `GET`, `HEAD`, `POST` only.
+- **`tools.allow`** must contain `http_request`.
+- **`http.post_paths`** must contain the exact host and path for a POST,
+  query string ignored. Some REST APIs expose search as a POST; this is the
+  only write-shaped verb the tool permits, and only to a pre-declared
+  endpoint.
+- **`credentials.allow`** must contain any vault slot named in the call. The
+  model names a slot by string and never supplies a secret value.
+
+A request that clears all four still goes out through `EgressClient`, so the
+host allowset above applies on top.
+
+### Credential-host binding
+
+A credential is bound to permitted hosts in the vault, by the operator:
+
+```bash
+wirken credentials add records-api --host records.example.org
+```
+
+The resolver checks the request host against the credential's stored
+`allowed_hosts` (exact, case-insensitive) before returning the secret, so a
+request to any other host is refused and the secret is never injected,
+whatever the skill's `egress.domains` allows. A credential with no `--host`
+is unusable by `http_request` at all. The effective destination set is the
+intersection of the operator's binding and the skill's allowlist: a skill
+can narrow it, never widen it.
+
+This is the control that keeps the tool safe at Tier 1. Without it,
+authorization would be the skill's own frontmatter, and a phished skill
+update pairing `credentials.allow: [api-key]` with
+`egress.domains: [attacker.example]` would exfiltrate the bearer token with
+no prompt.
+
+The resolved secret is injected as exactly one `Authorization: Bearer`
+header and then dropped. It is never stored on a struct, formatted into a
+returned string, logged, or audited; the audit row carries the slot name
+only. The returned `headers` map excludes `Authorization` and
+`Proxy-Authorization`. A model that puts either header in `headers` itself
+gets a refusal rather than a silent strip.
+
+Source: `crates/agent/src/http_tool.rs`, `CredentialMetadata::permits_host`
+(`crates/vault/src/store.rs`), `VaultCredentialResolver`
+(`crates/cli/src/commands/run.rs`).
 
 ## What `egress.domains` does not cover
 

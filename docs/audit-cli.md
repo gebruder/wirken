@@ -1,27 +1,161 @@
-# Audit CLI
+# Audit
 
-`wirken audit` reads and verifies the hash-chained audit log produced by every running wirken instance. The log is per-session: each session has its own chain of events, and the integrity of any one session is provable independently. This page documents the user-facing surface so you can cite results in research output, script integrity checks, or hand the schema to a downstream tool.
+Wirken's audit surface is a per-session, hash-chained SQLite table of typed
+`SessionEvent` rows at `<data_dir>/audit.db`. Every row is appended before the
+action it records runs, every row's payload is SHA-256-hashed, and the
+integrity of any one session is provable independently of every other.
 
-The schema is versioned. As of this release, JSON output is `schema_version: 2`. Schema 2 is the first version with chain-head signature reporting; schema 1 archives stay readable through the same fields, signatures simply read as zero counters.
+This page owns the chain, the event surface, and the CLI. Other pages link
+here rather than restating any of it.
+
+The audit schema version is the workspace version: the audit crate inherits it
+(`version.workspace = true`), so a change to this schema bumps the workspace,
+and therefore the binary, version.
+
+## Event surface
+
+Audit events come in two shapes: typed `SessionEvent` variants for actions the
+agent runtime drives, and the `AuditLegacy` wrapper for the flat-tuple events
+the gateway and subsystems emit (`gateway.start`, `audit.chain_broken`,
+adapter handshake records). Variants are serde-tagged with `kind =
+"<snake_case>"` so wire consumers dispatch on a single string field.
+
+| `kind` | Identity fields | Emit context |
+|--------|-----------------|--------------|
+| `user_message` | `adapter_id`, `sender_id`, `inbound_id` | Inbound that triggered a turn. `None` for subagent recursion. |
+| `assistant_message` | `agent_id` | Final assistant text for a turn. |
+| `assistant_tool_calls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter and sender carry the originating channel so a SIEM need not join to the sibling `UserMessage`. |
+| `tool_result` | `agent_id`, `adapter_id`, `sender_id` | Result of a tool call. |
+| `llm_request` | `agent_id`, `credential_id`, `sender_id` | Pre-call row carrying `messages_hash`, `tools_hash` and `tools_hash_version` for replay. `credential_id` is the vault entry name, never the secret. `sender_id` is the platform-side human the call is on behalf of; `None` for CLI, cron and subagent sessions. |
+| `llm_response` | `agent_id`, `credential_id`, `sender_id` | Token usage, latency, and per-call cost. See [cost monitoring](cost-monitoring.md). |
+| `budget_exceeded` | `agent_id`, `credential_id` | Spend ceiling reached. `action` is `alerted` or `blocked`. |
+| `http_fetch` | `agent_id`, `skill_name` | Egress through `EgressClient`. Host, URL, outcome, bytes, status. |
+| `permission_denied` | `agent_id` | Tier or org-policy denial. Carries `tool`, `action_key`, `denial_source`, and `tier` when the source is `Tier`. |
+| `permission_approved` / `permission_renewed` / `permission_grant_expired` / `permission_grant_pruned` | `agent_id` | Grant lifecycle. See [permissions](permissions-and-identity.md#what-the-chain-records-about-a-grant). |
+| `skill_permission_denied` | `agent_id` | A per-skill profile denied an axis. |
+| `sandbox_egress_verdict` / `sandbox_egress_unsupported` | `agent_id`, `channel`, `adapter_id`, `sender_id` | One row per sandbox egress request, allowed or not. See [egress](egress.md#audit). |
+| `subagent_spawned` / `subagent_session_bound` / `subagent_result` | `agent_id`, `child_agent_id` | Sub-agent lifecycle under capability-attenuated ceilings. |
+| `phase_entered` / `phase_exited` | `skill_id` | Skill-declared phase overlays. See [skills](skills.md#phase-boundaries). |
+| `hook_dispatched` / `egress_hook_dispatched` / `tool_output_redacted` | `hook_id`, `agent_id` | Operator hook outcomes. See [enforcement model](enforcement-model.md#veto-and-egress-hooks). |
+| `mcp_entry_verified` / `mcp_entry_refused` | `server_name`, `signer` | MCP entry signature check, on the `gateway-mcp` sentinel session. |
+| `memory_entry_written` / `cross_channel_memory_read` | `agent_id` | Memory provenance and trust-zone crossings. |
+| `import_started` / `import_completed` / `imported_chat_read` / `imported_chat_searched` | `agent_id` | Archive imports and gated reads. See [imported archives](imported-archives.md). |
+| `compaction` | `agent_id`, `provider`, `model` | Context engine trimmed the conversation. |
+| `system_prompt_set` | `agent_id` | New effective system prompt. |
+| `attestation` | `signer_pubkey`, `signature` | Per-agent Ed25519 signature over the chain head. |
+| `chain_head` | `signing_pubkey` | Signed chain-head record. |
+| `rewind` | `agent_id`, `reason` | Sentinel emitted before truncating the most recent N events. |
+| `audit_legacy` | `actor_kind`, `actor_id`, `action`, `target` | Gateway-emitted flat-tuple events. |
+
+Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`,
+`CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`,
+`PerspectiveSkipped`, `PerspectiveExpansion`) carry per-pipeline identity.
+
+Source: `crates/audit/src/session_log.rs:480-1701` (`SessionEvent`).
+
+## Hash chain construction
+
+Every row carries three hashes:
+
+- `leaf_hash` = SHA-256 over the canonical-JSON payload of the row.
+- `prev_hash` = the chain hash of the previous row in the same `session_id`.
+  Empty string for the first row.
+- `hash` = SHA-256 over `prev_hash` and `leaf_hash` in **ASCII hex** form, the
+  same form stored in the column. Length-prefixed by virtue of fixed 64-char
+  hex.
+
+Construction is per-session: a fresh `session_id` starts with an empty
+`prev_hash`, and each subsequent append's `prev_hash` is the prior row's
+`hash`. Two sessions on the same database never share chain state, so the
+chain is not one chain for the whole deployment.
+
+Source: `chain_hex()` at `crates/audit/src/session_log.rs:3258-3263`.
+
+## Chain-head signing
+
+`ChainHead` carries an Ed25519 signature over a length-prefixed message
+binding the schema version, the session's sequence range, the previous chain
+hash, and the current chain hash. Heads are written at session boundaries, on
+a cadence of every 1000 appends or 5 minutes of wall-clock since the last
+head, and on log rotation.
+
+```text
+"wirken/audit-chain-head/v1\0"        (domain separator, including the NUL)
+|| seq_start.to_le_bytes()             (8 bytes, u64 little-endian)
+|| seq_end.to_le_bytes()               (8 bytes, u64 little-endian)
+|| (prev_chain_hash.len() as u32).to_le_bytes()
+|| prev_chain_hash.as_bytes()          (ASCII hex form)
+|| (current_chain_hash.len() as u32).to_le_bytes()
+|| current_chain_hash.as_bytes()       (ASCII hex form)
+|| schema_version.to_le_bytes()        (4 bytes, u32 little-endian)
+```
+
+`schema_version` is `2`. Bumping it is a wire-incompatible change to
+chain-head verification.
+
+The signing key lives at `<data_dir>/audit/audit-signing.key` (Ed25519 raw
+32-byte seed, mode 0o600 on Unix), public half alongside it. It is distinct
+from the IPC handshake keypair and from per-agent attestation identities. See
+[signing.md](signing.md#chain-head-signing).
+
+**What the signature does not protect against:** a malicious gateway that
+signs a fabricated chain in real time. The key is held by the same process
+that writes the chain, so a compromised gateway can record any sequence of
+events and sign it. The signature is meaningful for offline replay and for
+tamper detection by a third party reading the database.
+
+Source: `build_signed_message()` at `crates/audit/src/signing.rs:189-208`;
+constants at `:38` and `:44`; `load_or_create` / `load_from` at `:78-110`.
+
+## Tamper response
+
+When the continuous verifier inside `AuditWriter`'s flush loop detects a chain
+break, two records get written. The out-of-chain alarm comes first and is the
+load-bearing record; the in-chain `audit.chain_broken` row is best-effort.
+
+- **Alarm log.** `AlarmLog::append` writes one JSON record per line to
+  `<data_dir>/audit-alarms.log` (mode 0o600 on Unix, append-only). Structure
+  at `crates/audit/src/alarm_log.rs:78-106`, append boundary at `:177`.
+  Operators read alarms via `wirken doctor`.
+- **In-chain row.** The verify pass emits `AuditLegacy { action:
+  "audit.chain_broken" }` through the writer's mpsc channel, so SIEM receivers
+  see chain-tamper events alongside the rest of the legacy stream.
+
+The dispatch is best-effort because the rest of the chain is compromised by
+definition: an attacker who tampered the SQLite chain can also tamper any
+follow-up row, so the alarm log (independent file, separate inode) is the
+surviving channel. The independence is inode-level only; a same-UID attacker
+can rewrite both files. Detection against that attacker rests on SIEM
+corroboration of the alarm log plus the writer's `tracing::error!` halt event.
+
+**Halt-boundary gap.** When the writer halts at `MAX_INTEGRITY_FAILURES` (3),
+the `audit.chain_broken` event from the halt-triggering pass can be dropped
+before flush. Operators see `N-1` chain_broken rows on the SIEM pipe plus the
+halt log line plus the full alarm-log set. The alarm log is canonical at the
+halt boundary.
+
+**Halt counters are per-process.** The writer halts after 3 consecutive failed
+verification passes or 3 consecutive failed alarm-log writes. Both counters
+live in the in-process flush loop and reset on every gateway restart, so an
+attacker with restart authority can drain the counter between failures. That
+attacker already has UID-equivalent control of the host, at which point the
+chain is no longer a defended boundary. A persistent state file was rejected
+for the same reason: it would be writable at the same UID.
+
+After a halt, `wirken audit acknowledge --all` archives the alarm log to a
+timestamped sibling before the next `wirken run` will start.
 
 ## Commands
 
 ### `wirken audit log`
 
-Show events from the audit log.
+- `--action <name>` filter by action string (`exec`, `permission_denied`).
+- `--actor <name>`, `--channel <name>`, `--session <id>` filters.
+- `--since <iso8601>`, `--until <iso8601>` time bounds.
+- `-n` / `--limit <n>` cap the events returned (default 50).
+- `--format human|json` (default `human`).
 
-Flags:
-
-- `--action <name>` filter by action string (e.g. `exec`, `permission.denied`).
-- `--actor <name>` filter by actor.
-- `--channel <name>` filter by channel.
-- `--session <id>` filter by full session id (e.g. `assistant/webchat/abc123`).
-- `--since <iso8601>` filter to events at or after this timestamp.
-- `--until <iso8601>` filter to events at or before this timestamp.
-- `-n <n>` / `--limit <n>` cap the number of events returned (default 50).
-- `--format human|json` choose output format (default `human`).
-
-When `--session <id>` is provided, the human output includes a header that decomposes the session id:
+With `--session <id>` the human output decomposes the id:
 
 ```
   Session: assistant/webchat/abc123
@@ -30,199 +164,217 @@ When `--session <id>` is provided, the human output includes a header that decom
     ID:      abc123
 ```
 
-If the id is not in the canonical `{agent}/{channel}/{id}` form (system sentinel sessions, zirkel runs whose id is just a UUID, etc.), only the `Session:` line is shown.
+A non-canonical id (system sentinel sessions, zirkel runs keyed by UUID) shows
+only the `Session:` line.
+
+The human table does not carry the detail payload; `--format json` does.
 
 ### `wirken audit verify`
 
-Verify the hash-chained integrity of every per-session log, plus the Ed25519 signature on every `ChainHead` row.
+Verifies the hash-chained integrity of every per-session log, plus the Ed25519
+signature on every `ChainHead` row.
 
-Flags:
+- `--format human|json` (default `human`).
+- `--require-signed` hard-fails on any session with zero signed `ChainHead`
+  rows. Without it, sessions recorded before chain-head signing was wired in
+  are reported in counts and the verify exits zero. Invalid signatures are
+  always a hard fail regardless. Under this flag the verifier also enforces an
+  operator trust anchor.
+- `--anchor <hex-or-path>` operator-pinned audit-signing public key,
+  repeatable so a rotated key set can list every accepted key. Each value is a
+  64-character hex Ed25519 public key, or a path to a file containing one.
+  Under `--require-signed`, a chain-head whose embedded `signing_key_id` is
+  not in the anchor set is rejected, so a gateway that minted a fresh key
+  cannot pass off a fabricated chain that otherwise verifies.
 
-- `--format human|json` choose output format (default `human`).
-- `--require-signed` hard-fail on any session that has zero signed `ChainHead` rows. Without this flag, transition-era sessions recorded before chain-head signing was wired in are reported in counts and the verify exits zero. Invalid signatures are always a hard fail regardless of this flag. Under this flag the verifier also enforces an operator trust anchor (see `--anchor`).
-- `--anchor <hex-or-path>` operator-pinned audit-signing public key, repeatable so a rotated key set can list every accepted key. Each value is a 64-character hex Ed25519 public key, or a path to a file containing one (e.g. the local `<data_dir>/audit/audit-signing.pub`). Under `--require-signed`, a chain-head whose embedded `signing_key_id` is not in the anchor set is rejected, so a gateway that minted a fresh key cannot pass off a fabricated chain that otherwise verifies. When no `--anchor` is given, the local `audit-signing.pub` is used as the default anchor when present; if neither a flag nor the local file is available, `--require-signed` fails closed. The default anchor lives in the same data dir as `audit.db`, so it guards only against an accidental signing-key mismatch, not against a same-UID attacker who can rewrite both `audit.db` and `audit-signing.pub`; tamper resistance against that attacker requires an anchor held out of band, a typed `--anchor <hex>` or a `--anchor <file>` pointing outside the data dir. Ignored without `--require-signed`.
+Exit `0` for an intact chain; exit `1` when a per-session chain is broken, a
+`ChainHead` signature did not verify, `--require-signed` found a session with
+no signed heads, or a chain-head is signed by a key outside the anchor set.
+The output identifies which case fired and the session and seq involved.
 
-Exit codes:
+**The default anchor is co-resident and says so.** When no `--anchor` is
+given, the local `<data_dir>/audit/audit-signing.pub` is used when present,
+and the verifier emits a `WARNING (audit anchor)` line to stderr and in human
+output, plus an `anchor_warning` field in JSON, stating that a same-UID
+attacker can swap that anchor together with the chain. Without
+`--require-signed`, report-only verification carries an analogous note that no
+operator trust anchor was consulted. The exit code is unchanged; this removes
+a silent false assurance rather than changing behaviour. Tamper-evident
+verification requires an out-of-band `--anchor`.
 
-- `0`: the chain is intact and (under `--require-signed`) every session carries at least one signed head whose signing key is in the operator anchor set.
-- `1`: at least one of these fired: a per-session hash chain is broken, a `ChainHead` signature did not verify, `--require-signed` is set and a session has no signed heads, or `--require-signed` is set and a chain-head is signed by a key not in the anchor set (the error names the un-anchored key id). The output identifies which case fired and the session and seq involved.
-
-Verifier behaviour:
-
-- `Broken` (chain hash mismatch) is always a hard fail.
-- `SignatureInvalid` is always a hard fail. Reasons include: claimed `current_chain_hash` does not match the stored chain hash at `sequence_range_end`; claimed `prev_chain_hash` does not match the stored hash at `sequence_range_start - 1`; the embedded `signing_key_id` is malformed; the Ed25519 signature did not verify; the embedded `schema_version` differs from the verifier's.
-- `MissingChainHead` is reachable only under `--require-signed`; without the flag the same session contributes to the `sessions_with_no_signed_heads` counter and the verify exits zero.
-- An un-anchored chain-head key is reachable only under `--require-signed`. The chain hashes and signature verified, but the signing key is not in the operator anchor set, so the verify hard-fails and names the unexpected key id. This is what stops a compromised gateway from minting a fresh key and signing a clean-verifying fabricated chain, provided the anchor is held out of band rather than left at the in-data-dir default (see `--anchor`).
-- Verifying against the co-resident default anchor is no longer a silent default. When `--require-signed` falls back to `<data_dir>/audit/audit-signing.pub` (no out-of-band `--anchor` given), the verifier still verifies but emits a loud warning: a `WARNING (audit anchor)` line to stderr and in human output, and an `anchor_warning` field in JSON, stating that a same-UID attacker can swap that anchor together with the chain, so the run is not tamper-evident against that attacker. Without `--require-signed`, report-only verification carries an analogous note that no operator trust anchor was consulted. The exit code is unchanged, so this does not break existing invocations; it removes the silent false assurance. Tamper-evident verification still requires an out-of-band `--anchor`.
-
-Scripted usage:
+`SignatureInvalid` is always a hard fail. Reasons: claimed
+`current_chain_hash` does not match the stored hash at `sequence_range_end`;
+claimed `prev_chain_hash` does not match the stored hash at
+`sequence_range_start - 1`; malformed `signing_key_id`; the signature did not
+verify; the embedded `schema_version` differs from the verifier's.
 
 ```sh
 wirken audit verify --require-signed --anchor /etc/wirken/audit-signing.pub && publish-results.sh
 ```
 
-If `verify` exits non-zero, the chain failed: a hash chain was broken, a signature did not verify, a session had no signed head, or a chain-head was signed by a key outside the operator anchor set. The script will not publish.
+### `wirken audit verify-attestations`
+
+Checks every attestation signature against the **configured identity** of the
+agent whose session it is, read from `{data_dir}/agents/<id>/identity.pub`.
+The key is never taken from the attestation row: a row naming its own signer
+and checked against that same key establishes only that the row is internally
+consistent, which is true of any row an attacker writes. The row's
+`signer_pubkey` is still checked, against the configured key, and a mismatch
+is the failure.
+
+Each session's agent is resolved from its id, except a sub-agent session,
+whose id names its parent and whose own `SubagentSessionBound` row names the
+agent it was woken as. `--agent <AGENT>` pins every session to one agent's
+identity instead, which is the question to ask when a log arrives from
+elsewhere.
+
+An agent with no identity on disk has attestation disabled, so its sessions
+carry signatures only if they were written when one existed. Those are
+reported as **unpinned** under their own count and exit `6`: the signatures
+are real and nothing here can say whose. That is distinct from a verification
+failure, which exits `1`.
+
+### `wirken sessions verify`
+
+Replays one session log, re-checks per-session chain integrity, recomputes
+message hashes at each `LlmRequest`, and re-executes deterministic tools
+(`read_file`, `list_files`) against the current workspace. Reports events as
+verified, unverifiable, or divergent.
+
+Exit codes: `3` broken chain, `1` divergences, `2` unverifiable under
+`--strict`, `5` cross-check disagreement, `4` no such agent or no events.
+
+#### What a `tools_hash` attests
+
+Each `LlmRequest` records a `tools_hash` over the tools the model was offered
+and a `tools_hash_version` naming the rules it was computed under. `verify`
+recomputes each row under its own version, so a session recorded under older
+rules is not re-judged against rules that postdate it.
+
+| Version | Covers | Does not cover |
+| --- | --- | --- |
+| `v1` | Base tools, MCP definitions, wasm skill definitions, the phase tools, filtered by the per-skill permission profile. | `spawn_subagent`, so a configured sub-agent ceiling was outside the attestation, and the `restrict_tools` clamp, so a child's narrowed tool set was outside it too. |
+| `v2` | Everything `v1` covers, plus `spawn_subagent` when a ceiling is configured, plus the `restrict_tools` clamp. One builder produces both the offered set and the recomputation. | |
+
+Rows written before the version field existed read as `v1`, which is what they
+are. Nothing rewrites a stored row. A clean verify over `v1` rows is a
+narrower claim than one over `v2` rows, and the difference is exactly the
+sub-agent ceiling and clamp; the report prints a `tools_hash v1 rows` count
+when any are covered.
+
+#### Sub-agent sessions and `--with-parent`
+
+A sub-agent session (`{parent}#sub-N`) verifies on its own. At spawn the child
+writes a `SubagentSessionBound` row on its own chain, before its first
+`LlmRequest`, naming the agent it was woken as and the tool set its parent's
+ceiling narrowed it to. The parent's chain is never opened; a child session
+verifies clean even when the parent's session is not present at all.
+
+`--with-parent` compares the child's binding row against the parent's
+`SubagentSpawned` row: agent id, granted tool set (as a set, since order is
+not meaningful), and permission-tier cap. `offered_tools` is deliberately not
+compared, being the granted set after the per-skill profile filter, so
+asserting equality would report a disagreement every time a profile did its
+job. A parent spawn row written before the tier was recorded there cannot be
+compared on that field, and the output says so rather than letting absence
+read as agreement.
+
+A disagreement is not a tampered row. Both rows sit inside per-session hash
+chains that `verify` checks separately, so neither can be edited after the
+fact without breaking its own chain. A disagreement is either the spawn path
+writing two different values, or two chains that do not belong together being
+presented as a pair, which is what a spliced audit trail looks like. A missing
+spawn row on the named parent (`NO MATCHING SPAWN ROW`) is the same class of
+finding.
+
+You cannot produce a cross-check failure by editing a row: an edit breaks that
+session's own chain, `verify` reports `chain: BROKEN`, exits `3`, and the
+cross-check never runs. Producing one takes two real runs, then moving the
+second run's child-session rows verbatim, hashes included, into the first
+run's log. Both chains still verify; what is false is the pairing.
+
+#### Sessions with no binding row
+
+A session whose id has the sub-agent shape but carries no binding row arises
+two ways: a chain written before the row existed, or one where the write
+failed or the chain was truncated. Either way the ceiling it ran under is
+unrecoverable.
+
+**Running it.** A live-purpose wake clamps to `tier1` with an empty tool set
+and logs at `error`. That is deliberately unusable: the child cannot be
+resumed under its original ceiling, because that ceiling is not recorded on
+it, and running it under a guessed one is worse than not running it. Respawn
+the child from its parent instead.
+
+**Verifying it.** `verify` does not clamp and does not recompute a ceiling.
+Inventing one would have the recomputation attest a tool set the verifier
+chose. The `tools_hash` on those rows is left unchecked and the report prints
+a `tools not attestable` count. Everything else about the session still
+verifies. A clean report carrying a non-zero `tools not attestable` count says
+nothing about which tools that session offered.
 
 ## JSON schema
 
-Every JSON document includes a `schema_version` and `wirken_version` at the top level:
+Every JSON document carries `schema_version` and `wirken_version` at the top
+level. `schema_version` is the contract: within a major version, fields may be
+added but existing fields will not be removed or change meaning. Consumers
+should ignore unknown fields and fall over loudly on a greater
+`schema_version`. As of this release it is `2`, the first version with
+chain-head signature reporting; schema 1 archives stay readable through the
+same fields, with signatures reading as zero counters.
+
+Session ids in JSON are objects, not bare strings:
 
 ```json
-{
-  "schema_version": 2,
-  "wirken_version": "1.2.0",
-  ...
-}
+{ "full": "assistant/webchat/abc123", "agent": "assistant", "channel": "webchat", "id": "abc123" }
 ```
 
-`schema_version` is the contract: when the shape of the output changes in a way that breaks existing consumers, the version bumps. Within a major schema version, fields may be added but existing fields will not be removed or have their meaning changed. Consumers should ignore unknown fields and fall over loudly if `schema_version` is greater than what they were written against.
+`full` is always present. The decomposed fields are conveniences and may be
+absent for non-canonical ids. Round-trip through `full` when in doubt.
 
-Schema 2 history: introduced chain-head signature reporting on `verify --format json` (`signed_heads_count`, `unsigned_heads_count`, `invalid_signatures_count`, `signing_key_ids_seen`, `sessions_with_no_signed_heads`, `unsigned_tail_max_len`), plus two new `result` values (`signature_invalid` and `missing_chain_head`).
+`wirken audit verify --format json` on an intact chain returns
+`"result": "ok"` with `rows_verified`, `sessions_total`, `signed_heads_count`,
+`unsigned_heads_count`, `invalid_signatures_count`,
+`sessions_with_no_signed_heads`, `signing_key_ids_seen`,
+`unsigned_tail_max_len` and `require_signed`.
 
-`wirken_version` is the binary that produced the output. Pin a specific Wirken version in scripted pipelines if you want bit-stable output across operator upgrades.
+`unsigned_heads_count` is reserved for forward-compat and is always `0` under
+schema 2. `signing_key_ids_seen` longer than one entry indicates a key
+rotation across the verified window. `unsigned_tail_max_len` is the largest
+count of events past the last signed head observed across sessions, which lets
+an operator flag a stale tail without failing the verify.
 
-### Session id shape
+Other `result` values are `empty`, `broken`, `signature_invalid` and
+`missing_chain_head`. A `broken` result adds `session`, `seq`,
+`expected_hash`, `actual_hash` and `verified_count`. A `signature_invalid`
+result adds `signing_key_id` and a `reason` citing the specific check that
+failed; the verifier short-circuits on the first one, so
+`invalid_signatures_count` is always `1` there. `verified_count` is the total
+that verified before the break, summed across sessions, so downstream data can
+be scoped to what still holds.
 
-Session ids in JSON output are objects, not bare strings:
+A `sessions_with_no_signed_heads` count is the transition-era case: a log
+accumulated before chain-head signing was wired in has no `ChainHead` rows.
+Under default verify those sessions are counted and the verify exits zero;
+under `--require-signed` the same sessions surface as `missing_chain_head` and
+it exits `1`. Run the default verify first to see how many there are before
+enabling the flag.
 
-```json
-{
-  "full": "assistant/webchat/abc123",
-  "agent": "assistant",
-  "channel": "webchat",
-  "id": "abc123"
-}
-```
+## Citing a session
 
-`full` is the canonical form used internally and is always present. The decomposed fields (`agent`, `channel`, `id`) are convenience fields and may be absent for non-canonical session ids; they may not exhaust future structure (i.e. a future Wirken version could add more decomposed fields without bumping the schema). When in doubt, round-trip through `full`.
+1. Run `wirken audit verify --format json` and record the result.
+2. Run `wirken audit log --session <id> --format json` and archive it.
+3. Cite the session by its `full` id. The `wirken_version` and
+   `schema_version` fields let a future reader reproduce the output format.
 
-### `wirken audit log --format json`
+Session ids encode `{agent_id}/{channel}/{conversation_id}`, so citations
+reveal the agent name and channel. Keep that in mind for privacy-sensitive
+contexts.
 
-```json
-{
-  "schema_version": 2,
-  "wirken_version": "0.9.1",
-  "events": [
-    {
-      "id": 47,
-      "ts": "2026-04-29T12:34:56+00:00",
-      "actor_kind": "service",
-      "actor_id": "gateway",
-      "action": "orchestrator.push.refused",
-      "target": "orchestrator",
-      "channel": null,
-      "session": { "full": "" },
-      "detail": {
-        "reason": "principal_mismatch",
-        "expected": "uid:1000",
-        "actual": "uid:1001"
-      },
-      "hash": "..."
-    }
-  ]
-}
-```
+## Source references
 
-### `wirken audit verify --format json`
-
-For an intact chain with signed chain heads:
-
-```json
-{
-  "schema_version": 2,
-  "wirken_version": "1.2.0",
-  "result": "ok",
-  "rows_verified": 1234,
-  "sessions_total": 7,
-  "signed_heads_count": 24,
-  "unsigned_heads_count": 0,
-  "invalid_signatures_count": 0,
-  "sessions_with_no_signed_heads": 0,
-  "signing_key_ids_seen": ["a3f2..."],
-  "unsigned_tail_max_len": 12,
-  "require_signed": true
-}
-```
-
-`signed_heads_count` is the number of `ChainHead` rows whose Ed25519 signature verified. `unsigned_heads_count` is reserved for forward-compat (a future schema may admit unsigned heads) and is always `0` under schema 2. `invalid_signatures_count` is `0` in this `result: ok` shape: an invalid signature is a hard fail and surfaces as `signature_invalid`. `sessions_with_no_signed_heads` is the count of transition-era sessions; `--require-signed` hard-fails on these instead of reporting them. `signing_key_ids_seen` is the sorted list of distinct signing key ids; length > 1 indicates a key rotation across the verified window. `unsigned_tail_max_len` is the largest count of events past the last signed head observed across sessions; operators can use it to flag stale tails without failing the verify.
-
-For an empty log:
-
-```json
-{
-  "schema_version": 2,
-  "wirken_version": "1.2.0",
-  "result": "empty",
-  "require_signed": false
-}
-```
-
-For a broken chain (process exit code is `1`):
-
-```json
-{
-  "schema_version": 2,
-  "wirken_version": "1.2.0",
-  "result": "broken",
-  "session": {
-    "full": "assistant/webchat/abc123",
-    "agent": "assistant",
-    "channel": "webchat",
-    "id": "abc123"
-  },
-  "seq": 47,
-  "expected_hash": "...",
-  "actual_hash": "...",
-  "verified_count": 1180,
-  "require_signed": false
-}
-```
-
-For an invalid chain-head signature (process exit code is `1`):
-
-```json
-{
-  "schema_version": 2,
-  "wirken_version": "1.2.0",
-  "result": "signature_invalid",
-  "session": { "full": "assistant/webchat/abc123", "agent": "assistant", "channel": "webchat", "id": "abc123" },
-  "seq": 102,
-  "signing_key_id": "a3f2...",
-  "reason": "current_chain_hash claim ... does not match stored hash ... at seq 101",
-  "verified_count": 1500,
-  "invalid_signatures_count": 1,
-  "require_signed": false
-}
-```
-
-`reason` cites the specific check that failed. The verifier short-circuits on the first invalid signature, so `invalid_signatures_count` is always `1` in this result.
-
-For a missing chain head under `--require-signed` (process exit code is `1`):
-
-```json
-{
-  "schema_version": 2,
-  "wirken_version": "1.2.0",
-  "result": "missing_chain_head",
-  "session": { "full": "assistant/webchat/abc123", "agent": "assistant", "channel": "webchat", "id": "abc123" },
-  "rows": 240,
-  "verified_count": 1500,
-  "require_signed": true
-}
-```
-
-`verified_count` is the total number of events that verified before the break, summed across all sessions plus the per-session count up to (but not including) the breaking event in the broken session. Use this to scope what data downstream of the break can still be relied on.
-
-### Transition behaviour
-
-A log accumulated before chain-head signing was wired in has no `ChainHead` rows. Under default verify (no `--require-signed`), such sessions are counted in `sessions_with_no_signed_heads` and the verify exits zero. Under `--require-signed`, the same sessions surface as `missing_chain_head` and the verify exits `1`. Operators upgrading should run `wirken audit verify` first to see how many sessions are transition-era, then plan to enable `--require-signed` after the relevant retention window has rolled over to fully signed sessions.
-
-## Citing a session in published research
-
-The hash-chained audit log is designed to support reproducible-claim citation. The shape we recommend:
-
-1. Run `wirken audit verify --format json` and record the result. If `result == "ok"`, the chain at the moment of citation is provably intact.
-2. Run `wirken audit log --session <id> --format json` and archive the JSON alongside whatever artifact references it.
-3. Cite the session by its `full` id and reference the archived JSON. The `wirken_version` and `schema_version` fields in the archive let a future reader reproduce the exact output format.
-
-Note that session ids encode `{agent_id}/{channel}/{conversation_id}` as a prefix, which means citations reveal the agent name and channel. Keep this in mind for privacy-sensitive citation contexts.
+- Variants and serde shape: `crates/audit/src/session_log.rs:480-1701`.
+- Hash chain: `crates/audit/src/session_log.rs:3258-3263` (`chain_hex`).
+- Chain-head signing: `crates/audit/src/signing.rs:38-208`.
+- Alarm log: `crates/audit/src/alarm_log.rs:78-205`.
+- Halt-boundary gap: [gebruder/wirken#107](https://github.com/gebruder/wirken/issues/107).

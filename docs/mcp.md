@@ -90,25 +90,41 @@ The MCP server runs as a grandchild of the gateway, parented by `wirken-mcp-prox
 
 ### What a compromised MCP server can reach
 
-Protected (a compromised MCP server cannot reach these):
+Protected, because they live in the gateway process and are not reachable from
+an MCP child: provider API keys; the vault unwrap key, since
+`WIRKEN_VAULT_PASSPHRASE` is removed from `mcp-proxy`'s environ after
+`probe_keychain` reads it and `StdioTransport::spawn` calls `env_clear()`
+before adding back only allowlisted shell variables; the vault contents at
+rest, which are inert without that key; and adapter Ed25519 secrets, which
+stay in their own subprocesses.
 
-- **Provider API keys** (OpenAI, Anthropic, Bedrock, Tinfoil, Privatemode, …). They live in the gateway process memory and are used by the in-process agent.
-- **Vault unwrap key.** `WIRKEN_VAULT_PASSPHRASE` is removed from `mcp-proxy`'s environ after `probe_keychain` reads it on startup, and `StdioTransport::spawn` calls `env_clear()` before adding back only the allowlisted shell variables (`PATH`, `HOME`, locale + `XDG_*`, etc.). The MCP child's environ does not contain the passphrase.
-- **Vault contents at rest.** `~/.wirken/vault.db` is XChaCha20-Poly1305-encrypted. Without the unwrap key (above), the bytes are inert.
-- **Adapter Ed25519 secrets.** Each adapter's secret stays in its own subprocess; the gateway resolves them once at handshake.
+At risk, which is the operator's blast radius:
 
-At risk (the operator's blast radius if an MCP server is malicious or compromised):
+- **Operator UID filesystem.** Same UID as the gateway, so the child can read
+  or write anything the operator can, `audit.db` and the home directory
+  included. Byte-tampering of `audit.db` is detected by
+  `wirken sessions verify`, but the tamper happens and the detection is after
+  the fact.
+- **Operator UID network reach.** Outbound to any host the operator can
+  reach.
+- **Per-MCP credentials in `env`.** Anything in the `env` block is plaintext
+  in the child's environment, `vault:`-resolved secrets included. That is
+  operator design, not an inadvertent leak, but a compromised server reads its
+  own environ and gets those tokens.
+- **The server's declared tool surface.** Whatever it exposes to the LLM is
+  operator-trusted.
 
-- **Operator UID filesystem.** Same UID as the gateway. The MCP child can read/write anything the operator can: `~/.wirken/audit.db`, the operator's home directory, any path outside `~/.wirken/` they have access to. Direct byte-tampering of `audit.db` is detected by `wirken sessions verify` (the hash chain catches it), but the tamper happens; the detection is after the fact.
-- **Operator UID network reach.** Outbound to any host the operator can reach. Use a per-server `network` strategy if your MCP doesn't need that reach.
-- **Per-MCP credentials in `env`.** Anything passed in via `mcp.json`'s `env` block is plaintext in the MCP child's environment — including `vault:`-resolved secrets. This is by operator design (you listed it), not an inadvertent leak. A compromised MCP server reads its own `env` and gets these tokens.
-- **The MCP server's declared tool surface.** Whatever tools the MCP server exposes to the LLM are operator-trusted. A compromised filesystem-MCP server gives the LLM file ops within its bind-mount; a compromised git-MCP server gives the LLM `git` operations on its checkout.
+**This is not a sandbox.** There is no `cap_drop`, seccomp filter, namespace,
+gVisor or Wasm runtime around the MCP child. The `exec` tool runs in a
+container ([sandbox-properties.md](sandbox-properties.md)); MCP servers do
+not. For a server that does not need the operator's network reach, run
+`wirken-mcp-proxy`, or the whole gateway, inside a network-namespaced
+container or a `firejail` profile.
 
-### What the operator should do
-
-- Treat each MCP server like a third-party CLI. Audit the source (or the `npx @org/package` provenance) before adding it to `mcp.json`.
-- Use a per-server `env` block to pass only the credentials that server actually needs. Don't dump shared secrets across multiple MCP servers.
-- For MCP servers that don't need the operator's network reach, run `wirken-mcp-proxy` (or the operator's whole gateway) inside a network-namespaced container or a `firejail` profile. Wirken does not yet ship per-MCP-server sandboxing — see the next section.
+Treat each server like a third-party CLI: audit the source or the `npx`
+package provenance before adding it, and use a per-server `env` block carrying
+only the credentials that server needs rather than dumping shared secrets
+across several.
 
 ### Signing MCP entries
 

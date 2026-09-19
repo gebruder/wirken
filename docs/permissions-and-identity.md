@@ -122,30 +122,33 @@ This is a real gap if the deployment uses one shared agent across a team. Workar
 
 ### Sub-agent ceilings
 
-When a parent agent is allowed to spawn a child via `spawn_subagent`, the parent's registration declares a `SubagentCeiling` per allowed child:
+A parent's registration declares a `SubagentCeiling` per allowed child (tool
+allowlist, max permission tier, max rounds, max runtime), which the LLM cannot
+widen. The ceiling and the `spawn_subagent` flow are owned by
+[multi-agent.md](multi-agent.md#sub-agent-orchestration).
 
-- `tool_allowlist`: child only sees tools in this list. Intersected with whatever the LLM passes in the spawn call. Anything outside is dropped.
-- `max_permission_tier`: child's tools above this tier are auto-denied. No interactive approval flow (children run headless).
-- `max_rounds`: max LLM rounds before the parent reports `rounds_exceeded`.
-- `max_runtime_secs`: wall-clock timeout.
+What belongs here is the gate's half. The gate takes the session id and the
+logical agent id as separate arguments: session-scoped grants key on the
+session, persisted grants key on the agent. A child's session id is its
+parent's with a `#sub-N` suffix and its agent id is whatever config it was
+woken as, so neither kind of grant reaches it from its caller.
 
-The LLM cannot widen these caps. The parent's harness intersects, clamps, and enforces. Configure via:
+This used to be one argument. The runtime passed its session id and the store
+recovered an agent from it by taking the prefix before the first `/`, which
+for a child is the parent's agent id. A child was therefore checked against
+its caller's persisted grant set, and its own configured agent id never
+reached the store. The tier ceiling narrowed that but did not close it: a
+ceiling of `tier2` still admitted every Tier 2 grant the parent held.
 
-```bash
-wirken agents allow-subagent parent child --tools "read_file,web_search" --max-tier tier1 --max-rounds 5 --max-runtime 30
-```
+Grants do not compose in the other direction either. A child's grant applies
+to the child alone, and a parent gains nothing from what its children are
+allowed. There is no intersection logic; each agent is checked against itself.
 
-The ceiling is stored as JSON in the `agents.allowed_subagents` column.
-
-#### A child runs on its own grants, not its caller's
-
-The permission gate takes the session id and the logical agent id as separate arguments. Session-scoped grants are keyed on the session; persisted grants are keyed on the agent. A child's session id is its parent's with a `#sub-N` suffix and its agent id is whatever config it was woken as, so neither kind of grant reaches it from its caller.
-
-This used to be one argument. The runtime passed its session id and the store recovered an agent from it by taking the prefix before the first `/`, which for a child is the parent's agent id. A child was checked against its caller's persisted grant set, and its own configured agent id never reached the store. The tier ceiling narrowed that but did not close it: a ceiling of `tier2` still admitted every Tier 2 grant the parent held. Issue #242.
-
-Grants do not compose in the other direction either. A child's grant applies to the child alone; a parent gains nothing from what its children are allowed. There is no intersection logic, and none is planned until a case calls for it: each agent is checked against itself.
-
-An agent that was never told which logical agent it is gets no persisted grants and prompts for every Tier 2 action. That is the safe direction, and it means a caller building an agent directly must name it (`set_agent_id`) before attaching a permission store. The factory does this at wake for every agent it produces, sub-agents included.
+An agent that was never told which logical agent it is gets no persisted
+grants and prompts for every Tier 2 action. That is the safe direction, and it
+means a caller building an agent directly must name it (`set_agent_id`) before
+attaching a permission store. The factory does this at wake for every agent it
+produces, sub-agents included.
 
 ### Org-level tool policy
 
@@ -160,32 +163,22 @@ Each adapter runs in its own OS process with a distinct ed25519 IPC identity. A 
 
 Process isolation is not credential ACL. The vault itself does not enforce per-process access: a process with access to `~/.wirken/vault.db` and the device key can retrieve any credential by name. The isolation is that adapters are spawned with a narrow retrieval pattern (only entries named `{channel}-*`) and run under the wirken daemon's boundary.
 
-## Planned
+## Downstream identity
 
-These items are not implemented. They are documented here so deployers can plan around them. No timeline is promised.
+The gateway acts on a downstream system through a connector identity: a
+service account, an API key, a vault-held credential. The downstream sees that
+identity and not the person whose message set the action in motion, so it
+cannot apply that principal's authorization or record who really acted.
 
-### Per-user permission scoping
+Attribution on Wirken's own chain is closed: `sender_id` rides the LLM call
+boundary, so `LlmRequest` and `LlmResponse` carry the platform-side sender
+alongside the inbound and tool-facing rows that already did. It is `None` for
+operator-originated sessions (CLI, cron, subagent recursion), never an empty
+string. Nothing on the wire to the provider carries it.
 
-Permission approvals would key on `(action_key, agent_id, principal_id)`, where `principal_id` is a Wirken-internal identifier that the platform sender id resolves to. Alice approving `shell:kubectl *` would not approve it for Bob.
+## Identity scope
 
-Open design questions: how the principal is named (platform id, an internal UUID, both), how a new sender on a channel is introduced, how revocation propagates.
-
-### Per-channel scoping within an agent
-
-Permission approvals would key on `(action_key, agent_id, channel)`. An agent bound to both `slack` and `matrix` would not have its Slack approvals leak to Matrix.
-
-### Role-based access control
-
-Named roles (`admin`, `approver`, `user`) with per-role tier caps. Admin users could approve Tier 3 actions on behalf of others without triggering an interactive prompt for every invocation.
-
-### Platform-to-principal identity mapping
-
-A configurable mapping from `(channel, platform_id)` to an internal principal. For example, `(slack, U04ABCD9)` and `(matrix, @alice:example.com)` both resolve to principal `alice`. Permissions and audit records would be attributed to `alice` across channels.
-
-### Attestation workflow
-
-`SessionEvent::Attestation` already carries an ed25519 signature over the per-session chain head. Two pieces are not yet in place: a CLI command to emit attestations on a schedule, and a documented external verifier workflow against a published signing key.
-
-### IdP / SSO integration
-
-Not planned in the short term. Wirken is not an IdP and is not intended to become one.
+Wirken is not an identity provider. It issues no identities, manages no user
+accounts, and has no login flow. There is no SAML, no OIDC, no SCIM. Platform
+sender identity is recorded on every inbound audit event and is not an
+identity Wirken authenticates.

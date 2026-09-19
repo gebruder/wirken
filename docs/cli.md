@@ -1,26 +1,22 @@
-# CLI Reference
+# CLI reference
+
+Command surface only. Mechanisms live on their owning pages and are linked
+rather than restated.
 
 ## wirken setup
 
-Interactive setup wizard. Configures AI provider, messaging channels, and optionally installs as a system service.
-
-```
-wirken setup [OPTIONS]
-```
+Interactive wizard: provider, channels, credentials, service, sandbox, audit.
 
 | Option | Description |
 |--------|-------------|
 | `--install-service` | Install as a systemd (Linux) or launchd (macOS) service |
 | `--uninstall-service` | Remove the system service |
-| `--org <URL>` | Pull provider, SIEM, MCP, and permission config from a company endpoint |
+| `--org <URL>` | Pull provider, SIEM, MCP and permission config from a company endpoint. See [enterprise.md](enterprise.md) |
 
 ## wirken run
 
-Start wirken. Spawns adapter processes, starts WebChat, and accepts connections.
-
-```
-wirken run [OPTIONS]
-```
+Starts the gateway. Spawns adapter processes, serves WebChat, accepts
+connections.
 
 | Option | Description |
 |--------|-------------|
@@ -28,203 +24,249 @@ wirken run [OPTIONS]
 
 ## wirken ask
 
-Send a message directly to an agent and print the response. No channel setup needed.
+Send a message to an agent and print the response. No channel setup needed.
 
-```
-wirken ask -m "your message"
+```bash
+wirken ask -m "your message" [--agent <AGENT>]
 ```
 
-| Option | Description |
-|--------|-------------|
-| `-m, --message <MESSAGE>` | The message to send (required) |
-| `--agent <AGENT>` | Agent ID (default: "default") |
+`--persona` is an interchangeable alias for `--agent`; every persona is an
+`AgentConfig` row keyed by its name. Default: `default`.
+
+When stdin is a terminal, an approval gate prompts for Tier 3 actions and
+reads one line: `y` or `yes` approves, anything else denies, and text after a
+space is recorded as the denial reason. A piped or redirected `wirken ask`
+gets no gate and short-circuits with a terminal deny, so a script does not
+hang on a prompt nobody will answer. `WIRKEN_ASK_APPROVAL_TIMEOUT_S` sets the
+read deadline (default 60).
 
 ## wirken channel
 
-Manage messaging channels.
-
-```
+```bash
 wirken channel add <CHANNEL>     # telegram, discord, slack, teams, matrix,
                                  # signal, google-chat, imessage, whatsapp
 wirken channel list
 wirken channel remove <CHANNEL>
 ```
 
-The `add` command prompts for the channel's primary token (and Slack's app token). Channels that need additional fields (Teams app ID, Matrix homeserver/username, Signal phone, BlueBubbles password, WhatsApp phone-number-id/verify-token/app-secret) are wired up by `wirken setup`'s per-channel sub-flows. WhatsApp's setup flow is interactive and collects the four Cloud API credentials (access token, phone number ID, verify token, app secret); see [WhatsApp channel docs](channels/whatsapp.md) for the vault entries it writes.
-
-> **Signal is Linux/macOS only.** The Signal adapter requires a Unix-domain socket to a local `signal-cli` daemon and is excluded at compile time on the Windows build. See [docs/channels/signal.md](channels/signal.md) and [docs/windows.md](windows.md).
+Per-channel prompts, vault entries and limits: [channels.md](channels.md).
 
 ## wirken agents
 
-Manage multi-agent configurations. Each agent can have its own model, API key, workspace, and channel bindings.
-
-```
-wirken agents add                       # interactive wizard
+```bash
+wirken agents add                        # wizard, or --id/--provider/--model for scripted use
 wirken agents list
 wirken agents remove <ID>
-wirken agents bind <AGENT> <CHANNEL>    # route a channel to an agent
+wirken agents bind <AGENT> <CHANNEL>
+wirken agents set <ID> [--model M] [--base-url U] [--tools-enabled true|false|auto] [--api-key]
+wirken agents set-egress <ID> --channel C --mode none|allowlist|open [--domains "a,b"]
+wirken agents allow-subagent <PARENT> <CHILD> [--tools T] [--max-tier tier1|tier2|tier3]
+                                              [--max-rounds N] [--max-runtime S]
+wirken agents deny-subagent <PARENT> <CHILD>
 ```
+
+`--api-key` prompts for the value rather than taking it on the command line,
+so it does not reach shell history or the process table. Defaults for
+`allow-subagent`: no tools, `tier1`, 5 rounds, 30s. See
+[multi-agent.md](multi-agent.md) and [egress.md](egress.md#sandbox-egress).
+
+## wirken persona
+
+Operator-facing bundle of an agent config plus an optional preset. See
+[multi-agent.md](multi-agent.md#personas).
+
+```bash
+wirken persona create <NAME> [--preset P] [--provider P] [--model M] [--base-url U]
+                             [--credential C] [--channel C]... [--allow-subagent A]...
+wirken persona list
+wirken persona show <NAME>
+wirken persona edit <NAME> (--preset P | --clear-preset) [--provider P] [--model M]
+                           [--base-url U] [--credential C] [--channel C]... [--display-name D]
+wirken persona delete <NAME>
+```
+
+`edit` requires at least one field flag. `--preset` and `--clear-preset` are
+mutually exclusive. `delete` leaves the workspace and per-agent skill
+directories on disk.
+
+## wirken preset
+
+```bash
+wirken preset list
+wirken preset install <NAME>
+wirken preset schedule <NAME>      # daily cron entry for the preset's orchestrator
+wirken preset unschedule <NAME>
+```
+
+Schedule and unschedule are Linux and macOS only.
 
 ## wirken skills
 
-Search, install, and manage skills.
-
-```
+```bash
 wirken skills search <QUERY>
 wirken skills install <NAME>
 wirken skills list
-wirken skills sign <DIR>         # sign a skill with Ed25519
-wirken skills verify <DIR>       # verify a skill's signature
+wirken skills sign <DIR> [--root-key <OFFLINE_ROOT_SEED>]
+wirken skills verify <DIR> [--strict]
+wirken skills trust-root <PUBKEY_HEX>
+wirken skills migrate [PATH] [--dry-run]
+```
+
+`--strict` on `verify` treats a self-signed bundle as a failure and exits 1.
+`trust-root` installs an operator root so the loader requires delegation.
+`migrate` rewrites deprecated `metadata.openclaw.*` keys, backing each file up
+first. See [signing.md](signing.md#skill-signing) and [skills.md](skills.md).
+
+## wirken mcp
+
+```bash
+wirken mcp authorize <SERVER> [--scope ID]... | [--no-scopes] | [--all-scopes]
+wirken mcp sign <SERVER>
+wirken mcp verify [<SERVER>]
+```
+
+See [mcp.md](mcp.md) and [credentials.md](credentials.md).
+
+## wirken hooks
+
+```bash
+wirken hooks register <ID> <PUBKEY_HEX> --type <observe|veto|egress>
+```
+
+See [enforcement-model.md](enforcement-model.md#veto-and-egress-hooks) and
+[siem-forwarder.md](siem-forwarder.md#observe-hook).
+
+## wirken approvers
+
+Channel-adapter approver allowlist and per-adapter approval chat.
+
+```bash
+wirken approvers add <ADAPTER_ID> <USER_ID> [--display NAME]
+wirken approvers list [--adapter A]
+wirken approvers remove <ADAPTER_ID> <USER_ID>
 ```
 
 ## wirken cron
 
-Manage scheduled cron jobs. Jobs send a message to an agent on a schedule.
-
-```
-wirken cron create <SCHEDULE> <MESSAGE> [OPTIONS]
-wirken cron list [--agent <ID>]
-wirken cron delete <JOB-ID>
-wirken cron pause <JOB-ID>
-wirken cron resume <JOB-ID>
+```bash
+wirken cron create <SCHEDULE> <MESSAGE> [--agent A] [--description T]
+wirken cron list [--agent A]
+wirken cron delete|pause|resume <JOB-ID>
 ```
 
-| Option | Description |
-|--------|-------------|
-| `--agent <AGENT>` | Agent to run the job (default: "default") |
-| `--description <TEXT>` | Description of the job |
-
-Schedule format is standard 6-field cron: `sec min hour day month weekday`. Examples:
-- `0 0 9 * * *` every day at 9:00 AM
-- `0 */30 * * * *` every 30 minutes
-- `0 0 0 * * Mon` every Monday at midnight
+Standard 6-field cron: `sec min hour day month weekday`. `0 0 9 * * *` is
+daily at 09:00, `0 */30 * * * *` every 30 minutes, `0 0 0 * * Mon` Mondays at
+midnight.
 
 ## wirken audit
 
-Query and verify the audit log.
-
-```
+```bash
 wirken audit log [OPTIONS]
-wirken audit verify
-wirken audit verify-attestations [--agent <AGENT>]
+wirken audit verify [--require-signed] [--anchor HEX_OR_PATH]... [--format human|json]
+wirken audit verify-attestations [--agent AGENT]
+wirken audit acknowledge --all
 ```
 
-`verify-attestations` checks every attestation signature in the log against the **configured identity** of the agent whose session it is, read from `{data_dir}/agents/<id>/identity.pub`. The key is never taken from the attestation row. A row naming its own signer and checked against that same key establishes only that the row is internally consistent, which is true of any row an attacker writes; pinning to a configured identity is what makes the signature say *who*. The row's `signer_pubkey` is still checked, against the configured key, and a mismatch is the failure.
-
-Each session's agent is resolved from its id, except a sub-agent session, whose id names its parent and whose own `SubagentSessionBound` row names the agent it was woken as. `--agent <AGENT>` pins every session to one agent's identity instead, which is the question to ask when a log arrives from elsewhere: is this signed by that agent's key.
-
-An agent with no identity on disk has attestation disabled, so its sessions carry signatures only if they were written when one existed. Those are reported as **unpinned** under their own count and exit `6`: the signatures are real and nothing here can say whose. That is distinct from a verification failure, which exits `1`.
-
-| Option | Description |
-|--------|-------------|
-| `--action <ACTION>` | Filter by action type (e.g., "exec", "credential.access") |
-| `--channel <CHANNEL>` | Filter by channel |
-| `-n, --limit <N>` | Number of events to show (default: 50) |
-
-`audit verify` checks the SHA-256 hash chain for tamper detection.
+Flags, exit codes, JSON schema and what each verification proves:
+[audit-cli.md](audit-cli.md).
 
 ## wirken sessions
 
-Manage and verify conversation sessions.
-
-```
-wirken sessions list [--channel <CHANNEL>]
+```bash
+wirken sessions list [--channel C] [--parent SESSION_ID]
 wirken sessions close <SESSION-ID>
-wirken sessions verify <SESSION-ID>
+wirken sessions verify <SESSION-ID> [--strict] [--with-parent]
 ```
 
-`verify` replays the session log, re-checks per-session hash chain integrity, recomputes message hashes at each LlmRequest event, and re-executes deterministic tools (read_file, list_files) against the current workspace. Reports events as verified, unverifiable, or divergent.
-
-### What a tools_hash attests
-
-Each `LlmRequest` row records a `tools_hash` over the tools the model was offered, and a `tools_hash_version` naming the rules it was computed under. `verify` recomputes each row under its own version, so a session recorded under older rules is not re-judged against rules that postdate it.
-
-| Version | Covers | Does not cover |
-| --- | --- | --- |
-| `v1` | Base tools, MCP definitions, wasm skill definitions, the phase tools, filtered by the per-skill permission profile. | `spawn_subagent`, so a configured sub-agent ceiling was outside the attestation. The sub-agent `restrict_tools` clamp, so a child's narrowed tool set was outside it too. |
-| `v2` | Everything `v1` covers, plus `spawn_subagent` when a ceiling is configured, plus the `restrict_tools` clamp. One builder produces both the offered set and the recomputation, so the hash attests exactly what the model saw. |  |
-
-Rows written before the version field existed read as `v1`, which is what they are. Nothing rewrites a stored row.
-
-A sub-agent session (`{parent}#sub-N`) verifies on its own. At spawn the child writes a `SubagentSessionBound` row on its own chain, before its first `LlmRequest`, naming the agent it was woken as and the tool set its parent's ceiling narrowed it to. `verify` reads the agent and the clamp from that row and prints which agent it resolved. The parent's chain is never opened; a child session verifies clean even when the parent's session is not present at all.
-
-The parent's `SubagentSpawned` row is unchanged and records the same grant from the parent's side. The two are independent records, and `--with-parent` compares them:
-
-```
-wirken sessions verify '<agent>/<channel>/<conv>#sub-0' --with-parent
-  parent cross-check:  OK (agrees with '<agent>/<channel>/<conv>')
-```
-
-It reads the parent named on the child's own row, finds that chain's `SubagentSpawned` row for this child session, and compares the agent id, the granted tool set, and the permission-tier cap. Granted tools are compared as a set, since order is not meaningful on either side. `offered_tools` is deliberately not compared: it is the granted set after the per-skill profile filter, so it is a subset rather than an equal, and asserting equality would report a disagreement every time a profile did its job.
-
-A parent spawn row written before the tier was recorded there cannot be compared on that field, and the output says so rather than letting absence read as agreement.
-
-Without the flag nothing opens the parent's chain, and the single-session checks are identical either way.
-
-What a disagreement means is worth knowing before acting on one. Both rows sit inside per-session hash chains, so neither can be edited after the fact without breaking its own chain, and `verify` checks those chains separately. A disagreement is therefore not a tampered row. It is either the spawn path writing two different values, or two chains that do not belong together being presented as a pair, which is what a spliced audit trail looks like. A missing spawn row on the named parent (`NO MATCHING SPAWN ROW`) is the same class of finding.
-
-Exit codes: `3` broken chain, `1` divergences, `2` unverifiable under `--strict`, `5` cross-check disagreement. The last is its own code because a cross-chain disagreement is a different finding from a divergence inside one chain.
-
-### Reproducing a disagreement
-
-Worth knowing if you ever need to exercise this, and worth knowing because it is the clearest statement of what the check is for: you cannot produce a cross-check failure by editing a row. Every row sits inside a per-session hash chain. Change one and that session's own chain breaks, `verify` reports `chain: BROKEN` and exits `3`, and the cross-check never runs. An edited row is caught one layer earlier, by the check that was already there.
-
-What `--with-parent` exists for is the case the single-session checks cannot see: two chains that are each internally valid and do not belong together. Producing that takes two real runs rather than an edit. Record one, record a second differing in the ceiling, then move the second run's child-session rows verbatim, hashes included, into the first run's log in place of its own child rows. Both chains still verify, because each was written by a real run; what is false is the pairing.
-
-That is the shape of a spliced audit trail, where a child session from one run is offered as evidence for a spawn in another. Every single-session check passes, because every single-session check is answerable from one chain, and whether two chains belong together is not a question one chain can answer.
-
-A session whose id has the sub-agent shape but carries no binding row arises two ways: a chain written before the row existed, or one where the row is missing because the write failed or the chain was truncated. Either way the ceiling it ran under is unrecoverable, and the two things you can do with such a session want opposite handling.
-
-**Running it.** A live-purpose wake clamps to `tier1` with an empty tool set and logs at `error`. No daemon path re-addresses an existing `#sub-N` session today, so this is reached through `AgentFactory::wake` rather than by a running daemon on its own. That is deliberately unusable: the child cannot be resumed under its original ceiling, because that ceiling is not recorded on it, and running it under a guessed one is worse than not running it. Respawn the child from its parent instead.
-
-**Verifying it.** `verify` does not clamp and does not recompute a ceiling. Inventing one would have the recomputation attest a tool set the verifier chose rather than one the session recorded. Instead the `tools_hash` on those rows is left unchecked and the report prints a `tools not attestable` count next to the `tools_hash v1 rows` count. Everything else about the session, the chain, the message hashes, the deterministic tool replays, still verifies normally. A clean report carrying a non-zero `tools not attestable` count says nothing at all about which tools that session offered.
-
-Nesting depth comes from the id in both cases, which carries one `#sub-` per level.
-
-When a report covers any `v1` rows it prints a `tools_hash v1 rows` line with the count and says what those rows do not attest. A clean verify over `v1` rows is a narrower claim than a clean verify over `v2` rows, and the difference is exactly the sub-agent ceiling and clamp.
+What `verify` replays and what a `tools_hash` attests:
+[audit-cli.md](audit-cli.md#wirken-sessions-verify).
 
 ## wirken permissions
 
-Manage tool approval records.
-
+```bash
+wirken permissions list [--agent A]
+wirken permissions approve <KEY> [--agent A] [--session ID] [--expires-in-days N]
+wirken permissions revoke <KEY> [--agent A]
+wirken permissions list-pending [--agent A]
+wirken permissions pending list
+wirken permissions pending show <REQUEST_ID>
+wirken permissions pending approve <REQUEST_ID>
+wirken permissions pending deny <REQUEST_ID> [REASON]
 ```
-wirken permissions list [--agent <AGENT>]
-wirken permissions approve <KEY> [--agent <AGENT>] [--session <SESSION_ID>] [--expires-in-days <DAYS>]
-wirken permissions revoke <KEY> [--agent <AGENT>]
-```
 
-Only Tier 2 action keys can be approved: a shell verb on the Tier 2
-allowlist, `file:<path>`, or `cross-conversation`. Tier 1 is allowed
-without a stored grant and Tier 3 prompts on every use, so a stored row
-for either would never be read by the gate.
-
-`--expires-in-days` overrides the window for one grant. Without it a
-persisted grant takes `default_expiry_days` from
-`~/.wirken/permissions.json`, which defaults to 30. The flag is refused
-alongside `--session`: a session grant is cleared on session end and
-carries no window.
+`list-pending` walks the audit log for historical denials with no matching
+approval. The `pending` subgroup operates on the gateway's in-memory queue of
+in-flight requests and resumes the awaiting agent task; ids accept any prefix
+unique to one row. Which keys are storable, and the grant window:
+[permissions-and-identity.md](permissions-and-identity.md).
 
 ## wirken credentials
 
-Manage encrypted credentials in the vault.
-
-```
-wirken credentials list      # metadata only, no secrets shown
-wirken credentials add <NAME> [--stdin | --value-file FILE] [--host HOST]...
+```bash
+wirken credentials list
+wirken credentials add <NAME> [--channel C] [--stdin | --value-file FILE] [--host HOST]...
 wirken credentials rotate <NAME> [--stdin | --value-file FILE]
 wirken credentials show <NAME>
 wirken credentials remove <NAME>
+wirken credentials rescope <NAME> [--scope ID]... | [--no-scopes] | [--all-scopes]
 ```
 
-Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when
-it is set and prompts only when it is not. With the variable set and the
-value supplied by `--stdin` or `--value-file`, `add` and `rotate` complete
-with no terminal.
+Every verb takes the vault passphrase from `WIRKEN_VAULT_PASSPHRASE` when set
+and prompts only when it is not, so `add` and `rotate` complete with no
+terminal. `--host` binds a credential to hosts `http_request` may send it to;
+see [egress.md](egress.md#credential-host-binding). Scopes and redaction:
+[credentials.md](credentials.md).
+
+## wirken vault
+
+```bash
+wirken vault reset
+```
+
+Destroys the device key and all stored credentials. Used after a forgotten
+passphrase, where the vault refuses to overwrite a keychain it cannot unwrap.
+Requires typing `reset`.
+
+## wirken zirkel
+
+```bash
+wirken zirkel run
+wirken zirkel bind --channel C --conversation ID [--agent A] [--force]
+wirken zirkel unbind [--agent A]
+wirken zirkel status
+wirken zirkel auth-set --source SOURCE
+wirken zirkel auth-list
+wirken zirkel calibrate [--run-id R] [--buckets N] [--by overall|source|keyword]
+```
+
+See [zirkel.md](zirkel.md).
+
+## wirken lyrik
+
+```bash
+wirken lyrik run --target DIR --run RUN_ID [--use-fixture FINDINGS_JSON]
+wirken lyrik report [--format sarif] (--findings PATH | --run RUN_ID) --output PATH
+wirken lyrik validate --path PATH
+```
+
+See [lyrik.md](lyrik.md).
+
+## wirken import
+
+```bash
+wirken import <ARCHIVE> [--sealed]
+```
+
+`--sealed` declares the source account closed; a sealed source imports once
+and refuses afterwards, and there is no unseal. See
+[imported-archives.md](imported-archives.md).
 
 ## wirken doctor
 
-Run diagnostics. Checks provider config, vault access, adapter registration, and Docker availability.
-
-```
+```bash
 wirken doctor
 ```
+
+Checks the data directory, provider config, vault access, adapter registry,
+MCP signing, the audit log and its alarm log, the attestation chain across all
+sessions, Docker, and gVisor.

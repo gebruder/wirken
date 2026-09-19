@@ -7,7 +7,7 @@ Wirken runs natively on Windows 11 (x86_64). The Windows binary uses named pipes
 Wirken targets a researcher / single-user-workstation profile on Windows. The Linux/macOS builds support more deployment shapes; the Windows build deliberately scopes down to what a single user actually needs:
 
 - **`mode: off` is a viable default.** The host-exec path runs through a configured shell (see [Shell choice](#shell-choice) below). Docker Desktop is supported but not required; the configurable sandbox is on the same code path as Linux/macOS.
-- **Vault uses an age-encrypted file.** Keys are stored in `%USERPROFILE%\.wirken\keychain\` and unlocked with a passphrase. Native Credential Manager / DPAPI integration is on the roadmap; the age-file backend is portable across machines if you keep the passphrase.
+- **Vault uses an age-encrypted file.** Keys are stored in `%USERPROFILE%\.wirken\keychain\` and unlocked with a passphrase. The age-file backend is portable across machines if you keep the passphrase.
 - **Zirkel's orchestrator digest push is Linux/macOS only.** After a successful `wirken zirkel run`, the digest is delivered to the bound channel over the orchestrator push socket, a same-user JSON-line trust boundary that has no analog on Windows. On Windows the run completes and reports the push as skipped; the rest of zirkel works.
 - **The Signal adapter is Linux/macOS only.** It connects to `signal-cli`'s unix-domain socket, which doesn't exist on Windows. The other channel adapters (Telegram, Discord, Slack, Teams, Matrix, WhatsApp, Google Chat) work.
 - **Service install is Unix-only.** `wirken setup --install-service` installs the systemd (Linux) or launchd (macOS) unit; there is no Windows equivalent. Run wirken manually, or schedule it via Task Scheduler.
@@ -31,7 +31,7 @@ Download the latest release binary from [github.com/gebruder/wirken/releases](ht
 2. Open a terminal in the folder containing `wirken.exe`.
 3. Run `.\wirken.exe setup` to configure, then `.\wirken.exe run` to start wirken.
 
-The binary is unsigned. On first run, Windows SmartScreen will warn that the publisher is unverified; click "More info" then "Run anyway". This is expected. Code signing is on the roadmap.
+The binary is unsigned. On first run, Windows SmartScreen will warn that the publisher is unverified; click "More info" then "Run anyway". This is expected: the binary carries no Authenticode signature.
 
 Optional: place `wirken.exe` somewhere on your `PATH` (e.g. `%USERPROFILE%\bin\`) so subsequent commands can use plain `wirken setup` / `wirken run`.
 
@@ -77,7 +77,7 @@ Wirken prints the resolved shell at startup:
 
 Wirken sets `0o600` on its key files (vault device key, agent identity, signing keys) on Linux/macOS. Windows does not have a direct equivalent; the keys are written without ACL tightening and rely on the user-profile isolation of `%USERPROFILE%`. Wirken emits a `tracing::warn!` on each such write so the posture is visible.
 
-If your threat model requires owner-only ACLs on these files, set them manually with `icacls` or PowerShell after first run. Native ACL-on-write is on the roadmap.
+If your threat model requires owner-only ACLs on these files, set them manually with `icacls` or PowerShell after first run.
 
 ## Citing a session in research
 
@@ -109,10 +109,10 @@ The audit log is the artifact that makes a Wirken-driven research workflow audit
 
 ## Troubleshooting
 
-**SmartScreen blocks the binary on first run.** Expected. Click "More info" → "Run anyway". Code signing is on the roadmap.
+**SmartScreen blocks the binary on first run.** Expected; the binary is unsigned. Click "More info" then "Run anyway".
 
 **`exec` tool says "no shell found."** No `sh`, `powershell`, or `cmd` resolved. Install Git for Windows (recommended) or pin `"shell": "cmd"` in `sandbox.json`.
 
-**Vault prompts for a passphrase every restart.** Expected — the age-file backend uses a user-provided passphrase. Native Credential Manager integration is on the roadmap.
+**Vault prompts for a passphrase every restart.** Expected: the age-file backend uses a user-provided passphrase.
 
 **Audit log integrity check fails after a crash.** SQLite WAL recovery should handle clean crashes; if you see `BROKEN` from `wirken audit verify`, that's a tampering signal, not a crash artifact. Open an issue with the failing session ID and seq.

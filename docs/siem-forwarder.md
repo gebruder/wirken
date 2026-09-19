@@ -1,91 +1,312 @@
-# SIEM forwarder
+# Getting the chain out
 
-Wirken pushes audit events to an operator-configured SIEM endpoint over HTTPS. Two pipes run in parallel: a legacy pipe carrying `AuditEvent` flat-tuple rows, and a typed pipe carrying `SessionEvent` rows polled from `session_events`. Both pipes share one `SiemConfig`; the typed pipe is opt-in.
+Four ways an out-of-process consumer reads the audit chain: two SIEM pipes
+over HTTPS, an observe hook over local IPC, and an OpenTelemetry projection.
+All four read the same source events. The chain itself is owned by
+[audit-cli.md](audit-cli.md).
 
-The webhook target documented here is one of two subscription surfaces for external consumers; for a same-UID consumer the observe-hook IPC pipe in [`external-consumers.md`](external-consumers.md) carries the same `SessionEvent` payloads under an Ed25519 handshake.
+The local hash-chained log stays primary. Every surface here is additive to
+it, not a replacement: `wirken sessions verify` verifies the chain and the
+Ed25519 attestation offline, independent of any consumer.
 
-## Two pipes
+## Choosing a surface
 
-### Legacy pipe
+| | Observe hook (IPC) | Webhook and SIEM targets (HTTPS) |
+|---|---|---|
+| Transport | Cap'n Proto over Unix domain socket, or a named pipe on Windows | HTTPS POST out from wirken |
+| Authentication | Ed25519 challenge-response; the hook holds the keypair | Optional HMAC-SHA-256 over the request body |
+| Direction | Pull; the consumer drives the cursor | Push; wirken polls `session_events` and posts batches |
+| Replay control | Consumer-held `sinceSeq` per session | One global cursor over `session_events.id`, one indexed range query per poll across all sessions |
+| Co-location | Must run at the wirken UID | Anywhere reachable from the gateway |
+| Filtering | None; the hook receives every event in every session it tails | The default-forward variant set, overridable |
 
-The `AuditWriter`'s flush loop batches `AuditEvent` rows every 50 ms or every 100 events and forwards each batch to the configured target. Always on when any endpoint is configured in `siem.json`. Carries gateway-level events (`gateway.start`, adapter handshake records, MCP proxy registration, permission denials, `audit.chain_broken`, etc.).
+Pick the hook for a same-UID consumer that wants Ed25519 authentication,
+pull-based backpressure and cursor-driven replay. Pick the webhook for a cloud
+SIEM that cannot run a local connector at the wirken UID.
 
-Source: `crates/audit/src/writer.rs:591-704` (`flush_loop`), `crates/audit/src/siem.rs:178-261` (per-target forward).
+**Neither defends against a same-UID attacker.** The hook's secret key is a
+file on disk at the wirken UID and the HMAC secret lives in `siem.json` at the
+same UID; whoever can read those can produce indistinguishable subscription
+clients. Detecting mid-stream tampering means verifying the chain offline, not
+trusting the wire.
 
-### Typed pipe
+## The two SIEM pipes
 
-A polling worker forwards new `session_events` rows to the typed transport. Each pass is a single indexed sweep (`SqliteSessionLog::get_events_after`) for rows past a global `session_events.id` cursor, across all sessions, so poll cost does not scale with session count. Opt-in: spawned only when at least one of the following is set in `siem.json`:
+Both share one `SiemConfig` in `<data_dir>/siem.json`. The typed pipe is
+opt-in.
 
-- `typed_forwarding_enabled: true` (explicit opt-in to the default forwardable-variant set).
-- `typed_include_variants` (operator-provided allowlist).
-- `typed_exclude_variants` (operator-provided denylist over the default set).
-- `sentinel_typed` (Sentinel parallel-pipe configuration).
+**Legacy pipe.** The `AuditWriter` flush loop batches `AuditEvent` rows every
+50 ms or every 100 events and forwards each batch. Always on when any endpoint
+is configured. Carries gateway-level events: `gateway.start`, adapter
+handshake records, MCP proxy registration, permission denials,
+`audit.chain_broken`. Source: `crates/audit/src/writer.rs:591-704`,
+`crates/audit/src/siem.rs:178-261`.
 
-`typed_forwarding_enabled: false` is an explicit off switch that overrides every other typed field; the worker is not spawned even when those are set. Use this to test the legacy-only path against a `siem.json` that already has the typed fields populated.
+**Typed pipe.** A polling worker forwards new `session_events` rows. Each pass
+is one indexed sweep (`get_events_after`) for rows past a global cursor across
+all sessions, so poll cost does not scale with session count. Spawned only
+when at least one of these is set: `typed_forwarding_enabled: true`,
+`typed_include_variants`, `typed_exclude_variants`, or `sentinel_typed`.
+`typed_forwarding_enabled: false` is an explicit off switch that overrides
+every other typed field, so the legacy-only path can be tested against a
+config that already has them populated.
 
-Cadence is `typed_poll_interval_ms` (default 50 ms, matching the legacy writer flush; a configured value is clamped up to a 10 ms floor to prevent a busy-spin). It is a tuning knob, not an opt-in trigger: setting it alone does not spawn the worker.
+Cadence is `typed_poll_interval_ms` (default 50 ms, clamped up to a 10 ms
+floor against busy-spin). It is a tuning knob, not an opt-in trigger: setting
+it alone does not spawn the worker. The worker never writes to
+`session_events`, so the hash chain is unaffected regardless of forwarder
+activity.
 
-The worker never writes to `session_events`, so the audit hash chain is unaffected regardless of forwarder activity.
+### Variant policy
 
-Source: `crates/audit/src/siem_typed.rs` (`spawn`, `run_one_pass`, `get_events_after` sweep, `resolve_poll_interval`), `crates/audit/src/siem.rs` (`SiemConfig`, `typed_forwarding_opted_in`).
+Default forward: `AssistantToolCalls`, `ToolResult`, `HttpFetch`,
+`PermissionDenied`, `PermissionGrantExpired`, `PermissionGrantPruned`,
+`SkillPermissionDenied`, `SubagentSpawned`, `SubagentSessionBound`,
+`SubagentResult`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`,
+`EgressHookDispatched`, `ToolOutputRedacted`, `BudgetExceeded`,
+`SandboxEgressVerdict`, `SandboxEgressUnsupported`, `MemoryEntryWritten`,
+`CrossChannelMemoryRead`, `ImportStarted`, `ImportCompleted`,
+`ImportedChatRead`, `ImportedChatSearched`.
 
-## Hybrid transport path
+Default exclude, opt-in only: `UserMessage` and `AssistantMessage` (message
+bodies, PII), `LlmRequest` and `LlmResponse` (token accounting),
+`SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`, `AuditLegacy`
+(already on the legacy pipe), and the Zirkel pipeline variants.
 
-| Target | Typed envelope | Endpoint shape |
-|--------|----------------|----------------|
-| Webhook | Mixed-shape batches at one endpoint | Single POST per flush, body is a JSON array of mixed legacy + typed entries when typed is enabled |
-| Splunk HEC | Mixed-shape batches at one endpoint | NDJSON body, one event per line; legacy and typed events both land in the same HEC token |
-| Datadog | Mixed-shape batches at one endpoint | JSON array per POST; typed entries distinguished by `ddtags: kind:<variant>` |
-| Sentinel | Two endpoints (DCR streams are column-pinned) | Legacy goes to `Custom-WirkenAudit`; typed goes to the operator-configured `sentinel_typed.endpoint` (typically `Custom-WirkenSession`) |
+`typed_include_variants` is a full allowset rather than an addition: when set,
+only what it lists is forwarded and the default set is ignored. It wins over
+`typed_exclude_variants` when both are set. Source:
+`crates/audit/src/siem_typed.rs:105-135` (`should_forward`).
 
-The Sentinel split is a Sentinel DCR constraint, not a wirken design choice: the legacy stream's DCR pins specific columns and rejects rows that don't match. The typed pipe needs its own stream with its own column schema.
+### Per-target wire shape
 
-Source: `crates/audit/src/siem_typed.rs:476-520` (`TypedTransport` and `TypedTransport::for_config` at `:490`, selecting Shared vs SentinelSeparate).
+| Target | Envelope | Endpoint |
+|--------|----------|----------|
+| Webhook | Mixed legacy and typed entries in one JSON array | Single POST per flush |
+| Splunk HEC | NDJSON, one event per line; legacy `sourcetype: "wirken:audit"`, typed `wirken:session` | One HEC token for both |
+| Datadog | JSON array per POST; typed entries carry `ddtags: kind:<variant>`, all carry `ddsource: "wirken"` | One endpoint |
+| Sentinel | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`AgentId`/`AdapterId`/`SenderId`/`Event` | Two: legacy to `Custom-WirkenAudit`, typed to the configured `sentinel_typed.endpoint` |
 
-## Variant include/exclude policy
+The Sentinel split is a DCR constraint, not a design choice: the legacy
+stream's DCR pins specific columns and rejects rows that do not match, so the
+typed pipe needs its own stream with its own column schema. Builders:
+`crates/audit/src/siem.rs:267-534`; transport selection at
+`siem_typed.rs:476-520`.
 
-The default forwardable variant set covers the audit events most useful for detection without leaking PII or token-accounting noise:
+Sentinel ingestion uses the Logs Ingestion API over a Data Collection Rule.
+The operator configures DCE, DCR and custom table out of band; `api_key` must
+be an Azure AD bearer token scoped for `https://monitor.azure.com/.default`.
+Wirken does not refresh it, so it expires on Azure AD's normal cadence,
+typically one hour; refresh by rewriting `siem.json` from a sidecar before
+expiry.
 
-**Default forward:** `AssistantToolCalls`, `ToolResult`, `HttpFetch`, `PermissionDenied`, `PermissionGrantExpired`, `PermissionGrantPruned`, `SkillPermissionDenied`, `SubagentSpawned`, `SubagentSessionBound`, `SubagentResult`, `ChainHead`, `McpEntryVerified`, `McpEntryRefused`, `EgressHookDispatched`, `ToolOutputRedacted`, `BudgetExceeded`, `SandboxEgressVerdict`, `SandboxEgressUnsupported`, `MemoryEntryWritten`, `CrossChannelMemoryRead`, `ImportStarted`, `ImportCompleted`, `ImportedChatRead`, `ImportedChatSearched`.
+### HMAC
 
-**Default exclude (opt-in via `typed_include_variants`):** `UserMessage`, `AssistantMessage` (carry message bodies, PII), `LlmRequest`, `LlmResponse` (token accounting), `SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`, `AuditLegacy` (already on the legacy pipe), and the Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`, `CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`, `PerspectiveExpansion`, `PerspectiveSkipped`).
+With `siem.json.hmac_secret` set, the webhook target and the typed webhook
+pipe carry `X-Wirken-Signature: sha256=<hex>` over the exact serialized body
+bytes. The `(body, signature)` factoring uses a single `serde_json::to_vec`
+call so the signed bytes are the bytes on the wire.
 
-`typed_include_variants` wins over `typed_exclude_variants` when both are set; the include list is treated as the canonical allowset and the exclude list is ignored.
+Receivers recompute `HMAC-SHA-256(hmac_secret, raw_request_body)` and compare
+constant-time. Verifying over a re-parsed JSON envelope is incorrect:
+re-serializing through a different language's encoder reorders fields and
+breaks the signature. A shared secret produces distinct signatures on the two
+pipes because the body shapes differ, so verify per pipe. Source:
+`crates/audit/src/siem.rs:745-752` (`compute_webhook_signature`).
 
-Source: `crates/audit/src/siem_typed.rs:105-135` (`should_forward`).
+### Retries
 
-## Per-target envelope shapes
+There are none. A forward failure logs a `tracing::warn!` and drops the batch;
+the next flush carries new events forward. Operators own retry at the receiver
+(Splunk HEC indexer acknowledgement, Datadog backlog).
 
-| Target | Legacy builder | Typed builder | Wire shape |
-|--------|----------------|---------------|------------|
-| Datadog | `build_datadog_payload` (`crates/audit/src/siem.rs:267-295`) | `build_datadog_typed_payload` (`crates/audit/src/siem.rs:434-442`) | JSON array of log entries with `ddsource: "wirken"`, `ddtags: "service:..,env:..,kind:.."` |
-| Splunk HEC | `build_splunk_body` (`crates/audit/src/siem.rs:299-321`) | `build_splunk_typed_body` (`crates/audit/src/siem.rs:448-469`) | NDJSON; legacy `sourcetype: "wirken:audit"`, typed `sourcetype: "wirken:session"` |
-| Sentinel | `build_sentinel_payload` (`crates/audit/src/siem.rs:326-348`) | `build_sentinel_typed_payload` (`crates/audit/src/siem.rs:474-496`) | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`AgentId`/`AdapterId`/`SenderId`/`Event` |
-| Webhook | `build_webhook_request` (`crates/audit/src/siem.rs:360-392`) | `build_webhook_typed_request` (`crates/audit/src/siem.rs:503-534`) | JSON array of flat objects; typed wrapper adds `session_id`, `seq`, `kind`, `trust` |
+The typed pipe is the exception, and only partly: its global cursor advances
+**only** after a successful POST, so a transport error means the next pass
+re-reads every row since. Because a pass batches across sessions, that replay
+spans sessions. This gives bounded duplicate delivery during transient failure
+rather than silent loss.
 
-## HMAC
+## Observe hook
 
-When `siem.json.hmac_secret` is set, the webhook target (and the typed webhook pipe) carry `X-Wirken-Signature: sha256=<hex>` over the exact serialized body bytes. The `(body, signature)` factoring uses a single `serde_json::to_vec` call so the signed bytes are the bytes that go on the wire; field-ordering drift between a re-serialized envelope and the wire body would otherwise produce a different signature than the receiver computes.
+Register the hook's public key, then connect.
 
-Receivers verify by recomputing `HMAC-SHA-256(hmac_secret, raw_request_body)` and comparing constant-time against the header value. Verifying over a re-parsed JSON envelope is incorrect: re-serializing through a different language's JSON encoder will reorder fields and break the signature.
+```bash
+wirken hooks register <hook-id> <pubkey-hex> --type observe
+```
 
-A shared `hmac_secret` produces distinct signatures on the legacy and typed pipes because the body shapes differ. Operators verifying both pipes must run the recompute per pipe.
+The hook id is operator-chosen and appears on every audit row the hook
+produces. The pubkey is the 32-byte Ed25519 public key, hex-encoded.
 
-Source: `crates/audit/src/siem.rs:360-392` (legacy webhook + HMAC), `crates/audit/src/siem.rs:503-534` (typed webhook + HMAC), `crates/audit/src/siem.rs:745-752` (`compute_webhook_signature`).
+**Handshake.** The hook connects to `<data_dir>/sockets/gateway-hooks.sock`,
+or the equivalent named pipe on Windows. The gateway sends an `AuthChallenge`;
+the hook responds with
+`HookAuthResponse { publicKey, signature, hookId, hookType }`. The signature is
+Ed25519 over `HOOK_HANDSHAKE_DOMAIN || hookId || 0x00 || nonce`, where
+`HOOK_HANDSHAKE_DOMAIN = b"wirken-ipc-hook-handshake-v1\x00"`. The gateway
+looks `hookId` up in the `hooks` table of `<data_dir>/hooks.db`, verifies with
+`verify_strict`, and accepts or rejects. The domain separator means an adapter
+signature can never replay against the hooks acceptor, or the reverse.
 
-## Retries
+**Subscription.** A pull loop: one `SessionLogTail` frame out, one
+`SessionLogTailResponse` back.
 
-There are no retries. A forward failure logs a `tracing::warn!` and drops the batch; the next flush carries new events forward. Operators own retry at the receiver (Splunk HEC indexer-acknowledgement, Datadog backlog, etc.).
+```
+SessionLogTail          sessionId: Text, sinceSeq: UInt64, maxRows: UInt32
+SessionLogTailResponse  events: List(SessionLogTailEvent), nextSeq: UInt64
+SessionLogTailEvent     seq: UInt64, payload: Text
+```
 
-The typed pipe holds a single global cursor over `session_events.id` and advances it **only** after a successful POST: if the typed transport returns `Err`, the cursor does not move and the next polling pass re-reads every new row since it. Because a pass batches rows across sessions, that replay spans sessions. This is the polling pipe's analogue of receiver-side ack and gives bounded duplicate delivery during transient failure rather than silent loss.
+`payload` is `Text` carrying a JSON-serialized `SessionEvent`, which the hook
+deserializes against its own copy of the enum. The JSON wire keeps the capnp
+schema independent of audit-side variant churn: a new `SessionEvent` variant
+does not change the schema.
 
-Source: `crates/audit/src/siem_typed.rs` (`run_one_pass` cursor advance gated on `forward` success).
+**Cursor.** The hook owns it. On a non-empty response it persists `nextSeq`
+and passes it as the next `sinceSeq`; on an empty response `nextSeq` equals
+the request's `sinceSeq`. Wirken keeps no per-hook cursor state.
+
+**Delivery is at-least-once.** A hook that receives a batch and crashes before
+persisting the cursor sees the same rows on its next connection. The
+per-session `seq` is the dedup key: treat `(sessionId, seq)` as a primary key
+and ignore duplicates. The chain is append-only and per-session monotonic, so
+the dedup is unambiguous.
+
+**Multi-session.** The hook requests each session id independently. To
+discover sessions it can poll a known id (the `gateway-hooks` and
+`gateway-mcp` sentinel sessions exist for cross-cutting events) or maintain a
+list out of band; wirken pushes no session-list endpoint over IPC.
+
+One hook process can register under different ids for any combination of
+`observe`, `veto` and `egress` roles. The veto and egress roles are described
+in [enforcement-model.md](enforcement-model.md#veto-and-egress-hooks).
+
+**Building one.** Depend on `wirken-ipc` for the frame types and handshake
+helpers, point at `gateway-hooks.sock`, drive `SessionLogTail` in a loop.
+`serve_observe_loop` in `crates/cli/src/commands/run.rs` is the server side of
+the same protocol and reads as a reference implementation. Non-Rust consumers
+implement from `crates/ipc/schema/wirken.capnp` and the domain separator
+constant.
+
+## OpenTelemetry projection
+
+Wirken projects the chain to OpenTelemetry GenAI semantic conventions over
+OTLP/HTTP+JSON. The same spans land in Datadog, Honeycomb, Jaeger, Splunk
+Observability, Microsoft Agent 365, or any OTel-aware backend with no change
+beyond endpoint and bearer auth.
+
+Encoding choices the exporter makes, several of which are the difference
+between landing and being silently filtered:
+
+- OTLP/HTTP+JSON, not the gRPC variant.
+- Trace and span ids as hex, timestamps as string-encoded nanoseconds, `kind`
+  and `status.code` as integers.
+- **Every attribute value as `stringValue`, including numeric fields like
+  token counts.** A naive OTel SDK exporter emits `intValue` or `doubleValue`
+  and those spans are rejected at Agent 365 ingestion.
+- `parentSpanId` on every non-root span.
+- A single-root tree per run: one `invoke_agent` root with `chat`,
+  `execute_tool` and `output_messages` parented directly to it.
+- Lowercase operation-name literals: `invoke_agent`, `chat`, `execute_tool`,
+  `output_messages`. Spans carrying anything else are filtered at ingestion.
+- Batches split when a response indicates the 1 MB body limit is exceeded;
+  single spans above 1 MB after split are dropped with an audit row noting it.
+- `Retry-After` honored on 429 with jittered exponential backoff.
+
+Run-wide attributes stamped on every span: `microsoft.tenant.id`,
+`gen_ai.agent.id`, `gen_ai.agent.name`, `microsoft.a365.agent.blueprint.id`,
+`microsoft.channel.name`, `gen_ai.conversation.id`, `microsoft.session.id`.
+Tool spans add `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.tool.call.id`,
+`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`. Chat spans add
+`gen_ai.request.model` and `gen_ai.provider.name`. Root spans add `user.id`.
+
+### Microsoft Agent 365
+
+Wirken is not affiliated with or endorsed by Microsoft Corporation. The names
+below are used for compatibility documentation only.
+
+Endpoint:
+
+```
+https://agent365.svc.cloud.microsoft/observabilityService/tenants/{tenantId}/otlp/agents/{agentId}/traces?api-version=1
+```
+
+with `Authorization: Bearer <token>` and `Content-Type: application/json`.
+Tokens come from Microsoft Entra via OAuth2 client credentials; the scope is
+`9b975845-388f-4429-889e-eab1ef63949c/.default`, and the issued token must
+carry `roles` containing `Agent365.Observability.OtelWrite` with `aud`
+matching the resource. That needs a standard Entra app registration with the
+role granted and admin-consented.
+
+**Ingestion also requires an M365 E7 or Agent 365 license assigned to at least
+one user in the tenant.** The SKU being present in the directory is not
+enough: without an assignment the endpoint returns 200 OK with
+`partialSuccess` null and the spans are silently dropped.
+
+Hook roles map onto three Microsoft pillars: `egress` onto Purview DLP
+(inspect, redact or block tool output before it returns to the assistant),
+`veto` onto Entra Conditional Access on agent identity (allow or deny a tool
+invocation before dispatch), `observe` onto Sentinel and Defender XDR (stream
+the typed chain).
+
+`gen_ai.tool.type` takes two values: MCP server tools emit `MCP Server`, and
+everything else (built-ins, Wasm skills, `exec`, `web_search`,
+`generate_image`) emits `function`. Microsoft derives `ExecuteToolByGateway`
+and `ExecuteToolByMCPServer` from these. Wasm skills emit `function` because
+Microsoft's enumeration has no Wasm entry and that is the closest match for a
+runtime-executed tool.
+
+`channel.name` pivots on a canonical set. The Teams adapter emits literal
+`msteams` to land in the native pivot; `outlook` is the other documented
+value. The other eight adapters emit their own name (`telegram`, `discord`,
+`slack`, `matrix`, `whatsapp`, `signal`, `googlechat`, `imessage`), which is
+accepted but appears in raw channel data rather than the default filter.
+
+**Identity.** The per-agent Ed25519 keypair stays the local attestation root;
+federation is additive. A pluggable `FederatedIdentity` trait covers Entra and
+Keycloak, differing only in claim validation and the run-wide attributes
+stamped. `EntraFederatedIdentity` validates the
+`Agent365.Observability.OtelWrite` role and stamps Microsoft-namespaced
+attributes; `KeycloakFederatedIdentity` does OIDC client credentials against a
+realm and stamps vendor-neutral ones.
+
+**User identity.** Chat-platform callers have no Entra identity by
+construction; Teams is the exception, carrying `from.aadObjectId` natively. A
+standalone `UserResolver` consults sources in order: an adapter-supplied real
+Entra object id, then an operator-supplied `user_map.json` overlay (a
+Slack-email-to-Entra mapping is the canonical case), then a keyed synthetic
+GUID derived from a vault-held salt over `(tenant_id, adapter_id, sender_id)`.
+The synthetic is shaped like an Entra object id and pivots stably per
+channel-and-sender pair while remaining non-reversible to a phone number or
+handle by anyone outside the deployment. **The salt is
+per-deployment-forever:** rotating it re-pseudonymizes every external caller
+and breaks longitudinal pivot in Defender across the rotation.
+
+**What this does not cover.** Conditional Access policy evaluation, content
+classification, Defender XDR correlation across user, device and network
+signals, and lifecycle workflows are Microsoft's data plane. Wirken honors a
+denial arriving as a 403 and projects it onto the chain as a
+`PermissionDenied` row; it does not evaluate the policy. The `egress` hook
+delivers tool output to whatever classifier the operator wires up; wirken does
+not classify content. `wirken setup --org` invokes the documented Agent 365
+registration flow for operators who want the agent in the M365 admin center
+inventory, but the telemetry path does not require a Graph-registered agent.
+
+This page describes the integration surface against Microsoft Learn
+documentation verified on 2026-05-22. It is not evidence that emissions
+currently land in any particular tenant: the Microsoft surfaces are under
+active migration and the ingestion-side filter set can tighten between
+releases, so a claim that emissions land is dated and tenant-bound.
 
 ## Source references
 
-- Two-pipe topology: `crates/audit/src/writer.rs:591-704` (legacy `flush_loop`), `crates/audit/src/siem_typed.rs:349` (`spawn`) and `:415` (`run_one_pass`) (typed).
-- Variant policy: `crates/audit/src/siem_typed.rs:105-135` (`should_forward`).
+- Two-pipe topology: `crates/audit/src/writer.rs:591-704` (legacy),
+  `crates/audit/src/siem_typed.rs:349` (`spawn`) and `:415` (`run_one_pass`).
+- Variant policy: `crates/audit/src/siem_typed.rs:105-135`.
 - Per-target builders: `crates/audit/src/siem.rs:267-534`.
-- HMAC: `crates/audit/src/siem.rs:745-752` (`compute_webhook_signature`).
-- Spawn-guard: `crates/audit/src/siem.rs:97-110` (`SiemConfig::typed_forwarding_opted_in`).
-- Operational issues: [gebruder/wirken#105](https://github.com/gebruder/wirken/issues/105), [gebruder/wirken#106](https://github.com/gebruder/wirken/issues/106).
+- HMAC: `crates/audit/src/siem.rs:745-752`.
+- Spawn guard: `crates/audit/src/siem.rs:97-110`.
+- Hook handshake: `crates/ipc/src/auth.rs` (`HOOK_HANDSHAKE_DOMAIN`,
+  `perform_hook_handshake`, `perform_gateway_hook_handshake`).
+- Hook registry: `crates/gateway/src/hook_registry.rs`.
+- OTel exporter and projector: `crates/audit/src/otel_exporter.rs`,
+  `crates/audit/src/otel_projector.rs`.

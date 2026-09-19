@@ -1,18 +1,22 @@
-# Enforcement Model: Compile-Time vs. Runtime
+# Enforcement model
 
-Wirken's security guarantees split into two categories: **compile-time invariants** enforced by Rust's type system (cannot be bypassed without recompiling the binary) and **runtime policies** configurable by operators (can be changed without rebuilding). This distinction matters for long-running agents: structural safety must never be compromised, while operational policies must be tunable without downtime.
+Which guarantees the compiler enforces and which are runtime policy. The
+distinction matters for a long-running agent: structural safety must not be
+compromised, while operational policy must be tunable without downtime.
 
----
+This page also owns two mechanisms that sit across the boundary: the hook
+surface and cross-channel memory.
 
-## Compile-Time Guarantees
+## Compile-time
 
-These properties are enforced by the Rust compiler. They cannot be bypassed by configuration, user input, or runtime state. Violating them requires modifying source code and recompiling.
+Enforced by the Rust compiler. Not bypassable by configuration, input or
+runtime state; violating one requires modifying source and recompiling.
 
-### Channel Isolation
+### Channel isolation
 
-**Crate:** `wirken-ipc` | **File:** `crates/ipc/src/channel.rs`
+`wirken-ipc`, `crates/ipc/src/channel.rs`.
 
-Each channel adapter is scoped to a zero-sized type marker via `PhantomData<C>`. Session handles are parameterized by channel type:
+Each channel adapter is scoped to a zero-sized marker via `PhantomData<C>`:
 
 ```rust
 pub struct SessionHandle<C: Channel> {
@@ -21,187 +25,218 @@ pub struct SessionHandle<C: Channel> {
 }
 ```
 
-Channel markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`, `Teams`, `Signal`, `IMessage`, `GoogleChat`, and `Generic`) that implement the sealed `Channel` trait. The trait is defined with `Send + Sync + 'static` bounds and can only be implemented within the `wirken-ipc` crate.
+Markers are zero-sized structs (`Telegram`, `Discord`, `Slack`, `Matrix`,
+`Teams`, `Signal`, `IMessage`, `GoogleChat`, `Generic`) implementing the
+sealed `Channel` trait, which can only be implemented inside `wirken-ipc`.
 
-**What the compiler prevents:**
-- A Telegram adapter cannot construct `SessionHandle<Discord>` -- the type parameter is wrong.
-- A function accepting `SessionHandle<Telegram>` cannot be called with `SessionHandle<Discord>`.
-- Cross-channel routing mistakes in code that uses `SessionHandle<C>` are caught at compile time.
+The compiler prevents a Telegram adapter constructing a
+`SessionHandle<Discord>`, and prevents a function taking
+`SessionHandle<Telegram>` being called with the wrong one. Cross-channel
+routing mistakes are caught at compile time **in code that uses
+`SessionHandle<C>`**.
 
-**Status of the production message path:** The `SessionHandle<C: Channel>` API and its negative-test scaffolding (regression-tested in `crates/ipc/src/tests.rs:20-30`) exist at the type-system level but are not yet threaded through the production gateway routing path. Production frames carry a `String`-typed channel discriminator on the `AuthenticatedChannel` value resolved at handshake time, and cross-channel mismatch is rejected at runtime via the `adapter.channel_mismatch` audit event rather than at compile time. Threading the phantom-typed handle through production routing to retire the `String` discriminator is not implemented.
+**The production message path does not.** Production frames carry a
+`String`-typed channel discriminator on the `AuthenticatedChannel` value
+resolved at handshake, and a cross-channel mismatch is rejected at runtime via
+the `adapter.channel_mismatch` audit event rather than at compile time. The
+typed API and its negative-test scaffolding exist at the type-system level;
+the live cross-channel control is the runtime match.
 
-**What this does NOT cover:** The runtime decision of which agent handles which channel. That is a routing policy (see Runtime section).
+What this does not cover either way: which agent handles which channel, which
+is routing policy.
 
-### Credential Leak Prevention
+### Credential leak prevention
 
-**Crate:** `wirken-vault` | **File:** `crates/vault/src/secret.rs`
+`wirken-vault`, `crates/vault/src/secret.rs`.
 
-Decrypted secrets are wrapped in `VaultSecret`, which wraps `SecretString` from the `secrecy` 0.10 crate:
+`VaultSecret` wraps `SecretString` and intentionally implements none of:
 
-```rust
-pub struct VaultSecret {
-    inner: SecretString,
-}
-```
-
-`VaultSecret` intentionally does **not** implement:
-
-| Missing Trait | Compile-Time Effect |
+| Missing trait | Compile-time effect |
 |---|---|
 | `Display` | `println!("{}", secret)` is a compile error |
 | `Debug` | `tracing::info!("{:?}", secret)` is a compile error |
 | `Clone` | Cannot make copies that escape the intended scope |
-| `Serialize` | Cannot accidentally write to JSON, logs, or files |
+| `Serialize` | Cannot write to JSON, logs or files |
 
-The only access path is `expose() -> &str`, which returns a short-lived borrow. The reference cannot outlive the `VaultSecret`. On drop, `zeroize` 1.8 overwrites the memory.
+The only access path is `expose() -> &str`, a short-lived borrow that cannot
+outlive the value. Memory is zeroed on drop.
 
-**What the compiler prevents:**
-- Logging a secret via `tracing`, `println!`, or `format!`.
-- Serializing a secret into a JSON response, config file, or audit event.
-- Cloning a secret into a long-lived cache or collection.
-- Passing a secret to any function that requires `Display`, `Debug`, or `Serialize`.
+**What this does not cover:** a caller who captures the `&str` and copies it
+into a new `String`. Deliberate: the API makes the safe path easy and the
+unsafe path visible in code review.
 
-**What this does NOT cover:** A caller who captures the `&str` from `expose()` and copies it into a new `String`. This is deliberate -- the API makes the safe path easy and the unsafe path visible in code review.
+### Adapter authentication identity
 
-### Adapter Authentication Identity
+`crates/ipc/src/auth.rs`. Each adapter holds an `AdapterIdentity` containing
+an Ed25519 signing key, generated at registration and verified during the
+handshake: the gateway sends a 32-byte nonce, the adapter signs it, the
+gateway verifies against the registered public key.
 
-**Crate:** `wirken-ipc` | **File:** `crates/ipc/src/auth.rs`
+The handshake protocol is encoded in the type signatures of
+`perform_adapter_handshake` and `perform_gateway_handshake`; a caller cannot
+skip the challenge step because the function requires both reader and writer
+and the protocol is sequential. `SigningKey` implements neither `Serialize`
+nor `Display`, preventing accidental export.
 
-Each adapter holds an `AdapterIdentity` containing an Ed25519 `SigningKey`. The keypair is generated at adapter registration and verified during the IPC handshake via challenge-response:
+**What this does not cover:** which public keys are trusted, which is runtime
+state in `AdapterRegistry`.
 
-1. Gateway sends a 32-byte random nonce.
-2. Adapter signs the nonce with its private key.
-3. Gateway verifies the signature against the registered public key.
+### IPC frame safety
 
-**What the compiler prevents:**
-- The handshake protocol is encoded in the type signatures of `perform_adapter_handshake` and `perform_gateway_handshake`. A caller cannot skip the challenge step -- the function requires both reader and writer, and the protocol is sequential.
-- `SigningKey` does not implement `Serialize` or `Display`, preventing accidental export of private keys.
+`crates/ipc/src/transport.rs`. `FrameReader` enforces a 16MB frame size limit
+and passes Cap'n Proto reader options with a 64M word traversal limit (512 MB)
+and a 64-level nesting limit. These are compile-time constants; a frame
+exceeding the size limit is rejected before allocation.
 
-**What this does NOT cover:** The registry of which public keys are trusted. That is runtime state in `AdapterRegistry` (SQLite).
+Cap'n Proto's generated reader types are lifetime-parameterized, so
+deserialized data cannot outlive its buffer, and the schema is compiled from
+`.capnp` at build time, so structure mismatches are caught by `cargo build`.
 
-### IPC Frame Safety
+## Runtime
 
-**Crate:** `wirken-ipc` | **File:** `crates/ipc/src/transport.rs`
+Enforced by configuration and runtime checks. Changeable by operators without
+recompiling.
 
-`FrameReader` enforces a 16MB frame size limit and passes Cap'n Proto reader options with a 64M word traversal limit (512 MB) and 64-level nesting limit. These are compile-time constants in the transport layer:
-
-```rust
-// Frame too large -- rejected before allocation
-if length > 16 * 1024 * 1024 {
-    return Err(IpcError::FrameTooLarge(length));
-}
-```
-
-Cap'n Proto's generated reader types are lifetime-parameterized (`Reader<'a>`), ensuring deserialized data cannot outlive its buffer. The schema is compiled from `.capnp` files at build time -- message structure mismatches are caught by `cargo build`, not at runtime.
-
----
-
-## Runtime Guarantees
-
-These properties are enforced by configuration, runtime checks, and operational policy. They can be changed by operators without recompiling.
-
-### Skill Loading
-
-**Crate:** `wirken-agent` | **Files:** `crates/agent/src/skill.rs`, `crates/agent/src/wasm_sandbox.rs`
-
-Skills are loaded from the filesystem at gateway startup:
-- `SkillLoader::load_dir()` scans `~/.wirken/skills/` and per-agent skill directories.
-- `Agent::load_skills()` rebuilds the system prompt with available skills.
-- Wasm skills are compiled from `.wasm` files via `wasmtime`; the pinned version lives in the workspace `Cargo.toml`.
-
-**Live update:** Add or remove SKILL.md files from the skills directory. The agent picks up changes on next `load_skills()` call (currently requires gateway restart; no filesystem watcher yet).
-
-### Permission Tiers
-
-**Crate:** `wirken-gateway` | **File:** `crates/gateway/src/permissions.rs`
-
-The three-tier permission model is backed by SQLite:
-
-| Tier | Behavior | Example Actions |
+| Surface | Live update? | Owner |
 |---|---|---|
-| Tier 1 | Always allowed | Workspace file access, channel converse, web search, `http_request` |
-| Tier 2 | First-use approval, 30-day expiry | A curated allowlist of shell-inspection verbs (ls / cat / grep / stat / pwd / whoami / ...), external file access. See T3 in [security-properties.md](security-properties.md) for the canonical list. There is no documented Tier-2 exec escape hatch -- shell wrappers, language interpreters with `-c`/`-e` eval, and build/deploy tools default to Tier 3. |
-| Tier 3 | Always prompt | Credential access, destructive ops, cron creation, every shell verb outside the Tier 2 inspection-verb allowlist |
+| Permission tiers and grants | Yes. `approve` and `revoke` are SQLite writes checked on every query | [permissions-and-identity.md](permissions-and-identity.md) |
+| Skill loading | On next `load_skills`, currently a gateway restart; there is no filesystem watcher | [skills.md](skills.md) |
+| Org policy | Refreshed at gateway start. Mid-session changes require a restart | [enterprise.md](enterprise.md) |
+| Provider configuration | Requires a restart. The `LlmClient` is constructed once per agent at startup | [configuration.md](configuration.md) |
+| Sandbox mode | Requires a restart. Container resource limits are constants in the sandbox module | [sandbox-properties.md](sandbox-properties.md) |
+| Sandbox egress per channel | Next `exec` | [egress.md](egress.md#sandbox-egress) |
+| SIEM targets | Requires a restart after editing `siem.json`. Forwarding is non-blocking; failures are logged and do not block the audit pipeline | [siem-forwarder.md](siem-forwarder.md) |
+| Audit chain-head key rotation | A fresh gateway start picks up a new keypair. The verifier accepts heads signed by any key whose public part is on the row and reports the distinct set | [audit-cli.md](audit-cli.md#chain-head-signing) |
+| Hook registry | Durable in `hooks.db`. Active connections survive a registry edit and continue dispatching until disconnect; new connections honor the updated registry at handshake | below |
 
-**Live update:** `PermissionStore::approve()` and `PermissionStore::revoke()` take effect immediately -- they are SQLite writes checked on every permission query. No restart required.
+### Rate limits
 
-```bash
-wirken permissions revoke shell:curl --agent default  # immediate effect
-```
+`crates/gateway/src/rate_limit.rs`. Two limiters, both in memory:
 
-### Organization Policy
+- `AuthRateLimiter`: per-source, 5 failures / 60s / 10-minute lockout, with no
+  loopback exemption.
+- `ControlPlaneRateLimiter`: global GCRA via `governor`, lock-free atomics.
 
-**Crate:** `wirken-gateway` | **File:** `crates/gateway/src/org.rs`
-
-`OrgConfig` is fetched from a central HTTP endpoint and applied to local configuration files (`provider.json`, `siem.json`, `mcp.json`). Fields include provider settings, SIEM targets, MCP servers, permission overrides, and skill policies.
-
-**Live update:** Org config is refreshed at gateway start. Mid-session changes require a gateway restart. A SIGHUP-triggered refresh is a planned enhancement.
-
-### Provider Configuration
-
-**Crate:** `wirken-agent` | **File:** `crates/agent/src/llm.rs`
-
-`LlmConfig` specifies provider, model, base URL, and parameters. Per-agent configs are stored in `AgentConfigStore` (SQLite).
-
-**Live update:** Provider changes require gateway restart. The `LlmClient` is constructed once per agent at startup and holds an `reqwest::Client` with HTTPS enforcement.
+State resets on gateway restart; thresholds are set at startup from
+`GatewayConfig`.
 
 ### Model governance
 
-The model an agent runs is operator configuration, not a chat setting. There is no user-facing model selector: an end user talking to an agent over any channel cannot choose or change the model, and no chat command switches it. The global default is pinned in `provider.json` (`provider`, `model`, `base_url`); a per-agent override is pinned in the agent's `LlmConfig` in `AgentConfigStore` (SQLite), which takes precedence when a record exists and otherwise falls back to `provider.json` (`crates/cli/src/commands/session.rs:360-378`). Because both are admin-side config files applied at gateway start, pinning a model version is an operator control: changing the model means editing `provider.json` or the agent's config and restarting, which is auditable rather than user-driven.
+The model an agent runs is operator configuration, not a chat setting. There
+is no user-facing model selector: an end user talking to an agent over any
+channel cannot choose or change the model, and no chat command switches it.
+The global default is pinned in `provider.json`; a per-agent override is
+pinned in `AgentConfigStore` and takes precedence when a record exists.
+Because both are admin-side files applied at gateway start, pinning a model
+version is an operator control: changing it means editing one of them and
+restarting, which is auditable rather than user-driven.
 
-```json
-{
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514",
-    "base_url": "https://api.anthropic.com"
-}
+Model pinning pairs with cost metering: the pinned pair is what per-call cost
+is priced against and what per-agent spend attributes to. See
+[cost-monitoring.md](cost-monitoring.md).
+
+### Prompt injection detection
+
+`crates/gateway/src/injection_detect.rs`. `InjectionDetector` scans inbound
+messages for role-switching attempts, instruction-override markers,
+base64-encoded commands, tool-call injection structures and system-prompt
+extraction attempts.
+
+**Detection does not block.** It tags the audit event with a `threat` detail
+object and emits a separate `message.threat_flagged` event for SIEM
+visibility. The permission tiers and the sandbox are what limit what an
+injected agent can actually do.
+
+Patterns are compiled into the binary, so adding one requires recompilation.
+The detector is stateless and shared across all adapter connections.
+
+## Veto and egress hooks
+
+Operators register external hook processes:
+
+```bash
+wirken hooks register <id> <pubkey-hex> --type <observe|veto|egress>
 ```
 
-Model pinning pairs with cost metering: the pinned (provider, model) is what per-call cost is priced against, and what per-agent spend and the cost-anomaly detection attribute to. See [Cost monitoring](cost-monitoring.md).
+Each hook holds its own Ed25519 keypair, connects inbound on
+`<data_dir>/sockets/gateway-hooks.sock`, and is matched against the registry
+at handshake. The handshake binds the signature under a domain separator
+distinct from the adapter handshake, so a key valid for one cannot replay
+against the other. The `observe` role and the wire protocol are in
+[siem-forwarder.md](siem-forwarder.md#observe-hook).
 
-### Rate Limits
+**Veto hooks run pre-dispatch.** After the built-in tier and per-skill gates
+accept a tool call, the runtime calls
+`HookDispatcher::dispatch(tool_name, arguments, session_id)`. Hooks run in
+registration order under a cumulative wall-clock budget
+(`WIRKEN_VETO_BUDGET_MS`, 1000ms default) with a per-hook ceiling of 500ms.
+The first `Deny` short-circuits and the remaining hooks are recorded as
+`Skipped` with no audit row; a `Timeout` row lands on the chain so budget
+exhaustion is distinguishable from an operator deny. Each non-skipped outcome
+emits one `HookDispatched` row.
 
-**Crate:** `wirken-gateway` | **File:** `crates/gateway/src/rate_limit.rs`
+**Egress hooks run post-execution.** After a tool returns and before its
+output enters the LLM conversation, the runtime calls
+`EgressDispatcher::dispatch(tool_name, output_bytes, session_id)` under a
+`WIRKEN_EGRESS_BUDGET_MS` budget with the same per-hook cap. Each hook returns
+one of:
 
-Two rate limiters, both in-memory:
-- `AuthRateLimiter`: per-source tracking, 5 failures / 60s / 10-minute lockout. No loopback exemption.
-- `ControlPlaneRateLimiter`: global GCRA via `governor` 0.10, lock-free atomics.
+- `Allow`: the working bytes pass through unchanged.
+- `Replace { bytes }`: the working bytes are substituted, and the next hook in
+  the pipeline sees the new bytes.
+- `Refuse { reason }`: short-circuits; the tool's output becomes a refusal
+  placeholder and the LLM sees that the call produced no usable bytes.
 
-**Live update:** Rate limit state resets on gateway restart. Thresholds are set at startup via `GatewayConfig`.
+Each non-skipped outcome emits one `EgressHookDispatched` row carrying the
+operator-readable decision. When the final bytes differ from the original, a
+paired `ToolOutputRedacted` row records `original_sha256`, `original_size`,
+`redacted_sha256`, `redacted_size` and the attribution fields.
 
-### Audit Chain-Head Signatures
+**The original bytes are not on the chain by design.** An egress hook's
+purpose is preventing those bytes from spreading; recording them defeats the
+redaction. The original sha256 is the only on-chain reference, which is
+sufficient for an auditor holding a candidate plaintext to verify the
+redaction was applied to the bytes they expect.
 
-**Crate:** `wirken-audit` | **Files:** `crates/audit/src/signing.rs`, `crates/audit/src/session_log.rs` (`SessionEvent::ChainHead`)
+**Chain invariant.** `ToolResult.output` carries the post-mediation bytes
+verbatim, and the conversation that produced the next `LlmRequest`'s
+`messages_hash` was built from those same bytes, so `sessions verify`
+reconstitutes an identical conversation and the hash matches.
+Deterministic-tool re-execution checks skip rows that have a
+`ToolOutputRedacted` paired row at a higher seq for the same `call_id`: the
+redaction is operator policy, not wirken behaviour, and re-execution would
+compare freshly-produced source bytes against operator-redacted ones.
 
-The per-session SHA-256 hash chain gives tamper evidence for every event. The chain-head signature anchors the chain itself: at session boundaries (`SessionStart`, `SessionEnd`), on a checkpoint cadence (every 1000 ordinary appends or 5 minutes of wall-clock since the last head, whichever fires first), and on log rotation, the gateway writes a `ChainHead` event signed under a per-gateway Ed25519 key. The signed payload covers `(sequence_range_start, sequence_range_end, prev_chain_hash, current_chain_hash, schema_version)` under the `wirken/audit-chain-head/v1` domain separator. The signing key lives at `<data_dir>/audit/audit-signing.{key,pub}`, mode 0600 on Unix, distinct from the IPC handshake keypair and from per-agent attestation identities.
+**Timeout posture.** Both dispatchers fail closed by default.
+`WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` flips the timeout path to fail open with a
+`tracing::warn!`; the audit row records the timeout regardless, so a reviewer
+can distinguish "hook timed out" from "hook ran clean".
 
-**What the signature protects against:** writer rewriting history (an operator with raw SQLite access cannot forge new heads without the signing key), and storage-layer tampering (a corrupted or substituted chain row breaks either the chain hash recomputation or the signature payload). An offline verifier with the public key from `<data_dir>/audit/audit-signing.pub` runs `wirken audit verify --require-signed` and gets a verdict that does not depend on trusting the gateway process.
+## Cross-channel memory
 
-**What the signature does not protect against:** a malicious gateway that signs a fabricated chain in real time. The audit signing key is held by the same process that writes the chain, so a compromised gateway can record any sequence of events and sign it. The signature is meaningful for offline replay and for tamper detection by a third party reading the database; it is not a guarantee of fidelity to ground truth at write time. Operator-pinned trust anchors and out-of-band publication of public keys are separate items.
+`crates/gateway/src/memory.rs`, `crates/agent/src/memory_tool.rs`.
 
-**Live update:** Key rotation creates a new `<data_dir>/audit/audit-signing.{key,pub}` and a fresh gateway start picks it up. The verifier accepts heads signed by any key whose public part is embedded on the row, and reports the set of distinct ids as `signing_key_ids_seen` so a rotation across sessions is visible.
+Continuity between channels is carried by labelled entries, not by replaying
+other channels' session logs. Replay would import history written before these
+labels existed, so provenance would be incomplete from the first read.
 
-### SIEM Forwarding
+Every entry carries five origin labels stamped at insert: `channel`,
+`adapter_id`, `sender_id`, `agent_id`, `origin_session_id`.
+`MemoryStore::write` refuses an entry with any label empty and is the only
+insert path; every column is `NOT NULL` and nothing backfills. The labels are
+built by the runtime from the turn's inbound context and are not reachable
+from tool arguments, so a model cannot author its own provenance. A turn
+missing a channel, adapter or sender installs no memory context at all, which
+leaves the tools unconfigured for that turn rather than writing a partial
+entry; cron and CLI turns land there.
 
-**Crate:** `wirken-audit` | **File:** `crates/audit/src/siem.rs`
+`origin_session_id` is carried because the other labels reconstruct
+`{agent_id}/{channel}/…` but not the conversation segment. Without it an entry
+narrows only to "some conversation on this channel with this agent"; with it
+the entry pins to the hash chain that recorded its creation.
 
-`SiemForwarder` sends audit events to Datadog, Splunk HEC, Microsoft Sentinel (Logs Ingestion API), or a generic webhook endpoint. Configuration is read from `~/.wirken/siem.json` at gateway start.
-
-**Live update:** Changing SIEM targets requires editing `siem.json` and restarting the gateway. Event forwarding is non-blocking -- failures are logged but do not block the audit pipeline.
-
-**External consumers:** The webhook target is one of two subscription surfaces for out-of-process consumers; the observe-hook IPC pipe carries the same `SessionEvent` payloads under an Ed25519 handshake. See [`external-consumers.md`](external-consumers.md).
-
-### Cross-channel memory
-
-**Crate:** `wirken-gateway` / `wirken-agent` | **Files:** `crates/gateway/src/memory.rs`, `crates/agent/src/memory_tool.rs`
-
-Continuity between channels is carried by labelled entries, not by replaying other channels' session logs. Replay would import history written before these labels existed, so provenance would be incomplete from the first read.
-
-Every entry carries five origin labels stamped at insert: `channel`, `adapter_id`, `sender_id`, `agent_id`, and `origin_session_id`. `MemoryStore::write` refuses an entry with any label empty and is the only insert path, and every column is `NOT NULL`. Nothing backfills. The labels are built by the runtime from the turn's inbound context and are not reachable from tool arguments, so a model cannot author its own provenance. A turn missing a channel, adapter, or sender installs no memory context at all, which leaves the tools unconfigured for that turn rather than writing a partial entry; cron and CLI turns land there.
-
-`origin_session_id` is carried because the other labels reconstruct `{agent_id}/{channel}/…` but not the conversation segment. Without it an entry narrows only to "some conversation on this channel with this agent"; with it the entry pins to the hash chain that recorded its creation.
-
-Three tools, registered in `tool_to_action` so none reaches the gate as an unregistered name:
+Three tools, all registered in `tool_to_action` so none reaches the gate as an
+unregistered name:
 
 | Tool | Action | Tier |
 |---|---|---|
@@ -209,184 +244,33 @@ Three tools, registered in `tool_to_action` so none reaches the gate as an unreg
 | `memory_read` | `WorkspaceFileAccess` | 1 |
 | `memory_read_channel` | `CrossChannelMemoryRead { from_channel }` | 3 |
 
-Writing, and reading the current channel's own entries, cross no trust zone and stay at the workspace tier. Reading another channel's entries is a crossing and is Tier 3: it prompts on every use and cannot be pre-approved, and `approve_by_key` refuses a `cross_channel_memory:` key outright so an operator cannot come to believe otherwise. The key carries the channel being read *from*, so approving one channel's history approves no other; the destination is the channel the turn already runs on and is recorded on the audit row instead. A missing `channel` argument produces an empty key, which matches no stored channel and therefore returns nothing rather than widening.
+Writing, and reading the current channel's own entries, cross no trust zone.
+Reading another channel's entries is a crossing: Tier 3, prompting on every
+use, and `approve_by_key` refuses a `cross_channel_memory:` key outright so an
+operator cannot come to believe otherwise. The key carries the channel being
+read *from*, so approving one channel's history approves no other; the
+destination is the channel the turn already runs on and is recorded on the
+audit row instead. A missing `channel` argument produces an empty key, which
+matches no stored channel and returns nothing rather than widening.
 
-Two events land on the hash chain: `MemoryEntryWritten` carries the full label set, and `CrossChannelMemoryRead` carries both ends of the crossing plus the entry count. The crossing event is emitted even when the read returns nothing, because the crossing was still made.
+Two events land on the chain: `MemoryEntryWritten` with the full label set,
+and `CrossChannelMemoryRead` with both ends of the crossing plus the entry
+count. The crossing event is emitted even when the read returns nothing,
+because the crossing was still made.
 
-Reads are scoped to one agent. **Cross-channel means another channel of the same agent, never another person.** `(adapter_id, sender_id)` is a *platform-scoped* principal, not a person: a Slack uid and a Signal number are different values for the same human, and wirken has no identity linking to join them. Per-channel process isolation is untouched — continuity is mediated entirely through the gateway store, with no adapter-to-adapter path and no shared state between channel processes.
+Reads are scoped to one agent. **Cross-channel means another channel of the
+same agent, never another person.** `(adapter_id, sender_id)` is a
+platform-scoped principal, not a person: a Slack uid and a Signal number are
+different values for the same human, and wirken has no identity linking to
+join them. Per-channel process isolation is untouched, since continuity is
+mediated entirely through the gateway store with no adapter-to-adapter path
+and no shared state between channel processes.
 
-### Veto and egress hooks
+## Orchestrator push
 
-**Crate:** `wirken-gateway` | **Files:** `crates/gateway/src/hook_dispatcher.rs`, `crates/gateway/src/egress_dispatcher.rs`
-
-Operators register external hook processes via `wirken hooks register <id> <pubkey-hex> --type <observe|veto|egress>`. Each hook process holds its own Ed25519 keypair, connects inbound on `<data_dir>/sockets/gateway-hooks.sock`, and is matched against the registry at handshake time. The handshake binds the signature under a domain separator distinct from the adapter handshake so a key valid for one cannot replay against the other.
-
-**Veto hooks** run pre-dispatch. After the built-in tier and per-skill permission gates accept a tool call, the runtime calls `HookDispatcher::dispatch(tool_name, arguments, session_id)`. Hooks run in registration order under a cumulative wall-clock budget (`WIRKEN_VETO_BUDGET_MS`, 1000ms default) with a per-hook ceiling of 500ms. The first `Deny` short-circuits; remaining hooks are recorded as `Skipped` (no audit row); a `Timeout` row lands on the chain to distinguish budget exhaustion from operator deny. Each non-skipped outcome emits one `HookDispatched` row.
-
-**Egress hooks** run post-execution. After a tool returns and before its output enters the LLM conversation, the runtime calls `EgressDispatcher::dispatch(tool_name, output_bytes, session_id)`. Hooks run in registration order under a `WIRKEN_EGRESS_BUDGET_MS` budget (1000ms default; same 500ms per-hook cap). Each hook returns one of:
-
-- `Allow`: the working bytes pass through unchanged.
-- `Replace { bytes }`: the working bytes are substituted; the next hook in the pipeline sees the new bytes.
-- `Refuse { reason }`: short-circuits the pipeline; the tool's output becomes a refusal placeholder and the LLM sees that the call did not produce usable bytes.
-
-Each non-skipped outcome emits one `EgressHookDispatched` row carrying the operator-readable `EgressDecision` (Allow / Replace / Refuse / Timeout). When the final working bytes differ from the original, a paired `ToolOutputRedacted` row records `original_sha256`, `original_size`, `redacted_sha256`, `redacted_size`, and the attribution fields (`hook_id`, `agent_id`, `adapter_id`, `sender_id`). **The original output bytes are not on the chain by design**: an egress hook's purpose is preventing those bytes from spreading; recording them defeats the redaction. The original sha256 is the only on-chain reference, sufficient for an auditor with a candidate plaintext to verify the redaction was applied to the bytes they expect.
-
-**Chain invariant.** `ToolResult.output` carries the post-mediation bytes verbatim. The conversation that produced the next `LlmRequest`'s `messages_hash` was built from those same bytes, so `wirken sessions verify` reconstitutes an identical conversation by calling `add_tool_result(stored_output_bytes)` and the hash matches. Deterministic-tool re-execution divergence checks (`read_file`, `list_files`) skip rows that have a `ToolOutputRedacted` paired row at a higher seq for the same `call_id`: the redaction is operator policy, not wirken behavior, and re-execution would compare freshly-produced source bytes against operator-redacted bytes.
-
-**Timeout posture.** Both dispatchers fail-closed by default. `WIRKEN_ALLOW_UNREGISTERED_HOOKS=1` flips the timeout path to fail-open with a `tracing::warn!`; the audit row records the timeout regardless so a reviewer can distinguish "hook timed out" from "hook ran clean".
-
-**Live update:** Registering or unregistering a hook is durable in the `hooks.db` SQLite registry. Active connections survive a registry edit and continue dispatching until disconnect; new connections honor the updated registry at handshake time.
-
-### Sandbox Configuration
-
-**Crate:** `wirken-agent` | **File:** `crates/agent/src/sandbox.rs`
-
-`SandboxMode` (`Off`, `ExecOnly`, `GVisor`) and `SandboxConfig` (image, timeout, network, memory/PID limits) are set at agent construction. `SandboxConfig::default()` is `ExecOnly` as of 0.7.5; the operator can override to `Off` or `GVisor` via `sandbox.json` in the data dir, which the CLI writes during `wirken setup` (with an upgrade prompt if `runsc` is registered) and which `apply_org_config` populates from `OrgPermissions.sandbox_mode`. `GVisor` mode uses the `runsc` OCI runtime via Docker, providing kernel attack surface reduction: agent code syscalls are intercepted by gVisor's Sentry rather than reaching the host kernel. Container hardening is identical across `ExecOnly` and `GVisor`: `cap_drop=ALL`, `no-new-privileges`, default seccomp, read-only rootfs with a 64 MB tmpfs at `/tmp`, 512 MB memory, 256 PIDs, non-root user (1000:1000), workspace bind-mounted RW at `/workspace`, and no network by default.
-
-**Sandbox egress.** A channel with no egress policy, which is the default, gets `--network none`. A channel configured for `allowlist` or `open` egress instead gets two per-exec networks: an `Internal` bridge the sandbox joins, and an ordinary bridge only the sidecar proxy container joins. The isolation invariant on the internal network is that it is `Internal`, per exec, and has exactly two members, the sandbox and its own sidecar; it is destroyed when the exec ends. Inter-container communication stays enabled on it because the sandbox reaching its sidecar is the only flow it carries.
-
-The sidecar holds no policy. It asks the gateway over a per-exec Unix socket and receives either already-resolved addresses or a refusal, so policy, DNS resolution, the global-unicast filter, and the `SandboxEgressVerdict` audit row all stay in the gateway process. No host port is bound at any point. A sidecar that cannot start, never reports ready, or is not running when the sandbox is about to start refuses the `exec`. See [egress.md](egress.md).
-
-If Docker is not reachable when the first sandboxed tool runs, the `ToolRegistry` logs a warning naming `Docker` specifically and refuses `exec` (fail-closed) for the agent's lifetime; it does not fall back to host execution. If `gvisor` mode is configured but `runsc` is not registered with Docker, the warning names `runsc` specifically. Host execution happens only under `sandbox.json` `mode: off`, the documented opt-out. Provisioning failures are sticky for the lifetime of the registry; a fresh `wirken run` retries.
-
-**Live update:** Sandbox mode changes require gateway restart. Container resource limits are constants in the sandbox module.
-
-### Prompt Injection Detection
-
-**Crate:** `wirken-gateway` | **File:** `crates/gateway/src/injection_detect.rs`
-
-`InjectionDetector` scans inbound messages for common prompt injection signatures: role-switching attempts, instruction override markers, base64-encoded commands, tool-call injection structures, and system prompt extraction attempts. Detection does not block messages — it tags the audit event with a `threat` detail object and emits a separate `message.threat_flagged` event for SIEM visibility.
-
-**Live update:** Detection patterns are compiled into the binary. Adding new patterns requires recompilation. The detector is stateless and shared across all adapter connections.
-
-### Permission Denial Logging
-
-**Crate:** `wirken-agent` | **File:** `crates/agent/src/runtime.rs`
-
-When a `PermissionStore` is configured on an agent, tool calls are checked against the three-tier permission model before execution. Denials are collected as `PermissionDenialContext` structs in the `ProcessResult` returned by `process_message()`. The gateway's message loop logs each denial as a `permission.denied` audit event with full context: tool name, required tier, agent ID, and the trigger message that prompted the tool call.
-
-**Live update:** Permission approvals and revocations take effect immediately (SQLite). New tool-to-action mappings require recompilation.
-
-### Orchestrator Push Peer-Credential Check
-
-**Crate:** `wirken-cli` | **File:** `crates/cli/src/commands/run.rs` (accept loop), `crates/ipc/src/stream.rs` (peer-identity extraction)
-
-The gateway exposes an orchestrator push socket (`~/.wirken/sockets/orchestrator.sock` on unix, a named pipe on windows) used by `wirken zirkel run`'s digest push and similar callers to deliver outbound messages without going through the per-adapter Ed25519 handshake. Because the socket bypasses adapter authentication, every accepted connection has its peer credentials checked against the gateway's own identity:
-
-- **Unix:** `SO_PEERCRED` returns the connecting process's EUID at accept time (`tokio::net::UnixStream::peer_cred()`). The EUID is wrapped in a `Principal::Uid` and compared with the gateway's own `Principal::Uid(geteuid())`.
-- **Windows:** the named-pipe handle is queried via `GetNamedPipeClientProcessId`, then the client process's user SID is extracted via `OpenProcessToken` + `GetTokenInformation(TokenUser)` + `ConvertSidToStringSidW`. The SID is wrapped in a `Principal::Sid` and compared with the gateway's own user SID. The check happens in gateway code, not at the named-pipe DACL level, so the audit log witnesses the refusal in the same shape as on unix.
-
-The unified peer-identity surface is the `wirken_ipc::Stream::peer_principal()` method, which returns a `Principal` enum:
-
-```rust
-pub enum Principal {
-    Uid(u32),       // unix
-    Sid(String),    // windows
-}
-```
-
-`Principal` displays as a tagged string (`uid:1000` or `sid:S-1-5-21-...`) and serializes through that form, so audit consumers parse one schema regardless of platform.
-
-A refusal emits an `orchestrator.push.refused` audit event with structured detail. Two reason variants exist today:
-
-```json
-{
-  "reason": "principal_mismatch",
-  "expected": "uid:1000",
-  "actual": "uid:1001"
-}
-```
-
-```json
-{
-  "reason": "peer_principal_unavailable",
-  "expected": "uid:1000",
-  "error": "..."
-}
-```
-
-`principal_mismatch` is the load-bearing case: the connecting peer ran as a different user. `peer_principal_unavailable` is the defensive case: the OS could not return peer credentials, so the gateway refuses rather than risk admitting an unverified peer. Both refusals are recorded in the hash-chained audit log; a missing entry is itself a tampering signal.
-
-**File and pipe permissions** are defense-in-depth, not the load-bearing gate: 0600 on the unix socket, owner-only DACL on the windows named pipe. The peer-credential check above is what enforces the cross-user trust boundary; the surface posture protects against accidentally permissive defaults.
-
-**What this protects:** a process running as a different user on the same machine cannot inject orchestrator pushes through this socket, even if file permissions or pipe DACLs are accidentally relaxed. Every refusal is witnessed by the audit log.
-
-**What this does NOT protect:** code running as the same user. The orchestrator socket is a same-user trust boundary; user-level isolation (per-agent unix accounts, separate Windows user profiles) is the operator's responsibility.
-
-**Live update:** N/A — the gateway's own identity is fixed at startup.
-
----
-
-## Live Policy Updates Without Restart
-
-| Capability | Hot-Reloadable | Mechanism | Latency |
-|---|---|---|---|
-| Permission approvals | Yes | SQLite write, checked per-request | Immediate |
-| Permission revocations | Yes | SQLite delete, checked per-request | Immediate |
-| Cron job create/pause/resume | Yes | SQLite, polled every 30 seconds | Up to 30s |
-| Adapter registration | No | Requires restart | -- |
-| Skill installation | No | Requires restart (no fs watcher) | -- |
-| SIEM target change | No | Requires restart | -- |
-| Provider/model change | No | Requires restart | -- |
-| Sandbox mode change | No | Requires restart | -- |
-| Org policy refresh | No | Refreshed on startup only | -- |
-| Injection detection patterns | No | Compiled into binary | -- |
-
----
-
-## Why Compile-Time Enforcement Does Not Prevent Hot-Reloading
-
-A common objection: "If security is enforced at compile time, how can you update policies in a long-running agent without restarting?"
-
-The answer is that **compile-time and runtime enforcement protect different things**, and they are complementary.
-
-**Compile-time guarantees protect structural invariants** -- properties that must hold for the entire lifetime of the process, under all configurations, and cannot safely vary:
-- A Telegram session handle must never be usable as a Discord session handle.
-- A decrypted secret must never be printable or serializable.
-- An adapter must prove its identity before communicating with the gateway.
-
-These invariants have no legitimate reason to change at runtime. An operator should never need to "temporarily allow cross-channel session access" or "make secrets serializable for this one request." Making these invariants compile-time eliminates an entire class of bypass bugs.
-
-**Runtime guarantees protect operational policies** -- properties that operators legitimately need to tune for their deployment:
-- Which tools an agent is allowed to use (permission tiers).
-- Where audit events are forwarded (SIEM targets).
-- Which LLM provider handles requests (provider config).
-- How often scheduled jobs run (cron schedules).
-
-These are naturally dynamic. An operator granting shell access to an agent at 2 PM should not require recompiling and redeploying the binary.
-
-**The split is not a compromise.** It is the correct decomposition. The type system handles the things that *must never change*. The runtime handles the things that *must be changeable*. Neither mechanism is sufficient alone, and they do not interfere with each other.
-
----
-
-## Guarantee Map
-
-| Guarantee | Enforcement | Crate | Key Type / Function |
-|---|---|---|---|
-| Channel isolation (handle API) | Compile-time | `wirken-ipc` | `SessionHandle<C: Channel>`, `PhantomData<C>` (type-system layer; production routing still uses a `String`-typed `AuthenticatedChannel` discriminator with runtime mismatch detection) |
-| No credential logging | Compile-time | `wirken-vault` | `VaultSecret` (no `Debug` / `Display`) |
-| No credential serialization | Compile-time | `wirken-vault` | `VaultSecret` (no `Serialize`) |
-| No credential copying | Compile-time | `wirken-vault` | `VaultSecret` (no `Clone`) |
-| Credential memory zeroing | Compile-time | `wirken-vault` | `SecretString` + `zeroize` 1.8 |
-| Adapter identity proof | Compile-time | `wirken-ipc` | `AdapterIdentity`, Ed25519 challenge-response |
-| IPC frame size bound | Compile-time | `wirken-ipc` | `FrameReader` (16MB constant) |
-| IPC traversal limits | Compile-time | `wirken-ipc` | Cap'n Proto reader options (64M words / 512 MB, 64 nesting) |
-| Schema wire format | Compile-time | `wirken-ipc` | `.capnp` schema, generated `Reader<'a>` / `Builder` |
-| Permission tiers | Runtime | `wirken-gateway` | `PermissionStore::check()` |
-| Permission approvals | Runtime | `wirken-gateway` | `PermissionStore::approve()` / `revoke()` |
-| Rate limiting (auth) | Runtime | `wirken-gateway` | `AuthRateLimiter` |
-| Rate limiting (control plane) | Runtime | `wirken-gateway` | `ControlPlaneRateLimiter` |
-| Audit logging | Runtime | `wirken-audit` | `AuditWriter::log()` |
-| Audit hash chain | Runtime | `wirken-audit` | `AuditLog::write_batch()`, SHA-256 chain |
-| Audit chain-head signatures | Runtime | `wirken-audit` | `SessionEvent::ChainHead`, `AuditSigningKey`, Ed25519 over `signing::build_signed_message` |
-| SIEM forwarding | Runtime | `wirken-audit` | `SiemForwarder::forward()` |
-| Skill availability | Runtime | `wirken-agent` | `SkillLoader::load_dir()` |
-| Wasm resource limits | Runtime | `wirken-agent` | `WasmSkill::execute()`, fuel + memory cap |
-| Sandbox mode | Runtime | `wirken-agent` | `SandboxConfig`, `DockerSandbox::exec()` |
-| Org policy | Runtime | `wirken-gateway` | `OrgConfig`, `apply_org_config()` |
-| Provider selection | Runtime | `wirken-agent` | `LlmConfig`, `LlmClient::new()` |
-| Session expiry | Runtime | `wirken-gateway` | `SessionStore`, 24h inactivity timeout |
-| Cron scheduling | Runtime | `wirken-gateway` | `CronStore::due_jobs()`, 30s poll |
-| Prompt injection detection | Runtime | `wirken-gateway` | `InjectionDetector::scan()` |
-| Permission denial logging | Runtime | `wirken-agent` | `ProcessResult::denials` |
-| gVisor sandbox isolation | Runtime | `wirken-agent` | `SandboxMode::GVisor`, `runtime: "runsc"` |
+The gateway exposes a push socket (`<data_dir>/sockets/orchestrator.sock` on
+unix, a named pipe on windows) used by `wirken zirkel run`'s digest push and
+similar callers to deliver outbound messages without going through the
+per-adapter Ed25519 handshake. Because the socket bypasses adapter
+authentication, every accepted connection has its peer credentials checked
+against the gateway's own identity.

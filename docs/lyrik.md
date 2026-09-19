@@ -1,220 +1,340 @@
 # Lyrik
 
-Lyrik is Wirken's security-assessment skill; this page is the setup and configuration guide — for what Lyrik is and why it exists, see [lyrik-overview.md](lyrik-overview.md).
+<img src="img/lyrik-wirken.png" alt="Lyrik" width="360" align="right">
 
-## What goes where
+Lyrik audits a codebase against a scoring guide your team has written. The
+report shows every finding it considered, which it kept, which it threw out,
+which it could not decide on, and the reason for each.
 
-Lyrik draws a hard line between operator-level state and per-repo state. Operator-level state lives where it already lives in Wirken — the lyrik config does not duplicate or override it. Per-repo state lives in `.lyrik/` in the repo being assessed and is committed to the repo.
+## Who it is for
 
-| Lives at | What | Updated by |
-|---|---|---|
-| Wirken vault | provider API keys, channel adapter credentials | `wirken setup`, `wirken channel add`, `wirken credentials add` |
-| `~/.wirken/sandbox.json` | sandbox mode (`off` / `exec-only` / `gvisor`) | `wirken setup`, manual edit |
-| `<repo>/.lyrik/config.json` | scope, model pins per phase, gate destinations, prior-findings path, memory path | committed to repo |
-| `<repo>/.lyrik/rubric.md` | severity rubric approved at Phase 0 | committed to repo |
-| `<repo>/.lyrik/context.md` | project context approved at Phase 0 (with hot zones and per-component history) | committed to repo |
-| `<repo>/.lyrik/prior/` | past CVEs, pentest reports, internal disclosures | committed to repo |
-| `<repo>/.lyrik/memory/` | ADRs, postmortems, threat models, design docs (markdown) | committed to repo |
-| `<repo>/.lyrik/memory/jira.csv` | optional Jira export for project-history enrichment | team policy decides whether to commit |
+Highly technical security teams doing red-team or pentest work to find code
+flaws before a product ships, and internal teams running pre-release defensive
+review. Teams that need the assessment to be defensible weeks after the run,
+not just at the moment it produces a findings list.
 
-`.lyrik/config.json` references operator-level resources by name. `phases.score.provider: "privatemode"` resolves through the Wirken vault; `gates.phase_0_signoff.adapter: "slack"` resolves through Wirken's channel registry. Lyrik never sees a credential.
+Not for general code-review developers, compliance auditors, or buyers who
+want a single PASS/FAIL number.
 
-The form of `rubric.md` and `context.md` is whatever the channel renders well — markdown prose, tables, bulleted tiers. The team picks at first sign-off; the chosen form is committed and reviewed in PR like any other artifact. When the team writes the first rubric, include a short "acknowledged tensions" section listing project-level constraints the rubric consciously accepts (e.g. pre-1.0 crypto deps that have no 1.0 alternative); Lyrik can then reference these as INFO-tier lines per run instead of regenerating findings the team will discard.
+## Why it exists
 
-## First-run setup
+Common LLM code audits work for a single file and become unreliable across a
+repository. The same bugs come back run after run, severity scores drift,
+there is no log of what the model considered, CI cannot block on the output,
+and when the model is unsure the output does not say so.
 
-1. Install Wirken — see [getting-started.md](getting-started.md). Pick at least one LLM provider and at least one channel adapter that can carry the gates.
-2. From the assessed repo, message the agent: *"run a lyrik assessment, full type."*
-3. Phase 0 generates the project context and severity rubric, and routes them to `gates.phase_0_signoff`. If `.lyrik/config.json` is missing, Lyrik asks the user to nominate a destination.
-4. Review the artifacts in your channel. Approve, amend, or reject. Lyrik does not proceed on silence. For guidance on what good rubric content looks like and what each section is for, see [lyrik-rubric-authoring.md](lyrik-rubric-authoring.md).
-5. On approval, Lyrik writes `.lyrik/rubric.md` and `.lyrik/context.md` to your repo. Commit them. Subsequent runs skip Phase 0 unless the dependency lockfile hash or framework version fingerprint has changed.
-6. Optional: populate `.lyrik/prior/` with past CVEs, pentest reports, and internal disclosures. The dedup gate reads this directory recursively. Without it, the regression-finding stream stays empty.
-7. Optional: populate `.lyrik/memory/` with ADRs, postmortems, threat models, and design docs (markdown). Add `.lyrik/memory/jira.csv` if you have a Jira export. Both feed Phase 0's hot-zones and per-component history. Without them, the project context still gets built — just without the history layer.
-8. Optional: write `.lyrik/config.json`. Without it, Lyrik prompts for routing on each run.
+Pre-ship defensive review needs more than a findings list. It needs a record
+of what the audit decided, what it set aside, what was a duplicate, and where
+the team and the model disagreed. Compliance scanners produce a
+tier-collapsed verdict against a fixed framework. Lyrik produces an assessment
+whose every step is recorded against a scoring guide the team owns.
 
-## `.lyrik/config.json` schema
+## What it is not
 
-A sample is at [`lyrik.example.json`](lyrik.example.json). Each top-level key:
+- Not a vulnerability scanner. Lyrik runs scanners; it is not one.
+- Not a compliance tool. It does not score against MITRE ATLAS, OWASP or NIST
+  unless the team's scoring guide chooses to.
+- Not a continuous monitor. It audits source on demand and does not watch
+  running systems.
+- Not a single-number tool. There is no PASS/FAIL and no aggregate severity
+  score; the structure of the assessment is the output.
+- Not a disclosure tool. It does not notify vendors, file CVEs or open
+  tickets.
 
-### `scope`
+It will not claim a finding is exploitable without verifying it, will not
+invent a severity tier the guide does not cover, will not average disagreeing
+scorers into a consensus, and will not auto-route high-severity findings to a
+delivery channel without human signoff.
 
-Object. Paths included in and excluded from the assessment. A user request like *"assess only `src/`"* overrides this for the run.
+## What ships today
 
-- `include` — array of glob patterns. Defaults to `["**/*"]` if absent.
-- `exclude` — array of glob patterns. Defaults to `["target/**", "node_modules/**", ".git/**"]` if absent.
+- **Scoring against the inline rubric in `SKILL.md`.** The rubric that derives
+  every finding's tier lives in the skill body. The committed-guide workflow
+  (Phase 0 sign-off writing `.lyrik/rubric.md` and `.lyrik/context.md` for the
+  team to review) auto-approves under bench mode and is not wired into
+  production runs.
+- **Two-pass scoring.** Each finding is scored by two independent passes. When
+  they disagree by more than one step on any axis the finding carries
+  `scoring_disagreement: true` and the runner picks the lower-implied tier.
+  That is the mechanism behind "will not average": disagreement is recorded
+  and resolved conservatively.
+- **Grade caps at 0.5.** A finding gets `grade: 0.5` when both passes mark
+  `real_bug: yes` and `reachable: yes`; everything else gets `0`. The ceiling
+  is by design: Lyrik confirms real-and-reachable, and exploit verification is
+  a separate workload against the same findings.
+- **Per-finding `detection_source` provenance**, a closed enum enforced when
+  present.
+- **Opt-in Semgrep prescreen.** With `scanner.semgrep.enabled` set, the runner
+  invokes a pinned Semgrep version before the LLM passes, materializes
+  taint/dataflow candidates as seeds the model rules on, and records
+  `lyrik.scanner.dispatched` with the binary version and ruleset sha. A
+  missing binary or version mismatch degrades to LLM-only.
+- **Tool-call preflight.** Before any target-touching work the runner probes
+  the configured model through the same dispatch path, with one tool defined
+  and a prompt asking the model to call it. Pass emits
+  `lyrik.model.tool_calls_supported`; fail aborts before scanner dispatch with
+  the case named.
+- **Bundled skill staged per run**, self-signed with a one-shot keypair so the
+  loader's signature gate accepts it, which is why `/lyrik` resolves to the
+  staged copy regardless of operator state under `<data_dir>/skills/`.
+- **Citation-resolution gate.** For every emitted finding the runner confirms
+  the cited file exists and the cited line resolves, then runs class-specific
+  sub-gates on the cited line plus a window, routing to a named deferred tag
+  when no honest check is available.
+- **Per-skill restricted tool lists.** The skill's `permissions` block is
+  enforced at runtime by the gateway. Lyrik ships its own; operators can
+  review or tighten it before install.
+- **Audit logs.** A per-run NDJSON `<run>/audit.log` for every dispatch
+  decision, plus the signed hash-chained gateway chain for cross-session
+  integrity. See [audit-cli.md](audit-cli.md).
+- **JSON findings schema** with a reference validator and a SARIF emitter.
 
-### `phases`
+## Setup
 
-Object. One entry per phase that makes a model call. Each entry pins the provider and model for that phase. The provider must be a name configured in the Wirken vault; the model must be one supported by that provider.
+1. Install Wirken and pick at least one provider and one channel adapter that
+   can carry the gates. See [getting-started.md](getting-started.md).
+2. From the assessed repo, message the agent: *"run a lyrik assessment, full
+   type."*
+3. Phase 0 generates the project context and severity rubric and routes them
+   to `gates.phase_0_signoff`. Lyrik does not proceed on silence.
+4. On approval, Lyrik writes `.lyrik/rubric.md` and `.lyrik/context.md`.
+   Commit them. Later runs skip Phase 0 unless the dependency lockfile hash or
+   the framework version fingerprint changes, or the team asks for a re-run.
+5. Optionally populate `.lyrik/prior/` with past CVEs, pentest reports and
+   internal disclosures; the dedup gate reads it recursively. Without it the
+   regression-finding stream stays empty.
+6. Optionally populate `.lyrik/memory/` with ADRs, postmortems, threat models
+   and design docs, plus `jira.csv` if you have an export. Both feed Phase 0's
+   hot-zones and per-component history. Without them the context still builds,
+   minus the history layer.
 
-| Phase | What it does |
+## What lives where
+
+Operator-level state stays where it already lives in Wirken; the Lyrik config
+does not duplicate or override it. Per-repo state lives in `.lyrik/` and is
+committed.
+
+| Lives at | What |
 |---|---|
-| `articulate` | Phase 0 project context generation. Long-context reasoning over the repo. |
-| `rubric` | Phase 0 severity rubric derivation from the project context. |
-| `recon` | Entry-point and trust-boundary mapping. Cheap pass. |
-| `framing` | The nine framings (`auth`, `crypto`, `injection`, `deserialization`, `memory_safety`, `secrets`, `supply_chain`, `race_condition`, `prompt_injection`) and their two sub-passes. The largest token consumer. |
-| `score` | Four-axis scoring per finding, multi-instance. The dedup gate's causal tier reuses this pin. |
-| `exploit` | Exploit-attempt code generation, run inside the gVisor sandbox. |
+| Wirken vault | provider API keys, channel adapter credentials |
+| `<data_dir>/sandbox.json` | sandbox mode |
+| `<repo>/.lyrik/config.json` | scope, model pins per phase, gate destinations, prior-findings path, memory path |
+| `<repo>/.lyrik/rubric.md` | severity rubric approved at Phase 0 |
+| `<repo>/.lyrik/context.md` | project context approved at Phase 0 |
+| `<repo>/.lyrik/prior/` | past CVEs, pentest reports, internal disclosures |
+| `<repo>/.lyrik/memory/` | ADRs, postmortems, threat models, design docs |
 
-Confidentiality is achieved by pinning confidential phases to a Privatemode or Tinfoil provider. Lyrik has no `confidential: true` flag — the pin is the mechanism.
+`.lyrik/config.json` references operator-level resources by name:
+`phases.score.provider: "privatemode"` resolves through the vault,
+`gates.phase_0_signoff.adapter: "slack"` through the channel registry. Lyrik
+never sees a credential.
 
-Per-class pinning inside `framing` (`framing.crypto` on a different provider than `framing.injection`) is not supported. If a real engagement needs it, file a `skills/lyrik/FOLLOWUPS.md` entry.
+## `.lyrik/config.json`
 
-#### `prompt_injection` activation
+A sample is at [`lyrik.example.json`](lyrik.example.json).
 
-`prompt_injection` is the ninth framing class. Recon activates it when the scope contains any of: an LLM client, an agent loop, tool execution, system-prompt construction, retrieval (RAG, embedding lookup, in-context file reads), or an MCP host. Untrusted text reaching a model's context is a distinct trust model from classical SQL/shell/log injection — sanitization shapes from those domains do not apply, and in-context content inherits trust from the surrounding prompt by default. The framing covers system-prompt content under attacker influence, tool-output amplification into context, retrieval payload trust, and cross-tool prompt-relay paths.
+**`scope`** — `include` globs (default `["**/*"]`) and `exclude` globs
+(default `["target/**", "node_modules/**", ".git/**"]`). A user request like
+"assess only `src/`" overrides this for the run.
 
-For Wirken-internal scopes, this means `crates/agent/`, `crates/mcp-proxy/` (MCP host surface), `crates/cli/src/commands/webchat.rs`, and any skill loader or skill execution path activates `prompt_injection`. For external assessments, the same pattern applies to any LLM-hosting application: agent frameworks, RAG pipelines, retrieval-augmented chat services, MCP servers, and skill/tool/plugin executors all activate it.
+**`phases`** — one entry per phase that makes a model call, pinning provider
+and model. Phases: `articulate` (Phase 0 context generation), `rubric` (Phase
+0 rubric derivation), `recon` (entry-point and trust-boundary mapping),
+`framing` (the nine framing classes and their sub-passes, the largest token
+consumer), `score` (four-axis scoring, multi-instance), `exploit`
+(exploit-attempt code, run inside the gVisor sandbox).
 
-### `gates`
+Confidentiality is the pin: there is no `confidential: true` flag, so pinning
+a phase to Privatemode or Tinfoil is the mechanism. Per-class pinning inside
+`framing` is not supported.
 
-Object. One entry per human gate. Each entry specifies which channel adapter delivers the gate and the adapter-specific target string.
+The nine framings are `auth`, `crypto`, `injection`, `deserialization`,
+`memory_safety`, `secrets`, `supply_chain`, `race_condition` and
+`prompt_injection`. Recon activates `prompt_injection` when the scope contains
+an LLM client, an agent loop, tool execution, system-prompt construction,
+retrieval, or an MCP host. Untrusted text reaching a model's context is a
+distinct trust model from classical SQL or shell injection: sanitization
+shapes from those domains do not apply, and in-context content inherits trust
+from the surrounding prompt by default.
 
-| Gate | When it fires |
+**`gates`** — one entry per human gate, each naming an `adapter` and an
+adapter-native `target`.
+
+| Gate | Fires when |
 |---|---|
-| `phase_0_signoff` | Phase 0 artifacts (project context, severity rubric) await approval. |
-| `scoring_disagreement` | Two scoring passes disagree by more than one severity tier on any axis. The finding plus all rationales lands here for adjudication. |
-| `high_severity_review` | A finding lands at grade 1.0. The reviewer signs off on the delivery destination, redirects, or holds. There is no auto-routing for 1.0-grade findings — encrypted channel or otherwise. |
+| `phase_0_signoff` | Phase 0 artifacts await approval |
+| `scoring_disagreement` | Two scoring passes disagree by more than one tier on any axis |
+| `high_severity_review` | A finding lands at grade 1.0. There is no auto-routing for these, encrypted channel or otherwise |
 
-Each gate entry:
+Target syntax is whatever the adapter natively addresses a destination by:
+Slack a channel ID (`C012ABCDEF`) or `#channel-name`, Matrix a room ID
+(`!roomid:server.tld`), Signal an E.164 number. Others use their own
+conversation ids.
 
-- `adapter` — name of a configured Wirken channel adapter (`slack`, `discord`, `matrix`, `signal`, `telegram`, `imessage`, `teams`, `whatsapp`, `google-chat`).
-- `target` — free-form string, parsed by the adapter. See "Channel target syntax" below.
+**`prior_findings_path`** and **`memory_path`** default to `./.lyrik/prior`
+and `./.lyrik/memory`.
 
-### `prior_findings_path`
+**`walks` and `max_concurrent_walks`** — opt into per-walk dispatch: one agent
+turn per named walk, run concurrently against the same target, producing a
+single deduped `findings.json`.
 
-String. Path to the directory containing prior CVEs, pentest reports, and internal disclosures. Absolute, or relative to the repo root. Defaults to `./.lyrik/prior` if absent. The dedup gate reads this directory recursively.
+```json
+{ "walks": ["sink-walk", "chain-walk", "graph-walk"], "max_concurrent_walks": 4 }
+```
 
-### `memory_path`
+The validator runs at config-parse time, before any LLM call, and hard-fails
+when the array is empty (the way to skip Lyrik is not to run it), when a name
+is outside the canonical set (`chain-walk`, `crypto-walk`,
+`differential-walk`, `doc-walk`, `fuzz-walk`, `graph-walk`, `invariant-walk`,
+`sink-walk`), or when the named walk is not installed at
+`~/.claude/skills/<walk-name>/SKILL.md`. `max_concurrent_walks` defaults to 4,
+tuned to the conservative end of common provider rate limits; 0 is rejected
+and a value above the walk count is a no-op.
 
-String. Path to the project-memory directory holding ADRs, postmortems, threat models, and design docs (markdown). Absolute, or relative to the repo root. Defaults to `./.lyrik/memory` if absent. Phase 0 reads this directory recursively for project-history enrichment. The Jira CSV, if present, is read at `<memory_path>/jira.csv`.
+Each walk runs as its own task gated by a semaphore. Every walk's agent shares
+the run-level session id (`lyrik-<run-id>`), so all walk turns land in one
+signed audit chain however many run in parallel. Per-walk staging lives under
+`.lyrik/state/runs/<run-id>/staging/<walk-name>/`.
 
-### `walks` and `max_concurrent_walks`
+Dedup on the merged output: findings sharing `(location.file,
+location.line_start)` collapse to one; `framing` becomes the sorted unique
+union; `tier` rises to the highest; `dedup_disagreement: true` when input
+tiers differ; `dedup_sources` lists every contributing walk in first-seen
+order. The first finding's `summary`, `id` and `stable_id` survive as
+canonical. Findings without a file and line pass through unchanged, so a
+malformed input does not collapse against everything else under a default key.
 
-Optional. Opts a run into per-walk dispatch: instead of one `/lyrik` agent turn covering both framings serially, the runner spawns one agent turn per named walk and runs them concurrently against the same target. The output is a single deduped `findings.json`.
+Exit `0` when at least one walk returned success with no permission denials;
+non-zero when any walk hit a permission denial, which is operator intent and
+never silently merged into partial success, or when every selected walk failed
+transiently. Either way a partial `findings.json` is produced.
+
+**`bench_mode`** — defaults false. When true, `phase_0_signoff` and
+`high_severity_review` auto-approve so a run completes without an interactive
+reviewer. `scoring_disagreement` is **not** short-circuited; three-way
+disagreement still routes, to a benchmark-side log file rather than a channel.
+Both auto-approvals emit audit records with `signoff.decision: "auto_bench"`
+so bench runs are distinguishable after the fact. Set it only on benchmark or
+batch-evaluation targets.
+
+## Writing the scoring guide
+
+A markdown file at `.lyrik/rubric.md` in the repo being assessed. The team
+owns it, commits it, and reviews it in PR like any other artifact. It is not
+CVSS-shaped (CVSS produces a number; a rubric produces tier definitions
+specific to the software), not a compliance checklist, and not universal:
+different projects need different rubrics, and the same project needs a
+different one when its threat model changes.
+
+Sections worth including: software identification; what counts as a security
+property of *this* software and what does not; tier definitions with concrete
+examples; **acknowledged tensions**, the project-level constraints the rubric
+consciously accepts, so Lyrik can reference them as INFO-tier lines per run
+instead of regenerating findings the team will discard; rubric-silent cases,
+which route to human review rather than getting an invented tier; and any
+run-specific constraints.
+
+Lyrik drafts most of it at Phase 0 in collaboration with you, rather than
+expecting you to write it from scratch. The form is whatever the channel
+renders well: prose, tables, bulleted tiers. The team picks at first sign-off
+and the chosen form is committed.
+
+## Findings schema (1.1)
+
+`findings.json` is the contract external consumers (SIEM ingestors, ticketing
+systems, CI gates, diff tools) pin against.
+
+`$id` is
+`https://raw.githubusercontent.com/gebruder/wirken/schema-v1.1/docs/lyrik-json-schema.json`.
+The schema is tag-pinned, not release-pinned: wirken releases that do not
+change it do not move the tag, and schema changes cut a new tag and a new
+spec. `wirken lyrik validate --path <path>` embeds the schema bytes and never
+fetches `$id`; the URL is for external JSON Schema validators.
 
 ```json
 {
-  "walks": ["sink-walk", "chain-walk", "graph-walk"],
-  "max_concurrent_walks": 4
+  "schema_version": "1.1",
+  "run_id": "<non-empty string>",
+  "produced_at": "<RFC 3339 timestamp>",
+  "findings": [ /* zero or more */ ]
 }
 ```
 
-`walks` is an array of walk skill names. The validator runs at config-parse time, before any LLM call, and hard-fails when:
+Required per finding: `id`, `stable_id`, `framing` (array of one or more
+closed-enum strings), `location.file` (workspace-relative), `location.line_start`
+(1-based), `title`, `summary`, `tier`. Closed enums: `framing[*]` is `"auth"`
+or `"injection"`; `tier` is `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`, `INFO`;
+`detection_source`, optional but enforced when present, is `static_prescreen`,
+`model_reasoning` or `both`.
 
-- the array is empty (the way to skip Lyrik is to not run it, not to set `walks: []`),
-- a name is not in the canonical set (`chain-walk`, `crypto-walk`, `differential-walk`, `doc-walk`, `fuzz-walk`, `graph-walk`, `invariant-walk`, `sink-walk`),
-- the named walk skill is not installed at `~/.claude/skills/<walk-name>/SKILL.md`.
+`detection_source` records the origin of the candidate: `static_prescreen`
+when the scanner raised the location and the model ruled it a real bug,
+`model_reasoning` when the model raised it without a matching scanner
+candidate, and `both` when the two converged on the same file and line across
+walks. **`both` is produced only by per-walk dedup**, so single-call mode never
+emits it.
 
-`max_concurrent_walks` defaults to `4` when absent. Tuned to the conservative end of common provider rate limits; operators on higher tiers can raise it. Values above the selected walk count are no-ops; values of `0` are rejected.
+Extra fields at both levels are allowed and ignored, so producers can carry
+`grade`, `stream`, `scoring_passes`, `dedup_sources`, `location.line_end` and
+similar through without the validator enforcing their shape.
 
-Walk dispatch shape:
+**Stable-ID grammar.**
 
-- Each walk runs as its own `tokio::spawn` task gated by a `Semaphore` with `max_concurrent_walks` permits.
-- Every walk's Agent shares the run-level session id (`lyrik-<run-id>`), so all walk turns land in one signed audit chain regardless of how many run in parallel.
-- Per-walk staging at `.lyrik/state/runs/<run-id>/staging/<walk-name>/{context,rubric,findings}/`. The runner aggregates per-walk findings into the canonical `findings.json` after every walk turn returns.
-- Walk skills are operator-installed in the Claude-style skill tree. The runner stages them with synthesized wirken-shaped frontmatter under `<run-dir>/walks-skills/<walk-name>/SKILL.md` so the slash interceptor finds `/<walk-name>` as a first-class skill.
-
-Dedup contract on the merged `findings.json`:
-
-- Findings sharing `(location.file, location.line_start)` collapse to one entry.
-- `framing` becomes the sorted unique union of input framings.
-- `tier` rises to the highest of the inputs (`CRITICAL` > `HIGH` > `MEDIUM` > `LOW` > `INFO`).
-- `dedup_disagreement: true` when input tiers differ. `false` otherwise. The first finding's `summary`, `id`, and `stable_id` survive as the canonical record.
-- `dedup_sources: ["sink-walk", "graph-walk"]` lists every walk that contributed in first-seen order.
-
-Findings without a `location.file` and `location.line_start` pass through unchanged so a malformed input does not collapse against everything else under a default key.
-
-Exit code:
-
-- `0`: at least one walk returned `success`, no permission denials.
-- non-zero: any walk hit a permission denial (operator intent, never silently merged into partial success), or every selected walk failed transient.
-
-Per-walk outcome lands in the audit log as `lyrik.walk.started` and `lyrik.walk.completed` rows regardless of run-level exit. Even a non-zero exit produces a partial `findings.json` so the operator can review what landed.
-
-When `walks` is absent, the runner takes the existing one-call slice path: a single `/lyrik` turn, no per-walk staging, no dedup. Operators opt in when they want the parallelism.
-
-### `scanner`
-
-Optional. Opt-in for the pre-LLM static-prescreen pass. Absent the block (default), Lyrik runs LLM-only and emits findings without `detection_source`.
-
-```json
-{
-  "scanner": {
-    "semgrep": { "enabled": true }
-  }
-}
+```
+stable_id := framing "::" rel_file ":" line
 ```
 
-When `scanner.semgrep.enabled` is `true`, the runner invokes a pinned Semgrep version with a bundled ruleset against the target before the LLM passes, materialises taint/dataflow candidates as seed files under `.lyrik/state/runs/<run-id>/seeds/seed-NNN.json`, and amends the dispatch prompt so the model rules on each seed. The model accepts a seed by emitting a finding at the seed's location (the runner annotates `detection_source` post-turn based on location match — see schema-v1.1 spec for the closed enum), or declines by writing `staging/<walk?>/declines/decline-NNN.json` with `{seed_id, reason}`.
+The last `:` separates the line from the path, which admits `:` inside a
+POSIX filename without an escape character. `rel_file` is byte-for-byte what
+Lyrik sees on disk, with no Unicode normalization applied at the producer
+side; filesystems disagree (Linux is bytes, macOS HFS+ may apply NFD, Windows
+is UTF-16), so consumers comparing across platforms normalize themselves.
 
-Per-seed disposition is recorded in the per-run NDJSON `audit.log`:
+Conforming: `auth::src/foo.rs:42`, `injection::deeply/nested/file.py:1`,
+`auth::a:b:c.rs:7`. Not conforming: an absolute path, an empty or unknown
+framing, a missing or non-integer line.
 
-- `lyrik.scanner.dispatched` — Semgrep ran. Detail: `{tool, version, ruleset_url, ruleset_sha, target, seed_count}`.
-- `lyrik.scanner.unavailable` — binary absent, version mismatch against the runner's pin, or invocation/parse failure. Detail: `{tool, reason, detail}` with `reason` a stable snake_case label. Run proceeds LLM-only.
-- `lyrik.candidate.declined` — model wrote a decline file for a seed. One row per (walk, decline) pair so per-walk decline rationales stay distinguishable.
-- `lyrik.candidate.unaddressed` — seed matched no finding and no decline. One row per seed.
+`line` is the brittle component: a finding shifts line numbers when unrelated
+edits land above it, so consumer-side fuzzy matchers should fall back to
+file-proximity matching on an exact-ID miss.
 
-The runner pin is the contract: a different `semgrep --version` on PATH counts as `version_mismatch`. None of the scanner rows are signed; they live in the per-run NDJSON only (see issue tracker for the typed signed-`SessionLog` variant).
+`findings[]` is sorted by `(location.file, location.line_start)` ascending,
+stable across runs of the same scope.
 
-### `bench_mode`
+**Not in the 1.1 surface**, and consumers must not pin against them: a
+top-level `target`, `funnel`, `concentration` or `observations` block;
+per-finding `gate_routed`, `dedup_match` or `stream` as closed enums; a
+`triage_status` field. 1.1 does not require producers to emit `$schema`, and
+if a report carries one the validator asserts it string-equals `$id`.
 
-Boolean. Defaults to `false`. When `true`, two human gates are short-circuited so the run can complete without an interactive reviewer:
+## Reports and audit
 
-- `phase_0_signoff` auto-approves the rubric and context. The committed `.lyrik/rubric.md` is treated as approved without routing to the gate adapter.
-- `high_severity_review` auto-approves delivery for grade 1.0 findings. The reviewer step is recorded but not waited on.
+```bash
+wirken lyrik report --format sarif --run <run-id> --output findings.sarif
+wirken lyrik validate --path findings.json
+```
 
-The `scoring_disagreement` gate is **not** short-circuited. Three-way disagreement still routes through the gate to a benchmark-side log file rather than a channel adapter; the disagreement count remains a metric.
+Every phase output writes to the Wirken audit subsystem with no opt-out, each
+entry carrying a run ID that the final report includes so downstream readers
+can pull the chain. The report opens with the assessment shape: counts of
+findings produced, duplicates of each other, duplicates of earlier runs,
+scored, sent for human review, exploit-tested, and set aside with the reason.
+The numbers reconcile and a reader can check the math. That funnel disclosure
+is the structural rebuttal to "we found N high-severity bugs": a finding count
+without disclosure of what was dropped or stopped before scoring is not an
+assessment.
 
-Both auto-approvals emit audit records with `signoff.decision: "auto_bench"` so consumers can distinguish bench runs from production runs after the fact. Only set this on benchmark or batch-evaluation targets; production runs should leave it `false`.
+Scanner rows (`lyrik.scanner.dispatched`, `lyrik.scanner.unavailable`,
+`lyrik.candidate.declined`, `lyrik.candidate.unaddressed`) live in the per-run
+NDJSON only and are not signed.
 
-## Enrichment inputs
+Each report records the source location (git URL, commit SHA, and whether the
+run was on current code, before a fix, after a fix, or a pinned state), the
+scoring guide path, the audit log path, and instructions to reproduce from a
+clean clone.
 
-Phase 0 reads three kinds of input to give the project context real history. All are opt-in: lyrik runs without them, but the resulting context lacks the hot-zones and per-component-history layers that downstream framing and scoring rely on.
+## When markdown is not enough
 
-| Source | Where | Used for |
-|---|---|---|
-| Markdown project memory | `.lyrik/memory/*.md` (recursive) | ADRs, postmortems, threat models, design docs. Filtered to security-relevant content during articulate. |
-| Git history | the target repo's `.git/` | Security-keyword commits (`git log --grep`), FIXME density (`git grep -c`), churn over the rubric window (`git log --since=... --name-only`), distinct authors per file (`git blame --line-porcelain`). |
-| Jira CSV | `<memory_path>/jira.csv` | Ticket export with required columns `key,summary,description,status,created`; optional `labels,priority,components`. Filtered to security-relevant tickets. |
-
-The articulate phase combines these into two sections of `.lyrik/context.md`:
-
-- **Hot zones.** Files flagged by multiple dimensions (churn × security-keyword commits × Jira tickets × FIXME density). A file flagged on three or four dimensions is a hot zone; one dimension alone is noise.
-- **Per-component history.** For each component identified in the software-identity pass, one short paragraph naming relevant ADRs, postmortems, recent Jira tickets, churn rate, FIXME density.
-
-Framing and scoring phases receive a **component-filtered slice** of this enrichment. A finding in `crates/vault/` gets vault-relevant memory and history; a finding in `crates/mcp-proxy/` gets mcp-proxy-relevant. The slicing is by component path, not by global salience.
-
-The smallest-viable enrichment is intentional: filesystem markdown and a CSV file, no API connectors, no live Jira/GitHub/Linear integrations. Operators who outgrow this surface should file a `skills/lyrik/FOLLOWUPS.md` entry with the worked case.
-
-## Channel target syntax
-
-The `gates.<gate>.target` string is whatever form the adapter natively addresses a destination by. Verified forms in the bundled adapters:
-
-| Adapter | Target form |
-|---|---|
-| `slack` | Slack channel ID (`C012ABCDEF`) or `#channel-name`. |
-| `matrix` | Matrix room ID, `!roomid:server.tld`. |
-| `signal` | E.164 phone number, `+15551234567`. |
-
-Other adapters use their own native conversation IDs. If you're unsure, look at the adapter's source under `crates/adapter-<name>/` — the field is consistently named (`channel_id`, `room_id`, `phone_number`, etc.).
-
-## What gets written to the audit log
-
-Every phase output writes to the Wirken audit subsystem (`crates/audit`). No phase has an opt-out. Each entry carries a run ID; the final report includes the run ID so downstream readers can pull the chain.
-
-The Lyrik report explicitly includes a **funnel disclosure**: candidates generated → after dedup → scored → exploit-verified. The numbers must reconcile. This is the rebuttal to aggregate counts presented without provenance.
-
-## When Phase 0 gets re-run
-
-Lyrik treats the committed `.lyrik/rubric.md` and `.lyrik/context.md` as approved unless invalidated. Invalidation triggers:
-
-- Dependency lockfile hash changes (`Cargo.lock`, `package-lock.json`, `pnpm-lock.yaml`, `poetry.lock`, `go.sum`, etc., depending on the project).
-- Framework version fingerprint changes (major version bumps of the primary framework).
-- The team explicitly asks for a Phase 0 re-run.
-
-When invalidated, Lyrik re-generates and routes through `phase_0_signoff` again. The previous `rubric.md` and `context.md` stay in git history — diff them in PR.
-
-## When the markdown form is not enough
-
-If real use surfaces a boundary that `.lyrik/config.json` plus the SKILL.md can't carry — a state store the agent can't reconstruct from filesystem reads, a typed schema that needs validation at write time, a programmatic dispatch that needs harness support — record it in `skills/lyrik/FOLLOWUPS.md`. Don't grow this guide or the SKILL.md into a substitute for it.
+If real use surfaces a boundary that `.lyrik/config.json` plus the `SKILL.md`
+cannot carry, record it in `skills/lyrik/FOLLOWUPS.md` rather than growing
+this guide or the skill body into a substitute for it.

@@ -74,30 +74,14 @@ sidecar container, not to the exec sandbox:
 ### Sandbox egress
 
 `network_mode: none` is the default and applies whenever the channel serving
-the turn has no egress policy.
+the turn has no egress policy. A channel configured for `allowlist` or `open`
+joins a per-exec two-member internal network and reaches the outside only
+through a sidecar proxy container. The topology, the isolation invariant, the
+port and address rules, and the known CONNECT/SNI limit are in
+[egress.md](egress.md#sandbox-egress). Everything else in the hardening table
+above is unchanged on that path.
 
-When a channel is configured for `allowlist` or `open` egress, two networks are
-created for that exec:
-
-| Network | Kind | Members | Purpose |
-|---|---|---|---|
-| `wirken-egress-<id>` | `Internal`, no route off the host | the sandbox and its sidecar, exactly two | carries the sandbox's requests to the sidecar |
-| `wirken-egress-out-<id>` | ordinary bridge | the sidecar only | the sole path outward |
-
-The sandbox joins the internal network only, so its one reachable peer is its
-own sidecar. The isolation invariant is that network being `Internal`, per
-exec, and two-member; both networks are removed when the exec ends.
-Inter-container communication is left enabled on the internal network because
-the sandbox reaching its sidecar is the only flow it carries.
-
-The sidecar proxy holds no policy: it asks the gateway over a per-exec Unix
-socket, so no host port is bound. The other rows in the table above are
-unchanged on this path.
-
-The sidecar runs the wirken binary itself, bind-mounted read-only, which
-requires the statically linked build. `sandbox.json` sets `sidecar_binary` to
-point at a static binary when the running gateway is not one, and `image` to
-name the container image `exec` runs in:
+Two `sandbox.json` keys matter here:
 
 ```json
 {
@@ -107,26 +91,27 @@ name the container image `exec` runs in:
 }
 ```
 
-`sidecar_binary` absent defaults to the gateway's own executable. A configured
-path that does not exist refuses the `exec` rather than running it unproxied.
+`sidecar_binary` absent defaults to the gateway's own executable, which is the
+shipping shape: the sidecar runs the wirken binary itself, bind-mounted
+read-only, and releases are statically linked. A dynamically linked
+development build cannot run inside the sandbox image, so this key points at a
+static one. A configured path that does not exist refuses the `exec` rather
+than running it unproxied.
 
-`image` absent or empty means the compiled-in default, and the default carries
-no HTTP client by decision. An `exec` on a channel granted proxied egress
-reaches nothing from the default image. An operator who needs that path
-exercised sets `image` to an image that carries a proxy-aware client, as in the
-block above, and that opt-in key is the supported way to get one. The default
-stays without a client because a client there widens the sandbox surface for
-every install, including the installs that never configure egress and rely on
-no interface and no client as two independent walls. Putting the choice in
-`sandbox.json` puts it where the consequence lands.
+`image` absent or empty means the compiled-in default, and **the default
+carries no HTTP client by decision**, so an `exec` on a channel granted
+proxied egress reaches nothing from it. An operator who needs that path
+exercised sets `image` to an image carrying a proxy-aware client, and that
+opt-in key is the supported way to get one. The default stays without a client
+because adding one widens the sandbox surface for every install, including
+installs that never configure egress and rely on no interface and no client as
+two independent walls. Putting the choice in `sandbox.json` puts it where the
+consequence lands.
 
-A key in `sandbox.json` that the loader does not read is named in a warning
-at start and ignored. The loader never refuses a file over one, so a file
-written for a newer build does not stop an older one from starting; the
-warning is what says the setting did nothing.
-
-See [egress.md](egress.md) for the modes, properties, runtime requirement, and
-the known CONNECT/SNI limit.
+A key in `sandbox.json` that the loader does not read is named in a warning at
+start and ignored. The loader never refuses a file over one, so a file written
+for a newer build does not stop an older one from starting; the warning is
+what says the setting did nothing.
 
 `security_opt` does NOT explicitly set seccomp. Per Docker semantics
 ([upstream](https://docs.docker.com/engine/security/seccomp/)), when no
@@ -216,7 +201,7 @@ Honest about the gaps:
 - **Side-channel attacks** (Spectre-class, page-cache timing, etc.).
   Wirken's sandbox is a logical isolation boundary, not a microarchitectural
   one. Multi-tenant deployments that need that should use a TEE provider
-  ([reference/privatemode.md](reference/privatemode.md)).
+  ([configuration.md](configuration.md#confidential-inference)).
 - **Workspace TOCTOU.** The bind-mount at `/workspace` is the host
   workspace. Shell code inside the sandbox can write files the host
   process later reads; if the host process trusts file metadata between
