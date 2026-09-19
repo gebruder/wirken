@@ -139,8 +139,14 @@ jobs:
             ~/.cargo/bin/cargo-fuzz
             fuzz/target/
           key: ${{ runner.os }}-fuzz-${{ hashFiles('fuzz/Cargo.toml', '**/Cargo.lock') }}
+      # The cache above restores `~/.cargo/bin/cargo-fuzz`, and
+      # `cargo install` refuses to overwrite an existing binary rather
+      # than treating it as already done. So the install runs on a cold
+      # cache and is skipped on a warm one. `--force` would work and
+      # would rebuild cargo-fuzz from source on every push, which is
+      # most of this job's wall clock.
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: command -v cargo-fuzz >/dev/null || cargo install cargo-fuzz --locked
       # Sixty seconds per target on every push. That is not a fuzzing
       # campaign; it is a tripwire that the committed corpus still
       # passes and that a change did not open a shallow crash. Long
