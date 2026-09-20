@@ -114,6 +114,14 @@ class Handler(BaseHTTPRequestHandler):
             req = {}
 
         n = len(req.get("messages", []))
+        # A fresh `wirken ask` opens with just the system and user
+        # messages; every later call in the same turn carries the
+        # tool round-trips too. Treat the short one as the start of
+        # the script, so the demo runs again without restarting the
+        # server. Without this the counter only climbs, and a second
+        # pass answers every call with the step-4 text reply.
+        if n <= 2:
+            Handler.step = 0
         idx = min(Handler.step, len(SCRIPT) - 1)
         message = SCRIPT[idx]
         Handler.step += 1
