@@ -172,6 +172,34 @@ impl SessionStore {
     }
 
     /// Close (expire) a session.
+    /// Whether a `(channel, conversation_id)` pair has a live
+    /// session: a row not marked expired and not past the inactivity
+    /// window.
+    ///
+    /// Read-only, unlike [`Self::get_or_create`], which marks a stale
+    /// row expired and mints a replacement. A liveness question must
+    /// not create the thing it is asking about, and this is asked on
+    /// the permission gate's path, where minting a session as a side
+    /// effect of checking a grant would be its own defect.
+    ///
+    /// Both halves of the test, because either alone is wrong: a row
+    /// keeps `expired = 0` until something touches it, so age is what
+    /// catches a conversation nobody came back to, and the flag is
+    /// what catches one an operator closed.
+    pub fn is_live(&self, channel: &str, conversation_id: &str) -> bool {
+        let cutoff = (Utc::now() - Duration::seconds(self.expiry_secs as i64)).to_rfc3339();
+        self.conn
+            .query_row(
+                "SELECT 1 FROM sessions
+                 WHERE channel = ?1 AND conversation_id = ?2
+                   AND expired = 0 AND last_activity > ?3
+                 LIMIT 1",
+                params![channel, conversation_id, cutoff],
+                |_| Ok(()),
+            )
+            .is_ok()
+    }
+
     pub fn close(&self, session_id: &str) -> Result<(), GatewayError> {
         let changes = self.conn.execute(
             "UPDATE sessions SET expired = 1 WHERE id = ?1",

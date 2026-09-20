@@ -240,15 +240,13 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
 /// is what the replay-on-wake path in `AgentFactory::wake` consumes
 /// to leave the in-memory cache empty on the next wake.
 ///
-/// Coherence note: the daemon (if running) keeps any session-scoped
-/// grants in its own in-process cache until process restart, because
-/// the CLI runs out-of-band of the daemon and cannot directly call
-/// `factory.evict`. A daemon-side sweep routing expired sessions
-/// through `factory.evict` would close it; there is none, so an
-/// in-flight grant on a CLI-closed session stays effective for the
-/// lifetime of the daemon process. Replay correctness on the next
-/// wake is preserved by the tombstone emitted here; the live cache
-/// is not.
+/// The running daemon does not need to be told. Its permission store
+/// asks whether a session is live before serving a session-scoped
+/// grant from its cache, and the store row this marks expired is what
+/// it asks about, so the next check after this returns
+/// `NeedsApproval` and the cached entry is dropped. The tombstone
+/// emitted below is for the replay path on the next wake; the store
+/// row is what the live gate reads.
 pub async fn close(id: &str) -> Result<()> {
     let cfg = config();
     let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)

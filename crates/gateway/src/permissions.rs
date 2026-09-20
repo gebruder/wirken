@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::GatewayError;
 
@@ -496,6 +497,14 @@ impl SweepReport {
     }
 }
 
+/// Answers whether a session is still live.
+///
+/// Taken as a predicate so [`PermissionStore`] need not hold a
+/// session store: a permission store that opens `sessions.db` to
+/// answer a grant question couples two stores with no other reason
+/// to know about each other.
+pub type SessionLiveness = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Permission store backed by SQLite.
 ///
 /// `session_cache` holds session-scoped approvals: nested map of
@@ -512,6 +521,21 @@ pub struct PermissionStore {
     conn: Connection,
     default_expiry_days: u32,
     session_cache: RefCell<HashMap<String, HashMap<String, Approval>>>,
+    /// Answers whether a session is still live, for the cache
+    /// short-circuit in [`Self::check`].
+    ///
+    /// Injected rather than looked up here, because the store holds
+    /// no session store and should not: a permission store that
+    /// opens `sessions.db` to answer a grant question couples two
+    /// stores that have no other reason to know about each other.
+    ///
+    /// `None` means nothing installed one, and every session then
+    /// reads as live. That is the right default for a process with
+    /// no session store to consult, a CLI invocation or a test, where
+    /// the cache is empty anyway because it does not survive the
+    /// process. The daemon installs one; see
+    /// [`Self::set_session_liveness`].
+    session_liveness: Option<SessionLiveness>,
     /// What the open-time sweep removed, held until a caller with a
     /// session log takes it. Empty on the overwhelmingly common
     /// open, where there was nothing stale to remove.
@@ -582,10 +606,28 @@ impl PermissionStore {
             conn,
             default_expiry_days,
             session_cache: RefCell::new(HashMap::new()),
+            session_liveness: None,
             last_sweep: SweepReport::default(),
         };
         store.last_sweep = store.sweep_stale_grants()?;
         Ok(store)
+    }
+
+    /// Install the predicate [`Self::check`] consults before serving
+    /// a session-scoped grant from the cache.
+    ///
+    /// A session-scoped grant is supposed to die with its session,
+    /// and before this it did not: the CLI closing a session wrote a
+    /// tombstone to the audit chain, which the next `wake` replays,
+    /// but the daemon's in-memory cache kept the grant until the
+    /// process restarted. A grant an operator had revoked by closing
+    /// its session went on allowing calls, which is the direction
+    /// that matters.
+    ///
+    /// The predicate takes the session id the cache is keyed on, the
+    /// composite `{agent}/{channel}/{conversation}`.
+    pub fn set_session_liveness(&mut self, f: SessionLiveness) {
+        self.session_liveness = Some(f);
     }
 
     /// The default grant window in days, for callers that report it
@@ -764,7 +806,15 @@ impl PermissionStore {
                     .is_some()
             };
             if session_hit {
-                return Ok(PermissionCheck::Allowed);
+                // A hit is not yet an answer: the grant lives only as
+                // long as its session. A dead session's entry is
+                // dropped here rather than left to rot, so the next
+                // call costs no liveness query and the cache cannot
+                // report a grant the operator ended.
+                if self.session_is_live(session_id) {
+                    return Ok(PermissionCheck::Allowed);
+                }
+                self.session_cache.borrow_mut().remove(session_id);
             }
         }
         let Some(agent_id) = agent_id else {
@@ -812,6 +862,16 @@ impl PermissionStore {
                 tier: PermissionTier::Tier3,
                 lapsed_at: None,
             }),
+        }
+    }
+
+    /// Whether `session_id` is still live, per the installed
+    /// predicate. `true` when none is installed; see
+    /// [`Self::session_liveness`].
+    fn session_is_live(&self, session_id: &str) -> bool {
+        match &self.session_liveness {
+            Some(f) => f(session_id),
+            None => true,
         }
     }
 

@@ -542,7 +542,44 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     ));
 
     // --- Open permission store ---
-    let permissions = Arc::new(std::sync::Mutex::new(super::open_permission_store(&cfg)?));
+    let mut permission_store = super::open_permission_store(&cfg)?;
+
+    // A session-scoped grant dies with its session, and the gate has
+    // to be able to ask. Its own read connection rather than the
+    // `sessions` handle above: `PermissionStore::check` is sync and
+    // runs under a std mutex, so it cannot await a tokio one, and a
+    // `try_lock` that treated contention as "live" would fail in the
+    // direction that keeps a revoked grant working.
+    match SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs) {
+        Ok(liveness_store) => {
+            let liveness_store = std::sync::Mutex::new(liveness_store);
+            permission_store.set_session_liveness(Arc::new(move |session_id: &str| {
+                // The cache is keyed on `{agent}/{channel}/{conversation}`.
+                // An id that is not that shape is a sentinel lane, which
+                // never carries a session-scoped grant, so there is
+                // nothing for this to be wrong about.
+                let mut parts = session_id.splitn(3, '/');
+                let (Some(_agent), Some(channel), Some(conversation)) =
+                    (parts.next(), parts.next(), parts.next())
+                else {
+                    return true;
+                };
+                match liveness_store.lock() {
+                    Ok(store) => store.is_live(channel, conversation),
+                    Err(_) => true,
+                }
+            }));
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "session liveness is unavailable: a session-scoped grant will stay \
+                 in this process's cache until restart even after its session closes"
+            );
+        }
+    }
+
+    let permissions = Arc::new(std::sync::Mutex::new(permission_store));
 
     // --- Setup router and gather per-agent static configs ---
     //
