@@ -37,7 +37,7 @@ pub struct Skill {
     /// into one effective per-agent profile at `attach_skills` time.
     pub permissions: PermissionProfile,
     /// Whether the skill is excluded from the LLM's auto-pickable set
-    /// (matches OpenClaw's `disable-model-invocation` field, #79).
+    /// (matches OpenClaw's `disable-model-invocation` field).
     /// Default `true` — Wirken's posture is that auto-invocation
     /// requires explicit author opt-in. Auto-invocable skills declare
     /// `disable-model-invocation: false`. Explicit-only skills are
@@ -238,7 +238,7 @@ impl SkillLoader {
         };
 
         // Default-true (Wirken's posture: auto-invocation requires
-        // explicit opt-in). #79.
+        // explicit opt-in).
         let disable_model_invocation = frontmatter.disable_model_invocation.unwrap_or(true);
 
         Ok(Skill {
@@ -256,7 +256,7 @@ impl SkillLoader {
     /// Build a system prompt fragment from loaded skills.
     /// Includes only auto-invocable, available skills. Explicit-only
     /// skills (`disable-model-invocation: true`) are reached via
-    /// `/<skill-name>` slash commands (#79); their bodies are injected
+    /// `/<skill-name>` slash commands; their bodies are injected
     /// into the user message at invocation time, not into the system
     /// prompt at agent init.
     pub fn build_prompt(skills: &[Skill]) -> String {
@@ -358,8 +358,9 @@ pub fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), Ag
 
 /// Extract required binary names from the metadata field. The only
 /// recognised location is `metadata.wirken.requires.bins`; any
-/// `metadata.openclaw.*` entry in the frontmatter is ignored (the
-/// deprecated alias was retired by the skill-loader spec). Skills
+/// `metadata.openclaw.*` entry in the frontmatter is ignored: the
+/// deprecated alias is retired, and honouring it would let one skill
+/// declare its requirements under a key nothing else reads. Skills
 /// authored against the previous alias should rename the key; the
 /// `wirken skills migrate` subcommand performs the rewrite.
 fn extract_required_bins(fm: &SkillFrontmatter) -> Vec<String> {
@@ -392,7 +393,7 @@ fn which_exists(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Spec form of a skill name: lowercase letter prefix, then any
+/// Canonical form of a skill name: lowercase letter prefix, then any
 /// combination of `a-z 0-9 -` up to 64 characters total. Reject
 /// names whose first character is a digit or hyphen so a skill name
 /// can never be confused with a numeric flag or option in a CLI
@@ -426,7 +427,7 @@ fn validate_name(name: &str, path: &Path) -> Result<(), AgentError> {
     Ok(())
 }
 
-/// Spec form of a skill description: present, non-empty, at most
+/// Canonical form of a skill description: present, non-empty, at most
 /// 1024 characters.
 fn validate_description(desc: &str, path: &Path) -> Result<(), AgentError> {
     if desc.is_empty() {
@@ -445,9 +446,9 @@ fn validate_description(desc: &str, path: &Path) -> Result<(), AgentError> {
 }
 
 /// Refuse any skill whose name, description, or body contains a
-/// literal envelope marker token. The 1.2.0 schema renames are not
-/// at issue here; this gate protects the trust boundary between the
-/// system prompt and the third-party skill envelope. Runs early, ahead
+/// literal envelope marker token. This gate protects the trust
+/// boundary between the system prompt and the third-party skill
+/// envelope. Runs early, ahead
 /// of the name and description format gates, so an envelope-forging
 /// name surfaces as [`AgentError::EnvelopeCollision`] rather than a
 /// less-specific format error.

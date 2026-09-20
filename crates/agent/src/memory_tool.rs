@@ -1,4 +1,4 @@
-//! Cross-channel memory tools (#64).
+//! Cross-channel memory tools.
 //!
 //! Three tools over [`wirken_gateway::memory::MemoryStore`]:
 //!

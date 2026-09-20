@@ -72,9 +72,9 @@ fn telegram_timeout_from(raw: Option<&str>) -> Duration {
 /// Channel constant for the Telegram surface. Used to resolve the
 /// live writer in `OutboundDispatcher` and as the adapter_id when
 /// looking up the approval chat. The single-Telegram-bot model
-/// today maps `channel == adapter_id == "telegram"`; multi-bot
-/// deployments are a follow-up slice that introduces per-adapter
-/// channel naming.
+/// maps `channel == adapter_id == "telegram"`. A multi-bot
+/// deployment would need per-adapter channel naming; this constant
+/// assumes one bot.
 const TELEGRAM_CHANNEL: &str = "telegram";
 
 pub struct TelegramApprovalGate {

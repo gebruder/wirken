@@ -2,8 +2,8 @@
 //!
 //! Same shape as [`crate::bundled_skills`] but for multi-file preset
 //! bundles. The CLI's `wirken preset install <name>` writes these to
-//! `~/.wirken/presets/<name>/`; from there the user (or a follow-up
-//! scope's runtime) loads them via [`crate::preset::PresetLoader`].
+//! `~/.wirken/presets/<name>/`; from there they are loaded via
+//! [`crate::preset::PresetLoader`].
 //!
 //! Adding a new bundled preset means: (1) commit the preset directory
 //! under `preset/<name>/`, (2) add a `BundledPreset` entry below with
@@ -122,8 +122,8 @@ mod tests {
     /// The keystone integration test: install the bundled Zirkel preset
     /// to a temp dir, load it via `PresetLoader::load_dir`, and verify
     /// the bundle is internally coherent (both skills load with parsed
-    /// permissions blocks; effective profile resolves cleanly via the
-    /// per-skill permissions union from #76).
+    /// permissions blocks; effective profile resolves cleanly via
+    /// the per-skill permissions union).
     #[test]
     fn zirkel_preset_loads_and_merges_into_a_resolved_effective_profile() {
         let tmp = tempfile::tempdir().unwrap();

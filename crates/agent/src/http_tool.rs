@@ -1,8 +1,8 @@
 //! The `http_request` built-in tool: a scoped outbound HTTPS request
 //! that attaches a vault-held credential the model never sees.
 //!
-//! Spec: `docs/design/http-request-tool.md`. The gating (tools.allow,
-//! credentials.allow, http.post_paths) is enforced in `runtime.rs`
+//! The gating (tools.allow, credentials.allow, http.post_paths) is
+//! enforced in `runtime.rs`
 //! before dispatch; the egress allowlist is enforced in-flight by
 //! [`crate::egress::EgressClient`]. This module owns the request
 //! construction, credential injection, redaction, response cap, and the

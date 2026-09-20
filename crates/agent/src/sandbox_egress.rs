@@ -354,7 +354,7 @@ pub struct SandboxEgressContext {
     pub policy: SandboxEgressPolicy,
     pub attribution: SandboxEgressAttribution,
     pub audit: Option<SandboxEgressAudit>,
-    /// Confidentiality labels this session has observed (#214).
+    /// Confidentiality labels this session has observed.
     pub observed: ObservedSensitivity,
     /// Operator approval surface. `None` means no operator is
     /// reachable, which is the cron and headless-subagent case; a
@@ -451,7 +451,7 @@ impl SandboxEgressContext {
     }
 
     /// Decide a request that has already cleared [`check_target`],
-    /// conditioning on what the session has read (#214).
+    /// conditioning on what the session has read.
     ///
     /// No restricting label observed: allowed unchanged. Otherwise the
     /// verdict escalates, and what escalation means depends on the
@@ -707,7 +707,7 @@ async fn serve_decision(
         return write_reply(&mut wr, &reply).await;
     }
 
-    // Confidentiality stage (#214): the channel policy admitted this
+    // Confidentiality stage: the channel policy admitted this
     // destination, but what the session has already read can still
     // change the verdict.
     let decision = ctx.decide_with_sensitivity(&req.host, req.port).await;

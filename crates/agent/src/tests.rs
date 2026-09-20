@@ -9,9 +9,9 @@ use crate::tool::{ToolConfig, ToolRegistry};
 use wirken_audit::{SessionLog, SqliteSessionLog};
 
 /// Test helper: in-memory session log shared by every test that
-/// constructs an Agent. Item 2 slice 1 made the session log a
-/// required dependency of `Agent::new`. Tests that don't care about
-/// the log just hand the agent a fresh in-memory store.
+/// constructs an Agent. The session log is a required dependency of
+/// `Agent::new`, so a test that does not care about the log still
+/// has to hand the agent one.
 fn test_session_log() -> Arc<dyn SessionLog> {
     Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"))
 }
@@ -152,10 +152,11 @@ Use `curl wttr.in/{city}` to get current weather.
 
 #[test]
 fn load_skill_no_frontmatter_fails_post_flip() {
-    // Pre-#76 hard-fail flip, a SKILL.md with no frontmatter loaded
-    // with directory-name fallback. Post-flip, every skill must declare
-    // a `permissions:` block, which requires frontmatter, so no-frontmatter
-    // skills no longer load. SkillLoader::load_dir logs and skips per-file
+    // A SKILL.md with no frontmatter used to load with a
+    // directory-name fallback. Every skill must now declare a
+    // `permissions:` block, which requires frontmatter, so
+    // no-frontmatter skills no longer load at all.
+    // SkillLoader::load_dir logs and skips per-file
     // errors, so the directory-level test sees an empty result.
     let tmp = TempDir::new().unwrap();
     let skill_dir = tmp.path().join("notes");
@@ -341,10 +342,10 @@ fn every_bundled_skill_ships_a_valid_delegated_signature() {
     );
 }
 
-/// Every bundled SKILL.md must load successfully. Post-migration-flip
-/// (#76 follow-up), a missing `permissions:` block is a hard load
-/// error rather than a deprecation warning, so this test also catches
-/// any future bundled skill added without a block.
+/// Every bundled SKILL.md must load successfully. A missing
+/// `permissions:` block is a hard load error rather than a
+/// deprecation warning, so this test also catches any future bundled
+/// skill added without a block.
 #[test]
 fn every_bundled_skill_loads_with_a_permissions_block() {
     let tmp = TempDir::new().unwrap();
@@ -367,8 +368,8 @@ fn every_bundled_skill_loads_with_a_permissions_block() {
     }
 }
 
-/// Spec change: a SKILL.md without a `permissions:` block now loads
-/// successfully, filling the permission profile from
+/// A SKILL.md without a `permissions:` block loads successfully,
+/// filling the permission profile from
 /// `PermissionProfile::default()` (least-privilege on every axis). The
 /// skill can be present in the system prompt but cannot exercise any
 /// tool, host, path, or provider until the operator writes an explicit
@@ -1689,7 +1690,7 @@ fn agent_conversation_tracking() {
 }
 
 // ---------------------------------------------------------------------------
-// Item 2 slice 1: durability writes to the session log
+// Durability writes to the session log
 // ---------------------------------------------------------------------------
 
 mod durability {
@@ -1946,7 +1947,7 @@ mod durability {
 }
 
 // ---------------------------------------------------------------------------
-// Item 2 slice 2: wake / refuse-and-surface / factory
+// Wake / refuse-and-surface / factory
 // ---------------------------------------------------------------------------
 
 mod wake {
@@ -2356,7 +2357,7 @@ mod wake {
 }
 
 // ---------------------------------------------------------------------------
-// Item 6 slice 1: multi-agent orchestration / spawn_subagent
+// Multi-agent orchestration / spawn_subagent
 // ---------------------------------------------------------------------------
 
 mod subagent {
@@ -2552,8 +2553,8 @@ mod subagent {
     // The child wakes against an Ollama LlmConfig pointed at a
     // non-routable URL, so the actual LLM call inside the child
     // fails immediately. The parent intercept catches the error
-    // and produces `status: "error"` — but along the way it
-    // performs all the bookkeeping the slice 1 design demands
+    // and produces `status: "error"`, but along the way it performs
+    // all the bookkeeping the spawn path owes the parent's chain
     // (audit events, child session id, tool intersection). Those
     // are exactly the behaviors these tests assert on.
 
@@ -2776,7 +2777,7 @@ mod subagent {
         // (This is the precondition the harness uses to omit the tool.)
         assert_eq!(agent.subagent_depth_for_test(), 0);
         // The built-in registry never contains spawn_subagent on
-        // its own — slice 1 keeps it as a harness-injected def.
+        // its own: it is a harness-injected def.
         let tool_names: Vec<String> = crate::tool::ToolRegistry::new(
             std::env::temp_dir(),
             crate::tool::ToolConfig::default(),
@@ -3035,7 +3036,7 @@ mod subagent {
     ///
     /// A recomputation walking the session forward has to have the
     /// clamp in hand by the time it reaches the first `LlmRequest`,
-    /// or it sizes and hashes against the wrong tool set. Issue #246.
+    /// or it sizes and hashes against the wrong tool set.
     #[tokio::test]
     async fn the_subagent_binding_row_precedes_everything_else_on_the_chain() {
         let tmp = TempDir::new().unwrap();
@@ -3089,7 +3090,7 @@ mod subagent {
         }
     }
 
-    /// Issue #242 closing condition, at the runtime.
+    /// A child is checked against its own grants, not its caller's.
     ///
     /// A parent holds a Tier 2 shell allowlist grant. A child is
     /// woken exactly as `spawn_subagent_intercept` wakes one: the
@@ -3944,7 +3945,7 @@ fn egress_network_wins_over_the_legacy_network_flag() {
 /// A channel that grants no egress must not get more network than one
 /// that grants some.
 ///
-/// Issue 232. `needs_proxy` is false for mode `None`, so no proxy is
+/// `needs_proxy` is false for mode `None`, so no proxy is
 /// provisioned and no network name is produced. That used to arrive at
 /// `build_host_config` as the same absent value an exec with no policy
 /// at all produces, and the legacy `network` flag decided: with it
@@ -4090,8 +4091,8 @@ fn host_config_gvisor_adds_runsc_runtime_without_loosening_hardening() {
 // image to be pulled on the host.
 // ---------------------------------------------------------------------------
 
-/// Live container check for issue 232: a denying policy with the
-/// legacy flag set leaves the container with no network interface.
+/// Live container check: a denying policy with the legacy flag set
+/// leaves the container with no network interface.
 ///
 /// The struct-level tests assert the `HostConfig` this produces. This
 /// one asserts what the kernel then does with it, which is the claim
@@ -4754,7 +4755,7 @@ fn process_result_empty_denials() {
 }
 
 // ---------------------------------------------------------------------------
-// Identity (item 8)
+// Identity
 // ---------------------------------------------------------------------------
 
 mod identity_tests {
@@ -4853,7 +4854,7 @@ mod identity_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Attestation (item 8)
+// Attestation
 // ---------------------------------------------------------------------------
 
 mod attestation_tests {
@@ -4972,7 +4973,7 @@ mod attestation_tests {
 
     /// The multi-session path pins each session's key from the
     /// caller, so a chain attested by one agent fails under another's
-    /// key and passes under its own. Issue #243.
+    /// key and passes under its own.
     #[test]
     fn recent_attestations_are_pinned_to_the_resolved_key() {
         use crate::attestation::{RecentAttestationResult, verify_recent_attestations};
@@ -5094,7 +5095,7 @@ mod attestation_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Item 8 slice 2: auto-attestation trigger from the harness loop
+// Auto-attestation trigger from the harness loop
 // ---------------------------------------------------------------------------
 
 mod auto_attest {
@@ -5354,7 +5355,7 @@ mod auto_attest {
 }
 
 // ---------------------------------------------------------------------------
-// Item 4 slice 1: ContextEngine — token budgeting and trimming
+// ContextEngine: token budgeting and trimming
 // ---------------------------------------------------------------------------
 
 mod context_engine {
@@ -5565,7 +5566,7 @@ mod context_engine {
 
         // The first assistant message got trimmed; the second is
         // intact (it's in the protected tail). Use role-based lookup
-        // since slice 2α may inject a Compaction message at position 1.
+        // because a Compaction message may sit at position 1.
         let assistant_msgs: Vec<&crate::conversation::Message> = conv
             .messages()
             .iter()
@@ -5687,7 +5688,7 @@ mod context_engine {
     }
 
     // -----------------------------------------------------------------
-    // Item 4 slice 2 (alpha): Role::Compaction projection
+    // Role::Compaction projection
     // -----------------------------------------------------------------
 
     #[test]
@@ -5902,7 +5903,7 @@ mod context_engine {
 
     #[test]
     fn tool_def_ordering_is_stable() {
-        // The slice 1 sort happens in process_message and
+        // The sort happens in process_message and
         // process_message_stream, not in ContextEngine itself. This
         // test asserts the contract: a sorted slice in produces a
         // sorted slice out.
@@ -5931,7 +5932,7 @@ mod context_engine {
 }
 
 // ---------------------------------------------------------------------------
-// Item 10 slice 1: reproducible replay / verify
+// Reproducible replay / verify
 // ---------------------------------------------------------------------------
 
 mod verify {
@@ -6370,9 +6371,9 @@ mod verify {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let (agent, log, _tmp) = fresh_agent_and_log();
-            // Item 10 follow-up: divergence detection requires a
-            // recorded SystemPromptSet — without one the LlmRequest
-            // is unverifiable, not divergent.
+            // Divergence detection requires a recorded
+            // SystemPromptSet: without one the LlmRequest is
+            // unverifiable, not divergent.
             seed_system_prompt(
                 &*log,
                 "verify-test",
@@ -6575,14 +6576,15 @@ mod verify {
     // wirken-agent doesn't depend on rusqlite.
 
     // -----------------------------------------------------------------
-    // Item 10 follow-up: SystemPromptSet recording and verification
+    // SystemPromptSet recording and verification
     // -----------------------------------------------------------------
 
     #[test]
     fn legacy_session_without_prompt_event_marks_llm_request_unverifiable() {
         // A session that has an LlmRequest but no preceding
-        // SystemPromptSet event (the way item 10 slice 1 wrote
-        // sessions before this fix). The verifier cannot reproduce
+        // SystemPromptSet event, which is the shape of every session
+        // written before that variant existed. The verifier cannot
+        // reproduce
         // the prompt that was hashed, so the LlmRequest must be
         // reported as unverifiable, NOT divergent.
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -6650,7 +6652,7 @@ mod verify {
 }
 
 // ---------------------------------------------------------------------------
-// Item 10 follow-up: SystemPromptSet write side and replay
+// SystemPromptSet write side and replay
 // ---------------------------------------------------------------------------
 
 mod system_prompt_event {
@@ -6759,7 +6761,7 @@ mod system_prompt_event {
 }
 
 // ---------------------------------------------------------------------------
-// Per-channel LLM override (closes #60 core slice)
+// Per-channel LLM override
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -6863,8 +6865,8 @@ mod per_channel_llm_override {
 
     #[tokio::test]
     async fn wake_with_empty_overrides_preserves_default_behavior() {
-        // Pre-#60 semantics: no overrides, every session uses the
-        // agent's default llm_config. This is the back-compat path.
+        // No overrides: every session uses the agent's default
+        // llm_config.
         let (factory, _tmp) = make_factory_with_overrides("only-model", None, HashMap::new());
         let session = session_id_for("a1", "telegram", "conv-1");
         let agent = factory.wake("a1", &session).unwrap();
@@ -6915,8 +6917,8 @@ mod per_channel_llm_override {
 
     // -- Integration: audit capture + verify across providers --------
     //
-    // Acceptance from #60: audit log records provider per LLM call,
-    // and `wirken sessions verify` passes when providers differ
+    // The audit log records the provider per LLM call, and
+    // `wirken sessions verify` passes when providers differ
     // across turns. The factory + audit integration is what ties
     // them together: whichever LlmConfig wake() picked is what ends
     // up in the LlmRequest event's `provider` field, and because
@@ -7202,7 +7204,7 @@ mod per_channel_llm_override {
 }
 
 // ---------------------------------------------------------------------------
-// Org-level tool allow/deny policy (closes #32)
+// Org-level tool allow/deny policy
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -8128,7 +8130,7 @@ mod recovery_tool_validation {
 }
 
 // -------------------------------------------------------------------------
-// Per-pass phase deny overlay (slice 2): typed reason propagation +
+// Per-pass phase deny overlay: typed reason propagation +
 // turn-end auto-exit. End-to-end at the Agent boundary; the in-process
 // gate logic itself is unit-tested in skill_perms.rs.
 // -------------------------------------------------------------------------
@@ -8361,7 +8363,7 @@ mod phase_overlay {
     }
 
     // -------------------------------------------------------------
-    // Slice 3: synthetic tool intercepts
+    // Synthetic tool intercepts
     // -------------------------------------------------------------
 
     fn enter_phase_args(phase: &str, denied_tools: &[&str]) -> String {
@@ -8631,9 +8633,9 @@ mod phase_overlay {
 // ---------------------------------------------------------------------------
 // OpenAI-compat stub server. Validates the `custom` provider path that
 // NIM (NVIDIA inference runtime), vLLM, and similar OpenAI-compatible
-// endpoints all go through. The verify-first audit for the NIM slice
-// flagged that the streaming consumer must terminate on `data: [DONE]`
-// rather than the first `finish_reason` chunk - vLLM/NIM emit the
+// endpoints all go through. The streaming consumer has to terminate
+// on `data: [DONE]` rather than on the first `finish_reason` chunk:
+// vLLM/NIM emit the
 // trailing `usage` block in a separate chunk *after* finish_reason,
 // and early termination would silently zero-count tokens on every NIM
 // call. This stub reproduces the exact response shape and pins the
@@ -8738,7 +8740,7 @@ mod openai_compat_stub {
 
     // Infomaniak rides the OpenAI-compat path with an account-specific
     // base_url (the product_id is a path segment, folded in at setup
-    // like Bedrock's region). This pins two things the setup slice
+    // like Bedrock's region). This pins two things that path
     // depends on: (1) provider="infomaniak" streams through
     // stream_openai rather than the non-streaming fallback - the stub
     // serves SSE, which the fallback's complete_openai would fail to
@@ -9090,7 +9092,7 @@ mod budget_enforcement {
     /// expensive MCP tool is turned away by the ledger rather than
     /// classified into the tier model. The row has to say what
     /// reached the ceiling, or an operator reading a `BudgetExceeded`
-    /// cannot tell an inference block from a tool block. Issue #244.
+    /// cannot tell an inference block from a tool block.
     #[tokio::test]
     async fn a_budget_block_on_a_tool_call_names_the_tool() {
         let store = Arc::new(Mutex::new(BudgetStore::open_in_memory().unwrap()));
@@ -9447,7 +9449,7 @@ mod obo_identity {
 }
 
 // ---------------------------------------------------------------------------
-// Sandbox egress integration tests (gebruder/wirken#202).
+// Sandbox egress integration tests.
 //
 // These drive the real enforcement path: a per-exec internal Docker
 // network, a live CONNECT proxy bound to its gateway, and a container
@@ -9631,8 +9633,8 @@ mod sandbox_egress_live {
         );
     }
 
-    /// #202 acceptance: a process that ignores the proxy env vars must
-    /// fail to route. Uses a raw bash /dev/tcp socket, so the proxy env
+    /// A process that ignores the proxy env vars must fail to
+    /// route. Uses a raw bash /dev/tcp socket, so the proxy env
     /// is not consulted at all.
     #[tokio::test]
     async fn direct_connection_bypassing_proxy_env_cannot_route() {
@@ -9667,8 +9669,8 @@ mod sandbox_egress_live {
         );
     }
 
-    /// #202 acceptance: IP-literal CONNECT refused before the allowlist
-    /// is consulted.
+    /// IP-literal CONNECT is refused before the allowlist is
+    /// consulted.
     #[tokio::test]
     async fn ip_literal_connect_is_refused() {
         let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
@@ -9693,8 +9695,8 @@ mod sandbox_egress_live {
         );
     }
 
-    /// #202 acceptance: CONNECT to a non-443 port refused even for an
-    /// allowlisted host.
+    /// CONNECT to a non-443 port is refused even for an allowlisted
+    /// host.
     #[tokio::test]
     async fn connect_to_non_443_port_is_refused_even_when_allowlisted() {
         let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
@@ -9719,7 +9721,7 @@ mod sandbox_egress_live {
         );
     }
 
-    /// #202 acceptance: an unlisted host is refused, and the denial row
+    /// An unlisted host is refused, and the denial row
     /// carries attribution taken from the listener binding rather than
     /// from anything the sandboxed process could influence.
     #[tokio::test]
@@ -9767,7 +9769,7 @@ mod sandbox_egress_live {
         }
     }
 
-    /// #202 acceptance: mode `open` is recorded on the denial row, and
+    /// Mode `open` is recorded on the denial row, and
     /// open still bounds the port.
     #[tokio::test]
     async fn open_mode_records_its_mode_on_denials() {
@@ -9829,7 +9831,7 @@ mod sandbox_egress_live {
         (nets, cs)
     }
 
-    /// #202 acceptance, the positive half: an allowed domain resolves
+    /// The positive half: an allowed domain resolves
     /// on the host, connects through the sidecar, and returns real
     /// bytes. Without this the refusal tests above would all pass on
     /// a proxy that denies everything.
@@ -9863,7 +9865,7 @@ mod sandbox_egress_live {
     }
 
     // -----------------------------------------------------------------
-    // #235: the taint-to-verdict ladder, guarded.
+    // The taint-to-verdict ladder, guarded.
     //
     // Deliberately narrower than the observation that closed the
     // imported-archives egress condition. That run drove a real turn:
@@ -10084,7 +10086,7 @@ mod sandbox_egress_live {
         }
     }
 
-    /// #202 acceptance: tier none creates no sidecar and no network.
+    /// Tier none creates no sidecar and no network.
     #[tokio::test]
     async fn tier_none_creates_no_sidecar_and_no_network() {
         let Some(h) = harness(SandboxEgressPolicy::denied(), CURL_IMAGE).await else {
@@ -10114,8 +10116,8 @@ mod sandbox_egress_live {
         );
     }
 
-    /// #202 acceptance: a sidecar that cannot be started means exec is
-    /// refused, never run unproxied.
+    /// A sidecar that cannot be started means exec is refused, never
+    /// run unproxied.
     #[tokio::test]
     async fn absent_sidecar_binary_refuses_exec() {
         let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
@@ -10139,8 +10141,8 @@ mod sandbox_egress_live {
         );
     }
 
-    /// #202 acceptance: exit removes the sidecar, both networks, and
-    /// the socket directory.
+    /// Exit removes the sidecar, both networks, and the socket
+    /// directory.
     #[tokio::test]
     async fn teardown_leaves_no_orphans() {
         let Some(h) = harness(allowlist(&["example.com"]), CURL_IMAGE).await else {
@@ -10198,7 +10200,7 @@ mod sandbox_egress_live {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-channel memory (#64). The classifier registration is the load-
+// Cross-channel memory. The classifier registration is the load-
 // bearing part: an unregistered memory tool would reach the runtime gate
 // as `UnknownTool`, which default-denies but reports the wrong action and
 // gives the operator the wrong prompt. These pin the registration and the
@@ -10283,7 +10285,7 @@ fn cross_channel_read_without_a_channel_argument_does_not_widen() {
 }
 
 // ---------------------------------------------------------------------------
-// Named-query allowlist pin (#214).
+// Named-query allowlist pin.
 //
 // The read-sensitivity classifier marks `sqlite_query` as non-restricting
 // on the grounds that it can only reach the zirkel corpus. That holds
@@ -10341,7 +10343,7 @@ async fn sqlite_query_rejects_arbitrary_sql() {
 }
 
 // ---------------------------------------------------------------------------
-// Provenance-conditioned egress (#214).
+// Provenance-conditioned egress.
 //
 // Confidentiality axis only: these pin what the session has *seen*, not
 // whether what it saw was trustworthy. The set is unordered; the only
@@ -10799,8 +10801,8 @@ fn a_search_is_marked_for_the_observed_sensitivity_set() {
     );
 }
 
-/// The replay verifier attaches no import store, and the doc's tool
-/// slice closes partly on the tools being unreachable from it.
+/// The replay verifier attaches no import store, so the imported
+/// tools are unreachable from it.
 ///
 /// Unreachable here means the tool reads nothing: with no context
 /// installed it reports itself unconfigured and never touches a store.
@@ -10881,8 +10883,9 @@ fn an_imported_chat_read_is_marked_for_the_observed_sensitivity_set() {
 fn writes_and_network_tools_carry_no_read_label() {
     use crate::tool::tool_to_read_sensitivity;
 
-    // This slice is observation-level: it marks what was read, and does
-    // not inspect tool output. `web_search` and `http_request` fetch
+    // The classifier is observation-level: it marks what was read,
+    // and does not inspect tool output. `web_search` and
+    // `http_request` fetch
     // from the public network, the same position as the corpus.
     for tool in ["write_file", "exec", "web_search", "http_request"] {
         assert_eq!(tool_to_read_sensitivity(tool), None, "{tool}");

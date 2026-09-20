@@ -80,10 +80,11 @@ pub struct ToolRegistry {
     tools: HashMap<String, ToolDef>,
     /// HTTP client used by built-in tools that touch the network
     /// (`web_search`, `generate_image`). Wrapped with the egress
-    /// allowlist enforcement (#76 Phase 2.2). The agent updates the
-    /// enforcement at `attach_skills` time. A future per-host
-    /// rate limiter sits between this wrapper and `reqwest::Client`,
-    /// not outside it — see [`crate::egress`].
+    /// allowlist enforcement. The agent updates the enforcement at
+    /// `attach_skills` time. The per-host rate limiter sits between
+    /// this wrapper and `reqwest::Client`, not outside it, so a
+    /// rate-limited retry is still egress-checked. See
+    /// [`crate::egress`].
     http: crate::egress::EgressClient,
     config: ToolConfig,
     /// Lazily provisioned on first use of a sandboxed tool. The outer
@@ -107,7 +108,7 @@ pub struct ToolRegistry {
     /// session log at attach time. `None` disables the extra row (the
     /// generic ToolResult row still lands).
     http_audit: RwLock<Option<crate::http_tool::HttpAuditCtx>>,
-    /// Cross-channel memory (#64): the entry store plus the origin
+    /// Cross-channel memory: the entry store plus the origin
     /// labels this agent's writes are stamped with. `None` leaves the
     /// three memory tools out of the LLM's tool list entirely, which
     /// is the posture for any agent the gateway has not wired a store
@@ -643,8 +644,8 @@ impl ToolRegistry {
         self.http.set_enforcement(enforcement);
     }
 
-    /// Slice-6 phase-overlay sync. Push a phase deny set onto the
-    /// HTTP client so subsequent egress checks consult the overlay
+    /// Phase-overlay sync. Push a phase deny set onto the HTTP
+    /// client so subsequent egress checks consult the overlay
     /// before the base enforcement. Called from
     /// `Agent::sync_phase_overlay_to_egress` after every phase
     /// transition (enter, exit, turn-end auto-clear, wake-replay).
@@ -652,7 +653,7 @@ impl ToolRegistry {
         self.http.set_phase_overlay_deny(deny);
     }
 
-    /// Slice-6 phase-overlay clear. Drop any installed phase deny
+    /// Phase-overlay clear. Drop any installed phase deny
     /// from the HTTP client. Pair with [`Self::set_phase_overlay_egress`].
     pub fn clear_phase_overlay_egress(&self) {
         self.http.clear_phase_overlay_deny();
@@ -982,14 +983,12 @@ impl ToolRegistry {
 
     /// Run a named query against the zirkel kept-items database.
     ///
-    /// Trust posture (the load-bearing decision for the C-Librarian
-    /// slice): the LLM does not write SQL. It picks one of a small
-    /// set of named queries and fills typed parameters; the tool
-    /// runs the parameterized SQL the librarian skill committed to.
-    /// Free-form SQL would let the LLM hallucinate column names,
-    /// construct unbounded scans, or drift from the audit log's
-    /// expected query shape — exactly the trust posture this slice
-    /// rejects.
+    /// Trust posture: the LLM does not write SQL. It picks one of a
+    /// small set of named queries and fills typed parameters; the
+    /// tool runs the parameterized SQL the librarian skill committed
+    /// to. Free-form SQL would let the LLM hallucinate column names,
+    /// construct unbounded scans, or drift from the query shape the
+    /// audit log expects.
     ///
     /// The DB connection is opened with `SQLITE_OPEN_READ_ONLY`, so
     /// a write attempt is refused at the connection layer (not by
@@ -1166,22 +1165,6 @@ struct SearchResult {
     snippet: String,
 }
 
-/// Map an [`crate::egress::HttpAccessDenied`] from the wrapped HTTP
-/// client into an [`AgentError`]. The agent's tool dispatcher (#76
-/// Run one of the librarian's named queries against the zirkel
-/// database. Read-only by construction (`SQLITE_OPEN_READ_ONLY`);
-/// caller has already verified that the path is configured.
-///
-/// Each branch hardcodes the SQL — the LLM cannot inject column
-/// names or join shape. Parameters are bound positionally so a
-/// hostile param value (which a typo'd name could synthesize)
-/// cannot escape into the query body.
-///
-/// Result is JSON-serialized as `{"rows": [...], "count": N}` for
-/// item-shaped queries, or `{"themes": [...], "count": N}` for the
-/// `recent_themes` query. The librarian skill body tells the LLM
-/// which key to read and to relay rows verbatim — title, source,
-/// date, url — without paraphrase.
 /// The complete set of query names `sqlite_query` accepts. Closed by
 /// construction: there is no path that takes SQL.
 ///
@@ -1201,6 +1184,20 @@ pub const KNOWN_ZIRKEL_QUERIES: &[&str] = &[
     "recent_themes",
 ];
 
+/// Run one of the librarian's named queries against the zirkel
+/// database. Read-only by construction (`SQLITE_OPEN_READ_ONLY`);
+/// caller has already verified that the path is configured.
+///
+/// Each branch hardcodes the SQL, so the LLM cannot inject column
+/// names or join shape. Parameters are bound positionally so a
+/// hostile param value (which a typo'd name could synthesize)
+/// cannot escape into the query body.
+///
+/// Result is JSON-serialized as `{"rows": [...], "count": N}` for
+/// item-shaped queries, or `{"themes": [...], "count": N}` for the
+/// `recent_themes` query. The librarian skill body tells the LLM
+/// which key to read and to relay rows verbatim (title, source,
+/// date, url) without paraphrase.
 fn run_named_query(
     db_path: &Path,
     query_name: &str,
@@ -1443,7 +1440,9 @@ fn extract_required_string(params: &serde_json::Value, name: &str) -> Result<Str
     Ok(s)
 }
 
-/// Phase 2.2) intercepts both variants and emits the appropriate
+/// Map an [`crate::egress::HttpAccessDenied`] from the wrapped HTTP
+/// client into an [`AgentError`]. The agent's tool dispatcher
+/// intercepts both variants and emits the appropriate
 /// `SkillPermissionDenied` audit event before surfacing a non-success
 /// `ToolResult`. The agent-tool case (web_search / generate_image)
 /// runs with an unrestricted rate limit by default so the
@@ -1630,12 +1629,9 @@ const SHELL_METACHARS: &[&str] = &["|", ";", "&", "$(", "`", ">", "<", "\n"];
 /// from colliding with any plausible binary name.
 const PIPELINE_SENTINEL: &str = ":pipeline:";
 
-/// Map a built-in tool invocation to a permission Action for tier checking.
-/// Returns None for tools that don't map to a permission-checkable action
-/// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
 /// How confidential the data a tool reads is, for the purpose of
 /// deciding whether a session that has read it may still egress
-/// freely (#214, a slice of #47).
+/// freely.
 ///
 /// This is a **confidentiality** axis: it marks what the session has
 /// seen that should not leave. It is deliberately not a trust axis.
@@ -1712,12 +1708,15 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
         // and `http_request` fetch from the public network, which is
         // the same confidentiality position as AggregatedExternal and
         // needs no marking; `exec` output is not classified here
-        // because this slice is observation-level and does not inspect
+        // because the classifier reads tool names and arguments, never
         // tool output.
         _ => None,
     }
 }
 
+/// Map a built-in tool invocation to a permission Action for tier checking.
+/// Returns None for tools that don't map to a permission-checkable action
+/// (e.g., unknown MCP or Wasm tools are not subject to permission checks).
 pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Action> {
     match tool_name {
         "exec" => {
@@ -1760,7 +1759,7 @@ pub fn tool_to_action(tool_name: &str, args: &serde_json::Value) -> Option<Actio
         // the same read tier as workspace files: the tool opens the DB
         // read-only and is unavailable when no DB path is bound.
         "sqlite_query" => Some(Action::WorkspaceFileAccess),
-        // Cross-channel memory (#64). Writing, and reading this
+        // Cross-channel memory. Writing, and reading this
         // channel's own entries, stay at the workspace read/write
         // tier: neither crosses a trust zone.
         "memory_write" | "memory_read" => Some(Action::WorkspaceFileAccess),
@@ -1857,14 +1856,13 @@ fn resolve_exec_pattern(first: &str) -> String {
 }
 
 /// Whether a built-in tool produces deterministic output for
-/// deterministic input. Used by [`crate::runtime::Agent::verify`]
-/// (item 10) to decide which tools may be re-executed during a
+/// deterministic input. Used by [`crate::runtime::Agent::verify`] to
+/// decide which tools may be re-executed during a
 /// reproducible-replay verification.
 ///
-/// Slice 1 hardcodes the list rather than introducing a marker
-/// trait. The set is conservative: only tools whose output is a
-/// pure function of their arguments and the workspace state belong
-/// here.
+/// The list is hardcoded rather than carried by a marker trait, and
+/// is conservative: only tools whose output is a pure function of
+/// their arguments and the workspace state belong here.
 ///
 /// - `read_file` — bytes of a file in the workspace
 /// - `list_files` — sorted directory listing

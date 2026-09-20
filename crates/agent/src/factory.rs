@@ -1,5 +1,4 @@
-//! `AgentFactory` — the only public way to construct an [`Agent`]
-//! after item 2 slice 2.
+//! `AgentFactory`: the only public way to construct an [`Agent`].
 //!
 //! The factory holds per-agent static configuration (workspace,
 //! LLM config, API key, skills, MCP client, permissions) plus a
@@ -13,8 +12,8 @@
 //! The session id format is `{agent_id}/{channel}/{conversation_id}`.
 //! [`session_id_for`] is the canonical helper. Two channels routed
 //! to the same agent get separate sessions and separate conversation
-//! state — slice 2 fixes the slice 1 / pre-slice-1 bug where multi-
-//! channel agents mashed all conversations into one history.
+//! state. Keying on the full triple is what keeps a multi-channel
+//! agent from mashing every conversation into one history.
 //!
 //! ## Cache contract
 //!
@@ -67,8 +66,8 @@ const DEFAULT_CACHE_CAPACITY: usize = 64;
 /// `{agent_id}/{channel}/{conversation_id}`. None of the supported
 /// channel conversation_ids contain `/`, so collisions are not a
 /// concern in practice. Reserved sentinels `__system__` and
-/// `__pre_migration__` from item 1 slice 2 are unaffected — they
-/// don't go through this helper.
+/// `__pre_migration__` are unaffected: they don't go through this
+/// helper.
 pub fn session_id_for(agent_id: &str, channel: &str, conversation_id: &str) -> String {
     format!("{agent_id}/{channel}/{conversation_id}")
 }
@@ -118,13 +117,12 @@ pub struct AgentStaticConfig {
     pub agent_id: String,
     pub workspace: PathBuf,
     pub llm_config: LlmConfig,
-    /// Optional per-channel (LLM config + API key) override
-    /// (closes #60). When the waked session id names a channel
-    /// with an entry in this map, the factory builds the Agent
-    /// with that override's provider and credential instead of
-    /// the defaults. Missing channels fall through to the
-    /// agent-wide defaults. Empty map = no overrides, same as
-    /// pre-#60 behavior.
+    /// Optional per-channel (LLM config + API key) override. When
+    /// the waked session id names a channel with an entry in this
+    /// map, the factory builds the Agent with that override's
+    /// provider and credential instead of the defaults. Missing
+    /// channels fall through to the agent-wide defaults. Empty map
+    /// means every channel uses the agent-wide defaults.
     #[doc(alias = "per-channel-provider")]
     pub channel_overrides: HashMap<String, ChannelOverride>,
     pub api_key: Option<String>,
@@ -142,12 +140,12 @@ pub struct AgentStaticConfig {
     /// optimization if profiling shows it.
     pub mcp_client: Option<Arc<AsyncMutex<McpProxyClient>>>,
     /// Optional Ed25519 signing identity for session attestation.
-    /// Item 8 slice 2: when set, the harness loop auto-signs the
+    /// When set, the harness loop auto-signs the
     /// chain head after every turn that crosses the trigger
     /// threshold. The factory clones this into every waked Agent.
     pub identity: Option<crate::identity::AgentIdentity>,
-    /// Item 6 slice 1: child agents this agent may spawn via the
-    /// built-in `spawn_subagent` tool, with per-child capability
+    /// Child agents this agent may spawn via the built-in
+    /// `spawn_subagent` tool, with per-child capability
     /// ceilings. Empty by default. The factory injects a clone into
     /// every waked Agent so the harness can read the ceiling
     /// without re-querying the gateway config store.
@@ -239,7 +237,7 @@ pub struct AgentFactory {
     /// permission check. Shared across every waked Agent because org
     /// policy is a gateway-wide setting, not a per-agent one.
     org_permissions: Option<Arc<OrgPermissions>>,
-    /// Cross-channel memory store (#64), shared by every agent this
+    /// Cross-channel memory store, shared by every agent this
     /// factory wakes. Interior-mutable and set after construction,
     /// mirroring the other gateway-wide injections. `None` leaves the
     /// memory tools unconfigured.
@@ -298,8 +296,9 @@ pub struct AgentFactory {
     /// Channel-specific approval gate for webchat sessions
     /// (`{agent}/webchat/{conv}` session-id format). Installed by
     /// the `wirken webchat` command when serving locally; webchat
-    /// is loopback-only and bound to the gateway's owner so no
-    /// per-user allowlist exists yet (login is a separate slice).
+    /// is loopback-only and bound to the gateway's owner. There is
+    /// no per-user allowlist: anything that can reach the loopback
+    /// port is treated as the owner.
     sse_approval_gate: std::sync::RwLock<Option<Arc<dyn crate::approval_gate::ApprovalGate>>>,
     /// Budget enforcement wiring (spend store + global default),
     /// shared across every waked Agent. `None` until the CLI calls
@@ -311,8 +310,8 @@ pub struct AgentFactory {
     cache: StdMutex<LruCache<String, Arc<AsyncMutex<Agent>>>>,
     cache_mode: CacheMode,
     /// `Weak<Self>` of this very factory, captured at construction
-    /// via [`Arc::new_cyclic`]. Item 6 slice 1: the harness uses
-    /// this to re-enter the factory from inside `spawn_subagent`
+    /// via [`Arc::new_cyclic`]. The harness uses this to re-enter
+    /// the factory from inside `spawn_subagent`
     /// without leaking the strong Arc into every waked Agent (which
     /// would form an unbreakable cycle through the LRU cache).
     self_weak: Weak<AgentFactory>,
@@ -448,9 +447,9 @@ impl AgentFactory {
 
     /// Install the Telegram-specific approval gate. Sessions whose
     /// id parses with channel `"telegram"` route through this gate;
-    /// other sessions fall back to the default gate. Per the
-    /// channel-specific dispatch sub-finding the slice flagged:
-    /// the factory chooses per-wake, not the gate runtime.
+    /// other sessions fall back to the default gate. The factory
+    /// picks the gate at wake; a gate never dispatches on channel
+    /// itself.
     pub fn attach_telegram_approval_gate(&self, gate: Arc<dyn crate::approval_gate::ApprovalGate>) {
         *self.telegram_approval_gate.write().unwrap() = Some(gate);
     }
@@ -625,7 +624,7 @@ impl AgentFactory {
             .get(agent_id)
             .ok_or_else(|| AgentError::ToolNotFound(format!("unknown agent_id '{agent_id}'")))?;
 
-        // #60: per-channel LLM override. Extract the channel segment
+        // Per-channel LLM override. Extract the channel segment
         // from the session id and pick the matching entry from
         // `channel_overrides` — an override carries both the
         // `LlmConfig` and the `api_key` so the agent ends up with
@@ -659,8 +658,7 @@ impl AgentFactory {
         // Name the agent before anything can gate on it. `agent_id`
         // is the key this config was looked up under, so a sub-agent
         // woken as a different config carries that config's id and is
-        // checked against its own grants rather than its caller's
-        // (issue #242).
+        // checked against its own grants rather than its caller's.
         agent.set_agent_id(agent_id);
         // Inject the per-agent shared resources.
         agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone())?;
@@ -684,8 +682,8 @@ impl AgentFactory {
                 );
             }
         }
-        // Slice 4 of the per-pass deny overlay: replay PhaseEntered /
-        // PhaseExited events to re-establish any active phase
+        // Replay PhaseEntered / PhaseExited events to re-establish
+        // any active phase
         // overlay across the wake. Runs AFTER `attach_skills` so the
         // base `PhasedEffective` is in place: `attach_skills` resets
         // the overlay slot, so the replay's `set_overlay` is the
@@ -737,8 +735,8 @@ impl AgentFactory {
         if let Some(identity) = &cfg.identity {
             agent.attach_identity(identity.clone());
         }
-        // Item 6 slice 1: hand the freshly built Agent its own
-        // factory back-pointer plus the per-agent subagent ceilings
+        // Hand the freshly built Agent its own factory back-pointer
+        // plus the per-agent subagent ceilings
         // so the spawn_subagent intercept inside the harness loop
         // can validate and dispatch a child without re-querying
         // the gateway config store.
@@ -894,7 +892,7 @@ fn replay_session_scoped_approvals(
 /// wake is crash recovery on a live daemon or `wirken sessions
 /// verify` rebuilding the session offline. Without it the rebuild is
 /// an unclamped agent and every recomputation over its tool set is
-/// wrong. Issue #246.
+/// wrong.
 ///
 /// The parent's chain is never consulted. Last row wins, so a session
 /// re-bound across restarts reflects the most recent binding.
@@ -1006,7 +1004,7 @@ fn replay_subagent_binding(
 /// PhaseEntered / PhaseExited lifecycle events to the agent's
 /// effective permissions, last-event-wins. Mirrors
 /// `replay_session_scoped_approvals` in shape but targets the
-/// per-pass deny overlay added in slices 1-3.
+/// per-pass deny overlay.
 ///
 /// Semantics:
 /// - `PhaseEntered` reconstructs a [`PhaseDenyOverlay`] from the
@@ -1102,8 +1100,9 @@ mod replay_tests {
     }
 
     /// Append a synthetic PermissionApproved(Session) event for
-    /// `action_key` under `session_id`. Mirrors what slice 4's CLI
-    /// surface will emit through `approve_and_log`; the test path
+    /// `action_key` under `session_id`. Mirrors what the CLI
+    /// surface emits through
+    /// `wirken_gateway::permissions::approve_and_log`; the test
     /// fakes the emission to keep the replay assertion focused.
     fn append_session_grant(
         log: &Arc<dyn SessionLog>,
@@ -1313,7 +1312,7 @@ mod replay_tests {
     }
 
     // -----------------------------------------------------------------
-    // replay_phase_overlay (slice 4 of per-pass deny overlay)
+    // replay_phase_overlay
     // -----------------------------------------------------------------
 
     use crate::llm::LlmConfig;
@@ -1327,7 +1326,8 @@ mod replay_tests {
     /// `(agent, log_arc, session_id, _tmp)` where `_tmp` keeps the
     /// audit DB alive for the test's lifetime. The agent's
     /// permission profile is the default `Legacy` shape; the phase
-    /// overlay sits on top of it and is what slice 4 reconstructs.
+    /// overlay sits on top of it and is what the replay
+    /// reconstructs.
     fn agent_for_phase_replay() -> (Agent, Arc<SqliteSessionLog>, String, TempDir) {
         let tmp = TempDir::new().unwrap();
         let log_path = tmp.path().join("audit.db");
@@ -1417,7 +1417,7 @@ mod replay_tests {
     ///
     /// Nothing reads the parent's chain. The binding row is the whole
     /// input, which is what lets a sub-agent session be verified on
-    /// its own. Issue #246.
+    /// its own.
     #[test]
     fn replay_restores_the_clamp_from_the_childs_own_row() {
         let (mut agent, log, session_id, _tmp) = agent_for_phase_replay();

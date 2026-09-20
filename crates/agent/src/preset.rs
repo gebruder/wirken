@@ -1,9 +1,8 @@
-//! Preset bundles — curated multi-skill packages with a coherent posture.
+//! Preset bundles: curated multi-skill packages with a coherent posture.
 //!
 //! A preset is a directory containing a `preset.toml` declaration plus a
 //! `skills/<name>/SKILL.md` per included skill. Optional siblings:
-//! `sources.toml`, `prompts/`, and (in later scopes) per-preset config
-//! that the runtime consumes.
+//! `sources.toml` and `prompts/`.
 //!
 //! ```text
 //! preset/<name>/
@@ -19,14 +18,13 @@
 //! referenced skill subdirectories exist, loads each through
 //! [`crate::skill::SkillLoader`], and returns a [`LoadedPreset`]. The
 //! caller (typically [`crate::Agent::attach_skills`]) merges the
-//! profiles via #76's union semantics; coherence checks fire there.
+//! profiles via the per-skill union semantics; coherence checks fire
+//! there.
 //!
-//! Loading the preset does *not* configure the runtime — fetcher,
-//! scheduler, and channel-push wiring are the next scope. This module
-//! is the keystone gap-G fix from `docs/zirkel/DESIGN.md` (Scope A):
-//! the directory layout, the `preset.toml` schema, and the smoke test
-//! that the bundle is internally coherent. Later scopes wire the
-//! runtime pieces.
+//! Loading a preset does not configure the runtime. This module owns
+//! the directory layout, the `preset.toml` schema, and the check that
+//! a bundle is internally coherent; fetcher, scheduler and
+//! channel-push wiring live elsewhere.
 
 use std::path::{Path, PathBuf};
 
@@ -96,10 +94,10 @@ impl PresetLoader {
     /// `Agent::attach_skills`.
     ///
     /// This loader does not enforce any cross-skill coherence
-    /// (permissions merge, name uniqueness, reachability of explicit-
-    /// only skills) — those checks fire in `attach_skills` per #76 and
-    /// #79, and are the same regardless of whether the skills came
-    /// from a preset or were attached individually.
+    /// (permissions merge, name uniqueness, reachability of
+    /// explicit-only skills). Those checks fire in `attach_skills`,
+    /// and are the same whether the skills came from a preset or
+    /// were attached individually.
     pub fn load_dir(preset_dir: &Path) -> Result<LoadedPreset, PresetError> {
         let manifest_path = preset_dir.join("preset.toml");
         if !manifest_path.exists() {

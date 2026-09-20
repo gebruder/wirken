@@ -1,4 +1,4 @@
-//! Per-agent Ed25519 identity used for session attestation (item 8).
+//! Per-agent Ed25519 identity used for session attestation.
 //!
 //! Modeled on `wirken_ipc::AdapterIdentity` — same primitives, same
 //! disk format, different purpose. Adapter identities authenticate
@@ -37,9 +37,10 @@ use crate::error::AgentError;
 /// One agent's signing identity. Holds the secret key in memory; the
 /// caller is responsible for not exposing it.
 ///
-/// `Clone` is cheap (the underlying `SigningKey` is just 32 bytes).
-/// Item 8 slice 2 uses it: [`crate::factory::AgentFactory`] holds a
-/// canonical identity per agent_id and clones it into every waked
+/// `Clone` is cheap (the underlying `SigningKey` is just 32 bytes),
+/// which is what the wake path relies on:
+/// [`crate::factory::AgentFactory`] holds a canonical identity per
+/// agent_id and clones it into every waked
 /// Agent so the harness can sign attestation events without
 /// touching disk on every wake.
 #[derive(Clone)]

@@ -1,4 +1,4 @@
-//! Slash-command invocation surface for explicit-only skills (#79).
+//! Slash-command invocation surface for explicit-only skills.
 //!
 //! Skills declared `disable-model-invocation: true` are excluded from the
 //! system prompt's auto-pickable set ([`crate::skill::SkillLoader::build_prompt`]).

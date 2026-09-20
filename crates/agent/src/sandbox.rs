@@ -950,7 +950,7 @@ pub(crate) fn egress_decision(
 /// indistinguishable from an exec that had no policy at all, and both
 /// fell through to the legacy `network` flag. With that flag set, the
 /// deny case joined Docker's default bridge: the strictest policy
-/// produced the widest network. See issue 232.
+/// produced the widest network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EgressDecision<'a> {
     /// No egress policy reached this exec. The legacy `network` flag

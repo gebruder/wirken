@@ -123,9 +123,9 @@ fn host_matches(host: &str, pattern: &str) -> bool {
 /// per-pass deny mechanism. The check path consults this BEFORE the
 /// base [`EgressEnforcement`], so a phase that denies a host
 /// short-circuits even when the base profile would have allowed it.
-/// Closes the egress-axis coverage gap that the original slice-2
-/// commit message flagged: `PhaseAxis::EgressHost` was type-prepared
-/// but the runtime gate didn't consult the overlay.
+/// `PhaseAxis::EgressHost` is enforced here rather than at the
+/// runtime gate, because egress leaves through this client and a
+/// gate-side check would not see a request the client makes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhaseEgressDeny {
     /// Operator-readable label from the active phase; surfaced on
@@ -143,9 +143,10 @@ pub struct PhaseEgressDeny {
 /// `SkillPermissionDenied` audit row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressDenyReason {
-    /// Base permission profile refused the host (the pre-slice-6
-    /// shape). Pre-slice-6 audit rows that did not carry a reason
-    /// field deserialize as this via the audit-side default.
+    /// Base permission profile refused the host. Older audit rows
+    /// that carry no reason field deserialize as this via the
+    /// audit-side default, so the variant is also the compatibility
+    /// landing spot.
     Profile,
     /// Active phase deny overlay refused the host. `phase_name`
     /// flows into the audit event for SIEM correlation with the
@@ -157,9 +158,9 @@ pub enum EgressDenyReason {
 /// wrapper holds the enforcement policy in shared state so the agent
 /// can update it after attaching skills without rebuilding the client.
 ///
-/// Slice 6 of the per-pass deny overlay adds a second `Arc<RwLock<_>>`
-/// holding the optional phase overlay deny. The check path consults
-/// the overlay first, then the base enforcement; transitions
+/// A second `Arc<RwLock<_>>` holds the optional phase overlay deny.
+/// The check path consults the overlay first, then the base
+/// enforcement; transitions
 /// (`enter_phase`, `exit_phase`, turn-end auto-clear, wake-replay)
 /// push the overlay state via [`Self::set_phase_overlay_deny`] /
 /// [`Self::clear_phase_overlay_deny`].
@@ -230,7 +231,7 @@ impl EgressClient {
         }
     }
 
-    /// Slice-6 phase-overlay setter. Called by the runtime's phase
+    /// Phase-overlay setter. Called by the runtime's phase
     /// intercepts (`wirken_enter_phase`) and the wake-replay path
     /// after `Agent::enter_phase` or `Agent::restore_phase_overlay`
     /// successfully installs an overlay. The overlay is consulted
@@ -243,7 +244,7 @@ impl EgressClient {
         }
     }
 
-    /// Slice-6 phase-overlay clear. Called by the runtime's
+    /// Phase-overlay clear. Called by the runtime's
     /// `wirken_exit_phase` intercept, the turn-end auto-clear, and
     /// any wake-replay that ends with no active phase. A no-op when
     /// no overlay is currently installed.
@@ -286,7 +287,7 @@ impl EgressClient {
                 host: format!("<unparseable url: {url}>"),
                 reason: EgressDenyReason::Profile,
             })?;
-        // Slice 6: overlay deny first. A phase-installed deny entry
+        // Overlay deny first. A phase-installed deny entry
         // short-circuits even when the base enforcement would have
         // allowed the host, and surfaces a `Phase` reason so the
         // runtime emits `SkillDeniedReason::Phase { phase_name }` on
@@ -498,7 +499,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Phase overlay deny (slice 6 of per-pass deny overlay)
+    // Phase overlay deny
     // ---------------------------------------------------------------
 
     fn overlay_denying(phase: &str, host: &str) -> PhaseEgressDeny {

@@ -145,9 +145,9 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    /// Minimal AgentConfig with `preset = None`. Mirrors the
-    /// pre-slice-1 shape every existing test in
-    /// `wirken_gateway::agent_config` constructs.
+    /// Minimal AgentConfig with `preset = None`. The shape every
+    /// existing test in `wirken_gateway::agent_config` constructs,
+    /// so a persona that names no preset is covered.
     fn agent_config_without_preset(id: &str) -> AgentConfig {
         AgentConfig {
             id: id.to_string(),
@@ -283,8 +283,8 @@ skills = ["{skill_dir_name}"]
 
     #[test]
     fn agent_config_round_trips_preset_field_through_store() {
-        // Regression on the schema-delta half of slice 1:
-        // AgentConfigStore must round-trip the new column. Without
+        // AgentConfigStore must round-trip the `preset` column.
+        // Without
         // this test the agent_config_db_path migration could
         // silently swallow `preset` on get / list and the persona
         // view would always materialize with `preset: None`.

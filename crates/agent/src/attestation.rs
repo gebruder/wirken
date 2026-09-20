@@ -2,9 +2,7 @@
 //! external auditor with the agent's public key can prove the
 //! transcript is intact and untampered.
 //!
-//! This is item 8 of the Managed Agents parity work
-//! (`docs/managed-agents-parity.md`). It is a leapfrog primitive —
-//! no hosted agent service can offer it because they hold the
+//! No hosted agent service can offer this, because they hold the
 //! signing key inside their own infrastructure. A self-hosted
 //! operator's key on the operator's hardware is qualitatively
 //! different.
@@ -29,15 +27,12 @@
 //! Bumping the version suffix (`v1` → `v2`) is the canonical way to
 //! retire an old format.
 //!
-//! ## Slice 1 scope
+//! ## Who calls this
 //!
-//! Slice 1 ships the library primitives only. There is no auto-trigger
-//! from a harness loop yet — `attest_session` is called manually.
-//! When item 2 (stateless harness/wake) lands, the harness will call
-//! `attest_session` every N events / K seconds / on close. CLI
-//! commands (`wirken session attest`, `wirken session
-//! verify-attestations`, `wirken keys export-pubkey`) ship in a
-//! follow-up alongside item 2 so they have real sessions to operate on.
+//! This module owns the primitives. The harness calls
+//! `attest_session` from its own trigger logic
+//! (`Agent::maybe_attest`), and the CLI's audit command verifies what
+//! was written. Nothing here schedules anything.
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -294,8 +289,9 @@ fn map_audit_err(e: AuditError) -> AgentError {
 /// chain_head_seq. It does *not* anchor to an out-of-band trust
 /// source. An attacker who rotates the agent's identity key on disk
 /// and re-signs the entire transcript end-to-end will pass this
-/// check. Operator-pinned signer keys are required for stronger
-/// guarantees; that work is a separate item.
+/// check. [`verify_recent_attestations`] is the stronger check: it
+/// takes the signer key the operator pinned on disk rather than the
+/// one the row claims.
 ///
 /// Returns the aggregate result. The first session whose attestations
 /// fail to verify produces a `Broken` result and the walk stops there.

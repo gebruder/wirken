@@ -24,8 +24,8 @@ pub enum Role {
     User,
     Assistant,
     Tool,
-    /// Item 4 slice 2 (alpha): a harness-controlled summary of
-    /// content the context engine trimmed from the conversation
+    /// A harness-controlled summary of content the context engine
+    /// trimmed from the conversation
     /// history. Provider adapters in `crate::llm` map this to the
     /// provider's `system` role with content wrapped in
     /// [`COMPACTION_FENCE_OPEN`] / [`COMPACTION_FENCE_CLOSE`]. The
@@ -200,9 +200,9 @@ impl Conversation {
 
     /// Insert a message at the given index, shifting later
     /// messages right. Out-of-range indices are clamped to the
-    /// end. Used by [`crate::context::ContextEngine::fit`] (item 4
-    /// slice 2) to inject a [`Role::Compaction`] summary at
-    /// position 1, immediately after the system prompt.
+    /// end. Used by [`crate::context::ContextEngine::fit`] to
+    /// inject a [`Role::Compaction`] summary at position 1,
+    /// immediately after the system prompt.
     pub fn insert_at(&mut self, idx: usize, message: Message) {
         let pos = idx.min(self.messages.len());
         self.messages.insert(pos, message);
@@ -226,9 +226,9 @@ impl Conversation {
         }
     }
 
-    /// Replay session events into the conversation. Used by
-    /// `Agent::wake` (item 2 slice 2) to reconstruct an in-memory
-    /// conversation from a durable session log.
+    /// Replay session events into the conversation. Used at wake to
+    /// reconstruct an in-memory conversation from a durable session
+    /// log.
     ///
     /// Variants that participate in the LLM-visible conversation
     /// projection are replayed:

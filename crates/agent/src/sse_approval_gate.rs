@@ -12,10 +12,9 @@
 //! exactly the way the Telegram callback path does.
 //!
 //! Operator identity collapses to the literal label `"webchat"`
-//! today because webchat has no login layer (verify-first finding
-//! Q3). When login lands as a separate slice the actor field
-//! flows through to per-user identity without touching this gate's
-//! contract.
+//! because webchat has no login layer: there is no per-user identity
+//! to record. The actor field is the seam a login layer would fill,
+//! so adding one would not change this gate's contract.
 
 use std::sync::Arc;
 use std::time::Duration;

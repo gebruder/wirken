@@ -97,28 +97,27 @@ pub enum AgentError {
         budget_tokens: usize,
     },
 
-    /// Item 6 slice 1: a child agent invocation hit its
-    /// `max_rounds` budget before producing a final assistant
+    /// A child agent invocation hit its `max_rounds` budget before
+    /// producing a final assistant
     /// message. The parent harness catches this and reports
     /// `status: "rounds_exceeded"` in the `SubagentResult` envelope.
     #[error("subagent rounds budget exceeded after {rounds} rounds")]
     RoundsExceeded { rounds: usize },
 
-    /// #76 Phase 2.2: a built-in tool tried to reach a host that the
-    /// agent's effective skill permissions egress allow-set rejects.
+    /// A built-in tool tried to reach a host that the agent's
+    /// effective skill permissions egress allow-set rejects.
     /// The agent's dispatcher catches this variant, emits a
     /// `SkillPermissionDenied` audit event, and returns a non-success
     /// `ToolResult` to the LLM rather than propagating the error up.
     ///
-    /// Slice 6 of the per-pass deny overlay restructured this as a
-    /// tuple variant wrapping [`crate::egress::EgressDenied`] so the
-    /// `reason` field (Profile vs Phase) carries through to the
+    /// A tuple variant wrapping [`crate::egress::EgressDenied`] so
+    /// the `reason` field (Profile vs Phase) carries through to the
     /// audit emit site without a parallel `host` slot drifting from
     /// the underlying egress error.
     #[error("{0}")]
     EgressDenied(crate::egress::EgressDenied),
 
-    /// #79: user typed `/<name>` as a slash invocation but no loaded
+    /// User typed `/<name>` as a slash invocation but no loaded
     /// skill has that name. Surfaced to the channel so the user can
     /// retry with a correct skill name.
     #[error("unknown skill '/{name}'; loaded skills: {}", known.join(", "))]

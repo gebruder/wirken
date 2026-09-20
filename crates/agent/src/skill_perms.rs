@@ -628,7 +628,7 @@ pub fn effective_for_skills(
 /// [`EffectiveProfile`]. Entries listed here are denied even when the
 /// base profile would have allowed them. The overlay is single-slot:
 /// only one phase can be active per Agent at a time. Set by a skill
-/// via the `wirken_enter_phase` host function (slice 3); cleared via
+/// via the `wirken_enter_phase` host function; cleared via
 /// `wirken_exit_phase`, turn-end, or skill-unload.
 ///
 /// The four deny axes mirror the four `allows_*` methods on
@@ -655,8 +655,6 @@ pub struct PhaseDenyOverlay {
 
 impl PhaseDenyOverlay {
     /// True when the overlay would deny `name` on the tools axis.
-    /// Slice 2 wires this into the agent's permission gate; slice 1
-    /// only defines the predicate so the type's shape is testable.
     pub fn denies_tool(&self, name: &str) -> bool {
         self.tools.contains(name)
     }
@@ -730,10 +728,10 @@ impl PhaseAxis {
 /// audit shape (profile-denial vs phase-denial) without re-querying
 /// the overlay.
 ///
-/// Pre-slice-2 the gate methods returned `bool`; the explicit enum
-/// is the typed-reason channel the audit layer needs to distinguish
-/// "phase overlay" from "permission profile mismatch" in the SIEM
-/// chain.
+/// The gate methods return this rather than `bool` because the audit
+/// layer has to distinguish "phase overlay" from "permission profile
+/// mismatch" in the SIEM chain, and a bare `false` cannot say which
+/// refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
     /// Tool call is allowed: neither the active overlay (if any) nor
@@ -744,9 +742,8 @@ pub enum GateDecision {
     /// `PhaseEntered` row; `axis` is the gate axis the overlay
     /// matched on.
     DeniedByPhase { phase_name: String, axis: PhaseAxis },
-    /// The base [`EffectiveProfile`] refused the call. The pre-slice-2
-    /// shape: gate site knows its own axis statically, so no extra
-    /// data carried on the variant.
+    /// The base [`EffectiveProfile`] refused the call. Carries no
+    /// data: a gate site knows its own axis statically.
     DeniedByProfile,
 }
 
@@ -769,10 +766,10 @@ pub enum PhaseError {
 /// which side denied.
 ///
 /// The overlay's lifetime is bounded by the agent turn that owns
-/// it: `enter_phase` is called from inside a turn (slice 3 wires
-/// the WASM host fn), `exit_phase` is called either by the same
-/// skill before the next phase (`PhaseExitReason::PhaseChange`) or
-/// by the host at turn end (`PhaseExitReason::TurnEnd`).
+/// it: `enter_phase` is called from inside a turn, and `exit_phase`
+/// either by the same skill before the next phase
+/// (`PhaseExitReason::PhaseChange`) or by the host at turn end
+/// (`PhaseExitReason::TurnEnd`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PhasedEffective {
     base: EffectiveProfile,
@@ -780,9 +777,8 @@ pub struct PhasedEffective {
 }
 
 impl PhasedEffective {
-    /// Wrap an [`EffectiveProfile`] with an empty overlay slot.
-    /// Pre-slice-2 callers that held an `EffectiveProfile` directly
-    /// land here via `PhasedEffective::from_base(...)`.
+    /// Wrap an [`EffectiveProfile`] with an empty overlay slot. The
+    /// entry point for any caller holding a bare `EffectiveProfile`.
     pub fn from_base(base: EffectiveProfile) -> Self {
         Self {
             base,
@@ -914,8 +910,8 @@ impl PhasedEffective {
 
     /// Install `overlay` as the active phase. Errors with
     /// [`PhaseError::AlreadyActive`] when one is already active;
-    /// the skill must `exit_phase` first. Slice 3 wires this through
-    /// the `wirken_enter_phase` host function.
+    /// the skill must `exit_phase` first. Reached from a skill
+    /// through the `wirken_enter_phase` host function.
     pub fn enter_phase(&mut self, overlay: PhaseDenyOverlay) -> Result<(), PhaseError> {
         if self.overlay.is_some() {
             return Err(PhaseError::AlreadyActive);
@@ -932,7 +928,7 @@ impl PhasedEffective {
         self.overlay.take()
     }
 
-    /// Slice-4 replay-side setter. Unconditionally installs
+    /// Replay-side setter. Unconditionally installs
     /// `overlay`, replacing whatever is currently active. Skips the
     /// `AlreadyActive` check the live [`Self::enter_phase`] enforces
     /// because replay needs to set the final state observed in the
@@ -1424,7 +1420,7 @@ inference:
     }
 
     // -----------------------------------------------------------------
-    // PhasedEffective + GateDecision (slice 2 per-pass deny overlay)
+    // PhasedEffective + GateDecision
     // -----------------------------------------------------------------
 
     fn overlay_with_tool(phase_name: &str, tool: &str) -> PhaseDenyOverlay {
@@ -1593,8 +1589,8 @@ inference:
     #[test]
     fn phased_default_is_legacy_with_no_overlay() {
         // Regression: with the default-constructed PhasedEffective
-        // (matching the `Legacy` pre-slice-2 initializer in
-        // runtime.rs), every gate_* call returns Allow.
+        // (the `Legacy` shape an agent with no skills attached
+        // carries), every gate_* call returns Allow.
         let phased = PhasedEffective::default();
         assert_eq!(phased.gate_tool("anything"), GateDecision::Allow);
         assert_eq!(phased.gate_host("api.example.com"), GateDecision::Allow);

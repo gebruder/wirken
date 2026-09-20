@@ -1,44 +1,41 @@
 //! Context engine — fits a [`Conversation`] under the model's
 //! token budget before each LLM call.
 //!
-//! Item 4 of the Managed Agents parity work
-//! (`docs/managed-agents-parity.md`). The user-visible problem this
-//! solves: context blowups killing sessions. The pre-slice-1
-//! [`Conversation::compact`] method dropped the oldest half of
-//! non-system messages indiscriminately when over a hardcoded 100k
-//! token budget — naive, not configurable, and unaware of tool
-//! call/result pairing.
+//! The user-visible problem this solves: context blowups killing
+//! sessions. The [`Conversation::compact`] method this replaced
+//! dropped the oldest half of non-system messages indiscriminately
+//! when over a hardcoded 100k token budget: not configurable, and
+//! unaware of tool call/result pairing.
 //!
-//! ## What slice 1 ships
+//! ## What the engine does
 //!
 //! - A [`ContextEngine`] derived from the agent's [`LlmConfig`] that
 //!   knows the per-model budget.
 //! - A [`ContextEngine::fit`] method that trims the conversation in
 //!   place, preferring to drop oldest tool result *content* (not the
-//!   message itself — pairing stays intact) before touching user or
-//!   assistant text.
+//!   message itself, so call/result pairing stays intact) before
+//!   touching user or assistant text.
 //! - A guarantee that the system prompt and the most recent
 //!   `min_recent_turns` (default 3) user messages plus everything
 //!   after them are never trimmed.
 //! - A structured [`SessionEvent::Compaction`] event written to the
 //!   session log every time something is trimmed, recording which
 //!   conversation positions were touched and how many bytes were
-//!   reclaimed. `via_model: false` — slice 1 never invokes an LLM
-//!   for compaction.
+//!   reclaimed. `via_model: false` on every such event, because
+//!   `fit` never calls a model. The optional free-text summary is
+//!   produced by the harness afterwards and replaces the
+//!   `Role::Compaction` message content, leaving the event as
+//!   written.
 //! - An [`AgentError::ContextOverflow`] when trimming reaches the
 //!   floor and the conversation still does not fit.
 //!
-//! ## What slice 1 does NOT do
+//! ## What the engine does not do
 //!
-//! - No LLM-based free-text summarization (slice 2)
-//! - No `Role::Compaction` projection (slice 2 — needs the
-//!   conversation enum to gain a new variant)
-//! - No [`InjectionDetector`] integration on replay (slice 2 — only
-//!   meaningful when compaction events round-trip back into the
-//!   prompt)
-//! - No provider-specific prompt cache markers (slice 3)
-//! - No `ContextStrategy` trait (premature; one strategy in slice 1)
-//! - No real tokenizer (sticking with `len/4 + 1` for now)
+//! - No [`InjectionDetector`] integration on replay: a compaction
+//!   summary that round-trips back into the prompt is not re-scanned.
+//! - No `ContextStrategy` trait. There is one strategy.
+//! - No real tokenizer. `len/4 + 1` means the budget is an estimate,
+//!   which is why it is set conservatively.
 //!
 //! [`InjectionDetector`]: wirken_gateway::injection_detect::InjectionDetector
 //! [`SessionEvent::Compaction`]: wirken_audit::SessionEvent::Compaction
@@ -52,8 +49,7 @@ use crate::tool::ToolDef;
 
 /// Result of a [`ContextEngine::fit`] call. Carries the original
 /// content of any messages that were trimmed so the harness can
-/// optionally pass them to an LLM for a free-text summary (item 4
-/// slice 2.5).
+/// optionally pass them to an LLM for a free-text summary.
 pub struct FitResult {
     /// Original content of messages replaced with placeholders
     /// during this fit() call. Empty when nothing was trimmed.
@@ -158,7 +154,7 @@ impl ContextEngine {
     /// is still over budget after trimming everything that may be
     /// trimmed.
     ///
-    /// Item 4 slice 2 (alpha): at the start, removes any existing
+    /// At the start, removes any existing
     /// `Role::Compaction` message from the conversation so the
     /// summary block is recomputed fresh on every fit() call. At
     /// the end, if the session log has any prior Compaction events,
@@ -177,8 +173,8 @@ impl ContextEngine {
             trimmed_messages: Vec::new(),
         };
 
-        // Item 4 slice 2: drop any prior compaction summary so we
-        // can recompute it fresh below. This must happen before the
+        // Drop any prior compaction summary so we can recompute it
+        // fresh below. This must happen before the
         // budget check so identical fit() calls converge to the
         // same conversation shape.
         conversation.remove_role(Role::Compaction);
@@ -257,8 +253,8 @@ impl ContextEngine {
             return Ok(empty_result);
         }
 
-        // Item 4 slice 2.5: snapshot the original content of
-        // messages about to be trimmed. The harness uses this to
+        // Snapshot the original content of messages about to be
+        // trimmed. The harness uses this to
         // build a summarization prompt if a compaction model is
         // configured. Captured BEFORE apply() replaces the content
         // with placeholders.
@@ -538,9 +534,8 @@ pub(crate) fn estimate_conversation_tokens(conversation: &Conversation) -> usize
         .sum()
 }
 
-/// Estimate the tokens for one message. Uses the existing
-/// `len/4 + 1` heuristic per the slice 1 design (decision 1) plus
-/// [`PER_MESSAGE_OVERHEAD_TOKENS`].
+/// Estimate the tokens for one message. Uses the `len/4 + 1`
+/// heuristic plus [`PER_MESSAGE_OVERHEAD_TOKENS`].
 pub(crate) fn estimate_message_tokens(msg: &Message) -> usize {
     let content_tokens = estimate_tokens(&msg.content);
     // Tool calls add a JSON-ish payload not in `content`. Add a

@@ -14,7 +14,7 @@
 //!
 //! ## Why this exists
 //!
-//! The slash-command surface from #79 was the first consumer
+//! The slash-command surface was the first consumer
 //! (`Agent::preprocess_slash_invocation` → `crate::slash::parse`).
 //! Zirkel's keep/skip reply parser is the second. The refactor from
 //! a hardcoded slash-only call to a registered chain happens **because
