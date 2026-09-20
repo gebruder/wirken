@@ -158,12 +158,10 @@ def every_keychain_probe_reads_the_passphrase_from_an_approved_supplier():
 
 
 def webchat_routes_keep_their_guards():
-    """Four properties of the webchat request handler.
+    """Four properties of the webchat routes.
 
-    The handler is one `if`/`else if` chain inside a spawned task, so
-    no route is callable and none of these can be a behavioural test
-    until it is extracted. That extraction is its own commit; until
-    then these are checks on source text and they live here.
+    Checks on source text: where a guard sits inside a route, not
+    what the route answers.
     """
     path = ROOT / "crates/cli/src/commands/webchat.rs"
     src = path.read_text()
@@ -173,20 +171,20 @@ def webchat_routes_keep_their_guards():
             after = src.split(start_marker, 1)[1]
             return after.split(end_marker, 1)[0]
         except IndexError:
-            fail(path, None, f"could not find the {label} route arm")
+            fail(path, None, f"could not find the {label} route")
             return ""
 
     verify = arm(
-        'first_line.starts_with("POST /api/verify")',
-        "parse_approval_path(first_line)",
+        "async fn route_verify(",
+        "/// Verify the audit chain",
         "verify",
     )
     if verify:
-        if "api_preflight(&request, port, true)" not in verify:
+        if "api_preflight(req.raw, shared.port, true)" not in verify:
             fail(path, None, "the verify route must require an Origin")
-        if "verify_limit.check()" not in verify:
+        if "shared.verify_limit.check()" not in verify:
             fail(path, None, "the verify route must be rate limited")
-        if "VerifyClaim::claim(&verify_running)" not in verify:
+        if "VerifyClaim::claim(&shared.verify_running)" not in verify:
             fail(path, None, "the verify route must take a single-flight claim")
         if "verify_running.store(" in verify:
             fail(
@@ -195,12 +193,25 @@ def webchat_routes_keep_their_guards():
                 "the verify latch is released by the claim going out of scope, not "
                 "by a statement the next early return can skip",
             )
-        if "spawn_blocking" not in verify:
+        if "verify_chain_off_runtime(" not in verify:
             fail(path, None, "the verify must run off the async runtime")
 
+    off_runtime = arm(
+        "async fn verify_chain_off_runtime(",
+        "\n}\n",
+        "off-runtime verify",
+    )
+    if off_runtime and "spawn_blocking" not in off_runtime:
+        fail(
+            path,
+            None,
+            "verify_chain_off_runtime is the route's only path to AuditLog::verify; "
+            "the scan runs on the blocking pool or it holds the runtime",
+        )
+
     chat = arm(
-        'first_line.starts_with("POST /api/chat")',
-        'first_line.starts_with("POST /api/verify")',
+        "async fn route_chat(",
+        "/// Stream one accepted turn",
         "chat",
     )
     if chat:
@@ -225,48 +236,11 @@ def webchat_routes_keep_their_guards():
             )
         if scan >= 0 and flagged >= 0 and not scan < flagged:
             fail(path, None, "the threat row follows the scan that produced it")
-        if "open_turns.try_open(&conversation)" not in chat:
+        if "shared.open_turns.try_open(&conversation)" not in chat:
             fail(path, None, "the chat route must claim the conversation's turn")
-        if "conversation_of(" not in chat and "conversation" not in chat:
+        if "conversation_key(json[\"conversation\"].as_str())" not in chat:
             fail(path, None, "the chat route must take its conversation from the request")
-
-    decision = arm(
-        "else if let Some(request_id) = parse_approval_path(first_line)",
-        "let resolve = pending_approvals.resolve(&request_id, decision);",
-        "approval decision",
-    )
-    if decision and (
-        "approval_belongs_to_webchat(&pending_approvals, &request_id) == Some(false)"
-        not in decision
-    ):
-        fail(
-            path,
-            None,
-            "the decision route must consult the channel guard before resolving",
-        )
-
-    if "let session_id = SessionId::new(viewing);" not in src:
-        fail(path, None, "the decision ack must go to the conversation being viewed")
-
-    if chat:
-        # The turn claim comes before the stream registers, or two
-        # streams briefly share a conversation.
-        claim = chat.find("open_turns.try_open(&conversation)")
-        register = chat.find("sse_registry.register_guard(")
-        if claim < 0 or register < 0 or not claim < register:
-            fail(
-                path,
-                None,
-                "the chat route must claim the turn before it registers the stream",
-            )
-        if r'data: {\"type\":\"done\"}\n\n' not in chat:
-            fail(
-                path,
-                None,
-                "the chat handler must emit a done event before the socket closes; "
-                "its absence is what the page reads as a cut-off stream",
-            )
-        if "HTTP/1.1 503 Service Unavailable" not in chat:
+        if "json_unavailable(" not in chat:
             fail(
                 path,
                 None,
@@ -280,51 +254,57 @@ def webchat_routes_keep_their_guards():
                 "a send into an open turn must be refused through json_conflict; "
                 "what that builder returns is asserted in the test binary",
             )
-
-    # The About panel's two routes are the only ones that serve
-    # capabilities and credentials, and both preflight.
-    for route in ("GET /api/capabilities ", "GET /api/credentials "):
-        an_arm = arm(
-            f'first_line.starts_with("{route}")',
-            "} else if first_line.starts_with(",
-            route.strip(),
-        )
-        if an_arm and "api_preflight(&request, port, false)" not in an_arm:
-            fail(path, None, f"the {route.strip()} route must preflight")
-
-    if chat:
         # The open-turn refusal names the age, so the page can say how
-        # long, and goes out through the shared 409 builder.
+        # long, and goes out before anything is spent on the turn.
         for needle, why in (
             (
-                '"age_seconds": open_turns.open_age(&conversation)',
+                '"age_seconds": shared.open_turns.open_age(&conversation)',
                 "the refusal must carry the open turn's age",
             ),
             ("json_conflict(&body)", "the refusal must go through the 409 builder"),
         ):
             if needle not in chat:
                 fail(path, None, why)
-        # Refused before anything is spent on it.
-        claim = chat.find("open_turns.try_open(&conversation)")
-        inbound = chat.find('"message.inbound",')
-        headers = chat.find("text/event-stream")
-        lock = chat.find("agent_mutex.lock().await")
-        for later, why in (
-            (inbound, "refused before the inbound row is written"),
-            (headers, "refused before any stream is opened"),
-            (lock, "nothing waits on the agent lock"),
-        ):
-            if claim < 0 or later < 0 or not claim < later:
-                fail(path, None, f"the turn claim comes first: {why}")
+        claim = chat.find("shared.open_turns.try_open(&conversation)")
+        if claim < 0 or inbound < 0 or not claim < inbound:
+            fail(
+                path,
+                None,
+                "the turn claim comes first: refused before the inbound row is written",
+            )
 
+    turn = arm(
+        "async fn run_turn(",
+        "/// `POST /api/verify`",
+        "chat stream",
+    )
+    if turn and r'data: {\"type\":\"done\"}\n\n' not in turn:
+        fail(
+            path,
+            None,
+            "the chat stream must emit a done event before the socket closes; "
+            "its absence is what the page reads as a cut-off stream",
+        )
+
+    decision = arm(
+        "async fn route_decision(",
+        "let resolve = shared.pending_approvals.resolve(&request_id, decision);",
+        "approval decision",
+    )
     if decision:
         for needle, why in (
+            (
+                "approval_belongs_to_webchat(&shared.pending_approvals, &request_id) "
+                "== Some(false)",
+                "the decision route must consult the channel guard before resolving",
+            ),
             (
                 'conversation_key(json["conversation"].as_str())',
                 "the decision must name the conversation it came from",
             ),
             (
-                "approval_belongs_to_conversation(&pending_approvals, &request_id, &viewing)",
+                "approval_belongs_to_conversation(&shared.pending_approvals, "
+                "&request_id, &viewing)",
                 "the decision must be checked against that conversation",
             ),
             (
@@ -335,24 +315,37 @@ def webchat_routes_keep_their_guards():
             if needle not in decision:
                 fail(path, None, why)
 
+    if "let session_id = SessionId::new(viewing);" not in src:
+        fail(path, None, "the decision ack must go to the conversation being viewed")
+
+    # The About panel's two routes are the only ones that serve
+    # capabilities and credentials, and both preflight.
+    for fn_marker, next_marker, label in (
+        ("async fn route_capabilities(", "/// `GET /api/credentials`", "GET /api/capabilities"),
+        ("fn route_credentials(", "/// `GET /api/status`", "GET /api/credentials"),
+    ):
+        an_arm = arm(fn_marker, next_marker, label)
+        if an_arm and "api_preflight(req.raw, shared.port, false)" not in an_arm:
+            fail(path, None, f"the {label} route must preflight")
+
     approvals = arm(
-        'first_line.starts_with("GET /api/approvals ")',
-        "} else if first_line.starts_with(",
+        "fn route_approvals(",
+        "/// `GET /api/capabilities`",
         "approvals",
     )
     if approvals:
         for needle, why in (
-            ('query_param(first_line, "c")', "the listing must read the conversation"),
+            ('query_param(req.first_line, "c")', "the listing must read the conversation"),
             ("conversation_key(Some(c))", "and normalise it the same way"),
             (
-                "approvals_snapshot_for(&pending_approvals, conversation.as_deref())",
+                "approvals_snapshot_for(&shared.pending_approvals, conversation.as_deref())",
                 "and scope the snapshot to it",
             ),
         ):
             if needle not in approvals:
                 fail(path, None, why)
 
-    if "conversation_rows(&cfg, rows, &open_turns)" not in src:
+    if "conversation_rows(&cfg, rows, &shared.open_turns)" not in src:
         fail(
             path,
             None,

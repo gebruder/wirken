@@ -41,6 +41,10 @@ const WEBCHAT_CONVERSATION: &str = "webchat-default";
 /// stuck one can be told from a busy one.
 const TURN_OPEN_ERROR: &str = "turn open";
 
+/// The body of the 400 every route answers a malformed conversation
+/// key with.
+const BAD_CONVERSATION_KEY: &str = r#"{"error":"bad conversation key"}"#;
+
 /// A decision posted from a page that is not viewing the conversation
 /// the request came from. The link is the whole surface for that.
 const DECISION_WRONG_CONVERSATION: &str =
@@ -2502,41 +2506,27 @@ pub async fn serve(
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     tracing::info!("WebChat listening on http://127.0.0.1:{port}");
 
-    // Set once the audit writer refuses a row. The writer never
-    // recovers inside a process (its flush loop has exited), so the
-    // flag only ever goes from false to true. The status route reports
-    // it; the chat route refuses turns while it is set.
-    let writer_halted = Arc::new(AtomicBool::new(false));
-
-    // Chain verification is two full scans of the audit log with a hash
-    // per row, run on the blocking pool. One at a time per process, and
-    // no more often than the control-plane limit: a browser must not be
-    // able to keep the gateway verifying.
-    let verify_limit = Arc::new(ControlPlaneRateLimiter::new(
-        super::config().control_plane_rate_limit.max(1),
-    ));
-    let verify_running = Arc::new(AtomicBool::new(false));
-    let open_turns = Arc::new(OpenTurns::default());
-
-    // Per-process rate limiter on the chat POST path. GCRA from
-    // `wirken-gateway::rate_limit`; lock-free hot path. See
-    // `WEBCHAT_MAX_POSTS_PER_MIN` for the cap rationale.
-    let rate_limit = Arc::new(ControlPlaneRateLimiter::new(WEBCHAT_MAX_POSTS_PER_MIN));
+    let shared = Shared {
+        port,
+        factory,
+        audit,
+        sessions,
+        pending_approvals,
+        sse_registry,
+        status_inputs,
+        detector,
+        writer_halted: Arc::new(AtomicBool::new(false)),
+        rate_limit: Arc::new(ControlPlaneRateLimiter::new(WEBCHAT_MAX_POSTS_PER_MIN)),
+        verify_limit: Arc::new(ControlPlaneRateLimiter::new(
+            super::config().control_plane_rate_limit.max(1),
+        )),
+        verify_running: Arc::new(AtomicBool::new(false)),
+        open_turns: Arc::new(OpenTurns::default()),
+    };
 
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let factory = factory.clone();
-        let audit = audit.clone();
-        let sessions = sessions.clone();
-        let rate_limit = rate_limit.clone();
-        let pending_approvals = pending_approvals.clone();
-        let sse_registry = sse_registry.clone();
-        let status_inputs = status_inputs.clone();
-        let detector = detector.clone();
-        let writer_halted = writer_halted.clone();
-        let verify_limit = verify_limit.clone();
-        let verify_running = verify_running.clone();
-        let open_turns = open_turns.clone();
+        let shared = shared.clone();
 
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
@@ -2545,699 +2535,783 @@ pub async fn serve(
                 _ => return,
             };
 
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let first_line = request.lines().next().unwrap_or("");
+            let raw = String::from_utf8_lossy(&buf[..n]);
+            let response = match Request::parse(&raw) {
+                Some(request) => route(&request, &shared).await,
+                None => not_found(),
+            };
 
-            if first_line.starts_with("GET / ") || first_line.starts_with("GET /index.html") {
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    HTML.len(),
-                    HTML
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-            } else if let Some((session_id, after)) = parse_session_events_path(first_line) {
-                // GET /api/sessions/{id}/events[?after=N] — the session
-                // log projected to what the page draws. Webchat
-                // sessions only: this route exposes far more per row
-                // than the transcript does, and other channels' rows
-                // are theirs.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
+            match response {
+                Response::Complete(bytes) => {
+                    let _ = stream.write_all(bytes.as_bytes()).await;
                 }
-                if !events_route_allowed(&session_id) {
-                    let _ = stream
-                        .write_all(
-                            json_forbidden("events are served for webchat sessions only")
-                                .as_bytes(),
-                        )
-                        .await;
-                    return;
-                }
-                let cfg = super::config();
-                let body = session_events(&cfg, &session_id, after);
-                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if let Some(session_id) = parse_session_path(first_line) {
-                // GET /api/sessions/{id} — transcript for one session,
-                // rendered into the messages pane. Safe read: the Host
-                // check closes DNS-rebinding, and Origin is validated
-                // only when the browser sends one (it omits it on a
-                // same-origin GET).
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let cfg = super::config();
-                let body = match super::session::session_transcript(&cfg, &session_id) {
-                    Ok(turns) => serde_json::to_string(&turns).unwrap_or_else(|_| "[]".into()),
-                    Err(_) => "[]".to_string(),
-                };
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if let Some(route) = parse_imported_path(first_line) {
-                // Imported-archive reads. Same posture as the other
-                // read routes: Host is checked on every route, which
-                // is what closes DNS rebinding, and a present Origin
-                // is validated even though a browser omits it on a
-                // same-origin GET.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let cfg = super::config();
-                let body = super::import::read_route_json(&cfg, &route);
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if first_line.starts_with("GET /api/approvals ") {
-                // GET /api/approvals — this browser's pending decisions
-                // with their trigger text, and a count of everyone
-                // else's. Other channels' request ids and messages stay
-                // on their channel: an id is the only thing standing
-                // between a webchat tab and a Telegram user's approval.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let conversation = match query_param(first_line, "c")
-                    .map(|c| conversation_key(Some(c)))
-                {
-                    None => None,
-                    Some(Ok(c)) => Some(c),
-                    Some(Err(_)) => {
-                        let resp = r#"{"error":"bad conversation key"}"#;
-                        let response = format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                };
-                let body = approvals_snapshot_for(&pending_approvals, conversation.as_deref());
-                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if first_line.starts_with("GET /api/capabilities ") {
-                // GET /api/capabilities — what the default agent is
-                // offered and gated by: tools with their tier rule,
-                // persisted grants, skills with their permissions and
-                // signature status. Wakes the agent and holds its lock
-                // briefly; a turn in flight gets "busy", never a wait.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let conversation = match conversation_key(query_param(first_line, "c")) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        let resp = r#"{"error":"bad conversation key"}"#;
-                        let response = format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                };
-                let cfg = super::config();
-                let body = capabilities_snapshot(&cfg, &factory, &conversation).await;
-                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if first_line.starts_with("GET /api/credentials ") {
-                // GET /api/credentials — credential names without the
-                // vault key, and MCP connectors reduced to name,
-                // transport, auth kind and credential names.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let cfg = super::config();
-                let body = credentials_snapshot(&cfg);
-                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if first_line.starts_with("GET /api/status ") {
-                // GET /api/status — one snapshot of the gateway's
-                // posture for the status line, the banners and the
-                // About panel. Safe read: Host checked, Origin
-                // validated only when present.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let cfg = super::config();
-                let snapshot = status_snapshot(
-                    &cfg,
-                    port,
-                    &status_inputs,
-                    writer_halted.load(Ordering::Relaxed),
-                )
-                .await;
-                let body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into());
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if first_line.starts_with("GET /api/sessions ") {
-                // GET /api/sessions — active-session list backing the
-                // sidebar. Safe read, same Host-only posture as the
-                // transcript route above.
-                if let Some(resp) = api_preflight(&request, port, false) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                let cfg = super::config();
-                let body = match super::session::active_session_rows(&cfg, None) {
-                    Ok(rows) => serde_json::to_string(&conversation_rows(&cfg, rows, &open_turns))
-                        .unwrap_or_else(|_| "[]".into()),
-                    Err(_) => "[]".to_string(),
-                };
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if first_line.starts_with("POST /api/chat") {
-                // Rate-limit before any other work. A spinning client
-                // (runaway browser tab, naive CSRF, scripted abuse)
-                // would otherwise drive unbounded LLM spend on the
-                // operator's API key. Burst-tolerant via GCRA.
-                if let Err(retry_after) = rate_limit.check() {
-                    let resp = r#"{"error":"rate limit exceeded"}"#;
-                    let response = format!(
-                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        retry_after.as_secs().max(1),
-                        resp.len(),
-                        resp
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    return;
-                }
-
-                // CSRF defence: a browser request must carry an
-                // `Origin` header matching the WebChat origin. A page
-                // on attacker.com that POSTs to
-                // http://127.0.0.1:18790/api/chat would carry
-                // `Origin: https://attacker.com`; without this check
-                // the browser's same-origin policy blocks the SSE
-                // response read but the agent still runs the prompt
-                // and bills the operator's API key.
-                //
-                // `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1` opts out for
-                // non-browser scripts that don't send Origin (curl,
-                // shell pipelines). When that mode is active the
-                // gateway logs a warning at startup; the `Origin`
-                // header is still validated when present.
-                if let Some(resp) = api_preflight(&request, port, true) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-
-                // Extract JSON body
-                let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-                let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-                let message = json["message"].as_str().unwrap_or("").to_string();
-
-                if message.is_empty() {
-                    let resp = r#"{"error":"empty message"}"#;
-                    let response = format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        resp.len(),
-                        resp
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    return;
-                }
-
-                // The conversation comes from the request. A page with
-                // no key sends none and gets the legacy conversation;
-                // a key of the wrong shape is refused before it can
-                // name a session.
-                let conversation = match conversation_key(json["conversation"].as_str()) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        let resp = r#"{"error":"bad conversation key"}"#;
-                        let response = format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                };
-
-                // One turn per conversation. A second send while one
-                // is running is answered now, before the inbound row
-                // is written and before any stream is opened: nothing
-                // waits on the agent lock, and the page can say "turn
-                // open" instead of holding a silent stream.
-                let Some(_open_turn) = open_turns.try_open(&conversation) else {
-                    let body = serde_json::json!({
-                        "error": TURN_OPEN_ERROR,
-                        "age_seconds": open_turns.open_age(&conversation).unwrap_or(0),
-                    })
-                    .to_string();
-                    let _ = stream.write_all(json_conflict(&body).as_bytes()).await;
-                    return;
-                };
-
-                // Audit. Webchat has no platform-assigned message id;
-                // synthesize one so `target` stays a stable resource
-                // handle and the body lives under `detail.content`.
-                let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
-
-                let mut inbound_detail = serde_json::json!({ "content": &message });
-
-                // Scan for prompt-injection signatures, the same way
-                // the adapter message loop does and through the same
-                // helper. The detector tags; it never blocks; a
-                // failure in it is named on the chain rather than
-                // being taken for a clean scan. See
-                // `super::inbound_scan`.
-                //
-                // The scan runs before the row is written, which is
-                // only safe because it is caught: a detector panic
-                // used to unwind past this write and leave no trace of
-                // the message that caused it. It returns now, so the
-                // row is written either way and carries the verdict.
-                let threat_detail = super::inbound_scan::scan_catching_panics(
-                    &detector,
-                    &message,
-                    &format!("webchat conversation '{}'", conversation.as_str()),
-                );
-                if let Some(ref threat) = threat_detail
-                    && let (Some(obj), Some(threat_obj)) =
-                        (inbound_detail.as_object_mut(), threat.as_object())
-                {
-                    for (k, v) in threat_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
-                if threat_detail.is_some() {
-                    let _ = audit
-                        .log(
-                            AuditEvent::new(
-                                ActorKind::Service,
-                                "webchat-user",
-                                "message.threat_flagged",
-                                &inbound_target,
-                            )
-                            .with_channel("webchat")
-                            .with_session(conversation.as_str())
-                            .with_detail(inbound_detail.clone()),
-                        )
-                        .await;
-                }
-
-                // A turn is not started unless its inbound row was
-                // accepted. The writer returns an error only once its
-                // flush loop has halted (chain break, alarm-log failure,
-                // or repeated SQLite failure); from then on nothing is
-                // being recorded, so the chat route refuses rather than
-                // running an unrecorded turn. The page raises its
-                // halted banner from this status.
-                let inbound_logged = audit
-                    .log(
-                        AuditEvent::new(
-                            ActorKind::Service,
-                            "webchat-user",
-                            "message.inbound",
-                            &inbound_target,
-                        )
-                        .with_channel("webchat")
-                        .with_session(conversation.as_str())
-                        .with_detail(inbound_detail),
-                    )
-                    .await;
-                if let Err(e) = inbound_logged {
-                    writer_halted.store(true, Ordering::Relaxed);
-                    tracing::error!(
-                        "webchat: audit writer refused the inbound row; refusing the turn: {e}"
-                    );
-                    let resp = r#"{"error":"audit writer halted"}"#;
-                    let response = format!(
-                        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        resp.len(),
-                        resp
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    return;
-                }
-
-                // Session. `get_or_create` moves `last_activity` but
-                // leaves `message_count` alone; `record_message` is the
-                // only statement that increments it. Calling just the
-                // former, as this path used to, leaves the sidebar
-                // reading `0 msg` no matter how long the conversation
-                // runs, while every other channel counts correctly
-                // through the pair in `run.rs`. Counter failures are
-                // logged rather than propagated: a display counter is
-                // not worth failing a chat turn over.
-                {
-                    let store = sessions.lock().await;
-                    match store.get_or_create("webchat", &conversation) {
-                        Ok(session) => {
-                            if let Err(e) = store.record_message(&session.id) {
-                                tracing::warn!("webchat message count not recorded: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("webchat session not resolved: {e}");
-                        }
-                    }
-                }
-
-                // SSE headers — stream tokens as they arrive
-                let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
-                if stream.write_all(header.as_bytes()).await.is_err()
-                    || stream.flush().await.is_err()
-                {
-                    return;
-                }
-
-                // Wake the default agent for this conversation's
-                // session. Webchat synthesizes a UUID per inbound
-                // message for crash-recovery dedup.
-                let session_id_str = webchat_session_id(&conversation);
-                let inbound_id = format!("webchat-{}", uuid::Uuid::new_v4());
-
-                // Register the per-request SSE sender so the
-                // SseApprovalGate can push ApprovalRequest events
-                // into this stream when the agent hits
-                // NeedsApproval mid-tool-dispatch. The RAII guard
-                // unregisters on every exit path (success, error,
-                // panic, early return). The slice's load-bearing
-                // cleanup property — no orphan senders survive a
-                // panicking handler.
-                let (sse_tx, mut sse_rx) = tokio::sync::mpsc::channel::<SseEvent>(8);
-                let _registry_guard =
-                    sse_registry.register_guard(SessionId::new(session_id_str.clone()), sse_tx);
-
-                match factory.wake("default", &session_id_str) {
-                    Ok(agent_mutex) => {
-                        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-
-                        // Run agent streaming and SSE forwarding concurrently
-                        let mut ag = agent_mutex.lock().await;
-                        let inbound_ctx = wirken_agent::InboundContext {
-                            adapter_id: Some("webchat".to_string()),
-                            sender_id: Some("webchat-user".to_string()),
-                            channel: Some("webchat".to_string()),
-                        };
-                        let stream_future =
-                            ag.process_message_stream_with(&message, inbound_id, tx, inbound_ctx);
-
-                        // Forward both streams to the HTTP response
-                        // as SSE. `rx` carries the agent's
-                        // text-delta / done / error events; `sse_rx`
-                        // carries approval-request / decision-ack
-                        // events from the gate. `tokio::select!`
-                        // multiplexes them onto the single TCP
-                        // stream as `data: {...}\n\n` lines.
-                        let write_stream = &mut stream;
-                        let forward_future = async {
-                            loop {
-                                tokio::select! {
-                                    Some(event) = rx.recv() => {
-                                        let line = match event {
-                                            wirken_agent::llm_stream::StreamEvent::TextDelta(text) => {
-                                                format!(
-                                                    "data: {}\n\n",
-                                                    serde_json::json!({"type": "delta", "text": text})
-                                                )
-                                            }
-                                            wirken_agent::llm_stream::StreamEvent::Done(_) => break,
-                                            wirken_agent::llm_stream::StreamEvent::Error(e) => {
-                                                format!(
-                                                    "data: {}\n\n",
-                                                    serde_json::json!({"type": "error", "text": e})
-                                                )
-                                            }
-                                        };
-                                        if write_stream.write_all(line.as_bytes()).await.is_err()
-                                            || write_stream.flush().await.is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Some(sse_event) = sse_rx.recv() => {
-                                        let line = sse_event.to_sse_line();
-                                        if write_stream.write_all(line.as_bytes()).await.is_err()
-                                            || write_stream.flush().await.is_err()
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    else => break,
-                                }
-                            }
-                        };
-
-                        let (result, _) = tokio::join!(stream_future, forward_future);
-
-                        match result {
-                            Ok(result) => {
-                                let outbound_target =
-                                    format!("webchat:out:{}", uuid::Uuid::new_v4());
-                                let _ = audit
-                                    .log(
-                                        AuditEvent::new(
-                                            ActorKind::User,
-                                            "default",
-                                            "message.outbound",
-                                            &outbound_target,
-                                        )
-                                        .with_channel("webchat")
-                                        .with_session(conversation.as_str())
-                                        .with_detail(
-                                            serde_json::json!({ "content": &result.response }),
-                                        ),
-                                    )
-                                    .await;
-                                // The turn is finished and its outbound row
-                                // has been offered to the writer. Say so on
-                                // the stream: without this event a socket
-                                // that closed mid-answer and one that closed
-                                // after the last token look the same to the
-                                // page, which now marks the former as cut
-                                // off.
-                                let done = "data: {\"type\":\"done\"}\n\n";
-                                let _ = stream.write_all(done.as_bytes()).await;
-                                let _ = stream.flush().await;
-                            }
-                            Err(e) => {
-                                let err = format!(
-                                    "data: {}\n\n",
-                                    serde_json::json!({"type": "error", "text": e.to_string()})
-                                );
-                                let _ = stream.write_all(err.as_bytes()).await;
-                                let _ = stream.flush().await;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let err = format!(
-                            "data: {}\n\n",
-                            serde_json::json!({
-                                "type": "error",
-                                "text": format!("factory.wake failed: {e}"),
-                            })
-                        );
-                        let _ = stream.write_all(err.as_bytes()).await;
-                    }
-                }
-            } else if first_line.starts_with("POST /api/verify") {
-                // POST /api/verify — run the audit chain verifier and
-                // return its verdict with the anchor caveat attached.
-                // State-changing in cost if not in effect: Origin
-                // required, rate-limited, single-flight, blocking pool.
-                if let Some(resp) = api_preflight(&request, port, true) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-                if let Err(retry_after) = verify_limit.check() {
-                    let resp = r#"{"result":"rate_limited"}"#;
-                    let response = format!(
-                        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        retry_after.as_secs().max(1),
-                        resp.len(),
-                        resp
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    return;
-                }
-                let Some(_verify_claim) = VerifyClaim::claim(&verify_running) else {
-                    let resp = r#"{"result":"busy"}"#;
-                    let response = format!(
-                        "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        resp.len(),
-                        resp
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                    return;
-                };
-                let cfg = super::config();
-                let started_at = chrono::Utc::now();
-                let started = std::time::Instant::now();
-                let outcome = tokio::task::spawn_blocking(move || {
-                    AuditLog::open(&cfg.audit_db_path()).and_then(|log| log.verify())
-                })
-                .await;
-                // The claim is released by `_verify_claim` going out
-                // of scope at the end of this branch, on every path
-                // through it.
-                let duration_ms = started.elapsed().as_millis() as u64;
-                let body = match outcome {
-                    Ok(Ok(result)) => verify_result_json(&result, started_at, duration_ms),
-                    Ok(Err(e)) => serde_json::json!({
-                        "result": "error",
-                        "error": e.to_string(),
-                        "started_at": started_at.to_rfc3339(),
-                        "duration_ms": duration_ms,
-                        "caveat": VERIFY_CAVEAT,
-                    }),
-                    Err(_) => serde_json::json!({
-                        "result": "error",
-                        "error": "the verify task did not complete",
-                        "started_at": started_at.to_rfc3339(),
-                        "duration_ms": duration_ms,
-                        "caveat": VERIFY_CAVEAT,
-                    }),
-                };
-                let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
-                let _ = stream.write_all(json_ok(&body).as_bytes()).await;
-            } else if let Some(request_id) = parse_approval_path(first_line) {
-                // POST /api/approvals/{request_id}
-                //
-                // Operator's decision on a pending NeedsApproval
-                // request. Same Origin-header CSRF posture as
-                // /api/chat. The handler resolves the queue entry
-                // (gateway-centralized authorization: there is no
-                // per-user allowlist in webchat today, the loopback
-                // bind + Origin check are the trust boundary) and
-                // pushes an ApprovalDecisionAck event onto the SSE
-                // stream so the browser closes the approval UI.
-
-                // Same CSRF + DNS-rebinding preflight as /api/chat.
-                if let Some(resp) = api_preflight(&request, port, true) {
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                    return;
-                }
-
-                let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-                let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-                let decision_str = json["decision"].as_str().unwrap_or("");
-                let reason = json["reason"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .filter(|s| !s.is_empty());
-
-                let decision = match decision_str {
-                    "allow" => PendingDecision::Allow {
-                        actor: Some("webchat".to_string()),
-                    },
-                    "deny" => PendingDecision::Deny {
-                        reason,
-                        actor: Some("webchat".to_string()),
-                    },
-                    _ => {
-                        let resp = r#"{"error":"decision must be allow or deny"}"#;
-                        let response = format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                };
-
-                // A decision made here is made as actor "webchat" with no
-                // per-operator identity. That is acceptable for this
-                // browser's own conversation and for nothing else: a
-                // request that belongs to another channel's session is
-                // refused, whatever its id, so enumerating ids can never
-                // become a way around that channel's approver list.
-                if approval_belongs_to_webchat(&pending_approvals, &request_id) == Some(false) {
-                    wirken_gateway::permissions::emit_approval_refused(
-                        factory.session_log().as_ref(),
-                        &pending_approvals,
-                        &request_id,
-                        "webchat",
-                        wirken_audit::ApprovalRefusalReason::WrongChannel,
-                        Some("webchat"),
-                    );
-                    let _ = stream
-                        .write_all(
-                            json_forbidden("approvals are decided on their own channel").as_bytes(),
-                        )
-                        .await;
-                    return;
-                }
-                // And it is made for one conversation: the caller names
-                // the conversation it is viewing, and the request must
-                // have come from there. A page showing conversation B
-                // never decides A's request, however it learned the id.
-                let conversation = match conversation_key(json["conversation"].as_str()) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        let resp = r#"{"error":"bad conversation key"}"#;
-                        let response = format!(
-                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                            resp.len(),
-                            resp
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                        return;
-                    }
-                };
-                let viewing = webchat_session_id(&conversation);
-                if approval_belongs_to_conversation(&pending_approvals, &request_id, &viewing)
-                    == Some(false)
-                {
-                    wirken_gateway::permissions::emit_approval_refused(
-                        factory.session_log().as_ref(),
-                        &pending_approvals,
-                        &request_id,
-                        &viewing,
-                        wirken_audit::ApprovalRefusalReason::WrongConversation,
-                        Some("webchat"),
-                    );
-                    let _ = stream
-                        .write_all(json_forbidden(DECISION_WRONG_CONVERSATION).as_bytes())
-                        .await;
-                    return;
-                }
-                let resolve = pending_approvals.resolve(&request_id, decision);
-                let ack = match resolve {
-                    ResolveResult::Accepted => AckResult::Accepted,
-                    ResolveResult::UnknownKey => AckResult::UnknownKey,
-                };
-
-                // Push the ack onto the stream of the conversation the
-                // request came from, which the guard above has shown is
-                // the one being viewed.
-                let session_id = SessionId::new(viewing);
-                if let Some(sender) = sse_registry.sender_for(&session_id) {
-                    let ack_event = SseEvent::ApprovalDecisionAck {
-                        request_id: request_id.clone(),
-                        result: ack.clone(),
-                    };
-                    let _ = sender.send(ack_event).await;
-                }
-
-                let ack_str = match ack {
-                    AckResult::Accepted => "accepted",
-                    AckResult::UnknownKey => "unknown_key",
-                    AckResult::Expired => "expired",
-                };
-                let resp = format!(r#"{{"result":"{ack_str}"}}"#);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    resp.len(),
-                    resp
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-            } else {
-                let response =
-                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = stream.write_all(response.as_bytes()).await;
+                Response::Turn(turn) => run_turn(*turn, &mut stream, &shared).await,
             }
         });
     }
+}
+
+/// One request, split into what the router dispatches on.
+///
+/// `path` and `query` are the two halves of the request target. The
+/// path parsers keep taking `first_line` whole: the identifiers they
+/// pull out are percent-encoded, and their segment rules are about
+/// the raw target rather than about which route it names.
+struct Request<'a> {
+    /// The request as it arrived. The preflight reads `Origin` and
+    /// `Host` out of it, and the POST routes read the body.
+    raw: &'a str,
+    first_line: &'a str,
+    method: &'a str,
+    /// The request target with any query string removed.
+    path: &'a str,
+    /// The query string, when the target carried one.
+    query: Option<&'a str>,
+}
+
+impl<'a> Request<'a> {
+    /// `None` when the request line names no target, which no route
+    /// can match.
+    fn parse(raw: &'a str) -> Option<Self> {
+        let first_line = raw.lines().next().unwrap_or("");
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next()?;
+        let target = parts.next()?;
+        let (path, query) = match target.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (target, None),
+        };
+        Some(Self {
+            raw,
+            first_line,
+            method,
+            path,
+            query,
+        })
+    }
+
+    /// The request body, which every POST route here sends as JSON.
+    fn body(&self) -> &'a str {
+        self.raw.split("\r\n\r\n").nth(1).unwrap_or("")
+    }
+}
+
+/// What every route is given besides the request: the gateway's
+/// long-lived handles and the state the routes share for the life of
+/// the process. Built once in [`serve`] and cloned per connection.
+#[derive(Clone)]
+struct Shared {
+    /// The bound port, which the preflight checks `Origin` and `Host`
+    /// against.
+    port: u16,
+    factory: Arc<AgentFactory>,
+    audit: Arc<AuditWriter>,
+    sessions: Arc<Mutex<SessionStore>>,
+    pending_approvals: Arc<PendingApprovalQueue>,
+    sse_registry: Arc<SseApprovalRegistry>,
+    status_inputs: StatusInputs,
+    detector: Arc<InjectionDetector>,
+    /// Set once the audit writer refuses a row. The writer never
+    /// recovers inside a process (its flush loop has exited), so the
+    /// flag only ever goes from false to true. The status route
+    /// reports it; the chat route refuses turns while it is set.
+    writer_halted: Arc<AtomicBool>,
+    /// Per-process rate limiter on the chat POST path. GCRA from
+    /// `wirken-gateway::rate_limit`; lock-free hot path. See
+    /// `WEBCHAT_MAX_POSTS_PER_MIN` for the cap rationale.
+    rate_limit: Arc<ControlPlaneRateLimiter>,
+    /// Chain verification is two full scans of the audit log with a
+    /// hash per row, run on the blocking pool. One at a time per
+    /// process, and no more often than the control-plane limit: a
+    /// browser must not be able to keep the gateway verifying.
+    verify_limit: Arc<ControlPlaneRateLimiter>,
+    verify_running: Arc<AtomicBool>,
+    open_turns: Arc<OpenTurns>,
+}
+
+/// What a route hands back.
+enum Response {
+    /// A complete HTTP response: written to the socket, which then
+    /// closes.
+    Complete(String),
+    /// A chat turn the route accepted. The socket becomes that turn's
+    /// event stream, which [`run_turn`] writes until the agent is
+    /// done.
+    Turn(Box<AcceptedTurn>),
+}
+
+/// A chat turn past every refusal: its conversation is claimed, its
+/// inbound row is written, and nothing is left to decide.
+struct AcceptedTurn {
+    /// The claim on the conversation, released when this value drops
+    /// at the end of [`run_turn`], on every path out of it.
+    _open_turn: OpenTurn,
+    conversation: String,
+    message: String,
+}
+
+/// Dispatch one request to its route.
+///
+/// The five parameterless `GET` routes match an exact path and no
+/// query string; a target carrying one reaches no route and gets the
+/// 404.
+async fn route(req: &Request<'_>, shared: &Shared) -> Response {
+    match (req.method, req.path) {
+        ("GET", "/") => route_page(),
+        ("GET", path) if path.starts_with("/index.html") => route_page(),
+        ("GET", path) if path.starts_with("/api/sessions/") => route_session(req, shared),
+        ("GET", path) if path.starts_with("/api/imported/") => route_imported(req, shared),
+        ("GET", "/api/approvals") if req.query.is_none() => route_approvals(req, shared),
+        ("GET", "/api/capabilities") if req.query.is_none() => {
+            route_capabilities(req, shared).await
+        }
+        ("GET", "/api/credentials") if req.query.is_none() => route_credentials(req, shared),
+        ("GET", "/api/status") if req.query.is_none() => route_status(req, shared).await,
+        ("GET", "/api/sessions") if req.query.is_none() => route_sessions(req, shared),
+        ("POST", path) if path.starts_with("/api/chat") => route_chat(req, shared).await,
+        ("POST", path) if path.starts_with("/api/verify") => route_verify(req, shared).await,
+        ("POST", path) if path.starts_with("/api/approvals/") => {
+            match parse_approval_path(req.first_line) {
+                Some(request_id) => route_decision(req, shared, request_id).await,
+                None => not_found(),
+            }
+        }
+        _ => not_found(),
+    }
+}
+
+/// The response for a target no route names.
+fn not_found() -> Response {
+    Response::Complete(
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+    )
+}
+
+/// `GET /` and `GET /index.html` — the single page the gateway serves.
+fn route_page() -> Response {
+    Response::Complete(format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        HTML.len(),
+        HTML
+    ))
+}
+
+/// The two `GET /api/sessions/{id}` routes, told apart by the parsers
+/// that know their shapes. A target under that prefix matching
+/// neither names no route.
+fn route_session(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some((session_id, after)) = parse_session_events_path(req.first_line) {
+        route_session_events(req, shared, &session_id, after)
+    } else if let Some(session_id) = parse_session_path(req.first_line) {
+        route_session_transcript(req, shared, &session_id)
+    } else {
+        not_found()
+    }
+}
+
+/// `GET /api/sessions/{id}/events[?after=N]` — the session log
+/// projected to what the page draws. Webchat sessions only: this
+/// route exposes far more per row than the transcript does, and other
+/// channels' rows are theirs.
+fn route_session_events(
+    req: &Request<'_>,
+    shared: &Shared,
+    session_id: &str,
+    after: Option<u64>,
+) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    if !events_route_allowed(session_id) {
+        return Response::Complete(json_forbidden(
+            "events are served for webchat sessions only",
+        ));
+    }
+    let cfg = super::config();
+    let body = session_events(&cfg, session_id, after);
+    let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+    Response::Complete(json_ok(&body))
+}
+
+/// `GET /api/sessions/{id}` — transcript for one session, rendered
+/// into the messages pane. Safe read: the Host check closes
+/// DNS-rebinding, and Origin is validated only when the browser sends
+/// one (it omits it on a same-origin GET).
+fn route_session_transcript(req: &Request<'_>, shared: &Shared, session_id: &str) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let cfg = super::config();
+    let body = match super::session::session_transcript(&cfg, session_id) {
+        Ok(turns) => serde_json::to_string(&turns).unwrap_or_else(|_| "[]".into()),
+        Err(_) => "[]".to_string(),
+    };
+    Response::Complete(json_ok(&body))
+}
+
+/// The imported-archive reads. Same posture as the other read routes:
+/// Host is checked on every route, which is what closes DNS
+/// rebinding, and a present Origin is validated even though a browser
+/// omits it on a same-origin GET.
+fn route_imported(req: &Request<'_>, shared: &Shared) -> Response {
+    let Some(route) = parse_imported_path(req.first_line) else {
+        return not_found();
+    };
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let cfg = super::config();
+    let body = super::import::read_route_json(&cfg, &route);
+    Response::Complete(json_ok(&body))
+}
+
+/// `GET /api/approvals` — this browser's pending decisions with their
+/// trigger text, and a count of everyone else's. Other channels'
+/// request ids and messages stay on their channel: an id is the only
+/// thing standing between a webchat tab and a Telegram user's
+/// approval.
+fn route_approvals(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let conversation = match query_param(req.first_line, "c").map(|c| conversation_key(Some(c))) {
+        None => None,
+        Some(Ok(conversation)) => Some(conversation),
+        Some(Err(_)) => return Response::Complete(json_bad_request(BAD_CONVERSATION_KEY)),
+    };
+    let body = approvals_snapshot_for(&shared.pending_approvals, conversation.as_deref());
+    let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+    Response::Complete(json_ok(&body))
+}
+
+/// `GET /api/capabilities` — what the default agent is offered and
+/// gated by: tools with their tier rule, persisted grants, skills
+/// with their permissions and signature status. Wakes the agent and
+/// holds its lock briefly; a turn in flight gets "busy", never a
+/// wait.
+async fn route_capabilities(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let conversation = match conversation_key(query_param(req.first_line, "c")) {
+        Ok(conversation) => conversation,
+        Err(_) => return Response::Complete(json_bad_request(BAD_CONVERSATION_KEY)),
+    };
+    let cfg = super::config();
+    let body = capabilities_snapshot(&cfg, &shared.factory, &conversation).await;
+    let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+    Response::Complete(json_ok(&body))
+}
+
+/// `GET /api/credentials` — credential names without the vault key,
+/// and MCP connectors reduced to name, transport, auth kind and
+/// credential names.
+fn route_credentials(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let cfg = super::config();
+    let body = credentials_snapshot(&cfg);
+    let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+    Response::Complete(json_ok(&body))
+}
+
+/// `GET /api/status` — one snapshot of the gateway's posture for the
+/// status line, the banners and the About panel. Safe read: Host
+/// checked, Origin validated only when present.
+async fn route_status(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let cfg = super::config();
+    let snapshot = status_snapshot(
+        &cfg,
+        shared.port,
+        &shared.status_inputs,
+        shared.writer_halted.load(Ordering::Relaxed),
+    )
+    .await;
+    let body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into());
+    Response::Complete(json_ok(&body))
+}
+
+/// `GET /api/sessions` — active-session list backing the sidebar.
+/// Safe read, same Host-only posture as the transcript route.
+fn route_sessions(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, false) {
+        return Response::Complete(resp);
+    }
+    let cfg = super::config();
+    let body = match super::session::active_session_rows(&cfg, None) {
+        Ok(rows) => serde_json::to_string(&conversation_rows(&cfg, rows, &shared.open_turns))
+            .unwrap_or_else(|_| "[]".into()),
+        Err(_) => "[]".to_string(),
+    };
+    Response::Complete(json_ok(&body))
+}
+
+/// `POST /api/chat` — one turn from the composer.
+///
+/// Everything a turn can be refused for is decided here, in the order
+/// the refusals cost: the limiter and the preflight before the body
+/// is read, the conversation's claim before the inbound row is
+/// written and before any stream is opened. What comes back on the
+/// accepted path is a claimed turn for [`run_turn`] to stream.
+async fn route_chat(req: &Request<'_>, shared: &Shared) -> Response {
+    // Rate-limit before any other work. A spinning client (runaway
+    // browser tab, naive CSRF, scripted abuse) would otherwise drive
+    // unbounded LLM spend on the operator's API key. Burst-tolerant
+    // via GCRA.
+    if let Err(retry_after) = shared.rate_limit.check() {
+        return Response::Complete(json_rate_limited(
+            r#"{"error":"rate limit exceeded"}"#,
+            retry_after,
+        ));
+    }
+
+    // CSRF defence: a browser request must carry an `Origin` header
+    // matching the WebChat origin. A page on attacker.com that POSTs
+    // to http://127.0.0.1:18790/api/chat would carry
+    // `Origin: https://attacker.com`; without this check the
+    // browser's same-origin policy blocks the SSE response read but
+    // the agent still runs the prompt and bills the operator's API
+    // key.
+    //
+    // `WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN=1` opts out for non-browser
+    // scripts that don't send Origin (curl, shell pipelines). When
+    // that mode is active the gateway logs a warning at startup; the
+    // `Origin` header is still validated when present.
+    if let Some(resp) = api_preflight(req.raw, shared.port, true) {
+        return Response::Complete(resp);
+    }
+
+    let json: serde_json::Value = serde_json::from_str(req.body()).unwrap_or_default();
+    let message = json["message"].as_str().unwrap_or("").to_string();
+
+    if message.is_empty() {
+        return Response::Complete(json_bad_request(r#"{"error":"empty message"}"#));
+    }
+
+    // The conversation comes from the request. A page with no key
+    // sends none and gets the legacy conversation; a key of the wrong
+    // shape is refused before it can name a session.
+    let conversation = match conversation_key(json["conversation"].as_str()) {
+        Ok(conversation) => conversation,
+        Err(_) => return Response::Complete(json_bad_request(BAD_CONVERSATION_KEY)),
+    };
+
+    // One turn per conversation. A second send while one is running
+    // is answered now, before the inbound row is written and before
+    // any stream is opened: nothing waits on the agent lock, and the
+    // page can say "turn open" instead of holding a silent stream.
+    let Some(open_turn) = shared.open_turns.try_open(&conversation) else {
+        let body = serde_json::json!({
+            "error": TURN_OPEN_ERROR,
+            "age_seconds": shared.open_turns.open_age(&conversation).unwrap_or(0),
+        })
+        .to_string();
+        return Response::Complete(json_conflict(&body));
+    };
+
+    // Audit. Webchat has no platform-assigned message id; synthesize
+    // one so `target` stays a stable resource handle and the body
+    // lives under `detail.content`.
+    let inbound_target = format!("webchat:{}", uuid::Uuid::new_v4());
+
+    let mut inbound_detail = serde_json::json!({ "content": &message });
+
+    // Scan for prompt-injection signatures, the same way the adapter
+    // message loop does and through the same helper. The detector
+    // tags; it never blocks; a failure in it is named on the chain
+    // rather than being taken for a clean scan. See
+    // `super::inbound_scan`.
+    //
+    // The scan runs before the row is written, which is only safe
+    // because it is caught: a detector panic used to unwind past this
+    // write and leave no trace of the message that caused it. It
+    // returns now, so the row is written either way and carries the
+    // verdict.
+    let threat_detail = super::inbound_scan::scan_catching_panics(
+        &shared.detector,
+        &message,
+        &format!("webchat conversation '{}'", conversation.as_str()),
+    );
+    if let Some(ref threat) = threat_detail
+        && let (Some(obj), Some(threat_obj)) = (inbound_detail.as_object_mut(), threat.as_object())
+    {
+        for (k, v) in threat_obj {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    if threat_detail.is_some() {
+        let _ = shared
+            .audit
+            .log(
+                AuditEvent::new(
+                    ActorKind::Service,
+                    "webchat-user",
+                    "message.threat_flagged",
+                    &inbound_target,
+                )
+                .with_channel("webchat")
+                .with_session(conversation.as_str())
+                .with_detail(inbound_detail.clone()),
+            )
+            .await;
+    }
+
+    // A turn is not started unless its inbound row was accepted. The
+    // writer returns an error only once its flush loop has halted
+    // (chain break, alarm-log failure, or repeated SQLite failure);
+    // from then on nothing is being recorded, so the chat route
+    // refuses rather than running an unrecorded turn. The page raises
+    // its halted banner from this status.
+    let inbound_logged = shared
+        .audit
+        .log(
+            AuditEvent::new(
+                ActorKind::Service,
+                "webchat-user",
+                "message.inbound",
+                &inbound_target,
+            )
+            .with_channel("webchat")
+            .with_session(conversation.as_str())
+            .with_detail(inbound_detail),
+        )
+        .await;
+    if let Err(e) = inbound_logged {
+        shared.writer_halted.store(true, Ordering::Relaxed);
+        tracing::error!("webchat: audit writer refused the inbound row; refusing the turn: {e}");
+        return Response::Complete(json_unavailable(r#"{"error":"audit writer halted"}"#));
+    }
+
+    // Session. `get_or_create` moves `last_activity` but leaves
+    // `message_count` alone; `record_message` is the only statement
+    // that increments it. Calling just the former, as this path used
+    // to, leaves the sidebar reading `0 msg` no matter how long the
+    // conversation runs, while every other channel counts correctly
+    // through the pair in `run.rs`. Counter failures are logged
+    // rather than propagated: a display counter is not worth failing
+    // a chat turn over.
+    {
+        let store = shared.sessions.lock().await;
+        match store.get_or_create("webchat", &conversation) {
+            Ok(session) => {
+                if let Err(e) = store.record_message(&session.id) {
+                    tracing::warn!("webchat message count not recorded: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("webchat session not resolved: {e}");
+            }
+        }
+    }
+
+    Response::Turn(Box::new(AcceptedTurn {
+        _open_turn: open_turn,
+        conversation,
+        message,
+    }))
+}
+
+/// Stream one accepted turn onto the socket the request arrived on.
+///
+/// The turn's claim rides in `turn` and is released when it drops at
+/// the end of this function, whichever way the stream ended.
+async fn run_turn(turn: AcceptedTurn, stream: &mut tokio::net::TcpStream, shared: &Shared) {
+    // SSE headers — stream tokens as they arrive
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+    if stream.write_all(header.as_bytes()).await.is_err() || stream.flush().await.is_err() {
+        return;
+    }
+
+    // Wake the default agent for this conversation's session. Webchat
+    // synthesizes a UUID per inbound message for crash-recovery
+    // dedup.
+    let session_id_str = webchat_session_id(&turn.conversation);
+    let inbound_id = format!("webchat-{}", uuid::Uuid::new_v4());
+
+    // Register the per-request SSE sender so the SseApprovalGate can
+    // push ApprovalRequest events into this stream when the agent
+    // hits NeedsApproval mid-tool-dispatch. The RAII guard
+    // unregisters on every exit path (success, error, panic, early
+    // return). The slice's load-bearing cleanup property — no orphan
+    // senders survive a panicking handler.
+    let (sse_tx, mut sse_rx) = tokio::sync::mpsc::channel::<SseEvent>(8);
+    let _registry_guard = shared
+        .sse_registry
+        .register_guard(SessionId::new(session_id_str.clone()), sse_tx);
+
+    match shared.factory.wake("default", &session_id_str) {
+        Ok(agent_mutex) => {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+
+            // Run agent streaming and SSE forwarding concurrently
+            let mut ag = agent_mutex.lock().await;
+            let inbound_ctx = wirken_agent::InboundContext {
+                adapter_id: Some("webchat".to_string()),
+                sender_id: Some("webchat-user".to_string()),
+                channel: Some("webchat".to_string()),
+            };
+            let stream_future =
+                ag.process_message_stream_with(&turn.message, inbound_id, tx, inbound_ctx);
+
+            // Forward both streams to the HTTP response as SSE. `rx`
+            // carries the agent's text-delta / done / error events;
+            // `sse_rx` carries approval-request / decision-ack events
+            // from the gate. `tokio::select!` multiplexes them onto
+            // the single TCP stream as `data: {...}\n\n` lines.
+            let write_stream = &mut *stream;
+            let forward_future = async {
+                loop {
+                    tokio::select! {
+                        Some(event) = rx.recv() => {
+                            let line = match event {
+                                wirken_agent::llm_stream::StreamEvent::TextDelta(text) => {
+                                    format!(
+                                        "data: {}\n\n",
+                                        serde_json::json!({"type": "delta", "text": text})
+                                    )
+                                }
+                                wirken_agent::llm_stream::StreamEvent::Done(_) => break,
+                                wirken_agent::llm_stream::StreamEvent::Error(e) => {
+                                    format!(
+                                        "data: {}\n\n",
+                                        serde_json::json!({"type": "error", "text": e})
+                                    )
+                                }
+                            };
+                            if write_stream.write_all(line.as_bytes()).await.is_err()
+                                || write_stream.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Some(sse_event) = sse_rx.recv() => {
+                            let line = sse_event.to_sse_line();
+                            if write_stream.write_all(line.as_bytes()).await.is_err()
+                                || write_stream.flush().await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                        else => break,
+                    }
+                }
+            };
+
+            let (result, _) = tokio::join!(stream_future, forward_future);
+
+            match result {
+                Ok(result) => {
+                    let outbound_target = format!("webchat:out:{}", uuid::Uuid::new_v4());
+                    let _ = shared
+                        .audit
+                        .log(
+                            AuditEvent::new(
+                                ActorKind::User,
+                                "default",
+                                "message.outbound",
+                                &outbound_target,
+                            )
+                            .with_channel("webchat")
+                            .with_session(turn.conversation.as_str())
+                            .with_detail(serde_json::json!({ "content": &result.response })),
+                        )
+                        .await;
+                    // The turn is finished and its outbound row has
+                    // been offered to the writer. Say so on the
+                    // stream: without this event a socket that closed
+                    // mid-answer and one that closed after the last
+                    // token look the same to the page, which now
+                    // marks the former as cut off.
+                    let done = "data: {\"type\":\"done\"}\n\n";
+                    let _ = stream.write_all(done.as_bytes()).await;
+                    let _ = stream.flush().await;
+                }
+                Err(e) => {
+                    let err = format!(
+                        "data: {}\n\n",
+                        serde_json::json!({"type": "error", "text": e.to_string()})
+                    );
+                    let _ = stream.write_all(err.as_bytes()).await;
+                    let _ = stream.flush().await;
+                }
+            }
+        }
+        Err(e) => {
+            let err = format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "type": "error",
+                    "text": format!("factory.wake failed: {e}"),
+                })
+            );
+            let _ = stream.write_all(err.as_bytes()).await;
+        }
+    }
+}
+
+/// `POST /api/verify` — run the audit chain verifier and return its
+/// verdict with the anchor caveat attached. State-changing in cost if
+/// not in effect: Origin required, rate-limited, single-flight,
+/// blocking pool.
+async fn route_verify(req: &Request<'_>, shared: &Shared) -> Response {
+    if let Some(resp) = api_preflight(req.raw, shared.port, true) {
+        return Response::Complete(resp);
+    }
+    if let Err(retry_after) = shared.verify_limit.check() {
+        return Response::Complete(json_rate_limited(
+            r#"{"result":"rate_limited"}"#,
+            retry_after,
+        ));
+    }
+    let Some(_verify_claim) = VerifyClaim::claim(&shared.verify_running) else {
+        return Response::Complete(json_conflict(r#"{"result":"busy"}"#));
+    };
+    let cfg = super::config();
+    let started_at = chrono::Utc::now();
+    let started = std::time::Instant::now();
+    let outcome = verify_chain_off_runtime(cfg).await;
+    // The claim is released by `_verify_claim` going out of scope at
+    // the end of this function, on every path through it.
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let body = match outcome {
+        Ok(Ok(result)) => verify_result_json(&result, started_at, duration_ms),
+        Ok(Err(e)) => serde_json::json!({
+            "result": "error",
+            "error": e.to_string(),
+            "started_at": started_at.to_rfc3339(),
+            "duration_ms": duration_ms,
+            "caveat": VERIFY_CAVEAT,
+        }),
+        Err(_) => serde_json::json!({
+            "result": "error",
+            "error": "the verify task did not complete",
+            "started_at": started_at.to_rfc3339(),
+            "duration_ms": duration_ms,
+            "caveat": VERIFY_CAVEAT,
+        }),
+    };
+    let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
+    Response::Complete(json_ok(&body))
+}
+
+/// Verify the audit chain without holding the async runtime.
+///
+/// Two full scans of the log with a hash per row is work measured in
+/// seconds on a large database, so it runs on the blocking pool. This
+/// is the only path from a route to [`AuditLog::verify`], which is
+/// what keeps that true.
+async fn verify_chain_off_runtime(
+    cfg: wirken_gateway::config::GatewayConfig,
+) -> Result<Result<wirken_audit::VerifyResult, wirken_audit::AuditError>, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        AuditLog::open(&cfg.audit_db_path()).and_then(|log| log.verify())
+    })
+    .await
+}
+
+/// `POST /api/approvals/{request_id}` — the operator's decision on a
+/// pending NeedsApproval request.
+///
+/// Same Origin-header CSRF posture as `/api/chat`. The route resolves
+/// the queue entry (gateway-centralized authorization: there is no
+/// per-user allowlist in webchat today, the loopback bind + Origin
+/// check are the trust boundary) and pushes an ApprovalDecisionAck
+/// event onto the SSE stream so the browser closes the approval UI.
+async fn route_decision(req: &Request<'_>, shared: &Shared, request_id: String) -> Response {
+    // Same CSRF + DNS-rebinding preflight as /api/chat.
+    if let Some(resp) = api_preflight(req.raw, shared.port, true) {
+        return Response::Complete(resp);
+    }
+
+    let json: serde_json::Value = serde_json::from_str(req.body()).unwrap_or_default();
+    let decision_str = json["decision"].as_str().unwrap_or("");
+    let reason = json["reason"]
+        .as_str()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
+
+    let decision = match decision_str {
+        "allow" => PendingDecision::Allow {
+            actor: Some("webchat".to_string()),
+        },
+        "deny" => PendingDecision::Deny {
+            reason,
+            actor: Some("webchat".to_string()),
+        },
+        _ => {
+            return Response::Complete(json_bad_request(
+                r#"{"error":"decision must be allow or deny"}"#,
+            ));
+        }
+    };
+
+    // A decision made here is made as actor "webchat" with no
+    // per-operator identity. That is acceptable for this browser's own
+    // conversation and for nothing else: a request that belongs to
+    // another channel's session is refused, whatever its id, so
+    // enumerating ids can never become a way around that channel's
+    // approver list.
+    if approval_belongs_to_webchat(&shared.pending_approvals, &request_id) == Some(false) {
+        wirken_gateway::permissions::emit_approval_refused(
+            shared.factory.session_log().as_ref(),
+            &shared.pending_approvals,
+            &request_id,
+            "webchat",
+            wirken_audit::ApprovalRefusalReason::WrongChannel,
+            Some("webchat"),
+        );
+        return Response::Complete(json_forbidden("approvals are decided on their own channel"));
+    }
+    // And it is made for one conversation: the caller names the
+    // conversation it is viewing, and the request must have come from
+    // there. A page showing conversation B never decides A's request,
+    // however it learned the id.
+    let conversation = match conversation_key(json["conversation"].as_str()) {
+        Ok(conversation) => conversation,
+        Err(_) => return Response::Complete(json_bad_request(BAD_CONVERSATION_KEY)),
+    };
+    let viewing = webchat_session_id(&conversation);
+    if approval_belongs_to_conversation(&shared.pending_approvals, &request_id, &viewing)
+        == Some(false)
+    {
+        wirken_gateway::permissions::emit_approval_refused(
+            shared.factory.session_log().as_ref(),
+            &shared.pending_approvals,
+            &request_id,
+            &viewing,
+            wirken_audit::ApprovalRefusalReason::WrongConversation,
+            Some("webchat"),
+        );
+        return Response::Complete(json_forbidden(DECISION_WRONG_CONVERSATION));
+    }
+    let resolve = shared.pending_approvals.resolve(&request_id, decision);
+    let ack = match resolve {
+        ResolveResult::Accepted => AckResult::Accepted,
+        ResolveResult::UnknownKey => AckResult::UnknownKey,
+    };
+
+    // Push the ack onto the stream of the conversation the request
+    // came from, which the guard above has shown is the one being
+    // viewed.
+    let session_id = SessionId::new(viewing);
+    if let Some(sender) = shared.sse_registry.sender_for(&session_id) {
+        let ack_event = SseEvent::ApprovalDecisionAck {
+            request_id: request_id.clone(),
+            result: ack.clone(),
+        };
+        let _ = sender.send(ack_event).await;
+    }
+
+    let ack_str = match ack {
+        AckResult::Accepted => "accepted",
+        AckResult::UnknownKey => "unknown_key",
+        AckResult::Expired => "expired",
+    };
+    Response::Complete(json_ok(&format!(r#"{{"result":"{ack_str}"}}"#)))
 }
 
 /// What the SIEM forwarder is pointed at, reduced to what a status
@@ -4712,8 +4786,16 @@ fn json_ok(body: &str) -> String {
     )
 }
 
-/// A 403 response carrying `{"error":"<msg>"}`. `msg` is a fixed literal
-/// at every call site, so no escaping is needed.
+/// A 400 response carrying a JSON body.
+fn json_bad_request(body: &str) -> String {
+    format!(
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+/// A 409 response carrying a JSON body.
 fn json_conflict(body: &str) -> String {
     format!(
         "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -4722,6 +4804,28 @@ fn json_conflict(body: &str) -> String {
     )
 }
 
+/// A 429 response carrying a JSON body and the wait the limiter
+/// asked for, never under a second.
+fn json_rate_limited(body: &str, retry_after: std::time::Duration) -> String {
+    format!(
+        "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        retry_after.as_secs().max(1),
+        body.len(),
+        body
+    )
+}
+
+/// A 503 response carrying a JSON body.
+fn json_unavailable(body: &str) -> String {
+    format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+/// A 403 response carrying `{"error":"<msg>"}`. `msg` is a fixed literal
+/// at every call site, so no escaping is needed.
 fn json_forbidden(msg: &str) -> String {
     let body = format!(r#"{{"error":"{msg}"}}"#);
     format!(
