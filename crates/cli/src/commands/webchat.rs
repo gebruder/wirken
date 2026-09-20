@@ -5806,8 +5806,10 @@ mod tests {
     #[test]
     fn session_events_project_the_whitelisted_kinds() {
         use wirken_audit::{
-            DenialSource, SessionEvent, SessionId, SessionLog, SqliteSessionLog, ToolCallRecord,
-            TrustLevel,
+            ApprovalScopeKind, ApprovalSource, BudgetAction, ChainHeadReason, DenialSource,
+            GrantExpiryDetection, HashHex, HexBytes, SandboxEgressDenyReason,
+            SandboxEgressModeLabel, SessionEvent, SessionId, SessionLog, SqliteSessionLog,
+            SubagentStatus, ToolCallRecord, ToolsHashVersion, TrustLevel,
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = cfg_at(dir.path());
@@ -5815,6 +5817,10 @@ mod tests {
         let id = "default/webchat/webchat-default";
         let handle = log.handle_for(SessionId::new(id.to_string()));
         let agent = || "default".to_string();
+        let stamp = |s: &str| {
+            s.parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a timestamp")
+        };
         let rows = vec![
             (
                 TrustLevel::User,
@@ -5904,7 +5910,165 @@ mod tests {
                     agent_id: agent(),
                 },
             ),
+            (
+                TrustLevel::System,
+                SessionEvent::LlmRequest {
+                    provider: "ollama".into(),
+                    model: "local".into(),
+                    request_id: "r1".into(),
+                    tools_hash: HashHex::from_bytes(&[1u8; 32]),
+                    tools_hash_version: ToolsHashVersion::V2,
+                    messages_hash: HashHex::from_bytes(&[2u8; 32]),
+                    agent_id: agent(),
+                    credential_id: Some("provider-key".into()),
+                    sender_id: Some("webchat-user".into()),
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::BudgetExceeded {
+                    agent_id: agent(),
+                    credential_id: Some("provider-key".into()),
+                    window_spend_usd_micros: 1_200_000,
+                    ceiling_usd_micros: 1_000_000,
+                    window: "day".into(),
+                    action: BudgetAction::Blocked,
+                    tool: Some("exec".into()),
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::PermissionApproved {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    approved_by: "operator".into(),
+                    scope: ApprovalScopeKind::Persisted,
+                    session_id: None,
+                    approved_via: Some(ApprovalSource::Sse),
+                    adapter_id: Some("webchat".into()),
+                    sender_id: None,
+                    tier: Some("tier2".into()),
+                    expires_at: Some(stamp("2026-10-20T00:00:00Z")),
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::PermissionRenewed {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    approved_by: "operator".into(),
+                    previous_expires_at: stamp("2026-10-20T00:00:00Z"),
+                    expires_at: stamp("2026-11-20T00:00:00Z"),
+                    approved_via: Some(ApprovalSource::Sse),
+                    adapter_id: Some("webchat".into()),
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::PermissionGrantExpired {
+                    action_key: "shell:rm".into(),
+                    agent_id: agent(),
+                    tool: Some("exec".into()),
+                    tier: Some("tier3".into()),
+                    expired_at: stamp("2026-09-19T00:00:00Z"),
+                    detected_by: GrantExpiryDetection::ToolCall,
+                    adapter_id: Some("webchat".into()),
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::PermissionGrantPruned {
+                    action_key: "shell:rm".into(),
+                    agent_id: agent(),
+                    expires_at: stamp("2026-09-19T00:00:00Z"),
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::SandboxEgressVerdict {
+                    host: "api.example.com".into(),
+                    port: 443,
+                    allowed: false,
+                    reason: Some(SandboxEgressDenyReason::NotAllowed),
+                    mode: SandboxEgressModeLabel::Allowlist,
+                    sensitivity_basis: vec!["allowlist".into()],
+                    escalated: true,
+                    agent_id: agent(),
+                    channel: Some("webchat".into()),
+                    adapter_id: Some("webchat".into()),
+                    sender_id: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::SubagentSpawned {
+                    child_session_id: "researcher/webchat/sub-1".into(),
+                    child_agent_id: "researcher".into(),
+                    tools_granted: vec!["read_file".into()],
+                    max_permission_tier: Some("tier1".into()),
+                },
+            ),
+            (
+                TrustLevel::Tool,
+                SessionEvent::SubagentResult {
+                    child_session_id: "researcher/webchat/sub-1".into(),
+                    output: "three sources".into(),
+                    status: SubagentStatus::Ok,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::Attestation {
+                    chain_head_seq: 6,
+                    chain_head_hash: HashHex::from_bytes(&[3u8; 32]),
+                    signature: HexBytes::from_bytes(&[4u8; 64]),
+                    signer_pubkey: HashHex::from_bytes(&[5u8; 32]),
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::ChainHead {
+                    reason: ChainHeadReason::Checkpoint,
+                    sequence_range_start: 0,
+                    sequence_range_end: 6,
+                    prev_chain_hash: HashHex::from_bytes(&[6u8; 32]),
+                    current_chain_hash: HashHex::from_bytes(&[7u8; 32]),
+                    signature: HexBytes::from_bytes(&[8u8; 64]),
+                    signing_pubkey: HashHex::from_bytes(&[9u8; 32]),
+                    schema_version: 1,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::Compaction {
+                    spans: vec![0, 3],
+                    extracts: serde_json::json!({
+                        "trimmed_bytes": 4096,
+                        "kept_messages": 12,
+                        "dropped_messages": 30,
+                    }),
+                    via_model: false,
+                    agent_id: agent(),
+                    provider: None,
+                    model: None,
+                },
+            ),
+            (
+                TrustLevel::System,
+                SessionEvent::HttpRequest {
+                    method: "GET".into(),
+                    host: "api.example.com".into(),
+                    path: "/v1/status".into(),
+                    status: 200,
+                    credential: Some("provider-key".into()),
+                    truncated: false,
+                    agent_id: agent(),
+                },
+            ),
         ];
+        let row_count = rows.len() as u64;
         for (trust, ev) in rows {
             log.append(&handle, trust, ev).expect("append");
         }
@@ -5924,21 +6088,40 @@ mod tests {
                 "tool_result",
                 "permission_denied",
                 "llm_response",
-                "assistant_message"
-            ]
+                "assistant_message",
+                "llm_request",
+                "budget_exceeded",
+                "permission_approved",
+                "permission_renewed",
+                "permission_grant_expired",
+                "permission_grant_pruned",
+                "sandbox_egress_verdict",
+                "subagent_spawned",
+                "subagent_result",
+                "attestation",
+                "chain_head",
+                "compaction",
+                "http_request",
+            ],
+            "every kind the projection emits, one row each"
         );
         // And each of them reaches a branch of the page's renderer. A
-        // kind the projection emits and the page has no case for is
-        // invisible from both ends: the row is served and nothing is
-        // drawn. This pairs the kinds these rows produce; a variant
-        // with no row here is not covered.
+        // kind that falls through to `default:` is invisible from both
+        // ends: the row is served and nothing is drawn. The fixture
+        // above writes one row per kind the projection emits, so this
+        // pairs all of them; a kind added to the projection needs a
+        // row here too.
         let script = page_script();
-        for kind in &kinds {
-            assert!(
-                script.contains(&format!("case '{kind}':")),
-                "the page has no renderer for '{kind}'"
-            );
-        }
+        let unrendered: Vec<&str> = kinds
+            .iter()
+            .copied()
+            .filter(|kind| !script.contains(&format!("case '{kind}':")))
+            .collect();
+        assert!(
+            unrendered.is_empty(),
+            "renderEvent has no case for {unrendered:?}: add the case, \
+             do not drop the kind from the list above"
+        );
         let calls = &v["events"][1]["calls"];
         assert_eq!(calls[0]["computed_tier"], "tier2");
         assert_eq!(calls[0]["action_key"], "shell:ls");
@@ -5958,7 +6141,15 @@ mod tests {
         assert_eq!(v["totals"]["cost_known"], true);
         assert_eq!(v["totals"]["tool_calls"], 2);
         assert_eq!(v["totals"]["llm_calls"], 1);
-        assert_eq!(v["head"]["seq"], 6);
+        assert_eq!(v["head"]["seq"], row_count - 1, "the last row appended");
+        assert_eq!(v["head"]["last_signed_head_seq"], 6, "from the chain head");
+        assert_eq!(
+            v["head"]["unsigned_tail_len"], 2,
+            "the rows written after that head"
+        );
+        assert_eq!(v["totals"]["attestations"], 1);
+        assert_eq!(v["last_compaction"]["trimmed_bytes"], 4096);
+        assert_eq!(v["last_compaction"]["dropped_messages"], 30);
         let text = serde_json::to_string(&v).unwrap();
         assert!(
             !text.contains("PROMPT BODY"),
@@ -5970,11 +6161,18 @@ mod tests {
             "\"signature\"",
             "signing_pubkey",
             "sender_id",
+            "provider-key",
         ] {
             assert!(!text.contains(forbidden), "{forbidden} leaked");
         }
 
         // `after` filters rows but not the totals.
+        let all_seqs: Vec<u64> = v["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["seq"].as_u64().unwrap())
+            .collect();
         let tail = session_events(&cfg, id, Some(3));
         let seqs: Vec<u64> = tail["events"]
             .as_array()
@@ -5982,7 +6180,9 @@ mod tests {
             .iter()
             .map(|e| e["seq"].as_u64().unwrap())
             .collect();
-        assert_eq!(seqs, [4, 5, 6]);
+        let kept: Vec<u64> = all_seqs.iter().copied().filter(|s| *s > 3).collect();
+        assert_eq!(seqs, kept);
+        assert!(seqs.len() < all_seqs.len(), "and something was filtered");
         assert_eq!(tail["totals"]["tool_calls"], 2);
     }
 
