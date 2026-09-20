@@ -74,6 +74,26 @@ have been checking are fixed alongside it.
   list, so a head covering one compared against an empty string and
   reported `SignatureInvalid`: a schema mismatch reading as tampering.
   A drift row inside a signed range is reported as drift.
+- Every advisory exemption in `deny.toml` states the dependency path it
+  rests on. Six advisories resolve against the lockfile and all six are
+  deferred rather than fixed, because none has a fix this project can
+  take: four in `rustls-webpki 0.102.8` (RUSTSEC-2026-0049, -0098,
+  -0099, -0104), which reaches the binary only through
+  `serenity 0.12.5`'s websocket stack and has no upstream 0.102.x
+  backport; the Marvin Attack in `rsa` (RUSTSEC-2023-0071), which has
+  no patched release; and the unmaintained notice for
+  `proc-macro-error2` (RUSTSEC-2026-0173). Each entry now names the
+  path `cargo tree --invert` resolves and why the advisory does not
+  apply on it: the two CRL bugs because nothing on that path supplies
+  or parses a CRL, the two name-constraint bugs because they bite only
+  after signature verification and need a CA in the trust store to
+  misissue, Marvin because only public-key verification is reachable
+  through `sev`'s `crypto_nossl` path, and the last because a proc
+  macro runs in the compiler and contributes no code to the binary.
+  The `rsa` entry previously cited `jsonwebtoken`, which is not a
+  dependency of this workspace and has not been one: the conclusion
+  held and every stated fact was wrong, which is the kind of exemption
+  that passes review forever.
 
 ### Changed
 

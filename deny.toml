@@ -22,29 +22,40 @@ unsound = "all"
 # release: chacha20 0.10.0 sat yanked under the vault's AEAD and the
 # gate said so in passing.
 yanked = "deny"
+# Every entry names the dependency path `cargo tree --invert` resolves
+# today and the reason the advisory does not apply on that path. A
+# reason that cannot be checked against the graph is not a reason: one
+# entry here used to cite `jsonwebtoken`, which is not a dependency of
+# this workspace and has not been one, and it would have passed review
+# indefinitely. Re-derive these when the lockfile moves.
 ignore = [
-    # rustls-webpki CRL distribution point matching issue (low impact,
-    # requires CA compromise). Pinned by serenity 0.12 via rustls 0.22;
-    # no upstream fix available yet.
-    "RUSTSEC-2026-0049",
-    # rustls-webpki name-constraint bugs in the 0.102.x branch.
-    # Upstream is unpatched: the advisory lists 0.103.12 as the first
-    # patched version, and there is no 0.102.x backport. rustls-webpki
-    # 0.102.8 reaches wirken only via rustls 0.22.4 -> tokio-tungstenite
-    # 0.21 -> serenity 0.12.5 -> wirken-adapter-discord, and serenity
-    # 0.12.5 is the latest stable release (no 0.13.x exists yet). Both
-    # bugs require CA misissuance of a name-constrained certificate to
-    # exploit; the Discord adapter only connects to hardcoded Discord
-    # endpoints (gateway.discord.gg, discord.com, cdn.discordapp.com)
-    # served by standard commercial CAs that do not issue name-
-    # constrained certificates for Discord's domains. The rustls 0.23
-    # branch (reqwest, hyper-rustls) is already on the patched
-    # rustls-webpki 0.103.12 via Cargo.lock.
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the URI-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.102.x is unpatched upstream and only reaches wirken via rustls 0.22 -> serenity 0.12 (Discord). Discord endpoints are not served by name-constrained CAs, so the wildcard-name-constraint bug cannot be triggered on this path. Revisit when serenity 0.13 releases with rustls 0.23." },
-    { id = "RUSTSEC-2026-0104", reason = "Reachable panic in CRL parsing (BorrowedCertRevocationList::from_der). The 0.103.x instance is patched via cargo update to 0.103.13. The residual 0.102.8 instance reaches wirken only via rustls 0.22 -> serenity 0.12 (Discord); serenity does not configure CRL validation and Discord endpoints are not distributed via CRL-bearing PKI, so from_der is not invoked on this path. No upstream 0.102.x backport; revisit when serenity 0.13 releases with rustls 0.23." },
-    { id = "RUSTSEC-2023-0071", reason = "Marvin Attack in the rsa crate affects RSA private-key operations (signing, decryption) observable via network timing. wirken reaches rsa only through jsonwebtoken's RS256 verify path, which performs public-key operations (signature verification) that are not affected by Marvin. RSA private keys are used only in dev-deps (adapter-teams and adapter-google-chat tests) for synthetic JWT generation; those paths never run in production and are not network-observable. Revisit when rsa crate ships a constant-time implementation or jsonwebtoken switches to a non-rsa backend." },
-    { id = "RUSTSEC-2026-0173", reason = "Unmaintained advisory (informational, not a vulnerability) for proc-macro-error2, a compile-time proc-macro helper with no runtime surface. It reaches wirken only via aquamarine 0.6 -> teloxide 0.17 -> wirken-adapter-telegram; teloxide 0.17 is the current release and there is no safe upgrade. Revisit when teloxide/aquamarine drop the dependency." },
+    # rustls-webpki 0.102.8, reached only by:
+    #   rustls 0.22.4 -> tokio-rustls 0.25.0 / tungstenite 0.21.0
+    #     -> tokio-tungstenite 0.21.0 -> serenity 0.12.5
+    #     -> wirken-adapter-discord -> wirken-cli
+    # serenity 0.12 enables `rustls_backend` by default, so this is a
+    # compiled path, not merely a locked one. The 0.103.x instance in
+    # the lock (0.103.15, under rustls 0.23 for reqwest/hyper-rustls)
+    # is past every patched range below. No 0.102.x backport exists
+    # upstream and serenity 0.12.5 is the latest stable release, so
+    # all four are revisitable when serenity ships a release on
+    # rustls 0.23.
+    { id = "RUSTSEC-2026-0049", reason = "CRL distribution-point matching: only the first distributionPoint is checked, so a correctly supplied CRL may not be consulted. Not reachable on this path because no CRL is supplied on it. `CertRevocationList` and `with_crls` appear in zero files across serenity 0.12.5, tokio-tungstenite 0.21.0, tungstenite 0.21.0 and tokio-rustls 0.25.0, so the matching logic never runs. Revisit if serenity configures revocation checking, or on serenity with rustls 0.23." },
+    { id = "RUSTSEC-2026-0098", reason = "URI name constraints were ignored rather than enforced. rustls-webpki implements no API for asserting URI names, so nothing on this path can present one. Name constraints also restrict otherwise properly-issued certificates and are evaluated only after signature verification, so exploiting this needs a CA in the client trust store to misissue a name-constrained certificate. Revisit on serenity with rustls 0.23." },
+    { id = "RUSTSEC-2026-0099", reason = "A permitted-subtree DNS name constraint was accepted for a certificate asserting a wildcard name. Same precondition as RUSTSEC-2026-0098: reachable only after signature verification and only against a name-constrained certificate a trusted CA misissued. Revisit on serenity with rustls 0.23." },
+    { id = "RUSTSEC-2026-0104", reason = "Panic in BorrowedCertRevocationList::from_der / OwnedCertRevocationList::from_der on an empty BIT STRING in onlySomeReasons, reachable before the CRL signature is verified. The advisory states applications that do not use CRLs are unaffected, and nothing on this path parses one: `CertRevocationList` and `from_der` are never called through serenity, tokio-tungstenite, tungstenite or tokio-rustls. Revisit if serenity configures revocation checking, or on serenity with rustls 0.23." },
+
+    # rsa 0.9.10, reached only by:
+    #   wirken-agent -> tinfoil v0.1.1 (git) -> sev 7.1.0 -> rsa
+    #   wirken-agent -> tinfoil v0.1.1 (git) -> rsa
+    # sev pulls rsa only under its `crypto_nossl` feature, the
+    # pure-Rust SEV-SNP certificate-chain verifier tinfoil enables.
+    { id = "RUSTSEC-2023-0071", reason = "The Marvin Attack is a timing sidechannel in RSA private-key operations (decryption and signing). Only public-key verification is reachable here: sev's crypto_nossl path uses rsa::RsaPublicKey with rsa::pss::VerifyingKey and rsa::signature::Verifier to check the SEV-SNP certificate chain, and tinfoil uses RsaPublicKey with Pkcs1v15Sign the same way. RsaPrivateKey, pss::SigningKey, pkcs1v15::SigningKey, Pkcs1v15Encrypt, Oaep and decrypt appear in zero files across both trees. The rsa crate has no patched release. Revisit if sev or tinfoil grows a private-key operation, or when rsa ships a constant-time implementation." },
+
+    # proc-macro-error2 2.0.1, reached only by:
+    #   aquamarine 0.6.0 (proc-macro) -> teloxide 0.17.0
+    #     -> wirken-adapter-telegram -> wirken-cli
+    { id = "RUSTSEC-2026-0173", reason = "Unmaintained advisory, informational rather than a vulnerability. proc-macro-error2 is a proc-macro crate, so it runs in the compiler and contributes no code to the shipped binary. teloxide 0.17 is the current release and there is no version of it without aquamarine. Revisit when teloxide or aquamarine drops the dependency." },
 ]
 
 [licenses]
