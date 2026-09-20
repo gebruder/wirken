@@ -15,6 +15,18 @@ pub struct PermissionDenialContext {
     pub agent_id: String,
     /// The inbound user message that triggered the agent's tool call attempt.
     pub trigger_message: Option<String>,
+    /// The arguments the model sent for this call, as it sent them.
+    ///
+    /// The gate's own [`Action`] is a classification: `shell:ls` for
+    /// a whole family of `ls` invocations, and the sentinel
+    /// `shell::pipeline:` for anything carrying a shell
+    /// metacharacter. An operator approving a call is approving this
+    /// string, not that key, so a prompt that shows only the key is
+    /// asking them to approve something they have not been shown.
+    ///
+    /// `None` where the call has no arguments to show, and on the
+    /// paths that build a context without a call in hand.
+    pub arguments: Option<String>,
 }
 
 impl std::fmt::Display for PermissionDenialContext {
@@ -63,7 +75,11 @@ pub enum AgentError {
     PermissionDenied(String),
 
     #[error("permission denied: {0}")]
-    PermissionDeniedCtx(PermissionDenialContext),
+    /// Boxed: this is the largest variant by a wide margin, and an
+    /// `AgentError` is returned from most of the crate's fallible
+    /// paths. Inline it and every one of those `Result`s carries the
+    /// context's width whether it denies anything or not.
+    PermissionDeniedCtx(Box<PermissionDenialContext>),
 
     #[error("conversation error: {0}")]
     Conversation(String),

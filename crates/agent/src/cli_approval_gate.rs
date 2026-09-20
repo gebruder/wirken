@@ -127,6 +127,7 @@ mod tests {
             requested_tier: PermissionTier::Tier2,
             agent_id: "default".into(),
             trigger_message: Some("operator request".into()),
+            arguments: None,
         }
     }
 

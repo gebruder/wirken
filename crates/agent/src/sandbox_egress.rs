@@ -508,6 +508,9 @@ impl SandboxEgressContext {
                 "sandbox egress to {host}:{port} after reading {}",
                 basis.join(", ")
             )),
+            // No tool call: what is being approved is the
+            // destination, which the action already names.
+            arguments: None,
         };
         let approved = matches!(
             gate.request_approval(&ctx).await,

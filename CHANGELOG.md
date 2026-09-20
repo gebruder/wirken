@@ -12,6 +12,18 @@ tagged.
 
 ### Added
 
+- The CLI approval prompt says what is being approved before it asks.
+  It showed the tool name and the tier, which do not describe the
+  call: every command carrying a shell metacharacter classifies to
+  the single key `shell::pipeline:`, so `cat a | bash` and
+  `cat b | bash` produced the same prompt. It now shows the action
+  key the gate matched, the arguments the model sent, and the message
+  the turn is replying to, each on its own line above the `[y/N]`.
+  Everything interpolated is model output or an inbound message, so
+  escape sequences are stripped and line breaks are folded: an
+  argument cannot repaint the line above it or write a second line
+  that looks like the question.
+
 - An `exec` tool result records where the command ran. The row now
   carries a `sandbox` object with the configured mode (`exec_only`,
   `gvisor`, `off`), the runtime that actually ran it (`docker`,

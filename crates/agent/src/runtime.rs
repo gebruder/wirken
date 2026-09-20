@@ -3306,13 +3306,16 @@ impl Agent {
                     if self.approval_bypass.as_ref() == Some(&action) {
                         self.approval_bypass = None;
                     } else {
-                        return Err(AgentError::PermissionDeniedCtx(PermissionDenialContext {
-                            tool_name: name.to_string(),
-                            action,
-                            requested_tier: tier,
-                            agent_id: self.audited_agent_id(),
-                            trigger_message: self.current_trigger.clone(),
-                        }));
+                        return Err(AgentError::PermissionDeniedCtx(Box::new(
+                            PermissionDenialContext {
+                                tool_name: name.to_string(),
+                                action,
+                                requested_tier: tier,
+                                agent_id: self.audited_agent_id(),
+                                trigger_message: self.current_trigger.clone(),
+                                arguments: Some(arguments.to_string()),
+                            },
+                        )));
                     }
                 }
             }
@@ -3518,7 +3521,7 @@ impl Agent {
         let result = match self.execute_tool(&call.name, &call.arguments).await {
             Ok(result) => result,
             Err(AgentError::PermissionDeniedCtx(ctx)) => {
-                self.handle_permission_denial(call, ctx, denials).await?
+                self.handle_permission_denial(call, *ctx, denials).await?
             }
             // agent-runtime-error-recovery: argument-validation
             // failures from the registry (`AgentError::Tool`) are
@@ -3816,7 +3819,7 @@ impl Agent {
                         // single-shot and is already consumed.
                         self.emit_unmediated_denial(&ctx2)?;
                         let output = unmediated_deny_message(&ctx2);
-                        denials.push(ctx2);
+                        denials.push(*ctx2);
                         Ok(crate::tool::ToolResult {
                             output,
                             success: false,

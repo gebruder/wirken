@@ -205,6 +205,7 @@ mod tests {
             // module agree with a gate that reconstructed the id.
             agent_id: "default/webchat/webchat-default".into(),
             trigger_message: Some("clean logs".into()),
+            arguments: None,
         }
     }
 

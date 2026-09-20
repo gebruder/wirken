@@ -236,6 +236,7 @@ mod tests {
             requested_tier: PermissionTier::Tier2,
             agent_id: "default".into(),
             trigger_message: Some("clean old logs".into()),
+            arguments: None,
         }
     }
 

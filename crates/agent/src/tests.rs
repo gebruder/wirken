@@ -4737,6 +4737,7 @@ fn denial_context_display() {
         requested_tier: PermissionTier::Tier3,
         agent_id: "default".into(),
         trigger_message: Some("fetch that URL".into()),
+        arguments: None,
     };
 
     let display = format!("{ctx}");
