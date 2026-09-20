@@ -82,8 +82,8 @@ fn tampered_row_detected() {
         .collect();
     log.write_batch(&events).unwrap();
 
-    // Tamper with row 5's hash. After slice 2 of item 1, audit_events
-    // is a SQL view over session_events — UPDATE the underlying table.
+    // Tamper with row 5's hash. `audit_events` is a SQL view over
+    // `session_events`, so the UPDATE has to name the real table.
     drop(log);
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -114,9 +114,9 @@ fn tampered_row_data_detected() {
         .collect();
     log.write_batch(&events).unwrap();
 
-    // Tamper with row 3's payload — rewrite the AuditLegacy variant
-    // so the leaf_hash no longer matches the stored value. After
-    // slice 2, the underlying table is session_events.
+    // Tamper with row 3's payload: rewrite the AuditLegacy variant so
+    // the leaf_hash no longer matches the stored value. The real
+    // table is `session_events`.
     drop(log);
     {
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -224,10 +224,10 @@ fn prune_old_events() {
     let log = AuditLog::open(&db_path).unwrap();
 
     // Insert events with backdated timestamps directly into
-    // session_events. After slice 2, audit_events is a view and
-    // cannot be inserted into. Hash chain values are dummy strings
-    // — the prune logic filters by ts only and the test never calls
-    // verify() afterwards.
+    // `session_events`: `audit_events` is a view and cannot be
+    // inserted into. The hash chain values are dummy strings, which
+    // is safe here because the prune logic filters on ts alone and
+    // nothing calls verify() afterwards.
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     let old_ts = (Utc::now() - Duration::days(100)).to_rfc3339();
     let recent_ts = Utc::now().to_rfc3339();
@@ -265,8 +265,8 @@ fn prune_old_events() {
 }
 
 // ---------------------------------------------------------------------------
-// Slice 2 of item 1: migration from legacy audit_events table to
-// session_events + view.
+// Migration from the legacy audit_events table to session_events
+// plus a view.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -576,7 +576,7 @@ async fn writer_1000_events_hash_chain_intact() {
 }
 
 // ---------------------------------------------------------------------------
-// Session log (item 1 slice 1)
+// Session log
 // ---------------------------------------------------------------------------
 
 mod session {

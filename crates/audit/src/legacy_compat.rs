@@ -1,10 +1,9 @@
 //! Backward-compatibility layer between the legacy [`AuditLog`] API
 //! and the new [`SqliteSessionLog`] storage.
 //!
-//! Slice 2 of item 1 in `docs/managed-agents-parity.md` makes
-//! `session_events` the single source of truth. The legacy
-//! `audit_events` table no longer exists as a real table — it
-//! becomes a SQL view that COALESCEs JSON fields out of the
+//! `session_events` is the single source of truth. The legacy
+//! `audit_events` table no longer exists as a real table: it is a SQL
+//! view that COALESCEs JSON fields out of the
 //! [`SessionEvent`] payload so existing SIEM consumers see both
 //! legacy events and typed events without changing their queries.
 //!

@@ -25,11 +25,6 @@
 //! boundary they consume.
 //!
 //! ## Module status
-//!
-//! Foundation commit. Defines the trait, the config shape, the static
-//! testing identity, and the error type. The projector, batcher, and
-//! local-collector smoke test arrive in follow-up commits on the same
-//! issue.
 
 use std::collections::HashMap;
 
@@ -99,8 +94,8 @@ pub trait FederatedIdentity: Send + Sync {
     ///
     /// The Agent 365 ingestion endpoint requires several attributes
     /// whose values are knowable only via the federated identity.
-    /// The Microsoft-Entra implementation (issue #132) returns the
-    /// full Microsoft-namespaced set:
+    /// The Microsoft-Entra implementation returns the full
+    /// Microsoft-namespaced set:
     ///
     /// - `microsoft.tenant.id` (must equal the URL `{tenantId}`
     ///   the exporter targets; mismatch is a documented 403)
@@ -110,8 +105,8 @@ pub trait FederatedIdentity: Send + Sync {
     /// - `microsoft.a365.agent.blueprint.id` (no-blueprint case
     ///   reuses `gen_ai.agent.id`, else blueprint roll-ups break)
     ///
-    /// Vendor-neutral implementations (Keycloak for non-Microsoft
-    /// backends, issue #131) return the vendor-neutral subset
+    /// A vendor-neutral implementation, Keycloak for a non-Microsoft
+    /// backend say, returns the vendor-neutral subset
     /// (`gen_ai.agent.id`, `gen_ai.agent.name`) and omit the
     /// Microsoft-namespaced attributes the backend does not
     /// consume.

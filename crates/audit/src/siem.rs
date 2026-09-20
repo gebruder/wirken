@@ -392,7 +392,7 @@ pub fn build_webhook_request(
 }
 
 // ---------------------------------------------------------------------------
-// Typed-event builders (per Section B3 of the typed-forwarder spec)
+// Typed-event builders
 // ---------------------------------------------------------------------------
 
 /// Datadog Log-Intake entry for one typed [`StoredSessionEvent`].

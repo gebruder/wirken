@@ -1,6 +1,5 @@
-//! Legacy [`AuditLog`] API. Slice 2 of item 1 makes this a thin
-//! façade over [`SqliteSessionLog`] — see
-//! `docs/managed-agents-parity.md` for the full design.
+//! Legacy [`AuditLog`] API, a thin façade over
+//! [`SqliteSessionLog`].
 //!
 //! The public surface is unchanged for the existing CLI commands
 //! (`wirken audit log`, `wirken audit verify`) and for the

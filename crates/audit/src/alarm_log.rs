@@ -3,9 +3,9 @@
 //! The continuous-verify loop in [`crate::writer`] calls
 //! [`AlarmLog::append`] when [`crate::AuditLog::verify`] reports a
 //! broken chain. The alarm record is the load-bearing evidence: an
-//! attacker who tampered the SQLite chain can also tamper any
-//! follow-up `audit.chain_broken` row written into the same chain,
-//! so that row is defense-in-depth, not the primary record.
+//! attacker who tampered the SQLite chain can also tamper the
+//! `audit.chain_broken` row written into that same chain, so that row
+//! is defense-in-depth, not the primary record.
 //!
 //! The alarm log is an append-only newline-delimited JSON file at
 //! `<data_dir>/audit-alarms.log`, created with `O_APPEND | O_CREAT |
@@ -40,13 +40,12 @@ type HmacSha256 = Hmac<Sha256>;
 /// block until an operator acknowledges it via
 /// `wirken audit acknowledge --all`.
 ///
-/// The single entry is the upgrade-compat case: pre-#115 gateways
-/// emitted a `verify_error` bucket for "verify pass errored,
-/// classification unknown." The #115 slice replaced that bucket
-/// with structured tamper-class / schema-class discriminants, so
-/// any `verify_error` record on disk today comes from an older
-/// gateway version and is not evidence of tampering by the
-/// current binary.
+/// The single entry is an upgrade-compat case. Older gateways
+/// emitted a `verify_error` bucket meaning "verify pass errored,
+/// classification unknown"; that bucket was replaced with structured
+/// tamper-class and schema-class discriminants, so a `verify_error`
+/// record on disk was written by a binary that could not tell the two
+/// apart and is not evidence of tampering by this one.
 ///
 /// New `alarm_type` strings must be added here explicitly to be
 /// treated as proceed-class. The symmetry is intentional: the
@@ -597,8 +596,9 @@ mod tests {
 
     #[test]
     fn verify_error_record_alone_does_not_block() {
-        // Pre-#115 upgrade-compat: a `verify_error` record from an
-        // older gateway is the one explicit proceed-class type.
+        // A `verify_error` record can only have come from a gateway
+        // old enough to lack the structured discriminants, so it is
+        // the one explicit proceed-class type.
         let tmp = TempDir::new().unwrap();
         let log = AlarmLog::new(tmp.path());
         log.append(&fixture(&tmp, "verify_error")).unwrap();

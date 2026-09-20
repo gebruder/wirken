@@ -42,7 +42,7 @@ pub const TYPED_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// misconfiguration cannot busy-spin the poll loop.
 const POLL_INTERVAL_FLOOR_MS: u64 = 10;
 
-/// Resolve the forwarder poll interval from config (#106). `None`
+/// Resolve the forwarder poll interval from config. `None`
 /// uses [`TYPED_POLL_INTERVAL`] (the 50ms default). A configured value
 /// is clamped up to [`POLL_INTERVAL_FLOOR_MS`].
 pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
@@ -351,7 +351,7 @@ impl TypedEventForwarder {
         let handle = tokio::spawn(async move {
             // Single global cursor over the `session_events.id` primary
             // key, not a per-session map: one indexed query per tick
-            // regardless of how many sessions exist (#105). Starts at 0,
+            // regardless of how many sessions exist. Starts at 0,
             // so a fresh worker re-reads from the start and relies on
             // SIEM dedup, the same restart-replay contract as before.
             let mut cursor: i64 = 0;
@@ -401,7 +401,7 @@ const POLL_BATCH_LIMIT: i64 = 1000;
 /// rows past the global `id` cursor, across all sessions, filters via
 /// [`should_forward`], hands the batch to `sink`, and on success
 /// advances the cursor to the highest `id` read. This is O(1) queries
-/// per tick rather than one-per-session (#105); the cursor is the
+/// per tick rather than one-per-session; the cursor is the
 /// monotonic `session_events.id`, not a per-session seq.
 ///
 /// On sink error the cursor is not advanced. The next pass replays the

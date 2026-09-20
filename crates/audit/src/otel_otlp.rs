@@ -23,11 +23,11 @@
 //!
 //! ## Layer boundary
 //!
-//! Pure structural serialization. No batching, no
-//! body-size policing, no HTTP. The batcher and HTTP transport
-//! that consume this output land in follow-up commits and apply
-//! policy (1 MiB cap with recursive split on 413, 429 backoff,
-//! bearer-auth injection).
+//! Pure structural serialization: no batching, no body-size
+//! policing, no HTTP. Policy is the transport's, which applies the
+//! 1 MiB cap with recursive split on 413, the 429 backoff, and
+//! bearer-auth injection. Keeping them apart is what lets this be
+//! tested against a byte-for-byte expected body.
 
 use serde_json::{Value, json};
 

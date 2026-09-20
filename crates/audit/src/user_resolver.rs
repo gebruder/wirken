@@ -17,14 +17,6 @@
 //! `FederatedIdentity` would make both implementations carry an
 //! identical federation-irrelevant method, which is the
 //! abstraction-around-a-nonexistent-boundary anti-pattern.
-//!
-//! ## Module status
-//!
-//! Third commit on issue #130. Lands the trait, a `UserId`
-//! newtype, and [`DeterministicUserResolver`] as a deterministic
-//! default. The full resolver (Teams adapter `from.aadObjectId`
-//! extraction, operator `user_map.json` overlay, keyed-synthetic
-//! with vault-held salt) lands in issue #132.
 
 use sha2::{Digest, Sha256};
 
@@ -68,13 +60,10 @@ pub trait UserResolver: Send + Sync {
 /// WhatsApp, a Telegram numeric id) can recompute the pseudonym.
 /// Acceptable for a development collector that does not leave the
 /// deployment; not acceptable for shipping telemetry to a
-/// third-party cloud against an external IdP.
-///
-/// Issue #132 lands the keyed-synthetic variant with a vault-held
-/// salt so the pseudonym is reproducible only inside the
-/// deployment that holds the salt, plus the precedence chain
-/// (Teams adapter-supplied real OID, then operator-supplied
-/// `user_map.json` overlay, then keyed synthetic).
+/// third-party cloud against an external IdP. A keyed variant would
+/// close it, because a salt the deployment holds makes the pseudonym
+/// reproducible only inside it; this is not that, and the docstring
+/// says so rather than letting the name imply it.
 pub struct DeterministicUserResolver;
 
 impl UserResolver for DeterministicUserResolver {

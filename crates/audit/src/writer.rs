@@ -193,8 +193,8 @@ fn verify_every_flushes() -> u64 {
 ///
 /// Failure path writes the alarm to the out-of-chain `audit-alarms.log`
 /// **first** — that file is the load-bearing evidence because an
-/// attacker who tampered the SQLite chain can also tamper any
-/// follow-up `audit.chain_broken` row written into the same chain. The
+/// attacker who tampered the SQLite chain can also tamper the
+/// `audit.chain_broken` row written into that same chain. The
 /// in-chain row is defense-in-depth: if it's still there, an honest
 /// chain-walk reader sees both signals; if it isn't, the alarm log
 /// is the surviving record.
@@ -1094,8 +1094,8 @@ mod tests {
 
     #[tokio::test]
     async fn channel_routed_chain_broken_events_drain_at_halt_boundary() {
-        // The headline #107 property: when the verify pass routes
-        // chain_broken events through the channel and MAX_INTEGRITY_FAILURES
+        // The property: when the verify pass routes chain_broken
+        // events through the channel and MAX_INTEGRITY_FAILURES
         // is reached, every chain_broken event from the failing passes
         // lands in SQLite (and would forward to SIEM) before the loop
         // breaks. Prior to the drain wiring, the receiver dropped on
@@ -1170,12 +1170,13 @@ mod tests {
 
     #[tokio::test]
     async fn channel_routed_row_unverifiable_events_drain_at_halt_boundary() {
-        // Composition with #115: when the writer halts (here forced
-        // by repeated drift passes that don't themselves halt, then
-        // a drain call), audit.row_unverifiable events the verify
-        // pass routed through the channel land in SQLite before the
-        // receiver drops. The drain is event-agnostic; the property
-        // generalises to any future channel-routed verify event.
+        // The same drain property, for a different event. When the
+        // writer halts (forced here by repeated drift passes that do
+        // not themselves halt, then a drain call), the
+        // audit.row_unverifiable events the verify pass routed
+        // through the channel land in SQLite before the receiver
+        // drops. The drain is event-agnostic, so this holds for any
+        // channel-routed verify event, not only these two.
         let tmp = tempfile::TempDir::new().unwrap();
         let db_path = tmp.path().join("audit.db");
         {

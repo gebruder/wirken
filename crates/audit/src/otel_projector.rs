@@ -16,11 +16,10 @@
 //! wakes the agent, runs to a final assistant message, terminates),
 //! so a session has at most one in-flight run buffer at a time.
 //!
-//! ## Module status
+//! ## What projects
 //!
-//! Active development on issue #130. The `invoke_agent` root,
-//! `chat`, `execute_tool`, and `output_messages` spans are
-//! implemented, plus the agent-to-agent caller block on the
+//! The `invoke_agent` root, `chat`, `execute_tool`, and
+//! `output_messages` spans, plus the agent-to-agent caller block on the
 //! `invoke_agent` root of a spawned subagent. The root carries
 //! its full mandatory all-span attribute set
 //! (`gen_ai.operation.name`, input and output message bodies,
@@ -42,8 +41,10 @@
 //! `gen_ai.execution.type = "Agent2Agent"`, populated from a
 //! cross-session snapshot taken when the parent's
 //! `SubagentSpawned` event is projected (see
-//! [`Self::snapshot_subagent_caller`]). The error-status branch
-//! lands in a follow-up commit.
+//! [`Self::snapshot_subagent_caller`]). A row the projector has no
+//! arm for projects nothing rather than an untyped span, so an
+//! unmapped variant is absent from the trace instead of arriving
+//! mislabelled.
 
 use std::collections::HashMap;
 use std::sync::Arc;

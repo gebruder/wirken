@@ -1,28 +1,22 @@
 //! Per-session, type-scoped event log with a Merkle-frontier hash chain.
 //!
-//! This is the keystone of the Managed Agents parity work — item 1 in
-//! `docs/managed-agents-parity.md`. The session log records every
-//! interaction in a typed transcript that can be:
+//! The session log records every interaction in a typed transcript
+//! that can be:
 //!
 //! - sliced by position via [`SessionLog::get_range`] and
 //!   [`SessionLog::get_since`],
 //! - rewound to N events before a given index via [`SessionLog::rewind`],
 //! - verified for tamper detection via [`SessionLog::verify`], and
-//! - extended with Merkle inclusion proofs (item 11) without a schema
+//! - extended with Merkle inclusion proofs without a schema
 //!   migration, because every leaf hash is stored alongside the chain
 //!   hash.
-//!
-//! Slice 1 ships the data layer alone. No production [`AuditWriter`]
-//! callers are converted yet — the existing `audit_events` table
-//! remains the write target for legacy callers. `session_events` is a
-//! parallel table that slice 2 will turn into the source of truth.
 //!
 //! ## Type-scoped reads
 //!
 //! [`SessionHandle`] is parameterized by a sealed [`SessionScope`]
-//! marker. Slice 1 only defines [`OwnSession`]; future admin scopes
-//! will plug into the same pattern. The handle's `id` field is the
-//! only session it can address through any method on this trait.
+//! marker. [`OwnSession`] is the only one defined, and the handle's
+//! `id` field is the only session it can address through any method
+//! on this trait.
 //!
 //! The phantom type catches accidental cross-session bugs in trusted
 //! code at compile time. It does **not** defend against a malicious
@@ -70,9 +64,9 @@ pub trait SessionScope: private::Sealed + Send + Sync + 'static {}
 /// The harness's own session — minted by the harness for the
 /// `session_id` of the agent loop currently running. Read-write.
 ///
-/// Slice 1 only defines this scope. Future scopes (e.g.
-/// `AdminScope` for cross-session debugging tooling) will be added
-/// when there is a real caller.
+/// The only scope defined. A wider one, say for cross-session
+/// debugging tooling, would be a new type rather than a flag on this
+/// one, so nothing can widen its reach by passing an argument.
 #[derive(Debug, Clone, Copy)]
 pub struct OwnSession;
 impl SessionScope for OwnSession {}
@@ -81,8 +75,8 @@ impl SessionScope for OwnSession {}
 // Session id and handle
 // ---------------------------------------------------------------------------
 
-/// Opaque session identifier. The harness picks the format; slice 1
-/// makes no assumptions beyond non-empty UTF-8.
+/// Opaque session identifier. The harness picks the format; nothing
+/// here assumes more than non-empty UTF-8.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
@@ -152,9 +146,9 @@ impl<S: SessionScope> Clone for SessionHandle<S> {
 // Trust level
 // ---------------------------------------------------------------------------
 
-/// Trust label for a session event. Drives the context engine
-/// (item 4) — `Compaction` events are treated as untrusted and
-/// scanned through the injection detector before replay.
+/// Trust label for a session event. Drives the context engine:
+/// `Compaction` events are treated as untrusted and scanned through
+/// the injection detector before replay.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TrustLevel {
@@ -166,8 +160,8 @@ pub enum TrustLevel {
     /// Output from a verified internal tool.
     Tool,
     /// Output produced by an external tool the operator installs on
-    /// their own machine (the Lyrik Semgrep-seed pass, #136, is the
-    /// first producer). Distinct from `Tool`, which is verified-
+    /// their own machine, the Lyrik Semgrep-seed pass being the one
+    /// producer today. Distinct from `Tool`, which is verified-
     /// internal: an external analyzer's output is operator-controlled
     /// but attacker-influenceable (a poisoned ruleset can emit
     /// injection text in a finding message), so the elevation into
@@ -175,7 +169,8 @@ pub enum TrustLevel {
     /// `Tool`. No ordering is implied relative to the other variants;
     /// nothing reads a `TrustLevel` ordering today. The model later
     /// reads the individual external-tool artifacts via `read_file`,
-    /// logged at `Tool`; closing that read-side dual-labeling is #47.
+    /// logged at `Tool`, which labels by the tool that read them
+    /// rather than by where the bytes came from.
     ExternalTool,
     /// Output that originated from a model call (compaction
     /// summaries, free-text fallbacks). Treat as untrusted — must
@@ -247,10 +242,9 @@ pub enum BudgetAction {
 /// the operator click through". Both are useful for SIEM detections;
 /// they answer different questions.
 ///
-/// `tag = "kind"` so future surfaces (channel adapters with
-/// `channel: String`, future SDK) slot in without breaking the wire
-/// for existing consumers. `Stdin` is the first surface to ship;
-/// `Sse`, `Cli`, `ChannelAdapter` are reserved for follow-up slices.
+/// `tag = "kind"` so a surface added later, a channel adapter
+/// carrying its own `channel: String` for instance, slots in without
+/// breaking the wire for existing consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApprovalSource {
@@ -571,7 +565,7 @@ pub enum SessionEvent {
     },
     /// LLM request metadata. Full request body is reconstructible
     /// from prior session events; this carries hashes for the
-    /// reproducible-replay verifier (item 10).
+    /// reproducible-replay verifier.
     ///
     /// `credential_id` is the vault entry NAME (the slot the operator
     /// configured in `provider.json` or `channel_overrides`) under
@@ -920,7 +914,7 @@ pub enum SessionEvent {
     /// the child from its session alone therefore rebuilt the wrong
     /// agent with the wrong tools, which is why `wirken sessions
     /// verify` reported a `tools_hash` divergence on every sub-agent
-    /// session. Issue #246.
+    /// session.
     ///
     /// This row makes a child session self-contained. `parent_session_id`
     /// is recorded for correlation, not for lookup: nothing reads the
@@ -1160,7 +1154,7 @@ pub enum SessionEvent {
         before_hash: HashHex,
         after_hash: HashHex,
     },
-    /// Compaction event from the context engine (item 4). The
+    /// Compaction event from the context engine. The
     /// `extracts` are structured key-value claims, not free-text.
     /// `via_model: true` flags the rare free-text fallback path
     /// which the context engine treats as untrusted on replay.
@@ -1184,14 +1178,14 @@ pub enum SessionEvent {
     },
     /// External-tool output ingested into a run as model-visible
     /// context, recorded at `TrustLevel::ExternalTool`. First and only
-    /// producer today: the Lyrik Semgrep-seed pass (#136), whose parsed
+    /// producer today: the Lyrik Semgrep-seed pass, whose parsed
     /// seed set enters the assessment turns. `items` carries the
     /// ingested content verbatim (parallel to `Compaction::extracts`)
     /// so the evidence row is self-contained proof of exactly what
     /// external bytes entered, not merely a hash. The model later reads
     /// the individual seed files via `read_file`, logged at `Tool`;
-    /// that read-side dual-labeling is deliberately partial (#47 owns
-    /// the read side).
+    /// that read-side dual-labeling is deliberately partial: the read
+    /// path labels by tool, not by the provenance of what it read.
     ExternalToolOutput {
         /// External tool that produced the output (e.g. `semgrep`).
         tool: String,
@@ -1213,7 +1207,7 @@ pub enum SessionEvent {
         #[serde(default)]
         agent_id: String,
     },
-    /// Periodic chain-head signature (item 8). Self-contained proof
+    /// Periodic chain-head signature. Self-contained proof
     /// that the chain up to `chain_head_seq` is intact.
     Attestation {
         chain_head_seq: u64,
@@ -1249,8 +1243,8 @@ pub enum SessionEvent {
         signing_pubkey: HashHex,
         schema_version: u32,
     },
-    /// Item 10 follow-up — the harness records its current effective
-    /// system prompt as a session event before the first
+    /// The harness records its current effective system prompt as a
+    /// session event before the first
     /// `LlmRequest` of every session, and again whenever the prompt
     /// drifts (e.g., a skill is installed or the default prompt
     /// changes between binary versions). The verifier uses the most
@@ -1285,7 +1279,7 @@ pub enum SessionEvent {
         deleted_count: u64,
         reason: String,
     },
-    /// Sub-agent spawned by the harness (item 6).
+    /// Sub-agent spawned by the harness.
     SubagentSpawned {
         child_session_id: String,
         child_agent_id: String,
@@ -1991,9 +1985,12 @@ pub struct InvalidSignatureDetail {
 // Trait
 // ---------------------------------------------------------------------------
 
-/// Read/write API for the session log. Slice 1 only takes
-/// `SessionHandle<OwnSession>` — future scopes will plug in by adding
-/// generic methods or scope-specific traits.
+/// Read/write API for the session log.
+///
+/// Every method takes `SessionHandle<OwnSession>`, so a caller can
+/// only reach the session it was handed. A wider scope would arrive
+/// as its own handle type rather than as an argument to these, which
+/// is what keeps the reach of a handle readable from its type.
 pub trait SessionLog: Send + Sync {
     /// Mint a handle for `id`. Anyone with a `SessionLog` reference
     /// can mint a handle for any id — the security claim is that
@@ -2738,7 +2735,7 @@ impl SqliteSessionLog {
     /// indexed range scan over the `session_events` primary key, across
     /// every session, returning only genuinely-new rows. Replaces the
     /// per-session `get_since` fan-out in the typed forwarder so poll
-    /// cost no longer scales with total session count (#105). `limit`
+    /// cost no longer scales with total session count. `limit`
     /// bounds the per-tick batch so a large backlog (e.g. a forwarder
     /// restart reading from id 0) drains over successive ticks instead
     /// of loading every historical row at once.
@@ -2760,8 +2757,8 @@ impl SqliteSessionLog {
         raw.into_iter().map(parse_row).collect()
     }
 
-    /// Item 6 slice 2: list child session IDs whose session_id
-    /// starts with `{parent_id}#sub-`. Returns distinct session IDs
+    /// List child session IDs whose session_id starts with
+    /// `{parent_id}#sub-`. Returns distinct session IDs
     /// in ascending order. Used by `wirken sessions list --parent`.
     pub fn list_child_sessions(&self, parent_id: &str) -> Vec<String> {
         let prefix = format!("{parent_id}#sub-");
