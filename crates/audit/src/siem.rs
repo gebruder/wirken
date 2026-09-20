@@ -652,8 +652,86 @@ fn extract_identity_for_sentinel(
         | SessionEvent::Compaction { agent_id, .. }
         | SessionEvent::BudgetExceeded { agent_id, .. }
         | SessionEvent::ExternalToolOutput { agent_id, .. } => (None, None, Some(agent_id.clone())),
-        _ => (None, None, None),
+        // No column is filled. A "carries" note below means the row
+        // holds that field and this function does not read it, which
+        // is a gap rather than an absence.
+        // Carries an agent_id these columns do not read.
+        SessionEvent::HttpRequest { .. } => (None, None, None),
+        // Carries all three these columns do not read.
+        SessionEvent::PermissionApproved { .. } => (None, None, None),
+        // Carries an adapter_id these columns do not read; its actor is a
+        // caller, not a sender.
+        SessionEvent::PermissionApprovalRefused { .. } => (None, None, None),
+        // Carries an agent_id these columns do not read.
+        SessionEvent::PermissionRevoked { .. } => (None, None, None),
+        // Carries all three these columns do not read.
+        SessionEvent::PermissionRenewed { .. } => (None, None, None),
+        // Carries all three these columns do not read.
+        SessionEvent::PermissionGrantExpired { .. } => (None, None, None),
+        // Carries an agent_id these columns do not read.
+        SessionEvent::PermissionGrantPruned { .. } => (None, None, None),
+        // Carries an agent_id these columns do not read.
+        SessionEvent::SubagentSessionBound { .. } => (None, None, None),
+        // A session id, a count and a reason; none of the three.
+        SessionEvent::SessionScopedApprovalsCleared { .. } => (None, None, None),
+        // A skill and a phase name; none of the three.
+        SessionEvent::PhaseEntered { .. } => (None, None, None),
+        // A skill and a phase name; none of the three.
+        SessionEvent::PhaseExited { .. } => (None, None, None),
+        // A Zirkel run id and a topic; none of the three.
+        SessionEvent::PerspectiveSkipped { .. } => (None, None, None),
+        // A Zirkel run id and its perspectives; none of the three.
+        SessionEvent::PerspectiveExpansion { .. } => (None, None, None),
+        // A Zirkel run id and a candidate; none of the three.
+        SessionEvent::CandidateScored { .. } => (None, None, None),
+        // A Zirkel run id and a candidate; none of the three.
+        SessionEvent::CandidateLlmScored { .. } => (None, None, None),
+        // A Zirkel run id and a candidate; none of the three.
+        SessionEvent::CandidateKept { .. } => (None, None, None),
+        // A Zirkel run id and a url hash; none of the three.
+        SessionEvent::CandidateSkipped { .. } => (None, None, None),
+        // A Zirkel run id and a theme; none of the three.
+        SessionEvent::ThemeNamed { .. } => (None, None, None),
+        // Two hashes; none of the three.
+        SessionEvent::InterestsEdited { .. } => (None, None, None),
+        // A chain head and a signature; none of the three.
+        SessionEvent::Attestation { .. } => (None, None, None),
+        // A sequence range and a signature; none of the three.
+        SessionEvent::ChainHead { .. } => (None, None, None),
+        // A sequence and a count; none of the three.
+        SessionEvent::Rewind { .. } => (None, None, None),
+        // The child's id and grants; the parent's identity is on its own
+        // rows.
+        SessionEvent::SubagentSpawned { .. } => (None, None, None),
+        // The child's id and status; the same.
+        SessionEvent::SubagentResult { .. } => (None, None, None),
+        // Carries an adapter_id these columns do not read.
+        SessionEvent::DeliveryConfirmed { .. } => (None, None, None),
+        // Carries an adapter_id these columns do not read.
+        SessionEvent::DeliveryFailed { .. } => (None, None, None),
+        // An actor and a channel in the legacy shape, not the three.
+        SessionEvent::AuditLegacy { .. } => (None, None, None),
+        // A hook id and its signature status; none of the three.
+        SessionEvent::HookRegistered { .. } => (None, None, None),
+        // Carries all three these columns do not read.
+        SessionEvent::HookDispatched { .. } => (None, None, None),
+        // A hook id and an error; none of the three.
+        SessionEvent::HookCrashed { .. } => (None, None, None),
+        // A server name and a signer; none of the three.
+        SessionEvent::McpEntryVerified { .. } => (None, None, None),
+        // A server name and a reason; none of the three.
+        SessionEvent::McpEntryRefused { .. } => (None, None, None),
+        // Carries all three these columns do not read.
+        SessionEvent::EgressHookDispatched { .. } => (None, None, None),
+        // Carries all three these columns do not read.
+        SessionEvent::ToolOutputRedacted { .. } => (None, None, None),
     }
+}
+
+/// The fallback summary: the row's own debug form, cut to 80
+/// characters. What every kind with no hand-written line gets.
+fn debug_summary(event: &crate::session_log::SessionEvent) -> String {
+    format!("{:?}", event).chars().take(80).collect()
 }
 
 fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
@@ -723,7 +801,95 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             run_id,
             ..
         } => format!("external_tool_output tool={tool} items={item_count} run={run_id}"),
-        other => format!("{:?}", other).chars().take(80).collect(),
+        // No hand-written line: the row's own debug form is the
+        // summary. What each row holds is named so the choice can be
+        // revisited per kind.
+        // Reaches this line only when an operator opted the variant in; the
+        // debug form then carries up to 80 characters of the message.
+        SessionEvent::UserMessage { .. } => debug_summary(event),
+        // The same, for the agent's reply.
+        SessionEvent::AssistantMessage { .. } => debug_summary(event),
+        // Method, host and status are already the whole row.
+        SessionEvent::HttpRequest { .. } => debug_summary(event),
+        // Provider, model and hashes; the debug form is the summary.
+        SessionEvent::LlmRequest { .. } => debug_summary(event),
+        // Token and cost accounting; the debug form is the summary.
+        SessionEvent::LlmResponse { .. } => debug_summary(event),
+        // An action key and who approved it.
+        SessionEvent::PermissionApproved { .. } => debug_summary(event),
+        // A request id and why it was refused.
+        SessionEvent::PermissionApprovalRefused { .. } => debug_summary(event),
+        // An action key and who revoked it.
+        SessionEvent::PermissionRevoked { .. } => debug_summary(event),
+        // An action key and the two expiries.
+        SessionEvent::PermissionRenewed { .. } => debug_summary(event),
+        // An action key and when it lapsed.
+        SessionEvent::PermissionGrantExpired { .. } => debug_summary(event),
+        // An action key and the expiry it was pruned for.
+        SessionEvent::PermissionGrantPruned { .. } => debug_summary(event),
+        // A parent id, a depth and the grants.
+        SessionEvent::SubagentSessionBound { .. } => debug_summary(event),
+        // A session id and a count.
+        SessionEvent::SessionScopedApprovalsCleared { .. } => debug_summary(event),
+        // A skill and a phase name.
+        SessionEvent::PhaseEntered { .. } => debug_summary(event),
+        // A skill, a phase name and why it ended.
+        SessionEvent::PhaseExited { .. } => debug_summary(event),
+        // An axis and what was asked for.
+        SessionEvent::SkillPermissionDenied { .. } => debug_summary(event),
+        // A Zirkel run id and a topic.
+        SessionEvent::PerspectiveSkipped { .. } => debug_summary(event),
+        // A Zirkel run id and its perspectives.
+        SessionEvent::PerspectiveExpansion { .. } => debug_summary(event),
+        // A Zirkel candidate and its keyword score.
+        SessionEvent::CandidateScored { .. } => debug_summary(event),
+        // A Zirkel candidate and its model score.
+        SessionEvent::CandidateLlmScored { .. } => debug_summary(event),
+        // A Zirkel candidate and how it was kept.
+        SessionEvent::CandidateKept { .. } => debug_summary(event),
+        // A Zirkel url hash and why it was skipped.
+        SessionEvent::CandidateSkipped { .. } => debug_summary(event),
+        // A Zirkel theme and its member count.
+        SessionEvent::ThemeNamed { .. } => debug_summary(event),
+        // Two hashes.
+        SessionEvent::InterestsEdited { .. } => debug_summary(event),
+        // Spans and extract counts.
+        SessionEvent::Compaction { .. } => debug_summary(event),
+        // A chain head sequence and a signature.
+        SessionEvent::Attestation { .. } => debug_summary(event),
+        // Opt-in only; the debug form then carries up to 80 characters of
+        // the prompt.
+        SessionEvent::SystemPromptSet { .. } => debug_summary(event),
+        // A sequence, a count and a reason.
+        SessionEvent::Rewind { .. } => debug_summary(event),
+        // A target and a message id.
+        SessionEvent::DeliveryConfirmed { .. } => debug_summary(event),
+        // A target and an error.
+        SessionEvent::DeliveryFailed { .. } => debug_summary(event),
+        // The legacy row's own actor, action and target.
+        SessionEvent::AuditLegacy { .. } => debug_summary(event),
+        // A hook id and its signature status.
+        SessionEvent::HookRegistered { .. } => debug_summary(event),
+        // A hook id, a tool and a decision.
+        SessionEvent::HookDispatched { .. } => debug_summary(event),
+        // A hook id and an error.
+        SessionEvent::HookCrashed { .. } => debug_summary(event),
+        // A server name and a signer.
+        SessionEvent::McpEntryVerified { .. } => debug_summary(event),
+        // A server name and a reason.
+        SessionEvent::McpEntryRefused { .. } => debug_summary(event),
+        // A hook id, a tool and an egress decision.
+        SessionEvent::EgressHookDispatched { .. } => debug_summary(event),
+        // A call id, a hook id and the two sizes.
+        SessionEvent::ToolOutputRedacted { .. } => debug_summary(event),
+        // A source, a conversation and a message count.
+        SessionEvent::ImportedChatRead { .. } => debug_summary(event),
+        // A source, an outcome and a match count.
+        SessionEvent::ImportedChatSearched { .. } => debug_summary(event),
+        // A source, a provider and an archive hash.
+        SessionEvent::ImportStarted { .. } => debug_summary(event),
+        // The same, with what the import did to the store.
+        SessionEvent::ImportCompleted { .. } => debug_summary(event),
     }
 }
 

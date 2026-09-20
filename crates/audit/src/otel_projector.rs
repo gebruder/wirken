@@ -457,7 +457,109 @@ impl OtelProjector {
                 );
                 Vec::new()
             }
-            _ => Vec::new(),
+            // No span. The run/chat/tool tree above is opened by chat
+            // turns and tool calls; every kind below either sits
+            // outside a run or is already covered by a span one of
+            // those opened.
+            // The built-in tool's own row. The tool span its call opened is
+            // what times it.
+            SessionEvent::HttpRequest { .. } => Vec::new(),
+            // A gate outcome before the call, so no span was opened to
+            // attribute it to.
+            SessionEvent::BudgetExceeded { .. } => Vec::new(),
+            // A gate decision, not a timed operation.
+            SessionEvent::PermissionDenied { .. } => Vec::new(),
+            // A grant, not a timed operation.
+            SessionEvent::PermissionApproved { .. } => Vec::new(),
+            // A refused decision, not a timed operation.
+            SessionEvent::PermissionApprovalRefused { .. } => Vec::new(),
+            // Grant bookkeeping outside any run.
+            SessionEvent::PermissionRevoked { .. } => Vec::new(),
+            // Grant bookkeeping outside any run.
+            SessionEvent::PermissionRenewed { .. } => Vec::new(),
+            // A lapse noticed outside any run.
+            SessionEvent::PermissionGrantExpired { .. } => Vec::new(),
+            // A lapsed grant removed at store open, outside any run.
+            SessionEvent::PermissionGrantPruned { .. } => Vec::new(),
+            // The child's own run opens the child's own spans.
+            SessionEvent::SubagentSessionBound { .. } => Vec::new(),
+            // Teardown bookkeeping after the run closed.
+            SessionEvent::SessionScopedApprovalsCleared { .. } => Vec::new(),
+            // Skill phases have no span shape here.
+            SessionEvent::PhaseEntered { .. } => Vec::new(),
+            // The other half of that pair.
+            SessionEvent::PhaseExited { .. } => Vec::new(),
+            // A refusal, not a timed operation.
+            SessionEvent::SkillPermissionDenied { .. } => Vec::new(),
+            // A Zirkel run. This projector opens runs from chat turns.
+            SessionEvent::PerspectiveSkipped { .. } => Vec::new(),
+            // The same.
+            SessionEvent::PerspectiveExpansion { .. } => Vec::new(),
+            // A skill's own fetch, outside the chat and tool span tree.
+            SessionEvent::HttpFetch { .. } => Vec::new(),
+            // A Zirkel pipeline row.
+            SessionEvent::CandidateScored { .. } => Vec::new(),
+            // A Zirkel pipeline row.
+            SessionEvent::CandidateLlmScored { .. } => Vec::new(),
+            // A Zirkel pipeline row.
+            SessionEvent::CandidateKept { .. } => Vec::new(),
+            // A Zirkel pipeline row.
+            SessionEvent::CandidateSkipped { .. } => Vec::new(),
+            // A Zirkel pipeline row.
+            SessionEvent::ThemeNamed { .. } => Vec::new(),
+            // A Zirkel pipeline row.
+            SessionEvent::InterestsEdited { .. } => Vec::new(),
+            // Context trimmed between turns, inside no span.
+            SessionEvent::Compaction { .. } => Vec::new(),
+            // Findings entering context, inside no span.
+            SessionEvent::ExternalToolOutput { .. } => Vec::new(),
+            // A signature over a chain head.
+            SessionEvent::Attestation { .. } => Vec::new(),
+            // A signed chain head.
+            SessionEvent::ChainHead { .. } => Vec::new(),
+            // Set before the run opens.
+            SessionEvent::SystemPromptSet { .. } => Vec::new(),
+            // Rows removed. The spans they produced are already exported.
+            SessionEvent::Rewind { .. } => Vec::new(),
+            // The child's own run closes the child's own span.
+            SessionEvent::SubagentResult { .. } => Vec::new(),
+            // Adapter delivery, after the run closed.
+            SessionEvent::DeliveryConfirmed { .. } => Vec::new(),
+            // The same, failing.
+            SessionEvent::DeliveryFailed { .. } => Vec::new(),
+            // A bridged gateway row with no run of its own.
+            SessionEvent::AuditLegacy { .. } => Vec::new(),
+            // Startup lifecycle.
+            SessionEvent::HookRegistered { .. } => Vec::new(),
+            // The verdict lands on the tool result the tool span already
+            // times.
+            SessionEvent::HookDispatched { .. } => Vec::new(),
+            // Hook lifecycle.
+            SessionEvent::HookCrashed { .. } => Vec::new(),
+            // A load-time registry check.
+            SessionEvent::McpEntryVerified { .. } => Vec::new(),
+            // A load-time registry check.
+            SessionEvent::McpEntryRefused { .. } => Vec::new(),
+            // Rides the tool result the tool span times.
+            SessionEvent::EgressHookDispatched { .. } => Vec::new(),
+            // Rides the tool result the tool span times.
+            SessionEvent::ToolOutputRedacted { .. } => Vec::new(),
+            // Memory I/O inside the tool call that wrote it.
+            SessionEvent::MemoryEntryWritten { .. } => Vec::new(),
+            // An archive read inside the tool call that made it.
+            SessionEvent::ImportedChatRead { .. } => Vec::new(),
+            // An archive search inside the tool call that made it.
+            SessionEvent::ImportedChatSearched { .. } => Vec::new(),
+            // The import command, which opens no run.
+            SessionEvent::ImportStarted { .. } => Vec::new(),
+            // The import command, which opens no run.
+            SessionEvent::ImportCompleted { .. } => Vec::new(),
+            // A trust-zone crossing inside the tool call that read.
+            SessionEvent::CrossChannelMemoryRead { .. } => Vec::new(),
+            // An egress decision inside the tool call it gated.
+            SessionEvent::SandboxEgressVerdict { .. } => Vec::new(),
+            // A mode note, with no call to time.
+            SessionEvent::SandboxEgressUnsupported { .. } => Vec::new(),
         }
     }
 

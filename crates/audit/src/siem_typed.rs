@@ -87,16 +87,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   tool, with its outcome, its match count, and a keyed digest of
 ///   the query. The query itself is never on the row.
 ///
-/// Default-exclude (PII or noisy by default; opt-in only):
-///
-/// - `UserMessage`, `AssistantMessage`: carry message bodies.
-/// - `LlmRequest`, `LlmResponse`: token accounting.
-/// - `SystemPromptSet`, `Compaction`, `Rewind`, `Attestation`.
-/// - Zirkel pipeline events: `CandidateScored`, `CandidateLlmScored`,
-///   `CandidateKept`, `CandidateSkipped`, `ThemeNamed`,
-///   `InterestsEdited`, `PerspectiveExpansion`,
-///   `PerspectiveSkipped`.
-/// - `AuditLegacy`: already on the legacy pipe.
+/// Every other variant is excluded by default and reachable only by
+/// opting in. The match below names each one with the reason it is
+/// out, rather than a list here that drifts from it.
 ///
 /// Operator overrides via
 /// [`SiemConfig::typed_include_variants`] and
@@ -108,42 +101,109 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
     if let Some(include) = &config.typed_include_variants {
         return include.iter().any(|k| k == kind);
     }
-    let in_default = matches!(
-        event,
-        SessionEvent::AssistantToolCalls { .. }
-            | SessionEvent::ToolResult { .. }
-            | SessionEvent::HttpFetch { .. }
-            | SessionEvent::PermissionDenied { .. }
-            // Forwarded for the same reason `PermissionDenied` is: it
-            // is a gate outcome that turned a call away. Its sibling
-            // `PermissionApproved` is not in the default set, and
-            // `PermissionRenewed` follows the sibling rather than
-            // this one.
-            | SessionEvent::PermissionGrantExpired { .. }
-            // A row the gate could never have read, removed. Same
-            // reason as the lapse above: it changes what is granted.
-            | SessionEvent::PermissionGrantPruned { .. }
-            | SessionEvent::SkillPermissionDenied { .. }
-            | SessionEvent::SubagentSpawned { .. }
-            // Same reason as the spawn row: it records what a child
-            // was granted, from the child's own side.
-            | SessionEvent::SubagentSessionBound { .. }
-            | SessionEvent::SubagentResult { .. }
-            | SessionEvent::ChainHead { .. }
-            | SessionEvent::McpEntryVerified { .. }
-            | SessionEvent::McpEntryRefused { .. }
-            | SessionEvent::EgressHookDispatched { .. }
-            | SessionEvent::ToolOutputRedacted { .. }
-            | SessionEvent::BudgetExceeded { .. }
-            | SessionEvent::SandboxEgressVerdict { .. }
-            | SessionEvent::SandboxEgressUnsupported { .. }
-            | SessionEvent::MemoryEntryWritten { .. }
-            | SessionEvent::CrossChannelMemoryRead { .. }
-            | SessionEvent::ImportStarted { .. }
-            | SessionEvent::ImportCompleted { .. }
-            | SessionEvent::ImportedChatRead { .. }
-            | SessionEvent::ImportedChatSearched { .. }
-    );
+    // Exhaustive on purpose: this decides what leaves the box, so a
+    // new variant has to be answered for here rather than defaulting
+    // to silence.
+    let in_default = match event {
+        SessionEvent::AssistantToolCalls { .. } => true,
+        SessionEvent::ToolResult { .. } => true,
+        SessionEvent::HttpFetch { .. } => true,
+        SessionEvent::PermissionDenied { .. } => true,
+        // Forwarded for the same reason `PermissionDenied` is: it is
+        // a gate outcome that turned a call away.
+        SessionEvent::PermissionGrantExpired { .. } => true,
+        // A row the gate could never have read, removed. Same reason
+        // as the lapse above: it changes what is granted.
+        SessionEvent::PermissionGrantPruned { .. } => true,
+        SessionEvent::SkillPermissionDenied { .. } => true,
+        SessionEvent::SubagentSpawned { .. } => true,
+        // Same reason as the spawn row: it records what a child was
+        // granted, from the child's own side.
+        SessionEvent::SubagentSessionBound { .. } => true,
+        SessionEvent::SubagentResult { .. } => true,
+        SessionEvent::ChainHead { .. } => true,
+        SessionEvent::McpEntryVerified { .. } => true,
+        SessionEvent::McpEntryRefused { .. } => true,
+        SessionEvent::EgressHookDispatched { .. } => true,
+        SessionEvent::ToolOutputRedacted { .. } => true,
+        SessionEvent::BudgetExceeded { .. } => true,
+        SessionEvent::SandboxEgressVerdict { .. } => true,
+        SessionEvent::SandboxEgressUnsupported { .. } => true,
+        SessionEvent::MemoryEntryWritten { .. } => true,
+        SessionEvent::CrossChannelMemoryRead { .. } => true,
+        SessionEvent::ImportStarted { .. } => true,
+        SessionEvent::ImportCompleted { .. } => true,
+        SessionEvent::ImportedChatRead { .. } => true,
+        SessionEvent::ImportedChatSearched { .. } => true,
+        // Not in the default set. An operator reaches any of these
+        // with `typed_include_variants`.
+        // Carries the message body.
+        SessionEvent::UserMessage { .. } => false,
+        // Carries the reply body.
+        SessionEvent::AssistantMessage { .. } => false,
+        // The built-in tool's request line. Its ToolResult row is already in
+        // the set.
+        SessionEvent::HttpRequest { .. } => false,
+        // Token accounting.
+        SessionEvent::LlmRequest { .. } => false,
+        // Token accounting.
+        SessionEvent::LlmResponse { .. } => false,
+        // A grant made. The set carries denials and lapses, which are what
+        // turn a call away.
+        SessionEvent::PermissionApproved { .. } => false,
+        // A decision refused at the gate's own boundary, not a call outcome.
+        SessionEvent::PermissionApprovalRefused { .. } => false,
+        // An operator action on the store, not a call outcome.
+        SessionEvent::PermissionRevoked { .. } => false,
+        // Follows PermissionApproved rather than the denial side.
+        SessionEvent::PermissionRenewed { .. } => false,
+        // Session teardown bookkeeping.
+        SessionEvent::SessionScopedApprovalsCleared { .. } => false,
+        // Skill phase bookkeeping.
+        SessionEvent::PhaseEntered { .. } => false,
+        // Skill phase bookkeeping.
+        SessionEvent::PhaseExited { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::PerspectiveSkipped { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::PerspectiveExpansion { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::CandidateScored { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::CandidateLlmScored { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::CandidateKept { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::CandidateSkipped { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::ThemeNamed { .. } => false,
+        // A Zirkel pipeline row.
+        SessionEvent::InterestsEdited { .. } => false,
+        // Context housekeeping.
+        SessionEvent::Compaction { .. } => false,
+        // Carries an external analyzer's findings, which are attacker-
+        // influenceable text.
+        SessionEvent::ExternalToolOutput { .. } => false,
+        // ChainHead is the signed-head feed; this is its detached signature.
+        SessionEvent::Attestation { .. } => false,
+        // Carries the prompt body.
+        SessionEvent::SystemPromptSet { .. } => false,
+        // Chain housekeeping.
+        SessionEvent::Rewind { .. } => false,
+        // Adapter delivery receipts, not gate outcomes.
+        SessionEvent::DeliveryConfirmed { .. } => false,
+        // Adapter delivery receipts, not gate outcomes.
+        SessionEvent::DeliveryFailed { .. } => false,
+        // Already on the legacy pipe.
+        SessionEvent::AuditLegacy { .. } => false,
+        // Startup lifecycle, not a per-call outcome.
+        SessionEvent::HookRegistered { .. } => false,
+        // The tool-call hook's verdict; EgressHookDispatched is the egress
+        // half the set carries.
+        SessionEvent::HookDispatched { .. } => false,
+        // An operator's hook failing, not a gate outcome.
+        SessionEvent::HookCrashed { .. } => false,
+    };
     if !in_default {
         return false;
     }

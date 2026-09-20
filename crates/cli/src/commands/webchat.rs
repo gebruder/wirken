@@ -4164,7 +4164,93 @@ pub fn session_events(
             } => Some(json!({
                 "kind": "http_request", "method": method, "host": host, "status": status,
             })),
-            _ => None,
+            // Withheld from the thread. Each of these is a real row on
+            // the chain; none of them is something this page draws in
+            // a conversation, and the reason differs per kind.
+            // A decision the gate would not take from that caller. The
+            // approvals route is where the page learns a request is still
+            // open.
+            SessionEvent::PermissionApprovalRefused { .. } => None,
+            // An operator removed a grant out of band, with no turn to draw
+            // it against.
+            SessionEvent::PermissionRevoked { .. } => None,
+            // The child's own record of what it was granted; it belongs to
+            // the child's session, not this thread.
+            SessionEvent::SubagentSessionBound { .. } => None,
+            // Grants dropped at session end, after the last turn.
+            SessionEvent::SessionScopedApprovalsCleared { .. } => None,
+            // Skill phase bookkeeping. The thread draws tool calls, not the
+            // phases around them.
+            SessionEvent::PhaseEntered { .. } => None,
+            // The other half of that pair.
+            SessionEvent::PhaseExited { .. } => None,
+            // The tool row it belongs to already says the call did not run.
+            SessionEvent::SkillPermissionDenied { .. } => None,
+            // A Zirkel run's row, and a Zirkel run is not a webchat
+            // conversation.
+            SessionEvent::PerspectiveSkipped { .. } => None,
+            // The same run's row.
+            SessionEvent::PerspectiveExpansion { .. } => None,
+            // A fetch made inside a skill, not the built-in tool whose call
+            // this thread draws.
+            SessionEvent::HttpFetch { .. } => None,
+            // Zirkel keyword scoring.
+            SessionEvent::CandidateScored { .. } => None,
+            // Zirkel model scoring.
+            SessionEvent::CandidateLlmScored { .. } => None,
+            // Zirkel selection.
+            SessionEvent::CandidateKept { .. } => None,
+            // Zirkel selection.
+            SessionEvent::CandidateSkipped { .. } => None,
+            // Zirkel naming.
+            SessionEvent::ThemeNamed { .. } => None,
+            // A Zirkel interests edit.
+            SessionEvent::InterestsEdited { .. } => None,
+            // An external analyzer's findings. The tool row that carried
+            // them into context is what the thread draws.
+            SessionEvent::ExternalToolOutput { .. } => None,
+            // The prompt body, withheld from the page on purpose.
+            SessionEvent::SystemPromptSet { .. } => None,
+            // Rows removed from the chain. The page draws what is left.
+            SessionEvent::Rewind { .. } => None,
+            // An adapter's receipt for an outbound message. The webchat
+            // stream is its own receipt.
+            SessionEvent::DeliveryConfirmed { .. } => None,
+            // The failing half of that receipt.
+            SessionEvent::DeliveryFailed { .. } => None,
+            // A gateway audit row bridged onto the chain. The Record panel
+            // is where those read.
+            SessionEvent::AuditLegacy { .. } => None,
+            // A hook installed at startup, before any turn.
+            SessionEvent::HookRegistered { .. } => None,
+            // The hook's verdict is already the outcome on the tool row it
+            // gated.
+            SessionEvent::HookDispatched { .. } => None,
+            // An operator's hook failing. The Record panel carries it.
+            SessionEvent::HookCrashed { .. } => None,
+            // A connector's load-time signature check. The About panel lists
+            // connectors.
+            SessionEvent::McpEntryVerified { .. } => None,
+            // The refusing half of that check.
+            SessionEvent::McpEntryRefused { .. } => None,
+            // The verdict rides the tool row it gated.
+            SessionEvent::EgressHookDispatched { .. } => None,
+            // The tool row already carries the output as redacted.
+            SessionEvent::ToolOutputRedacted { .. } => None,
+            // A memory write. The turn that caused it is the row.
+            SessionEvent::MemoryEntryWritten { .. } => None,
+            // A read of an imported archive, which the archive views serve.
+            SessionEvent::ImportedChatRead { .. } => None,
+            // A search over imported archives, served the same way.
+            SessionEvent::ImportedChatSearched { .. } => None,
+            // The import command's own row.
+            SessionEvent::ImportStarted { .. } => None,
+            // The import command's own row.
+            SessionEvent::ImportCompleted { .. } => None,
+            // A trust-zone crossing. The turn that caused it is the row.
+            SessionEvent::CrossChannelMemoryRead { .. } => None,
+            // A mode note, not a verdict on a request.
+            SessionEvent::SandboxEgressUnsupported { .. } => None,
         };
         if let Some(mut v) = projected
             && after.is_none_or(|a| row.seq > a)

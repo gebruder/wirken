@@ -488,6 +488,27 @@ fn default_legacy_actor_kind() -> crate::event::ActorKind {
 /// New variants may be added without breaking older readers when the
 /// reader is forward-compatible (serde `tag = "kind"` representation).
 /// Removing or renaming variants is a breaking change.
+///
+/// # Wildcards
+///
+/// A match that decides what leaves the box has no wildcard arm. A
+/// match that asks whether a row is the one kind it is looking for
+/// has one, and the wildcard is the meaning.
+///
+/// Concretely: a match that **routes, forwards, projects, renders or
+/// counts by kind** is exhaustive, so a variant added here is a
+/// compile error at every surface that would otherwise drop it in
+/// silence. Each withheld kind gets its own arm and a line saying
+/// why. The surfaces holding that shape today are
+/// `siem_typed::variant_kind`, `siem_typed::should_forward`,
+/// `siem::extract_identity_for_sentinel`, `siem::typed_summary`,
+/// `otel_projector::OtelProjector::project`, and the webchat
+/// projection in `wirken-cli`.
+///
+/// A match that **looks for one variant** (the last
+/// `SystemPromptSet`, the `SubagentSpawned` naming a given child)
+/// keeps its wildcard: a new variant is not the row it is looking
+/// for, and listing every other kind there says nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionEvent {
