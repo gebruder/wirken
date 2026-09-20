@@ -94,11 +94,10 @@ pub async fn run() -> Result<()> {
         // zero the orchestrator falls through to the default fetch
         // loop (build_perspective_passes treats missing topic and
         // zero planned fan-out as a skip), so the librarian path
-        // is observationally unchanged until a future CLI knob
-        // surfaces topic + cap configuration. Flipping the flag
-        // here is the predicate for that follow-up: the slice 1
-        // mechanism is committed and downstream code can rely on
-        // the audit-event shape.
+        // is observationally unchanged while no CLI knob surfaces
+        // topic and cap configuration. The flag is on regardless, so
+        // the audit-event shape is the same whether or not expansion
+        // has anything to do.
         perspectives_enabled: true,
         topic: None,
         max_perspectives: 0,
@@ -551,7 +550,7 @@ enum KeyedSource {
 }
 
 /// Resolve every keyed source against the vault, for a run with no
-/// operator at a terminal. Issue 233.
+/// operator at a terminal.
 ///
 /// `wirken zirkel run` is what cron calls, so there is nobody to
 /// prompt: the passphrase comes from WIRKEN_VAULT_PASSPHRASE or it does

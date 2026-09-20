@@ -104,7 +104,7 @@
 //!    That may resolve or fail for the wrong reason (the
 //!    underlying claim is about a different interpreter sink,
 //!    but the check is generic). The gate tag discloses what
-//!    ran; further class-specific detectors are tracked in #143.
+//!    ran; other classes have no detector here.
 //! 8. `file_line_only` (fallback): no claim-class keywords
 //!    matched. The file exists and the line resolves; nothing
 //!    further is checked.
@@ -141,7 +141,7 @@
 //! Class-specific detectors that would do more than this slice
 //! does need stronger discriminators than a structural in-line
 //! check can provide (flow analysis, dataflow taint, multi-line
-//! pattern matching). They are tracked in GitHub issue #143; this
+//! pattern matching), and are not detected here; this
 //! slice closes the issue's first pass by handling every claim
 //! class the bench has surfaced, with the honesty discipline
 //! consistent across all of them.

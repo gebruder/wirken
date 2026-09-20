@@ -293,7 +293,7 @@ pub async fn delete(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Slice 3 of named persona bundling: resolve the persona's preset
+/// Resolve the persona's preset
 /// reference into the skill list to attach at agent construction
 /// time. The construction sites (`wirken ask`, `wirken run`'s
 /// per-agent `AgentStaticConfig` build) call this once per agent;

@@ -7337,7 +7337,7 @@ mod tests {
         );
     }
 
-    /// The five follow-ups from the turn-4 check: separators are
+    /// Five layout properties: separators are
     /// measured after layout so a wrapped row never starts with one;
     /// the card and the rail tick one request's age from one anchor
     /// set from the gateway's age; text held in a locked composer is

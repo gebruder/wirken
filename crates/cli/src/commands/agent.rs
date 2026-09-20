@@ -292,7 +292,7 @@ async fn send_with_agent_config(
         let _ = agent.load_skills(&shared_skills);
     }
 
-    // Persona-bundling slice 3: resolve the persona's preset
+    // Resolve the persona's preset
     // reference (if any) and merge its declared skills into the
     // agent. The resolver hard-fails on a dangling reference or
     // load failure so a misconfigured persona surfaces as an

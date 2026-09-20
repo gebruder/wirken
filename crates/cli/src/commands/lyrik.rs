@@ -428,7 +428,7 @@ async fn dispatch_via_agent_runtime(
     // run, at ExternalTool trust, so the elevation of operator-installed
     // analyzer output into the assessment turns is represented in the
     // evidence log rather than only implied by the seed files the model
-    // later reads (those reads log at Tool trust; #47 owns that read
+    // later reads (those reads log at Tool trust, which labels by the
     // side). One event per run on the run-level session; both dispatch
     // paths below consume the same seed set. It is the first append to a
     // fresh session, so it auto-emits the SessionStart chain head.
@@ -1950,9 +1950,9 @@ fn rewrite_top_level_run_id(body: &str, new_run_id: &str) -> Result<String> {
 
 /// Per-run NDJSON audit log written to `<run-dir>/audit.log`. The
 /// runner emits one record per stage. Lyrik's deployment posture
-/// (the wirken-audit-chain claim) wants these records to flow into
-/// the hash-chained audit subsystem too; that wiring is a follow-up
-/// slice.
+/// is its own file, not the hash-chained audit subsystem: a Lyrik run
+/// is reproducible from its run directory alone, and nothing here is
+/// tamper-evident. Do not cite this log as audit evidence.
 struct AuditLogger {
     file: std::fs::File,
     run_id: String,

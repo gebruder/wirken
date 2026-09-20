@@ -1,11 +1,10 @@
 //! Operator-facing OAuth scope selection.
 //!
-//! Bundle A item 3 slice 2: the interactive picker + scripted-mode
-//! flag handling. Used by `wirken mcp authorize` (slice 2) and by
-//! `wirken credentials rescope` (slice 3).
+//! The interactive picker and scripted-mode flag handling, used by
+//! `wirken mcp authorize` and by `wirken credentials rescope`.
 //!
 //! The picker shows operator-pickable scopes only. Required scopes
-//! (per the slice-1 catalog) are auto-included in every returned
+//! (per the provider catalog) are auto-included in every returned
 //! `Vec<String>` regardless of how the operator submits, so a
 //! deselected required scope cannot leave the function. This is
 //! cleaner UX than locked checkboxes: the operator's mental model is
@@ -14,7 +13,10 @@
 //! `default_scopes` (the pre-picker hardcoded set on `OAuthProvider`)
 //! is still added by `run_authorization_code_flow` itself, so the
 //! final auth URL union is `default_scopes ∪ required ∪ picker_output`.
-//! Slice 3 unifies those layers; slice 2 keeps the existing
+//! The three layers stay separate: `default_scopes` is the provider's
+//! floor, `required` is what the catalog marks non-negotiable, and
+//! the picker output is what the operator chose. Collapsing them
+//! would make a scope's origin unrecoverable from the existing
 //! `extra_scopes` augment-semantics.
 
 use std::collections::BTreeSet;
@@ -493,7 +495,7 @@ mod tests {
         assert!(out.contains(&"repo".to_string()));
     }
 
-    // Slice 3 picker-defaults tests. The non-picker paths
+    // Picker-defaults tests. The non-picker paths
     // (`--no-scopes`, `--all-scopes`, explicit `--scope`) must ignore
     // `picker_defaults` because those flags are the operator's
     // scripted-mode instruction; the picker pre-selection is only
@@ -556,7 +558,7 @@ mod tests {
 
     #[test]
     fn resolve_thin_wrapper_passes_empty_defaults() {
-        // The slice 2 entry `resolve_scopes` is a thin wrapper that
+        // The entry point `resolve_scopes` is a thin wrapper that
         // calls `resolve_scopes_with_defaults` with an empty slice.
         // This regression test asserts the wrapper still produces
         // identical output to the explicit-empty form so future

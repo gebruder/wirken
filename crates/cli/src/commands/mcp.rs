@@ -1,7 +1,6 @@
 //! `wirken mcp` subcommands.
 //!
-//! Item 7 slice 2 of `docs/managed-agents-parity.md`. Slice 2 ships
-//! one subcommand: `authorize <server>` which runs the OAuth2
+//! One subcommand: `authorize <server>`, which runs the OAuth2
 //! authorization code flow with PKCE for an HTTP MCP server
 //! configured with `auth.type = "oauth2"` in `~/.wirken/mcp.json`.
 
@@ -95,14 +94,14 @@ pub async fn authorize(
     println!("  credential: {credential_name}");
     println!();
 
-    // Bundle A item 3 slice 2: operator-facing scope selection. The
-    // resolver returns the operator's chosen scope set with the
-    // required floor unconditionally included. Required scopes
-    // (per the slice-1 catalog) are non-negotiable; explicit flags
-    // augment the floor, the interactive picker is the default at a
-    // TTY. The result is passed as `extra_scopes` and unioned with
-    // the provider's hardcoded `default_scopes` inside
-    // `run_authorization_code_flow`; slice 3 unifies those layers.
+    // Operator-facing scope selection. The resolver returns the
+    // operator's chosen scope set with the required floor included
+    // unconditionally: required scopes are non-negotiable, explicit
+    // flags augment the floor, and the interactive picker is the
+    // default at a TTY. The result is passed as `extra_scopes` and
+    // unioned with the provider's hardcoded `default_scopes` inside
+    // `run_authorization_code_flow`, which keeps each scope's origin
+    // recoverable from the three layers.
     let scope_flags = ScopeFlags {
         scope,
         no_scopes,

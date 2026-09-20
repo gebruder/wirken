@@ -5,10 +5,10 @@
 //! GitHub Code Scanning ingest is the authoritative validator at
 //! fixture-upload time.
 //!
-//! Slice 5 ships per-finding results, the nine framing rules, the
+//! Emits per-finding results, the nine framing rules, the
 //! rung+deferral pair, the property template, and the lyrik-specific
 //! properties bag. SARIF-native `fixes[]` for patch_localized lands
-//! in slice 6.
+//! later.
 //!
 //! Dependency floor: `serde` + `serde_json` only.
 
@@ -71,8 +71,8 @@ const FRAMINGS: &[(&str, &str, &str)] = &[
 
 // ===========================================================================
 // Input: Lyrik findings.json schema (subset we consume).
-// All optional fields tolerate absence so slice 5 reads pre-schema-update
-// findings.json files.
+// Every optional field tolerates absence, so a findings.json written
+// before a schema addition still reads rather than failing the emit.
 // ===========================================================================
 
 #[derive(Debug, Deserialize)]

@@ -71,7 +71,7 @@ pub(crate) const SANDBOX_KEYS: &[&str] = &["image", "mode", "network", "shell", 
 /// sorted. An unread key produced nothing at all before this existed:
 /// the operator wrote a setting, the file parsed, the gateway started
 /// clean, and the setting did nothing. The only way to find out was to
-/// read the loader. Issue 234.
+/// read the loader.
 pub(crate) fn unknown_sandbox_keys(val: &serde_json::Value) -> Vec<String> {
     let Some(obj) = val.as_object() else {
         return Vec::new();
@@ -829,7 +829,7 @@ mod tests {
         assert!(!cfg.network);
     }
 
-    /// Issue 234: `image` was a field on `SandboxConfig` that no
+    /// `image` was a field on `SandboxConfig` that no
     /// configuration path set, so a key written into sandbox.json was
     /// read by nothing and the sandbox always ran the compiled-in image.
     #[test]

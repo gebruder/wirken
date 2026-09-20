@@ -165,7 +165,7 @@ pub fn session_transcript(
 pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()> {
     let cfg = config();
 
-    // Item 6 slice 2: --parent shows child sessions by querying
+    // --parent shows child sessions by querying
     // session_events for session_ids that start with the parent's
     // id followed by "#sub-".
     if let Some(ref parent_id) = parent {
@@ -243,12 +243,12 @@ pub async fn list(channel: Option<String>, parent: Option<String>) -> Result<()>
 /// Coherence note: the daemon (if running) keeps any session-scoped
 /// grants in its own in-process cache until process restart, because
 /// the CLI runs out-of-band of the daemon and cannot directly call
-/// `factory.evict`. A daemon-side background sweep that routes
-/// expired sessions through `factory.evict` is the architecturally
-/// clean follow-up; until that lands, in-flight grants on a CLI-
-/// closed session remain effective for the lifetime of the daemon
-/// process. Replay correctness on the next wake is preserved by the
-/// tombstone emitted here.
+/// `factory.evict`. A daemon-side sweep routing expired sessions
+/// through `factory.evict` would close it; there is none, so an
+/// in-flight grant on a CLI-closed session stays effective for the
+/// lifetime of the daemon process. Replay correctness on the next
+/// wake is preserved by the tombstone emitted here; the live cache
+/// is not.
 pub async fn close(id: &str) -> Result<()> {
     let cfg = config();
     let store = SessionStore::open(&cfg.sessions_db_path(), cfg.session_expiry_secs)
@@ -285,7 +285,7 @@ pub async fn close(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// `wirken session verify <session_id> [--strict]` — item 10 slice 1.
+/// `wirken session verify <session_id> [--strict]`.
 ///
 /// Walks the session log for `session_id` and verifies what can be
 /// verified: chain integrity, LlmRequest input hashes (against the
@@ -370,10 +370,10 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
     };
     let session_id = session_id_owned.as_str();
 
-    // Parse agent_id from session_id. Slice 2 of item 2 fixed the
-    // format as `{agent_id}/{channel}/{conversation_id}`. Older
-    // (slice-1-of-item-2) sessions used the bare agent_id; if we
-    // can't split, treat the whole thing as the agent_id.
+    // Parse agent_id from session_id. The format is
+    // `{agent_id}/{channel}/{conversation_id}`; an older session used
+    // the bare agent_id, so a value that will not split is treated as
+    // the agent_id rather than rejected.
     let agent_id = match session_id.split_once('/') {
         Some((aid, _)) => aid.to_string(),
         None => session_id.to_string(),
@@ -382,7 +382,7 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
     // A sub-agent session's id names its parent, so the prefix above
     // resolves to the wrong agent for one. The child records the agent
     // it was woken as on its own chain at spawn; read it from there.
-    // The parent's session is never opened. Issue #246.
+    // The parent's session is never opened.
     let agent_id = match subagent_agent_id(&cfg, session_id) {
         Some(child_agent) => {
             println!();

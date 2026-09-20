@@ -651,7 +651,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 
     println!();
 
-    // --- Step 2b: Per-channel LLM overrides (closes #60) ---
+    // --- Step 2b: Per-channel LLM overrides ---
     //
     // Skip silently when no channels were selected; the override
     // question has no meaning without a channel to attach it to.
@@ -1116,7 +1116,7 @@ async fn setup_whatsapp_channel(
     Ok(())
 }
 
-/// #60: prompt the operator for optional per-channel LLM provider
+/// Prompt the operator for optional per-channel LLM provider
 /// overrides and persist them into provider.json under a
 /// `channel_overrides` map. Each override is keyed by channel and
 /// carries provider + model + base_url + the vault slot name to read
@@ -1193,8 +1193,9 @@ async fn configure_channel_overrides(
             .default(default_base_url.to_string())
             .interact_text()?;
 
-        // Per the #60 design: configs reference vault slots by name,
-        // the vault owns key material. The default slot name is
+        // Configs reference vault slots by name and the vault owns
+        // the key material, so a config file is safe to read and to
+        // copy. The default slot name is
         // `<provider>-api-key` (matching how `wirken setup` stores
         // the main provider's key).
         let default_slot = format!("{provider_name}-api-key");

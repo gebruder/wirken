@@ -5,7 +5,7 @@
 //! reliability (equal-frequency buckets), and optional
 //! stratification by source or matched keyword.
 //!
-//! Data-source rationale (see issue #138): SQLite, not the audit
+//! Data-source rationale: SQLite, not the audit
 //! chain. `CandidateSkipped` audit events carry `url_hash` not
 //! `candidate_id`, which would force a url-hash join for negatives.
 //! `digest_items.decision` ∈ `{"kept","skipped",NULL}` is set by

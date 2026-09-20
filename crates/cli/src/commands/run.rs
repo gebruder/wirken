@@ -131,7 +131,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     println!();
     // Version, commit and cleanliness on one line, the executable's
     // path on the next, so a paste that starts with a restart names
-    // the build it is evidence about. Issue 231.
+    // the build it is evidence about.
     println!("  wirken v{}", crate::build_info::identity());
     println!("  binary: {}", crate::build_info::binary_path());
     println!("  ──────");
@@ -516,13 +516,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Open the session log alongside the audit log ---
     //
-    // Item 1 slice 2 made the audit DB the home of session_events.
-    // Item 2 slice 1 has the agent write durability events
-    // (UserMessage, AssistantMessage, AssistantToolCalls, ToolResult,
-    // PermissionDenied) into the same store. Slice 2 will introduce
-    // wake() which reads them back. Each agent gets its own session
-    // id of `agent_id` for now; per-conversation session ids land
-    // with wake().
+    // The audit DB is the home of session_events, so the durability
+    // events the agent writes (UserMessage, AssistantMessage,
+    // AssistantToolCalls, ToolResult, PermissionDenied) and the rows
+    // wake() reads back on recovery live in one store under one hash
+    // chain. Two stores would mean two chains and no single answer to
+    // what happened in a session.
     let session_log_concrete = match audit_signer.clone() {
         Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
             .context("Failed to open session log")?,
@@ -547,7 +546,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // --- Setup router and gather per-agent static configs ---
     //
-    // Item 2 slice 2: agents are no longer long-lived `Mutex<Agent>`
+    // Agents are not long-lived `Mutex<Agent>`
     // instances. The gateway holds an `AgentFactory` that wakes a
     // per-conversation Agent on every inbound message, replaying its
     // session log to reconstruct conversation state. Skills, MCP,
@@ -625,7 +624,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 skills.extend(s);
             }
 
-            // Persona-bundling slice 3: merge preset skills into the
+            // Merge preset skills into the
             // static config. A dangling reference or load failure
             // hard-fails daemon startup so a misconfigured persona
             // cannot silently route channel traffic to an agent with
@@ -652,12 +651,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 );
             }
 
-            // Item 8 slice 2: load (or generate) the agent's
-            // Ed25519 signing identity. The first run creates the
-            // key files at ~/.wirken/agents/{id}/identity.{key,pub};
-            // subsequent runs load them. Failure here is non-fatal —
-            // attestation becomes a no-op for that agent and we log
-            // a warning.
+            // Load (or generate) the agent's Ed25519 signing
+            // identity. The first run creates the key files at
+            // ~/.wirken/agents/{id}/identity.{key,pub}; later runs
+            // load them. Failure here is non-fatal: attestation
+            // becomes a no-op for that agent and the run logs a
+            // warning, because an agent that cannot sign is still an
+            // agent that can answer.
             let identity_dir = wirken_agent::identity::identity_dir(&cfg.data_dir, &agent_cfg.id);
             let identity = match wirken_agent::AgentIdentity::load_or_create(
                 &agent_cfg.id,
@@ -698,8 +698,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // Create default agent for any unbound channels (backward compat with wirken setup)
     if !static_configs.contains_key("default") {
-        // Channel overrides from provider.json (closes #60). Optional;
-        // absent or empty map means "single-provider agent, pre-#60
+        // Channel overrides from provider.json. Optional;
+        // absent or empty map means "single-provider agent, the
         // behavior." Each override entry names a vault slot for its
         // api_key rather than carrying the key directly, so configs
         // on disk stay key-free.
@@ -1018,7 +1018,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // The proxy runs as a sibling process. The agent process never holds
     // plaintext MCP credentials — the proxy owns the vault handle for any
     // `vault:`-prefixed env values in mcp.json and resolves them inside its
-    // own address space. See docs/managed-agents-parity.md item 7.
+    // own address space.
     let mcp_proxy_socket = cfg.socket_dir().join("mcp-proxy.sock");
     if mcp_proxy_socket.exists() {
         let _ = std::fs::remove_file(&mcp_proxy_socket);
@@ -1062,7 +1062,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     // Connect each agent to the MCP proxy. The proxy client is held
     // in the AgentStaticConfig and shared across every waked Agent
-    // for that agent_id (slice 2 design — see crates/agent/src/factory.rs).
+    // for that agent_id; see crates/agent/src/factory.rs.
     //
     // The proxy requires Ed25519 authentication. An agent whose
     // identity file failed to load earlier (cfg.identity is None)
@@ -1201,7 +1201,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         Arc::new(wirken_gateway::egress_dispatcher::EgressDispatcher::default());
     factory.attach_egress_dispatcher(egress_dispatcher.clone());
 
-    // --- cross-channel memory (#64) ---
+    // --- cross-channel memory ---
     // Opening the store is what makes the memory tools available at
     // all. If it cannot be opened the gateway still starts; the tools
     // report themselves unconfigured rather than the process failing
@@ -3291,9 +3291,9 @@ async fn message_loop(
                     .resolve(&channel, &conversation_id)
                     .unwrap_or_else(|_| "default".into());
 
-                // Wake the agent for THIS conversation. Per-conversation
-                // session ids land in slice 2: each (agent, channel,
-                // conversation_id) gets its own session. The platform
+                // Wake the agent for THIS conversation: each
+                // (agent, channel, conversation_id) pair gets its own
+                // session. The platform
                 // message id (msg `id` field on the capnp frame) is the
                 // inbound_id used for crash-recovery dedup.
                 let resolved_agent = if factory.has_agent(&agent_id) {
@@ -3498,10 +3498,9 @@ async fn message_loop(
                 // against `approver_registry` BEFORE resolving the
                 // queue. Unauthorized actions are silently dropped
                 // (queue stays open until timeout or until an
-                // authorized action arrives). Per the slice, an
-                // explicit "unauthorized attempt" audit variant is
-                // a follow-up if SIEM detections need to count
-                // attempts; today's signal is the warn-level log.
+                // authorized action arrives). An unauthorized attempt
+                // leaves a warn-level log and no audit row, so a SIEM
+                // detection cannot count attempts from the chain.
                 if !approver_registry.verify(adapter_id, &user_id) {
                     tracing::warn!(
                         adapter_id = adapter_id,
@@ -4150,7 +4149,8 @@ fn load_siem_config(cfg: &wirken_gateway::config::GatewayConfig) -> Option<SiemC
 /// An absent / malformed `channel_overrides` key is treated as
 /// "no overrides" — the function returns an empty map and
 /// `AgentFactory::wake` falls through to the default for every
-/// channel. This matches the back-compat contract from #60.
+/// channel, which is the back-compat contract: a config with no
+/// overrides behaves as it did before overrides existed.
 ///
 /// `api_key_name` is looked up in the vault; the function is
 /// fail-closed on a configured-but-missing slot (an operator who

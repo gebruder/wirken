@@ -774,7 +774,7 @@ enum ZirkelCommands {
     /// keep/skip label set from `digest_items.decision`. Reads the
     /// operator's local `~/.wirken/zirkel/aggregator.db`;
     /// computation only, corpus never leaves the machine. See
-    /// issue #138 for the data-source rationale (SQLite over the
+    /// the module docs for the data-source rationale (SQLite over the
     /// audit chain).
     Calibrate {
         /// Optional `candidates.run_id` filter. Absent → all runs.
@@ -995,7 +995,7 @@ enum McpCommands {
     /// the tokens in the vault under the credential name from the
     /// server's auth block.
     ///
-    /// Slice 2 supports providers: linear, notion, github, google.
+    /// Supported providers: linear, notion, github, google.
     /// Operators must register their own OAuth app at the provider
     /// and supply WIRKEN_<PROVIDER>_CLIENT_ID (and CLIENT_SECRET if
     /// the provider is confidential) before running this command.
