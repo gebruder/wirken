@@ -295,7 +295,23 @@ impl Action {
                 // mistaken for an approval to sweep them all.
                 None => "imported_search_corpus".to_string(),
             },
-            other => format!("{other:?}"),
+            // The parameterless actions. These carried the derived
+            // `Debug` form until this arm existed, which made the key
+            // a Rust identifier: it changed with a variant rename,
+            // and `NetworkRequest` produced
+            // `NetworkRequest { domain: "x" }`, braces, spaces,
+            // quotes and all. None of them is storable
+            // (see `is_storable_approval_key`), so naming them
+            // properly orphans no grant; what it fixes is every
+            // surface that shows a key to an operator.
+            Action::WorkspaceFileAccess => "workspace_file".to_string(),
+            Action::ChannelConverse => "channel_converse".to_string(),
+            Action::WebSearch => "web_search".to_string(),
+            Action::HttpRequest => "http_request".to_string(),
+            Action::DestructiveFileOp => "destructive_file_op".to_string(),
+            Action::NetworkRequest { domain } => format!("network:{domain}"),
+            Action::CredentialAccess => "credential_access".to_string(),
+            Action::CronCreate => "cron_create".to_string(),
         }
     }
 }
@@ -3249,6 +3265,91 @@ mod tier_tests {
     // Storable-key allowlist
     // -----------------------------------------------------------------
 
+    /// Every variant's key is a name, not a rendering of the Rust
+    /// value.
+    ///
+    /// An action key is shown to an operator at the approval prompt,
+    /// written to the chain on every denial and approval row, and
+    /// matched against the storable allowlist. A key produced by
+    /// `Debug` is none of those things reliably: it changes when a
+    /// field is renamed, and a parameterised variant renders as
+    /// `Variant { field: "value" }`, braces and quotes included.
+    /// `{` or `(` in a key means a variant has fallen back to the
+    /// derived form.
+    #[test]
+    fn no_action_key_is_a_debug_rendering() {
+        let sample = || "x".to_string();
+        // One value per variant. The match below is exhaustive, so a
+        // variant added to `Action` fails to compile here until it is
+        // given a sample and an expected key.
+        let all = [
+            Action::WorkspaceFileAccess,
+            Action::ChannelConverse,
+            Action::WebSearch,
+            Action::HttpRequest,
+            Action::ShellExec { pattern: sample() },
+            Action::ExternalFileAccess { path: sample() },
+            Action::CrossConversationMessage,
+            Action::DestructiveFileOp,
+            Action::NetworkRequest { domain: sample() },
+            Action::CredentialAccess,
+            Action::CronCreate,
+            Action::McpToolCall { tool: sample() },
+            Action::UnknownTool { tool: sample() },
+            Action::WasmSkillCall { skill: sample() },
+            Action::CrossChannelMemoryRead {
+                from_channel: sample(),
+            },
+            Action::ImportedChatRead {
+                source_id: sample(),
+            },
+            Action::ImportedChatSearch {
+                source_id: Some(sample()),
+            },
+            Action::ImportedChatSearch { source_id: None },
+        ];
+
+        for action in &all {
+            let key = action.approval_key();
+            assert!(
+                !key.contains('{') && !key.contains('('),
+                "{action:?} fell through to the debug form: {key}"
+            );
+            assert!(!key.is_empty(), "{action:?} has no key");
+
+            // The name each variant is expected to key as. Exhaustive
+            // on purpose: this is the compile-time half of the
+            // tripwire.
+            let expected = match action {
+                Action::WorkspaceFileAccess => "workspace_file".to_string(),
+                Action::ChannelConverse => "channel_converse".to_string(),
+                Action::WebSearch => "web_search".to_string(),
+                Action::HttpRequest => "http_request".to_string(),
+                Action::ShellExec { pattern } => format!("shell:{pattern}"),
+                Action::ExternalFileAccess { path } => format!("file:{path}"),
+                Action::CrossConversationMessage => "cross-conversation".to_string(),
+                Action::DestructiveFileOp => "destructive_file_op".to_string(),
+                Action::NetworkRequest { domain } => format!("network:{domain}"),
+                Action::CredentialAccess => "credential_access".to_string(),
+                Action::CronCreate => "cron_create".to_string(),
+                Action::McpToolCall { tool } => format!("mcp:{tool}"),
+                Action::UnknownTool { tool } => format!("tool:{tool}"),
+                Action::WasmSkillCall { skill } => format!("wasm:{skill}"),
+                Action::CrossChannelMemoryRead { from_channel } => {
+                    format!("cross_channel_memory:{from_channel}")
+                }
+                Action::ImportedChatRead { source_id } => format!("imported_chat:{source_id}"),
+                Action::ImportedChatSearch {
+                    source_id: Some(id),
+                } => format!("imported_search:{id}"),
+                Action::ImportedChatSearch { source_id: None } => {
+                    "imported_search_corpus".to_string()
+                }
+            };
+            assert_eq!(key, expected, "{action:?}");
+        }
+    }
+
     #[test]
     fn only_tier2_keys_are_storable() {
         for key in ["shell:ls", "shell:cat", "file:/tmp/x", "cross-conversation"] {
@@ -3268,15 +3369,16 @@ mod tier_tests {
             "imported_chat:src-1",
             "imported_search:src-1",
             "imported_search_corpus",
-            "NetworkRequest { domain: \"api.openai.com\" }",
-            "CredentialAccess",
-            "CronCreate",
-            "DestructiveFileOp",
+            "network:api.openai.com",
+            "credential_access",
+            "cron_create",
+            "destructive_file_op",
             // Tier 1: allowed with no lookup, so a stored row is
             // dead weight that reads as though it did something.
-            "WorkspaceFileAccess",
-            "WebSearch",
-            "HttpRequest",
+            "workspace_file",
+            "web_search",
+            "http_request",
+            "channel_converse",
             // Degenerate.
             "file:",
             "",

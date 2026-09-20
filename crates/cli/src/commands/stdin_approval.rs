@@ -497,12 +497,8 @@ mod tests {
             prompt.contains("requests 'http_request' (tier3)"),
             "{prompt}"
         );
-        // `NetworkRequest` has no arm in `approval_key`, so its key
-        // is the debug form. Asserted as it is rather than as it
-        // ought to be; a key that reads like a struct literal is its
-        // own problem and not one this prompt should paper over.
         assert!(
-            prompt.contains(r#"action key: NetworkRequest { domain: "exfil.example.net" }"#),
+            prompt.contains("action key: network:exfil.example.net"),
             "{prompt}"
         );
         assert!(

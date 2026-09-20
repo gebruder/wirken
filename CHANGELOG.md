@@ -47,6 +47,21 @@ tagged.
   tool that runs inside the gateway's own process records. The SIEM
   typed summary and the webchat session projection both carry it.
 
+### Changed
+
+- Every `Action` has an explicit approval key. Eight variants fell
+  through to the derived `Debug` form, which made the key a Rust
+  identifier that changed with a rename and, for `NetworkRequest`,
+  rendered as `NetworkRequest { domain: "x" }`, braces and quotes
+  included. They key as `network:<domain>`, `workspace_file`,
+  `channel_converse`, `web_search`, `http_request`,
+  `destructive_file_op`, `credential_access` and `cron_create`. None
+  of the eight was storable (`is_storable_approval_key` admits only
+  the Tier 2 namespaces), so no stored grant is orphaned; what
+  changes is the key shown at the prompt and written to the chain on
+  every denial row. Thirteen corpus lines carried the old spellings
+  and are updated.
+
 ### Fixed
 
 - The Sentinel and webhook envelopes carry the identity the row
