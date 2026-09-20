@@ -236,6 +236,25 @@ pub enum BudgetAction {
     Blocked,
 }
 
+/// Why an approval attempt was refused on authority grounds.
+///
+/// Three distinct failures that a single "unauthorized" label would
+/// flatten. The first is a caller who is not an approver at all; the
+/// other two are approvers reaching outside what they may decide, and
+/// a run of those means something different from a run of the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalRefusalReason {
+    /// The caller is not on the channel's approver list.
+    UnauthorizedActor,
+    /// The request was raised on a different channel, so it is
+    /// decided there.
+    WrongChannel,
+    /// The request was raised in a different conversation on this
+    /// channel.
+    WrongConversation,
+}
+
 /// Which surface mediated an operator's approve / deny decision.
 /// `ApprovalScopeKind` answers "how long does this grant last"
 /// (Persisted vs Session); [`ApprovalSource`] answers "which UI did
@@ -813,6 +832,39 @@ pub enum SessionEvent {
         /// sentinel rather than a date anything reads.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
+    },
+    /// An approval attempt was refused because the caller had no
+    /// authority to make it.
+    ///
+    /// Not a denial of the underlying action, which
+    /// [`Self::PermissionDenied`] covers, and not a refusal of the
+    /// key, which the store answers with an error to its caller.
+    /// This is somebody trying to decide an approval that was not
+    /// theirs to decide: an actor who is not on the channel's
+    /// approver list, or a page deciding a request that belongs to
+    /// another channel or another conversation.
+    ///
+    /// Before this the three refusals left a warn-level log and
+    /// nothing on the chain, so a detection could not count attempts.
+    /// Attempts are the interesting number: one is a misconfigured
+    /// client, a run of them from one caller is not.
+    PermissionApprovalRefused {
+        /// The request the caller tried to decide.
+        request_id: String,
+        /// Action the request was raised for, when the queue still
+        /// holds it. `None` when the request id matched nothing,
+        /// which is itself worth seeing: a caller naming ids that do
+        /// not exist is enumerating.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action_key: Option<String>,
+        /// Who tried. A platform principal for a channel adapter, or
+        /// the webchat browser session.
+        caller: String,
+        /// Why the caller had no authority.
+        reason: ApprovalRefusalReason,
+        /// Adapter the attempt arrived through, when there is one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
     },
     /// An operator removed a stored grant.
     ///

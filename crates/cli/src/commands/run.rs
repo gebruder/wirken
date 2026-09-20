@@ -3533,17 +3533,24 @@ async fn message_loop(
             } => {
                 // Centralized authorization: validate the actor
                 // against `approver_registry` BEFORE resolving the
-                // queue. Unauthorized actions are silently dropped
-                // (queue stays open until timeout or until an
-                // authorized action arrives). An unauthorized attempt
-                // leaves a warn-level log and no audit row, so a SIEM
-                // detection cannot count attempts from the chain.
+                // queue. The queue stays open until timeout or until
+                // an authorized action arrives, so the attempt
+                // changes nothing; the row is what lets a detection
+                // count attempts, which is the interesting number.
                 if !approver_registry.verify(adapter_id, &user_id) {
                     tracing::warn!(
                         adapter_id = adapter_id,
                         user_id = %user_id,
                         request_id = %request_id,
                         "channel approval: unauthorized actor sent approve/deny; dropping"
+                    );
+                    wirken_gateway::permissions::emit_approval_refused(
+                        factory.session_log().as_ref(),
+                        &pending_approvals,
+                        &request_id,
+                        &user_id,
+                        wirken_audit::ApprovalRefusalReason::UnauthorizedActor,
+                        Some(adapter_id),
                     );
                     continue;
                 }

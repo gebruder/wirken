@@ -176,6 +176,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionDenied { .. } => "permission_denied",
         SessionEvent::PermissionApproved { .. } => "permission_approved",
         SessionEvent::PermissionRevoked { .. } => "permission_revoked",
+        SessionEvent::PermissionApprovalRefused { .. } => "permission_approval_refused",
         SessionEvent::PermissionRenewed { .. } => "permission_renewed",
         SessionEvent::PermissionGrantExpired { .. } => "permission_grant_expired",
         SessionEvent::PermissionGrantPruned { .. } => "permission_grant_pruned",

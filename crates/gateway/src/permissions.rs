@@ -1682,6 +1682,50 @@ pub fn emit_operator_approval(
     Ok(())
 }
 
+/// Record an approval attempt that failed the authority check.
+///
+/// Written to the session that raised the request when the queue
+/// still holds it, so the refusal sits beside the request it was
+/// aimed at; to the operator lane otherwise, because a request id
+/// that matches nothing has no session to attribute it to.
+///
+/// Failure to record is logged, not propagated. The refusal itself
+/// has already happened and the caller has already been told no;
+/// turning a missing audit row into a different answer would be the
+/// wrong direction, and the row's purpose is counting attempts, not
+/// gating one.
+pub fn emit_approval_refused(
+    log: &dyn wirken_audit::SessionLog,
+    queue: &crate::pending_approvals::PendingApprovalQueue,
+    request_id: &str,
+    caller: &str,
+    reason: wirken_audit::ApprovalRefusalReason,
+    adapter_id: Option<&str>,
+) {
+    let detail = queue.show(request_id);
+    let session = detail
+        .as_ref()
+        .map(|d| d.agent_id.clone())
+        .unwrap_or_else(|| OPERATOR_PERMISSIONS_SESSION.to_string());
+    let handle = log.handle_for(wirken_audit::SessionId::new(session.clone()));
+    let event = wirken_audit::SessionEvent::PermissionApprovalRefused {
+        request_id: request_id.to_string(),
+        action_key: detail.map(|d| d.action_key),
+        caller: caller.to_string(),
+        reason,
+        adapter_id: adapter_id.map(str::to_string),
+    };
+    if let Err(e) = log.append(&handle, wirken_audit::TrustLevel::System, event) {
+        tracing::error!(
+            error = %e,
+            request_id,
+            session,
+            "could not record an approval refusal; the refusal stands but nothing \
+             counts it"
+        );
+    }
+}
+
 /// Record an operator's revoke on the audit chain.
 ///
 /// The store's DELETE leaves nothing behind, so this row is the only

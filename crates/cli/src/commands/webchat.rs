@@ -3152,6 +3152,14 @@ pub async fn serve(
                 // refused, whatever its id, so enumerating ids can never
                 // become a way around that channel's approver list.
                 if approval_belongs_to_webchat(&pending_approvals, &request_id) == Some(false) {
+                    wirken_gateway::permissions::emit_approval_refused(
+                        factory.session_log().as_ref(),
+                        &pending_approvals,
+                        &request_id,
+                        "webchat",
+                        wirken_audit::ApprovalRefusalReason::WrongChannel,
+                        Some("webchat"),
+                    );
                     let _ = stream
                         .write_all(
                             json_forbidden("approvals are decided on their own channel").as_bytes(),
@@ -3180,6 +3188,14 @@ pub async fn serve(
                 if approval_belongs_to_conversation(&pending_approvals, &request_id, &viewing)
                     == Some(false)
                 {
+                    wirken_gateway::permissions::emit_approval_refused(
+                        factory.session_log().as_ref(),
+                        &pending_approvals,
+                        &request_id,
+                        &viewing,
+                        wirken_audit::ApprovalRefusalReason::WrongConversation,
+                        Some("webchat"),
+                    );
                     let _ = stream
                         .write_all(json_forbidden(DECISION_WRONG_CONVERSATION).as_bytes())
                         .await;
