@@ -29,9 +29,9 @@ pub struct LlmConfig {
     pub tools_enabled: bool,
     /// Total context window in tokens. The [`crate::context::ContextEngine`]
     /// uses this as the budget ceiling for trimming conversations before
-    /// each LLM call. Item 4 slice 1 in `docs/managed-agents-parity.md`.
-    /// Defaults to a conservative 32_000 if missing — existing
-    /// [`LlmConfig`] entries deserialized from older data files get this.
+    /// each LLM call. Defaults to a conservative 32_000 when missing,
+    /// which is the value [`LlmConfig`] entries deserialized from older
+    /// data files pick up.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
 }
@@ -576,8 +576,10 @@ impl LlmClient {
         let url = format!("{}/messages", self.config.base_url);
 
         // Anthropic separates system prompt from messages.
-        // Item 4 slice 2: Role::Compaction is also folded into the
-        // system slot, with content wrapped in the compaction fence.
+        // Role::Compaction is folded into the system slot too, with
+        // its content wrapped in the compaction fence, so a summary
+        // of trimmed turns arrives as harness text rather than as
+        // something the model could read as a user turn.
         let system_prompt: String = messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Compaction)
@@ -653,8 +655,8 @@ impl LlmClient {
             "max_tokens": self.config.max_tokens,
         });
 
-        // Item 4 slice 3: send the system prompt as a content-block
-        // array with cache_control on the last block. Anthropic
+        // Send the system prompt as a content-block array with
+        // cache_control on the last block. Anthropic
         // caches everything up to and including the last block
         // marked ephemeral, so the system prompt (which is stable
         // across turns) gets a prompt-cache hit on repeat calls
@@ -678,9 +680,8 @@ impl LlmClient {
                     })
                 })
                 .collect();
-            // Item 4 slice 3: mark the last tool def as cacheable
-            // so the full tool surface is included in the prompt
-            // cache prefix.
+            // Mark the last tool def as cacheable so the full tool
+            // surface is inside the prompt cache prefix.
             if let Some(last) = tools_json.last_mut() {
                 last["cache_control"] = serde_json::json!({"type": "ephemeral"});
             }
@@ -728,9 +729,8 @@ impl LlmClient {
             self.config.base_url, self.config.model
         );
 
-        // Extract system prompt. Item 4 slice 2: Role::Compaction
-        // is folded in here with the fence wrapper, same pattern as
-        // Anthropic.
+        // Extract system prompt. Role::Compaction is folded in here
+        // with the fence wrapper, same as the Anthropic path.
         let system_text: String = messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Compaction)
@@ -891,9 +891,8 @@ impl LlmClient {
             self.config.base_url, self.config.model
         );
 
-        // Extract system prompt. Item 4 slice 2: Role::Compaction
-        // is folded in here as another system block with the fence
-        // wrapper.
+        // Extract system prompt. Role::Compaction is folded in here
+        // as another system block with the fence wrapper.
         let system_blocks: Vec<serde_json::Value> = messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Compaction)
@@ -1249,9 +1248,9 @@ pub fn parse_ollama_response(
 }
 
 pub(crate) fn message_to_json(msg: &Message) -> serde_json::Value {
-    // Item 4 slice 2: Role::Compaction is folded into the
-    // provider's `system` role with the content wrapped in the
-    // compaction fence. The agent's system prompt instructs the
+    // Role::Compaction is folded into the provider's `system` role
+    // with the content wrapped in the compaction fence. The agent's
+    // system prompt instructs the
     // model to treat fenced blocks as harness-controlled facts.
     let (wire_role, wire_content) = if msg.role == Role::Compaction {
         (
