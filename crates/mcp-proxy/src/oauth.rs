@@ -1,12 +1,12 @@
 //! OAuth2 support for HTTP MCP servers.
 //!
-//! Item 7 slice 2 of `docs/managed-agents-parity.md`. Three pieces:
+//! Three pieces:
 //!
 //! 1. **Provider registry.** A hardcoded table of well-known OAuth2
 //!    providers (Linear, Notion, GitHub, Google) with their auth
-//!    URLs, token URLs, and default scopes. Per decision 5 of the
-//!    slice 2 design, slice 2 hardcodes; future work may add
-//!    `.well-known/oauth-authorization-server` discovery.
+//!    URLs, token URLs, and default scopes. Hardcoded rather than
+//!    discovered, so a provider's endpoints cannot move under a
+//!    running deployment without a release saying so.
 //!
 //! 2. **Authorization code flow runner.** [`run_authorization_code_flow`]
 //!    runs the OAuth dance with PKCE: generate verifier + challenge,
@@ -59,19 +59,19 @@ pub struct OAuthProvider {
     pub client_id_env: &'static str,
     /// Some providers (Google) require a client_secret for the
     /// authorization code grant; others (most installed-app
-    /// flows) accept PKCE alone. Slice 2 sets this to `Some` for
-    /// every provider since none of the four supported providers
-    /// is fully public-client; users can leave the env var unset
-    /// if they registered a public OAuth app.
+    /// flows) accept PKCE alone. `Some` for every provider here,
+    /// because none of the four is fully public-client; an operator
+    /// who registered a public OAuth app can leave the env var unset.
     pub client_secret_env: Option<&'static str>,
-    /// Bundle A item 3 slice 1: catalog of OAuth scopes the
-    /// interactive picker offers for this provider. The picker
-    /// (slice 2) renders a `dialoguer::MultiSelect` from this
-    /// catalog with `required: true` entries pre-checked and not
-    /// de-selectable. Slice 3 routes the picker's output into the
-    /// authorization URL via the existing `extra_scopes` parameter
-    /// on [`run_authorization_code_flow`]; `default_scopes` above
-    /// stays in place until slice 3 unifies the two.
+    /// Catalog of OAuth scopes the interactive picker offers for
+    /// this provider. The picker renders a `dialoguer::MultiSelect`
+    /// from it with `required: true` entries pre-checked and locked,
+    /// and its output reaches the authorization URL through the
+    /// `extra_scopes` parameter on [`run_authorization_code_flow`].
+    ///
+    /// `default_scopes` above is a separate list and the two are not
+    /// unified: a provider's floor is what `default_scopes` holds,
+    /// and this catalog is what an operator may add to it.
     pub scopes: &'static [ScopeChoice],
 }
 
@@ -162,9 +162,9 @@ const LINEAR_SCOPES: &[ScopeChoice] = &[
 /// Notion does not use OAuth scopes for permission scoping. Each
 /// Notion integration receives access to a per-workspace set of
 /// pages selected during the Notion connection UI, not via OAuth
-/// scopes. The picker (slice 2) short-circuits for this provider
-/// with a "no scope choices needed at OAuth time" message; this
-/// empty catalog is the data representation of that fact.
+/// scopes. The picker short-circuits for this provider with a "no
+/// scope choices needed at OAuth time" message; this empty catalog is
+/// the data representation of that fact.
 const NOTION_SCOPES: &[ScopeChoice] = &[];
 
 /// GitHub scope catalog. GitHub accepts auth requests with no
@@ -323,10 +323,10 @@ const GOOGLE: OAuthProvider = OAuthProvider {
 };
 
 /// Compute the set of scope ids the picker pre-checks. Returns
-/// every `required: true` scope in catalog order. Used by slice 2
-/// as the initial selection state for `dialoguer::MultiSelect`.
-/// The picker also consults `required` per-entry to lock the
-/// pre-checked items so the operator cannot deselect them.
+/// every `required: true` scope in catalog order, which is the
+/// initial selection state for `dialoguer::MultiSelect`. The picker
+/// also consults `required` per entry to lock the pre-checked items,
+/// so an operator cannot deselect a scope the provider needs.
 pub fn default_selected_scopes(provider: &OAuthProvider) -> Vec<&'static str> {
     provider
         .scopes
@@ -336,8 +336,9 @@ pub fn default_selected_scopes(provider: &OAuthProvider) -> Vec<&'static str> {
         .collect()
 }
 
-/// Look up a provider by name. Returns `None` if the name isn't in
-/// the slice 2 registry.
+/// Look up a provider by name. `None` when the name is not in the
+/// registry, which is what makes an unknown provider a configuration
+/// error rather than an unauthenticated request.
 pub fn lookup_provider(name: &str) -> Option<&'static OAuthProvider> {
     match name {
         "linear" => Some(&LINEAR),
@@ -738,9 +739,9 @@ async fn accept_callback(listener: tokio::net::TcpListener) -> Result<CallbackPa
 }
 
 fn percent_decode(s: &str) -> String {
-    // Tiny URL-decode. The OAuth params are typically URL-safe
-    // base64 codes and a CSRF token; full RFC 3986 compliance is
-    // overkill for slice 2.
+    // Tiny URL-decode. The OAuth params are URL-safe base64 codes
+    // and a CSRF token, so the cases full RFC 3986 decoding adds do
+    // not arise on this path.
     let mut out = String::with_capacity(s.len());
     let mut bytes = s.bytes();
     while let Some(b) = bytes.next() {

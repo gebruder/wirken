@@ -5,8 +5,6 @@
 //! in `mcp.json`, and exposes the resulting MCP tools to the agent over
 //! a Unix domain socket.
 //!
-//! See `docs/managed-agents-parity.md` item 7 for the full design.
-//!
 //! Wire protocol: NDJSON, see [`wire`].
 
 pub mod auth;

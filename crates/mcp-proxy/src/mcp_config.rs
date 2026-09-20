@@ -6,10 +6,9 @@
 //!
 //! ## Schema
 //!
-//! Item 7 slice 2 of `docs/managed-agents-parity.md` extends the
-//! schema with HTTP transport and OAuth2-protected MCP servers. The
-//! enum is `untagged` so existing stdio configs without an explicit
-//! `transport` field still parse — backward compatibility for any
+//! The schema covers stdio, HTTP transport and OAuth2-protected MCP
+//! servers. The enum is `untagged` so a stdio config with no explicit
+//! `transport` field still parses: backward compatibility for any
 //! `mcp.json` written before this slice.
 //!
 //! ```jsonc
@@ -185,7 +184,7 @@ pub enum McpAuth {
     Bearer { credential: String },
     /// OAuth2 authorization code flow. `provider` selects a
     /// hardcoded entry from the per-provider endpoint registry
-    /// (`linear`, `notion`, `github`, `google` for slice 2).
+    /// (`linear`, `notion`, `github`, `google`).
     /// `credential` is a `vault:NAME` string pointing at a vault
     /// entry that holds the JSON-serialized [`OAuthCredential`]
     /// (`access_token`, `refresh_token`, `expires_at`, …). Run

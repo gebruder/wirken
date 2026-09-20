@@ -45,9 +45,9 @@ pub async fn run() -> Result<(), ProxyError> {
 
     // Open the credential vault. The vault handle stays in this process
     // for the lifetime of the proxy and is never sent to the agent.
-    // Wrapped in `Arc<Mutex<Option<_>>>` so the auth providers (item 7
-    // slice 2 — BearerAuth, OAuth2Auth) can hold a long-lived
-    // reference and refresh tokens on the request path.
+    // Wrapped in `Arc<Mutex<Option<_>>>` so the auth providers,
+    // BearerAuth and OAuth2Auth, can hold a long-lived reference and
+    // refresh tokens on the request path.
     let vault: SharedVault = Arc::new(StdMutex::new(open_vault(&data_dir)));
     if vault.lock().expect("vault mutex").is_none() {
         tracing::warn!(

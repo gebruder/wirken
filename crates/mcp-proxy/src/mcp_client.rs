@@ -29,9 +29,9 @@ pub struct McpToolResult {
 }
 
 /// A connected MCP server client. Holds a [`Transport`] enum so the
-/// same client logic works over stdio (item 7 slice 1) and HTTP
-/// (item 7 slice 2). The MCP protocol itself is identical at the
-/// JSON-RPC layer; the transport is just a byte mover.
+/// same client logic works over stdio and HTTP: the MCP protocol is
+/// identical at the JSON-RPC layer, and the transport only moves
+/// bytes.
 pub struct McpClient {
     pub name: String,
     transport: Transport,

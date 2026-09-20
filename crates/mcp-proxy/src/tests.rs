@@ -211,8 +211,8 @@ fn response_error_round_trip() {
 // Boots an in-process server bound to a tempdir UDS, opens a client
 // connection, walks the hello → list_tools → shutdown handshake, and
 // asserts the proxy correctly returns an empty tool set for an agent
-// that has no MCP servers loaded. This is the slice 1 happy path
-// without depending on a real MCP subprocess.
+// that has no MCP servers loaded, without depending on a real MCP
+// subprocess.
 // ---------------------------------------------------------------------------
 
 // Miri interprets Rust and has no sockets, so the transport tests
@@ -415,7 +415,7 @@ async fn server_rejects_tampered_signature() {
 }
 
 // ---------------------------------------------------------------------------
-// Item 7 slice 2: HTTP transport + auth providers
+// HTTP transport and auth providers
 // ---------------------------------------------------------------------------
 
 mod http_transport_test {
@@ -536,8 +536,10 @@ mod http_transport_test {
     #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]
     #[tokio::test]
     async fn http_transport_rejects_non_localhost_http() {
-        // Plain http:// to a non-localhost host must be rejected at
-        // construction time. Slice 2 enforces HTTPS for remote URLs.
+        // Plain http:// to a non-localhost host is rejected at
+        // construction time: a remote MCP server carries credentials,
+        // so the transport refuses to build rather than failing on
+        // the first request.
         let result = HttpTransport::new("http://example.com/rpc".to_string(), Box::new(NoAuth));
         assert!(result.is_err());
     }

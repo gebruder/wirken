@@ -276,7 +276,7 @@ impl StdioTransport {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP transport (item 7 slice 2)
+// HTTP transport
 // ---------------------------------------------------------------------------
 
 /// HTTP JSON-RPC transport. Sends MCP requests as POST bodies to a

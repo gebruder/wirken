@@ -5,13 +5,13 @@
 //! 1. The registry is partitioned by `agent_id`. Tools from agent A's
 //!    `mcp.json` are never visible to agent B, even when both connect to
 //!    the same proxy process.
-//! 2. Vault `vault:`-prefixed env values are resolved here using the
-//!    real credential store. Previously the agent crate accepted a
-//!    closure that callers wired to a no-op (`|_| None`) — meaning
-//!    `vault:` was effectively unsupported. Slice 1 fixed this.
+//! 2. Vault `vault:`-prefixed env values are resolved here against
+//!    the real credential store. The agent crate took a resolver
+//!    closure that every caller wired to a no-op, so `vault:` parsed
+//!    and then silently resolved to nothing.
 //! 3. The vault handle never leaves this process.
-//! 4. Item 7 slice 2: HTTP MCP servers with bearer or OAuth2 auth
-//!    are loaded via [`HttpTransport`] + a pluggable
+//! 4. HTTP MCP servers with bearer or OAuth2 auth are loaded via
+//!    [`HttpTransport`] and a pluggable
 //!    [`AuthProvider`]. The auth provider holds an `Arc` to the
 //!    shared vault and resolves credentials on every request.
 //!

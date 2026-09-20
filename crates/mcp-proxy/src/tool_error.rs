@@ -1,7 +1,7 @@
 //! Typed MCP tool-call error variants.
 //!
-//! Bundle A follow-up: previously the only typed error a tool call
-//! could surface was `ProxyError` (transport/protocol/io) plus a flat
+//! Previously the only typed error a tool call could surface was
+//! `ProxyError` (transport/protocol/io) plus a flat
 //! `McpToolResult { success: false, output: String }` for JSON-RPC
 //! errors. The agent runtime had no way to distinguish "credential
 //! lacks the scope this tool needs" from any other failure, so the
