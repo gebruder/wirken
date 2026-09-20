@@ -187,6 +187,14 @@ jobs:
       - name: Message-field reporter gate tests
         run: python3 -W error::ResourceWarning scripts/test_anthropic_export_message_fields.py
 
+      # Checks on the text of Rust source. They are lints, not tests,
+      # and the first one is what keeps them out of the test binary: a
+      # `#[test]` that greps a `.rs` file breaks on a rename that
+      # changed nothing and passes on a rewrite that broke everything,
+      # while reading as behavioural coverage.
+      - name: Source lints
+        run: python3 -W error::ResourceWarning scripts/source_lints.py
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest

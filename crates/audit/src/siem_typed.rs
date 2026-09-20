@@ -163,7 +163,7 @@ pub(crate) fn variant_kind_for(event: &SessionEvent) -> &'static str {
     variant_kind(event)
 }
 
-fn variant_kind(event: &SessionEvent) -> &'static str {
+pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
     match event {
         SessionEvent::UserMessage { .. } => "user_message",
         SessionEvent::AssistantMessage { .. } => "assistant_message",

@@ -1425,6 +1425,7 @@ mod replay_tests {
 
         let offered: Vec<String> = agent
             .build_turn_tool_defs(Vec::new())
+            .into_inner()
             .into_iter()
             .map(|d| d.name)
             .collect();
@@ -1569,6 +1570,7 @@ mod replay_tests {
             .unwrap();
         let offered: Vec<String> = agent
             .build_turn_tool_defs(Vec::new())
+            .into_inner()
             .into_iter()
             .map(|d| d.name)
             .collect();

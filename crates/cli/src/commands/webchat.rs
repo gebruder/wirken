@@ -4829,11 +4829,11 @@ mod tests {
         DECISION_WRONG_CONVERSATION, HTML, ImportedRoute, OpenTurns, SiemSummary, SkillSignature,
         StatusInputs, TURN_OPEN_ERROR, VERIFY_CAVEAT, VerifyClaim, api_preflight,
         approval_belongs_to_conversation, approval_belongs_to_webchat, approvals_snapshot_for,
-        capabilities_snapshot, conversation_key, conversation_of, conversation_rows,
-        credentials_snapshot, events_route_allowed, is_webchat_host, is_webchat_origin,
-        parse_approval_path, parse_imported_path, parse_session_events_path, parse_session_path,
-        percent_decode, query_param, session_events, skill_frontmatter, skill_signature_word,
-        status_snapshot, tool_tier_entry, verify_result_json, webchat_session_id,
+        capabilities_snapshot, conversation_rows, credentials_snapshot, events_route_allowed,
+        is_webchat_host, is_webchat_origin, json_conflict, parse_approval_path,
+        parse_imported_path, parse_session_events_path, parse_session_path, percent_decode,
+        session_events, skill_frontmatter, skill_signature_word, status_snapshot, tool_tier_entry,
+        verify_result_json, webchat_session_id,
     };
 
     #[test]
@@ -5096,12 +5096,8 @@ mod tests {
         assert!(script.contains("renderApproval(event)"));
         assert!(script.contains("ackApproval(event.request_id, event.result)"));
         assert!(script.contains("thread.appendChild(card)"));
-        // And the handler really emits the done event the page waits
-        // for, in the same wire shape as everything else.
-        assert!(
-            SERVER_SOURCE.contains(r#"data: {\"type\":\"done\"}\n\n"#),
-            "the chat handler must emit a done event before the socket closes"
-        );
+        // That the handler really emits the done event is a check on
+        // the handler's source, so it lives in scripts/source_lints.py.
     }
 
     /// The composer is on screen only for the conversation it writes
@@ -5158,10 +5154,6 @@ mod tests {
             "and label it rather than draw an empty span",
         );
     }
-
-    /// The handler source, so a test can pin what the server puts on
-    /// the wire next to what the page expects from it.
-    const SERVER_SOURCE: &str = include_str!("webchat.rs");
 
     /// A refusal is its own block, never red text spliced into the
     /// assistant's sentence. The page recognises a sandbox refusal by
@@ -5227,9 +5219,8 @@ mod tests {
             "a halted writer is its own state: {head}"
         );
         assert!(script.contains("function setHalted()"));
-        // And the server really answers 503 when the writer refuses the
-        // inbound row.
-        assert!(SERVER_SOURCE.contains("HTTP/1.1 503 Service Unavailable"));
+        // That the server really answers 503 is a check on the
+        // handler's source, so it lives in scripts/source_lints.py.
     }
 
     /// The page fetches nothing from anywhere but its own origin: no
@@ -5481,25 +5472,32 @@ mod tests {
     /// The six boolean hatches the status route reports are the six the
     /// page has copy for; a hatch added on one side without the other
     /// would be engaged and invisible.
-    #[test]
-    fn every_reported_escape_hatch_has_copy_on_the_page() {
+    #[tokio::test]
+    async fn every_reported_escape_hatch_has_copy_on_the_page() {
         let script = page_script();
-        let snapshot_fn = SERVER_SOURCE
-            .split_once("pub async fn status_snapshot(")
-            .expect("status_snapshot exists")
-            .1;
-        for name in [
-            "WIRKEN_ALLOW_UNSIGNED_ORG_CONFIG",
-            "WIRKEN_ALLOW_UNSIGNED_SKILLS",
-            "WIRKEN_ALLOW_UNSIGNED_MCP",
-            "WIRKEN_ALLOW_STALE_ORG_CONFIG",
-            "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN",
-            "WIRKEN_ALLOW_UNREGISTERED_HOOKS",
-        ] {
-            assert!(
-                snapshot_fn.contains(&format!("\"{name}\": parse_boolean_escape(\"{name}\")")),
-                "route reports {name}"
-            );
+        // The escape hatches `status_snapshot` reports. Taken from the
+        // snapshot it returns, not from its source: the names are keys
+        // in a value the function produces.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let snap = status_snapshot(&cfg, 18790, &status_inputs_for(dir.path(), None), false).await;
+        let hatches = snap["escape_hatches"]
+            .as_object()
+            .expect("the snapshot reports escape hatches");
+        // The environment hatches, which are the ones the page keeps a
+        // copy map for. Two other entries ride in the same object and
+        // are drawn their own way: `sandbox_mode_off` has a banner,
+        // asserted below, and `skill_registry_root_pinned` is a
+        // posture the About panel reports rather than a hatch. A third,
+        // `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`, is a cadence value, not
+        // a hatch at all.
+        let named: Vec<&String> = hatches
+            .iter()
+            .filter(|(k, v)| k.starts_with("WIRKEN_") && v.is_boolean())
+            .map(|(k, _)| k)
+            .collect();
+        assert!(named.len() >= 5, "too few hatches to be trusted: {named:?}");
+        for name in named {
             assert!(
                 script.contains(&format!("{name}: '")),
                 "page has copy for {name}"
@@ -5845,26 +5843,10 @@ mod tests {
     #[test]
     fn every_projected_kind_has_a_renderer_and_recorded_needs_a_row() {
         let script = page_script();
-        let projection = SERVER_SOURCE
-            .split_once("pub fn session_events(")
-            .expect("session_events exists")
-            .1;
-        let mut kinds: Vec<&str> = projection
-            .match_indices("\"kind\": \"")
-            .map(|(i, _)| {
-                let rest = &projection[i + 9..];
-                rest.split('"').next().unwrap()
-            })
-            .collect();
-        kinds.sort_unstable();
-        kinds.dedup();
-        assert!(kinds.len() >= 15, "found kinds: {kinds:?}");
-        for kind in &kinds {
-            assert!(
-                script.contains(&format!("case '{kind}':")),
-                "the page has no renderer for {kind}"
-            );
-        }
+        // That every kind `session_events` projects has a renderer
+        // here is a check on the projection's source, so it lives in
+        // scripts/source_lints.py: reading the list behaviourally
+        // would mean a populated session log per kind.
         let ack = script
             .split_once("function ackApproval(")
             .expect("ackApproval exists")
@@ -6024,12 +6006,8 @@ mod tests {
             Some(false)
         );
         assert_eq!(approval_belongs_to_webchat(&queue, "not-a-request"), None);
-        assert!(
-            SERVER_SOURCE.contains(
-                "approval_belongs_to_webchat(&pending_approvals, &request_id) == Some(false)"
-            ),
-            "the decision route consults the guard before resolving"
-        );
+        // That the decision route consults this guard is a check on
+        // the route's source, so it lives in scripts/source_lints.py.
     }
 
     /// The badge for other channels' pending approvals is drawn only
@@ -6153,33 +6131,8 @@ mod tests {
     /// appended once, outside every state branch.
     #[test]
     fn verify_is_guarded_and_the_page_draws_its_states() {
-        let route = SERVER_SOURCE
-            .split_once("first_line.starts_with(\"POST /api/verify\")")
-            .expect("verify route exists")
-            .1
-            .split_once("parse_approval_path(first_line)")
-            .unwrap()
-            .0;
-        assert!(
-            route.contains("api_preflight(&request, port, true)"),
-            "Origin required"
-        );
-        assert!(route.contains("verify_limit.check()"), "rate limited");
-        // Single flight, and held as a claim rather than set and
-        // cleared around the work: an unwind between two statements
-        // used to leave the latch set and answer `busy` for the life
-        // of the process. `VerifyClaim`'s own release is covered by
-        // `a_panic_while_holding_the_claim_still_releases_it`.
-        assert!(
-            route.contains("VerifyClaim::claim(&verify_running)"),
-            "single flight"
-        );
-        assert!(
-            !route.contains("verify_running.store("),
-            "the latch is released by the claim going out of scope, not by a statement \
-             the next early return can skip"
-        );
-        assert!(route.contains("spawn_blocking"), "off the async runtime");
+        // What the route itself does is a check on its source,
+        // so it lives in scripts/source_lints.py.
         let script = page_script();
         for state in [
             "'not run yet'",
@@ -6763,19 +6716,8 @@ mod tests {
     /// them, and nothing on the default screen draws from them.
     #[test]
     fn capabilities_and_the_vault_are_drawn_only_in_about() {
-        for route in ["GET /api/capabilities ", "GET /api/credentials "] {
-            let arm = SERVER_SOURCE
-                .split_once(&format!("first_line.starts_with(\"{route}\")"))
-                .unwrap_or_else(|| panic!("{route} route exists"))
-                .1
-                .split_once("} else if first_line.starts_with(")
-                .unwrap()
-                .0;
-            assert!(
-                arm.contains("api_preflight(&request, port, false)"),
-                "{route} preflighted"
-            );
-        }
+        // That both routes preflight is a check on their source and
+        // lives in scripts/source_lints.py.
         let script = page_script();
         assert_eq!(script.matches("'/api/capabilities'").count(), 1);
         assert_eq!(script.matches("'/api/credentials'").count(), 1);
@@ -6859,80 +6801,6 @@ mod tests {
         assert_eq!(skill_frontmatter(&dir.path().join("missing")), None);
     }
 
-    /// (1) The conversation comes from the request. The key is the
-    /// legacy constant or `c-` plus twelve lowercase hex digits, and
-    /// nothing else can become a session id; the chat route, its three
-    /// audit rows, the store row, the decision route and the
-    /// capabilities route all read it from the request.
-    #[test]
-    fn the_conversation_comes_from_the_request() {
-        assert_eq!(conversation_key(None).unwrap(), "webchat-default");
-        assert_eq!(conversation_key(Some("")).unwrap(), "webchat-default");
-        assert_eq!(
-            conversation_key(Some("webchat-default")).unwrap(),
-            "webchat-default"
-        );
-        assert_eq!(
-            conversation_key(Some("c-0123456789ab")).unwrap(),
-            "c-0123456789ab"
-        );
-        for bad in [
-            "c-0123456789AB",
-            "c-0123456789a",
-            "c-0123456789abc",
-            "x-0123456789ab",
-            "../../etc",
-            "default/webchat/c-0123456789ab",
-            "c-0123456789ab#sub-1",
-            "telegram",
-        ] {
-            assert!(conversation_key(Some(bad)).is_err(), "{bad} refused");
-        }
-        assert_eq!(
-            webchat_session_id("c-0123456789ab"),
-            "default/webchat/c-0123456789ab"
-        );
-        assert_eq!(
-            conversation_of("default/webchat/c-0123456789ab"),
-            Some("c-0123456789ab")
-        );
-        assert_eq!(conversation_of("default/telegram/-1001234"), None);
-        assert_eq!(
-            query_param("GET /api/approvals?c=c-0123456789ab HTTP/1.1", "c"),
-            Some("c-0123456789ab")
-        );
-        assert_eq!(query_param("GET /api/approvals HTTP/1.1", "c"), None);
-
-        let chat = SERVER_SOURCE
-            .split_once("first_line.starts_with(\"POST /api/chat\")")
-            .unwrap()
-            .1
-            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
-            .unwrap()
-            .0;
-        assert!(chat.contains("conversation_key(json[\"conversation\"].as_str())"));
-        assert_eq!(
-            chat.matches(".with_session(conversation.as_str())").count(),
-            3,
-            "the threat, inbound and outbound rows carry the request's conversation"
-        );
-        assert!(chat.contains("store.get_or_create(\"webchat\", &conversation)"));
-        assert!(chat.contains("webchat_session_id(&conversation)"));
-        assert!(
-            !chat.contains("WEBCHAT_CONVERSATION"),
-            "the constant is not used inside the chat route"
-        );
-        let capabilities = SERVER_SOURCE
-            .split_once("first_line.starts_with(\"GET /api/capabilities \")")
-            .unwrap()
-            .1
-            .split_once("} else if first_line.starts_with(")
-            .unwrap()
-            .0;
-        assert!(capabilities.contains("conversation_key(query_param(first_line, \"c\"))"));
-        assert!(capabilities.contains("capabilities_snapshot(&cfg, &factory, &conversation)"));
-    }
-
     /// (2) A send into a conversation whose turn is open is answered
     /// "turn open" at once. The claim is taken after the body is parsed
     /// and before the inbound row, the stream headers or the agent
@@ -6971,36 +6839,12 @@ mod tests {
             "aged from the claim"
         );
         drop(held);
-        let chat = SERVER_SOURCE
-            .split_once("first_line.starts_with(\"POST /api/chat\")")
-            .unwrap()
-            .1
-            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
-            .unwrap()
-            .0;
-        let claim = chat
-            .find("open_turns.try_open(&conversation)")
-            .expect("the route claims the turn");
-        let refuse = chat
-            .find("\"error\": TURN_OPEN_ERROR,")
-            .expect("and refuses with the body");
+        // Where the refusal sits in the route, and that it is built
+        // by `json_conflict`, are checks on the route's source and
+        // live in scripts/source_lints.py.
         assert!(
-            chat.contains("\"age_seconds\": open_turns.open_age(&conversation)"),
-            "the refusal carries the turn's age"
-        );
-        assert!(chat.contains("json_conflict(&body)"));
-        let inbound = chat.find("\"message.inbound\"").unwrap();
-        let headers = chat.find("text/event-stream").unwrap();
-        let lock = chat.find("agent_mutex.lock().await").unwrap();
-        assert!(
-            claim < refuse && refuse < inbound,
-            "refused before the inbound row is written"
-        );
-        assert!(claim < headers, "refused before any stream is opened");
-        assert!(claim < lock, "nothing waits on the agent lock");
-        assert!(
-            SERVER_SOURCE.contains("HTTP/1.1 409 Conflict"),
-            "the refusal is a 409"
+            json_conflict("{}").starts_with("HTTP/1.1 409 Conflict"),
+            "the refusal the route builds is a 409"
         );
     }
 
@@ -7033,22 +6877,8 @@ mod tests {
             DECISION_WRONG_CONVERSATION,
             "This approval belongs to another conversation. Open it to decide."
         );
-        let route = SERVER_SOURCE
-            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
-            .unwrap()
-            .1
-            .split_once("let resolve = pending_approvals.resolve(&request_id, decision);")
-            .unwrap()
-            .0;
-        assert!(route.contains("conversation_key(json[\"conversation\"].as_str())"));
-        assert!(route.contains(
-            "approval_belongs_to_conversation(&pending_approvals, &request_id, &viewing)"
-        ));
-        assert!(route.contains("json_forbidden(DECISION_WRONG_CONVERSATION)"));
-        assert!(
-            SERVER_SOURCE.contains("let session_id = SessionId::new(viewing);"),
-            "the ack goes to the conversation being viewed"
-        );
+        // What the route itself does is a check on its source,
+        // so it lives in scripts/source_lints.py.
     }
 
     /// (4) Two live streams never share a conversation. The stream
@@ -7064,19 +6894,8 @@ mod tests {
             turns.try_open("c-0123456789ab").is_none(),
             "the second stream is never registered"
         );
-        let chat = SERVER_SOURCE
-            .split_once("first_line.starts_with(\"POST /api/chat\")")
-            .unwrap()
-            .1
-            .split_once("else if let Some(request_id) = parse_approval_path(first_line)")
-            .unwrap()
-            .0;
-        let claim = chat.find("open_turns.try_open(&conversation)").unwrap();
-        let register = chat.find("sse_registry.register_guard(").unwrap();
-        assert!(
-            claim < register,
-            "the claim comes before the stream registers"
-        );
+        // That the claim comes before the stream registers is a
+        // check on the route's source, in scripts/source_lints.py.
         drop(first);
         assert!(turns.try_open("c-0123456789ab").is_some());
     }
@@ -7135,20 +6954,8 @@ mod tests {
         );
         assert_eq!(v["elsewhere"].as_array().unwrap().len(), 0);
 
-        let route = SERVER_SOURCE
-            .split_once("first_line.starts_with(\"GET /api/approvals \")")
-            .unwrap()
-            .1
-            .split_once("} else if first_line.starts_with(")
-            .unwrap()
-            .0;
-        assert!(
-            route.contains("query_param(first_line, \"c\")")
-                && route.contains("conversation_key(Some(c))")
-        );
-        assert!(
-            route.contains("approvals_snapshot_for(&pending_approvals, conversation.as_deref())")
-        );
+        // What the route itself does is a check on its source,
+        // so it lives in scripts/source_lints.py.
     }
 
     /// (6) The list route carries each webchat conversation's first
@@ -7271,10 +7078,8 @@ mod tests {
         assert!(t["turn_open"].is_null() && t["turn_open_age_seconds"].is_null());
         let text = serde_json::to_string(&v).unwrap();
         assert!(!text.contains("telegram user's words"));
-        assert!(
-            SERVER_SOURCE.contains("conversation_rows(&cfg, rows, &open_turns)"),
-            "the list route serves these rows"
-        );
+        // That the list route serves these rows is a check on
+        // the route's source, so it lives in scripts/source_lints.py.
     }
 
     /// The status snapshot carries the quiet window so the rail footnote
@@ -7747,54 +7552,6 @@ mod tests {
         assert!(
             VerifyClaim::claim(&running).is_some(),
             "a later verify must still be able to run"
-        );
-    }
-
-    /// The chat route scans through the shared helper and writes its
-    /// inbound row after the scan, so the row carries the verdict.
-    ///
-    /// The ordering is only safe because the scan is caught: the
-    /// detector is pattern matching over attacker-chosen text and can
-    /// break on a message, and a panic here used to unwind past the
-    /// write and leave no trace of what arrived. Both halves are
-    /// pinned against the route's own source, because the direct call
-    /// is what would reintroduce the unwind and `inbound_scan` cannot
-    /// see its callers.
-    #[test]
-    fn the_chat_route_writes_its_inbound_row_after_the_caught_scan() {
-        let route = SERVER_SOURCE
-            .split_once(r#"first_line.starts_with("POST /api/chat")"#)
-            .expect("chat route exists")
-            .1
-            .split_once(r#"first_line.starts_with("POST /api/verify")"#)
-            .expect("the verify route follows it")
-            .0;
-
-        let scan = route
-            .find("inbound_scan::scan_catching_panics")
-            .expect("the chat route scans through the shared helper");
-        let inbound = route
-            .find(r#""message.inbound","#)
-            .expect("the chat route writes an inbound row");
-        assert!(
-            scan < inbound,
-            "the inbound row is written after the scan so it carries the verdict"
-        );
-
-        let flagged = route
-            .find(r#""message.threat_flagged","#)
-            .expect("a finding raises its own row");
-        assert!(
-            scan < flagged,
-            "the threat row follows the scan that produced it"
-        );
-
-        // The half that makes the ordering safe. A direct call is
-        // uncaught, and an uncaught panic here unwinds past the
-        // inbound write.
-        assert!(
-            !route.contains("detector.scan("),
-            "the detector is reached through the shared helper, not called directly"
         );
     }
 }

@@ -2,7 +2,16 @@ use chrono::{Duration, Utc};
 use tempfile::TempDir;
 
 use crate::event::{ActorKind, AuditEvent};
+// Every field type `every_session_event` has to name. Imported rather
+// than path-qualified because the list below reads as data.
 use crate::log::{AuditLog, AuditQuery, VerifyResult};
+use crate::session_log::HexBytes;
+use crate::session_log::{
+    ApprovalScopeKind, BudgetAction, ChainHeadReason, EgressDecision, GrantExpiryDetection,
+    HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome, ImportedSearchOutcome,
+    PhaseDenyContent, PhaseExitReason, SandboxEgressModeLabel, SkillDeniedReason, SubagentStatus,
+    ToolsHashVersion,
+};
 use crate::writer::AuditWriter;
 
 // ---------------------------------------------------------------------------
@@ -2465,143 +2474,499 @@ use crate::{
     TrustLevel, cross_check_subagent_session,
 };
 
-/// serde's `rename_all = "snake_case"`, reimplemented so the drift
-/// guards below can compute the wire tag of a variant without
-/// constructing one.
+/// One value of every `SessionEvent` variant.
 ///
-/// Pinned against real serde output by
-/// `wire_tag_matches_serde_for_representative_variants`; if serde ever
-/// changes its casing rule, that test fails and this one is wrong.
-fn wire_tag(variant: &str) -> String {
-    let mut out = String::new();
-    for (i, ch) in variant.char_indices() {
-        if i > 0 && ch.is_uppercase() {
-            out.push('_');
-        }
-        out.push(ch.to_ascii_lowercase());
-    }
-    out
+/// The list used to be read out of `session_log.rs` with
+/// `include_str!`, which made the test pass or fail on the text of a
+/// source file: a rename that kept the wire tag broke it, and a
+/// variant declared in a shape the parser did not expect went
+/// unchecked. These are real values, so what the tests below read is
+/// what serde and the shipped functions actually produce.
+///
+/// Kept in step with the enum by [`variant_name`] below, whose match
+/// the compiler requires to be exhaustive, and by
+/// [`SESSION_EVENT_VARIANTS`].
+fn every_session_event() -> Vec<SessionEvent> {
+    vec![
+        SessionEvent::UserMessage {
+            content: String::new(),
+            inbound_id: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::AssistantMessage {
+            content: String::new(),
+            agent_id: String::new(),
+        },
+        SessionEvent::AssistantToolCalls {
+            calls: Vec::new(),
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::ToolResult {
+            call_id: String::new(),
+            tool_name: String::new(),
+            output: String::new(),
+            success: false,
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::HttpRequest {
+            method: String::new(),
+            host: String::new(),
+            path: String::new(),
+            status: 0,
+            credential: None,
+            truncated: false,
+            agent_id: String::new(),
+        },
+        SessionEvent::LlmRequest {
+            provider: String::new(),
+            model: String::new(),
+            request_id: String::new(),
+            tools_hash: HashHex(String::new()),
+            tools_hash_version: ToolsHashVersion::V1,
+            messages_hash: HashHex(String::new()),
+            agent_id: String::new(),
+            credential_id: None,
+            sender_id: None,
+        },
+        SessionEvent::LlmResponse {
+            request_id: String::new(),
+            finish_reason: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            latency_ms: 0,
+            agent_id: String::new(),
+            credential_id: None,
+            input_cost_usd_micros: None,
+            output_cost_usd_micros: None,
+            total_cost_usd_micros: None,
+            sender_id: None,
+        },
+        SessionEvent::BudgetExceeded {
+            agent_id: String::new(),
+            credential_id: None,
+            window_spend_usd_micros: 0,
+            ceiling_usd_micros: 0,
+            window: String::new(),
+            action: BudgetAction::Alerted,
+            tool: None,
+        },
+        SessionEvent::PermissionDenied {
+            tool: String::new(),
+            action_key: String::new(),
+            denial_source: DenialSource::Tier,
+            tier: None,
+            agent_id: String::new(),
+            trigger: None,
+            denied_via: None,
+            denial_reason: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::PermissionApproved {
+            action_key: String::new(),
+            agent_id: String::new(),
+            approved_by: String::new(),
+            scope: ApprovalScopeKind::Persisted,
+            session_id: None,
+            approved_via: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::PermissionRenewed {
+            action_key: String::new(),
+            agent_id: String::new(),
+            approved_by: String::new(),
+            previous_expires_at: Utc::now(),
+            expires_at: Utc::now(),
+            approved_via: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::PermissionGrantExpired {
+            action_key: String::new(),
+            agent_id: String::new(),
+            tool: None,
+            tier: None,
+            expired_at: Utc::now(),
+            detected_by: GrantExpiryDetection::ToolCall,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::PermissionGrantPruned {
+            action_key: String::new(),
+            agent_id: String::new(),
+            expires_at: Utc::now(),
+        },
+        SessionEvent::SubagentSessionBound {
+            agent_id: String::new(),
+            parent_session_id: String::new(),
+            depth: 0,
+            max_permission_tier: String::new(),
+            tools_granted: Vec::new(),
+            offered_tools: Vec::new(),
+        },
+        SessionEvent::SessionScopedApprovalsCleared {
+            session_id: String::new(),
+            count: 0,
+            reason: String::new(),
+        },
+        SessionEvent::PhaseEntered {
+            skill_id: String::new(),
+            phase_name: String::new(),
+            denied: PhaseDenyContent::default(),
+        },
+        SessionEvent::PhaseExited {
+            skill_id: String::new(),
+            phase_name: String::new(),
+            reason: PhaseExitReason::PhaseChange,
+        },
+        SessionEvent::SkillPermissionDenied {
+            axis: String::new(),
+            requested: String::new(),
+            agent_id: String::new(),
+            trigger: None,
+            denied_reason: SkillDeniedReason::Profile,
+        },
+        SessionEvent::PerspectiveSkipped {
+            run_id: String::new(),
+            topic: String::new(),
+            reason: String::new(),
+        },
+        SessionEvent::PerspectiveExpansion {
+            run_id: String::new(),
+            topic: String::new(),
+            perspectives: Vec::new(),
+            expansion_id: String::new(),
+            dropped_for_collision: Vec::new(),
+        },
+        SessionEvent::HttpFetch {
+            source: String::new(),
+            host: String::new(),
+            url: String::new(),
+            outcome: HttpFetchOutcome::Success,
+            http_status_code: None,
+            bytes: 0,
+            run_id: None,
+            expansion_id: None,
+            agent_id: None,
+            skill_name: None,
+        },
+        SessionEvent::CandidateScored {
+            run_id: String::new(),
+            candidate_id: 0,
+            keyword_match_score: 0,
+            matched_keywords: Vec::new(),
+            expansion_id: None,
+        },
+        SessionEvent::CandidateLlmScored {
+            run_id: String::new(),
+            candidate_id: 0,
+            llm_relevance_score: 0,
+            matched_keyword: String::new(),
+            why_surfaced: String::new(),
+        },
+        SessionEvent::CandidateKept {
+            run_id: String::new(),
+            candidate_id: 0,
+            via: String::new(),
+        },
+        SessionEvent::CandidateSkipped {
+            run_id: String::new(),
+            url_hash: HashHex(String::new()),
+            source: String::new(),
+            reason: String::new(),
+        },
+        SessionEvent::ThemeNamed {
+            run_id: String::new(),
+            theme_id: 0,
+            name: String::new(),
+            member_count: 0,
+        },
+        SessionEvent::InterestsEdited {
+            before_hash: HashHex(String::new()),
+            after_hash: HashHex(String::new()),
+        },
+        SessionEvent::Compaction {
+            spans: Vec::new(),
+            extracts: serde_json::Value::Null,
+            via_model: false,
+            agent_id: String::new(),
+            provider: None,
+            model: None,
+        },
+        SessionEvent::ExternalToolOutput {
+            tool: String::new(),
+            run_id: String::new(),
+            item_count: 0,
+            items: serde_json::Value::Null,
+            ruleset_sha: None,
+            agent_id: String::new(),
+        },
+        SessionEvent::Attestation {
+            chain_head_seq: 0,
+            chain_head_hash: HashHex(String::new()),
+            signature: HexBytes(String::new()),
+            signer_pubkey: HashHex(String::new()),
+        },
+        SessionEvent::ChainHead {
+            reason: ChainHeadReason::SessionStart,
+            sequence_range_start: 0,
+            sequence_range_end: 0,
+            prev_chain_hash: HashHex(String::new()),
+            current_chain_hash: HashHex(String::new()),
+            signature: HexBytes(String::new()),
+            signing_pubkey: HashHex(String::new()),
+            schema_version: 0,
+        },
+        SessionEvent::SystemPromptSet {
+            content: String::new(),
+            agent_id: String::new(),
+        },
+        SessionEvent::Rewind {
+            old_last_seq: 0,
+            deleted_count: 0,
+            reason: String::new(),
+        },
+        SessionEvent::SubagentSpawned {
+            child_session_id: String::new(),
+            child_agent_id: String::new(),
+            tools_granted: Vec::new(),
+            max_permission_tier: None,
+        },
+        SessionEvent::SubagentResult {
+            child_session_id: String::new(),
+            output: String::new(),
+            status: SubagentStatus::Ok,
+        },
+        SessionEvent::DeliveryConfirmed {
+            target: String::new(),
+            message_id: String::new(),
+            adapter_id: None,
+        },
+        SessionEvent::DeliveryFailed {
+            target: String::new(),
+            error: String::new(),
+            adapter_id: None,
+        },
+        SessionEvent::AuditLegacy {
+            actor_kind: ActorKind::User,
+            actor_id: String::new(),
+            action: String::new(),
+            target: String::new(),
+            channel: None,
+            detail: serde_json::Value::Null,
+        },
+        SessionEvent::HookRegistered {
+            hook_id: String::new(),
+            hook_type: HookKind::Observe,
+            signature_status: HookSignatureStatus::Registered,
+        },
+        SessionEvent::HookDispatched {
+            hook_id: String::new(),
+            tool_name: String::new(),
+            agent_id: String::new(),
+            decision: HookDecision::Allow,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::EgressHookDispatched {
+            hook_id: String::new(),
+            tool_name: String::new(),
+            agent_id: String::new(),
+            decision: EgressDecision::Allow,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::ToolOutputRedacted {
+            call_id: String::new(),
+            hook_id: String::new(),
+            reason: String::new(),
+            original_sha256: HashHex(String::new()),
+            original_size: 0,
+            redacted_sha256: HashHex(String::new()),
+            redacted_size: 0,
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::MemoryEntryWritten {
+            entry_id: String::new(),
+            channel: String::new(),
+            adapter_id: String::new(),
+            sender_id: String::new(),
+            agent_id: String::new(),
+            origin_session_id: String::new(),
+        },
+        SessionEvent::ImportedChatRead {
+            source_id: String::new(),
+            source_account: None,
+            conversation_uuid: String::new(),
+            message_count: 0,
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::ImportedChatSearched {
+            source_id: None,
+            outcome: ImportedSearchOutcome::Hits,
+            match_count: 0,
+            query_digest: None,
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::ImportStarted {
+            source_id: String::new(),
+            provider: String::new(),
+            source_account: String::new(),
+            archive_sha256: String::new(),
+            actor: String::new(),
+        },
+        SessionEvent::ImportCompleted {
+            source_id: String::new(),
+            provider: String::new(),
+            source_account: String::new(),
+            archive_sha256: String::new(),
+            actor: String::new(),
+            added: 0,
+            updated: 0,
+            unchanged: 0,
+            unorderable: 0,
+            skipped: 0,
+        },
+        SessionEvent::CrossChannelMemoryRead {
+            from_channel: String::new(),
+            to_channel: String::new(),
+            entry_count: 0,
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::SandboxEgressVerdict {
+            host: String::new(),
+            port: 0,
+            allowed: false,
+            reason: None,
+            mode: SandboxEgressModeLabel::None,
+            sensitivity_basis: Vec::new(),
+            escalated: false,
+            agent_id: String::new(),
+            channel: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::SandboxEgressUnsupported {
+            mode: SandboxEgressModeLabel::None,
+            agent_id: String::new(),
+            channel: None,
+            adapter_id: None,
+            sender_id: None,
+        },
+        SessionEvent::HookCrashed {
+            hook_id: String::new(),
+            error: String::new(),
+        },
+        SessionEvent::McpEntryRefused {
+            server_name: String::new(),
+            reason: String::new(),
+        },
+        SessionEvent::McpEntryVerified {
+            server_name: String::new(),
+            signer: String::new(),
+        },
+    ]
 }
 
-/// Every `SessionEvent` variant name declared in `session_log.rs`.
-/// Read from the source rather than listed here, so a variant added
-/// without a matching wire tag fails rather than going unchecked.
-fn declared_variants() -> Vec<String> {
-    let src = include_str!("session_log.rs");
-    let start = src
-        .find("pub enum SessionEvent {")
-        .expect("SessionEvent enum not found");
-    let mut depth = 0usize;
-    let mut end = start;
-    for (i, ch) in src[start..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = start + i;
-                    break;
-                }
-            }
-            _ => {}
-        }
+/// The Rust variant name, from an exhaustive match.
+///
+/// This is the tripwire. A variant added to `SessionEvent` stops this
+/// file compiling until someone writes an arm, and the count assert
+/// then fails until they add a value to [`every_session_event`].
+fn variant_name(event: &SessionEvent) -> &'static str {
+    match event {
+        SessionEvent::UserMessage { .. } => "UserMessage",
+        SessionEvent::AssistantMessage { .. } => "AssistantMessage",
+        SessionEvent::AssistantToolCalls { .. } => "AssistantToolCalls",
+        SessionEvent::ToolResult { .. } => "ToolResult",
+        SessionEvent::HttpRequest { .. } => "HttpRequest",
+        SessionEvent::LlmRequest { .. } => "LlmRequest",
+        SessionEvent::LlmResponse { .. } => "LlmResponse",
+        SessionEvent::BudgetExceeded { .. } => "BudgetExceeded",
+        SessionEvent::PermissionDenied { .. } => "PermissionDenied",
+        SessionEvent::PermissionApproved { .. } => "PermissionApproved",
+        SessionEvent::PermissionRenewed { .. } => "PermissionRenewed",
+        SessionEvent::PermissionGrantExpired { .. } => "PermissionGrantExpired",
+        SessionEvent::PermissionGrantPruned { .. } => "PermissionGrantPruned",
+        SessionEvent::SubagentSessionBound { .. } => "SubagentSessionBound",
+        SessionEvent::SessionScopedApprovalsCleared { .. } => "SessionScopedApprovalsCleared",
+        SessionEvent::PhaseEntered { .. } => "PhaseEntered",
+        SessionEvent::PhaseExited { .. } => "PhaseExited",
+        SessionEvent::SkillPermissionDenied { .. } => "SkillPermissionDenied",
+        SessionEvent::PerspectiveSkipped { .. } => "PerspectiveSkipped",
+        SessionEvent::PerspectiveExpansion { .. } => "PerspectiveExpansion",
+        SessionEvent::HttpFetch { .. } => "HttpFetch",
+        SessionEvent::CandidateScored { .. } => "CandidateScored",
+        SessionEvent::CandidateLlmScored { .. } => "CandidateLlmScored",
+        SessionEvent::CandidateKept { .. } => "CandidateKept",
+        SessionEvent::CandidateSkipped { .. } => "CandidateSkipped",
+        SessionEvent::ThemeNamed { .. } => "ThemeNamed",
+        SessionEvent::InterestsEdited { .. } => "InterestsEdited",
+        SessionEvent::Compaction { .. } => "Compaction",
+        SessionEvent::ExternalToolOutput { .. } => "ExternalToolOutput",
+        SessionEvent::Attestation { .. } => "Attestation",
+        SessionEvent::ChainHead { .. } => "ChainHead",
+        SessionEvent::SystemPromptSet { .. } => "SystemPromptSet",
+        SessionEvent::Rewind { .. } => "Rewind",
+        SessionEvent::SubagentSpawned { .. } => "SubagentSpawned",
+        SessionEvent::SubagentResult { .. } => "SubagentResult",
+        SessionEvent::DeliveryConfirmed { .. } => "DeliveryConfirmed",
+        SessionEvent::DeliveryFailed { .. } => "DeliveryFailed",
+        SessionEvent::AuditLegacy { .. } => "AuditLegacy",
+        SessionEvent::HookRegistered { .. } => "HookRegistered",
+        SessionEvent::HookDispatched { .. } => "HookDispatched",
+        SessionEvent::EgressHookDispatched { .. } => "EgressHookDispatched",
+        SessionEvent::ToolOutputRedacted { .. } => "ToolOutputRedacted",
+        SessionEvent::MemoryEntryWritten { .. } => "MemoryEntryWritten",
+        SessionEvent::ImportedChatRead { .. } => "ImportedChatRead",
+        SessionEvent::ImportedChatSearched { .. } => "ImportedChatSearched",
+        SessionEvent::ImportStarted { .. } => "ImportStarted",
+        SessionEvent::ImportCompleted { .. } => "ImportCompleted",
+        SessionEvent::CrossChannelMemoryRead { .. } => "CrossChannelMemoryRead",
+        SessionEvent::SandboxEgressVerdict { .. } => "SandboxEgressVerdict",
+        SessionEvent::SandboxEgressUnsupported { .. } => "SandboxEgressUnsupported",
+        SessionEvent::HookCrashed { .. } => "HookCrashed",
+        SessionEvent::McpEntryRefused { .. } => "McpEntryRefused",
+        SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
     }
-    let body = &src[start..end];
-    let mut names = Vec::new();
-    for line in body.lines() {
-        // A variant declaration sits at exactly one level of
-        // indentation and opens a struct body or ends the arm.
-        let Some(rest) = line.strip_prefix("    ") else {
-            continue;
-        };
-        if rest.starts_with(' ') || rest.starts_with('#') || rest.starts_with("//") {
-            continue;
-        }
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if name.is_empty() || !name.starts_with(|c: char| c.is_uppercase()) {
-            continue;
-        }
-        if rest[name.len()..].trim_start().starts_with(['{', ',']) {
-            names.push(name);
-        }
-    }
-    names.sort();
-    names.dedup();
-    assert!(
-        names.len() > 40,
-        "the variant scraper found too few to be trusted: {names:?}",
-    );
-    names
 }
 
-/// The wire tag this crate computes is the one serde actually emits.
-///
-/// The guards below compare hand-written strings against
-/// [`wire_tag`], so [`wire_tag`] itself has to be right. These are
-/// real values through real serde: a plain name, one with a leading
-/// acronym, and a long multi-word one.
+/// Raised in the same edit that adds a variant.
+const SESSION_EVENT_VARIANTS: usize = 53;
+
+/// The list covers the enum.
 #[test]
-fn wire_tag_matches_serde_for_representative_variants() {
-    fn tag_of(event: &SessionEvent) -> String {
-        serde_json::to_value(event).unwrap()["kind"]
-            .as_str()
-            .expect("tagged repr always carries a string kind")
-            .to_string()
-    }
-
-    let cases: Vec<(&str, SessionEvent)> = vec![
-        (
-            "PermissionDenied",
-            SessionEvent::PermissionDenied {
-                tool: "exec".into(),
-                action_key: "shell:ls".into(),
-                denial_source: DenialSource::Tier,
-                tier: Some("tier2".into()),
-                agent_id: "default".into(),
-                trigger: None,
-                denied_via: None,
-                denial_reason: None,
-                adapter_id: None,
-                sender_id: None,
-            },
-        ),
-        (
-            "LlmRequest",
-            SessionEvent::LlmRequest {
-                provider: "custom".into(),
-                model: "stub".into(),
-                request_id: "req-1".into(),
-                tools_hash_version: crate::session_log::ToolsHashVersion::V2,
-                tools_hash: HashHex(String::new()),
-                messages_hash: HashHex(String::new()),
-                agent_id: "default".into(),
-                credential_id: None,
-                sender_id: None,
-            },
-        ),
-        (
-            "SessionScopedApprovalsCleared",
-            SessionEvent::SessionScopedApprovalsCleared {
-                session_id: "default/webchat/c1".into(),
-                count: 1,
-                reason: "session_ended".into(),
-            },
-        ),
-    ];
-
-    for (name, event) in &cases {
-        assert_eq!(
-            tag_of(event),
-            wire_tag(name),
-            "serde's casing rule and `wire_tag` disagree on {name}",
-        );
-    }
-    // And the specific one a shipped query depends on.
-    assert_eq!(wire_tag("PermissionDenied"), "permission_denied");
-    assert_eq!(wire_tag("ChainHead"), "chain_head");
+fn every_session_event_variant_has_a_value() {
+    let events = every_session_event();
+    assert_eq!(
+        events.len(),
+        SESSION_EVENT_VARIANTS,
+        "every_session_event() lists {} of {SESSION_EVENT_VARIANTS} variants; \
+         variant_name's match will have named the new one",
+        events.len()
+    );
+    let names: std::collections::BTreeSet<&str> = events.iter().map(variant_name).collect();
+    assert_eq!(
+        names.len(),
+        events.len(),
+        "two entries in every_session_event() are the same variant"
+    );
 }
 
 /// `siem_typed::variant_kind` hand-writes the same strings serde
@@ -2611,115 +2976,24 @@ fn wire_tag_matches_serde_for_representative_variants() {
 /// through `typed_include_variants` / `typed_exclude_variants`, so a
 /// label that drifts from the tag on the forwarded JSON silently
 /// filters the wrong set. The match itself is exhaustive, so the
-/// compiler catches a missing arm; only the string content can rot,
-/// which is what this reads.
+/// compiler catches a missing arm; only the string content can rot.
+///
+/// Every variant is run through both, so what is compared is the
+/// label the shipped function returns against the tag serde actually
+/// emits for the same value.
 #[test]
 fn every_variant_kind_label_is_the_serde_wire_tag() {
-    let src = include_str!("siem_typed.rs");
-    let start = src
-        .find("fn variant_kind(event: &SessionEvent) -> &'static str {")
-        .expect("variant_kind not found");
-    let body = &src[start..];
-
-    let mut checked = 0usize;
-    for variant in declared_variants() {
-        let needle = format!("SessionEvent::{variant} {{ .. }} => \"");
-        let at = body.find(&needle).unwrap_or_else(|| {
-            panic!("variant_kind has no arm for {variant}; wire tag would be unmapped")
-        });
-        let rest = &body[at + needle.len()..];
-        let label: String = rest.chars().take_while(|c| *c != '"').collect();
+    for event in every_session_event() {
+        let serde_tag = serde_json::to_value(&event).expect("event serialises")["kind"]
+            .as_str()
+            .expect("the tagged representation always carries a string kind")
+            .to_string();
         assert_eq!(
-            label,
-            wire_tag(&variant),
-            "variant_kind labels {variant} as {label:?}, but serde emits \"{}\"",
-            wire_tag(&variant),
+            crate::siem_typed::variant_kind(&event),
+            serde_tag,
+            "variant_kind disagrees with serde on {}",
+            variant_name(&event)
         );
-        checked += 1;
-    }
-    assert!(checked > 40, "checked too few variants: {checked}");
-}
-
-/// Every `LIKE '%"..."%'` predicate in the workspace names a real
-/// wire tag.
-///
-/// A predicate written against the Rust variant name matches no row
-/// and returns an empty result with no error, which is
-/// indistinguishable from "there is nothing to find". That is how
-/// `find_permission_denials` came to report no denials for any agent
-/// for as long as it existed. Audit owns `SessionEvent`, so the guard
-/// over its wire tags lives here even though it reads other crates.
-#[test]
-fn every_event_kind_like_predicate_names_a_real_wire_tag() {
-    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/audit has a parent");
-    let mut files = Vec::new();
-    collect_rs_files(crates_dir, &mut files);
-    assert!(
-        files.len() > 50,
-        "the walker saw too few files to be trusted: {}",
-        files.len()
-    );
-
-    let tags: std::collections::HashSet<String> = declared_variants()
-        .into_iter()
-        .map(|v| wire_tag(&v))
-        .collect();
-
-    let mut found = 0usize;
-    for path in &files {
-        let src = std::fs::read_to_string(path).unwrap();
-        for (i, line) in src.lines().enumerate() {
-            // Skip comments: this guard's own prose describes the
-            // shape it looks for, and would otherwise flag itself.
-            if line.trim_start().starts_with("//") {
-                continue;
-            }
-            let Some(at) = line.find("LIKE '%") else {
-                continue;
-            };
-            let rest = &line[at..];
-            let token: String = rest
-                .trim_start_matches("LIKE '%")
-                .trim_start_matches('\\')
-                .trim_start_matches('"')
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if token.is_empty() {
-                continue;
-            }
-            found += 1;
-            assert!(
-                tags.contains(&token),
-                "{}:{} matches on {token:?}, which is not a SessionEvent wire tag. \
-                 The tag is the serde form, not the Rust variant name.",
-                path.display(),
-                i + 1,
-            );
-        }
-    }
-    assert!(
-        found >= 2,
-        "expected to find the known predicates; the scanner is not seeing them",
-    );
-}
-
-fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == "target") {
-                continue;
-            }
-            collect_rs_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
     }
 }
 

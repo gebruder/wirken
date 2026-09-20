@@ -362,7 +362,136 @@ pub struct Agent {
     approval_bypass: Option<wirken_gateway::permissions::Action>,
 }
 
+/// The tool list for one turn.
+///
+/// A newtype whose field is private to this module, so nothing
+/// outside it can produce one. The two dispatches used to assemble
+/// their own lists and had drifted: the streaming path, which
+/// webchat drives, left out wasm skill defs, `spawn_subagent`, both
+/// phase tools and the `restrict_tools` clamp. A source grep used
+/// to watch for a second assembly site; this makes one a compile
+/// error instead.
+///
+/// `Deref` to `[ToolDef]` so callers read the list without
+/// unwrapping it. [`Self::into_inner`] exists for the two callers
+/// that own the `Vec` afterwards, and taking it is deliberate and
+/// visible rather than something a dispatch does by accident.
+mod turn_tools {
+    use super::*;
+
+    pub(crate) struct TurnToolDefs(Vec<crate::tool::ToolDef>);
+
+    impl TurnToolDefs {
+        /// The tool set offered to the LLM for one turn.
+        ///
+        /// Both message dispatches call this. They each used to assemble
+        /// their own list and had drifted: the streaming path, which is
+        /// what webchat drives, omitted wasm skill defs, `spawn_subagent`,
+        /// both phase tools, and the `restrict_tools` ceiling clamp. An
+        /// agent's capabilities therefore depended on which channel drove
+        /// it, and nothing said so; a parent with a configured
+        /// `allowed_subagents` ceiling simply could not delegate from
+        /// webchat, because the tool was never in the request and the
+        /// model never asked for it. Issue #245.
+        ///
+        /// Silent in both directions is what made it worth removing
+        /// rather than keeping in sync: a capability that is not offered
+        /// produces no refusal and no log line, only an agent that does
+        /// not do the thing.
+        ///
+        /// `mcp_defs` is passed in because reading it takes an async lock
+        /// and this is a sync method; both callers already hold the
+        /// result.
+        pub(crate) fn assemble(agent: &Agent, mcp_defs: Vec<crate::tool::ToolDef>) -> Self {
+            let mut tool_defs = if agent.llm.config().tools_enabled {
+                let mut defs = agent.tools.definitions();
+                defs.extend(mcp_defs);
+                defs.extend(agent.wasm_skills.iter().map(|s| s.tool_def()));
+                // Item 6 slice 1: expose `spawn_subagent` to the LLM
+                // only when the agent has at least one allowed child.
+                // Empty allowed_subagents = never offer the tool.
+                if !agent.allowed_subagents.is_empty() && agent.subagent_depth < MAX_SUBAGENT_DEPTH
+                {
+                    defs.push(spawn_subagent_tool_def());
+                }
+                // Per-pass deny overlay slice 3: phase tools are
+                // discoverable only when a loaded skill has them in its
+                // declared `tools.allow`. Legacy mode (no skills attached)
+                // does not advertise them; agents with no opted-in skill
+                // see them not at all.
+                if agent
+                    .effective_permissions
+                    .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
+                {
+                    defs.push(wirken_enter_phase_tool_def());
+                }
+                if agent
+                    .effective_permissions
+                    .skills_admit_tool(WIRKEN_EXIT_PHASE_TOOL)
+                {
+                    defs.push(wirken_exit_phase_tool_def());
+                }
+                defs
+            } else {
+                Vec::new()
+            };
+            // Item 6 slice 1: when this agent is running as a child
+            // with a `restrict_tools` clamp, drop every tool the parent
+            // didn't grant. The clamp is applied AFTER the spawn tool
+            // is appended so a child cannot accidentally inherit
+            // spawn_subagent unless its own ceiling explicitly grants
+            // it via the same name.
+            if let Some(ref allowed) = agent.restrict_tools {
+                tool_defs.retain(|t| allowed.contains(&t.name));
+            }
+            // Per-skill permission profile (#76): only surface tools the
+            // effective profile allows. `Legacy` admits everything, so an
+            // agent with no profile attached sees no change.
+            //
+            // This filter used to run on the recomputation side only, so
+            // the model was offered tools its profile would refuse at
+            // call time and `tools_hash` could not match. Offering a tool
+            // that is already decided against is its own small lie to the
+            // model; running the filter here removes both problems.
+            tool_defs.retain(|d| {
+                matches!(
+                    agent.effective_permissions.gate_tool(&d.name),
+                    crate::skill_perms::GateDecision::Allow
+                )
+            });
+            // Stable tool def ordering — prompt-cache friendly even
+            // before slice 3 adds provider-specific cache markers.
+            tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
+            Self(tool_defs)
+        }
+
+        /// The list, owned. Only for callers that need the `Vec`.
+        pub(crate) fn into_inner(self) -> Vec<crate::tool::ToolDef> {
+            self.0
+        }
+    }
+
+    impl std::ops::Deref for TurnToolDefs {
+        type Target = [crate::tool::ToolDef];
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+}
+
 impl Agent {
+    /// The turn's tool list, from the one place that assembles it.
+    ///
+    /// A forwarder to [`turn_tools::TurnToolDefs::assemble`]; the
+    /// assembly lives in that module so its newtype cannot be built
+    /// anywhere else.
+    pub(crate) fn build_turn_tool_defs(
+        &self,
+        mcp_defs: Vec<crate::tool::ToolDef>,
+    ) -> turn_tools::TurnToolDefs {
+        turn_tools::TurnToolDefs::assemble(self, mcp_defs)
+    }
+
     /// Create a new agent.
     ///
     /// `api_key_credential` is the vault entry name the gateway
@@ -1574,6 +1703,7 @@ impl Agent {
         };
         let offered_tools: Vec<String> = self
             .build_turn_tool_defs(mcp_defs)
+            .into_inner()
             .into_iter()
             .map(|d| d.name)
             .collect();
@@ -4771,91 +4901,6 @@ impl Agent {
         })
     }
 
-    /// The tool set offered to the LLM for one turn.
-    ///
-    /// Both message dispatches call this. They each used to assemble
-    /// their own list and had drifted: the streaming path, which is
-    /// what webchat drives, omitted wasm skill defs, `spawn_subagent`,
-    /// both phase tools, and the `restrict_tools` ceiling clamp. An
-    /// agent's capabilities therefore depended on which channel drove
-    /// it, and nothing said so; a parent with a configured
-    /// `allowed_subagents` ceiling simply could not delegate from
-    /// webchat, because the tool was never in the request and the
-    /// model never asked for it. Issue #245.
-    ///
-    /// Silent in both directions is what made it worth removing
-    /// rather than keeping in sync: a capability that is not offered
-    /// produces no refusal and no log line, only an agent that does
-    /// not do the thing.
-    ///
-    /// `mcp_defs` is passed in because reading it takes an async lock
-    /// and this is a sync method; both callers already hold the
-    /// result.
-    pub(crate) fn build_turn_tool_defs(
-        &self,
-        mcp_defs: Vec<crate::tool::ToolDef>,
-    ) -> Vec<crate::tool::ToolDef> {
-        let mut tool_defs = if self.llm.config().tools_enabled {
-            let mut defs = self.tools.definitions();
-            defs.extend(mcp_defs);
-            defs.extend(self.wasm_skills.iter().map(|s| s.tool_def()));
-            // Item 6 slice 1: expose `spawn_subagent` to the LLM
-            // only when the agent has at least one allowed child.
-            // Empty allowed_subagents = never offer the tool.
-            if !self.allowed_subagents.is_empty() && self.subagent_depth < MAX_SUBAGENT_DEPTH {
-                defs.push(spawn_subagent_tool_def());
-            }
-            // Per-pass deny overlay slice 3: phase tools are
-            // discoverable only when a loaded skill has them in its
-            // declared `tools.allow`. Legacy mode (no skills attached)
-            // does not advertise them; agents with no opted-in skill
-            // see them not at all.
-            if self
-                .effective_permissions
-                .skills_admit_tool(WIRKEN_ENTER_PHASE_TOOL)
-            {
-                defs.push(wirken_enter_phase_tool_def());
-            }
-            if self
-                .effective_permissions
-                .skills_admit_tool(WIRKEN_EXIT_PHASE_TOOL)
-            {
-                defs.push(wirken_exit_phase_tool_def());
-            }
-            defs
-        } else {
-            Vec::new()
-        };
-        // Item 6 slice 1: when this agent is running as a child
-        // with a `restrict_tools` clamp, drop every tool the parent
-        // didn't grant. The clamp is applied AFTER the spawn tool
-        // is appended so a child cannot accidentally inherit
-        // spawn_subagent unless its own ceiling explicitly grants
-        // it via the same name.
-        if let Some(ref allowed) = self.restrict_tools {
-            tool_defs.retain(|t| allowed.contains(&t.name));
-        }
-        // Per-skill permission profile (#76): only surface tools the
-        // effective profile allows. `Legacy` admits everything, so an
-        // agent with no profile attached sees no change.
-        //
-        // This filter used to run on the recomputation side only, so
-        // the model was offered tools its profile would refuse at
-        // call time and `tools_hash` could not match. Offering a tool
-        // that is already decided against is its own small lie to the
-        // model; running the filter here removes both problems.
-        tool_defs.retain(|d| {
-            matches!(
-                self.effective_permissions.gate_tool(&d.name),
-                crate::skill_perms::GateDecision::Allow
-            )
-        });
-        // Stable tool def ordering — prompt-cache friendly even
-        // before slice 3 adds provider-specific cache markers.
-        tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
-        tool_defs
-    }
-
     /// The tool defs `verify` recomputes a `tools_hash` over, under
     /// the rules the row was written by.
     ///
@@ -4878,7 +4923,7 @@ impl Agent {
             None => Vec::new(),
         };
         match version {
-            wirken_audit::ToolsHashVersion::V2 => self.build_turn_tool_defs(mcp_defs),
+            wirken_audit::ToolsHashVersion::V2 => self.build_turn_tool_defs(mcp_defs).into_inner(),
             wirken_audit::ToolsHashVersion::V1 => self.snapshot_tool_defs_v1(mcp_defs),
         }
     }

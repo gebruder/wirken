@@ -878,35 +878,70 @@ mod tests {
         }
     }
 
-    /// The key list and the loader must not drift. This reads the
-    /// loader's own source, collects every `val.get("...")` it makes,
-    /// and asserts that set is exactly SANDBOX_KEYS. A key read by the
-    /// loader but missing from the list would be warned about as
-    /// unknown; a key in the list the loader never reads would be
-    /// silently ignored again, which is the defect this exists for.
+    /// `SANDBOX_KEYS` and the loader agree, checked by writing a file
+    /// and reading the config back.
+    ///
+    /// Both directions matter and both are observable. A key in the
+    /// list the loader never reads is a setting an operator writes
+    /// that does nothing, which is the defect this exists for: every
+    /// key is set to a non-default value here and every field has to
+    /// come back changed. A key the loader reads but the list omits
+    /// would be reported as unrecognised, so the same file has to
+    /// produce no unknown keys.
+    ///
+    /// This used to read the loader's own source and count
+    /// `.get("...")` calls, which broke once already when rustfmt
+    /// wrapped the chain differently.
     #[test]
-    fn sandbox_keys_matches_what_the_loader_reads() {
-        let src = include_str!("mod.rs");
-        let start = src
-            .find("pub fn load_sandbox_config(")
-            .expect("loader present");
-        let end = src[start..].find("\n}\n").expect("loader closes") + start;
-        let body = &src[start..end];
-        // `.get("` rather than `val.get("`: rustfmt wraps the longer
-        // chains as `val` on one line and `.get("...")` on the next, and
-        // a needle that assumed one line found two keys out of five and
-        // shipped red. Inside the loader body the only map queried is
-        // `val`, so the shorter needle is exact.
-        let mut read: Vec<&str> = body
-            .split(".get(\"")
-            .skip(1)
-            .filter_map(|rest| rest.split('"').next())
-            .collect();
-        read.sort();
-        read.dedup();
+    fn sandbox_keys_are_the_keys_the_loader_reads() {
+        let tmp = TempDir::new().unwrap();
+        let every_key = serde_json::json!({
+            "mode": "gvisor",
+            "image": "example.invalid/sandbox:test",
+            "network": true,
+            "shell": "sh",
+            "sidecar_binary": "/opt/wirken/egress-sidecar",
+        });
         assert_eq!(
-            read, SANDBOX_KEYS,
-            "SANDBOX_KEYS and the loader's reads have drifted"
+            every_key.as_object().unwrap().len(),
+            SANDBOX_KEYS.len(),
+            "this fixture has to carry every key in SANDBOX_KEYS"
+        );
+        std::fs::write(
+            tmp.path().join("sandbox.json"),
+            serde_json::to_string(&every_key).unwrap(),
+        )
+        .unwrap();
+
+        // Direction one: the loader reads every listed key.
+        let cfg = load_sandbox_config(tmp.path());
+        let default = SandboxConfig::default();
+        assert_eq!(cfg.mode, SandboxMode::GVisor, "mode is not read");
+        assert_eq!(
+            cfg.image, "example.invalid/sandbox:test",
+            "image is not read"
+        );
+        assert!(cfg.network && !default.network, "network is not read");
+        assert_ne!(cfg.shell, default.shell, "shell is not read");
+        assert_eq!(
+            cfg.sidecar_binary.as_deref(),
+            Some(std::path::Path::new("/opt/wirken/egress-sidecar")),
+            "sidecar_binary is not read"
+        );
+
+        // Direction two: nothing the loader reads is missing from the
+        // list, or this same file would carry an unrecognised key.
+        assert!(
+            unknown_sandbox_keys(&every_key).is_empty(),
+            "a key the loader reads is missing from SANDBOX_KEYS"
+        );
+
+        // And the warning still fires for a key that really is unread.
+        let with_extra = serde_json::json!({ "mode": "off", "memory_limit_mb": 512 });
+        assert_eq!(
+            unknown_sandbox_keys(&with_extra),
+            vec!["memory_limit_mb".to_string()],
+            "an unread key must be reported, not ignored"
         );
     }
 
@@ -940,163 +975,5 @@ mod tests {
         std::fs::write(tmp.path().join("sandbox.json"), "not json").unwrap();
         let cfg = load_sandbox_config(tmp.path());
         assert_eq!(cfg.mode, SandboxMode::default());
-    }
-
-    /// Every keychain probe in the crate takes its passphrase from a
-    /// supplier that reads `WIRKEN_VAULT_PASSPHRASE`. Three exist: the
-    /// shared `cached_vault_passphrase` (environment first, then one
-    /// prompt, cached in process memory), `run`'s per-boot cache
-    /// `prompt_vault_passphrase` (environment first, no environment
-    /// write because the gateway is multi-threaded), and
-    /// `vault_passphrase_source` at a site that must never prompt
-    /// (environment first, then whatever an earlier prompt in this
-    /// process cached). A raw `env::var` of the variable is not on the
-    /// list: it reads the exported value and misses the prompted one.
-    /// A probe that
-    /// prompts without reading the variable cannot run headless, and
-    /// its failure text names a variable the command ignored (issue
-    /// 239); a probe that supplies a constant seals or degrades silently
-    /// (issue 233). The earlier guard forbade the constant and let the
-    /// prompt-only probes through; this one names what is allowed.
-    ///
-    /// The check is textual: the probe line and the four lines on each
-    /// side must name one of the suppliers. Each allowance is asserted
-    /// to still hold exactly its probes, so a fix that removed one
-    /// cannot leave a stale reason behind and a new probe cannot hide
-    /// under an old allowance.
-    #[test]
-    fn every_keychain_probe_takes_its_passphrase_from_a_supplier_that_reads_the_environment() {
-        // Needles assembled at runtime so this test's own source does
-        // not contain them and match itself.
-        let probe = format!("probe_{}(", "keychain");
-        let suppliers = [
-            format!("cached_vault_{}()", "passphrase"),
-            format!("prompt_vault_{}(", "passphrase"),
-            format!("vault_passphrase_{}()", "source"),
-        ];
-
-        // (file relative to src/, probes it may hold outside a supplier, why)
-        let allowances: &[(&str, usize, &str)] = &[
-            (
-                "commands/doctor.rs",
-                1,
-                "a diagnostic must neither prompt nor depend on the environment; \
-                 it reports the posture it lands in, and is_signed() is printed",
-            ),
-            (
-                "commands/run.rs",
-                1,
-                "resolve_channel_overrides takes run's per-boot passphrase as a \
-                 parameter; its supplier is prompt_vault_passphrase at the call site",
-            ),
-        ];
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        collect_rs(&root, &mut files);
-        assert!(
-            files.len() > 10,
-            "the walker saw too few files to be trusted: {files:?}"
-        );
-
-        let mut probes_seen = 0usize;
-        let mut seen_rules_home = false;
-        for path in &files {
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            if rel == "commands/run.rs" {
-                seen_rules_home = true;
-            }
-            let src = std::fs::read_to_string(path).unwrap();
-            let lines: Vec<&str> = src.lines().collect();
-            let mut offenders = Vec::new();
-            for (i, line) in lines.iter().enumerate() {
-                let t = line.trim();
-                if t.starts_with("//") || t.starts_with("use ") || !t.contains(&probe) {
-                    continue;
-                }
-                probes_seen += 1;
-                let lo = i.saturating_sub(4);
-                let hi = (i + 5).min(lines.len());
-                let window = lines[lo..hi].join("\n");
-                if !suppliers.iter().any(|s| window.contains(s.as_str())) {
-                    offenders.push(format!("{rel}:{}", i + 1));
-                }
-            }
-            match allowances.iter().find(|(f, _, _)| *f == rel) {
-                Some((_, expected, why)) => assert_eq!(
-                    offenders.len(),
-                    *expected,
-                    "{rel}: the allowance ({why}) no longer matches what the file holds. \
-                     If the probe was fixed, remove the allowance with it. Found: {offenders:?}",
-                ),
-                None => assert!(
-                    offenders.is_empty(),
-                    "{rel}: a keychain probe takes its passphrase from something that does \
-                     not read WIRKEN_VAULT_PASSPHRASE, so the command cannot run headless \
-                     and its failure text names a variable it ignores. Take the passphrase \
-                     from cached_vault_passphrase (or prompt_vault_passphrase inside run), \
-                     or name an allowance here with its reason. Probes: {offenders:?}",
-                ),
-            }
-        }
-        assert!(seen_rules_home, "the walker never reached commands/run.rs");
-        assert!(
-            probes_seen > 25,
-            "the walker saw too few probes to be trusted: {probes_seen}"
-        );
-    }
-
-    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                collect_rs(&p, out);
-            } else if p.extension().is_some_and(|e| e == "rs") {
-                out.push(p);
-            }
-        }
-    }
-
-    #[test]
-    fn no_model_name_is_stored_in_the_config_paths() {
-        // The paths that choose a model to store. `mod.rs` is not one
-        // of them: its listers filter what a provider returned, and
-        // `"gpt-"` there is a prefix test over the provider's own
-        // answer rather than a name this repo offers anyone.
-        let sources = [
-            ("agents.rs", include_str!("agents.rs")),
-            ("setup.rs", include_str!("setup.rs")),
-        ];
-        // Vendor names a versioned model id starts with.
-        let vendors = ["claude", "gpt", "gemini", "llama", "mistral"];
-        for (name, src) in sources {
-            for line in src.lines() {
-                // Only string literals matter; prose about a provider
-                // is not a stored configuration value.
-                let Some((_, after)) = line.split_once('"') else {
-                    continue;
-                };
-                let Some((literal, _)) = after.split_once('"') else {
-                    continue;
-                };
-                // A vendor name plus a digit is a version: "gpt-4o",
-                // "llama3", "claude-sonnet-4-20250514". A bare vendor
-                // word in prose or a url is not.
-                if !literal.chars().any(|c| c.is_ascii_digit()) {
-                    continue;
-                }
-                for vendor in vendors {
-                    assert!(
-                        !literal.contains(vendor),
-                        "{name} stores a model name in a literal: {literal:?}. \
-                         Offer the provider's own list, or ask.",
-                    );
-                }
-            }
-        }
     }
 }
