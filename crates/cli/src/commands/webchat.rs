@@ -5917,6 +5917,18 @@ mod tests {
                 "assistant_message"
             ]
         );
+        // And each of them reaches a branch of the page's renderer. A
+        // kind the projection emits and the page has no case for is
+        // invisible from both ends: the row is served and nothing is
+        // drawn. This pairs the kinds these rows produce; a variant
+        // with no row here is not covered.
+        let script = page_script();
+        for kind in &kinds {
+            assert!(
+                script.contains(&format!("case '{kind}':")),
+                "the page has no renderer for '{kind}'"
+            );
+        }
         let calls = &v["events"][1]["calls"];
         assert_eq!(calls[0]["computed_tier"], "tier2");
         assert_eq!(calls[0]["action_key"], "shell:ls");
@@ -5964,16 +5976,11 @@ mod tests {
         assert_eq!(tail["totals"]["tool_calls"], 2);
     }
 
-    /// Every kind the projection emits has a renderer branch on the
-    /// page, and the word "recorded" is said only by the row renderer:
-    /// an ack means accepted, a row means recorded.
+    /// The word "recorded" is said only by the row renderer: an ack
+    /// means accepted, a row means recorded.
     #[test]
-    fn every_projected_kind_has_a_renderer_and_recorded_needs_a_row() {
+    fn recorded_is_said_only_by_the_row_renderer() {
         let script = page_script();
-        // That every kind `session_events` projects has a renderer
-        // here is a check on the projection's source, so it lives in
-        // scripts/source_lints.py: reading the list behaviourally
-        // would mean a populated session log per kind.
         let ack = script
             .split_once("function ackApproval(")
             .expect("ackApproval exists")
