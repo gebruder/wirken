@@ -2071,14 +2071,15 @@ function hatchBanner(name, copy) {
 function renderBanners() {
   clear(banners);
   const h = status.escape_hatches || {};
+  const p = status.posture || {};
   for (const name of Object.keys(HATCH_COPY)) {
     if (!h[name]) continue;
     // With a skill registry root pinned the loader is strict and the
     // flag does nothing; a banner would announce a hatch that is shut.
-    if (name === 'WIRKEN_ALLOW_UNSIGNED_SKILLS' && h.skill_registry_root_pinned) continue;
+    if (name === 'WIRKEN_ALLOW_UNSIGNED_SKILLS' && p.skill_registry_root_pinned) continue;
     banners.appendChild(hatchBanner(name, HATCH_COPY[name] + HATCH_CLEARS));
   }
-  if (h.sandbox_mode_off) {
+  if (p.sandbox_mode_off) {
     banners.appendChild(hatchBanner(null,
       'sandbox.json mode is off: exec runs on the host as the gateway user. ' +
       'Set in sandbox.json; clears when the file changes and the gateway restarts.'));
@@ -3436,7 +3437,18 @@ pub async fn status_snapshot(
         "WIRKEN_ALLOW_STALE_ORG_CONFIG": parse_boolean_escape("WIRKEN_ALLOW_STALE_ORG_CONFIG"),
         "WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN": parse_boolean_escape("WIRKEN_WEBCHAT_ALLOW_NO_ORIGIN"),
         "WIRKEN_ALLOW_UNREGISTERED_HOOKS": parse_boolean_escape("WIRKEN_ALLOW_UNREGISTERED_HOOKS"),
-        "WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES": std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES").ok(),
+    });
+
+    // Not escape hatches, and they used to ride in the same object.
+    // A hatch is a named environment variable an operator sets to
+    // switch a check off, which is why the page keeps one line of copy
+    // per hatch saying what turning it off costs. These three are a
+    // cadence value, a configuration mode, and a posture the loader
+    // reports; none of them has, or wants, that copy. Keeping them
+    // here made "every hatch has copy" a question nobody could answer
+    // from the object.
+    let posture = json!({
+        "audit_verify_every_flushes": std::env::var("WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES").ok(),
         "sandbox_mode_off": sb.mode == SandboxMode::Off,
         "skill_registry_root_pinned": wirken_gateway::skill_registry::load_registry_root(&cfg.data_dir).ok().flatten().is_some(),
     });
@@ -3536,6 +3548,7 @@ pub async fn status_snapshot(
         "sandbox": sandbox,
         "budget": budget,
         "escape_hatches": escape_hatches,
+        "posture": posture,
         "org": org,
         "audit": audit,
         "siem": siem,
@@ -5288,7 +5301,7 @@ mod tests {
             snap["sandbox"]["docker_reachable"].is_null(),
             "never probed here"
         );
-        assert_eq!(snap["escape_hatches"]["sandbox_mode_off"], true);
+        assert_eq!(snap["posture"]["sandbox_mode_off"], true);
         assert!(
             snap["agent"]["provider"].is_null(),
             "no agent row and no provider.json"
@@ -5484,28 +5497,22 @@ mod tests {
         let hatches = snap["escape_hatches"]
             .as_object()
             .expect("the snapshot reports escape hatches");
-        // The environment hatches, which are the ones the page keeps a
-        // copy map for. Two other entries ride in the same object and
-        // are drawn their own way: `sandbox_mode_off` has a banner,
-        // asserted below, and `skill_registry_root_pinned` is a
-        // posture the About panel reports rather than a hatch. A third,
-        // `WIRKEN_AUDIT_VERIFY_EVERY_FLUSHES`, is a cadence value, not
-        // a hatch at all.
-        let named: Vec<&String> = hatches
-            .iter()
-            .filter(|(k, v)| k.starts_with("WIRKEN_") && v.is_boolean())
-            .map(|(k, _)| k)
-            .collect();
-        assert!(named.len() >= 5, "too few hatches to be trusted: {named:?}");
-        for name in named {
+        // Every one of them, with no filter: the object holds hatches
+        // and nothing else now, so a hatch added without copy fails
+        // here rather than slipping past a predicate.
+        assert!(
+            hatches.len() >= 5,
+            "too few hatches to be trusted: {hatches:?}"
+        );
+        for name in hatches.keys() {
             assert!(
                 script.contains(&format!("{name}: '")),
                 "page has copy for {name}"
             );
         }
         assert!(
-            script.contains("h.sandbox_mode_off"),
-            "the sandbox-off hatch has its own banner"
+            script.contains("p.sandbox_mode_off"),
+            "the sandbox-off posture has its own banner"
         );
         assert!(
             script.contains("skill_registry_root_pinned"),
