@@ -7,7 +7,12 @@ use std::path::Path;
 
 use crate::error::GatewayError;
 
-/// Permission tiers from the spec.
+/// How much consent an action needs before it runs.
+///
+/// The tier is a property of the action, not of the caller, so the
+/// same action costs the same wherever it is reached from. Tier 3 is
+/// the default for anything unclassified, which is what makes an
+/// unregistered tool prompt rather than run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionTier {
     /// Always allowed — no approval needed.
@@ -706,8 +711,7 @@ impl PermissionStore {
     /// first `/`. A child's session id is its parent's with a
     /// `#sub-N` suffix, so the prefix is the parent's agent id and
     /// the child was checked against the parent's grant set. The
-    /// child's own configured agent id never reached the store. See
-    /// issue #242.
+    /// child's own configured agent id never reached the store.
     ///
     /// `agent_id` is used verbatim, with no prefix reduction. The
     /// write path still reduces (see [`canonical_agent_id`]), so a
@@ -829,8 +833,8 @@ impl PermissionStore {
     /// land in the in-memory cache keyed on `scope.session_id`. The
     /// caller-supplied `agent_id` is used by both paths (canonicalized
     /// for SQLite, recorded verbatim on the in-memory `Approval`), so
-    /// the audit emitter (slice 3) can record both fields without
-    /// re-deriving either.
+    /// the audit emitter can record both fields without re-deriving
+    /// either.
     ///
     /// Session-scoped approvals do not have a meaningful time-based
     /// expiry; the cache lookup in [`Self::check`] does not consult
@@ -1309,9 +1313,9 @@ pub struct ActiveSessionScopedGrant {
 /// `PermissionApproved(Session)` was not tombstoned by a later
 /// `SessionScopedApprovalsCleared`. Same last-event-wins semantics
 /// as `replay_session_scoped_approvals` in `wirken_agent::factory`,
-/// but returns the rows instead of mutating a cache. Used by the
-/// CLI list path (followup 2) to surface session-scoped grants
-/// without crossing the daemon process boundary.
+/// but returns the rows instead of mutating a cache, so the CLI can
+/// surface session-scoped grants without crossing the daemon process
+/// boundary to read the live cache.
 pub fn list_active_session_scoped_grants_in_session(
     log: &dyn wirken_audit::SessionLog,
     session_id: &str,
@@ -1390,21 +1394,19 @@ pub fn list_active_session_scoped_grants_for_agent(
 /// Approve an action and append a `SessionEvent::PermissionApproved`
 /// audit entry to `log` under `handle`. The orchestration helper for
 /// any caller that has both the perm store and a session-log handle
-/// in scope; the CLI session-scoped approval surface (slice 4) is
-/// the first production caller. PermissionStore stays a pure data
-/// layer; this function lives alongside it because it composes the
-/// gateway-owned store with the audit-owned log.
+/// in scope. PermissionStore stays a pure data layer; this function
+/// lives alongside it because it composes the gateway-owned store
+/// with the audit-owned log.
 ///
 /// Emission semantics:
 /// - The event fires for every successful approval, regardless of
 ///   scope. `scope = Persisted` emits with `session_id: None`;
 ///   `scope = Session { .. }` emits with `session_id: Some(_)`.
 /// - The persisted-from-CLI path (`commands::permission::approve`)
-///   does NOT route through here today: it has no session-log
-///   handle and no obvious session id to attribute the event to.
-///   That call site stays silent for slice 3; a future slice can
-///   wire a synthetic operator-action audit channel for it
-///   without changing this function's shape.
+///   does NOT route through here: it has no session-log handle and
+///   no obvious session id to attribute the event to, so it writes
+///   the grant without an audit row. An operator approving from the
+///   CLI leaves no session-log trace of it.
 /// - On audit failure the store-side write has already happened;
 ///   the helper returns `Err(GatewayError::Audit)` so the caller can
 ///   surface the inconsistency. This matches the existing pattern
@@ -2006,7 +2008,7 @@ mod tier_tests {
     }
 
     // -----------------------------------------------------------------
-    // Session-scoped approval cache (slice 2)
+    // Session-scoped approval cache
     // -----------------------------------------------------------------
 
     fn session_scope(id: &str) -> ApprovalScope {
@@ -2296,8 +2298,7 @@ mod tier_tests {
     fn session_scoped_check_wins_over_persisted_lookup() {
         // Order matters: the cache short-circuit runs before the
         // SQLite check, so a session-scoped grant covers an action
-        // even when no persisted approval exists. This is the
-        // canonical path slice 3 will exercise via the CLI.
+        // even when no persisted approval exists.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let store = PermissionStore::open(tmp.path()).unwrap();
         let session = "default/webchat/conv-x";
@@ -2314,7 +2315,7 @@ mod tier_tests {
     }
 
     // -----------------------------------------------------------------
-    // approve_and_log emission (slice 3)
+    // approve_and_log emission
     // -----------------------------------------------------------------
 
     #[test]
@@ -2531,7 +2532,7 @@ mod tier_tests {
     }
 
     // -----------------------------------------------------------------
-    // Session-end emit + count helpers (followup 1)
+    // Session-end emit and count helpers
     // -----------------------------------------------------------------
 
     #[test]
@@ -2624,8 +2625,8 @@ mod tier_tests {
         );
 
         // Re-grant after the tombstone: active set = {shell:ls} → 1.
-        // Matches the user's "clear wins iff no further grants"
-        // semantics from slice 3.
+        // A clear wins only until the next grant: it tombstones what
+        // came before it and says nothing about what comes after.
         log.append(
             &handle,
             wirken_audit::TrustLevel::System,
@@ -2716,7 +2717,7 @@ mod tier_tests {
     }
 
     // -----------------------------------------------------------------
-    // list_active_session_scoped_grants_for_agent (followup 2)
+    // list_active_session_scoped_grants_for_agent
     // -----------------------------------------------------------------
 
     fn append_session_grant(
@@ -3461,7 +3462,7 @@ mod tier_tests {
     }
 
     // -----------------------------------------------------------------
-    // Issue #242: the callee is checked against its own agent id
+    // The callee is checked against its own agent id
     // -----------------------------------------------------------------
 
     #[test]

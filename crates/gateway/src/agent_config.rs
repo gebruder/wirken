@@ -6,11 +6,12 @@ use std::path::Path;
 use crate::error::GatewayError;
 use crate::permissions::PermissionTier;
 
-/// Per-child ceiling for [`AgentConfig::allowed_subagents`]. Item 6
-/// slice 1 of `docs/managed-agents-parity.md`. The parent harness
-/// uses these caps to clamp anything the LLM passes to
-/// `spawn_subagent` — the LLM cannot widen the child's tools or
-/// permission tier, only narrow within the ceiling.
+/// Per-child ceiling for [`AgentConfig::allowed_subagents`].
+///
+/// The parent harness clamps whatever the LLM passes to
+/// `spawn_subagent` against these caps, so the LLM can narrow a
+/// child's tools and permission tier within the ceiling and can never
+/// widen them past it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SubagentCeiling {
     /// Hard tool allowlist. Tools the parent's LLM passes are
@@ -71,26 +72,26 @@ pub struct AgentConfig {
     pub api_key_credential: String,
     /// Channels bound to this agent (wildcard routing).
     pub channels: Vec<String>,
-    /// Item 6 slice 1: child agents this agent is allowed to spawn
-    /// via the built-in `spawn_subagent` tool, keyed by child agent
+    /// Child agents this agent is allowed to spawn via the built-in
+    /// `spawn_subagent` tool, keyed by child agent
     /// id, with a per-child capability ceiling. Empty by default —
     /// when empty, the harness omits the `spawn_subagent` tool from
     /// the LLM's tool list entirely.
     #[serde(default)]
     pub allowed_subagents: BTreeMap<String, SubagentCeiling>,
-    /// Item 6 slice 2: per-agent override for `LlmConfig.tools_enabled`.
+    /// Per-agent override for `LlmConfig.tools_enabled`.
     /// `Some(true)` forces tools on (useful for ollama models that
     /// support tool calling). `Some(false)` forces off. `None` uses
     /// the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools_enabled: Option<bool>,
-    /// Slice 1 of the named-persona-bundling feature: optional
-    /// reference to a `Preset` (see `wirken_agent::preset`) by name.
+    /// Optional reference to a `Preset` (see `wirken_agent::preset`)
+    /// by name.
     /// When set, the persona view materialised by
     /// `wirken_agent::persona::Persona::materialize` resolves the
     /// preset at lookup time and surfaces the bundled skills.
-    /// Defaulted on deserialize so pre-slice-1 rows / serialized
-    /// configs continue to read as `None` (no preset reference); a
+    /// Defaulted on deserialize so a row written before the column
+    /// existed reads as `None` (no preset reference); a
     /// row whose preset name later disappears surfaces as a
     /// `PersonaError::DanglingPresetReference` at materialize time
     /// rather than at row read.
@@ -131,10 +132,10 @@ impl AgentConfigStore {
              );",
         )?;
 
-        // Item 6 slice 1: additive migration for the
-        // `allowed_subagents` JSON column. SQLite has no IF NOT
-        // EXISTS for ALTER TABLE; ignore the duplicate-column error
-        // when the column is already present.
+        // Additive migration for the `allowed_subagents` JSON column.
+        // SQLite has no IF NOT EXISTS for ALTER TABLE, so the only way
+        // to tell "already migrated" from a real failure is the error
+        // text; anything that is not a duplicate column propagates.
         if let Err(e) = conn.execute(
             "ALTER TABLE agents ADD COLUMN allowed_subagents TEXT NOT NULL DEFAULT '{}'",
             [],
@@ -143,8 +144,8 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
-        // Item 6 slice 2: additive migration for the per-agent
-        // tools_enabled override.
+        // Additive migration for the per-agent tools_enabled
+        // override, on the same duplicate-column terms as above.
         if let Err(e) = conn.execute(
             "ALTER TABLE agents ADD COLUMN tools_enabled TEXT DEFAULT NULL",
             [],
@@ -153,9 +154,10 @@ impl AgentConfigStore {
             return Err(e.into());
         }
 
-        // Persona-bundling slice 1: additive migration for the
-        // optional `preset` reference. NULL default so existing
-        // rows continue to round-trip with `preset = None`.
+        // Additive migration for the optional `preset` reference, on
+        // the same terms. NULL default so a row written before the
+        // column existed round-trips as `preset = None` rather than
+        // failing to deserialize.
         if let Err(e) = conn.execute("ALTER TABLE agents ADD COLUMN preset TEXT DEFAULT NULL", [])
             && !e.to_string().contains("duplicate column")
         {
@@ -376,8 +378,11 @@ impl AgentConfigStore {
     }
 
     /// Replace the `allowed_subagents` ceilings for an existing
-    /// agent. Used by tests today; CLI plumbing for editing
-    /// ceilings is slice 2 work.
+    /// agent.
+    ///
+    /// Replaces rather than merges: the caller passes the whole map,
+    /// so removing a child is expressible and a partial write cannot
+    /// leave a ceiling nobody intended behind.
     pub fn set_allowed_subagents(
         &self,
         agent_id: &str,

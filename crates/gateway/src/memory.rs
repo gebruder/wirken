@@ -1,4 +1,4 @@
-//! Cross-channel memory entries (#64).
+//! Cross-channel memory entries.
 //!
 //! Continuity between channels is carried by labelled entries rather
 //! than by replaying other channels' session logs. Replay was the

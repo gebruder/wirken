@@ -79,7 +79,7 @@ impl GatewayConfig {
         self.data_dir.join("budget.db")
     }
 
-    /// Labelled cross-channel memory entries (#64).
+    /// Path to the labelled cross-channel memory entries.
     pub fn memory_db_path(&self) -> PathBuf {
         self.data_dir.join("memory.db")
     }
