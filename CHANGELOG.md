@@ -81,8 +81,14 @@ tagged.
   row and not the payload it removed can still say which row changed,
   confirm a copy held elsewhere is the one that was cut, see that the
   replacement has not been swapped since, and read who asked and why.
-  The head's signature does not cover those five; the chain does,
-  since they sit in the head row's own payload.
+  The head's signature covers those five: chain-head schema version 3
+  binds a digest of the record into the signed message. The chain
+  alone would not be enough, because a redaction head is the last row
+  in its session and whoever rewrites it can recompute that row's own
+  hashes with nothing after it to disagree. Each head is verified
+  under the layout it was signed with, so heads already on disk at
+  version 2 still verify; a record on one of those is refused,
+  because no signature covers it.
 
 ### Changed
 

@@ -2207,6 +2207,233 @@ mod chain_head_signing {
         assert_eq!(plain, None);
     }
 
+    /// A redaction head is the last row in its session, so rewriting
+    /// it and recomputing its own hashes leaves the chain walk clean:
+    /// nothing follows it to disagree. The signature is the only
+    /// thing standing between an operator's stated reason and any
+    /// other reason someone prefers, which is why the signed message
+    /// binds the record.
+    #[test]
+    fn altering_the_reason_on_a_tail_redaction_head_fails_the_signature() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("tail"));
+        for n in 0..10 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("row {n}")))
+                .unwrap();
+        }
+        log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+            .unwrap()
+            .unwrap();
+        let head_seq = log
+            .redact(
+                &h,
+                4,
+                &SessionEvent::UserMessage {
+                    content: "[redacted]".into(),
+                    inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
+                },
+                "operator",
+                "customer asked for their message to be removed",
+            )
+            .unwrap();
+        match audit.verify_require_signed().unwrap() {
+            crate::VerifyResult::Ok { .. } => {}
+            other => panic!("expected a clean chain after the redaction, got {other:?}"),
+        }
+
+        // The head is the last row: nothing after it holds its hash.
+        let last: u64 = log
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT MAX(seq) FROM session_events WHERE session_id = ?1",
+                    rusqlite::params![h.id().as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap() as u64;
+        assert_eq!(last, head_seq, "the redaction head is the tail row");
+
+        // Rewrite the stated reason and put the row's own hashes back
+        // in order, which is everything the chain walk checks.
+        log.with_conn(|conn| {
+            let payload: String = conn.query_row(
+                "SELECT payload FROM session_events WHERE session_id = ?1 AND seq = ?2",
+                rusqlite::params![h.id().as_str(), head_seq as i64],
+                |row| row.get(0),
+            )?;
+            let forged = payload.replace(
+                "customer asked for their message to be removed",
+                "routine cleanup",
+            );
+            assert_ne!(forged, payload, "the reason was on the row to rewrite");
+            let prev_hash: String = conn.query_row(
+                "SELECT hash FROM session_events WHERE session_id = ?1 AND seq = ?2",
+                rusqlite::params![h.id().as_str(), (head_seq as i64) - 1],
+                |row| row.get(0),
+            )?;
+            let leaf = crate::session_log::sha256_hex_for_test(forged.as_bytes());
+            let row_hash = crate::session_log::chain_hex_for_test(&prev_hash, &leaf);
+            conn.execute(
+                "UPDATE session_events SET payload = ?1, leaf_hash = ?2, hash = ?3
+                  WHERE session_id = ?4 AND seq = ?5",
+                rusqlite::params![forged, leaf, row_hash, h.id().as_str(), head_seq as i64],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+
+        // The chain walk alone sees nothing: the row hashes to what it
+        // says it hashes to, and no later row disagrees.
+        match log.verify(&h).unwrap() {
+            crate::session_log::SessionVerifyResult::Ok { .. } => {}
+            other => panic!("the chain walk should be clean after the fixup: {other:?}"),
+        }
+
+        // The signature is what catches it.
+        let sig = log.verify_signatures(&h).unwrap();
+        let invalid = sig
+            .first_invalid
+            .expect("a rewritten record must fail the signature");
+        assert_eq!(invalid.seq, head_seq);
+        match audit.verify_require_signed().unwrap() {
+            crate::VerifyResult::SignatureInvalid { seq, .. } => assert_eq!(seq, head_seq),
+            other => panic!("expected a signature failure, got {other:?}"),
+        }
+    }
+
+    /// Write a chain head the way a build before the record did, with
+    /// a real signature over the version 2 layout, and put the row's
+    /// hashes in order. Returns the head's seq.
+    fn append_v2_head(
+        log: &SqliteSessionLog,
+        h: &SessionHandle<crate::session_log::OwnSession>,
+        signer: &AuditSigningKey,
+        redaction: Option<crate::RedactionRecord>,
+    ) -> u64 {
+        let (range_end, current) = log
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT seq, hash FROM session_events
+                      WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+                    rusqlite::params![h.id().as_str()],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?)),
+                )
+            })
+            .unwrap();
+        let sig = signer.sign_chain_head_at_version((0, range_end), "", &current, 2, None);
+        let event = SessionEvent::ChainHead {
+            reason: ChainHeadReason::Checkpoint,
+            sequence_range_start: 0,
+            sequence_range_end: range_end,
+            prev_chain_hash: crate::HashHex(String::new()),
+            current_chain_hash: crate::HashHex(current),
+            signature: crate::HexBytes::from_bytes(&sig.to_bytes()),
+            signing_pubkey: crate::HashHex(signer.key_id_hex()),
+            schema_version: 2,
+            superseded_chain_hash: None,
+            superseded_signature: None,
+            redaction,
+        };
+        let payload = serde_json::to_string(&event).unwrap();
+        log.with_conn(|conn| {
+            let (prev_hash, seq): (String, i64) = conn.query_row(
+                "SELECT hash, seq + 1 FROM session_events
+                  WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![h.id().as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let leaf = crate::session_log::sha256_hex_for_test(payload.as_bytes());
+            let row_hash = crate::session_log::chain_hex_for_test(&prev_hash, &leaf);
+            conn.execute(
+                "INSERT INTO session_events
+                     (session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash)
+                 VALUES (?1, ?2, ?3, 'system', ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    h.id().as_str(),
+                    seq,
+                    chrono::Utc::now().to_rfc3339(),
+                    payload,
+                    leaf,
+                    prev_hash,
+                    row_hash
+                ],
+            )?;
+            Ok::<_, rusqlite::Error>(seq as u64)
+        })
+        .unwrap()
+    }
+
+    /// A head signed before the record existed verifies under the
+    /// layout it was signed with. Bumping the layout must not
+    /// invalidate what is already on disk.
+    #[test]
+    fn a_head_signed_at_the_older_layout_still_verifies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("older"));
+        log.append(&h, TrustLevel::User, user_msg("hello")).unwrap();
+
+        let seq = append_v2_head(&log, &h, &signer, None);
+        let sig = log.verify_signatures(&h).unwrap();
+        assert!(
+            sig.first_invalid.is_none(),
+            "a version 2 head must verify under version 2: {:?}",
+            sig.first_invalid
+        );
+        assert!(
+            sig.signed_heads_count >= 2,
+            "the session-start head and the version 2 one both counted"
+        );
+        assert!(seq > 0);
+    }
+
+    /// A record on a head signed at the older layout is a record no
+    /// signature covers. Reading it would be reading an unauthenticated
+    /// claim about what was cut and by whom, so the verifier refuses.
+    #[test]
+    fn a_record_on_an_older_head_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("older-with-record"));
+        log.append(&h, TrustLevel::User, user_msg("hello")).unwrap();
+
+        let seq = append_v2_head(
+            &log,
+            &h,
+            &signer,
+            Some(crate::RedactionRecord {
+                seq: 0,
+                original_leaf_hash: crate::HashHex("aa".repeat(32)),
+                redacted_leaf_hash: crate::HashHex("bb".repeat(32)),
+                operator: "someone".into(),
+                reason: "routine cleanup".into(),
+            }),
+        );
+
+        let sig = log.verify_signatures(&h).unwrap();
+        let invalid = sig
+            .first_invalid
+            .expect("an unsigned record must be refused");
+        assert_eq!(invalid.seq, seq);
+        assert!(
+            invalid.reason.contains("does not cover"),
+            "the reason says why: {}",
+            invalid.reason
+        );
+    }
+
     /// Without a signing key there is no head to mint, so a
     /// redaction would be indistinguishable from the hand edit above.
     /// It refuses instead.
@@ -2778,8 +3005,14 @@ mod chain_head_signing {
     #[test]
     fn signed_message_layout_round_trip() {
         let key = AuditSigningKey::generate();
-        let sig = key.sign_chain_head((10, 20), "deadbeef", "feedface");
-        let msg = build_signed_message((10, 20), "deadbeef", "feedface", CHAIN_HEAD_SCHEMA_VERSION);
+        let sig = key.sign_chain_head((10, 20), "deadbeef", "feedface", None);
+        let msg = build_signed_message(
+            (10, 20),
+            "deadbeef",
+            "feedface",
+            CHAIN_HEAD_SCHEMA_VERSION,
+            None,
+        );
         use ed25519_dalek::Verifier;
         key.verifying_key().verify(&msg, &sig).unwrap();
     }

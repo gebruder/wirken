@@ -41,7 +41,16 @@ pub const CHAIN_HEAD_DOMAIN: &[u8] = b"wirken/audit-chain-head/v1\0";
 /// Bump when the signed-message layout changes; the verifier rejects
 /// signatures whose embedded version does not match the version it
 /// was compiled against.
-pub const CHAIN_HEAD_SCHEMA_VERSION: u32 = 2;
+pub const CHAIN_HEAD_SCHEMA_VERSION: u32 = 3;
+
+/// Every chain-head layout this build can verify, newest last.
+///
+/// Heads are signed at [`CHAIN_HEAD_SCHEMA_VERSION`] and verified at
+/// whichever version they carry, so bumping the layout does not
+/// invalidate heads already on disk. A version absent from this list
+/// is one whose signed bytes this build cannot reconstruct, which is
+/// a verification failure rather than something to skip.
+pub const CHAIN_HEAD_SCHEMA_VERSIONS_VERIFIED: &[u32] = &[2, 3];
 
 /// Subdirectory under the gateway data dir that holds audit-signing
 /// material.
@@ -149,18 +158,49 @@ impl AuditSigningKey {
         hex_encode(&self.public_key_bytes())
     }
 
+    /// Sign a chain-head message built for a specific layout version.
+    ///
+    /// Only the crate's tests need this: production always signs at
+    /// [`CHAIN_HEAD_SCHEMA_VERSION`]. A test uses it to write a head
+    /// the way an older build would have, so the verifier's handling
+    /// of those is exercised by a real signature rather than by a
+    /// fixture that claims to be one.
+    #[cfg(test)]
+    pub(crate) fn sign_chain_head_at_version(
+        &self,
+        sequence_range: (u64, u64),
+        prev_chain_hash: &str,
+        current_chain_hash: &str,
+        schema_version: u32,
+        redaction_digest: Option<&[u8; 32]>,
+    ) -> Signature {
+        let payload = build_signed_message(
+            sequence_range,
+            prev_chain_hash,
+            current_chain_hash,
+            schema_version,
+            redaction_digest,
+        );
+        self.signing_key.sign(&payload)
+    }
+
     /// Sign a domain-separated chain-head payload.
+    ///
+    /// `redaction_digest` is [`redaction_digest`] over the head's
+    /// `RedactionRecord`, or `None` on a head that carries none.
     pub fn sign_chain_head(
         &self,
         sequence_range: (u64, u64),
         prev_chain_hash: &str,
         current_chain_hash: &str,
+        redaction_digest: Option<&[u8; 32]>,
     ) -> Signature {
         let payload = build_signed_message(
             sequence_range,
             prev_chain_hash,
             current_chain_hash,
             CHAIN_HEAD_SCHEMA_VERSION,
+            redaction_digest,
         );
         self.signing_key.sign(&payload)
     }
@@ -181,6 +221,8 @@ impl AuditSigningKey {
 ///  || u32_le(current_chain_hash.len())
 ///  || current_chain_hash.as_bytes()
 ///  || u32_le(schema_version)
+///  || u32_le(redaction_digest.len())     (version 3 onward; 0 when absent)
+///  || redaction_digest                   (32 bytes, or nothing)
 /// ```
 ///
 /// The hashes are passed as their hex string form (the same form
@@ -191,6 +233,7 @@ pub fn build_signed_message(
     prev_chain_hash: &str,
     current_chain_hash: &str,
     schema_version: u32,
+    redaction_digest: Option<&[u8; 32]>,
 ) -> Vec<u8> {
     let prev = prev_chain_hash.as_bytes();
     let curr = current_chain_hash.as_bytes();
@@ -204,7 +247,37 @@ pub fn build_signed_message(
     out.extend_from_slice(&(curr.len() as u32).to_le_bytes());
     out.extend_from_slice(curr);
     out.extend_from_slice(&schema_version.to_le_bytes());
+    // Version 3 onward. A version 2 head's message ends above, so an
+    // older head still verifies byte for byte under its own rule.
+    if schema_version >= 3 {
+        match redaction_digest {
+            Some(d) => {
+                out.extend_from_slice(&(d.len() as u32).to_le_bytes());
+                out.extend_from_slice(d);
+            }
+            // Length-prefixed and empty, so "no record" is a value
+            // and not an absence. Nothing follows it today, so this
+            // guards a version 4 that appends something else: without
+            // the prefix, "no record" and "a later field's first
+            // bytes" would be the same tail.
+            None => out.extend_from_slice(&0u32.to_le_bytes()),
+        }
+    }
     out
+}
+
+/// The digest of a head's redaction record, as the signature covers it.
+///
+/// Over the record's canonical JSON, which is the same bytes the row
+/// stores. A reader recomputing this from the row gets what the
+/// signer signed, so altering the seq, either hash, the operator or
+/// the reason moves the digest and the signature stops verifying.
+pub fn redaction_digest(record: &crate::session_log::RedactionRecord) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(record).expect("a redaction record always serializes");
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    hasher.finalize().into()
 }
 
 /// Default location of the audit signing key directory under a
@@ -326,16 +399,16 @@ mod tests {
     #[test]
     fn sign_and_verify_round_trip() {
         let key = AuditSigningKey::generate();
-        let sig = key.sign_chain_head((0, 5), "", "abc123");
-        let msg = build_signed_message((0, 5), "", "abc123", CHAIN_HEAD_SCHEMA_VERSION);
+        let sig = key.sign_chain_head((0, 5), "", "abc123", None);
+        let msg = build_signed_message((0, 5), "", "abc123", CHAIN_HEAD_SCHEMA_VERSION, None);
         key.verifying_key().verify(&msg, &sig).unwrap();
     }
 
     #[test]
     fn signature_does_not_verify_after_payload_mutation() {
         let key = AuditSigningKey::generate();
-        let sig = key.sign_chain_head((0, 5), "", "abc123");
-        let msg = build_signed_message((0, 5), "", "abc999", CHAIN_HEAD_SCHEMA_VERSION);
+        let sig = key.sign_chain_head((0, 5), "", "abc123", None);
+        let msg = build_signed_message((0, 5), "", "abc999", CHAIN_HEAD_SCHEMA_VERSION, None);
         assert!(key.verifying_key().verify(&msg, &sig).is_err());
     }
 

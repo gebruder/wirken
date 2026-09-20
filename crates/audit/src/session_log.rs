@@ -540,10 +540,15 @@ pub struct SandboxProvenance {
 /// What a redaction cut, by whom, and why.
 ///
 /// Carried on the [`ChainHeadReason::Redaction`] head so a reader knows
-/// what was removed without the payload that was removed. The head's
-/// signature does not cover these fields; the chain does. They live in
-/// the head row's payload, so altering them changes that row's leaf
-/// hash and breaks the chain at it, the same as altering any other row.
+/// what was removed without the payload that was removed.
+///
+/// The head's signature covers these fields, through
+/// [`crate::signing::redaction_digest`] in the signed message at
+/// chain-head schema version 3. The chain alone is not enough for
+/// them: a redaction head is the last row in its session, so someone
+/// who rewrites it can recompute its own leaf and chain hash and no
+/// later row disagrees. The signature is what stands between the
+/// operator's stated reason and any other reason someone prefers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedactionRecord {
     /// The row that was rewritten.
@@ -2731,10 +2736,14 @@ impl SqliteSessionLog {
             .unwrap_or_default()
         };
 
+        // Signed before the row is built, over the record the row
+        // is about to carry, so the two cannot disagree.
+        let digest = redaction.as_ref().map(crate::signing::redaction_digest);
         let sig = signer.sign_chain_head(
             (range_start, range_end),
             &prev_chain_hash,
             &current_chain_hash,
+            digest.as_ref(),
         );
 
         let event = SessionEvent::ChainHead {
@@ -2928,20 +2937,44 @@ impl SqliteSessionLog {
                 signature,
                 signing_pubkey: signing_key_id,
                 schema_version,
+                redaction,
                 ..
             } = &row.event
             else {
                 continue;
             };
 
-            if *schema_version != crate::signing::CHAIN_HEAD_SCHEMA_VERSION {
+            // Each head is verified under the layout it was signed
+            // with. Version 3 binds the redaction record into the
+            // message; version 2 predates the record and ends before
+            // it, so a head written then still verifies byte for byte
+            // rather than failing on a rule that did not exist when
+            // it was signed. A version this build does not know is a
+            // head it cannot check, which is a failure and not a
+            // waiver.
+            if !crate::signing::CHAIN_HEAD_SCHEMA_VERSIONS_VERIFIED.contains(schema_version) {
                 result.first_invalid = Some(InvalidSignatureDetail {
                     seq: row.seq,
                     signing_key_id: signing_key_id.0.clone(),
                     reason: format!(
-                        "chain head schema_version {} != verifier {}",
+                        "chain head schema_version {} is not one this verifier knows ({:?})",
                         schema_version,
-                        crate::signing::CHAIN_HEAD_SCHEMA_VERSION
+                        crate::signing::CHAIN_HEAD_SCHEMA_VERSIONS_VERIFIED
+                    ),
+                });
+                return Ok(result);
+            }
+            // A record on a version 2 head is a record the signature
+            // never covered. Refuse rather than read it: the whole
+            // point of binding it in version 3 is that an unbound one
+            // means nothing.
+            if *schema_version < 3 && redaction.is_some() {
+                result.first_invalid = Some(InvalidSignatureDetail {
+                    seq: row.seq,
+                    signing_key_id: signing_key_id.0.clone(),
+                    reason: format!(
+                        "chain head schema_version {schema_version} carries a redaction \
+                         record, which its signature does not cover"
                     ),
                 });
                 return Ok(result);
@@ -3037,11 +3070,16 @@ impl SqliteSessionLog {
             sig_arr.copy_from_slice(&sig_bytes);
             let sig = Signature::from_bytes(&sig_arr);
 
+            // Recomputed from the record on the row. A head that
+            // carries one and a forged record are the same bytes to
+            // the chain walk and different bytes here.
+            let digest = redaction.as_ref().map(crate::signing::redaction_digest);
             let payload = crate::signing::build_signed_message(
                 (*sequence_range_start, *sequence_range_end),
                 &prev_chain_hash.0,
                 &current_chain_hash.0,
                 *schema_version,
+                digest.as_ref(),
             );
             // verify_strict (not the legacy verify) rejects non-canonical
             // scalars and small-order / mixed-order R points so a malleable
@@ -3731,6 +3769,19 @@ fn canonicalize_payload(event: &SessionEvent) -> Result<Vec<u8>, AuditError> {
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+/// The two hash steps, reachable from the crate's tests so a test
+/// can put a rewritten row's own hashes back the way an attacker
+/// would, rather than approximating it.
+#[cfg(test)]
+pub(crate) fn sha256_hex_for_test(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn chain_hex_for_test(prev_hash: &str, leaf_hash: &str) -> String {
+    chain_hex(prev_hash, leaf_hash)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

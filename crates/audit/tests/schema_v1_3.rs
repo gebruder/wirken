@@ -710,7 +710,7 @@ fn snapshot_chain_head_uses_signing_pubkey() {
     assert_keys_absent(&v, &["signing_key_id"]);
     // Sanity: the signed-message builder still accepts the values
     // (i.e. nothing about the rename changed the canonical bytes).
-    let _ = build_signed_message((0, 0), "", "11", CHAIN_HEAD_SCHEMA_VERSION);
+    let _ = build_signed_message((0, 0), "", "11", CHAIN_HEAD_SCHEMA_VERSION, None);
 }
 
 #[test]

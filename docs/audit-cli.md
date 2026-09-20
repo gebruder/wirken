@@ -138,10 +138,22 @@ head, and on log rotation.
 || (current_chain_hash.len() as u32).to_le_bytes()
 || current_chain_hash.as_bytes()       (ASCII hex form)
 || schema_version.to_le_bytes()        (4 bytes, u32 little-endian)
+|| (redaction_digest.len() as u32).to_le_bytes()   (version 3 onward)
+|| redaction_digest                    (32 bytes, or nothing when 0)
 ```
 
-`schema_version` is `2`. Bumping it is a wire-incompatible change to
-chain-head verification.
+`schema_version` is `3`. Each head is verified under the layout it was
+signed with, so bumping it does not invalidate heads already on disk: a
+version 2 head's message ends at `schema_version` and still verifies byte
+for byte. A version this build does not know is a head it cannot check,
+which is a verification failure rather than something to skip.
+
+`redaction_digest` is SHA-256 over the canonical JSON of the head's
+`redaction` record, the same bytes the row stores, and is absent with a
+zero length prefix on every head that carries no record. A record on a
+version 2 head is a record no signature covers, so the verifier refuses it
+rather than reading an unauthenticated claim about what was cut and by
+whom.
 
 The signing key lives at `<data_dir>/audit/audit-signing.key` (Ed25519 raw
 32-byte seed, mode 0o600 on Unix), public half alongside it. It is distinct
@@ -170,7 +182,7 @@ re-hashes to the end of the session, and mints a head with
 superseded head's `current_chain_hash` and `signature`:
 
 ```json
-{"kind":"chain_head","reason":"redaction","sequence_range_start":4,"sequence_range_end":11,"prev_chain_hash":"989630194603d410593b62b1633ad20ade9e66335c11bb3401df26ea185815dd","current_chain_hash":"f7b3905637c598d2d630e541113ad313834e2d3f1a1f1a75b92fcd1fd7ef9b2b","signature":"161d14b5bd58c3289cc723b1cb74cc22affc9dff004dcf17273ac3c0bb986001274be58d678c3bd24f492661523b652ded52c5f1545be6a3f2793fa089dffb02","signing_pubkey":"c1fc2db759e1418391cd6aaba9e593abb7d903cc090990421f0f1138f77b12b5","schema_version":2,"superseded_chain_hash":"9d3f735d93344c5a47d412516b2917ddd0a847265cadfe766217c4e10b000d85","superseded_signature":"d9e17e1779c83824276a1405bcbc21a31f9beaf215db85feb5174e2f5e47ac21ffc09ca1bf5443ae5713166386211da9e8bac890cf471f90ee7ab79ab74b6d0d","redaction":{"seq":4,"original_leaf_hash":"6753ada6febe6b43b4eda65d8f16d7f399a1eccae7addba9228953fd27f75fcc","redacted_leaf_hash":"bdd1ccfe171568daa723d482410f13860e7b7ef458197bc26c7c831c340482fa","operator":"operator","reason":"customer asked for their message to be removed"}}
+{"kind":"chain_head","reason":"redaction","sequence_range_start":4,"sequence_range_end":11,"prev_chain_hash":"11d3f59eabeb44dd1a42b8654e42792bc609ed453dff80fc8efb92f2f230e3ef","current_chain_hash":"a5c2aafc09dcf3a20c9e448c66131d54971c3bd10c6268b4184055c1584b7f0c","signature":"45d2d6b0b0a3486225dede562ea7f73e8dd7627d2b67613e3c6601e4057eed1d8ff202352b7c514a51718a7b08d58f4c310a60427077bafc453d7d26d2c9ed0d","signing_pubkey":"fdd2d9f0c57802038596532097724bb048750bb91f142e4346201ddd6328e2b6","schema_version":3,"superseded_chain_hash":"b96e27183f85203eca050d150c6d11c5928677fdced2d6f03c991b9b904656d0","superseded_signature":"c94b1ca2d02016333c59adcea915faf83918dd7d2e68da63929c7a66b346c9be21f620d7c0fc3d21d47128e45d55c60d87e0241a1b2ff0984ae569820920ab05","redaction":{"seq":4,"original_leaf_hash":"6753ada6febe6b43b4eda65d8f16d7f399a1eccae7addba9228953fd27f75fcc","redacted_leaf_hash":"bdd1ccfe171568daa723d482410f13860e7b7ef458197bc26c7c831c340482fa","operator":"operator","reason":"customer asked for their message to be removed"}}
 ```
 
 `superseded_chain_hash` here is the `current_chain_hash` of the checkpoint
@@ -190,9 +202,15 @@ not the payload it removed. Five facts, answering five questions:
 | `operator` | Who ordered it. An operator label, not a platform sender id. |
 | `reason` | Why, in the operator's words. |
 
-The head's signature does not cover those five; the chain does. They sit
-in the head row's own payload, so altering them moves that row's leaf hash
-and breaks the chain at it, the same as altering any other row.
+The signature covers those five, through a digest of the record in the
+signed message at `schema_version` 3.
+
+The chain alone would not be enough for them. A redaction head is the last
+row in its session, so anyone who rewrites it can recompute that row's own
+leaf and chain hash and no later row disagrees: the chain walk comes back
+clean. The signature is the only thing standing between the operator's
+stated reason and any other reason someone prefers, which is why the
+record is bound into it rather than left to the chain.
 
 `verify` treats a head that a redaction names as accounted for rather than
 invalid; every other head still has to match its stored hash. A row
