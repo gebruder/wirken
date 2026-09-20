@@ -579,8 +579,6 @@ mod tests {
         assert!(out.contains("credential:   (none)"));
     }
 
-    // Slice 3 construction-helper tests.
-
     fn dangling_err() -> PersonaError {
         PersonaError::DanglingPresetReference {
             persona_name: "alice".into(),

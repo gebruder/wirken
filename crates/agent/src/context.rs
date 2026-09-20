@@ -306,8 +306,6 @@ impl ContextEngine {
             .append(handle, TrustLevel::Compaction, event)
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
 
-        // Item 4 slice 2: inject the freshly aggregated summary as
-        // a Role::Compaction message at position 1.
         self.maybe_inject_compaction_summary(conversation, session_log, handle)?;
 
         Ok(FitResult { trimmed_messages })

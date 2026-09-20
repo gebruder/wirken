@@ -2602,7 +2602,6 @@ impl Agent {
             return Ok(replay);
         }
 
-        // Item 10 follow-up — see process_message_inner.
         self.maybe_log_system_prompt()?;
 
         // Run pre-LLM interceptor chain. Same shape as

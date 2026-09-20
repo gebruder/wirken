@@ -604,7 +604,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     .and_then(|s| s.strip_suffix(".amazonaws.com"))
                     .map(String::from);
             }
-            // Item 6 slice 2: per-agent tools_enabled override.
             if let Some(override_val) = agent_cfg.tools_enabled {
                 llm.tools_enabled = override_val;
             }
@@ -751,7 +750,6 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             }
         }
 
-        // Item 8 slice 2: identity for the default agent.
         let default_identity_dir = wirken_agent::identity::identity_dir(&cfg.data_dir, "default");
         let default_identity = match wirken_agent::AgentIdentity::load_or_create(
             "default",

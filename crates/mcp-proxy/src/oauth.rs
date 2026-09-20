@@ -977,8 +977,6 @@ mod scope_catalog_tests {
         }
     }
 
-    // Slice 3 public-view tests.
-
     #[test]
     fn parse_public_view_splits_scope_string_on_whitespace() {
         let json = r#"{

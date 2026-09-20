@@ -768,8 +768,6 @@ mod tests {
         assert_eq!(got.channels, vec!["discord"]);
     }
 
-    // Item 6 slice 1: allowed_subagents column / round-trip.
-
     #[test]
     fn allowed_subagents_round_trip_through_store() {
         let tmp = TempDir::new().unwrap();

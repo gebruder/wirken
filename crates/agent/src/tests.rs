@@ -5686,8 +5686,6 @@ mod context_engine {
         assert_eq!(tool_msgs[1].tool_call_id.as_deref(), Some("c2"));
     }
 
-    // Slice 1 of item 10 tests live in their own module below.
-
     // -----------------------------------------------------------------
     // Item 4 slice 2 (alpha): Role::Compaction projection
     // -----------------------------------------------------------------

@@ -456,9 +456,6 @@ impl OtelProjector {
                 );
                 Vec::new()
             }
-            // Remaining child variants (PermissionDenied for
-            // error status) project in follow-up commits on
-            // issue #130.
             _ => Vec::new(),
         }
     }
