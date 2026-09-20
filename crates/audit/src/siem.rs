@@ -534,10 +534,21 @@ pub fn build_webhook_typed_request(
 }
 
 /// Pull adapter_id / sender_id / agent_id out of any variant that
-/// carries them. Returns `(adapter_id, sender_id, agent_id)`. None
-/// for variants that have no such field; the Sentinel and webhook
-/// envelopes already include the typed payload separately so a
-/// missing column does not lose information.
+/// carries them. Returns `(adapter_id, sender_id, agent_id)`.
+///
+/// Each column holds the field it is named after and nothing else.
+/// `sender_id` in particular is a platform sender id (a Telegram user
+/// id, a Slack uid, the literal `webchat-user`) or `None`; an
+/// operator label like an import's `actor`, a refused approval's
+/// `caller`, or a revocation's `revoked_by` never goes there, because
+/// a column that sometimes holds a platform id and sometimes a
+/// human-readable role name cannot be joined on either.
+///
+/// Those labels are not lost: the Sentinel and webhook envelopes
+/// carry the typed payload beside these columns, so every field stays
+/// on the row. If an operator identity ever needs a column of its
+/// own, it gets one under its own name and covers every variant that
+/// carries such a label, not just the one that prompted it.
 fn extract_identity_for_sentinel(
     event: &crate::session_log::SessionEvent,
 ) -> (Option<String>, Option<String>, Option<String>) {
@@ -619,14 +630,6 @@ fn extract_identity_for_sentinel(
             sender_id,
             ..
         } => (None, sender_id.clone(), Some(agent_id.clone())),
-        // No agent ran an import: it is an operator CLI action. The
-        // actor label goes in the principal position, and agent stays
-        // genuinely absent rather than being invented. `actor` is the
-        // one label mapped onto a column it is not named after; every
-        // other operator label below stays off these columns.
-        SessionEvent::ImportStarted { actor, .. } | SessionEvent::ImportCompleted { actor, .. } => {
-            (None, Some(actor.clone()), None)
-        }
         // An agent ran this one, unlike an import, so it attributes
         // like every other agent event rather than to an operator.
         SessionEvent::ImportedChatRead {
@@ -743,6 +746,11 @@ fn extract_identity_for_sentinel(
         // No column is filled: none of the rows below carries any of
         // the three. What each one carries instead is named so the
         // absence reads as a fact about the row.
+        // An operator CLI action, so `actor` is an operator label and
+        // not one of the three. It stays on the row in `Event`.
+        SessionEvent::ImportStarted { .. } | SessionEvent::ImportCompleted { .. } => {
+            (None, None, None)
+        }
         // A session id, a count and a reason; none of the three.
         SessionEvent::SessionScopedApprovalsCleared { .. } => (None, None, None),
         // A skill and a phase name; none of the three.
@@ -1011,8 +1019,11 @@ mod identity_tests {
     /// error here rather than a row with no attribution. What it
     /// takes from each variant that carries one of the three columns
     /// is asserted below.
+    /// An import is an operator CLI action, so its `actor` is a role
+    /// name and not a platform sender. It leaves the identity columns
+    /// empty and stays on the row in the typed payload.
     #[test]
-    fn import_rows_carry_the_operator_actor() {
+    fn an_import_fills_no_identity_column() {
         let started = SessionEvent::ImportStarted {
             source_id: "src-1".into(),
             provider: "anthropic".into(),
@@ -1034,9 +1045,131 @@ mod identity_tests {
         };
         for event in [started, completed] {
             let (channel, sender, agent) = extract_identity_for_sentinel(&event);
-            assert_eq!(sender.as_deref(), Some("an-operator"));
             assert_eq!(channel, None);
+            assert_eq!(sender, None, "an actor label is not a platform sender");
             assert_eq!(agent, None, "no agent ran an import");
+            // The actor is still on the row: the envelope carries the
+            // typed payload beside the columns.
+            let payload = serde_json::to_value(&event).expect("the row serializes");
+            assert_eq!(payload["actor"], "an-operator");
+        }
+    }
+
+    /// The identity columns hold the field they are named after. An
+    /// operator or role label is a different kind of name, and a
+    /// column that sometimes holds a platform id and sometimes a role
+    /// cannot be joined on either. Each row below carries a label in
+    /// a field that is not one of the three; none of it may come back
+    /// in a column.
+    #[test]
+    fn no_row_puts_an_actor_label_in_an_identity_column() {
+        use crate::session_log::{ApprovalScopeKind, DenialSource};
+        const LABEL: &str = "an-operator";
+        let stamp = |s: &str| {
+            s.parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a timestamp")
+        };
+        let rows = vec![
+            // `actor` on the two import rows.
+            SessionEvent::ImportStarted {
+                source_id: "src-1".into(),
+                provider: "anthropic".into(),
+                source_account: "acct-1".into(),
+                archive_sha256: "abc".into(),
+                actor: LABEL.into(),
+            },
+            SessionEvent::ImportCompleted {
+                source_id: "src-1".into(),
+                provider: "anthropic".into(),
+                source_account: "acct-1".into(),
+                archive_sha256: "abc".into(),
+                actor: LABEL.into(),
+                added: 1,
+                updated: 0,
+                unchanged: 0,
+                unorderable: 0,
+                skipped: 0,
+            },
+            // `caller` on a refused approval.
+            SessionEvent::PermissionApprovalRefused {
+                request_id: "req-1".into(),
+                action_key: None,
+                caller: LABEL.into(),
+                reason: crate::ApprovalRefusalReason::WrongChannel,
+                adapter_id: Some("slack".into()),
+            },
+            // `revoked_by` on a revocation.
+            SessionEvent::PermissionRevoked {
+                action_key: "shell:ls".into(),
+                agent_id: "worker".into(),
+                revoked_by: LABEL.into(),
+                tier: None,
+                expires_at: None,
+            },
+            // `approved_by` on a grant and on its renewal.
+            SessionEvent::PermissionApproved {
+                action_key: "shell:ls".into(),
+                agent_id: "worker".into(),
+                approved_by: LABEL.into(),
+                scope: ApprovalScopeKind::Persisted,
+                session_id: None,
+                approved_via: None,
+                adapter_id: Some("slack".into()),
+                sender_id: Some("U123".into()),
+                tier: None,
+                expires_at: None,
+            },
+            SessionEvent::PermissionRenewed {
+                action_key: "shell:ls".into(),
+                agent_id: "worker".into(),
+                approved_by: LABEL.into(),
+                previous_expires_at: stamp("2026-09-20T00:00:00Z"),
+                expires_at: stamp("2026-10-20T00:00:00Z"),
+                approved_via: None,
+                adapter_id: Some("slack".into()),
+                sender_id: Some("U123".into()),
+            },
+            // `denied_via` and `trigger` on a denial, neither of them
+            // an identity either.
+            SessionEvent::PermissionDenied {
+                tool: "exec".into(),
+                action_key: "shell:rm".into(),
+                denial_source: DenialSource::Tier,
+                tier: None,
+                agent_id: "worker".into(),
+                trigger: Some(LABEL.into()),
+                denied_via: None,
+                denial_reason: Some(LABEL.into()),
+                adapter_id: Some("slack".into()),
+                sender_id: Some("U123".into()),
+            },
+            // `actor_id` on a bridged legacy row.
+            SessionEvent::AuditLegacy {
+                actor_kind: crate::event::ActorKind::User,
+                actor_id: LABEL.into(),
+                action: "config.changed".into(),
+                target: "provider.json".into(),
+                channel: Some("cli".into()),
+                detail: serde_json::json!({}),
+            },
+        ];
+        for event in rows {
+            let kind = crate::siem_typed::variant_kind(&event);
+            let (adapter_id, sender_id, agent_id) = extract_identity_for_sentinel(&event);
+            for (column, value) in [
+                ("adapter_id", adapter_id),
+                ("sender_id", sender_id),
+                ("agent_id", agent_id),
+            ] {
+                assert_ne!(
+                    value.as_deref(),
+                    Some(LABEL),
+                    "{kind} put a role label in {column}"
+                );
+            }
+            // And the label is still on the row.
+            let payload = serde_json::to_string(&event).expect("the row serializes");
+            assert!(payload.contains(LABEL), "{kind} lost the label entirely");
         }
     }
 

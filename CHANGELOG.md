@@ -19,10 +19,20 @@ tagged.
   denial arrived with no channel and no sender, a `http_request` row
   with no agent, and every hook, redaction, grant and delivery row
   with nothing at all. Every variant that carries one of the three
-  now hands it over. Two operator labels stay off these columns on
-  purpose: the `caller` on a refused approval and the `revoked_by` on
-  a revocation are actor names, not the platform sender ids the
-  column holds elsewhere.
+  now hands it over.
+
+- Each Sentinel identity column holds the field it is named after and
+  nothing else. `SenderId` is a platform sender id or null; an
+  operator label never goes there. An import row's `actor` did, so
+  that column changes from the operator name to null for
+  `import_started` and `import_completed`; a query reading a platform
+  sender out of it was reading a role name. The label is still on the
+  row in `Event`, as are the other operator labels that were already
+  kept off these columns (`caller` on a refused approval,
+  `revoked_by` on a revocation, `approved_by` on a grant and its
+  renewal). An operator identity that needs a column of its own gets
+  one under its own name, covering every variant that carries such a
+  label rather than the one that prompted it.
 
 - The About panel draws the capabilities of the conversation it is
   open on. It asked `/api/capabilities` with no key, so it always
