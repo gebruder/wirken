@@ -75,6 +75,15 @@ tagged.
   whose key. `verify` treats a head a redaction names as accounted
   for rather than invalid; every other head still has to match.
 
+  The head carries a `redaction` object naming what was cut: the
+  `seq`, the row's `original_leaf_hash` and `redacted_leaf_hash`, the
+  `operator` who ordered it and the `reason`. A reader holding that
+  row and not the payload it removed can still say which row changed,
+  confirm a copy held elsewhere is the one that was cut, see that the
+  replacement has not been swapped since, and read who asked and why.
+  The head's signature does not cover those five; the chain does,
+  since they sit in the head row's own payload.
+
 ### Changed
 
 - Every `Action` has an explicit approval key. Eight variants fell

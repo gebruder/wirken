@@ -702,6 +702,7 @@ fn snapshot_chain_head_uses_signing_pubkey() {
         schema_version: CHAIN_HEAD_SCHEMA_VERSION,
         superseded_signature: None,
         superseded_chain_hash: None,
+        redaction: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["signing_pubkey"]);

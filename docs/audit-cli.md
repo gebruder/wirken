@@ -170,7 +170,7 @@ re-hashes to the end of the session, and mints a head with
 superseded head's `current_chain_hash` and `signature`:
 
 ```json
-{"kind":"chain_head","reason":"redaction","sequence_range_start":4,"sequence_range_end":7,"prev_chain_hash":"05a111eca546eed5bd0d94c22c94450ee9a40daccb7f3b0ab30559ca7148cc8d","current_chain_hash":"498d3721c78657dda557947b9b700dec626179ffccd123cbdd683a90bf42d951","signature":"73c82b648bd193a218e30896cb5dba999d4c0d9ee9c738c8b958f8ceef50c9d921fcd24e99afc62aea015e8aa568599fc860937847072132156c24ca3250140c","signing_pubkey":"81910acd06b86508de1dc28738d7ac18da03b5ed943f77adb58ffd191827a0fb","schema_version":2,"superseded_chain_hash":"70d69a1e854260de9e369cb0fa56124fc6e493c98b8f49e3e512960ef0a30164","superseded_signature":"5aaf615f06ff35699dab9f0a0a310feff7f4893a6c541d38fc5e4312be30f214d3016f4d280d2a96d69f322d56907c6549977f661acdc1835a27df8b0c051b07"}
+{"kind":"chain_head","reason":"redaction","sequence_range_start":4,"sequence_range_end":11,"prev_chain_hash":"989630194603d410593b62b1633ad20ade9e66335c11bb3401df26ea185815dd","current_chain_hash":"f7b3905637c598d2d630e541113ad313834e2d3f1a1f1a75b92fcd1fd7ef9b2b","signature":"161d14b5bd58c3289cc723b1cb74cc22affc9dff004dcf17273ac3c0bb986001274be58d678c3bd24f492661523b652ded52c5f1545be6a3f2793fa089dffb02","signing_pubkey":"c1fc2db759e1418391cd6aaba9e593abb7d903cc090990421f0f1138f77b12b5","schema_version":2,"superseded_chain_hash":"9d3f735d93344c5a47d412516b2917ddd0a847265cadfe766217c4e10b000d85","superseded_signature":"d9e17e1779c83824276a1405bcbc21a31f9beaf215db85feb5174e2f5e47ac21ffc09ca1bf5443ae5713166386211da9e8bac890cf471f90ee7ab79ab74b6d0d","redaction":{"seq":4,"original_leaf_hash":"6753ada6febe6b43b4eda65d8f16d7f399a1eccae7addba9228953fd27f75fcc","redacted_leaf_hash":"bdd1ccfe171568daa723d482410f13860e7b7ef458197bc26c7c831c340482fa","operator":"operator","reason":"customer asked for their message to be removed"}}
 ```
 
 `superseded_chain_hash` here is the `current_chain_hash` of the checkpoint
@@ -178,6 +178,21 @@ head that covered the range before the rewrite, and `superseded_signature`
 is the signature made over it. Both are on the row so an auditor holding
 the old head can see the range it signed, the hash it signed that range to,
 and that the hash on disk is a different one.
+
+The `redaction` object is what happened, for a reader who has this row and
+not the payload it removed. Five facts, answering five questions:
+
+| Field | Question |
+| --- | --- |
+| `seq` | Which row was cut. |
+| `original_leaf_hash` | What it was. The payload is gone; this is what is left of it, and it is enough to confirm that a copy held elsewhere is the row that was cut. |
+| `redacted_leaf_hash` | What it is now, so the replacement is pinned too and cannot be swapped for another afterwards. |
+| `operator` | Who ordered it. An operator label, not a platform sender id. |
+| `reason` | Why, in the operator's words. |
+
+The head's signature does not cover those five; the chain does. They sit
+in the head row's own payload, so altering them moves that row's leaf hash
+and breaks the chain at it, the same as altering any other row.
 
 `verify` treats a head that a redaction names as accounted for rather than
 invalid; every other head still has to match its stored hash. A row

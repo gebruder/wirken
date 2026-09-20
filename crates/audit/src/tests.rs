@@ -2020,6 +2020,8 @@ mod chain_head_signing {
                     adapter_id: None,
                     sender_id: None,
                 },
+                "operator",
+                "customer asked for their message to be removed",
             )
             .expect("the redaction succeeds");
 
@@ -2082,6 +2084,129 @@ mod chain_head_signing {
         }
     }
 
+    /// The redaction head says what was cut, by whom and why, without
+    /// the payload that was cut.
+    ///
+    /// Five facts, because a reader holding only this row has to be
+    /// able to answer five questions: which row, what it was, what it
+    /// is now, who ordered it, and why. The chain says a range was
+    /// resealed; without these it does not say what happened.
+    #[test]
+    fn a_redaction_head_names_the_row_the_hashes_the_operator_and_the_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("named"));
+        for n in 0..10 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("row {n}")))
+                .unwrap();
+        }
+        log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+            .unwrap()
+            .unwrap();
+
+        let original_leaf = log
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT leaf_hash FROM session_events WHERE session_id = ?1 AND seq = 4",
+                    rusqlite::params![h.id().as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+
+        // Which append lands at seq 4 depends on the heads written
+        // before it, so read the content rather than assuming it.
+        let cut = log
+            .get_since(&h, 0)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.seq == 4)
+            .map(|r| match r.event {
+                SessionEvent::UserMessage { content, .. } => content,
+                other => panic!("expected a user message at seq 4, got {other:?}"),
+            })
+            .expect("row at seq 4");
+
+        let replacement = SessionEvent::UserMessage {
+            content: "[redacted]".into(),
+            inbound_id: None,
+            adapter_id: None,
+            sender_id: None,
+        };
+        let head_seq = log
+            .redact(
+                &h,
+                4,
+                &replacement,
+                "operator",
+                "customer asked for their message to be removed",
+            )
+            .unwrap();
+
+        let rows = log.get_since(&h, 0).unwrap();
+        let record = match &rows.iter().find(|r| r.seq == head_seq).unwrap().event {
+            SessionEvent::ChainHead {
+                redaction: Some(record),
+                ..
+            } => record.clone(),
+            other => panic!("expected a redaction record on the head, got {other:?}"),
+        };
+
+        assert_eq!(record.seq, 4, "which row");
+        assert_eq!(
+            record.original_leaf_hash.0, original_leaf,
+            "what it was: the leaf hash the row had before"
+        );
+        let expected_now = log
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT leaf_hash FROM session_events WHERE session_id = ?1 AND seq = 4",
+                    rusqlite::params![h.id().as_str()],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            record.redacted_leaf_hash.0, expected_now,
+            "what it is now, so the replacement cannot be swapped later either"
+        );
+        assert_ne!(
+            record.original_leaf_hash, record.redacted_leaf_hash,
+            "the two hashes are the before and after of one row"
+        );
+        assert_eq!(record.operator, "operator", "who ordered it");
+        assert_eq!(
+            record.reason, "customer asked for their message to be removed",
+            "why"
+        );
+
+        // The payload itself is gone. The hash is what is left of it.
+        let text =
+            serde_json::to_string(&rows.iter().map(|r| &r.event).collect::<Vec<_>>()).unwrap();
+        assert!(
+            !text.contains(&cut),
+            "the cut content, {cut:?}, is not on the chain"
+        );
+
+        // An ordinary head carries no record: this is not a field
+        // every head has to answer for.
+        let plain = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                SessionEvent::ChainHead {
+                    reason: ChainHeadReason::Checkpoint,
+                    redaction,
+                    ..
+                } => Some(redaction.clone()),
+                _ => None,
+            })
+            .expect("the checkpoint head");
+        assert_eq!(plain, None);
+    }
+
     /// Without a signing key there is no head to mint, so a
     /// redaction would be indistinguishable from the hand edit above.
     /// It refuses instead.
@@ -2100,6 +2225,8 @@ mod chain_head_signing {
                     adapter_id: None,
                     sender_id: None,
                 },
+                "operator",
+                "customer asked for their message to be removed",
             )
             .expect_err("an unsigned log cannot reseal");
         assert!(format!("{err}").contains("redaction refused"), "{err}");
@@ -2960,6 +3087,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             schema_version: 0,
             superseded_chain_hash: None,
             superseded_signature: None,
+            redaction: None,
         },
         SessionEvent::SystemPromptSet {
             content: String::new(),

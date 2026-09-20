@@ -6159,6 +6159,7 @@ mod tests {
                     schema_version: 1,
                     superseded_chain_hash: None,
                     superseded_signature: None,
+                    redaction: None,
                 },
             ),
             (

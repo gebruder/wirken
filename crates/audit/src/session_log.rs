@@ -537,6 +537,30 @@ pub struct SandboxProvenance {
     pub container_id: Option<String>,
 }
 
+/// What a redaction cut, by whom, and why.
+///
+/// Carried on the [`ChainHeadReason::Redaction`] head so a reader knows
+/// what was removed without the payload that was removed. The head's
+/// signature does not cover these fields; the chain does. They live in
+/// the head row's payload, so altering them changes that row's leaf
+/// hash and breaks the chain at it, the same as altering any other row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactionRecord {
+    /// The row that was rewritten.
+    pub seq: u64,
+    /// The leaf hash the row had before the rewrite. The payload is
+    /// gone; this is what is left of it, and it is enough to confirm
+    /// a copy held elsewhere is the row that was cut.
+    pub original_leaf_hash: HashHex,
+    /// The leaf hash it has now, so the replacement is nailed down
+    /// too and cannot be swapped for another after the fact.
+    pub redacted_leaf_hash: HashHex,
+    /// Who ordered it. An operator label, not a platform sender id.
+    pub operator: String,
+    /// Why, in the operator's words.
+    pub reason: String,
+}
+
 /// One event in a session transcript.
 ///
 /// New variants may be added without breaking older readers when the
@@ -1446,6 +1470,13 @@ pub enum SessionEvent {
         /// old row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         superseded_signature: Option<HexBytes>,
+        /// What the redaction cut, by whom and why. Present only on a
+        /// [`ChainHeadReason::Redaction`] head. The two hashes on it
+        /// are the rewritten row's, not this head's: they say which
+        /// row changed and what it changed to, where the superseded
+        /// pair above says which head stopped covering it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redaction: Option<RedactionRecord>,
     },
     /// The harness records its current effective system prompt as a
     /// session event before the first
@@ -2439,6 +2470,8 @@ impl SqliteSessionLog {
         handle: &SessionHandle<OwnSession>,
         seq: u64,
         replacement: &SessionEvent,
+        operator: &str,
+        reason: &str,
     ) -> Result<u64, AuditError> {
         let signer = self
             .signer
@@ -2452,7 +2485,25 @@ impl SqliteSessionLog {
         // rewrite visible afterwards.
         let superseded = self.head_covering(&conn, handle.id.as_str(), seq)?;
 
+        // The leaf hash of the row as it stands, read before it is
+        // overwritten. The payload is about to be gone; this is what
+        // is left of it, and it is what lets a copy held elsewhere be
+        // confirmed as the row that was cut.
+        let original_leaf_hash: String = conn
+            .query_row(
+                "SELECT leaf_hash FROM session_events WHERE session_id = ?1 AND seq = ?2",
+                params![handle.id.as_str(), seq as i64],
+                |row| row.get(0),
+            )
+            .map_err(|_| {
+                AuditError::RedactionRefused(format!(
+                    "no row at seq {seq} in session {}",
+                    handle.id.as_str()
+                ))
+            })?;
+
         let payload_bytes = canonicalize_payload(replacement)?;
+        let redacted_leaf_hash = sha256_hex(&payload_bytes);
         let payload_str =
             String::from_utf8(payload_bytes.clone()).expect("serde_json output is valid utf-8");
         let changed = conn.execute(
@@ -2520,6 +2571,13 @@ impl SqliteSessionLog {
             ChainHeadReason::Redaction,
             &signer,
             superseded,
+            Some(RedactionRecord {
+                seq,
+                original_leaf_hash: HashHex(original_leaf_hash),
+                redacted_leaf_hash: HashHex(redacted_leaf_hash),
+                operator: operator.to_string(),
+                reason: reason.to_string(),
+            }),
         )
     }
 
@@ -2602,7 +2660,7 @@ impl SqliteSessionLog {
         reason: ChainHeadReason,
         signer: &AuditSigningKey,
     ) -> Result<u64, AuditError> {
-        self.append_chain_head_superseding(conn, handle, reason, signer, None)
+        self.append_chain_head_superseding(conn, handle, reason, signer, None, None)
     }
 
     /// The head builder, with the head this one replaces when the
@@ -2615,6 +2673,7 @@ impl SqliteSessionLog {
         reason: ChainHeadReason,
         signer: &AuditSigningKey,
         superseded: Option<(HashHex, HexBytes)>,
+        redaction: Option<RedactionRecord>,
     ) -> Result<u64, AuditError> {
         // Snapshot the current chain state. The ChainHead covers the
         // range from `last_head_seq + 1` (or 0) up to the current
@@ -2689,6 +2748,7 @@ impl SqliteSessionLog {
             schema_version: CHAIN_HEAD_SCHEMA_VERSION,
             superseded_chain_hash: superseded.as_ref().map(|(h, _)| h.clone()),
             superseded_signature: superseded.map(|(_, sig)| sig),
+            redaction,
         };
 
         let next_seq = append_inner(conn, handle, TrustLevel::System, event, None)?;
