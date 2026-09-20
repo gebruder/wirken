@@ -96,6 +96,7 @@ fn write(ctx: &MemoryContext, args: &serde_json::Value) -> Result<ToolResult, Ag
             Ok(ToolResult {
                 output: format!("recorded on {} as {entry_id}", ctx.labels.channel),
                 success: true,
+                sandbox: None,
             })
         }
         Err(e) => Ok(fail(&format!("memory_write refused: {e}"))),
@@ -117,6 +118,7 @@ fn read_same_channel(
     Ok(ToolResult {
         output: render(&entries, &ctx.labels.channel),
         success: true,
+        sandbox: None,
     })
 }
 
@@ -158,6 +160,7 @@ fn read_other_channel(
     Ok(ToolResult {
         output: render(&entries, from),
         success: true,
+        sandbox: None,
     })
 }
 
@@ -176,5 +179,6 @@ fn fail(message: &str) -> ToolResult {
     ToolResult {
         output: message.to_string(),
         success: false,
+        sandbox: None,
     }
 }

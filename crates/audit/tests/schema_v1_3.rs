@@ -189,6 +189,7 @@ fn a1_tool_result_emitted_with_webchat_identity() {
         agent_id: "default".into(),
         adapter_id: Some("webchat".into()),
         sender_id: Some("webchat-user".into()),
+        sandbox: None,
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(

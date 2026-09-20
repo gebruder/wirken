@@ -68,6 +68,7 @@ fn fixture_tool_result() -> SessionEvent {
         agent_id: "default".into(),
         adapter_id: Some("slack".into()),
         sender_id: Some("U123".into()),
+        sandbox: None,
     }
 }
 

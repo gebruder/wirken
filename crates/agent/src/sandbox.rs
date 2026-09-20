@@ -69,6 +69,15 @@ impl SandboxMode {
         }
     }
 
+    /// How this mode is named on an audit row.
+    pub(crate) fn label(self) -> wirken_audit::SandboxModeLabel {
+        match self {
+            Self::Off => wirken_audit::SandboxModeLabel::Off,
+            Self::ExecOnly => wirken_audit::SandboxModeLabel::ExecOnly,
+            Self::GVisor => wirken_audit::SandboxModeLabel::Gvisor,
+        }
+    }
+
     /// The OCI runtime name to pass to Docker, or None for the default (runc).
     pub(crate) fn runtime_name(self) -> Option<String> {
         match self {
@@ -438,11 +447,26 @@ impl DockerSandbox {
             platform: String::new(),
         };
 
+        let runtime = runtime_label(
+            container_config
+                .host_config
+                .as_ref()
+                .and_then(|host| host.runtime.as_deref()),
+        );
+
         let container = self
             .client
             .create_container(Some(create_opts), container_config)
             .await
             .map_err(|e| AgentError::Sandbox(format!("create container: {e}")))?;
+
+        // The id Docker returned for the container this command ran
+        // in, not a name this process chose.
+        let provenance = wirken_audit::SandboxProvenance {
+            mode: self.config.mode.label(),
+            runtime,
+            container_id: Some(container.id.clone()),
+        };
 
         self.client
             .start_container(&container.id, None)
@@ -488,6 +512,7 @@ impl DockerSandbox {
                         self.config.timeout_secs
                     ),
                     success: false,
+                    sandbox: Some(provenance),
                 });
             }
         };
@@ -544,6 +569,7 @@ impl DockerSandbox {
         Ok(ToolResult {
             output: result,
             success: exit_code == 0,
+            sandbox: Some(provenance),
         })
     }
 
@@ -1064,6 +1090,22 @@ pub async fn detect_image(image: &str) -> bool {
         return false;
     };
     docker.inspect_image(image).await.is_ok()
+}
+
+/// The runtime an audit row names, from the OCI runtime on the
+/// container body about to be sent.
+///
+/// Read off the body rather than off the sandbox's mode: this is what
+/// Docker is being told to use for this one container. A mode whose
+/// `runtime_name` says `runsc` and a body that carries none shows up
+/// as a `docker` row under a `gvisor` mode, which is the disagreement
+/// worth being able to see on the chain. `None` is Docker's default
+/// runtime, runc.
+pub(crate) fn runtime_label(runtime: Option<&str>) -> wirken_audit::SandboxRuntimeLabel {
+    match runtime {
+        Some("runsc") => wirken_audit::SandboxRuntimeLabel::Gvisor,
+        _ => wirken_audit::SandboxRuntimeLabel::Docker,
+    }
 }
 
 /// Detect if gVisor (runsc) is available as a Docker runtime.

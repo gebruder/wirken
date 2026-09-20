@@ -198,10 +198,15 @@ impl McpProxyClient {
         match resp {
             Response::CallToolResult {
                 output, success, ..
-            } => Ok(ToolResult { output, success }),
+            } => Ok(ToolResult {
+                output,
+                success,
+                sandbox: None,
+            }),
             Response::Error { message, .. } => Ok(ToolResult {
                 output: format!("MCP proxy error: {message}"),
                 success: false,
+                sandbox: None,
             }),
             other => Err(AgentError::Mcp(format!(
                 "unexpected response to call_tool: {other:?}"

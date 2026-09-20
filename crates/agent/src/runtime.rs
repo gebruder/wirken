@@ -481,6 +481,32 @@ mod turn_tools {
     }
 }
 
+/// The chain row for one tool result.
+///
+/// One builder for all three dispatch sites. They wrote the same
+/// eight fields by hand, which is how a field added to
+/// [`crate::tool::ToolResult`] could reach the chain from the
+/// non-streaming path and not from the streaming one. It now reaches
+/// the row from every path, or from none.
+pub(crate) fn tool_result_row(
+    call_id: &str,
+    tool_name: &str,
+    result: &crate::tool::ToolResult,
+    agent_id: String,
+    inbound: &InboundContext,
+) -> SessionEvent {
+    SessionEvent::ToolResult {
+        call_id: call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        output: result.output.clone(),
+        success: result.success,
+        agent_id,
+        adapter_id: inbound.adapter_id.clone(),
+        sender_id: inbound.sender_id.clone(),
+        sandbox: result.sandbox.clone(),
+    }
+}
+
 impl Agent {
     /// The turn's tool list, from the one place that assembles it.
     ///
@@ -751,6 +777,7 @@ impl Agent {
                 // result carries no platform identity.
                 adapter_id: None,
                 sender_id: None,
+                sandbox: None,
             };
             log.append(handle, TrustLevel::Tool, event)
                 .map_err(|e| AgentError::SessionLog(e.to_string()))?;
@@ -838,6 +865,23 @@ impl Agent {
     /// The session is not lost by this: every row already carries its
     /// session id as the row's own key, which is where a caller that
     /// wants the session should read it.
+    /// The chain row for one tool result, with this agent's identity
+    /// and inbound context filled in. See [`tool_result_row`].
+    fn tool_result_row(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        result: &crate::tool::ToolResult,
+    ) -> SessionEvent {
+        tool_result_row(
+            call_id,
+            tool_name,
+            result,
+            self.audited_agent_id(),
+            &self.current_inbound,
+        )
+    }
+
     fn audited_agent_id(&self) -> String {
         self.agent_id.clone().unwrap_or_else(|| self.id.clone())
     }
@@ -2495,15 +2539,7 @@ impl Agent {
                             .add_tool_result(&call.id, &call.name, &result.output);
                         self.log_event(
                             TrustLevel::Tool,
-                            SessionEvent::ToolResult {
-                                call_id: call.id.clone(),
-                                tool_name: call.name.clone(),
-                                output: result.output.clone(),
-                                success: result.success,
-                                agent_id: self.audited_agent_id(),
-                                adapter_id: self.current_inbound.adapter_id.clone(),
-                                sender_id: self.current_inbound.sender_id.clone(),
-                            },
+                            self.tool_result_row(&call.id, &call.name, &result),
                         )?;
                     }
 
@@ -2517,15 +2553,7 @@ impl Agent {
                                 .add_tool_result(&call.id, &call.name, &result.output);
                             self.log_event(
                                 TrustLevel::Tool,
-                                SessionEvent::ToolResult {
-                                    call_id: call.id.clone(),
-                                    tool_name: call.name.clone(),
-                                    output: result.output.clone(),
-                                    success: result.success,
-                                    agent_id: self.audited_agent_id(),
-                                    adapter_id: self.current_inbound.adapter_id.clone(),
-                                    sender_id: self.current_inbound.sender_id.clone(),
-                                },
+                                self.tool_result_row(&call.id, &call.name, &result),
                             )?;
                         }
                     }
@@ -2834,15 +2862,7 @@ impl Agent {
                             .add_tool_result(&call.id, &call.name, &result.output);
                         self.log_event(
                             TrustLevel::Tool,
-                            SessionEvent::ToolResult {
-                                call_id: call.id.clone(),
-                                tool_name: call.name.clone(),
-                                output: result.output.clone(),
-                                success: result.success,
-                                agent_id: self.audited_agent_id(),
-                                adapter_id: self.current_inbound.adapter_id.clone(),
-                                sender_id: self.current_inbound.sender_id.clone(),
-                            },
+                            self.tool_result_row(&call.id, &call.name, &result),
                         )?;
                     }
                 }
@@ -2946,6 +2966,7 @@ impl Agent {
             return Ok(crate::tool::ToolResult {
                 output: format!("tool '{name}' is not in this subagent's allowed tool set"),
                 success: false,
+                sandbox: None,
             });
         }
 
@@ -2977,6 +2998,7 @@ impl Agent {
                 return Ok(crate::tool::ToolResult {
                     output: format!("tool '{name}' is denied by active phase '{phase_name}'"),
                     success: false,
+                    sandbox: None,
                 });
             }
             crate::skill_perms::GateDecision::DeniedByProfile => {
@@ -2995,6 +3017,7 @@ impl Agent {
                         "tool '{name}' is not in the agent's effective skill permissions"
                     ),
                     success: false,
+                    sandbox: None,
                 });
             }
         }
@@ -3021,6 +3044,7 @@ impl Agent {
             return Ok(crate::tool::ToolResult {
                 output: message,
                 success: false,
+                sandbox: None,
             });
         }
 
@@ -3065,6 +3089,7 @@ impl Agent {
                             phase_name,
                         ),
                         success: false,
+                        sandbox: None,
                     });
                 }
                 crate::skill_perms::GateDecision::DeniedByProfile => {
@@ -3093,6 +3118,7 @@ impl Agent {
                             axis_str,
                         ),
                         success: false,
+                        sandbox: None,
                     });
                 }
             }
@@ -3140,6 +3166,7 @@ impl Agent {
                 return Ok(crate::tool::ToolResult {
                     output: reason,
                     success: false,
+                    sandbox: None,
                 });
             }
         }
@@ -3229,6 +3256,7 @@ impl Agent {
                             cap.label(),
                         ),
                         success: false,
+                        sandbox: None,
                     });
                 }
                 let check = {
@@ -3333,6 +3361,7 @@ impl Agent {
             return Ok(crate::tool::ToolResult {
                 output: format!("denied by veto hook: {deny_reason}"),
                 success: false,
+                sandbox: None,
             });
         }
         if veto_outcome.any_timeout {
@@ -3344,6 +3373,7 @@ impl Agent {
                             set WIRKEN_ALLOW_UNREGISTERED_HOOKS=1 for dev fail-open"
                         .to_string(),
                     success: false,
+                    sandbox: None,
                 });
             }
             tracing::warn!(
@@ -3380,6 +3410,7 @@ impl Agent {
                 return Ok(crate::tool::ToolResult {
                     output: block_msg,
                     success: false,
+                    sandbox: None,
                 });
             }
 
@@ -3458,6 +3489,7 @@ impl Agent {
                 Ok(crate::tool::ToolResult {
                     output,
                     success: false,
+                    sandbox: None,
                 })
             }
             Err(e) => Err(e),
@@ -3696,6 +3728,7 @@ impl Agent {
         Ok(crate::tool::ToolResult {
             output: mediated_output,
             success: mediated_success,
+            sandbox: None,
         })
     }
 
@@ -3787,6 +3820,7 @@ impl Agent {
                         Ok(crate::tool::ToolResult {
                             output,
                             success: false,
+                            sandbox: None,
                         })
                     }
                     Err(AgentError::Tool(msg)) => {
@@ -3830,6 +3864,7 @@ impl Agent {
                 Ok(crate::tool::ToolResult {
                     output,
                     success: false,
+                    sandbox: None,
                 })
             }
             Some(crate::approval_gate::ApprovalOutcome::Timeout) => {
@@ -3853,6 +3888,7 @@ impl Agent {
                 Ok(crate::tool::ToolResult {
                     output,
                     success: false,
+                    sandbox: None,
                 })
             }
             None => {
@@ -3865,6 +3901,7 @@ impl Agent {
                 Ok(crate::tool::ToolResult {
                     output,
                     success: false,
+                    sandbox: None,
                 })
             }
         }
@@ -3931,6 +3968,7 @@ impl Agent {
                     attempt - 1
                 ),
                 success: false,
+                sandbox: None,
             };
         }
         crate::tool::ToolResult {
@@ -3941,6 +3979,7 @@ impl Agent {
                 crate::recovery::MAX_TOOL_VALIDATION_RETRIES
             ),
             success: false,
+            sandbox: None,
         }
     }
 
@@ -4111,6 +4150,7 @@ impl Agent {
             crate::tool::ToolResult {
                 output: String::new(),
                 success: false,
+                sandbox: None,
             };
             calls.len()
         ];
@@ -4194,6 +4234,7 @@ impl Agent {
                     })
                     .to_string(),
                     success: false,
+                    sandbox: None,
                 });
             }
         };
@@ -4264,6 +4305,7 @@ impl Agent {
                 Ok(crate::tool::ToolResult {
                     output: serde_json::json!({"status": "ok"}).to_string(),
                     success: true,
+                    sandbox: None,
                 })
             }
             Err(crate::skill_perms::PhaseError::AlreadyActive) => {
@@ -4280,6 +4322,7 @@ impl Agent {
                     })
                     .to_string(),
                     success: false,
+                    sandbox: None,
                 })
             }
         }
@@ -4310,6 +4353,7 @@ impl Agent {
                         })
                         .to_string(),
                         success: false,
+                        sandbox: None,
                     });
                 }
             }
@@ -4325,6 +4369,7 @@ impl Agent {
                     })
                     .to_string(),
                     success: false,
+                    sandbox: None,
                 });
             }
             other => {
@@ -4336,6 +4381,7 @@ impl Agent {
                     })
                     .to_string(),
                     success: false,
+                    sandbox: None,
                 });
             }
         };
@@ -4347,6 +4393,7 @@ impl Agent {
                 })
                 .to_string(),
                 success: false,
+                sandbox: None,
             });
         };
         // The in-memory overlay is gone; mirror that on the HTTP
@@ -4371,6 +4418,7 @@ impl Agent {
         Ok(crate::tool::ToolResult {
             output: serde_json::json!({"status": "ok"}).to_string(),
             success: true,
+            sandbox: None,
         })
     }
 
@@ -5148,6 +5196,7 @@ fn envelope_result(child_session_id: &str, status: &str, output: &str) -> crate:
             format!("{{\"child_session_id\":\"{child_session_id}\",\"status\":\"{status}\"}}")
         }),
         success: status == "ok",
+        sandbox: None,
     }
 }
 

@@ -611,6 +611,7 @@ mod session {
             agent_id: "test-agent".into(),
             adapter_id: None,
             sender_id: None,
+            sandbox: None,
         }
     }
 
@@ -1168,6 +1169,7 @@ mod session {
             agent_id: "test-agent".into(),
             adapter_id: None,
             sender_id: None,
+            sandbox: None,
         };
         log.append(&h, TrustLevel::Tool, event.clone()).unwrap();
         log.append(&h, TrustLevel::Tool, event).unwrap();
@@ -2514,6 +2516,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             agent_id: String::new(),
             adapter_id: None,
             sender_id: None,
+            sandbox: None,
         },
         SessionEvent::HttpRequest {
             method: String::new(),

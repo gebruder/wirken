@@ -689,6 +689,7 @@ mod tests {
             agent_id: "default".into(),
             adapter_id: None,
             sender_id: None,
+            sandbox: None,
         };
         assert!(should_forward(&tr, &cfg));
         let http = SessionEvent::HttpFetch {
@@ -769,6 +770,7 @@ mod tests {
             agent_id: "work".into(),
             adapter_id: Some("slack".into()),
             sender_id: Some("U123".into()),
+            sandbox: None,
         };
         assert_eq!(
             serde_json::from_str::<SessionEvent>(&serde_json::to_string(&tr).unwrap()).unwrap(),
@@ -866,6 +868,7 @@ mod tests {
             agent_id: "default".into(),
             adapter_id: None,
             sender_id: None,
+            sandbox: None,
         };
         assert!(!should_forward(&tr, &cfg));
         // Variants not on the exclude list still pass.

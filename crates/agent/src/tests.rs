@@ -1801,6 +1801,7 @@ mod durability {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    sandbox: None,
                 },
             )
             .unwrap();
@@ -2056,6 +2057,7 @@ mod wake {
                 agent_id: "test-agent".into(),
                 adapter_id: None,
                 sender_id: None,
+                sandbox: None,
             },
         )
         .unwrap();
@@ -3371,6 +3373,7 @@ mod subagent {
 
         // The clamp gate produces `Ok(ToolResult { success: false,
         // output: "...exceeds this subagent's clamped permission
+        // tier..."     sandbox: None,
         // tier..." })`. Anything else means the clamp gate let the
         // call through. Both `Ok` with non-clamp output and `Err`
         // (sandbox/dispatch failure) are acceptable: the assertion
@@ -6461,6 +6464,7 @@ mod verify {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    sandbox: None,
                 },
             )
             .unwrap();
@@ -6510,6 +6514,7 @@ mod verify {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    sandbox: None,
                 },
             )
             .unwrap();
@@ -6556,6 +6561,7 @@ mod verify {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    sandbox: None,
                 },
             )
             .unwrap();
@@ -10914,5 +10920,295 @@ fn every_classified_read_tool_is_a_registered_tool() {
             "{tool} carries a read label but is not a registered tool"
         );
         assert!(tool_to_read_sensitivity(tool).is_some());
+    }
+}
+
+// --- Where an exec ran, on the row that records it ---
+
+/// Host execution is the one mode that runs a command in the
+/// gateway's own process tree, and the row says so: mode `off`,
+/// runtime `host`, no container.
+#[tokio::test]
+async fn a_host_exec_records_the_host_and_no_container() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::Off,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect("registry");
+
+    let result = tools
+        .execute("exec", r#"{"command":"echo where-did-this-run"}"#)
+        .await
+        .expect("exec runs on the host under mode off");
+    assert!(result.output.contains("where-did-this-run"));
+
+    let provenance = result.sandbox.expect("an exec row records where it ran");
+    assert_eq!(provenance.mode, wirken_audit::SandboxModeLabel::Off);
+    assert_eq!(provenance.runtime, wirken_audit::SandboxRuntimeLabel::Host);
+    assert_eq!(
+        provenance.container_id, None,
+        "there is no container to name"
+    );
+}
+
+/// A tool that runs inside this process records nothing: the absence
+/// is what tells an auditor the question does not apply, so it must
+/// not be filled in with a default.
+#[tokio::test]
+async fn an_in_process_tool_records_no_sandbox() {
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join("notes.txt"), "hello").unwrap();
+    let tools =
+        ToolRegistry::new(tmp.path().to_path_buf(), ToolConfig::default()).expect("registry");
+
+    let result = tools
+        .execute("read_file", r#"{"path":"notes.txt"}"#)
+        .await
+        .expect("read_file runs");
+    assert!(result.sandbox.is_none(), "read_file runs in this process");
+}
+
+/// The default mode runs the command in a container, and the row
+/// carries the id Docker returned for it rather than a name this
+/// process chose.
+#[tokio::test]
+async fn a_docker_exec_records_docker_and_its_container() {
+    use crate::sandbox::{SandboxConfig, SandboxMode, detect_image, detect_runtime};
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::ExecOnly,
+                image: "debian:bookworm-slim".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect("registry");
+
+    let result = tools
+        .execute("exec", r#"{"command":"echo where-did-this-run"}"#)
+        .await
+        .expect("exec runs in a container");
+    assert!(result.output.contains("where-did-this-run"));
+
+    let provenance = result.sandbox.expect("an exec row records where it ran");
+    assert_eq!(provenance.mode, wirken_audit::SandboxModeLabel::ExecOnly);
+    assert_eq!(
+        provenance.runtime,
+        wirken_audit::SandboxRuntimeLabel::Docker
+    );
+    let id = provenance.container_id.expect("the container it ran in");
+    assert!(
+        id.len() >= 12 && id.chars().all(|c| c.is_ascii_hexdigit()),
+        "a Docker container id, not a name: {id}"
+    );
+}
+
+/// gVisor is a second container runtime, not a second mode of the
+/// first: the row separates `runtime` from `mode` so the two can be
+/// told apart.
+#[tokio::test]
+async fn a_gvisor_exec_records_gvisor() {
+    use crate::sandbox::{SandboxConfig, SandboxMode, detect_gvisor, detect_image, detect_runtime};
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    if detect_runtime().await.is_none() {
+        eprintln!("skipping: Docker is not available on this host");
+        return;
+    }
+    if !detect_gvisor().await {
+        eprintln!("skipping: runsc is not registered as a Docker runtime on this host");
+        return;
+    }
+    if !detect_image("debian:bookworm-slim").await {
+        eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::GVisor,
+                image: "debian:bookworm-slim".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect("registry");
+
+    let result = tools
+        .execute("exec", r#"{"command":"echo where-did-this-run"}"#)
+        .await
+        .expect("exec runs under runsc");
+
+    let provenance = result.sandbox.expect("an exec row records where it ran");
+    assert_eq!(provenance.mode, wirken_audit::SandboxModeLabel::Gvisor);
+    assert_eq!(
+        provenance.runtime,
+        wirken_audit::SandboxRuntimeLabel::Gvisor
+    );
+    assert!(provenance.container_id.is_some());
+}
+
+/// The runtime is read off the container body that was sent, so a
+/// mode whose runtime name does not reach Docker is visible as a
+/// disagreement rather than being reported from config. This pins the
+/// mapping both modes rely on.
+#[test]
+fn the_runtime_name_a_mode_asks_for_is_the_one_the_row_reports() {
+    use crate::sandbox::SandboxMode;
+
+    assert_eq!(SandboxMode::ExecOnly.runtime_name(), None);
+    assert_eq!(SandboxMode::GVisor.runtime_name().as_deref(), Some("runsc"));
+    assert_eq!(SandboxMode::Off.runtime_name(), None);
+
+    assert_eq!(
+        SandboxMode::Off.label(),
+        wirken_audit::SandboxModeLabel::Off
+    );
+    assert_eq!(
+        SandboxMode::ExecOnly.label(),
+        wirken_audit::SandboxModeLabel::ExecOnly
+    );
+    assert_eq!(
+        SandboxMode::GVisor.label(),
+        wirken_audit::SandboxModeLabel::Gvisor
+    );
+
+    // And the runtime a row names comes from what the container body
+    // carries, which is the one place the two can disagree.
+    use crate::sandbox::runtime_label;
+    assert_eq!(
+        runtime_label(SandboxMode::GVisor.runtime_name().as_deref()),
+        wirken_audit::SandboxRuntimeLabel::Gvisor
+    );
+    assert_eq!(
+        runtime_label(SandboxMode::ExecOnly.runtime_name().as_deref()),
+        wirken_audit::SandboxRuntimeLabel::Docker
+    );
+    assert_eq!(
+        runtime_label(None),
+        wirken_audit::SandboxRuntimeLabel::Docker,
+        "no runtime on the body is Docker's default, runc"
+    );
+    assert_eq!(
+        runtime_label(Some("kata")),
+        wirken_audit::SandboxRuntimeLabel::Docker,
+        "a runtime this build does not know is still a container"
+    );
+}
+
+/// One builder puts a tool result on the chain, so what the dispatch
+/// reported about where the command ran reaches the row from every
+/// path. Each of the three runtimes, plus the in-process case.
+#[test]
+fn the_row_carries_what_the_dispatch_reported() {
+    use crate::tool::ToolResult;
+    use wirken_audit::{SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel, SessionEvent};
+
+    let inbound = crate::InboundContext {
+        adapter_id: Some("slack".into()),
+        sender_id: Some("U123".into()),
+        channel: Some("slack".into()),
+    };
+    let row_for = |sandbox| {
+        crate::runtime::tool_result_row(
+            "c1",
+            "exec",
+            &ToolResult {
+                output: "ok".into(),
+                success: true,
+                sandbox,
+            },
+            "worker".into(),
+            &inbound,
+        )
+    };
+    let provenance_of = |event| match event {
+        SessionEvent::ToolResult { sandbox, .. } => sandbox,
+        other => panic!("expected ToolResult, got {other:?}"),
+    };
+
+    for expected in [
+        SandboxProvenance {
+            mode: SandboxModeLabel::ExecOnly,
+            runtime: SandboxRuntimeLabel::Docker,
+            container_id: Some("70f792320e59".into()),
+        },
+        SandboxProvenance {
+            mode: SandboxModeLabel::Gvisor,
+            runtime: SandboxRuntimeLabel::Gvisor,
+            container_id: Some("abc123abc123".into()),
+        },
+        SandboxProvenance {
+            mode: SandboxModeLabel::Off,
+            runtime: SandboxRuntimeLabel::Host,
+            container_id: None,
+        },
+    ] {
+        assert_eq!(
+            provenance_of(row_for(Some(expected.clone()))),
+            Some(expected.clone()),
+            "the row carries the dispatch's own answer unchanged"
+        );
+    }
+
+    assert_eq!(
+        provenance_of(row_for(None)),
+        None,
+        "a tool that ran in this process leaves the question unanswered"
+    );
+
+    // The builder owns the other seven fields for all three sites
+    // too, so they are pinned here rather than at each of them.
+    match row_for(None) {
+        SessionEvent::ToolResult {
+            call_id,
+            tool_name,
+            output,
+            success,
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => {
+            assert_eq!(call_id, "c1");
+            assert_eq!(tool_name, "exec");
+            assert_eq!(output, "ok");
+            assert!(success);
+            assert_eq!(agent_id, "worker");
+            assert_eq!(adapter_id.as_deref(), Some("slack"));
+            assert_eq!(sender_id.as_deref(), Some("U123"));
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
     }
 }

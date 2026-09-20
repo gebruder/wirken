@@ -10,6 +10,21 @@ tagged.
 
 ## [Unreleased]
 
+### Added
+
+- An `exec` tool result records where the command ran. The row now
+  carries a `sandbox` object with the configured mode (`exec_only`,
+  `gvisor`, `off`), the runtime that actually ran it (`docker`,
+  `gvisor`, `host`) and the container id when there was one, written
+  by the code that dispatched the command rather than read back from
+  configuration when the row is emitted. An auditor reading
+  `audit.db` could not previously tell a containerised `exec` from a
+  host one: both paths format their output identically, and no row
+  named the difference. The field is additive and defaulted, so rows
+  written before it reads back as absent, and absent is also what a
+  tool that runs inside the gateway's own process records. The SIEM
+  typed summary and the webchat session projection both carry it.
+
 ### Fixed
 
 - The Sentinel and webhook envelopes carry the identity the row

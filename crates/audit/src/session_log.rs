@@ -483,6 +483,55 @@ fn default_legacy_actor_kind() -> crate::event::ActorKind {
     crate::event::ActorKind::Service
 }
 
+/// The configured sandbox mode an `exec` ran under, as recorded on
+/// [`SessionEvent::ToolResult`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxModeLabel {
+    /// `exec` runs in a container. The default.
+    ExecOnly,
+    /// `exec` runs in a gVisor container.
+    Gvisor,
+    /// `exec` runs on the host. Opt-in only.
+    Off,
+}
+
+/// What actually ran an `exec`, reported by the code that dispatched
+/// the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxRuntimeLabel {
+    /// A container on Docker's default runtime (runc).
+    Docker,
+    /// A container on Docker's `runsc` runtime.
+    Gvisor,
+    /// The gateway's own process tree. No container.
+    Host,
+}
+
+/// Where an `exec` tool call ran.
+///
+/// Written by the code that dispatched the command rather than read
+/// back from configuration when the row is emitted: `runtime` and
+/// `container_id` come from the container Docker actually created,
+/// and `Host` is recorded only by the branch that spawns a host
+/// process. A configured mode and a real runtime can disagree, and
+/// when they do this says so: `mode: exec_only` with
+/// `runtime: host` would be the sandbox silently failing open, which
+/// is the thing worth being able to see afterwards.
+///
+/// `mode` is the mode of the sandbox that dispatched the call, which
+/// is fixed for the life of that sandbox; a later edit to
+/// `sandbox.json` does not change what this row says.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxProvenance {
+    pub mode: SandboxModeLabel,
+    pub runtime: SandboxRuntimeLabel,
+    /// The container the command ran in, absent on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_id: Option<String>,
+}
+
 /// One event in a session transcript.
 ///
 /// New variants may be added without breaking older readers when the
@@ -572,6 +621,13 @@ pub enum SessionEvent {
         tool_name: String,
         output: String,
         success: bool,
+        /// Where the command ran, for `exec`. `None` for a tool that
+        /// runs in the gateway's own process, and for an `exec` row
+        /// written before this field existed; defaulted on
+        /// deserialize and omitted from the wire when absent, so both
+        /// read cleanly either way.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox: Option<SandboxProvenance>,
         #[serde(default)]
         agent_id: String,
         /// See [`Self::AssistantToolCalls::adapter_id`]. Mirrored

@@ -242,6 +242,7 @@ pub async fn execute(
     Ok(ToolResult {
         output,
         success: (200..300).contains(&status),
+        sandbox: None,
     })
 }
 
@@ -402,5 +403,6 @@ fn fail(msg: impl Into<String>) -> ToolResult {
     ToolResult {
         output: msg.into(),
         success: false,
+        sandbox: None,
     }
 }

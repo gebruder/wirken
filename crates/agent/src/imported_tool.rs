@@ -105,6 +105,7 @@ fn fail(message: &str) -> ToolResult {
     ToolResult {
         output: message.to_string(),
         success: false,
+        sandbox: None,
     }
 }
 
@@ -153,6 +154,7 @@ fn read_chat(ctx: &ImportedContext, args: &serde_json::Value) -> Result<ToolResu
     Ok(ToolResult {
         output: render(&detail),
         success: true,
+        sandbox: None,
     })
 }
 
@@ -238,6 +240,7 @@ fn search(ctx: &ImportedContext, args: &serde_json::Value) -> Result<ToolResult,
     Ok(ToolResult {
         output: render_hits(&hits, &query),
         success: true,
+        sandbox: None,
     })
 }
 

@@ -816,8 +816,25 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             tool_name,
             success,
             agent_id,
+            sandbox,
             ..
-        } => format!("tool_result name={tool_name} success={success} agent={agent_id}"),
+        } => {
+            let mut line =
+                format!("tool_result name={tool_name} success={success} agent={agent_id}");
+            // Where it ran, for the rows that say. A detection that
+            // cares whether a command reached the host should not
+            // have to parse the payload to find out.
+            if let Some(p) = sandbox {
+                line.push_str(&format!(
+                    " sandbox_mode={:?} runtime={:?}",
+                    p.mode, p.runtime
+                ));
+                if let Some(id) = &p.container_id {
+                    line.push_str(&format!(" container={}", &id[..id.len().min(12)]));
+                }
+            }
+            line
+        }
         SessionEvent::HttpFetch { host, outcome, .. } => {
             format!("http_fetch host={host} outcome={outcome:?}")
         }
@@ -1247,6 +1264,7 @@ mod identity_tests {
                     agent_id: agent(),
                     adapter_id: adapter(),
                     sender_id: sender(),
+                    sandbox: None,
                 },
                 Some("slack"),
                 Some("U123"),
@@ -1667,5 +1685,117 @@ mod identity_tests {
             assert_eq!(sender_id.as_deref(), want_sender, "{kind} sender_id");
             assert_eq!(agent_id.as_deref(), want_agent, "{kind} agent_id");
         }
+    }
+
+    /// The summary line says where the command ran, for each of the
+    /// three runtimes, so a detection on "a command reached the host"
+    /// does not have to parse the payload to find out.
+    #[test]
+    fn the_summary_says_which_runtime_ran_the_command() {
+        use crate::session_log::{SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel};
+
+        let row = |sandbox| SessionEvent::ToolResult {
+            call_id: "c1".into(),
+            tool_name: "exec".into(),
+            output: "ok".into(),
+            success: true,
+            agent_id: "worker".into(),
+            adapter_id: None,
+            sender_id: None,
+            sandbox,
+        };
+
+        let docker = typed_summary(&row(Some(SandboxProvenance {
+            mode: SandboxModeLabel::ExecOnly,
+            runtime: SandboxRuntimeLabel::Docker,
+            container_id: Some("70f792320e59b7c016b16ff2ebba57669af17efb".into()),
+        })));
+        assert!(docker.contains("sandbox_mode=ExecOnly"), "{docker}");
+        assert!(docker.contains("runtime=Docker"), "{docker}");
+        assert!(
+            docker.contains("container=70f792320e59"),
+            "the id, cut to the prefix an operator pastes: {docker}"
+        );
+
+        let gvisor = typed_summary(&row(Some(SandboxProvenance {
+            mode: SandboxModeLabel::Gvisor,
+            runtime: SandboxRuntimeLabel::Gvisor,
+            container_id: Some("abc123abc123abc123".into()),
+        })));
+        assert!(gvisor.contains("sandbox_mode=Gvisor"), "{gvisor}");
+        assert!(gvisor.contains("runtime=Gvisor"), "{gvisor}");
+
+        let host = typed_summary(&row(Some(SandboxProvenance {
+            mode: SandboxModeLabel::Off,
+            runtime: SandboxRuntimeLabel::Host,
+            container_id: None,
+        })));
+        assert!(host.contains("sandbox_mode=Off"), "{host}");
+        assert!(host.contains("runtime=Host"), "{host}");
+        assert!(
+            !host.contains("container="),
+            "there is no container to name: {host}"
+        );
+
+        // A tool that ran in this process says nothing, rather than
+        // saying host.
+        let in_process = typed_summary(&row(None));
+        assert!(!in_process.contains("runtime="), "{in_process}");
+        assert!(in_process.contains("tool_result name=exec"), "{in_process}");
+    }
+
+    /// The field is additive: a row written before it existed reads
+    /// back with no provenance rather than failing to parse, and a
+    /// row that has one round-trips.
+    #[test]
+    fn a_row_without_the_field_reads_as_no_provenance() {
+        use crate::session_log::{SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel};
+
+        let old = r#"{"kind":"tool_result","call_id":"c1","tool_name":"exec",
+                      "output":"ok","success":true,"agent_id":"worker"}"#;
+        match serde_json::from_str::<SessionEvent>(old).expect("an older row still parses") {
+            SessionEvent::ToolResult { sandbox, .. } => assert_eq!(sandbox, None),
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+
+        let row = SessionEvent::ToolResult {
+            call_id: "c1".into(),
+            tool_name: "exec".into(),
+            output: "ok".into(),
+            success: true,
+            agent_id: "worker".into(),
+            adapter_id: None,
+            sender_id: None,
+            sandbox: Some(SandboxProvenance {
+                mode: SandboxModeLabel::ExecOnly,
+                runtime: SandboxRuntimeLabel::Docker,
+                container_id: Some("70f792320e59".into()),
+            }),
+        };
+        let wire = serde_json::to_string(&row).expect("serializes");
+        assert!(wire.contains(r#""mode":"exec_only""#), "{wire}");
+        assert!(wire.contains(r#""runtime":"docker""#), "{wire}");
+        assert_eq!(
+            serde_json::from_str::<SessionEvent>(&wire).expect("round-trips"),
+            row
+        );
+
+        // The host shape omits the container rather than sending null.
+        let host = SessionEvent::ToolResult {
+            call_id: "c1".into(),
+            tool_name: "exec".into(),
+            output: "ok".into(),
+            success: true,
+            agent_id: "worker".into(),
+            adapter_id: None,
+            sender_id: None,
+            sandbox: Some(SandboxProvenance {
+                mode: SandboxModeLabel::Off,
+                runtime: SandboxRuntimeLabel::Host,
+                container_id: None,
+            }),
+        };
+        let wire = serde_json::to_string(&host).expect("serializes");
+        assert!(!wire.contains("container_id"), "{wire}");
     }
 }

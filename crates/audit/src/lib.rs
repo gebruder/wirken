@@ -29,10 +29,11 @@ pub use session_log::{
     CrossCheckDisagreement, CrossCheckStatus, DenialSource, EgressDecision, GrantExpiryDetection,
     HashHex, HexBytes, HookDecision, HookKind, HookSignatureStatus, HttpFetchOutcome,
     ImportedSearchOutcome, OwnSession, PermissionDenialRecord, PhaseDenyContent, PhaseExitReason,
-    SandboxEgressDenyReason, SandboxEgressModeLabel, SchemaDriftRecord, SessionEvent,
-    SessionHandle, SessionId, SessionLog, SessionScope, SessionVerifyResult, SkillDeniedReason,
-    SqliteSessionLog, StoredSessionEvent, SubagentCrossCheck, SubagentStatus, ToolCallRecord,
-    ToolsHashVersion, TrustLevel, cross_check_subagent_session,
+    SandboxEgressDenyReason, SandboxEgressModeLabel, SandboxModeLabel, SandboxProvenance,
+    SandboxRuntimeLabel, SchemaDriftRecord, SessionEvent, SessionHandle, SessionId, SessionLog,
+    SessionScope, SessionVerifyResult, SkillDeniedReason, SqliteSessionLog, StoredSessionEvent,
+    SubagentCrossCheck, SubagentStatus, ToolCallRecord, ToolsHashVersion, TrustLevel,
+    cross_check_subagent_session,
 };
 pub use siem::{
     SentinelTypedEndpoint, SiemConfig, SiemForwarder, SiemTarget, build_datadog_payload,

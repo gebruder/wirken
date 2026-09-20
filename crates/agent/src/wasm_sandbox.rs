@@ -158,6 +158,7 @@ impl WasmSkill {
                     out_str
                 },
                 success: true,
+                sandbox: None,
             }),
             Err(e) => {
                 // Check if it was a fuel exhaustion (infinite loop protection)
@@ -166,6 +167,7 @@ impl WasmSkill {
                     return Ok(ToolResult {
                         output: "Wasm skill exceeded CPU limit (possible infinite loop)".into(),
                         success: false,
+                        sandbox: None,
                     });
                 }
 
@@ -177,6 +179,7 @@ impl WasmSkill {
                 Ok(ToolResult {
                     output,
                     success: false,
+                    sandbox: None,
                 })
             }
         }

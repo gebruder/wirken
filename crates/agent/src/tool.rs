@@ -44,10 +44,14 @@ pub struct ToolDef {
 }
 
 /// Result of executing a tool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ToolResult {
     pub output: String,
     pub success: bool,
+    /// Where an `exec` ran, set by whichever branch dispatched the
+    /// command. `None` for every tool that runs inside this process,
+    /// which is every tool but `exec`.
+    pub sandbox: Option<wirken_audit::SandboxProvenance>,
 }
 
 /// Configuration for tools that need external services.
@@ -684,6 +688,7 @@ impl ToolRegistry {
                     None => Ok(ToolResult {
                         output: "memory is not configured for this agent".into(),
                         success: false,
+                        sandbox: None,
                     }),
                 }
             }
@@ -698,6 +703,7 @@ impl ToolRegistry {
                     None => Ok(ToolResult {
                         output: "imported archives are not configured for this agent".into(),
                         success: false,
+                        sandbox: None,
                     }),
                 }
             }
@@ -756,6 +762,11 @@ impl ToolRegistry {
                 return Ok(ToolResult {
                     output: format!("Command timed out after {}s", timeout.as_secs()),
                     success: false,
+                    sandbox: Some(wirken_audit::SandboxProvenance {
+                        mode: self.sandbox_config.mode.label(),
+                        runtime: wirken_audit::SandboxRuntimeLabel::Host,
+                        container_id: None,
+                    }),
                 });
             }
         };
@@ -802,6 +813,14 @@ impl ToolRegistry {
         Ok(ToolResult {
             output: result,
             success: output.status.success(),
+            // Reached only when the operator set `"mode":"off"`: the
+            // branch above refuses rather than falling back, so a
+            // host row cannot be a sandbox that quietly failed open.
+            sandbox: Some(wirken_audit::SandboxProvenance {
+                mode: self.sandbox_config.mode.label(),
+                runtime: wirken_audit::SandboxRuntimeLabel::Host,
+                container_id: None,
+            }),
         })
     }
 
@@ -827,11 +846,13 @@ impl ToolRegistry {
                 Ok(ToolResult {
                     output,
                     success: true,
+                    sandbox: None,
                 })
             }
             Err(e) => Ok(ToolResult {
                 output: format!("Error reading {path_for_err}: {e}"),
                 success: false,
+                sandbox: None,
             }),
         }
     }
@@ -864,10 +885,12 @@ impl ToolRegistry {
             Ok(()) => Ok(ToolResult {
                 output: format!("Wrote {content_len} bytes to {path_for_err}"),
                 success: true,
+                sandbox: None,
             }),
             Err(e) => Ok(ToolResult {
                 output: format!("Error writing {path_for_err}: {e}"),
                 success: false,
+                sandbox: None,
             }),
         }
     }
@@ -903,10 +926,12 @@ impl ToolRegistry {
             Ok(names) => Ok(ToolResult {
                 output: names.join("\n"),
                 success: true,
+                sandbox: None,
             }),
             Err(e) => Ok(ToolResult {
                 output: format!("Error listing {path_for_err}: {e}"),
                 success: false,
+                sandbox: None,
             }),
         }
     }
@@ -938,6 +963,7 @@ impl ToolRegistry {
             return Ok(ToolResult {
                 output: format!("Search failed: HTTP {}", resp.status()),
                 success: false,
+                sandbox: None,
             });
         }
 
@@ -951,6 +977,7 @@ impl ToolRegistry {
             return Ok(ToolResult {
                 output: format!("No results found for '{query}'."),
                 success: true,
+                sandbox: None,
             });
         }
 
@@ -966,6 +993,7 @@ impl ToolRegistry {
         Ok(ToolResult {
             output,
             success: true,
+            sandbox: None,
         })
     }
 
@@ -1007,6 +1035,7 @@ impl ToolRegistry {
                          Bind a librarian skill on an agent whose static config sets zirkel_db_path."
                     .into(),
                 success: false,
+                sandbox: None,
             });
         };
 
@@ -1031,10 +1060,12 @@ impl ToolRegistry {
             Ok(rows_json) => Ok(ToolResult {
                 output: rows_json,
                 success: true,
+                sandbox: None,
             }),
             Err(e) => Ok(ToolResult {
                 output: format!("sqlite_query error: {e}"),
                 success: false,
+                sandbox: None,
             }),
         }
     }
@@ -1048,6 +1079,7 @@ impl ToolRegistry {
                      Use an OpenAI-compatible provider, or use the exec tool with curl."
                 ),
                 success: false,
+                sandbox: None,
             });
         }
 
@@ -1057,6 +1089,7 @@ impl ToolRegistry {
                 return Ok(ToolResult {
                     output: "Image generation requires an API key.".into(),
                     success: false,
+                    sandbox: None,
                 });
             }
         };
@@ -1108,6 +1141,7 @@ impl ToolRegistry {
             return Ok(ToolResult {
                 output: format!("Image generation failed: HTTP {status}: {body}"),
                 success: false,
+                sandbox: None,
             });
         }
 
@@ -1155,6 +1189,7 @@ impl ToolRegistry {
         Ok(ToolResult {
             output: format!("Image saved to {} ({bytes_len} bytes)", file_path.display()),
             success: true,
+            sandbox: None,
         })
     }
 }

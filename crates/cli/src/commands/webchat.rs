@@ -3945,6 +3945,7 @@ pub fn session_events(
                 tool_name,
                 output,
                 success,
+                sandbox,
                 ..
             } => {
                 let elapsed = call_started
@@ -3958,6 +3959,13 @@ pub fn session_events(
                     "output": wirken_agent::ansi::strip_control_sequences(output),
                     "output_bytes": output.len(),
                     "elapsed_ms_approx": elapsed,
+                    // Where the command ran, for the rows that record
+                    // it. Null for a tool that runs in the gateway's
+                    // own process and for an exec row written before
+                    // the field existed; the page tells those apart
+                    // from a container by the absence, not by a
+                    // default that would read as an answer.
+                    "sandbox": sandbox,
                 }))
             }
             SessionEvent::LlmRequest {
@@ -5954,6 +5962,7 @@ mod tests {
                     agent_id: agent(),
                     adapter_id: None,
                     sender_id: None,
+                    sandbox: None,
                 },
             ),
             (
@@ -8837,6 +8846,97 @@ mod tests {
             .expect("the webchat row");
         assert_eq!(mine["turn_open"], false, "the turn ended");
         assert!(mine["turn_open_age_seconds"].is_null());
+    }
+
+    /// The projection carries where each exec ran, for all three
+    /// runtimes, and carries nothing for a tool that ran in this
+    /// process. The page reads the absence, so a default here would
+    /// read as an answer.
+    #[test]
+    fn the_projection_carries_where_each_exec_ran() {
+        use wirken_audit::{
+            SandboxModeLabel, SandboxProvenance, SandboxRuntimeLabel, SessionEvent, SessionLog,
+            SqliteSessionLog, TrustLevel,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let log = SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+        let id = "default/webchat/webchat-default";
+        let handle = log.handle_for(SessionId::new(id.to_string()));
+
+        let row = |call: &str, sandbox| SessionEvent::ToolResult {
+            call_id: call.into(),
+            tool_name: "exec".into(),
+            output: "ok".into(),
+            success: true,
+            agent_id: "default".into(),
+            adapter_id: None,
+            sender_id: None,
+            sandbox,
+        };
+        for (call, sandbox) in [
+            (
+                "docker",
+                Some(SandboxProvenance {
+                    mode: SandboxModeLabel::ExecOnly,
+                    runtime: SandboxRuntimeLabel::Docker,
+                    container_id: Some("70f792320e59".into()),
+                }),
+            ),
+            (
+                "gvisor",
+                Some(SandboxProvenance {
+                    mode: SandboxModeLabel::Gvisor,
+                    runtime: SandboxRuntimeLabel::Gvisor,
+                    container_id: Some("abc123abc123".into()),
+                }),
+            ),
+            (
+                "host",
+                Some(SandboxProvenance {
+                    mode: SandboxModeLabel::Off,
+                    runtime: SandboxRuntimeLabel::Host,
+                    container_id: None,
+                }),
+            ),
+            ("in-process", None),
+        ] {
+            log.append(&handle, TrustLevel::Tool, row(call, sandbox))
+                .expect("append");
+        }
+
+        let v = session_events(&cfg, id, None);
+        let by_call = |call: &str| {
+            v["events"]
+                .as_array()
+                .expect("events")
+                .iter()
+                .find(|e| e["call_id"] == call)
+                .cloned()
+                .unwrap_or_else(|| panic!("no row for {call}"))
+        };
+
+        let docker = by_call("docker");
+        assert_eq!(docker["sandbox"]["mode"], "exec_only");
+        assert_eq!(docker["sandbox"]["runtime"], "docker");
+        assert_eq!(docker["sandbox"]["container_id"], "70f792320e59");
+
+        let gvisor = by_call("gvisor");
+        assert_eq!(gvisor["sandbox"]["mode"], "gvisor");
+        assert_eq!(gvisor["sandbox"]["runtime"], "gvisor");
+
+        let host = by_call("host");
+        assert_eq!(host["sandbox"]["mode"], "off");
+        assert_eq!(host["sandbox"]["runtime"], "host");
+        assert!(
+            host["sandbox"]["container_id"].is_null(),
+            "there is no container to name"
+        );
+
+        assert!(
+            by_call("in-process")["sandbox"].is_null(),
+            "a tool that ran in this process answers the question with nothing"
+        );
     }
 
     /// The events route exposes far more per row than the transcript
