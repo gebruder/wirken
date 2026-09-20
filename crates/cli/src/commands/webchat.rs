@@ -1813,6 +1813,9 @@ function switchTo(key) {
   hideNotice();
   setTurn(null);
   unlockComposer();
+  // The About panel is about one conversation. Left open across a
+  // switch it would keep drawing the one that was left.
+  if (!about.hidden) loadAboutExtras();
   loadTranscript(currentLogId()).then(() => loadStatus());
 }
 function abortTurn() {
@@ -2288,7 +2291,14 @@ async function fetchJson(path) {
 async function loadAboutExtras() {
   capabilitiesState = 'fetching';
   vaultState = 'fetching';
-  const [c, v] = await Promise.all([fetchJson('/api/capabilities'), fetchJson('/api/credentials')]);
+  // Capabilities are per conversation: the agent is woken for this
+  // one's session, so what the panel says about a turn in flight is
+  // about this conversation's turn. A switch while the fetch is in
+  // flight starts its own, so the answer for the one left behind is
+  // dropped rather than drawn under the new name.
+  const key = currentKey;
+  const [c, v] = await Promise.all([fetchJson('/api/capabilities?c=' + encodeURIComponent(key)), fetchJson('/api/credentials')]);
+  if (key !== currentKey) return;
   capabilities = c;
   capabilitiesState = c ? 'loaded' : 'failed';
   vault = v;
@@ -6845,6 +6855,44 @@ mod tests {
         assert_eq!(busy["grants"].as_array().unwrap().len(), 1);
     }
 
+    /// The panel is about one conversation. Each wakes its own
+    /// session, so a turn holding one conversation's agent leaves
+    /// another's panel readable, and the sections the held agent owns
+    /// are null and named busy for that conversation alone.
+    #[tokio::test]
+    async fn two_conversations_get_their_own_capabilities() {
+        let routes = Routes::open();
+        let cfg = cfg_at(routes.dir.path());
+        let factory = &routes.shared.factory;
+
+        let held = factory
+            .wake("default", &webchat_session_id("c-0123456789ab"))
+            .expect("wake");
+        let guard = held.lock().await;
+
+        let busy = capabilities_snapshot(&cfg, factory, "c-0123456789ab").await;
+        assert_eq!(busy["busy"], true, "the conversation holding the agent");
+        assert!(busy["tools"].is_null() && busy["skills"].is_null());
+
+        let other = capabilities_snapshot(&cfg, factory, "c-ba9876543210").await;
+        assert_eq!(
+            other["busy"], false,
+            "another conversation is another session"
+        );
+        assert!(
+            other["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "and its panel is readable: {}",
+            other["tools"]
+        );
+
+        drop(guard);
+        let freed = capabilities_snapshot(&cfg, factory, "c-0123456789ab").await;
+        assert_eq!(freed["busy"], false, "the turn ended");
+        assert!(freed["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    }
+
     /// Both routes sit behind the preflight, and the page asks for
     /// them only when About opens: the status poll never touches
     /// them, and nothing on the default screen draws from them.
@@ -6853,7 +6901,7 @@ mod tests {
         // That both routes preflight is asserted in
         // `the_about_panel_routes_preflight`.
         let script = page_script();
-        assert_eq!(script.matches("'/api/capabilities'").count(), 1);
+        assert_eq!(script.matches("'/api/capabilities?c='").count(), 1);
         assert_eq!(script.matches("'/api/credentials'").count(), 1);
         let poll = script
             .split_once("async function loadStatus() {")
@@ -6871,8 +6919,17 @@ mod tests {
             .unwrap()
             .0;
         assert!(
-            extras.contains("fetchJson('/api/capabilities')")
-                && extras.contains("fetchJson('/api/credentials')")
+            extras.contains("fetchJson('/api/capabilities?c=' + encodeURIComponent(key))")
+                && extras.contains("fetchJson('/api/credentials')"),
+            "the panel asks for the conversation it was opened on"
+        );
+        assert!(
+            extras.contains("if (key !== currentKey) return;"),
+            "an answer for a conversation left behind is dropped"
+        );
+        assert!(
+            script.contains("if (!about.hidden) loadAboutExtras();"),
+            "an open panel follows the switch"
         );
         assert!(
             script.contains("if (open) { loadAboutExtras(); renderAbout(); }"),

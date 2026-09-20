@@ -12,6 +12,13 @@ tagged.
 
 ### Fixed
 
+- The About panel draws the capabilities of the conversation it is
+  open on. It asked `/api/capabilities` with no key, so it always
+  showed the legacy conversation: a turn running in the conversation
+  being viewed read as idle, and a turn in the legacy one read as
+  busy. The panel now sends the conversation it was opened on and
+  follows a switch made while it is open.
+
 - `GET /api/approvals?c=<conversation>` reaches its route. The webchat
   routes matched the request line up to the space after the path, so a
   target carrying a query string named no route and answered 404. That
