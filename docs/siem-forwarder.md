@@ -100,6 +100,45 @@ Wirken does not refresh it, so it expires on Azure AD's normal cadence,
 typically one hour; refresh by rewriting `siem.json` from a sidecar before
 expiry.
 
+### The identity columns
+
+`AgentId`, `AdapterId` and `SenderId` hold the field each is named after
+and nothing else. `SenderId` in particular is a platform sender id (a
+Slack uid, a Telegram user id, the literal `webchat-user`) or null. An
+operator or role label never goes there: a column that sometimes holds a
+platform id and sometimes a human-readable role cannot be joined on
+either. The labels this keeps out are the `caller` on a refused approval,
+the `revoked_by` on a revocation, the `approved_by` on a grant and its
+renewal, and the `actor` on an import row. They stay on the row inside
+`Event`, which the envelope carries beside the columns.
+
+Fourteen variants carried one of the three and were read for none of
+them, so a permission denial arrived with no channel and no sender, an
+`http_request` row with no agent, and every hook, redaction, grant and
+delivery row with nothing at all. Every variant that carries one of the
+three now hands it over. An import row's `actor` used to land in
+`SenderId`; that column reads null for `import_started` and
+`import_completed` now, and a query reading a platform sender out of it
+was reading a role name.
+
+If an operator identity ever needs a column of its own it gets one under
+its own name, covering every variant that carries such a label rather
+than the one that prompted it.
+
+### What the typed summary carries
+
+The Datadog `message` field is a one-line summary per row. For an `exec`
+result it names where the command ran, so a detection on "a command
+reached the host" does not have to parse the payload:
+
+```text
+tool_result name=exec success=true agent=worker sandbox_mode=ExecOnly runtime=Docker container=4911033061e4
+```
+
+A tool that ran in the gateway's own process says nothing about a sandbox
+rather than saying `host`. See
+[audit](audit-cli.md#fields-added-since-1230) for the field on the row.
+
 ### HMAC
 
 With `siem.json.hmac_secret` set, the webhook target and the typed webhook

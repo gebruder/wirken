@@ -22,6 +22,35 @@ connections.
 |--------|-------------|
 | `-p, --port <PORT>` | WebChat port (default: 18790) |
 
+### What WebChat serves
+
+Every route is bound to loopback and checks the `Host` header against the
+loopback names for the bound port, which is what closes DNS rebinding. The
+state-changing routes (`POST /api/chat`, `POST /api/approvals/{id}`,
+`POST /api/verify`) also require a matching `Origin`; safe reads validate
+one only when the browser sends it, because a browser omits it on a
+same-origin GET.
+
+Routes match on the request path with the query string taken off. They
+used to match the request line up to the space after the path, so a
+target carrying a query reached no route: `GET /api/approvals?c=<key>` is
+the only request the page makes to that route, and it answered 404. With
+it refused the page's approvals snapshot stayed null, which meant no
+"awaiting you elsewhere" chip, no other-channel badge, no awaiting marker
+in the rail, and no pending card restored after a reload however many
+decisions were waiting.
+
+The approval card shows the action key, the arguments the model sent and
+what the model said in the same message, all off the `ApprovalRequest`
+event. See
+[permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
+
+The About panel draws the capabilities of the conversation it is open on.
+It asked `/api/capabilities` with no conversation key, so it always
+showed the legacy conversation: a turn running in the conversation
+being viewed read as idle, and a turn in the legacy one read as busy. It
+sends the key now and reloads when a switch happens while it is open.
+
 ## wirken ask
 
 Send a message to an agent and print the response. No channel setup needed.
@@ -35,7 +64,10 @@ wirken ask -m "your message" [--agent <AGENT>]
 
 When stdin is a terminal, an approval gate prompts for Tier 3 actions and
 reads one line: `y` or `yes` approves, anything else denies, and text after a
-space is recorded as the denial reason. A piped or redirected `wirken ask`
+space is recorded as the denial reason. The prompt says what is being
+approved before it asks; see
+[permissions](permissions-and-identity.md#what-an-approval-prompt-shows)
+for what is on those lines and why. A piped or redirected `wirken ask`
 gets no gate and short-circuits with a terminal deny, so a script does not
 hang on a prompt nobody will answer. `WIRKEN_ASK_APPROVAL_TIMEOUT_S` sets the
 read deadline (default 60).

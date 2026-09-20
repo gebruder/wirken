@@ -44,6 +44,35 @@ On open, `PermissionStore::sweep_stale_grants` removes every row the gate cannot
 
 `wirken permissions list --agent work` prints all approvals for an agent. `wirken permissions revoke <key> --agent work` removes one.
 
+### Every action keys under a namespace
+
+An action key is what the gate matches, what a stored grant is recorded
+under, what the approval prompt shows, and what every denial row carries.
+Each `Action` variant maps to one explicitly:
+
+| Namespace | From |
+| --- | --- |
+| `shell:<verb>` | `ShellExec`, with the command canonicalised to its verb. A command carrying a shell metacharacter collapses to the sentinel `shell::pipeline:`. |
+| `file:<path>` | `ExternalFileAccess` |
+| `cross-conversation` | `CrossConversationMessage` |
+| `mcp:<tool>` | `McpToolCall` |
+| `tool:<name>` | `UnknownTool` |
+| `wasm:<skill>` | `WasmSkillCall` |
+| `cross_channel_memory:<from>` | `CrossChannelMemoryRead` |
+| `imported_chat:<source>` | `ImportedChatRead` |
+| `imported_search:<source>`, `imported_search_corpus` | `ImportedChatSearch`, scoped and unscoped |
+| `network:<domain>` | `NetworkRequest` |
+| `workspace_file`, `channel_converse`, `web_search`, `http_request`, `destructive_file_op`, `credential_access`, `cron_create` | The parameterless actions |
+
+Eight of those keyed through the derived `Debug` form until the change
+recorded under Unreleased in the changelog, which made the key a Rust
+identifier: it moved when a variant was renamed, and
+`NetworkRequest` rendered as `NetworkRequest { domain: "x" }`, braces and
+quotes included. None of the eight is storable, so no grant was orphaned by
+naming them; what changed is the key an operator is shown and the key
+written to the chain. A test formats every variant's key and refuses one
+containing a brace or a parenthesis.
+
 ### Only Tier 2 keys can be stored
 
 `permissions.db` accepts a grant only for an action key that is Tier 2: a shell verb on the Tier 2 allowlist, `file:<path>`, or `cross-conversation`. Every other key is refused at write time.
@@ -89,11 +118,13 @@ Both printed in `wirken permissions list` as though they were grants, which is a
 
 ### What the chain records about a grant
 
-Five events, so a reviewer can tell five different situations apart.
+Seven events, so a reviewer can tell seven different situations apart.
 
 | Event | Means |
 | --- | --- |
-| `PermissionApproved` | A grant was written where none existed. |
+| `PermissionApproved` | A grant was written where none existed. Carries the `tier` granted and the `expires_at` written, so the row says what was granted and for how long without a lookup against the store. |
+| `PermissionRevoked` | An operator took a grant back. Carries `revoked_by` and the `tier` and `expires_at` the row held, which is the only surviving record of what was removed. |
+| `PermissionApprovalRefused` | A decision arrived from a caller the gate would not take it from: another channel's request, or another conversation's. Carries `request_id`, `caller` and `reason`. The attempt is recorded whether or not it succeeded, so enumerating request ids leaves a trail. |
 | `PermissionRenewed` | A grant was written over one that was already there. Carries `previous_expires_at` alongside `expires_at`. |
 | `PermissionGrantExpired` | A grant was found lapsed and dropped. Carries the `expired_at` the row held. `detected_by: tool_call` means a call hit it, and the tool and tier are on the row; `detected_by: store_open` means the sweep found it, with no tool and no tier because no call was involved. |
 | `PermissionGrantPruned` | A grant was dropped because its key is Tier 1 or Tier 3 and the gate could never read it. Nothing ran out. Sweep only. |
@@ -104,6 +135,45 @@ The store keeps one row per key and renewal overwrites in place, so `previous_ex
 `PermissionGrantExpired` is the row that separates "the operator granted this and the window ran out" from "the operator never granted this". Both reach the agent as the same prompt, and only one is worth investigating.
 
 Operator grants made out of band of any conversation (`wirken permissions approve` without `--session`) are recorded under the `gateway-permissions` sentinel session, alongside the existing `gateway-hooks` and `gateway-mcp` lanes. They do not appear in `wirken sessions list`.
+
+### What an approval prompt shows
+
+The tool name and the tier do not describe the call. The action key is a
+classification, not a command: every command carrying a shell
+metacharacter collapses to `shell::pipeline:`, so the key alone cannot
+tell `cat a | bash` from `cat b | bash`. Both approval surfaces show the
+key, the arguments the model sent, and what the model said in the same
+message.
+
+On the CLI, above the `[y/N]`:
+
+```text
+wirken: agent 'default' requests 'exec' (tier3)
+  action key: shell::pipeline:
+  arguments:  {"command": "cat ./payload.sh | bash"}
+  the model said: Just checking the build script so the summary is accurate.
+  in reply to: summarise the release notes
+approve? [y/N]:
+```
+
+The sentence is the model's own account and not a description: reading it
+against the arguments is the decision. A model that sent calls and no text
+leaves the line out rather than printing an empty one.
+
+Everything on those lines except the tier is model output or an inbound
+message on its way to a terminal, so escape sequences are stripped and
+line breaks are folded. An argument cannot repaint the line above it or
+write a second line that looks like the question. A literal
+`approve? [y/N]:` inside the arguments survives, indented under
+`arguments:`, because it is part of the command being approved.
+
+In WebChat the same three reach the approval card on the `ApprovalRequest`
+event, so the card draws them on its first paint. It previously showed the
+action key where the command belonged and swapped the command in once the
+events poll had fetched the call row from the chain, which meant a card
+could be decided on before the command it was about had arrived. The
+pending queue carries them too, so a card restored after a browser reload
+shows what the live one showed.
 
 ### Platform sender identity is audited, not authorized
 

@@ -24,14 +24,16 @@ adapter handshake records). Variants are serde-tagged with `kind =
 |--------|-----------------|--------------|
 | `user_message` | `adapter_id`, `sender_id`, `inbound_id` | Inbound that triggered a turn. `None` for subagent recursion. |
 | `assistant_message` | `agent_id` | Final assistant text for a turn. |
-| `assistant_tool_calls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter and sender carry the originating channel so a SIEM need not join to the sibling `UserMessage`. |
-| `tool_result` | `agent_id`, `adapter_id`, `sender_id` | Result of a tool call. |
+| `assistant_tool_calls` | `agent_id`, `adapter_id`, `sender_id` | Model requested one or more tool calls. Adapter and sender carry the originating channel so a SIEM need not join to the sibling `UserMessage`. `text` is what the model said in the same message as the calls; absent when it said nothing. |
+| `tool_result` | `agent_id`, `adapter_id`, `sender_id` | Result of a tool call. `sandbox` says where an `exec` ran; absent for every tool that runs in the gateway's own process. |
 | `llm_request` | `agent_id`, `credential_id`, `sender_id` | Pre-call row carrying `messages_hash`, `tools_hash` and `tools_hash_version` for replay. `credential_id` is the vault entry name, never the secret. `sender_id` is the platform-side human the call is on behalf of; `None` for CLI, cron and subagent sessions. |
 | `llm_response` | `agent_id`, `credential_id`, `sender_id` | Token usage, latency, and per-call cost. See [cost monitoring](cost-monitoring.md). |
 | `budget_exceeded` | `agent_id`, `credential_id` | Spend ceiling reached. `action` is `alerted` or `blocked`. |
 | `http_fetch` | `agent_id`, `skill_name` | Egress through `EgressClient`. Host, URL, outcome, bytes, status. |
 | `permission_denied` | `agent_id` | Tier or org-policy denial. Carries `tool`, `action_key`, `denial_source`, and `tier` when the source is `Tier`. |
 | `permission_approved` / `permission_renewed` / `permission_grant_expired` / `permission_grant_pruned` | `agent_id` | Grant lifecycle. See [permissions](permissions-and-identity.md#what-the-chain-records-about-a-grant). |
+| `permission_revoked` | `agent_id` | An operator removed a grant. Carries `revoked_by` and the `tier` and `expires_at` the row held. |
+| `permission_approval_refused` | `adapter_id` | A decision arrived from a caller the gate would not take it from. Carries `request_id`, `caller` and `reason`; see [permissions](permissions-and-identity.md#what-the-chain-records-about-a-grant). |
 | `skill_permission_denied` | `agent_id` | A per-skill profile denied an axis. |
 | `sandbox_egress_verdict` / `sandbox_egress_unsupported` | `agent_id`, `channel`, `adapter_id`, `sender_id` | One row per sandbox egress request, allowed or not. See [egress](egress.md#audit). |
 | `subagent_spawned` / `subagent_session_bound` / `subagent_result` | `agent_id`, `child_agent_id` | Sub-agent lifecycle under capability-attenuated ceilings. |
@@ -43,13 +45,61 @@ adapter handshake records). Variants are serde-tagged with `kind =
 | `compaction` | `agent_id`, `provider`, `model` | Context engine trimmed the conversation. |
 | `system_prompt_set` | `agent_id` | New effective system prompt. |
 | `attestation` | `signer_pubkey`, `signature` | Per-agent Ed25519 signature over the chain head. |
-| `chain_head` | `signing_pubkey` | Signed chain-head record. |
+| `chain_head` | `signing_pubkey` | Signed chain-head record. A `reason` of `redaction` also carries `superseded_chain_hash` and `superseded_signature`. |
 | `rewind` | `agent_id`, `reason` | Sentinel emitted before truncating the most recent N events. |
 | `audit_legacy` | `actor_kind`, `actor_id`, `action`, `target` | Gateway-emitted flat-tuple events. |
 
 Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`,
 `CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`,
 `PerspectiveSkipped`, `PerspectiveExpansion`) carry per-pipeline identity.
+
+### Fields added since 1.23.0
+
+One row each, verbatim from a run.
+
+`assistant_tool_calls.text` is the assistant's own content from the
+message that carried the calls. Providers send it alongside them; it used
+to be dropped at parse time, so the chain held the calls and not the
+sentence that came with them:
+
+```json
+{"kind":"assistant_tool_calls","calls":[{"id":"call_2_exec","name":"exec","arguments":"{\"command\": \"cat ./payload.sh | bash\"}"}],"text":"Just checking the build script so the summary is accurate.","agent_id":"default"}
+```
+
+`tool_result.sandbox` says where an `exec` ran, written by the branch that
+dispatched it rather than read back from configuration. `mode` is what was
+configured, `runtime` is what actually ran it, and `container_id` is the id
+Docker returned:
+
+```json
+{"kind":"tool_result","call_id":"call_2_exec","tool_name":"exec","output":"[stderr] cat: ./payload.sh: No such file or directory\n","success":true,"sandbox":{"mode":"exec_only","runtime":"docker","container_id":"4911033061e420d87fab47be210b0f8ad9f52e1c05540090c5bf42d2e5dd261f"},"agent_id":"default"}
+```
+
+The two can disagree, which is why both are on the row: `mode: exec_only`
+with `runtime: host` would be a sandbox that failed open. A refused call
+records no `sandbox` at all, which is a different answer from `host`:
+nothing ran anywhere.
+
+`permission_approved` gained `tier` and `expires_at`, so a grant row says
+what was granted and for how long without a lookup against the store:
+
+```json
+{"kind":"permission_approved","action_key":"shell:ls","agent_id":"default","approved_by":"operator","scope":"persisted","approved_via":{"kind":"stdin"},"adapter_id":"slack","sender_id":"U04ABCD9","tier":"tier2","expires_at":"2026-10-21T09:00:00Z"}
+```
+
+`permission_revoked` is the operator taking one back:
+
+```json
+{"kind":"permission_revoked","action_key":"shell:ls","agent_id":"default","revoked_by":"operator","tier":"tier2","expires_at":"2026-10-21T09:00:00Z"}
+```
+
+`permission_approval_refused` records a decision the gate would not take
+from that caller, so an attempt to decide another channel's request leaves
+a row whether or not it succeeded:
+
+```json
+{"kind":"permission_approval_refused","request_id":"9b8f1c0a-1234-4abc-9def-0123456789ab","action_key":"shell:rm","caller":"webchat","reason":"wrong_channel","adapter_id":"webchat"}
+```
 
 Source: `crates/audit/src/session_log.rs:480-1701` (`SessionEvent`).
 
@@ -106,6 +156,40 @@ tamper detection by a third party reading the database.
 
 Source: `build_signed_message()` at `crates/audit/src/signing.rs:189-208`;
 constants at `:38` and `:44`; `load_or_create` / `load_from` at `:78-110`.
+
+## Redaction
+
+The chain is over payloads, so rewriting a row moves every hash from that
+row onward and the head signed before it stops covering what is on disk.
+Left there, the log reads as tampered from that row on and every row after
+it is unusable with it.
+
+`SqliteSessionLog::redact` is the sanctioned form. It replaces the row,
+re-hashes to the end of the session, and mints a head with
+`reason: redaction` over the rewritten range. That head carries the
+superseded head's `current_chain_hash` and `signature`:
+
+```json
+{"kind":"chain_head","reason":"redaction","sequence_range_start":4,"sequence_range_end":7,"prev_chain_hash":"05a111eca546eed5bd0d94c22c94450ee9a40daccb7f3b0ab30559ca7148cc8d","current_chain_hash":"498d3721c78657dda557947b9b700dec626179ffccd123cbdd683a90bf42d951","signature":"73c82b648bd193a218e30896cb5dba999d4c0d9ee9c738c8b958f8ceef50c9d921fcd24e99afc62aea015e8aa568599fc860937847072132156c24ca3250140c","signing_pubkey":"81910acd06b86508de1dc28738d7ac18da03b5ed943f77adb58ffd191827a0fb","schema_version":2,"superseded_chain_hash":"70d69a1e854260de9e369cb0fa56124fc6e493c98b8f49e3e512960ef0a30164","superseded_signature":"5aaf615f06ff35699dab9f0a0a310feff7f4893a6c541d38fc5e4312be30f214d3016f4d280d2a96d69f322d56907c6549977f661acdc1835a27df8b0c051b07"}
+```
+
+`superseded_chain_hash` here is the `current_chain_hash` of the checkpoint
+head that covered the range before the rewrite, and `superseded_signature`
+is the signature made over it. Both are on the row so an auditor holding
+the old head can see the range it signed, the hash it signed that range to,
+and that the hash on disk is a different one.
+
+`verify` treats a head that a redaction names as accounted for rather than
+invalid; every other head still has to match its stored hash. A row
+rewritten without minting a redaction head still reports `broken` at that
+row, with the count of rows that verified before it.
+
+**What redaction buys is attribution, not invisibility.** Anyone who can
+call it can rewrite history, and the signing key is held by the process
+that writes the chain, which is the same caveat the signature carries
+above. What it cannot do is rewrite quietly: exactly one range shows as
+resealed, under a named key. It refuses on an unsigned log, where there
+would be no head to mint and nothing to tell a redaction from tampering.
 
 ## Tamper response
 

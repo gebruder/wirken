@@ -48,6 +48,28 @@ registered), the `exec` tool refuses to run rather than running the command
 on the host. Operators who want host execution must opt in by writing
 `"mode":"off"` explicitly.
 
+## Where a call ran is on the row
+
+An `exec` result records where the command ran, written by the branch that
+dispatched it rather than read back from configuration when the row is
+emitted:
+
+```json
+"sandbox":{"mode":"exec_only","runtime":"docker","container_id":"4911033061e420d87fab47be210b0f8ad9f52e1c05540090c5bf42d2e5dd261f"}
+```
+
+`mode` is the configured mode of the sandbox that dispatched the call,
+`runtime` is what actually ran it (`docker`, `gvisor` or `host`), and
+`container_id` is the id Docker returned, absent on the host. Both output
+paths format their output identically, so before this field an auditor
+reading `audit.db` could not tell a containerised `exec` from a host one.
+
+The two can disagree and the row says so when they do: `mode: exec_only`
+with `runtime: host` is a sandbox that failed open, which is the case
+worth being able to see afterwards. A call refused at the gate records no
+`sandbox` at all, which is a different answer from `host`: nothing ran
+anywhere. A call cut at the timeout still records where it ran.
+
 ## Container hardening (applies to ExecOnly and GVisor)
 
 [`crates/agent/src/sandbox.rs:994-1045`](../crates/agent/src/sandbox.rs)
