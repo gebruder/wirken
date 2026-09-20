@@ -202,6 +202,10 @@ pub struct Agent {
     /// The current user message that triggered this processing round.
     /// Captured in process_message() for inclusion in denial audit events.
     current_trigger: Option<String>,
+    /// What the model said in the message carrying the tool calls
+    /// currently being dispatched. Set when the response is taken
+    /// apart, read by the row and by the approval gate.
+    current_assistant_text: Option<String>,
     /// Platform-side identity (adapter + sender) of the inbound that
     /// triggered the current processing round. Set at the top of
     /// `process_message_inner` / `process_message_stream_with` so
@@ -588,6 +592,7 @@ impl Agent {
             permissions: None,
             org_permissions: None,
             current_trigger: None,
+            current_assistant_text: None,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -686,6 +691,7 @@ impl Agent {
             permissions: None,
             org_permissions: None,
             current_trigger: None,
+            current_assistant_text: None,
             current_inbound: InboundContext::default(),
             session_log,
             session_handle,
@@ -2507,7 +2513,13 @@ impl Agent {
                         denials,
                     });
                 }
-                LlmResponse::ToolCalls(calls) => {
+                LlmResponse::ToolCalls { calls, text } => {
+                    // What the model said alongside the calls, held
+                    // for the row below and for any gate the calls
+                    // reach: an operator asked to approve one of
+                    // these is being asked about the sentence as
+                    // much as the arguments.
+                    self.current_assistant_text = text.clone();
                     // Record the tool call request in the conversation AND
                     // in the session log BEFORE executing any tools. The
                     // ordering is load-bearing for wake():
@@ -2519,6 +2531,7 @@ impl Agent {
                         TrustLevel::System,
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
+                            text: text.clone(),
                             agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
@@ -2835,12 +2848,14 @@ impl Agent {
                         denials,
                     });
                 }
-                LlmResponse::ToolCalls(calls) => {
+                LlmResponse::ToolCalls { calls, text } => {
+                    self.current_assistant_text = text.clone();
                     self.conversation.add_assistant_tool_calls(calls.clone());
                     self.log_event(
                         TrustLevel::System,
                         SessionEvent::AssistantToolCalls {
                             calls: Self::calls_to_records(&calls),
+                            text: text.clone(),
                             agent_id: self.audited_agent_id(),
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
@@ -3314,6 +3329,7 @@ impl Agent {
                                 agent_id: self.audited_agent_id(),
                                 trigger_message: self.current_trigger.clone(),
                                 arguments: Some(arguments.to_string()),
+                                assistant_text: self.current_assistant_text.clone(),
                             },
                         )));
                     }
@@ -5371,7 +5387,7 @@ fn unmediated_deny_message(ctx: &PermissionDenialContext) -> String {
 fn finish_reason_for(response: &LlmResponse) -> &'static str {
     match response {
         LlmResponse::Text(_) => "text",
-        LlmResponse::ToolCalls(_) => "tool_calls",
+        LlmResponse::ToolCalls { .. } => "tool_calls",
         LlmResponse::Empty => "empty",
     }
 }

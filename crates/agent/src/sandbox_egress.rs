@@ -511,6 +511,7 @@ impl SandboxEgressContext {
             // No tool call: what is being approved is the
             // destination, which the action already names.
             arguments: None,
+            assistant_text: None,
         };
         let approved = matches!(
             gate.request_approval(&ctx).await,

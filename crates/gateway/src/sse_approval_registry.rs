@@ -74,6 +74,11 @@ pub enum SseEvent {
         requested_tier: String,
         triggering_agent: String,
         trigger_message: String,
+        /// What the model said in the same message as the call.
+        /// Additive: a browser built against the older shape ignores
+        /// an unknown key, and an older gateway sends none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assistant_text: Option<String>,
     },
     /// Gateway → browser. Fires after the operator POSTs to
     /// /api/approvals/{request_id}. Distinct from
@@ -258,6 +263,7 @@ mod tests {
             requested_tier: "tier3".into(),
             triggering_agent: "default".into(),
             trigger_message: "clean logs".into(),
+            assistant_text: None,
         };
         let line = ev.to_sse_line();
         assert!(line.starts_with("data: "));

@@ -27,6 +27,13 @@ pub struct PermissionDenialContext {
     /// `None` where the call has no arguments to show, and on the
     /// paths that build a context without a call in hand.
     pub arguments: Option<String>,
+    /// What the model said in the same message as the call.
+    ///
+    /// Often the only statement of intent an operator gets: the
+    /// arguments say what would run and this says what the model
+    /// thinks it is doing, which is the pair a decision is made on.
+    /// `None` where the model sent calls and no text.
+    pub assistant_text: Option<String>,
 }
 
 impl std::fmt::Display for PermissionDenialContext {

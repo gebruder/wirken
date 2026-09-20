@@ -1354,6 +1354,7 @@ mod tests {
             agent_id: "default".to_string(),
             adapter_id: None,
             sender_id: None,
+            text: None,
         }
     }
 

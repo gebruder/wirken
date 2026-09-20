@@ -1040,6 +1040,7 @@ mod session {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    text: None,
                 },
             ),
             (
@@ -2507,6 +2508,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             agent_id: String::new(),
             adapter_id: None,
             sender_id: None,
+            text: None,
         },
         SessionEvent::ToolResult {
             call_id: String::new(),

@@ -68,6 +68,7 @@ impl ApprovalGate for CliApprovalGate {
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
             trigger_message: ctx.trigger_message.clone(),
+            assistant_text: None,
         };
         let (request_id, rx) = self.queue.register(request);
         tracing::info!(
@@ -128,6 +129,7 @@ mod tests {
             agent_id: "default".into(),
             trigger_message: Some("operator request".into()),
             arguments: None,
+            assistant_text: None,
         }
     }
 

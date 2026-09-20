@@ -213,7 +213,7 @@ pub async fn call_structured<T: DeserializeOwned>(
         .await
         .map_err(SyntheticToolError::Llm)?;
     match resp {
-        LlmResponse::ToolCalls(calls) => {
+        LlmResponse::ToolCalls { calls, .. } => {
             let actual: Vec<String> = calls.iter().map(|c| c.name.clone()).collect();
             let call = calls.iter().find(|c| c.name == tool_name).ok_or_else(|| {
                 SyntheticToolError::ToolNotCalled {

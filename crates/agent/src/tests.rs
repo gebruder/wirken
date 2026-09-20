@@ -1131,7 +1131,7 @@ fn parse_ollama_response_tool_calls_synthesizes_id() {
     });
     let (resp, usage) = parse_ollama_response(&body).unwrap();
     match resp {
-        LlmResponse::ToolCalls(calls) => {
+        LlmResponse::ToolCalls { calls, .. } => {
             assert_eq!(calls.len(), 2);
             // First call: arguments arrived as object; parser serializes to string.
             assert_eq!(calls[0].id, "call_0");
@@ -1231,7 +1231,7 @@ fn parse_tool_call_response() {
 
     let (response, _usage) = crate::llm::parse_completion_response(&body).unwrap();
     match response {
-        LlmResponse::ToolCalls(calls) => {
+        LlmResponse::ToolCalls { calls, .. } => {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "call_abc123");
             assert_eq!(calls[0].name, "exec");
@@ -1292,7 +1292,7 @@ fn parse_anthropic_tool_use_response() {
 
     let (response, _usage) = crate::llm::parse_anthropic_response(&body).unwrap();
     match response {
-        LlmResponse::ToolCalls(calls) => {
+        LlmResponse::ToolCalls { calls, .. } => {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "toolu_01A");
             assert_eq!(calls[0].name, "exec");
@@ -1314,7 +1314,7 @@ fn parse_anthropic_mixed_response() {
 
     // Tool calls take priority over text
     let (response, _usage) = crate::llm::parse_anthropic_response(&body).unwrap();
-    assert!(matches!(response, LlmResponse::ToolCalls(_)));
+    assert!(matches!(response, LlmResponse::ToolCalls { .. }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,7 +1357,7 @@ fn parse_gemini_function_call_response() {
 
     let (response, _usage) = crate::llm::parse_gemini_response(&body).unwrap();
     match response {
-        LlmResponse::ToolCalls(calls) => {
+        LlmResponse::ToolCalls { calls, .. } => {
             assert_eq!(calls.len(), 1);
             assert!(calls[0].id.starts_with("gemini_"));
             assert_eq!(calls[0].name, "exec");
@@ -1382,7 +1382,7 @@ fn parse_gemini_mixed_response() {
     });
 
     let (response, _usage) = crate::llm::parse_gemini_response(&body).unwrap();
-    assert!(matches!(response, LlmResponse::ToolCalls(_)));
+    assert!(matches!(response, LlmResponse::ToolCalls { .. }));
 }
 
 #[test]
@@ -1443,7 +1443,7 @@ fn parse_bedrock_tool_use_response() {
 
     let (response, _usage) = crate::llm::parse_bedrock_response(&body).unwrap();
     match response {
-        LlmResponse::ToolCalls(calls) => {
+        LlmResponse::ToolCalls { calls, .. } => {
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "tooluse_abc123");
             assert_eq!(calls[0].name, "exec");
@@ -1469,7 +1469,7 @@ fn parse_bedrock_mixed_response() {
     });
 
     let (response, _usage) = crate::llm::parse_bedrock_response(&body).unwrap();
-    assert!(matches!(response, LlmResponse::ToolCalls(_)));
+    assert!(matches!(response, LlmResponse::ToolCalls { .. }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1787,6 +1787,7 @@ mod durability {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    text: None,
                 },
             )
             .unwrap();
@@ -2033,6 +2034,7 @@ mod wake {
                 agent_id: "test-agent".into(),
                 adapter_id: None,
                 sender_id: None,
+                text: None,
             },
         )
         .unwrap();
@@ -4738,6 +4740,7 @@ fn denial_context_display() {
         agent_id: "default".into(),
         trigger_message: Some("fetch that URL".into()),
         arguments: None,
+        assistant_text: None,
     };
 
     let display = format!("{ctx}");
@@ -6451,6 +6454,7 @@ mod verify {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    text: None,
                 },
             )
             .unwrap();
@@ -6501,6 +6505,7 @@ mod verify {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    text: None,
                 },
             )
             .unwrap();
@@ -6548,6 +6553,7 @@ mod verify {
                     agent_id: "test-agent".into(),
                     adapter_id: None,
                     sender_id: None,
+                    text: None,
                 },
             )
             .unwrap();
@@ -8655,6 +8661,132 @@ mod openai_compat_stub {
     use crate::conversation::{Message, Role};
     use crate::llm::{LlmClient, LlmConfig, LlmResponse};
     use crate::llm_stream::StreamEvent;
+
+    /// The streaming OpenAI path: content deltas and a tool call in
+    /// the same stream. The deltas already reached the caller; the
+    /// same text has to survive on the response so the row and the
+    /// gate see what the model said.
+    #[tokio::test]
+    async fn streaming_openai_keeps_the_text_beside_the_calls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let body = "\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"I'll read the deploy log.\"}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"deploy.log\\\"}\"}}]}}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n\
+                data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let config = LlmConfig {
+            provider: "custom".into(),
+            model: "some-model".into(),
+            base_url: format!("http://{addr}/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+        };
+        let client = LlmClient::new(config).unwrap();
+        let messages = vec![Message {
+            role: Role::User,
+            content: "what happened last night".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+        let (response, _usage) = client
+            .complete_stream(&messages, &[], None, tx)
+            .await
+            .expect("stream completes");
+        let _ = stub.await;
+
+        match response {
+            LlmResponse::ToolCalls { calls, text } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "read_file");
+                assert_eq!(text.as_deref(), Some("I'll read the deploy log."));
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    /// The streaming Anthropic path: a text block and a tool_use
+    /// block in one message.
+    #[tokio::test]
+    async fn streaming_anthropic_keeps_the_text_beside_the_calls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stub = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let body = "\
+                event: content_block_start\n\
+                data: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                event: content_block_delta\n\
+                data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I'll read the deploy log.\"}}\n\n\
+                event: content_block_start\n\
+                data: {\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\"}}\n\n\
+                event: content_block_delta\n\
+                data: {\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"deploy.log\\\"}\"}}\n\n\
+                event: content_block_stop\n\
+                data: {\"index\":1}\n\n\
+                event: message_stop\n\
+                data: {}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        });
+
+        let config = LlmConfig {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+            base_url: format!("http://{addr}/v1"),
+            max_tokens: 256,
+            temperature: 0.7,
+            region: None,
+            tools_enabled: true,
+            context_window: 32_000,
+        };
+        let client = LlmClient::new(config).unwrap();
+        let messages = vec![Message {
+            role: Role::User,
+            content: "what happened last night".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_calls: None,
+        }];
+        let (tx, _rx) = tokio::sync::mpsc::channel::<StreamEvent>(16);
+        let (response, _usage) = client
+            .complete_stream(&messages, &[], Some("key"), tx)
+            .await
+            .expect("stream completes");
+        let _ = stub.await;
+
+        match response {
+            LlmResponse::ToolCalls { calls, text } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "toolu_1");
+                assert_eq!(text.as_deref(), Some("I'll read the deploy log."));
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn streaming_reads_trailing_usage_chunk_after_finish_reason() {
@@ -11254,4 +11386,124 @@ async fn a_host_exec_that_times_out_still_records_the_host() {
     assert_eq!(provenance.mode, wirken_audit::SandboxModeLabel::Off);
     assert_eq!(provenance.runtime, wirken_audit::SandboxRuntimeLabel::Host);
     assert_eq!(provenance.container_id, None);
+}
+
+// --- Text arriving beside tool calls, one fixture per parse site ---
+//
+// Providers put the model's own sentence in the same message as its
+// tool calls. Each parser used to return on the calls and never look
+// at the text, so the sentence explaining the call was gone before
+// anything could record or show it. One fixture per parser, each
+// carrying both.
+
+const SAID: &str = "I'll read the deploy log to answer that.";
+
+fn calls_and_text(
+    resp: crate::llm::LlmResponse,
+) -> (Vec<crate::conversation::ToolCallRequest>, Option<String>) {
+    match resp {
+        crate::llm::LlmResponse::ToolCalls { calls, text } => (calls, text),
+        other => panic!("expected ToolCalls, got {other:?}"),
+    }
+}
+
+#[test]
+fn ollama_keeps_the_text_beside_the_calls() {
+    use crate::llm::parse_ollama_response;
+    let body = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": SAID,
+            "tool_calls": [{
+                "function": { "name": "read_file", "arguments": {"path": "deploy.log"} }
+            }],
+        }
+    });
+    let (calls, text) = calls_and_text(parse_ollama_response(&body).unwrap().0);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].name, "read_file");
+    assert_eq!(text.as_deref(), Some(SAID));
+}
+
+#[test]
+fn the_openai_compatible_parser_keeps_the_text_beside_the_calls() {
+    use crate::llm::parse_completion_response;
+    let body = serde_json::json!({
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": SAID,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "function": { "name": "read_file", "arguments": "{\"path\":\"deploy.log\"}" }
+                }],
+            }
+        }]
+    });
+    let (calls, text) = calls_and_text(parse_completion_response(&body).unwrap().0);
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(text.as_deref(), Some(SAID));
+}
+
+#[test]
+fn anthropic_keeps_the_text_block_beside_the_tool_use() {
+    use crate::llm::parse_anthropic_response;
+    let body = serde_json::json!({
+        "content": [
+            { "type": "text", "text": SAID },
+            { "type": "tool_use", "id": "toolu_1", "name": "read_file",
+              "input": {"path": "deploy.log"} },
+        ]
+    });
+    let (calls, text) = calls_and_text(parse_anthropic_response(&body).unwrap().0);
+    assert_eq!(calls[0].id, "toolu_1");
+    assert_eq!(text.as_deref(), Some(SAID));
+}
+
+#[test]
+fn gemini_keeps_the_text_part_beside_the_function_call() {
+    use crate::llm::parse_gemini_response;
+    let body = serde_json::json!({
+        "candidates": [{
+            "content": {
+                "parts": [
+                    { "text": SAID },
+                    { "functionCall": { "name": "read_file", "args": {"path": "deploy.log"} } },
+                ]
+            }
+        }]
+    });
+    let (calls, text) = calls_and_text(parse_gemini_response(&body).unwrap().0);
+    assert_eq!(calls[0].name, "read_file");
+    assert_eq!(text.as_deref(), Some(SAID));
+}
+
+#[test]
+fn bedrock_keeps_the_text_block_beside_the_tool_use() {
+    use crate::llm::parse_bedrock_response;
+    let body = serde_json::json!({
+        "output": { "message": { "content": [
+            { "text": SAID },
+            { "toolUse": { "toolUseId": "tu_1", "name": "read_file",
+                           "input": {"path": "deploy.log"} } },
+        ]}}
+    });
+    let (calls, text) = calls_and_text(parse_bedrock_response(&body).unwrap().0);
+    assert_eq!(calls[0].id, "tu_1");
+    assert_eq!(text.as_deref(), Some(SAID));
+}
+
+/// A message with calls and no text records none, rather than an
+/// empty string that would print as a blank "the model said:".
+#[test]
+fn calls_with_no_text_carry_none() {
+    use crate::llm::parse_anthropic_response;
+    let body = serde_json::json!({
+        "content": [
+            { "type": "tool_use", "id": "toolu_1", "name": "read_file",
+              "input": {"path": "deploy.log"} },
+        ]
+    });
+    let (_, text) = calls_and_text(parse_anthropic_response(&body).unwrap().0);
+    assert_eq!(text, None);
 }

@@ -207,8 +207,20 @@ impl LlmConfig {
 pub enum LlmResponse {
     /// Text response — the assistant replied with content.
     Text(String),
-    /// Tool calls — the assistant wants to call tools.
-    ToolCalls(Vec<ToolCallRequest>),
+    /// Tool calls: the assistant wants to call tools, and may have
+    /// said something alongside them.
+    ///
+    /// `text` is the assistant's own content from the same message.
+    /// Providers send it in the same turn as the calls, and every
+    /// parse path used to drop it on the floor: the variant carried
+    /// only the calls, so the sentence explaining what the model was
+    /// about to do never reached the conversation, the chain, or the
+    /// operator being asked to approve it. `None` where the model
+    /// sent calls and no text.
+    ToolCalls {
+        calls: Vec<ToolCallRequest>,
+        text: Option<String>,
+    },
     /// Empty response (shouldn't happen but handle gracefully).
     Empty,
 }
@@ -1234,7 +1246,14 @@ pub fn parse_ollama_response(
             })
             .collect();
         if !calls.is_empty() {
-            return Ok((LlmResponse::ToolCalls(calls), usage));
+            // The content field of the same message. Providers put
+            // the model's own sentence here beside the calls.
+            let text = message
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+                .filter(|t| !t.is_empty());
+            return Ok((LlmResponse::ToolCalls { calls, text }, usage));
         }
     }
 
@@ -1334,7 +1353,14 @@ pub fn parse_completion_response(
             .collect();
 
         if !calls.is_empty() {
-            return Ok((LlmResponse::ToolCalls(calls), usage));
+            // The content field of the same message. Providers put
+            // the model's own sentence here beside the calls.
+            let text = message
+                .get("content")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+                .filter(|t| !t.is_empty());
+            return Ok((LlmResponse::ToolCalls { calls, text }, usage));
         }
     }
 
@@ -1397,7 +1423,16 @@ pub fn parse_anthropic_response(
     let usage = extract_anthropic_usage(body);
 
     if !tool_calls.is_empty() {
-        return Ok((LlmResponse::ToolCalls(tool_calls), usage));
+        // The text blocks of the same message, joined the way the
+        // text-only path below joins them.
+        let text = Some(text_parts.join("")).filter(|t| !t.is_empty());
+        return Ok((
+            LlmResponse::ToolCalls {
+                calls: tool_calls,
+                text,
+            },
+            usage,
+        ));
     }
 
     if !text_parts.is_empty() {
@@ -1450,7 +1485,16 @@ pub fn parse_gemini_response(
     let usage = extract_gemini_usage(body);
 
     if !tool_calls.is_empty() {
-        return Ok((LlmResponse::ToolCalls(tool_calls), usage));
+        // The text blocks of the same message, joined the way the
+        // text-only path below joins them.
+        let text = Some(text_parts.join("")).filter(|t| !t.is_empty());
+        return Ok((
+            LlmResponse::ToolCalls {
+                calls: tool_calls,
+                text,
+            },
+            usage,
+        ));
     }
 
     if !text_parts.is_empty() {
@@ -1504,7 +1548,16 @@ pub fn parse_bedrock_response(
     let usage = extract_bedrock_usage(body);
 
     if !tool_calls.is_empty() {
-        return Ok((LlmResponse::ToolCalls(tool_calls), usage));
+        // The text blocks of the same message, joined the way the
+        // text-only path below joins them.
+        let text = Some(text_parts.join("")).filter(|t| !t.is_empty());
+        return Ok((
+            LlmResponse::ToolCalls {
+                calls: tool_calls,
+                text,
+            },
+            usage,
+        ));
     }
 
     if !text_parts.is_empty() {

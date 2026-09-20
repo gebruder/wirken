@@ -124,6 +124,7 @@ impl ApprovalGate for SseApprovalGate {
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
             trigger_message: ctx.trigger_message.clone(),
+            assistant_text: ctx.assistant_text.clone(),
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -134,6 +135,7 @@ impl ApprovalGate for SseApprovalGate {
             requested_tier: ctx.requested_tier.label().to_string(),
             triggering_agent: ctx.agent_id.clone(),
             trigger_message: ctx.trigger_message.clone().unwrap_or_default(),
+            assistant_text: ctx.assistant_text.clone(),
         };
 
         if let Err(e) = sender.send(event).await {
@@ -206,6 +208,7 @@ mod tests {
             agent_id: "default/webchat/webchat-default".into(),
             trigger_message: Some("clean logs".into()),
             arguments: None,
+            assistant_text: None,
         }
     }
 

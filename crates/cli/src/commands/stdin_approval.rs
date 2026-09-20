@@ -98,6 +98,8 @@ const MAX_ARGUMENT_CHARS: usize = 2000;
 ///   command carrying a shell metacharacter collapses to
 ///   `shell::pipeline:`, so the key alone cannot distinguish
 ///   `cat a | bash` from `cat b | bash`;
+/// - what the model said in the same message as the call, which is
+///   its own statement of what it is about to do;
 /// - the message that triggered the turn, which is the operator's
 ///   own last input and the context in which the call makes sense or
 ///   does not.
@@ -147,6 +149,17 @@ pub(crate) fn render_prompt(ctx: &PermissionDenialContext) -> String {
                 "  arguments:  (none; the action key is the whole ask)"
             );
         }
+    }
+
+    if let Some(said) = ctx.assistant_text.as_deref().filter(|t| !t.is_empty()) {
+        let cleaned = clean(said);
+        let shown: String = cleaned.chars().take(MAX_ARGUMENT_CHARS).collect();
+        let cut = cleaned.chars().count() > MAX_ARGUMENT_CHARS;
+        let _ = writeln!(
+            prompt,
+            "  the model said: {shown}{}",
+            if cut { " … (cut)" } else { "" }
+        );
     }
 
     if let Some(trigger) = ctx.trigger_message.as_deref().filter(|t| !t.is_empty()) {
@@ -424,6 +437,7 @@ mod tests {
             agent_id: "default".into(),
             trigger_message: Some("summarise the release notes".into()),
             arguments: arguments.map(str::to_string),
+            assistant_text: None,
         }
     }
 

@@ -674,6 +674,7 @@ mod tests {
             agent_id: "default".into(),
             adapter_id: Some("slack".into()),
             sender_id: Some("U123".into()),
+            text: None,
         }
     }
 

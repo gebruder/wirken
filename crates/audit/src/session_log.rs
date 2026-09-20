@@ -601,6 +601,17 @@ pub enum SessionEvent {
     /// Assistant requested one or more tool calls.
     AssistantToolCalls {
         calls: Vec<ToolCallRecord>,
+        /// What the model said in the same message as the calls.
+        ///
+        /// Providers send the assistant's own text beside its tool
+        /// calls, and every parse path used to discard it, so the
+        /// sentence explaining the calls was absent from the chain
+        /// while the calls themselves were on it. Additive and
+        /// defaulted: a row written before this field reads back with
+        /// `None`, which is also what a message carrying calls and no
+        /// text records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
         #[serde(default)]
         agent_id: String,
         /// Adapter that delivered the inbound message that drove

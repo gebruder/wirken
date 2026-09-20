@@ -231,7 +231,12 @@ impl LlmClient {
                     arguments: tc.arguments,
                 })
                 .collect();
-            LlmResponse::ToolCalls(calls)
+            LlmResponse::ToolCalls {
+                calls,
+                // Deltas already streamed to the caller; the same
+                // text is kept here so the row and the gate see it.
+                text: Some(full_text.clone()).filter(|t| !t.is_empty()),
+            }
         } else if !full_text.is_empty() {
             LlmResponse::Text(full_text)
         } else {
@@ -520,7 +525,10 @@ impl LlmClient {
         }
 
         let response = if !tool_calls.is_empty() {
-            LlmResponse::ToolCalls(tool_calls)
+            LlmResponse::ToolCalls {
+                calls: tool_calls,
+                text: Some(text_parts.join("")).filter(|t| !t.is_empty()),
+            }
         } else if !text_parts.is_empty() {
             LlmResponse::Text(text_parts.join(""))
         } else {

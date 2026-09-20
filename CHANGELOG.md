@@ -12,6 +12,16 @@ tagged.
 
 ### Added
 
+- What the model says alongside its tool calls is kept. Providers
+  send the assistant's own text in the same message as its calls, and
+  all seven parse paths (Ollama, OpenAI-compatible, Anthropic, Gemini
+  and Bedrock, plus the two streaming ones) returned on the calls
+  without reading it, so the sentence explaining the call was gone
+  before anything could record it. `LlmResponse::ToolCalls` carries
+  it, `assistant_tool_calls` rows carry it as an additive defaulted
+  field, and both approval surfaces show it: the CLI prompt as "the
+  model said:" and the webchat approval card on its own line.
+
 - The CLI approval prompt says what is being approved before it asks.
   It showed the tool name and the tier, which do not describe the
   call: every command carrying a shell metacharacter classifies to

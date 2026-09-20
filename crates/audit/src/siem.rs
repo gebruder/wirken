@@ -1250,6 +1250,7 @@ mod identity_tests {
                     agent_id: agent(),
                     adapter_id: adapter(),
                     sender_id: sender(),
+                    text: None,
                 },
                 Some("slack"),
                 Some("U123"),

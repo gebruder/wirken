@@ -152,6 +152,7 @@ impl ApprovalGate for TelegramApprovalGate {
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
             trigger_message: ctx.trigger_message.clone(),
+            assistant_text: None,
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -237,6 +238,7 @@ mod tests {
             agent_id: "default".into(),
             trigger_message: Some("clean old logs".into()),
             arguments: None,
+            assistant_text: None,
         }
     }
 

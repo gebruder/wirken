@@ -386,6 +386,9 @@ const HTML: &str = r#"<!DOCTYPE html>
   .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; margin-left: auto; }
   .approval-cmd { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: rgba(0,0,0,.4); padding: 10px 12px; border-radius: 7px; overflow-x: auto; white-space: pre; }
   .approval-note { font-size: 11.5px; color: rgba(233,233,237,.5); }
+  .approval-said { margin-top: 6px; font-size: 12.5px; line-height: 1.45; }
+  .approval-said-label { color: rgba(233,233,237,.5); margin-right: 6px; }
+  .approval-said-text { color: rgba(233,233,237,.82); }
   .input { width: 100%; background: rgba(0,0,0,.25); border: 1px solid var(--neutral-800); border-radius: var(--radius-md); padding: 9px 12px; font-size: 13px; color: var(--text); resize: none; }
   .input::placeholder { color: rgba(233,233,237,.38); }
   .input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 2px rgba(145,132,217,.25); }
@@ -857,6 +860,15 @@ function renderApproval(ev) {
   const note = el('div', 'approval-note', 'action key as computed by the gate · tool ' + (ev.tool_name || ''));
   card.appendChild(cmd);
   card.appendChild(note);
+  // What the model said in the same message as the call. Its own
+  // statement of intent, which the arguments do not carry. Absent
+  // when the model sent calls and no text.
+  if (ev.assistant_text) {
+    const said = el('div', 'approval-said');
+    said.appendChild(el('span', 'approval-said-label', 'the model said:'));
+    said.appendChild(el('span', 'approval-said-text', ev.assistant_text));
+    card.appendChild(said);
+  }
   const join = () => {
     const entry = pendingToolRowFor(ev.tool_name);
     if (!entry) return false;
@@ -3826,9 +3838,9 @@ fn approvals_snapshot_for(
                 }));
                 continue;
             }
-            let trigger = queue
-                .show(&entry.request_id)
-                .and_then(|d| d.trigger_message);
+            let detail = queue.show(&entry.request_id);
+            let trigger = detail.as_ref().and_then(|d| d.trigger_message.clone());
+            let said = detail.and_then(|d| d.assistant_text);
             mine.push(json!({
                 "request_id": entry.request_id,
                 "agent_id": entry.agent_id,
@@ -3840,6 +3852,10 @@ fn approvals_snapshot_for(
                 "timeout_seconds": timeout,
                 "remaining_seconds": Value::Null,
                 "trigger_message": trigger,
+                // What the model said alongside the call. A card
+                // restored after a reload reads this; the live card
+                // reads the same value off the SSE event.
+                "assistant_text": said,
             }));
         } else {
             let channel = session_channel(&entry.agent_id)
@@ -5950,6 +5966,7 @@ mod tests {
                     agent_id: agent(),
                     adapter_id: None,
                     sender_id: None,
+                    text: None,
                 },
             ),
             (
@@ -6393,6 +6410,7 @@ mod tests {
             action_key: "shell:psql".into(),
             requested_tier: "tier3".into(),
             trigger_message: Some(trigger.into()),
+            assistant_text: None,
         }
     }
 

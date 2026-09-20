@@ -96,6 +96,7 @@ fn pre_1_2_0_assistant_tool_calls_deserializes_with_empty_agent_id() {
     match ev {
         SessionEvent::AssistantToolCalls {
             calls,
+            text,
             agent_id,
             adapter_id,
             sender_id,
@@ -105,6 +106,10 @@ fn pre_1_2_0_assistant_tool_calls_deserializes_with_empty_agent_id() {
             assert_eq!(agent_id, "");
             assert!(adapter_id.is_none(), "pre-A1 rows have no adapter_id");
             assert!(sender_id.is_none(), "pre-A1 rows have no sender_id");
+            assert!(
+                text.is_none(),
+                "a row written before the field carries no model text"
+            );
         }
         other => panic!("expected AssistantToolCalls, got {other:?}"),
     }
@@ -167,6 +172,7 @@ fn a1_assistant_tool_calls_emitted_with_webchat_identity() {
         agent_id: "default".into(),
         adapter_id: Some("webchat".into()),
         sender_id: Some("webchat-user".into()),
+        text: None,
     };
     let v = serde_json::to_value(&ev).unwrap();
     assert_eq!(

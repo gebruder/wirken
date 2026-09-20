@@ -99,7 +99,7 @@ pub async fn probe_tool_calling(
 /// the classification can be unit-tested without a real provider.
 pub fn classify(result: Result<(LlmResponse, Option<Usage>), AgentError>) -> Result<ProbeOutcome> {
     match result {
-        Ok((LlmResponse::ToolCalls(calls), _)) => {
+        Ok((LlmResponse::ToolCalls { calls, .. }, _)) => {
             let Some(c) = calls.first() else {
                 return Ok(ProbeOutcome::Fail {
                     case: FailCase::NoToolCall,
@@ -163,17 +163,23 @@ mod tests {
 
     #[test]
     fn parseable_tool_call_passes() {
-        let resp = LlmResponse::ToolCalls(vec![ToolCallRequest {
-            id: "1".into(),
-            name: "probe_ping".into(),
-            arguments: r#"{"marker": "ok"}"#.into(),
-        }]);
+        let resp = LlmResponse::ToolCalls {
+            calls: vec![ToolCallRequest {
+                id: "1".into(),
+                name: "probe_ping".into(),
+                arguments: r#"{"marker": "ok"}"#.into(),
+            }],
+            text: None,
+        };
         assert_eq!(classify(Ok((resp, None))).unwrap(), ProbeOutcome::Pass);
     }
 
     #[test]
     fn empty_tool_call_list_is_no_tool_call() {
-        let resp = LlmResponse::ToolCalls(vec![]);
+        let resp = LlmResponse::ToolCalls {
+            calls: vec![],
+            text: None,
+        };
         let out = classify(Ok((resp, None))).unwrap();
         match out {
             ProbeOutcome::Fail { case, .. } => assert_eq!(case, FailCase::NoToolCall),
@@ -183,11 +189,14 @@ mod tests {
 
     #[test]
     fn tool_call_with_bad_args_is_unparseable() {
-        let resp = LlmResponse::ToolCalls(vec![ToolCallRequest {
-            id: "1".into(),
-            name: "probe_ping".into(),
-            arguments: r#"{marker: "ok"#.into(),
-        }]);
+        let resp = LlmResponse::ToolCalls {
+            calls: vec![ToolCallRequest {
+                id: "1".into(),
+                name: "probe_ping".into(),
+                arguments: r#"{marker: "ok"#.into(),
+            }],
+            text: None,
+        };
         let out = classify(Ok((resp, None))).unwrap();
         match out {
             ProbeOutcome::Fail { case, .. } => assert_eq!(case, FailCase::UnparseableArguments),
