@@ -55,6 +55,26 @@ tagged.
   tool that runs inside the gateway's own process records. The SIEM
   typed summary and the webchat session projection both carry it.
 
+### Added
+
+- `SqliteSessionLog::redact` rewrites one row and re-seals the chain
+  over it. Rewriting a row by hand moves every hash from that row
+  onward, so the head signed before it stops covering what is on
+  disk: the log reads as tampered and every row after the edit is
+  unusable with it. Redaction does the rewrite, re-hashes forward,
+  and mints a `ChainHeadReason::Redaction` head carrying the
+  superseded head's chain hash and signature, so the rewrite is
+  attributable rather than silent. It refuses on an unsigned log,
+  where there would be no head to mint and nothing to tell a
+  redaction from tampering.
+
+  This buys attribution, not invisibility, and is not a way to make a
+  rewrite disappear: the redaction head names the hash the replaced
+  range used to end on and carries the signature made over it, so an
+  auditor holding the old head sees exactly one range resealed and by
+  whose key. `verify` treats a head a redaction names as accounted
+  for rather than invalid; every other head still has to match.
+
 ### Changed
 
 - Every `Action` has an explicit approval key. Eight variants fell

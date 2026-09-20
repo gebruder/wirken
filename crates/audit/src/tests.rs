@@ -1894,6 +1894,217 @@ mod chain_head_signing {
         (log, h, signer)
     }
 
+    /// Every ChainHead row in a session, oldest first.
+    fn head_rows(
+        log: &SqliteSessionLog,
+        h: &SessionHandle<crate::session_log::OwnSession>,
+    ) -> Vec<SessionEvent> {
+        log.get_since(h, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .filter(|e| matches!(e, SessionEvent::ChainHead { .. }))
+            .collect()
+    }
+
+    /// Ten rows, a sealed head, then row 4 rewritten in place.
+    ///
+    /// This is what "redacting" a row means with no redaction
+    /// operation to call: an operator with write access edits the
+    /// payload. The chain is over payloads, so the edit moves every
+    /// hash from that row onward and the head signed before it stops
+    /// covering what is on disk. The log reads as tampered, and the
+    /// nine rows after the edit are unusable along with it.
+    #[test]
+    fn a_row_rewritten_by_hand_breaks_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("by-hand"));
+        for n in 0..10 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("row {n}")))
+                .unwrap();
+        }
+        log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+            .unwrap()
+            .expect("a signed head");
+        match audit.verify_require_signed().unwrap() {
+            crate::VerifyResult::Ok { .. } => {}
+            other => panic!("expected a clean chain before the edit, got {other:?}"),
+        }
+
+        log.with_conn(|conn| {
+            let changed = conn.execute(
+                "UPDATE session_events
+                    SET payload = json_set(payload, '$.content', '[redacted]')
+                  WHERE session_id = ?1 AND seq = 4",
+                rusqlite::params![h.id().as_str()],
+            )?;
+            assert_eq!(changed, 1, "exactly one row is rewritten");
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+
+        match audit.verify_require_signed().unwrap() {
+            crate::VerifyResult::Broken {
+                seq,
+                verified_count,
+                ..
+            } => {
+                assert_eq!(seq, 4, "the break is at the row that was rewritten");
+                assert_eq!(verified_count, 4, "the four rows before it still verify");
+            }
+            other => panic!("a rewritten row verified clean: {other:?}"),
+        }
+    }
+
+    /// The same rewrite through [`SqliteSessionLog::redact`].
+    ///
+    /// The chain verifies afterwards, and the rewrite is on the
+    /// record: a `Redaction` head covers the rewritten range and
+    /// carries the hash and signature of the head it replaced. An
+    /// auditor holding the old head sees the range it signed, the
+    /// hash it signed it to, and that the hash on disk is a different
+    /// one. Redaction buys attribution, not invisibility.
+    #[test]
+    fn a_redaction_reseals_the_chain_and_names_the_head_it_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let audit = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let log = audit.session_log();
+        let h = log.handle_for(SessionId::new("redaction"));
+        for n in 0..10 {
+            log.append(&h, TrustLevel::User, user_msg(&format!("row {n}")))
+                .unwrap();
+        }
+        log.emit_chain_head(&h, ChainHeadReason::Checkpoint)
+            .unwrap()
+            .expect("a signed head");
+
+        // The hash the sealed head signed its range to, read before
+        // anything moves.
+        let sealed = head_rows(&log, &h).pop().expect("the checkpoint head");
+        let (sealed_hash, sealed_sig) = match &sealed {
+            SessionEvent::ChainHead {
+                current_chain_hash,
+                signature,
+                ..
+            } => (current_chain_hash.clone(), signature.clone()),
+            other => panic!("expected a ChainHead, got {other:?}"),
+        };
+
+        // Seq 4 is not the fourth append: the SessionStart head takes
+        // a sequence number of its own. Read what is there rather
+        // than assuming.
+        let before = log
+            .get_since(&h, 0)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.seq == 4)
+            .map(|r| match r.event {
+                SessionEvent::UserMessage { content, .. } => content,
+                other => panic!("expected a user message at seq 4, got {other:?}"),
+            })
+            .expect("row at seq 4");
+
+        let head_seq = log
+            .redact(
+                &h,
+                4,
+                &SessionEvent::UserMessage {
+                    content: "[redacted]".into(),
+                    inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            )
+            .expect("the redaction succeeds");
+
+        // The chain is verifiable again, under the stricter check.
+        match audit.verify_require_signed().unwrap() {
+            crate::VerifyResult::Ok { .. } => {}
+            other => panic!("a resealed chain must verify: {other:?}"),
+        }
+
+        // The row says what it now says, and nothing else does.
+        let rows = log.get_since(&h, 0).unwrap();
+        match &rows.iter().find(|r| r.seq == 4).expect("row 4").event {
+            SessionEvent::UserMessage { content, .. } => assert_eq!(content, "[redacted]"),
+            other => panic!("expected the replacement, got {other:?}"),
+        }
+        assert!(
+            rows.iter().all(|r| {
+                !matches!(&r.event, SessionEvent::UserMessage { content, .. } if *content == before)
+            }),
+            "the original content, {before:?}, is gone from every row"
+        );
+
+        // And the rewrite is on the record.
+        let head = rows
+            .iter()
+            .find(|r| r.seq == head_seq)
+            .map(|r| &r.event)
+            .expect("the redaction head");
+        match head {
+            SessionEvent::ChainHead {
+                reason,
+                sequence_range_start,
+                sequence_range_end,
+                current_chain_hash,
+                superseded_chain_hash,
+                superseded_signature,
+                ..
+            } => {
+                assert_eq!(*reason, ChainHeadReason::Redaction);
+                assert!(
+                    *sequence_range_start <= 4 && *sequence_range_end >= 10,
+                    "the head covers every row the rewrite moved: {sequence_range_start}..={sequence_range_end}"
+                );
+                assert_eq!(
+                    superseded_chain_hash.as_ref(),
+                    Some(&sealed_hash),
+                    "it names the hash the old head signed its range to"
+                );
+                assert_eq!(
+                    superseded_signature.as_ref(),
+                    Some(&sealed_sig),
+                    "and carries that head's signature"
+                );
+                assert_ne!(
+                    current_chain_hash, &sealed_hash,
+                    "the range ends on a different hash than it used to, which is the rewrite"
+                );
+            }
+            other => panic!("expected a ChainHead, got {other:?}"),
+        }
+    }
+
+    /// Without a signing key there is no head to mint, so a
+    /// redaction would be indistinguishable from the hand edit above.
+    /// It refuses instead.
+    #[test]
+    fn an_unsigned_log_refuses_to_redact() {
+        let log = SqliteSessionLog::open_in_memory().unwrap();
+        let h = log.handle_for(SessionId::new("unsigned"));
+        log.append(&h, TrustLevel::User, user_msg("row")).unwrap();
+        let err = log
+            .redact(
+                &h,
+                0,
+                &SessionEvent::UserMessage {
+                    content: "[redacted]".into(),
+                    inbound_id: None,
+                    adapter_id: None,
+                    sender_id: None,
+                },
+            )
+            .expect_err("an unsigned log cannot reseal");
+        assert!(format!("{err}").contains("redaction refused"), "{err}");
+    }
+
     /// Session-start fires a SessionStart head on the first append.
     /// Verifier confirms one signed head and zero invalid signatures.
     #[test]
@@ -2747,6 +2958,8 @@ fn every_session_event() -> Vec<SessionEvent> {
             signature: HexBytes(String::new()),
             signing_pubkey: HashHex(String::new()),
             schema_version: 0,
+            superseded_chain_hash: None,
+            superseded_signature: None,
         },
         SessionEvent::SystemPromptSet {
             content: String::new(),

@@ -700,6 +700,8 @@ fn snapshot_chain_head_uses_signing_pubkey() {
         signature: HexBytes("ab".repeat(32)),
         signing_pubkey: HashHex("cd".repeat(32)),
         schema_version: CHAIN_HEAD_SCHEMA_VERSION,
+        superseded_signature: None,
+        superseded_chain_hash: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["signing_pubkey"]);

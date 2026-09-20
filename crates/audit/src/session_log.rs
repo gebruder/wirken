@@ -200,6 +200,11 @@ pub enum ChainHeadReason {
     /// Audit-log file rotation. Emitted before the rotate so the
     /// pre-rotate file ends with a signed head.
     Rotation,
+    /// A row was rewritten and the chain re-hashed from it forward.
+    /// The head carries the superseded head's hash and signature, so
+    /// the rewrite is attributable rather than silent. See
+    /// [`SqliteSessionLog::redact`].
+    Redaction,
 }
 
 /// Why [`SessionEvent::PermissionDenied`] fired: the tier gate
@@ -1423,6 +1428,24 @@ pub enum SessionEvent {
         signature: HexBytes,
         signing_pubkey: HashHex,
         schema_version: u32,
+        /// The chain hash this head's range used to end on, when the
+        /// range was rewritten under a head that had already signed
+        /// it.
+        ///
+        /// Present only on a [`ChainHeadReason::Redaction`] head.
+        /// Together with `superseded_signature` it is the evidence
+        /// that a rewrite happened: an auditor holding the old head
+        /// can see the range it signed and the hash it signed it to,
+        /// and see that neither matches what is on disk now. Additive
+        /// and defaulted, so heads written before this field read
+        /// back with `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        superseded_chain_hash: Option<HashHex>,
+        /// The signature the superseded head carried, kept beside its
+        /// hash so the old head verifies on its own terms without the
+        /// old row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        superseded_signature: Option<HexBytes>,
     },
     /// The harness records its current effective system prompt as a
     /// session event before the first
@@ -2389,6 +2412,172 @@ impl SqliteSessionLog {
     /// in a row writes two ChainHead rows. Callers that want
     /// "emit-if-not-just-emitted" semantics should track that
     /// state themselves.
+    /// Rewrite one row and re-seal the chain over it.
+    ///
+    /// A sanctioned rewrite. The chain is over payloads, so replacing
+    /// a row's content moves every hash from that row onward and the
+    /// head signed before it stops covering what is on disk; left
+    /// there, the log reads as tampered and every row after the
+    /// rewrite is unusable. This does the rewrite and puts the chain
+    /// back in a verifiable state, then mints a
+    /// [`ChainHeadReason::Redaction`] head carrying the superseded
+    /// head's hash and signature.
+    ///
+    /// What this does **not** do is make the rewrite invisible. That
+    /// is the point of carrying the old head: the redaction head says
+    /// a range was resealed, names the hash that range used to end
+    /// on, and carries the signature that was made over it. An
+    /// auditor comparing the two sees exactly one range rewritten and
+    /// by whose key it was resealed. Anyone able to call this can
+    /// rewrite history; what they cannot do is rewrite it quietly.
+    ///
+    /// Refuses on an unsigned log: without a signer there is no head
+    /// to mint and the rewrite would be indistinguishable from
+    /// tampering.
+    pub fn redact(
+        &self,
+        handle: &SessionHandle<OwnSession>,
+        seq: u64,
+        replacement: &SessionEvent,
+    ) -> Result<u64, AuditError> {
+        let signer = self
+            .signer
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| AuditError::RedactionRefused("the log has no signing key".into()))?;
+        let conn = self.conn.lock().expect("session log mutex");
+
+        // The head that currently covers this row, captured before
+        // anything moves. Its hash and signature are what make the
+        // rewrite visible afterwards.
+        let superseded = self.head_covering(&conn, handle.id.as_str(), seq)?;
+
+        let payload_bytes = canonicalize_payload(replacement)?;
+        let payload_str =
+            String::from_utf8(payload_bytes.clone()).expect("serde_json output is valid utf-8");
+        let changed = conn.execute(
+            "UPDATE session_events SET payload = ?1
+              WHERE session_id = ?2 AND seq = ?3",
+            params![payload_str, handle.id.as_str(), seq as i64],
+        )?;
+        if changed != 1 {
+            return Err(AuditError::RedactionRefused(format!(
+                "no row at seq {seq} in session {}",
+                handle.id.as_str()
+            )));
+        }
+
+        // Re-hash from the rewritten row to the end of the session.
+        // `prev_hash` for the rewritten row is whatever the row
+        // before it ended on, which the rewrite did not touch.
+        let mut prev_hash: String = conn
+            .query_row(
+                "SELECT hash FROM session_events WHERE session_id = ?1 AND seq = ?2",
+                params![handle.id.as_str(), (seq as i64) - 1],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default();
+
+        let tail: Vec<(u64, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT seq, payload FROM session_events
+                  WHERE session_id = ?1 AND seq >= ?2
+                  ORDER BY seq ASC",
+            )?;
+            let rows = stmt.query_map(params![handle.id.as_str(), seq as i64], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        for (row_seq, payload) in tail {
+            let leaf_hash = sha256_hex(payload.as_bytes());
+            let row_hash = chain_hex(&prev_hash, &leaf_hash);
+            conn.execute(
+                "UPDATE session_events SET leaf_hash = ?1, prev_hash = ?2, hash = ?3
+                  WHERE session_id = ?4 AND seq = ?5",
+                params![
+                    leaf_hash,
+                    prev_hash,
+                    row_hash,
+                    handle.id.as_str(),
+                    row_seq as i64
+                ],
+            )?;
+            prev_hash = row_hash;
+        }
+
+        // A head over the rewritten range, carrying what it replaced.
+        // The range starts at the head before the rewrite so the new
+        // head covers every row whose hash moved.
+        self.reset_checkpoint_before(handle.id.as_str(), seq);
+        self.append_chain_head_superseding(
+            &conn,
+            handle,
+            ChainHeadReason::Redaction,
+            &signer,
+            superseded,
+        )
+    }
+
+    /// The most recent signed head whose range covers `seq`, as
+    /// (chain hash, signature).
+    fn head_covering(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        seq: u64,
+    ) -> Result<Option<(HashHex, HexBytes)>, AuditError> {
+        let mut stmt = conn.prepare(
+            "SELECT payload FROM session_events
+              WHERE session_id = ?1 AND seq > ?2
+              ORDER BY seq ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id, seq as i64], |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            let payload = row?;
+            if let Ok(SessionEvent::ChainHead {
+                sequence_range_start,
+                sequence_range_end,
+                current_chain_hash,
+                signature,
+                ..
+            }) = serde_json::from_str::<SessionEvent>(&payload)
+                && sequence_range_start <= seq
+                && seq <= sequence_range_end
+            {
+                return Ok(Some((current_chain_hash, signature)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Point the next head's range start at the row before `seq`, so
+    /// a redaction head covers everything the rewrite moved rather
+    /// than only the rows appended since the last head.
+    fn reset_checkpoint_before(&self, session_id: &str, seq: u64) {
+        let mut map = self
+            .checkpoint_state
+            .lock()
+            .expect("checkpoint state mutex");
+        let entry = map
+            .entry(session_id.to_string())
+            .or_insert(SessionCheckpointState {
+                last_head_ts: Utc::now(),
+                appends_since_head: 0,
+                last_head_seq: SeqRangeStart::Pending,
+            });
+        entry.last_head_seq = match seq.checked_sub(1) {
+            Some(before) => SeqRangeStart::AtSeq(before),
+            None => SeqRangeStart::Pending,
+        };
+    }
+
     pub fn emit_chain_head(
         &self,
         handle: &SessionHandle<OwnSession>,
@@ -2412,6 +2601,20 @@ impl SqliteSessionLog {
         handle: &SessionHandle<OwnSession>,
         reason: ChainHeadReason,
         signer: &AuditSigningKey,
+    ) -> Result<u64, AuditError> {
+        self.append_chain_head_superseding(conn, handle, reason, signer, None)
+    }
+
+    /// The head builder, with the head this one replaces when the
+    /// range was rewritten. `superseded` is `None` for every ordinary
+    /// head.
+    fn append_chain_head_superseding(
+        &self,
+        conn: &Connection,
+        handle: &SessionHandle<OwnSession>,
+        reason: ChainHeadReason,
+        signer: &AuditSigningKey,
+        superseded: Option<(HashHex, HexBytes)>,
     ) -> Result<u64, AuditError> {
         // Snapshot the current chain state. The ChainHead covers the
         // range from `last_head_seq + 1` (or 0) up to the current
@@ -2484,6 +2687,8 @@ impl SqliteSessionLog {
             signature: HexBytes::from_bytes(&sig.to_bytes()),
             signing_pubkey: HashHex(signer.key_id_hex()),
             schema_version: CHAIN_HEAD_SCHEMA_VERSION,
+            superseded_chain_hash: superseded.as_ref().map(|(h, _)| h.clone()),
+            superseded_signature: superseded.map(|(_, sig)| sig),
         };
 
         let next_seq = append_inner(conn, handle, TrustLevel::System, event, None)?;
@@ -2632,6 +2837,28 @@ impl SqliteSessionLog {
         let mut last_head_idx: Option<usize> = None;
         let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
+        // Heads a later redaction says it replaced, by the hash they
+        // signed their range to. A superseded head's claim cannot
+        // match the stored hash any more: the rows under it were
+        // rewritten, which is the whole point of the redaction head
+        // naming it. Treating that as an invalid signature would make
+        // every redacted log read as tampered, so the claim check
+        // below skips a head whose hash a redaction accounts for. The
+        // head's own signature is still verified; what is waived is
+        // only the requirement that the range still hash to what it
+        // hashed to then.
+        let superseded: std::collections::BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::ChainHead {
+                    reason: ChainHeadReason::Redaction,
+                    superseded_chain_hash: Some(h),
+                    ..
+                } => Some(h.0.clone()),
+                _ => None,
+            })
+            .collect();
+
         for (idx, row) in rows.iter().enumerate() {
             let SessionEvent::ChainHead {
                 sequence_range_start,
@@ -2666,7 +2893,10 @@ impl SqliteSessionLog {
                 .get(sequence_range_end)
                 .cloned()
                 .unwrap_or_default();
-            if !current_chain_hash.0.is_empty() && current_chain_hash.0 != actual_current {
+            if !current_chain_hash.0.is_empty()
+                && current_chain_hash.0 != actual_current
+                && !superseded.contains(&current_chain_hash.0)
+            {
                 result.first_invalid = Some(InvalidSignatureDetail {
                     seq: row.seq,
                     signing_key_id: signing_key_id.0.clone(),

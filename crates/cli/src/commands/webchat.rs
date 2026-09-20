@@ -6157,6 +6157,8 @@ mod tests {
                     signature: HexBytes::from_bytes(&[8u8; 64]),
                     signing_pubkey: HashHex::from_bytes(&[9u8; 32]),
                     schema_version: 1,
+                    superseded_chain_hash: None,
+                    superseded_signature: None,
                 },
             ),
             (

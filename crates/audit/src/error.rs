@@ -27,4 +27,9 @@ pub enum AuditError {
 
     #[error("SIEM configuration error: {0}")]
     SiemConfig(String),
+
+    /// A redaction could not be carried out. Distinct from a database
+    /// error: the log is intact and nothing was rewritten.
+    #[error("redaction refused: {0}")]
+    RedactionRefused(String),
 }
