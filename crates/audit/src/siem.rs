@@ -1173,6 +1173,15 @@ mod identity_tests {
         }
     }
 
+    /// One row and the three columns it should come back with:
+    /// adapter, sender, agent.
+    type IdentityCase = (
+        SessionEvent,
+        Option<&'static str>,
+        Option<&'static str>,
+        Option<&'static str>,
+    );
+
     /// One row per variant that carries an `adapter_id`, a
     /// `sender_id` or an `agent_id`, asserting the columns come back
     /// as the row holds them. A variant here with a field the
@@ -1193,8 +1202,7 @@ mod identity_tests {
                 .expect("a timestamp")
         };
 
-        // (row, expected adapter, expected sender, expected agent)
-        let cases: Vec<(SessionEvent, Option<&str>, Option<&str>, Option<&str>)> = vec![
+        let cases: Vec<IdentityCase> = vec![
             (
                 SessionEvent::UserMessage {
                     content: "hi".into(),
