@@ -251,9 +251,9 @@ impl LlmClient {
     ) -> Result<(LlmResponse, Option<Usage>), AgentError> {
         let url = format!("{}/messages", self.config().base_url);
 
-        // Item 4 slice 2: Role::Compaction is folded into the
-        // system prompt with the fence wrapper, same as the
-        // non-streaming Anthropic path.
+        // Role::Compaction is folded into the system prompt with
+        // the fence wrapper, same as the non-streaming Anthropic
+        // path.
         let system_prompt: String = messages
             .iter()
             .filter(|m| m.role == Role::System || m.role == Role::Compaction)
@@ -329,8 +329,9 @@ impl LlmClient {
             "stream": true,
         });
 
-        // Item 4 slice 3: same cache_control treatment as the
-        // non-streaming path. See complete_anthropic.
+        // Same cache_control treatment as the non-streaming path,
+        // so a turn gets the same cache prefix whichever dispatch
+        // drove it. See complete_anthropic.
         if !system_prompt.is_empty() {
             body["system"] = serde_json::json!([{
                 "type": "text",
@@ -388,10 +389,11 @@ impl LlmClient {
         let mut in_tool_block = false;
         // Anthropic emits `message_start` (input_tokens + initial
         // cache fields) and one or more `message_delta` events
-        // (output_tokens accumulating to the final count). The slice
-        // tracks input/cache fields from `message_start` and overwrites
-        // output_tokens from each `message_delta`; the last one before
-        // `message_stop` carries the final cumulative count.
+        // (output_tokens accumulating to the final count). Input and
+        // cache fields are taken from `message_start`; output_tokens
+        // is overwritten by each `message_delta`, because the count is
+        // cumulative and only the last one before `message_stop` is
+        // the total.
         let mut usage: Option<Usage> = None;
 
         'stream: while let Some(chunk) = stream.next().await {
