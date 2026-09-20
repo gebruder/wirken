@@ -74,6 +74,13 @@ pub enum SseEvent {
         requested_tier: String,
         triggering_agent: String,
         trigger_message: String,
+        /// The arguments the model sent for this call, as it sent
+        /// them. The card shows these rather than joining to the
+        /// chain for them: the join could not run until the events
+        /// poll caught up, so the first paint of the card showed the
+        /// action key where the command belonged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments: Option<String>,
         /// What the model said in the same message as the call.
         /// Additive: a browser built against the older shape ignores
         /// an unknown key, and an older gateway sends none.
@@ -264,6 +271,7 @@ mod tests {
             triggering_agent: "default".into(),
             trigger_message: "clean logs".into(),
             assistant_text: None,
+            arguments: None,
         };
         let line = ev.to_sse_line();
         assert!(line.starts_with("data: "));

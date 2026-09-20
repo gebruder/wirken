@@ -51,6 +51,7 @@ fn pending(queue: &PendingApprovalQueue) -> String {
         requested_tier: "tier2".to_string(),
         trigger_message: Some("roll staging back".to_string()),
         assistant_text: None,
+        arguments: None,
     });
     id
 }

@@ -128,6 +128,7 @@ impl ApprovalGate for SignalApprovalGate {
             requested_tier: ctx.requested_tier.label().to_string(),
             trigger_message: ctx.trigger_message.clone(),
             assistant_text: None,
+            arguments: None,
         };
         let (request_id, rx) = self.queue.register(request);
 

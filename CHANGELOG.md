@@ -12,6 +12,14 @@ tagged.
 
 ### Added
 
+- The webchat approval card shows what is being approved on its first
+  paint. `ApprovalRequest` carries the arguments the model sent and
+  what it said in the same message, so the card reads both off the
+  event. It used to show the action key where the command belonged
+  and swap the command in once the events poll had fetched the call
+  row from the chain, which meant a card could be decided on before
+  the command it was about had arrived.
+
 - What the model says alongside its tool calls is kept. Providers
   send the assistant's own text in the same message as its calls, and
   all seven parse paths (Ollama, OpenAI-compatible, Anthropic, Gemini

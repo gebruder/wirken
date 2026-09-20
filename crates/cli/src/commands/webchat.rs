@@ -852,12 +852,15 @@ function renderApproval(ev) {
   head.appendChild(age);
   card.appendChild(head);
 
-  // The approval event carries the action key, not the command line.
-  // The command is on the chain: the call row was written before the
-  // gate ran. When the poll has it, show it and say where it is from;
-  // until then the key is what the gate computed, and that is shown.
-  const cmd = el('div', 'approval-cmd', ev.action_key || ev.tool_name || '');
-  const note = el('div', 'approval-note', 'action key as computed by the gate · tool ' + (ev.tool_name || ''));
+  // The event carries the arguments the model sent, so the card shows
+  // what is being approved on its first paint. It used to show the
+  // action key here and swap in the command once the events poll had
+  // the call row, which meant the card could be decided on before the
+  // command it was about had arrived.
+  const cmd = el('div', 'approval-cmd', ev.arguments || ev.action_key || ev.tool_name || '');
+  const note = el('div', 'approval-note',
+    (ev.arguments ? 'arguments as sent by the model · action key ' + (ev.action_key || '')
+                  : 'action key as computed by the gate') + ' · tool ' + (ev.tool_name || ''));
   card.appendChild(cmd);
   card.appendChild(note);
   // What the model said in the same message as the call. Its own
@@ -869,15 +872,16 @@ function renderApproval(ev) {
     said.appendChild(el('span', 'approval-said-text', ev.assistant_text));
     card.appendChild(said);
   }
-  const join = () => {
+  // The thread's own row for this call is marked as awaiting a
+  // decision when the poll reaches it. That is all the join is for
+  // now: the card no longer needs the chain to say what it is about.
+  const markRow = () => {
     const entry = pendingToolRowFor(ev.tool_name);
     if (!entry) return false;
-    setText(cmd, compactArgs(entry.call));
-    setText(note, 'command as recorded in the chain, row ' + entry.seq + ' · action key ' + (ev.action_key || ''));
     markAwaiting(entry);
     return true;
   };
-  if (!join()) pollEvents().then(join);
+  if (!markRow()) pollEvents().then(markRow);
   if (turnOpen && !eventsTimer) startEventPolling();
 
   const reasonLabel = el('label', 'sr-only', 'Reason (optional)');
@@ -3840,6 +3844,7 @@ fn approvals_snapshot_for(
             }
             let detail = queue.show(&entry.request_id);
             let trigger = detail.as_ref().and_then(|d| d.trigger_message.clone());
+            let args = detail.as_ref().and_then(|d| d.arguments.clone());
             let said = detail.and_then(|d| d.assistant_text);
             mine.push(json!({
                 "request_id": entry.request_id,
@@ -3852,9 +3857,11 @@ fn approvals_snapshot_for(
                 "timeout_seconds": timeout,
                 "remaining_seconds": Value::Null,
                 "trigger_message": trigger,
-                // What the model said alongside the call. A card
-                // restored after a reload reads this; the live card
-                // reads the same value off the SSE event.
+                // The arguments the model sent and what it said
+                // alongside them. A card restored after a reload
+                // reads these; the live card reads the same values
+                // off the SSE event.
+                "arguments": args,
                 "assistant_text": said,
             }));
         } else {
@@ -6411,6 +6418,7 @@ mod tests {
             requested_tier: "tier3".into(),
             trigger_message: Some(trigger.into()),
             assistant_text: None,
+            arguments: None,
         }
     }
 

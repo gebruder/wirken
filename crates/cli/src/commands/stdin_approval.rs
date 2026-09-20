@@ -430,6 +430,20 @@ mod tests {
         action: wirken_gateway::permissions::Action,
         arguments: Option<&str>,
     ) -> PermissionDenialContext {
+        said_ctx(
+            tool,
+            action,
+            arguments,
+            Some("Pulling the release notes now."),
+        )
+    }
+
+    fn said_ctx(
+        tool: &str,
+        action: wirken_gateway::permissions::Action,
+        arguments: Option<&str>,
+        said: Option<&str>,
+    ) -> PermissionDenialContext {
         PermissionDenialContext {
             tool_name: tool.into(),
             action,
@@ -437,7 +451,7 @@ mod tests {
             agent_id: "default".into(),
             trigger_message: Some("summarise the release notes".into()),
             arguments: arguments.map(str::to_string),
-            assistant_text: None,
+            assistant_text: said.map(str::to_string),
         }
     }
 
@@ -468,10 +482,18 @@ mod tests {
             "the command itself, which the key does not carry: {prompt}"
         );
         assert!(
+            prompt.contains("  the model said: Pulling the release notes now.\n"),
+            "what the model said in the same message: {prompt}"
+        );
+        assert!(
             prompt.contains("  in reply to: summarise the release notes\n"),
             "{prompt}"
         );
         assert!(prompt.ends_with("approve? [y/N]: "), "{prompt}");
+        assert!(
+            prompt.find("arguments:").unwrap() < prompt.find("the model said:").unwrap(),
+            "the sentence reads under the command it accompanies"
+        );
         assert!(
             prompt.find("arguments:").unwrap() < prompt.find("approve?").unwrap(),
             "everything is shown before the question"
@@ -509,6 +531,10 @@ mod tests {
             prompt.contains(r#""credential": "openai_api_key""#),
             "the slot it would spend: {prompt}"
         );
+        assert!(
+            prompt.contains("the model said: Pulling the release notes now."),
+            "the sentence, which names none of that: {prompt}"
+        );
     }
 
     /// An unregistered name has no classification to show, so the key
@@ -534,6 +560,44 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains(r#"arguments:  {"scope": "*"}"#), "{prompt}");
+        assert!(
+            prompt.contains("the model said: Pulling the release notes now."),
+            "{prompt}"
+        );
+    }
+
+    /// A model that sent calls and no text leaves the line out
+    /// rather than printing an empty one: a blank "the model said:"
+    /// reads as a model that said nothing in particular, which is a
+    /// different claim from a model that said nothing.
+    #[test]
+    fn absent_model_text_omits_the_line() {
+        let ctx = said_ctx(
+            "exec",
+            wirken_gateway::permissions::Action::ShellExec {
+                pattern: "ls".into(),
+            },
+            Some(r#"{"command": "ls"}"#),
+            None,
+        );
+        let prompt = render_prompt(&ctx);
+        assert!(!prompt.contains("the model said:"), "{prompt:?}");
+        assert_eq!(
+            prompt.lines().count(),
+            5,
+            "head, key, arguments, trigger, question, and no said line: {prompt:?}"
+        );
+
+        // An empty string is the same absence, not an empty sentence.
+        let ctx = said_ctx(
+            "exec",
+            wirken_gateway::permissions::Action::ShellExec {
+                pattern: "ls".into(),
+            },
+            Some(r#"{"command": "ls"}"#),
+            Some(""),
+        );
+        assert!(!render_prompt(&ctx).contains("the model said:"));
     }
 
     /// The arguments are model output on their way to a terminal. An
@@ -566,9 +630,9 @@ mod tests {
         );
         assert_eq!(
             prompt.lines().count(),
-            5,
-            "a line each for the head, the key, the arguments, the trigger \
-             and the question: {prompt:?}"
+            6,
+            "a line each for the head, the key, the arguments, the sentence, \
+             the trigger and the question: {prompt:?}"
         );
         assert!(prompt.ends_with("approve? [y/N]: "));
     }
@@ -587,7 +651,7 @@ mod tests {
         let prompt = render_prompt(&ctx);
         assert_eq!(
             prompt.lines().count(),
-            5,
+            6,
             "the arguments stay on one line: {prompt:?}"
         );
         assert!(

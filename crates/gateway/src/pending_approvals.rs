@@ -61,9 +61,10 @@ pub struct PendingRequest {
     pub action_key: String,
     pub requested_tier: String,
     pub trigger_message: Option<String>,
-    /// What the model said in the same message as the call. Carried
-    /// so a card restored from this queue after a reload says the
-    /// same thing the live one did.
+    /// The arguments the model sent, and what it said in the same
+    /// message. Carried so a card restored from this queue after a
+    /// reload shows what the live one showed.
+    pub arguments: Option<String>,
     pub assistant_text: Option<String>,
 }
 
@@ -98,7 +99,9 @@ pub struct PendingDetail {
     pub action_key: String,
     pub requested_tier: String,
     pub trigger_message: Option<String>,
-    /// What the model said in the same message as the call.
+    /// The arguments the model sent, and what it said in the same
+    /// message.
+    pub arguments: Option<String>,
     pub assistant_text: Option<String>,
     pub requested_at: DateTime<Utc>,
     pub age_seconds: u64,
@@ -251,6 +254,7 @@ impl PendingApprovalQueue {
             action_key: e.request.action_key.clone(),
             requested_tier: e.request.requested_tier.clone(),
             trigger_message: e.request.trigger_message.clone(),
+            arguments: e.request.arguments.clone(),
             assistant_text: e.request.assistant_text.clone(),
             requested_at: e.requested_at,
             age_seconds: now.saturating_duration_since(e.requested_instant).as_secs(),
@@ -278,6 +282,7 @@ mod tests {
             requested_tier: "tier2".into(),
             trigger_message: Some("user said something".into()),
             assistant_text: None,
+            arguments: None,
         }
     }
 
