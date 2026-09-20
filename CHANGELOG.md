@@ -10,6 +10,18 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /api/approvals?c=<conversation>` reaches its route. The webchat
+  routes matched the request line up to the space after the path, so a
+  target carrying a query string named no route and answered 404. That
+  is the only request the page makes to this route, and with it
+  refused the page's approvals snapshot stayed null: no "awaiting you
+  elsewhere" chip, no other-channel badge, no awaiting marker in the
+  rail, and a pending card was not restored after a reload however
+  many decisions were waiting. Routes match on the path now, with the
+  query read off it.
+
 ## [1.23.0] - 2026-09-20
 
 A fuzz target found a message anyone could send that took down the

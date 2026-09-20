@@ -2559,20 +2559,19 @@ pub async fn serve(
 
 /// One request, split into what the router dispatches on.
 ///
-/// `path` and `query` are the two halves of the request target. The
-/// path parsers keep taking `first_line` whole: the identifiers they
-/// pull out are percent-encoded, and their segment rules are about
-/// the raw target rather than about which route it names.
+/// The path parsers keep taking `first_line` whole: the identifiers
+/// they pull out are percent-encoded, and their segment rules are
+/// about the raw target rather than about which route it names.
+/// `query_param` reads the query off it for the same reason.
 struct Request<'a> {
     /// The request as it arrived. The preflight reads `Origin` and
     /// `Host` out of it, and the POST routes read the body.
     raw: &'a str,
     first_line: &'a str,
     method: &'a str,
-    /// The request target with any query string removed.
+    /// The request target with any query string taken off, which is
+    /// what names a route.
     path: &'a str,
-    /// The query string, when the target carried one.
-    query: Option<&'a str>,
 }
 
 impl<'a> Request<'a> {
@@ -2583,16 +2582,12 @@ impl<'a> Request<'a> {
         let mut parts = first_line.split_whitespace();
         let method = parts.next()?;
         let target = parts.next()?;
-        let (path, query) = match target.split_once('?') {
-            Some((path, query)) => (path, Some(query)),
-            None => (target, None),
-        };
+        let path = target.split_once('?').map_or(target, |(path, _)| path);
         Some(Self {
             raw,
             first_line,
             method,
             path,
-            query,
         })
     }
 
@@ -2658,22 +2653,20 @@ struct AcceptedTurn {
 
 /// Dispatch one request to its route.
 ///
-/// The five parameterless `GET` routes match an exact path and no
-/// query string; a target carrying one reaches no route and gets the
-/// 404.
+/// Routes match on the path, which is the request target with its
+/// query string taken off. The two routes that read a query read it
+/// from a target that named them.
 async fn route(req: &Request<'_>, shared: &Shared) -> Response {
     match (req.method, req.path) {
         ("GET", "/") => route_page(),
         ("GET", path) if path.starts_with("/index.html") => route_page(),
         ("GET", path) if path.starts_with("/api/sessions/") => route_session(req, shared),
         ("GET", path) if path.starts_with("/api/imported/") => route_imported(req, shared),
-        ("GET", "/api/approvals") if req.query.is_none() => route_approvals(req, shared),
-        ("GET", "/api/capabilities") if req.query.is_none() => {
-            route_capabilities(req, shared).await
-        }
-        ("GET", "/api/credentials") if req.query.is_none() => route_credentials(req, shared),
-        ("GET", "/api/status") if req.query.is_none() => route_status(req, shared).await,
-        ("GET", "/api/sessions") if req.query.is_none() => route_sessions(req, shared),
+        ("GET", "/api/approvals") => route_approvals(req, shared),
+        ("GET", "/api/capabilities") => route_capabilities(req, shared).await,
+        ("GET", "/api/credentials") => route_credentials(req, shared),
+        ("GET", "/api/status") => route_status(req, shared).await,
+        ("GET", "/api/sessions") => route_sessions(req, shared),
         ("POST", path) if path.starts_with("/api/chat") => route_chat(req, shared).await,
         ("POST", path) if path.starts_with("/api/verify") => route_verify(req, shared).await,
         ("POST", path) if path.starts_with("/api/approvals/") => {
@@ -7091,7 +7084,7 @@ mod tests {
         assert_eq!(v["elsewhere"].as_array().unwrap().len(), 0);
 
         // What the route itself serves is asserted in
-        // `a_listing_that_names_its_conversation_reaches_no_route`.
+        // `the_listing_is_scoped_to_the_conversation_it_names`.
     }
 
     /// (6) The list route carries each webchat conversation's first
@@ -8314,12 +8307,13 @@ mod tests {
 
     // --- GET /api/approvals ---
 
-    /// The page asks for one conversation's pending decisions. That
-    /// request reaches no route: the target carries a query string,
-    /// and the routes that take no path parameter match an exact
-    /// path. Without a query the listing is the whole channel.
+    /// The listing reads its conversation from `c`, normalises it the
+    /// same way every other route does, and scopes the snapshot to
+    /// it. Another conversation's request id and trigger text stay
+    /// out of the answer; with no `c` the listing is the whole
+    /// channel.
     #[tokio::test]
-    async fn a_listing_that_names_its_conversation_reaches_no_route() {
+    async fn the_listing_is_scoped_to_the_conversation_it_names() {
         let routes = Routes::open();
         let (mine_id, _rx1) = routes.shared.pending_approvals.register(pending(
             &webchat_session_id("c-0123456789ab"),
@@ -8334,29 +8328,46 @@ mod tests {
             "a telegram user's words",
         ));
 
+        // What the page asks for.
         let resp = routes
             .call(&request("GET /api/approvals?c=c-0123456789ab", ""))
             .await;
-        let (head, _) = answered(&resp);
-        assert!(head.starts_with("HTTP/1.1 404 Not Found"), "{head}");
+        let (head, body) = answered(&resp);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        let mine = body["mine"].as_array().expect("mine is a list");
+        assert_eq!(mine.len(), 1, "scoped to the conversation it named");
+        assert_eq!(mine[0]["request_id"], mine_id);
+        assert_eq!(mine[0]["trigger_message"], "roll staging back");
+        let elsewhere = body["elsewhere"].as_array().expect("elsewhere is a list");
+        assert_eq!(elsewhere.len(), 1);
+        assert_eq!(elsewhere[0]["conversation"], "c-ba9876543210");
+        let text = serde_json::to_string(&body).unwrap();
+        assert!(
+            !text.contains(&other_id),
+            "no request id leaves for another conversation"
+        );
+        assert!(!text.contains("summarise slack"), "nor its trigger text");
+        assert_eq!(body["other_channels"]["count"], 1);
 
-        // Without a query the route is reached, and its unscoped
-        // snapshot is the whole channel with the other one a count.
+        // The key is normalised before it can name a session.
+        let resp = routes
+            .call(&request("GET /api/approvals?c=../../etc", ""))
+            .await;
+        let (head, body) = answered(&resp);
+        assert!(head.starts_with("HTTP/1.1 400 Bad Request"), "{head}");
+        assert_eq!(body["error"], "bad conversation key");
+
+        // With no key the listing is the whole channel.
         let resp = routes.call(&request("GET /api/approvals", "")).await;
         let (head, body) = answered(&resp);
         assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
-        let mine: Vec<&str> = body["mine"]
-            .as_array()
-            .expect("mine is a list")
-            .iter()
-            .map(|r| r["request_id"].as_str().expect("an id"))
-            .collect();
-        assert_eq!(mine.len(), 2, "unscoped is the whole channel");
-        assert!(mine.contains(&mine_id.as_str()) && mine.contains(&other_id.as_str()));
+        assert_eq!(
+            body["mine"].as_array().expect("mine is a list").len(),
+            2,
+            "unscoped is the whole channel"
+        );
         assert_eq!(body["other_channels"]["count"], 1);
     }
-
-    // --- Dispatch ---
 
     /// The events route exposes far more per row than the transcript
     /// does, so it serves webchat sessions and refuses every other
