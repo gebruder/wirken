@@ -10,7 +10,7 @@ tagged.
 
 ## [Unreleased]
 
-## [1.23.0] - 2026-09-19
+## [1.23.0] - 2026-09-20
 
 A fuzz target found a message anyone could send that took down the
 adapter connection carrying it. The fix is here, with the two changes
