@@ -621,9 +621,9 @@ fn extract_identity_for_sentinel(
         } => (None, sender_id.clone(), Some(agent_id.clone())),
         // No agent ran an import: it is an operator CLI action. The
         // actor label goes in the principal position, and agent stays
-        // genuinely absent rather than being invented. Without this
-        // arm the catch-all below would leave the row with nothing,
-        // which would look the same as an event that had no actor.
+        // genuinely absent rather than being invented. `actor` is the
+        // one label mapped onto a column it is not named after; every
+        // other operator label below stays off these columns.
         SessionEvent::ImportStarted { actor, .. } | SessionEvent::ImportCompleted { actor, .. } => {
             (None, Some(actor.clone()), None)
         }
@@ -645,33 +645,104 @@ fn extract_identity_for_sentinel(
             sender_id.clone(),
             Some(agent_id.clone()),
         ),
-        SessionEvent::PermissionDenied { agent_id, .. }
-        | SessionEvent::SkillPermissionDenied { agent_id, .. }
+        SessionEvent::PermissionDenied {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::SkillPermissionDenied { agent_id, .. }
         | SessionEvent::AssistantMessage { agent_id, .. }
         | SessionEvent::SystemPromptSet { agent_id, .. }
         | SessionEvent::Compaction { agent_id, .. }
         | SessionEvent::BudgetExceeded { agent_id, .. }
         | SessionEvent::ExternalToolOutput { agent_id, .. } => (None, None, Some(agent_id.clone())),
-        // No column is filled. A "carries" note below means the row
-        // holds that field and this function does not read it, which
-        // is a gap rather than an absence.
-        // Carries an agent_id these columns do not read.
-        SessionEvent::HttpRequest { .. } => (None, None, None),
-        // Carries all three these columns do not read.
-        SessionEvent::PermissionApproved { .. } => (None, None, None),
-        // Carries an adapter_id these columns do not read; its actor is a
-        // caller, not a sender.
-        SessionEvent::PermissionApprovalRefused { .. } => (None, None, None),
-        // Carries an agent_id these columns do not read.
-        SessionEvent::PermissionRevoked { .. } => (None, None, None),
-        // Carries all three these columns do not read.
-        SessionEvent::PermissionRenewed { .. } => (None, None, None),
-        // Carries all three these columns do not read.
-        SessionEvent::PermissionGrantExpired { .. } => (None, None, None),
-        // Carries an agent_id these columns do not read.
-        SessionEvent::PermissionGrantPruned { .. } => (None, None, None),
-        // Carries an agent_id these columns do not read.
-        SessionEvent::SubagentSessionBound { .. } => (None, None, None),
+        // The built-in tool's row names the agent that made the call
+        // and nothing about the inbound channel.
+        SessionEvent::HttpRequest { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        SessionEvent::PermissionApproved {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        // The channel the decision came in on. `caller` stays off the
+        // sender column: it is an actor label like "webchat", not the
+        // platform sender id every other row puts there.
+        SessionEvent::PermissionApprovalRefused { adapter_id, .. } => {
+            (adapter_id.clone(), None, None)
+        }
+        // `revoked_by` is an operator label, off the sender column for
+        // the same reason as the refusal's caller above.
+        SessionEvent::PermissionRevoked { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        SessionEvent::PermissionRenewed {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::PermissionGrantExpired {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        // Swept at store open, with no inbound channel behind it.
+        SessionEvent::PermissionGrantPruned { agent_id, .. } => {
+            (None, None, Some(agent_id.clone()))
+        }
+        // The child's own agent id. Its parent is named by
+        // `parent_session_id` on the row, not by these columns.
+        SessionEvent::SubagentSessionBound { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        // The adapter that carried the message out. `target` is the
+        // destination, not the sender that drove the turn.
+        SessionEvent::DeliveryConfirmed { adapter_id, .. }
+        | SessionEvent::DeliveryFailed { adapter_id, .. } => (adapter_id.clone(), None, None),
+        SessionEvent::HookDispatched {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        SessionEvent::EgressHookDispatched {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        }
+        | SessionEvent::ToolOutputRedacted {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
+        // No column is filled: none of the rows below carries any of
+        // the three. What each one carries instead is named so the
+        // absence reads as a fact about the row.
         // A session id, a count and a reason; none of the three.
         SessionEvent::SessionScopedApprovalsCleared { .. } => (None, None, None),
         // A skill and a phase name; none of the three.
@@ -705,26 +776,16 @@ fn extract_identity_for_sentinel(
         SessionEvent::SubagentSpawned { .. } => (None, None, None),
         // The child's id and status; the same.
         SessionEvent::SubagentResult { .. } => (None, None, None),
-        // Carries an adapter_id these columns do not read.
-        SessionEvent::DeliveryConfirmed { .. } => (None, None, None),
-        // Carries an adapter_id these columns do not read.
-        SessionEvent::DeliveryFailed { .. } => (None, None, None),
         // An actor and a channel in the legacy shape, not the three.
         SessionEvent::AuditLegacy { .. } => (None, None, None),
         // A hook id and its signature status; none of the three.
         SessionEvent::HookRegistered { .. } => (None, None, None),
-        // Carries all three these columns do not read.
-        SessionEvent::HookDispatched { .. } => (None, None, None),
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
         // A server name and a signer; none of the three.
         SessionEvent::McpEntryVerified { .. } => (None, None, None),
         // A server name and a reason; none of the three.
         SessionEvent::McpEntryRefused { .. } => (None, None, None),
-        // Carries all three these columns do not read.
-        SessionEvent::EgressHookDispatched { .. } => (None, None, None),
-        // Carries all three these columns do not read.
-        SessionEvent::ToolOutputRedacted { .. } => (None, None, None),
     }
 }
 
@@ -946,9 +1007,10 @@ mod identity_tests {
     use super::*;
     use crate::session_log::SessionEvent;
 
-    /// The identity extractor is not compiler-forced: its catch-all
-    /// would leave an unregistered variant with no attribution, which
-    /// looks the same as an event that had nobody to name.
+    /// The extractor is exhaustive, so a new variant is a compile
+    /// error here rather than a row with no attribution. What it
+    /// takes from each variant that carries one of the three columns
+    /// is asserted below.
     #[test]
     fn import_rows_carry_the_operator_actor() {
         let started = SessionEvent::ImportStarted {
@@ -975,6 +1037,494 @@ mod identity_tests {
             assert_eq!(sender.as_deref(), Some("an-operator"));
             assert_eq!(channel, None);
             assert_eq!(agent, None, "no agent ran an import");
+        }
+    }
+
+    /// One row per variant that carries an `adapter_id`, a
+    /// `sender_id` or an `agent_id`, asserting the columns come back
+    /// as the row holds them. A variant here with a field the
+    /// extractor drops is a Sentinel column that reads empty for rows
+    /// that could have filled it.
+    #[test]
+    fn every_row_that_carries_an_identity_hands_it_over() {
+        use crate::session_log::{
+            ApprovalScopeKind, BudgetAction, DenialSource, EgressDecision, GrantExpiryDetection,
+            HashHex, HookDecision, HttpFetchOutcome, PhaseDenyContent, PhaseExitReason,
+            SkillDeniedReason, ToolCallRecord, ToolsHashVersion,
+        };
+        let adapter = || Some("slack".to_string());
+        let sender = || Some("U123".to_string());
+        let agent = || "worker".to_string();
+        let stamp = |s: &str| {
+            s.parse::<chrono::DateTime<chrono::Utc>>()
+                .expect("a timestamp")
+        };
+
+        // (row, expected adapter, expected sender, expected agent)
+        let cases: Vec<(SessionEvent, Option<&str>, Option<&str>, Option<&str>)> = vec![
+            (
+                SessionEvent::UserMessage {
+                    content: "hi".into(),
+                    inbound_id: None,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                None,
+            ),
+            (
+                SessionEvent::AssistantMessage {
+                    content: "hello".into(),
+                    agent_id: agent(),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::AssistantToolCalls {
+                    calls: vec![ToolCallRecord {
+                        id: "c1".into(),
+                        name: "exec".into(),
+                        arguments: "{}".into(),
+                    }],
+                    agent_id: agent(),
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::ToolResult {
+                    call_id: "c1".into(),
+                    tool_name: "exec".into(),
+                    output: "ok".into(),
+                    success: true,
+                    agent_id: agent(),
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::HttpRequest {
+                    method: "GET".into(),
+                    host: "api.example.com".into(),
+                    path: "/v1".into(),
+                    status: 200,
+                    credential: None,
+                    truncated: false,
+                    agent_id: agent(),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::LlmRequest {
+                    provider: "ollama".into(),
+                    model: "local".into(),
+                    request_id: "r1".into(),
+                    tools_hash: HashHex::from_bytes(&[1u8; 32]),
+                    tools_hash_version: ToolsHashVersion::V2,
+                    messages_hash: HashHex::from_bytes(&[2u8; 32]),
+                    agent_id: agent(),
+                    credential_id: None,
+                    sender_id: sender(),
+                },
+                None,
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::LlmResponse {
+                    request_id: "r1".into(),
+                    finish_reason: "stop".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    latency_ms: 5,
+                    agent_id: agent(),
+                    credential_id: None,
+                    input_cost_usd_micros: None,
+                    output_cost_usd_micros: None,
+                    total_cost_usd_micros: None,
+                    sender_id: sender(),
+                },
+                None,
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::BudgetExceeded {
+                    agent_id: agent(),
+                    credential_id: None,
+                    window_spend_usd_micros: 2,
+                    ceiling_usd_micros: 1,
+                    window: "day".into(),
+                    action: BudgetAction::Blocked,
+                    tool: None,
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PermissionDenied {
+                    tool: "exec".into(),
+                    action_key: "shell:rm".into(),
+                    denial_source: DenialSource::Tier,
+                    tier: None,
+                    agent_id: agent(),
+                    trigger: None,
+                    denied_via: None,
+                    denial_reason: None,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PermissionApproved {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    approved_by: "operator".into(),
+                    scope: ApprovalScopeKind::Persisted,
+                    session_id: None,
+                    approved_via: None,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                    tier: None,
+                    expires_at: None,
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PermissionApprovalRefused {
+                    request_id: "req-1".into(),
+                    action_key: None,
+                    caller: "webchat".into(),
+                    reason: crate::ApprovalRefusalReason::WrongChannel,
+                    adapter_id: adapter(),
+                },
+                Some("slack"),
+                None,
+                None,
+            ),
+            (
+                SessionEvent::PermissionRevoked {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    revoked_by: "operator".into(),
+                    tier: None,
+                    expires_at: None,
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PermissionRenewed {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    approved_by: "operator".into(),
+                    previous_expires_at: stamp("2026-09-20T00:00:00Z"),
+                    expires_at: stamp("2026-10-20T00:00:00Z"),
+                    approved_via: None,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PermissionGrantExpired {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    tool: None,
+                    tier: None,
+                    expired_at: stamp("2026-09-19T00:00:00Z"),
+                    detected_by: GrantExpiryDetection::ToolCall,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PermissionGrantPruned {
+                    action_key: "shell:ls".into(),
+                    agent_id: agent(),
+                    expires_at: stamp("2026-09-19T00:00:00Z"),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::SubagentSessionBound {
+                    agent_id: agent(),
+                    parent_session_id: "default/slack/C1".into(),
+                    depth: 1,
+                    max_permission_tier: "tier1".into(),
+                    tools_granted: vec![],
+                    offered_tools: vec![],
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::SkillPermissionDenied {
+                    axis: "egress".into(),
+                    requested: "api.example.com".into(),
+                    agent_id: agent(),
+                    trigger: None,
+                    denied_reason: SkillDeniedReason::Profile,
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::HttpFetch {
+                    source: "skill".into(),
+                    host: "api.example.com".into(),
+                    url: "https://api.example.com/v1".into(),
+                    outcome: HttpFetchOutcome::Success,
+                    http_status_code: Some(200),
+                    bytes: 10,
+                    run_id: None,
+                    expansion_id: None,
+                    agent_id: Some(agent()),
+                    skill_name: None,
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::Compaction {
+                    spans: vec![],
+                    extracts: serde_json::json!({}),
+                    via_model: false,
+                    agent_id: agent(),
+                    provider: None,
+                    model: None,
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::ExternalToolOutput {
+                    tool: "semgrep".into(),
+                    run_id: "run-1".into(),
+                    item_count: 0,
+                    items: serde_json::json!([]),
+                    ruleset_sha: None,
+                    agent_id: agent(),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::SystemPromptSet {
+                    content: "PROMPT".into(),
+                    agent_id: agent(),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::DeliveryConfirmed {
+                    target: "C1".into(),
+                    message_id: "m1".into(),
+                    adapter_id: adapter(),
+                },
+                Some("slack"),
+                None,
+                None,
+            ),
+            (
+                SessionEvent::DeliveryFailed {
+                    target: "C1".into(),
+                    error: "boom".into(),
+                    adapter_id: adapter(),
+                },
+                Some("slack"),
+                None,
+                None,
+            ),
+            (
+                SessionEvent::HookDispatched {
+                    hook_id: "h1".into(),
+                    tool_name: "exec".into(),
+                    agent_id: agent(),
+                    decision: HookDecision::Allow,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::EgressHookDispatched {
+                    hook_id: "h1".into(),
+                    tool_name: "exec".into(),
+                    agent_id: agent(),
+                    decision: EgressDecision::Allow,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::ToolOutputRedacted {
+                    call_id: "c1".into(),
+                    hook_id: "h1".into(),
+                    reason: "secret".into(),
+                    original_sha256: HashHex::from_bytes(&[1u8; 32]),
+                    original_size: 10,
+                    redacted_sha256: HashHex::from_bytes(&[2u8; 32]),
+                    redacted_size: 4,
+                    agent_id: agent(),
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::MemoryEntryWritten {
+                    entry_id: "e1".into(),
+                    channel: "slack".into(),
+                    adapter_id: "slack".into(),
+                    sender_id: "U123".into(),
+                    agent_id: agent(),
+                    origin_session_id: "default/slack/C1".into(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::CrossChannelMemoryRead {
+                    from_channel: "telegram".into(),
+                    to_channel: "slack".into(),
+                    entry_count: 1,
+                    agent_id: agent(),
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::ImportedChatRead {
+                    source_id: "src-1".into(),
+                    source_account: None,
+                    conversation_uuid: "u1".into(),
+                    message_count: 1,
+                    agent_id: agent(),
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::ImportedChatSearched {
+                    source_id: None,
+                    outcome: crate::ImportedSearchOutcome::Hits,
+                    match_count: 1,
+                    query_digest: None,
+                    agent_id: agent(),
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::SandboxEgressVerdict {
+                    host: "api.example.com".into(),
+                    port: 443,
+                    allowed: true,
+                    reason: None,
+                    mode: crate::SandboxEgressModeLabel::Allowlist,
+                    sensitivity_basis: vec![],
+                    escalated: false,
+                    agent_id: agent(),
+                    channel: None,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::SandboxEgressUnsupported {
+                    mode: crate::SandboxEgressModeLabel::Allowlist,
+                    agent_id: agent(),
+                    channel: None,
+                    adapter_id: adapter(),
+                    sender_id: sender(),
+                },
+                Some("slack"),
+                Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::PhaseEntered {
+                    skill_id: "demo".into(),
+                    phase_name: "review".into(),
+                    denied: PhaseDenyContent::default(),
+                },
+                None,
+                None,
+                None,
+            ),
+            (
+                SessionEvent::PhaseExited {
+                    skill_id: "demo".into(),
+                    phase_name: "review".into(),
+                    reason: PhaseExitReason::TurnEnd,
+                },
+                None,
+                None,
+                None,
+            ),
+        ];
+
+        for (event, want_adapter, want_sender, want_agent) in cases {
+            let kind = crate::siem_typed::variant_kind(&event);
+            let (adapter_id, sender_id, agent_id) = extract_identity_for_sentinel(&event);
+            assert_eq!(adapter_id.as_deref(), want_adapter, "{kind} adapter_id");
+            assert_eq!(sender_id.as_deref(), want_sender, "{kind} sender_id");
+            assert_eq!(agent_id.as_deref(), want_agent, "{kind} agent_id");
         }
     }
 }

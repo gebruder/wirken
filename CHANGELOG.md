@@ -12,6 +12,18 @@ tagged.
 
 ### Fixed
 
+- The Sentinel and webhook envelopes carry the identity the row
+  holds. `extract_identity_for_sentinel` filled its `adapter_id`,
+  `sender_id` and `agent_id` columns from twenty variants and left
+  them empty for fourteen that carry the same fields, so a permission
+  denial arrived with no channel and no sender, a `http_request` row
+  with no agent, and every hook, redaction, grant and delivery row
+  with nothing at all. Every variant that carries one of the three
+  now hands it over. Two operator labels stay off these columns on
+  purpose: the `caller` on a refused approval and the `revoked_by` on
+  a revocation are actor names, not the platform sender ids the
+  column holds elsewhere.
+
 - The About panel draws the capabilities of the conversation it is
   open on. It asked `/api/capabilities` with no key, so it always
   showed the legacy conversation: a turn running in the conversation
