@@ -32,8 +32,8 @@ const BUDGET_BLOCK_MESSAGE: &str = "This agent has reached its configured spendi
      further model calls until the window resets.";
 
 /// Which side of the filesystem axis a built-in tool call exercises.
-/// Used by [`Agent::fs_axis_for_call`] and the dispatch gate (#76 Phase
-/// 2.3). `read_file` / `list_files` are read; `write_file` /
+/// Used by [`Agent::fs_axis_for_call`] and the dispatch gate.
+/// `read_file` / `list_files` are read; `write_file` /
 /// `generate_image` are write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FsAxis {
@@ -53,13 +53,13 @@ enum InterceptorOutcome {
     },
 }
 
-/// Item 6 slice 1 — hard cap on the depth of `spawn_subagent` calls,
-/// independent of any per-ceiling configuration. Even with badly
+/// Hard cap on the depth of `spawn_subagent` calls, independent
+/// of any per-ceiling configuration. Even with badly
 /// configured ceilings the harness refuses to nest deeper than this.
 /// Cheap insurance against `A → B → A → B → …` cycles.
 const MAX_SUBAGENT_DEPTH: usize = 4;
 
-/// The built-in tool name for spawning a child agent. Item 6 slice 1.
+/// The built-in tool name for spawning a child agent.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
 /// Separator a child's session id appends to its parent's, once per
@@ -71,16 +71,16 @@ pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 /// ordinary session. See `replay_subagent_binding`.
 pub(crate) const SUBAGENT_SESSION_MARKER: &str = "#sub-";
 
-/// Per-pass deny overlay slice 3: synthetic tool name a skill emits to
-/// install a phase deny overlay. Intercepted at the top of
+/// Synthetic tool name a skill emits to install a phase deny
+/// overlay. Intercepted at the top of
 /// [`Agent::execute_tool`] before any gate check or MCP dispatch, so
 /// an MCP server that happens to register a tool with this name is
 /// shadowed by the intercept; same defensive posture as
 /// [`SPAWN_SUBAGENT_TOOL`].
 pub(crate) const WIRKEN_ENTER_PHASE_TOOL: &str = "wirken_enter_phase";
 
-/// Per-pass deny overlay slice 3: synthetic tool name a skill emits to
-/// clear the active phase deny overlay. Same intercept posture as
+/// Synthetic tool name a skill emits to clear the active phase
+/// deny overlay. Same intercept posture as
 /// [`WIRKEN_ENTER_PHASE_TOOL`].
 pub(crate) const WIRKEN_EXIT_PHASE_TOOL: &str = "wirken_exit_phase";
 
@@ -88,12 +88,12 @@ pub(crate) const WIRKEN_EXIT_PHASE_TOOL: &str = "wirken_exit_phase";
 /// [`Agent::from_session_log`] writes for tool calls whose results
 /// were lost to a crash. The LLM sees a failed tool call with this
 /// recognizable string and can decide what to do (retry, give up,
-/// surface the failure to the user). Item 4's context engine will
-/// strip the sentinel before showing the LLM, but slice 2 just
-/// passes it through verbatim.
+/// surface the failure to the user). Nothing strips the sentinel
+/// on the way to the model: it is part of the tool output the LLM
+/// reads, which is what makes the lost result recoverable in-band.
 pub const PARTIAL_RESULT_LOST_SENTINEL: &str = "PARTIAL_RESULT_LOST:";
 
-/// Item 8 slice 2 — automatic session attestation triggers.
+/// Automatic session attestation triggers.
 ///
 /// The harness signs the chain head every time the running agent
 /// processes a turn AND any of these is true:
@@ -160,7 +160,7 @@ pub struct Agent {
     /// recovered from the session id by taking the prefix before the
     /// first `/`. That is the parent's agent id for a sub-agent,
     /// whose session id is the parent's plus a `#sub-N` suffix, so a
-    /// child was checked against its caller's grants (issue #242).
+    /// child was checked against its caller's grants.
     ///
     /// `None` for an agent that was never told which agent it is.
     /// Such an agent gets no persisted grants and prompts for every
@@ -211,24 +211,24 @@ pub struct Agent {
     /// turn re-sets it); tests that snapshot agent state between
     /// turns may observe the previous turn's value.
     current_inbound: InboundContext,
-    /// Session log this agent writes durability events to. Slice 1
-    /// of item 2 in `docs/managed-agents-parity.md` makes every
-    /// interaction in process_message a typed session event written
-    /// before the next LLM call. Item 2 slice 2 will add wake() and
-    /// make the agent stateless.
+    /// Session log this agent writes durability events to. Every
+    /// interaction in process_message is a typed session event
+    /// written before the next LLM call, which is what lets
+    /// [`AgentFactory::wake`] rebuild this agent from the log
+    /// alone.
     session_log: Arc<dyn SessionLog>,
-    /// Capability handle for this agent's session. Slice 1 uses
-    /// `agent_id` as the session id (one big chain per agent across
-    /// all channels). Slice 2 introduces per-conversation session
-    /// ids.
+    /// Capability handle for this agent's session. The session id
+    /// is per-conversation (`{agent}/{channel}/{conversation}`), not
+    /// the agent id, so one agent's turns on different channels land
+    /// on separate chains.
     session_handle: SessionHandle<OwnSession>,
-    /// Per-model context-window engine. Item 4 slice 1: trims the
+    /// Per-model context-window engine. Trims the
     /// conversation in place before each LLM call so context
     /// blowups stop killing sessions. Sized from the agent's
     /// [`LlmConfig::context_window`] at construction time.
     context_engine: ContextEngine,
     /// Optional Ed25519 signing identity for session attestation.
-    /// Item 8 slice 2: when present, the harness loop auto-signs
+    /// When present, the harness loop auto-signs
     /// the chain head after every turn that crosses the trigger
     /// threshold. When None, attestation is silently skipped (the
     /// session log is still hash-chained for tamper detection;
@@ -239,8 +239,8 @@ pub struct Agent {
     /// the next call to `maybe_attest` discovers an existing
     /// attestation in the session log.
     last_attestation: Option<(u64, std::time::SystemTime)>,
-    /// Item 6 slice 1: weak back-pointer to the [`AgentFactory`]
-    /// that woke this Agent. The harness uses it inside the
+    /// Weak back-pointer to the [`AgentFactory`] that woke this
+    /// Agent. The harness uses it inside the
     /// `spawn_subagent` intercept to wake a child Agent for the
     /// requested `child_agent_id`. `None` for standalone agents
     /// constructed via [`Agent::new`] (test fixtures, the legacy
@@ -248,16 +248,16 @@ pub struct Agent {
     /// spawn children and the spawn intercept returns
     /// `{status:"error"}`.
     factory: Option<Weak<AgentFactory>>,
-    /// Item 6 slice 1: per-child capability ceilings injected by
-    /// the factory at wake time. Empty by default — when empty,
+    /// Per-child capability ceilings injected by the factory at
+    /// wake time. Empty by default; when empty,
     /// the harness omits `spawn_subagent` from the LLM's tool list
     /// entirely so the LLM never tries to call it.
     allowed_subagents: BTreeMap<String, SubagentCeiling>,
-    /// Confidentiality labels this session has observed (#214).
+    /// Confidentiality labels this session has observed.
     /// Shared with the egress context rather than copied, so the
     /// proxy sees reads that happen after the context is installed.
     observed_sensitivity: crate::sandbox_egress::ObservedSensitivity,
-    /// Cross-channel memory store (#64). `None` leaves the memory
+    /// Cross-channel memory store. `None` leaves the memory
     /// tools unconfigured, which is the posture for any agent the
     /// gateway has not wired a store into.
     memory_store: Option<std::sync::Arc<std::sync::Mutex<wirken_gateway::memory::MemoryStore>>>,
@@ -273,12 +273,12 @@ pub struct Agent {
     /// `AgentConfig`. Empty means no channel has egress, which is
     /// the deny posture for every turn.
     channel_egress: BTreeMap<String, wirken_gateway::agent_config::ChannelEgress>,
-    /// Item 6 slice 1: spawn-call depth, set on a freshly woken
-    /// child by the parent's spawn intercept (parent depth + 1).
+    /// Spawn-call depth, set on a freshly woken child by the
+    /// parent's spawn intercept (parent depth + 1).
     /// 0 for the top-level agent. Capped at [`MAX_SUBAGENT_DEPTH`].
     subagent_depth: usize,
-    /// Item 6 slice 1: when `Some`, the harness auto-denies any
-    /// tool whose [`Action::tier`] exceeds this cap, with no
+    /// When `Some`, the harness auto-denies any tool whose
+    /// [`Action::tier`] exceeds this cap, with no
     /// interactive prompt. Children run headless. `None` means
     /// no extra clamp beyond the regular [`PermissionStore`].
     auto_deny_above_tier: Option<PermissionTier>,
@@ -296,8 +296,8 @@ pub struct Agent {
     /// while a budget is active, so the operator sees the control is
     /// pass-through for that provider without a per-call log flood.
     budget_uncosted_warned: bool,
-    /// Item 6 slice 1: when `Some`, only tool definitions whose
-    /// names appear in this set are exposed to the LLM, and any
+    /// When `Some`, only tool definitions whose names appear in
+    /// this set are exposed to the LLM, and any
     /// tool call whose name is not in the set is denied. Used by
     /// the parent to narrow a child's tools to the intersection
     /// of the spawn call's `tools` field and the ceiling's
@@ -308,10 +308,10 @@ pub struct Agent {
     /// declared `permissions:` block. `EffectiveProfile::Legacy` when
     /// no skills are attached or any attached skill is `Legacy`
     /// (transitional during the migration window). Enforcement is
-    /// per-agent, not per-skill — see gebruder/wirken#76.
+    /// per-agent, not per-skill.
     effective_permissions: crate::skill_perms::PhasedEffective,
     /// Pre-LLM inbound interceptors. The slash-command interceptor
-    /// (#79) is registered by default; additional interceptors plug
+    /// is registered by default; additional interceptors plug
     /// in via [`Self::attach_interceptor`]. The chain runs at the
     /// top of every `process_message` / `process_message_stream`
     /// invocation; first non-`Pass` result wins.
@@ -348,17 +348,18 @@ pub struct Agent {
     /// terminal deny. `Some(gate)` enables the gate-consult flow:
     /// on `NeedsApproval`, the runtime asks the gate, on `Approved`
     /// sets [`Self::approval_bypass`] and retries the call once.
-    /// The `wirken ask` CLI path attaches a `StdinApprovalGate`
-    /// when stdin is a TTY; webchat / channel adapters install
-    /// their own gates in future slices.
+    /// The `wirken ask` CLI path attaches a
+    /// [`crate::cli_approval_gate::CliApprovalGate`] when stdin is a
+    /// TTY; the webchat, Telegram and Signal adapters each install
+    /// their own.
     approval_gate: Option<Arc<dyn crate::approval_gate::ApprovalGate>>,
     /// One-shot approval bypass. Set by
     /// [`Self::dispatch_tool_with_approval`] right before the retry
     /// after the gate returns `Approved`; checked and cleared by
-    /// `execute_tool` at the `NeedsApproval` site. The semantics
-    /// match the slice's "per-tool-call, not session-wide" choice:
-    /// each grant covers exactly one execute_tool invocation; the
-    /// next call to the same tool prompts the gate fresh.
+    /// `execute_tool` at the `NeedsApproval` site. The grant is
+    /// per-tool-call, not session-wide: it covers exactly one
+    /// execute_tool invocation, and the next call to the same tool
+    /// prompts the gate fresh.
     approval_bypass: Option<wirken_gateway::permissions::Action>,
 }
 
@@ -392,7 +393,7 @@ mod turn_tools {
         /// it, and nothing said so; a parent with a configured
         /// `allowed_subagents` ceiling simply could not delegate from
         /// webchat, because the tool was never in the request and the
-        /// model never asked for it. Issue #245.
+        /// model never asked for it.
         ///
         /// Silent in both directions is what made it worth removing
         /// rather than keeping in sync: a capability that is not offered
@@ -407,15 +408,15 @@ mod turn_tools {
                 let mut defs = agent.tools.definitions();
                 defs.extend(mcp_defs);
                 defs.extend(agent.wasm_skills.iter().map(|s| s.tool_def()));
-                // Item 6 slice 1: expose `spawn_subagent` to the LLM
-                // only when the agent has at least one allowed child.
+                // Expose `spawn_subagent` to the LLM only when the
+                // agent has at least one allowed child.
                 // Empty allowed_subagents = never offer the tool.
                 if !agent.allowed_subagents.is_empty() && agent.subagent_depth < MAX_SUBAGENT_DEPTH
                 {
                     defs.push(spawn_subagent_tool_def());
                 }
-                // Per-pass deny overlay slice 3: phase tools are
-                // discoverable only when a loaded skill has them in its
+                // Phase tools are discoverable only when a loaded
+                // skill has them in its
                 // declared `tools.allow`. Legacy mode (no skills attached)
                 // does not advertise them; agents with no opted-in skill
                 // see them not at all.
@@ -435,8 +436,8 @@ mod turn_tools {
             } else {
                 Vec::new()
             };
-            // Item 6 slice 1: when this agent is running as a child
-            // with a `restrict_tools` clamp, drop every tool the parent
+            // When this agent is running as a child with a
+            // `restrict_tools` clamp, drop every tool the parent
             // didn't grant. The clamp is applied AFTER the spawn tool
             // is appended so a child cannot accidentally inherit
             // spawn_subagent unless its own ceiling explicitly grants
@@ -444,7 +445,7 @@ mod turn_tools {
             if let Some(ref allowed) = agent.restrict_tools {
                 tool_defs.retain(|t| allowed.contains(&t.name));
             }
-            // Per-skill permission profile (#76): only surface tools the
+            // Per-skill permission profile: only surface tools the
             // effective profile allows. `Legacy` admits everything, so an
             // agent with no profile attached sees no change.
             //
@@ -459,8 +460,9 @@ mod turn_tools {
                     crate::skill_perms::GateDecision::Allow
                 )
             });
-            // Stable tool def ordering — prompt-cache friendly even
-            // before slice 3 adds provider-specific cache markers.
+            // Stable tool def ordering: the tool block is
+            // byte-identical across turns, which is what the
+            // provider-side prompt cache keys on.
             tool_defs.sort_by(|a, b| a.name.cmp(&b.name));
             Self(tool_defs)
         }
@@ -949,7 +951,7 @@ impl Agent {
         skills: Vec<Skill>,
         wasm_skills: Vec<WasmSkill>,
     ) -> Result<(), AgentError> {
-        // Coherence checks (#79):
+        // Coherence checks:
         // - Skill names are unique among the loaded set, else `/<name>`
         //   slash invocation is ambiguous.
         // - A `disable-model-invocation: true` skill with an empty
@@ -991,7 +993,7 @@ impl Agent {
         // Expand the `<workspace>` token in filesystem paths now that we
         // know the workspace.
         let effective = effective.expand_workspace(self.tools.workspace());
-        // Static check (#76 Phase 2.4): the agent's configured inference
+        // Static check: the agent's configured inference
         // provider must satisfy the merged inference allow-set.
         // `Legacy` short-circuits — admits any provider.
         let provider = self.llm.config().provider.clone();
@@ -1003,7 +1005,7 @@ impl Agent {
         }
         // Push the egress enforcement to the tool registry's HTTP client
         // so built-in tools (web_search, generate_image) honor the agent's
-        // effective egress allow-set (#76 Phase 2.2).
+        // effective egress allow-set.
         self.tools
             .set_egress_enforcement(crate::egress::EgressEnforcement::from_profile(&effective));
         // Push the http_request audit context so a completed request
@@ -1273,12 +1275,13 @@ impl Agent {
         }
     }
 
-    /// Defence-in-depth gate emitted before each LLM dispatch (#76 Phase
-    /// 2.4). Redundant with the static check in `attach_skills` for the
-    /// current architecture (the agent's provider is fixed at
-    /// construction), but the spec calls for a per-request check and the
-    /// cost is one method call. If the provider is rejected, an audit
-    /// event is emitted and the call short-circuits.
+    /// Defence-in-depth gate emitted before each LLM dispatch.
+    /// Redundant with the static check in `attach_skills` while the
+    /// agent's provider is fixed at construction, and kept because
+    /// the guarantee wanted is per-request: a provider that becomes
+    /// reconfigurable later is still refused here, and the cost is
+    /// one method call. If the provider is rejected, an audit event
+    /// is emitted and the call short-circuits.
     fn check_inference_or_deny(&self) -> Result<(), AgentError> {
         let provider = &self.llm.config().provider;
         match self.effective_permissions.gate_provider(provider) {
@@ -1513,13 +1516,13 @@ impl Agent {
 
     /// Install a phase deny overlay for the remainder of the current
     /// turn. Returns [`crate::skill_perms::PhaseError::AlreadyActive`]
-    /// when an overlay is already active; the caller (slice 3's
-    /// `wirken_enter_phase` host fn) must exit the prior phase before
-    /// entering a new one.
+    /// when an overlay is already active: the caller must exit the
+    /// prior phase before entering a new one, so overlays never
+    /// nest.
     ///
-    /// Audit emission for the matching `PhaseEntered` row lands in
-    /// slice 3 alongside the host-fn wiring. Slice 2 exposes the
-    /// in-process mutator so unit tests can exercise the gate path.
+    /// The in-process mutator only. The matching `PhaseEntered`
+    /// audit row is written by [`Self::enter_phase_intercept`],
+    /// which is the path a skill's `wirken_enter_phase` call takes.
     pub fn enter_phase(
         &mut self,
         overlay: crate::skill_perms::PhaseDenyOverlay,
@@ -1533,7 +1536,7 @@ impl Agent {
         self.effective_permissions.overlay()
     }
 
-    /// Slice-4 replay-side counterpart to [`Self::enter_phase`].
+    /// Replay-side counterpart to [`Self::enter_phase`].
     /// Installs `overlay` unconditionally, replacing whatever is
     /// currently active. Skips the `AlreadyActive` check the live
     /// path enforces, and emits no `PhaseEntered` audit row (the
@@ -1546,7 +1549,7 @@ impl Agent {
         self.sync_phase_overlay_to_egress();
     }
 
-    /// Slice-6 phase-overlay → `EgressClient` sync. After any
+    /// Phase-overlay → `EgressClient` sync. After any
     /// transition that changes
     /// [`crate::skill_perms::PhasedEffective::overlay`] (enter,
     /// exit, turn-end auto-clear, wake-replay), push the egress
@@ -1575,7 +1578,7 @@ impl Agent {
     /// a missed audit row is a reconciliation issue, not a correctness
     /// one. The reason is fixed to `TurnEnd`; skill-initiated exits
     /// (`PhaseChange`) and skill-unload exits (`SkillUnloaded`) come
-    /// from slice 3's host-fn surface.
+    /// from [`Self::exit_phase_intercept`].
     ///
     /// `pub(crate)` so tests in `tests.rs` can drive the auto-exit
     /// path without spinning up a real LLM round trip via
@@ -1584,8 +1587,8 @@ impl Agent {
         let Some(overlay) = self.effective_permissions.exit_phase() else {
             return;
         };
-        // Slice 6: mirror the in-memory clear onto the HTTP client
-        // so any phase egress denies do not survive past turn end.
+        // Mirror the in-memory clear onto the HTTP client so any
+        // phase egress denies do not survive past turn end.
         self.sync_phase_overlay_to_egress();
         if let Err(err) = self.log_event(
             TrustLevel::System,
@@ -1604,8 +1607,8 @@ impl Agent {
         }
     }
 
-    /// Attach a signing identity for session attestation. Item 8
-    /// slice 2: when set, the harness loop auto-signs the chain
+    /// Attach a signing identity for session attestation. When
+    /// set, the harness loop auto-signs the chain
     /// head after every turn that crosses the
     /// [`ATTEST_EVERY_N_EVENTS`] / [`ATTEST_EVERY_K_SECONDS`]
     /// threshold (or after the very first turn, so every session
@@ -1614,16 +1617,16 @@ impl Agent {
         self.identity = Some(identity);
     }
 
-    /// Item 6 slice 1 — inject the back-pointer to the
-    /// [`AgentFactory`] that woke this Agent. The harness uses it
+    /// Inject the back-pointer to the [`AgentFactory`] that woke
+    /// this Agent. The harness uses it
     /// inside [`Self::spawn_subagent_intercept`] to wake the
     /// requested child.
     pub(crate) fn attach_factory(&mut self, factory: Weak<AgentFactory>) {
         self.factory = Some(factory);
     }
 
-    /// Item 6 slice 1 — inject the per-child capability ceilings
-    /// the factory loaded from this agent's persistent config.
+    /// Inject the per-child capability ceilings the factory loaded
+    /// from this agent's persistent config.
     /// Read-only after attach; spawn_subagent reads them on every
     /// call.
     pub(crate) fn attach_subagent_ceilings(&mut self, ceilings: BTreeMap<String, SubagentCeiling>) {
@@ -1644,8 +1647,8 @@ impl Agent {
         self.budget_ledger = store;
     }
 
-    /// Item 6 slice 1 — set this child Agent's nesting depth and
-    /// headless ceilings before its `process_message` is invoked.
+    /// Set this child Agent's nesting depth and headless ceilings
+    /// before its `process_message` is invoked.
     /// Called by the parent's spawn intercept on the freshly woken
     /// child Agent. The values are sticky for the lifetime of the
     /// child Arc — wake() returns a fresh Arc per session id, so
@@ -1681,7 +1684,6 @@ impl Agent {
     /// ceiling narrowed it to lived only in memory. A reader with the
     /// child's session and nothing else could not reconstruct either,
     /// which is what made a child session unverifiable on its own.
-    /// Issue #246.
     ///
     /// The row goes down before the first `LlmRequest`, so a
     /// recomputation walking the session forward has the binding in
@@ -1729,17 +1731,16 @@ impl Agent {
     }
 
     /// Test-only accessor returning the [`LlmConfig`] this agent
-    /// was woken with. Used by #60 tests to prove the factory
-    /// picked the right config per channel.
+    /// was woken with. Lets a test prove the factory picked the
+    /// right config for the session's channel.
     #[cfg(test)]
     pub(crate) fn llm_config_for_test(&self) -> &LlmConfig {
         self.llm.config()
     }
 
     /// Test-only accessor returning the api_key this agent was
-    /// woken with. Used by #60 tests to prove per-channel
-    /// credential selection pairs the right key with the right
-    /// provider.
+    /// woken with. Lets a test prove per-channel credential
+    /// selection pairs the right key with the right provider.
     #[cfg(test)]
     pub(crate) fn api_key_for_test(&self) -> Option<&str> {
         self.api_key.as_deref()
@@ -1882,15 +1883,16 @@ impl Agent {
         Ok(self.skills.len())
     }
 
-    /// Item 4 slice 2.5 — if fit() just trimmed substantive content,
-    /// call the LLM to produce a free-text summary and replace the
+    /// If fit() just trimmed substantive content, call the LLM to
+    /// produce a free-text summary and replace the
     /// deterministic aggregate in the Role::Compaction message. The
     /// summary gives the model actual context about what was
     /// discussed in the trimmed turns, not just byte counts.
     ///
     /// No-op when `trimmed_messages` is empty. Uses the agent's
-    /// primary LLM client (a separate compaction_model config is
-    /// future work).
+    /// primary LLM client; there is no separate compaction-model
+    /// config, so summarization is billed against the same model
+    /// the turn is using.
     async fn maybe_summarize_trimmed(
         &mut self,
         trimmed: &[crate::context::TrimmedMessage],
@@ -1969,8 +1971,8 @@ impl Agent {
         Ok(())
     }
 
-    /// Item 10 follow-up — write a [`SessionEvent::SystemPromptSet`]
-    /// for the current effective system prompt, but only if it has
+    /// Write a [`SessionEvent::SystemPromptSet`] for the current
+    /// effective system prompt, but only if it has
     /// drifted from the most recently recorded value (or has never
     /// been recorded for this session). The verifier uses these
     /// events to reconstruct the exact prompt that was active at
@@ -2218,8 +2220,8 @@ impl Agent {
             .await
     }
 
-    /// Item 6 slice 1 — `process_message` with an optional
-    /// `max_rounds_budget`. The public [`Self::process_message`] is
+    /// `process_message` with an optional `max_rounds_budget`.
+    /// The public [`Self::process_message`] is
     /// a thin wrapper that passes `None`. The `spawn_subagent`
     /// intercept calls this with `Some(ceiling.max_rounds)` so a
     /// child cannot run forever inside the parent's turn. When the
@@ -2247,9 +2249,9 @@ impl Agent {
         result
     }
 
-    /// The body of [`Self::process_message_inner`] before the
-    /// turn-end auto-exit was wrapped around it. Pure refactor;
-    /// shape unchanged from the slice-1 baseline.
+    /// The body of [`Self::process_message_inner`], split out so
+    /// the turn-end phase auto-exit in the caller wraps every return
+    /// path, including the error ones.
     async fn process_message_turn(
         &mut self,
         user_message: &str,
@@ -2268,8 +2270,8 @@ impl Agent {
         // a previous turn gets a fresh budget on this one.
         self.tool_validation_failures.clear();
 
-        // Item 10 follow-up — record the current system prompt (if
-        // it drifted) so the verifier can later reconstruct the
+        // Record the current system prompt (if it drifted) so the
+        // verifier can later reconstruct the
         // exact conversation prefix that was hashed into LlmRequest.
         self.maybe_log_system_prompt()?;
 
@@ -2374,8 +2376,8 @@ impl Agent {
             self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
                 .await?;
 
-            // Item 10 slice 1: durably log the LLM call inputs and
-            // outputs so `Agent::verify` can reproduce them. The hash
+            // Durably log the LLM call inputs and outputs so
+            // `Agent::verify` can reproduce them. The hash
             // is computed AFTER fit() so it captures what was
             // actually sent to the model.
             let request_id = format!("req-{}", uuid::Uuid::new_v4());
@@ -2464,7 +2466,7 @@ impl Agent {
                 LlmResponse::ToolCalls(calls) => {
                     // Record the tool call request in the conversation AND
                     // in the session log BEFORE executing any tools. The
-                    // ordering is load-bearing for item 2 slice 2's wake():
+                    // ordering is load-bearing for wake():
                     // an interruption between "LLM emitted tool calls" and
                     // "tools executed" must be detectable as
                     // AssistantToolCalls with no matching ToolResult events.
@@ -2479,8 +2481,8 @@ impl Agent {
                         },
                     )?;
 
-                    // Item 6 slice 2: partition into regular and spawn
-                    // calls. Regular calls execute sequentially first
+                    // Partition into regular and spawn calls.
+                    // Regular calls execute sequentially first
                     // (they may have ordering-dependent side effects).
                     // Spawn calls fan out in parallel via join_all.
                     let (spawn_calls, regular_calls): (Vec<_>, Vec<_>) =
@@ -2581,9 +2583,9 @@ impl Agent {
         result
     }
 
-    /// Body of [`Self::process_message_stream_with`] before the
-    /// turn-end auto-exit wrap. Pure refactor; shape unchanged from
-    /// the slice-1 baseline.
+    /// Body of [`Self::process_message_stream_with`], split out so
+    /// the turn-end phase auto-exit in the caller wraps every return
+    /// path, including the error ones.
     async fn process_message_stream_turn(
         &mut self,
         user_message: &str,
@@ -2695,8 +2697,8 @@ impl Agent {
             self.maybe_summarize_trimmed(&fit_result.trimmed_messages)
                 .await?;
 
-            // Item 10 slice 1: log LlmRequest after fit() so the
-            // hash captures what was actually sent. Same as the
+            // Log LlmRequest after fit() so the hash captures what
+            // was actually sent. Same as the
             // non-streaming path.
             let request_id = format!("req-{}", uuid::Uuid::new_v4());
             let messages_hash = compute_messages_hash(self.conversation.messages());
@@ -2823,9 +2825,9 @@ impl Agent {
                         // `execute_and_record_tool` so the
                         // approval-gate consult and the
                         // tool-validation-recovery branches live in
-                        // exactly one place. Pre-slice this site
-                        // inlined the catch; the new helper covers
-                        // both surfaces identically.
+                        // exactly one place. This site used to
+                        // inline the catch, which is how the two
+                        // surfaces drifted apart.
                         let result = self.execute_and_record_tool(call, &mut denials).await?;
 
                         self.conversation
@@ -2910,15 +2912,15 @@ impl Agent {
         name: &str,
         arguments: &str,
     ) -> Result<crate::tool::ToolResult, AgentError> {
-        // Item 6 slice 1: spawn_subagent runs through a dedicated
-        // intercept that re-enters the factory; it never goes
+        // spawn_subagent runs through a dedicated intercept that
+        // re-enters the factory; it never goes
         // through the sandbox/permission/MCP routing below.
         if name == SPAWN_SUBAGENT_TOOL {
             return self.spawn_subagent_intercept(arguments).await;
         }
 
-        // Per-pass deny overlay slice 3: phase signals are synthetic
-        // tools intercepted in-process. The intercept runs BEFORE the
+        // Phase signals are synthetic tools intercepted in-process.
+        // The intercept runs BEFORE the
         // permission gate so an active overlay that happens to deny
         // these names cannot lock a skill out of exiting its own
         // phase. An MCP server that registered a tool by these names
@@ -2931,8 +2933,8 @@ impl Agent {
             return self.exit_phase_intercept(arguments);
         }
 
-        // Item 6 slice 1: when this Agent runs as a child, the
-        // parent passes a `restrict_tools` clamp. Any call whose
+        // When this Agent runs as a child, the parent passes a
+        // `restrict_tools` clamp. Any call whose
         // name is not in the clamp is auto-denied here, before any
         // sandbox or permission work. This catches an LLM that
         // tries to call a tool the parent dropped from the
@@ -2947,7 +2949,7 @@ impl Agent {
             });
         }
 
-        // Per-skill permission profile (#76): the agent's effective
+        // Per-skill permission profile: the agent's effective
         // `permissions.tools.allow` filters every tool call. The LLM is
         // shown only the allowed tools (see `snapshot_tool_defs`), but
         // we re-check at dispatch in case the LLM ignores the surface.
@@ -3022,7 +3024,7 @@ impl Agent {
             });
         }
 
-        // Filesystem gate (#76 Phase 2.3): inner tighter check on top of
+        // Filesystem gate: inner tighter check on top of
         // the cap-std workspace scope. cap-std refuses absolute paths and
         // parent traversal at the syscall layer; this gate enforces the
         // skill-declared `filesystem.{read,write}_paths` allowlist on top
@@ -3166,7 +3168,7 @@ impl Agent {
                     tool: name.to_string(),
                 }),
             };
-            // Confidentiality observation (#214), taken at the same
+            // Confidentiality observation, taken at the same
             // point the tier gate classifies the call, so one dispatch
             // site decides both. Recorded before the gate runs: a call
             // the operator refuses still tells us what the agent tried
@@ -3195,7 +3197,7 @@ impl Agent {
             }
 
             if let Some(action) = action {
-                // Item 6 slice 1: in headless child mode the
+                // In headless child mode the
                 // auto_deny_above_tier clamp short-circuits before
                 // the regular permission store. Children never
                 // prompt for approval — anything beyond the cap is
@@ -3411,21 +3413,19 @@ impl Agent {
         // Otherwise, built-in tools.
         match self.tools.execute(name, arguments).await {
             Ok(r) => Ok(r),
-            // #76 Phase 2.2: egress denial bubbles up from the
-            // wrapped HTTP client. Emit the audit event here, then
+            // Egress denial bubbles up from the wrapped HTTP
+            // client. Emit the audit event here, then
             // surface a non-success ToolResult to the LLM rather
             // than propagating the error out of the agent.
             Err(AgentError::EgressDenied(denied)) => {
-                // Slice 6 of the per-pass deny overlay closes the
-                // egress-axis enforcement gap that earlier slices
-                // documented: `EgressClient::check_egress` now
-                // consults the phase overlay before the base
-                // enforcement and returns a typed reason. The audit
-                // emit matches on it so the
+                // `EgressClient::check_egress` consults the phase
+                // overlay before the base enforcement and returns a
+                // typed reason. The audit emit matches on it so the
                 // `SkillPermissionDenied` row carries
                 // `SkillDeniedReason::Phase { phase_name }` when the
-                // overlay refused, matching the typed-reason shape
-                // the tools / filesystem / inference axes already use.
+                // overlay refused, which is the same typed-reason
+                // shape the tools / filesystem / inference axes
+                // carry.
                 let (denied_reason, output) = match &denied.reason {
                     crate::egress::EgressDenyReason::Profile => (
                         SkillDeniedReason::Profile,
@@ -3705,8 +3705,8 @@ impl Agent {
     ///
     /// Branch shape:
     ///
-    /// - **No gate** (`approval_gate == None`): preserves the
-    ///   pre-slice behavior exactly. Emits
+    /// - **No gate** (`approval_gate == None`): the denial stays
+    ///   terminal. Emits
     ///   `PermissionDenied { denied_via: None, denial_reason: None }`
     ///   and returns the current denial message. Regression tests
     ///   pin this case.
@@ -3728,9 +3728,9 @@ impl Agent {
     /// Both catch sites (`execute_and_record_tool` for the
     /// non-streaming dispatch and the inline catch at the streaming
     /// dispatch in `process_message_stream_turn`) delegate to this
-    /// helper. Adding a new approval surface (sse, channel adapter)
-    /// involves adding a new `ApprovalSource` variant and a new
-    /// `ApprovalGate` impl; the runtime flow stays here.
+    /// helper. A new approval surface is a new `ApprovalSource`
+    /// variant and a new `ApprovalGate` impl; the runtime flow stays
+    /// here.
     async fn handle_permission_denial(
         &mut self,
         call: &crate::conversation::ToolCallRequest,
@@ -3856,8 +3856,8 @@ impl Agent {
                 })
             }
             None => {
-                // No gate attached: preserve the pre-slice behavior
-                // exactly. Same audit row shape (denied_via: None,
+                // No gate attached: the denial stays terminal.
+                // Same audit row shape (denied_via: None,
                 // denial_reason: None), same failure message.
                 self.emit_unmediated_denial(&ctx)?;
                 let output = unmediated_deny_message(&ctx);
@@ -3944,8 +3944,8 @@ impl Agent {
         }
     }
 
-    /// Item 6 slice 2: fan-out for multiple spawn_subagent calls
-    /// in a single tool-call round. Prepares all spawns sequentially
+    /// Fan-out for multiple spawn_subagent calls in a single
+    /// tool-call round. Prepares all spawns sequentially
     /// (validates ceilings, writes SubagentSpawned events, wakes
     /// children), then runs the children in parallel via join_all,
     /// then writes SubagentResult events sequentially.
@@ -4162,23 +4162,15 @@ impl Agent {
         Ok(final_results)
     }
 
-    /// Item 6 slice 1 — built-in `spawn_subagent` intercept. Routed
-    /// from [`Self::execute_tool`] before any sandbox/permission
-    /// dispatch. Validates the request against this agent's
-    /// `allowed_subagents` ceiling, wakes a child Agent through the
-    /// factory, runs the child's `process_message_inner` under a
-    /// timeout and round budget, writes structured `SubagentSpawned`
-    /// and `SubagentResult` events to this agent's session log, and
-    /// returns a JSON envelope as the tool result so the parent's
-    /// LLM sees a stable summary of what happened. The child's own
     /// Handle the synthetic [`WIRKEN_ENTER_PHASE_TOOL`] tool call.
     /// Parses the JSON arguments into a
     /// [`crate::skill_perms::PhaseDenyOverlay`], installs it via
     /// [`crate::skill_perms::PhasedEffective::enter_phase`], emits a
     /// `PhaseEntered` audit row, and returns a JSON status envelope
-    /// to the LLM. Atomicity per the slice-2 `factory.evict` pattern:
-    /// the in-memory swap happens first; audit-emit failure is
-    /// logged and swallowed because the policy is already live.
+    /// to the LLM. Ordering matches `factory.evict`: the in-memory
+    /// swap happens first, and an audit-emit failure is logged and
+    /// swallowed because the policy is already live and refusing
+    /// calls.
     ///
     /// Bypasses the [`crate::skill_perms::PhasedEffective::gate_tool`]
     /// check (the intercept fires at the top of
@@ -4247,8 +4239,8 @@ impl Agent {
 
         match self.effective_permissions.enter_phase(overlay) {
             Ok(()) => {
-                // Slice 6: keep the HTTP client's overlay slot in
-                // sync with the in-memory effective_permissions so
+                // Keep the HTTP client's overlay slot in sync with
+                // the in-memory effective_permissions so
                 // egress checks consult the active phase's deny
                 // hosts. Runs even when the overlay has no egress
                 // entries; the sync clears any stale push from a
@@ -4357,8 +4349,8 @@ impl Agent {
                 success: false,
             });
         };
-        // Slice 6: the in-memory overlay is gone; mirror that on the
-        // HTTP client so subsequent egress checks fall through to the
+        // The in-memory overlay is gone; mirror that on the HTTP
+        // client so subsequent egress checks fall through to the
         // base enforcement alone.
         self.sync_phase_overlay_to_egress();
         if let Err(err) = self.log_event(
@@ -4458,8 +4450,8 @@ impl Agent {
 
         // Compute the child session id. The slot is the count of
         // SubagentSpawned events already written to this parent
-        // session — that makes the id reproducible from the log
-        // (item 10's verify cares).
+        // session, which is what makes the id reproducible from
+        // the log alone at `verify` time.
         let parent_session_id = self.session_handle.id().to_string();
         let prior_spawns = self.count_subagent_spawns()?;
         let child_session_id =
@@ -4596,7 +4588,7 @@ impl Agent {
     }
 
     /// Walk this agent's session log and verify what can be
-    /// verified. Item 10 slice 1 of `docs/managed-agents-parity.md`.
+    /// verified.
     ///
     /// Three checks:
     ///
@@ -4605,8 +4597,8 @@ impl Agent {
     /// 2. **`LlmRequest` hashes**: replay the conversation
     ///    incrementally, and at each `LlmRequest` event clone the
     ///    current conversation, run the same `ContextEngine::fit`
-    ///    the original call did (per decision C1 — verify must
-    ///    reproduce what was actually sent), recompute
+    ///    the original call did (verify reproduces what was
+    ///    actually sent, not what would be sent now), recompute
     ///    `messages_hash` and `tools_hash`, compare. The dry-run
     ///    fit happens against an in-memory throwaway session log so
     ///    no Compaction events leak into the real log.
@@ -4650,8 +4642,8 @@ impl Agent {
         // populated by `from_session_log`) so we can rebuild it
         // from scratch and run dry-run fit() at each LlmRequest.
         //
-        // Item 10 follow-up: do NOT preload the system prompt with
-        // the agent's current `self.system_prompt`. The verifier
+        // Do NOT preload the system prompt with the agent's
+        // current `self.system_prompt`. The verifier
         // tracks the active prompt from `SystemPromptSet` events as
         // they come in. LlmRequests that have no preceding
         // `SystemPromptSet` (legacy sessions written before the
@@ -4694,8 +4686,8 @@ impl Agent {
         for row in &rows {
             match &row.event {
                 wirken_audit::SessionEvent::SystemPromptSet { content, .. } => {
-                    // Item 10 follow-up: apply the recorded prompt
-                    // to the verify-side conversation. set_system_prompt
+                    // Apply the recorded prompt to the verify-side
+                    // conversation. set_system_prompt
                     // replaces any existing system message in place.
                     conv.set_system_prompt(content);
                     have_recorded_prompt = true;
@@ -4791,8 +4783,8 @@ impl Agent {
                     messages_hash,
                     ..
                 } => {
-                    // Item 10 follow-up: legacy sessions without a
-                    // recorded SystemPromptSet cannot be verified
+                    // Legacy sessions without a recorded
+                    // SystemPromptSet cannot be verified
                     // because the prompt at hash time is unknown.
                     // Mark as unverifiable instead of divergent so
                     // a code-side prompt update doesn't produce
@@ -4971,8 +4963,8 @@ impl Agent {
     }
 }
 
-/// Item 6 slice 1 — JSON schema for the built-in `spawn_subagent`
-/// tool. Exposed to the LLM only when `allowed_subagents` is
+/// JSON schema for the built-in `spawn_subagent` tool. Exposed to
+/// the LLM only when `allowed_subagents` is
 /// non-empty AND the agent's `subagent_depth` is below
 /// [`MAX_SUBAGENT_DEPTH`].
 fn spawn_subagent_tool_def() -> crate::tool::ToolDef {
@@ -5011,7 +5003,7 @@ fn spawn_subagent_tool_def() -> crate::tool::ToolDef {
     }
 }
 
-/// Item 6 slice 1 — wire-format arguments for `spawn_subagent`.
+/// Wire-format arguments for `spawn_subagent`.
 #[derive(serde::Deserialize)]
 struct SpawnSubagentArgs {
     agent_id: String,
@@ -5020,8 +5012,8 @@ struct SpawnSubagentArgs {
     tools: Option<Vec<String>>,
 }
 
-/// Per-pass deny overlay slice 3: JSON arguments for
-/// `wirken_enter_phase`. `phase_name` is operator-readable
+/// JSON arguments for `wirken_enter_phase`. `phase_name` is
+/// operator-readable
 /// (recorded on the `PhaseEntered` audit row); `skill_id` defaults
 /// to the agent id because the runtime does not currently track
 /// per-tool-call skill attribution; `denied` lists the five axes
@@ -5048,8 +5040,8 @@ struct PhaseDeniedArgs {
     inference_providers: Vec<String>,
 }
 
-/// Per-pass deny overlay slice 3: JSON arguments for
-/// `wirken_exit_phase`. `reason` defaults to `"phase_change"` when
+/// JSON arguments for `wirken_exit_phase`. `reason` defaults to
+/// `"phase_change"` when
 /// the LLM omits it; `"skill_unloaded"` is also accepted. The
 /// host-only `"turn_end"` is rejected at the intercept.
 #[derive(serde::Deserialize, Default)]
@@ -5062,8 +5054,8 @@ fn default_exit_phase_reason() -> String {
     "phase_change".to_string()
 }
 
-/// Per-pass deny overlay slice 3: tool definition for the synthetic
-/// `wirken_enter_phase`. Exposed to the LLM only when a loaded skill
+/// Tool definition for the synthetic `wirken_enter_phase`. Exposed
+/// to the LLM only when a loaded skill
 /// has opted in by listing the tool name in its
 /// `permissions.tools.allow`; see
 /// [`crate::skill_perms::PhasedEffective::skills_admit_tool`].
@@ -5106,8 +5098,8 @@ fn wirken_enter_phase_tool_def() -> crate::tool::ToolDef {
     }
 }
 
-/// Per-pass deny overlay slice 3: tool definition for the synthetic
-/// `wirken_exit_phase`. Same opt-in discoverability as
+/// Tool definition for the synthetic `wirken_exit_phase`. Same
+/// opt-in discoverability as
 /// [`wirken_enter_phase_tool_def`].
 fn wirken_exit_phase_tool_def() -> crate::tool::ToolDef {
     crate::tool::ToolDef {
@@ -5132,8 +5124,8 @@ fn wirken_exit_phase_tool_def() -> crate::tool::ToolDef {
     }
 }
 
-/// Item 6 slice 1 — wire-format envelope returned to the parent's
-/// LLM as the tool result for a `spawn_subagent` call.
+/// Wire-format envelope returned to the parent's LLM as the tool
+/// result for a `spawn_subagent` call.
 #[derive(serde::Serialize)]
 struct SubagentEnvelope<'a> {
     child_session_id: &'a str,
@@ -5187,7 +5179,7 @@ fn str_to_status(s: &str) -> wirken_audit::SubagentStatus {
     }
 }
 
-/// Item 6 slice 1 — strict ordering on [`PermissionTier`].
+/// Strict ordering on [`PermissionTier`].
 /// `Tier1 < Tier2 < Tier3`. Returns true when `actual` is strictly
 /// above `cap` and the action must be auto-denied.
 fn tier_exceeds(actual: PermissionTier, cap: PermissionTier) -> bool {
@@ -5261,7 +5253,7 @@ fn sha256_hashhex(bytes: &[u8]) -> wirken_audit::HashHex {
 }
 
 // ---------------------------------------------------------------------------
-// Item 10 slice 1: hashing helpers and finish-reason classification
+// Hashing helpers and finish-reason classification
 // ---------------------------------------------------------------------------
 
 /// Canonical SHA-256 of the conversation messages slice as a
@@ -5279,8 +5271,9 @@ pub(crate) fn compute_messages_hash(
     sha256_hex(&bytes)
 }
 
-/// Canonical SHA-256 of the (already-sorted-by-name from item 4
-/// slice 1) tool defs slice. Used for `LlmRequest.tools_hash`.
+/// Canonical SHA-256 of the tool defs slice, which
+/// `TurnToolDefs::assemble` has already sorted by name. Used for
+/// `LlmRequest.tools_hash`.
 pub(crate) fn compute_tools_hash(tools: &[crate::tool::ToolDef]) -> wirken_audit::HashHex {
     let bytes = serde_json::to_vec(tools).unwrap_or_default();
     sha256_hex(&bytes)
@@ -5311,9 +5304,9 @@ fn approved_by_label(source: &wirken_audit::ApprovalSource) -> String {
     }
 }
 
-/// Default tool-failure message for an unmediated denial. Matches
-/// the string the pre-slice path returned so a regression test on
-/// the no-gate-attached path doesn't catch a behavioral drift.
+/// Default tool-failure message for an unmediated denial. Pinned
+/// by a regression test: what the LLM is told when no gate is
+/// attached must not drift.
 fn unmediated_deny_message(ctx: &PermissionDenialContext) -> String {
     format!(
         "Permission denied: '{}' requires {} approval. \
@@ -5454,7 +5447,7 @@ mod attribution_tests {
         assert_eq!(a.input_cost_usd_micros, b.input_cost_usd_micros);
         assert_eq!(a.output_cost_usd_micros, b.output_cost_usd_micros);
         assert_eq!(a.total_cost_usd_micros, b.total_cost_usd_micros);
-        // Sanity check the arithmetic matches the cost-fields slice.
+        // Sanity check the arithmetic.
         // claude-opus-4-7 input price: $15/M, 1000 tokens -> 15_000 micros.
         assert_eq!(a.input_cost_usd_micros, Some(15_000));
         // Output price: $75/M, 500 tokens -> 37_500 micros.
@@ -5463,8 +5456,8 @@ mod attribution_tests {
     }
 
     /// Unpriced model with reported usage: tokens populated, costs
-    /// `None`. Matches the cost-fields slice's behavior; included
-    /// here so the projection helper's full matrix is covered.
+    /// `None`. Covers the remaining cell of the projection helper's
+    /// matrix.
     #[test]
     fn reported_usage_on_unpriced_model_drops_cost_fields() {
         let usage = Usage {
@@ -5500,7 +5493,7 @@ mod attribution_tests {
 }
 
 // ---------------------------------------------------------------------------
-// Item 10 slice 1: VerifyReport types
+// VerifyReport types
 // ---------------------------------------------------------------------------
 
 /// Result of [`Agent::verify`].
