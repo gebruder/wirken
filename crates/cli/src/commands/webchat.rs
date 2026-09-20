@@ -2522,8 +2522,10 @@ pub async fn serve(
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     tracing::info!("WebChat listening on http://127.0.0.1:{port}");
 
+    let cfg = super::config();
     let shared = Shared {
         port,
+        cfg: cfg.clone(),
         factory,
         audit,
         sessions,
@@ -2534,7 +2536,7 @@ pub async fn serve(
         writer_halted: Arc::new(AtomicBool::new(false)),
         rate_limit: Arc::new(ControlPlaneRateLimiter::new(WEBCHAT_MAX_POSTS_PER_MIN)),
         verify_limit: Arc::new(ControlPlaneRateLimiter::new(
-            super::config().control_plane_rate_limit.max(1),
+            cfg.control_plane_rate_limit.max(1),
         )),
         verify_running: Arc::new(AtomicBool::new(false)),
         open_turns: Arc::new(OpenTurns::default()),
@@ -2615,6 +2617,11 @@ struct Shared {
     /// The bound port, which the preflight checks `Origin` and `Host`
     /// against.
     port: u16,
+    /// The gateway's config, read once at startup. Every route that
+    /// reaches a database reaches it through this, so a test can
+    /// point the routes at a directory of its own without writing the
+    /// environment the process-wide lookup reads.
+    cfg: wirken_gateway::config::GatewayConfig,
     factory: Arc<AgentFactory>,
     audit: Arc<AuditWriter>,
     sessions: Arc<Mutex<SessionStore>>,
@@ -2736,8 +2743,7 @@ fn route_session_events(
             "events are served for webchat sessions only",
         ));
     }
-    let cfg = super::config();
-    let body = session_events(&cfg, session_id, after);
+    let body = session_events(&shared.cfg, session_id, after);
     let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
     Response::Complete(json_ok(&body))
 }
@@ -2750,8 +2756,7 @@ fn route_session_transcript(req: &Request<'_>, shared: &Shared, session_id: &str
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
     }
-    let cfg = super::config();
-    let body = match super::session::session_transcript(&cfg, session_id) {
+    let body = match super::session::session_transcript(&shared.cfg, session_id) {
         Ok(turns) => serde_json::to_string(&turns).unwrap_or_else(|_| "[]".into()),
         Err(_) => "[]".to_string(),
     };
@@ -2769,8 +2774,7 @@ fn route_imported(req: &Request<'_>, shared: &Shared) -> Response {
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
     }
-    let cfg = super::config();
-    let body = super::import::read_route_json(&cfg, &route);
+    let body = super::import::read_route_json(&shared.cfg, &route);
     Response::Complete(json_ok(&body))
 }
 
@@ -2806,8 +2810,7 @@ async fn route_capabilities(req: &Request<'_>, shared: &Shared) -> Response {
         Ok(conversation) => conversation,
         Err(_) => return Response::Complete(json_bad_request(BAD_CONVERSATION_KEY)),
     };
-    let cfg = super::config();
-    let body = capabilities_snapshot(&cfg, &shared.factory, &conversation).await;
+    let body = capabilities_snapshot(&shared.cfg, &shared.factory, &conversation).await;
     let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
     Response::Complete(json_ok(&body))
 }
@@ -2819,8 +2822,7 @@ fn route_credentials(req: &Request<'_>, shared: &Shared) -> Response {
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
     }
-    let cfg = super::config();
-    let body = credentials_snapshot(&cfg);
+    let body = credentials_snapshot(&shared.cfg);
     let body = serde_json::to_string(&body).unwrap_or_else(|_| "{}".into());
     Response::Complete(json_ok(&body))
 }
@@ -2832,9 +2834,8 @@ async fn route_status(req: &Request<'_>, shared: &Shared) -> Response {
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
     }
-    let cfg = super::config();
     let snapshot = status_snapshot(
-        &cfg,
+        &shared.cfg,
         shared.port,
         &shared.status_inputs,
         shared.writer_halted.load(Ordering::Relaxed),
@@ -2850,9 +2851,9 @@ fn route_sessions(req: &Request<'_>, shared: &Shared) -> Response {
     if let Some(resp) = api_preflight(req.raw, shared.port, false) {
         return Response::Complete(resp);
     }
-    let cfg = super::config();
-    let body = match super::session::active_session_rows(&cfg, None) {
-        Ok(rows) => serde_json::to_string(&conversation_rows(&cfg, rows, &shared.open_turns))
+    let cfg = &shared.cfg;
+    let body = match super::session::active_session_rows(cfg, None) {
+        Ok(rows) => serde_json::to_string(&conversation_rows(cfg, rows, &shared.open_turns))
             .unwrap_or_else(|_| "[]".into()),
         Err(_) => "[]".to_string(),
     };
@@ -3172,10 +3173,9 @@ async fn route_verify(req: &Request<'_>, shared: &Shared) -> Response {
     let Some(_verify_claim) = VerifyClaim::claim(&shared.verify_running) else {
         return Response::Complete(json_conflict(r#"{"result":"busy"}"#));
     };
-    let cfg = super::config();
     let started_at = chrono::Utc::now();
     let started = std::time::Instant::now();
-    let outcome = verify_chain_off_runtime(cfg).await;
+    let outcome = verify_chain_off_runtime(shared.cfg.clone()).await;
     // The claim is released by `_verify_claim` going out of scope at
     // the end of this function, on every path through it.
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -7804,6 +7804,7 @@ mod tests {
                 .expect("the session log opens");
             let shared = Shared {
                 port: TEST_PORT,
+                cfg: cfg.clone(),
                 factory: wirken_agent::AgentFactory::new(configs, Arc::new(log), None),
                 audit: Arc::new(audit),
                 sessions: Arc::new(Mutex::new(sessions)),
@@ -8369,6 +8370,42 @@ mod tests {
         }
     }
 
+    /// The route reads `c` and answers for that conversation, which is
+    /// what lets the panel draw the one it is open on.
+    #[tokio::test]
+    async fn the_capabilities_route_answers_for_the_conversation_it_is_given() {
+        let routes = Routes::open();
+        let held = routes
+            .shared
+            .factory
+            .wake("default", &webchat_session_id("c-0123456789ab"))
+            .expect("wake");
+        let guard = held.lock().await;
+
+        let resp = routes
+            .call(&request("GET /api/capabilities?c=c-0123456789ab", ""))
+            .await;
+        let (head, body) = answered(&resp);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        assert_eq!(body["busy"], true, "the conversation holding the agent");
+
+        let resp = routes
+            .call(&request("GET /api/capabilities?c=c-ba9876543210", ""))
+            .await;
+        let (_, body) = answered(&resp);
+        assert_eq!(body["busy"], false, "another conversation, another session");
+        drop(guard);
+
+        // A key of the wrong shape is refused before it can name a
+        // session.
+        let resp = routes
+            .call(&request("GET /api/capabilities?c=../../etc", ""))
+            .await;
+        let (head, body) = answered(&resp);
+        assert!(head.starts_with("HTTP/1.1 400 Bad Request"), "{head}");
+        assert_eq!(body["error"], "bad conversation key");
+    }
+
     // --- GET /api/approvals ---
 
     /// The listing reads its conversation from `c`, normalises it the
@@ -8431,6 +8468,89 @@ mod tests {
             "unscoped is the whole channel"
         );
         assert_eq!(body["other_channels"]["count"], 1);
+    }
+
+    /// The list route serves the rows `conversation_rows` builds:
+    /// each webchat conversation with its first user message as the
+    /// title and whether a turn is open in it, and another channel's
+    /// row with neither.
+    #[tokio::test]
+    async fn the_list_route_serves_the_rows_conversation_rows_builds() {
+        use wirken_audit::{SessionEvent, SessionLog, SqliteSessionLog, TrustLevel};
+        let routes = Routes::open();
+        let cfg = cfg_at(routes.dir.path());
+        {
+            let store = routes.shared.sessions.lock().await;
+            let mine = store.get_or_create("webchat", "c-0123456789ab").unwrap();
+            store.record_message(&mine.id).unwrap();
+            store.get_or_create("telegram", "-1001234").unwrap();
+        }
+        let log = SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+        let say = |id: &str, content: &str| {
+            let handle = log.handle_for(SessionId::new(id.to_string()));
+            log.append(
+                &handle,
+                TrustLevel::User,
+                SessionEvent::UserMessage {
+                    content: content.into(),
+                    inbound_id: None,
+                    adapter_id: Some("webchat".into()),
+                    sender_id: None,
+                },
+            )
+            .unwrap();
+        };
+        say(
+            "default/webchat/c-0123456789ab",
+            "Roll staging \u{1b}[31mback\u{1b}[0m to last night's build",
+        );
+        say("default/telegram/-1001234", "a telegram user's words");
+
+        let held = routes
+            .shared
+            .open_turns
+            .try_open("c-0123456789ab")
+            .expect("the claim");
+
+        let resp = routes.call(&request("GET /api/sessions", "")).await;
+        let (head, body) = answered(&resp);
+        assert!(head.starts_with("HTTP/1.1 200 OK"), "{head}");
+        let rows = body.as_array().expect("a list of rows");
+
+        let mine = rows
+            .iter()
+            .find(|r| r["log_id"] == "default/webchat/c-0123456789ab")
+            .expect("the webchat row");
+        assert_eq!(
+            mine["first_message"], "Roll staging back to last night's build",
+            "the title, control sequences stripped"
+        );
+        assert_eq!(mine["turn_open"], true, "the claim this route can see");
+        assert!(mine["turn_open_age_seconds"].is_u64());
+        assert_eq!(mine["message_count"], 1);
+
+        let telegram = rows
+            .iter()
+            .find(|r| r["channel"] == "telegram")
+            .expect("the telegram row");
+        assert!(
+            telegram["first_message"].is_null() && telegram["turn_open"].is_null(),
+            "another channel's first message is that channel's user's words"
+        );
+        let text = serde_json::to_string(&body).unwrap();
+        assert!(!text.contains("a telegram user's words"));
+
+        drop(held);
+        let resp = routes.call(&request("GET /api/sessions", "")).await;
+        let (_, body) = answered(&resp);
+        let mine = body
+            .as_array()
+            .expect("a list of rows")
+            .iter()
+            .find(|r| r["log_id"] == "default/webchat/c-0123456789ab")
+            .expect("the webchat row");
+        assert_eq!(mine["turn_open"], false, "the turn ended");
+        assert!(mine["turn_open_age_seconds"].is_null());
     }
 
     /// The events route exposes far more per row than the transcript
