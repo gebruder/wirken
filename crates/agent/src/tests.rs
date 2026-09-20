@@ -11212,3 +11212,45 @@ fn the_row_carries_what_the_dispatch_reported() {
         other => panic!("expected ToolResult, got {other:?}"),
     }
 }
+
+/// A host exec cut at the timeout still records where it ran. The
+/// command is gone, the row is not: an operator asking "what reached
+/// the host" gets the same answer whether the command finished or
+/// was cut.
+#[tokio::test]
+async fn a_host_exec_that_times_out_still_records_the_host() {
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+    use crate::tool::{ToolConfig, ToolRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tools = ToolRegistry::new(
+        tmp.path().to_path_buf(),
+        ToolConfig {
+            sandbox: SandboxConfig {
+                mode: SandboxMode::Off,
+                timeout_secs: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .expect("registry");
+
+    let result = tools
+        .execute("exec", r#"{"command":"sleep 5"}"#)
+        .await
+        .expect("a timeout is a result, not an error");
+    assert!(
+        result.output.contains("Command timed out after 1s"),
+        "{}",
+        result.output
+    );
+    assert!(!result.success);
+
+    let provenance = result
+        .sandbox
+        .expect("a cut exec records where it ran, same as one that finished");
+    assert_eq!(provenance.mode, wirken_audit::SandboxModeLabel::Off);
+    assert_eq!(provenance.runtime, wirken_audit::SandboxRuntimeLabel::Host);
+    assert_eq!(provenance.container_id, None);
+}

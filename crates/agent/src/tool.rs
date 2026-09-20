@@ -755,7 +755,12 @@ impl ToolRegistry {
             .spawn()
             .map_err(|e| AgentError::Tool(format!("exec failed: {e}")))?;
 
-        let timeout = std::time::Duration::from_secs(300);
+        // The same knob the container path reads, so a host exec
+        // and a sandboxed one are cut at the same configured limit
+        // and a test can drive the branch without waiting it out.
+        // `SandboxConfig::default().timeout_secs` is 300, which is
+        // the literal this replaced.
+        let timeout = std::time::Duration::from_secs(self.sandbox_config.timeout_secs);
         let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
             Ok(result) => result.map_err(|e| AgentError::Tool(format!("exec failed: {e}")))?,
             Err(_) => {

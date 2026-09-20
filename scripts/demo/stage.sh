@@ -205,10 +205,22 @@ verify() {
     [ -f "$DB" ] || die "no audit log yet; run 'ask' first"
     local seq
     seq="$(target_seq)"
-    [ -n "$seq" ] || die "no exec denial on the chain; run 'ask' first"
+    # The edit lands on the denial row, which only an `ask` answered
+    # `n` leaves behind. A `y` pass approved the call, so there is
+    # none to make look boring.
+    [ -n "$seq" ] || die "no exec denial on the chain; run 'ask' and answer n"
 
     printf -- '── the chain as written ──\n'
     run_verify
+    # Where each exec ran, from the row that records it. Absent means
+    # the call never ran, which is what the n path produces.
+    sqlite3 "$DB" \
+        "SELECT '  exec at seq ' || seq || ': sandbox=' ||
+                COALESCE(json_extract(payload, '\$.sandbox'), 'absent')
+           FROM session_events
+          WHERE json_extract(payload, '\$.kind') = 'tool_result'
+            AND json_extract(payload, '\$.tool_name') = 'exec'
+          ORDER BY seq;"
 
     printf -- '\n── one UPDATE at seq %s ──\n' "$seq"
     sqlite3 "$DB" \

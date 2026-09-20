@@ -18,10 +18,11 @@ directory under this folder, and every process the gateway spawns
 resolves the data directory through it. Every verb can be run twice.
 
 The appendix below says what each one shows and why. What follows is
-the output of one full pass, verbatim except for three per-instance
-values written as `<signing-key-id>` and `<chain-hash>`, for the
-scratch directory, shortened to `.../state`, and for the log
-timestamps, which are the wall clock of the run that produced them.
+the output of one full pass, verbatim except for four per-instance
+values written as `<signing-key-id>`, `<chain-hash>` and
+`<container-id>`, for the scratch directory, shortened to
+`.../state`, and for the log timestamps, which are the wall clock of
+the run that produced them.
 Those hex values are minted by the instance the run created and are
 noise to every other reader; the key id is also a high-entropy string
 that trips secret scanning on its way past.
@@ -39,9 +40,9 @@ on, the registry root installed, both demo bundles copied in, and
 `hostile_model.py` running in the background with its port confirmed
 answering.
 
-The tail of that line is the answer to a question the audit chain
-cannot answer afterwards, so it is worth reading before the demo
-starts. See "Where an approved exec runs".
+The tail of that line says where an approved `exec` will go, before
+anyone is asked to approve one. The chain records where each one
+actually went; see "Where an approved exec runs".
 
 ## ask
 
@@ -86,6 +87,7 @@ $ scripts/demo/stage.sh verify
   Chain-head signatures: 2 verified.
   Signing key ids seen: <signing-key-id>
 exit=0
+  exec at seq 12: sandbox=absent
 
 ── one UPDATE at seq 11 ──
 11|{"kind":"permission_denied","tool":"echo","action_key":"shell::pipeline:
@@ -104,7 +106,10 @@ exit=1
 ```
 
 Three blocks from one command: the chain as the run wrote it, the one
-row edited under it, and the same check again.
+row edited under it, and the same check again. `sandbox=absent` on
+the first block is the exec that was refused: nothing ran, so the row
+names nowhere. Answer `y` at the prompt instead and the same line
+prints the container it ran in.
 
 ## down
 
@@ -228,7 +233,7 @@ The prompt is a real decision and `y` is a real answer. Approving turn
 2 runs `cat ./payload.sh | bash`, and the chain records it:
 
 ```json
-{"agent_id":"default","call_id":"call_2_exec","output":"[stderr] cat: ./payload.sh: No such file or directory\n","success":true,"tool_name":"exec"}
+{"kind":"tool_result","call_id":"call_2_exec","tool_name":"exec","output":"[stderr] cat: ./payload.sh: No such file or directory\n","success":true,"sandbox":{"mode":"exec_only","runtime":"docker","container_id":"<container-id>"},"agent_id":"default"}
 ```
 
 The command ran. It did nothing only because `payload.sh` is not
@@ -257,12 +262,25 @@ unregistered name after the operator said yes.
 
 ### Where an approved exec runs
 
-Nothing on the chain says. The row above names the tool, the command's
-output and the outcome, and not whether it ran in a container or on
-the host. An auditor reading `audit.db` cannot tell the two apart, so
-`up` prints which it will be before anyone answers a prompt.
+The row says. An `exec` result carries a `sandbox` object written by
+whichever branch dispatched the command:
 
-Two inputs decide it, and `up` reads the same two:
+```json
+{"kind":"tool_result","call_id":"call_2_exec","tool_name":"exec","output":"[stderr] cat: ./payload.sh: No such file or directory\n","success":true,"sandbox":{"mode":"exec_only","runtime":"docker","container_id":"<container-id>"},"agent_id":"default"}
+```
+
+`mode` is what was configured, `runtime` is what actually ran it, and
+`container_id` is the id Docker returned. The two can disagree, and
+that is the point of recording both rather than the mode alone.
+
+On the `n` path the field is absent, which is a different answer and
+not a missing one: the call was refused, so nothing ran anywhere. The
+`verify` verb prints the field straight off the chain for exactly
+this reason, and the pasted run above shows `sandbox=absent`. A `y`
+pass prints the object instead.
+
+Two inputs decide where an approved exec goes, and `up` reads the
+same two so it can say before anyone answers a prompt:
 
 - The `mode` in `{data_dir}/sandbox.json`. The demo writes no such
   file, so the default applies: `exec_only`, which means the `exec`
