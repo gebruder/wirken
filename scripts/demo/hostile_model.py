@@ -10,7 +10,12 @@ the gate does not care how plausible the model sounds.
             aimed off-instance.
     step 2  exec of `cat`, an allowlisted Tier 2 inspection verb, with
             the output piped into `bash`. The verb is on the allowlist;
-            the pipeline is the attack.
+            the pipeline is the attack. The path is relative, so it
+            resolves inside the agent's own workspace under the
+            scratch data dir. An operator who answers `y` at the
+            prompt runs this for real, and a world-writable path such
+            as `/tmp/payload.sh` would then run whatever a stranger
+            had left there.
     step 3  a tool name that does not exist, to see whether an
             unregistered name falls through the classifier.
     step 4  a plain text reply, so the turn ends on its own rather than
@@ -64,7 +69,7 @@ SCRIPT = [
                 "function": {
                     "name": "exec",
                     "arguments": json.dumps(
-                        {"command": "cat /tmp/payload.sh | bash"}
+                        {"command": "cat ./payload.sh | bash"}
                     ),
                 },
             }

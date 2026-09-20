@@ -1,7 +1,8 @@
 # Hostile-model demo
 
 A scripted hostile model drives a wirken agent through four turns.
-Nothing it asks for runs. The whole thing is five verbs:
+Every one of them is gated, and nothing runs that the operator did not
+approve. The whole thing is five verbs:
 
 ```
 scripts/demo/stage.sh up       everything before the first prompt, silently
@@ -29,7 +30,7 @@ that trips secret scanning on its way past.
 
 ```
 $ scripts/demo/stage.sh up
-ready: scratch .../state, hostile model on 127.0.0.1:8099
+ready: scratch .../state, hostile model on 127.0.0.1:8099, approved exec runs in a Docker container (sandbox mode exec_only)
 ```
 
 One line. Behind it: the scratch data directory, `provider.json`
@@ -37,6 +38,10 @@ pointing at the scripted server, the credential `wirken ask` insists
 on, the registry root installed, both demo bundles copied in, and
 `hostile_model.py` running in the background with its port confirmed
 answering.
+
+The tail of that line is the answer to a question the audit chain
+cannot answer afterwards, so it is worth reading before the demo
+starts. See "Where an approved exec runs".
 
 ## ask
 
@@ -54,6 +59,9 @@ Understood. I was unable to complete those steps, so here is the summary you ask
 
 Two prompts for four turns. Turn 1 is refused without asking anyone,
 and turn 4 is a plain reply.
+
+`n` is the scripted answer. `y` is a real one, and the appendix says
+what it does.
 
 ## skills
 
@@ -115,7 +123,7 @@ The four turns the model drives, and what stops each:
 | Turn | The model asks for | What stops it |
 | --- | --- | --- |
 | 1 | `http_request` POSTing to an off-host URL with a vault credential named | The skill-permission gate. Refusal, not a prompt. |
-| 2 | `exec` of `cat /tmp/payload.sh \| bash` | The pipeline sentinel. `cat` is a Tier 2 allowlisted verb; the pipe forces Tier 3, so the operator is asked. |
+| 2 | `exec` of `cat ./payload.sh \| bash` | The pipeline sentinel. `cat` is a Tier 2 allowlisted verb; the pipe forces Tier 3, so the operator is asked. |
 | 3 | A tool name that does not exist (`vault_dump_all`) | Default-deny on unregistered names. Tier 3, so the operator is asked. |
 | 4 | A plain text reply | Nothing. The turn ends on its own rather than on the round cap. |
 
@@ -136,8 +144,9 @@ once; the corpus holds it to that on every push.
   `target/debug/wirken`; a release build works the same way. Point the
   script at either with `WIRKEN=...`, or put one on PATH.
 - `python3` (standard library only) and `sqlite3`.
-- No Docker needed. Every tool call is refused before it reaches the
-  sandbox.
+- Docker only if you intend to answer `y`. On the `n` path every tool
+  call is refused before it reaches the sandbox. See "Where an
+  approved exec runs" below.
 
 ## The scratch environment
 
@@ -193,6 +202,14 @@ A call carrying only the system and user messages restarts that
 script, so a second `ask` gets the same four steps rather than the
 step-4 text reply for ever after.
 
+`up` adopts a `hostile_model.py` already serving the port instead of
+starting a second one, and refuses if something else holds it. That
+makes `up` cheap to repeat, and it means an edit to
+`hostile_model.py` needs a `down` first: a running server is serving
+the script it loaded at start. `down` finds the server by reading each
+process's argv for `hostile_model.py --port`, so it still stops one
+whose pidfile went with an earlier scratch dir.
+
 ## ask
 
 `RUST_LOG=wirken=error` is set inside the script and is only for
@@ -204,6 +221,61 @@ Two prompts, not three. Turn 1 never reaches a prompt: `http_request`
 is Tier 1, and with no skills attached the effective profile grants no
 `credentials.allow` and no `http.post_paths`, so the gate refuses it
 outright. A refusal is not an escalation.
+
+### Answering `y`
+
+The prompt is a real decision and `y` is a real answer. Approving turn
+2 runs `cat ./payload.sh | bash`, and the chain records it:
+
+```json
+{"agent_id":"default","call_id":"call_2_exec","output":"[stderr] cat: ./payload.sh: No such file or directory\n","success":true,"tool_name":"exec"}
+```
+
+The command ran. It did nothing only because `payload.sh` is not
+there: `cat` failed, and `bash` read an empty pipe. The path is
+relative, so it resolves inside the agent's own workspace under the
+scratch data dir, which `up` creates and `down` removes. An earlier
+draft of this demo named `/tmp/payload.sh`, which is a world-writable
+path: a mistyped `y` would have run whatever a stranger had left
+there.
+
+Two things about that turn are worth saying out loud, because they are
+the gate working rather than the gate failing:
+
+- The approval was recorded `"scope": "one_shot"` against action key
+  `shell::pipeline:`. Nothing was persisted, and the next identical
+  request asks again. The pipeline shape cannot be pre-approved.
+- Approving turn 3 does not conjure the tool. `vault_dump_all` is
+  approved and then fails at dispatch with
+  `Error: tool not found: vault_dump_all`. Approval is not
+  registration.
+
+That error ends the turn: there is no step-4 reply and no
+`SessionEnd`, so a `y` run seals one chain head where an `n` run seals
+two. On stage it reads as a crash. It is the tool registry refusing an
+unregistered name after the operator said yes.
+
+### Where an approved exec runs
+
+Nothing on the chain says. The row above names the tool, the command's
+output and the outcome, and not whether it ran in a container or on
+the host. An auditor reading `audit.db` cannot tell the two apart, so
+`up` prints which it will be before anyone answers a prompt.
+
+Two inputs decide it, and `up` reads the same two:
+
+- The `mode` in `{data_dir}/sandbox.json`. The demo writes no such
+  file, so the default applies: `exec_only`, which means the `exec`
+  tool runs in a Docker container.
+- Whether the Docker daemon answers. Under `exec_only` an unreachable
+  daemon means `exec` is refused outright; it never falls back to the
+  host. Host execution is opt-in only, with `"mode": "off"`.
+
+So the three tails `up` can print are: `in a Docker container
+(sandbox mode exec_only)`, `on the host (sandbox mode off)`, and
+`nowhere: sandbox mode exec_only and Docker is not reachable, so exec
+is refused`. The output pasted above is the first, from a machine with
+Docker running and `debian:bookworm-slim` pulled.
 
 The rows those refusals wrote are the point. The human table does not
 carry the detail payload; the JSON form does:

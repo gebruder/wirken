@@ -33,6 +33,31 @@ die() {
     exit 1
 }
 
+# The pid of a hostile_model.py serving this port, by reading each
+# process's argv. Not a pattern kill: `pkill -f hostile_model.py` also
+# matches any shell whose own command line mentions it, this one
+# included, which is how the first draft killed its caller.
+model_pid() {
+    python3 - "$PORT" <<'PY'
+import os, sys
+port = sys.argv[1]
+for entry in os.listdir("/proc"):
+    if not entry.isdigit():
+        continue
+    try:
+        with open(f"/proc/{entry}/cmdline", "rb") as fh:
+            argv = fh.read().split(b"\0")
+    except OSError:
+        continue
+    argv = [a.decode("utf-8", "replace") for a in argv if a]
+    if not any(a.endswith("hostile_model.py") for a in argv):
+        continue
+    if "--port" in argv and argv[argv.index("--port") + 1 :][:1] == [port]:
+        print(entry)
+        break
+PY
+}
+
 # One connect attempt, for "is it already up".
 listening() {
     python3 - "$PORT" <<'PY'
@@ -57,6 +82,46 @@ while time.time() < deadline:
     probe.close()
     time.sleep(0.1)
 sys.exit(1)
+PY
+}
+
+# Where an approved `exec` would run, by the same two inputs the agent
+# reads: the sandbox mode from sandbox.json (absent means the default,
+# ExecOnly) and whether the Docker daemon answers on the default local
+# socket. Nothing on the audit chain records this after the fact, so
+# `up` says it before anyone answers a prompt.
+exec_lands() {
+    python3 - "$WIRKEN_DATA_DIR" <<'PY'
+import json, pathlib, socket, sys
+
+data_dir = pathlib.Path(sys.argv[1])
+mode = "exec_only"
+config = data_dir / "sandbox.json"
+if config.is_file():
+    try:
+        mode = str(json.loads(config.read_text()).get("mode", mode)).lower()
+    except (OSError, ValueError):
+        pass
+
+if mode == "off":
+    print("on the host (sandbox mode off)")
+    sys.exit(0)
+
+reachable = False
+try:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(1.0)
+    sock.connect("/var/run/docker.sock")
+    sock.sendall(b"GET /version HTTP/1.1\r\nHost: docker\r\n\r\n")
+    reachable = b"200 OK" in sock.recv(256)
+    sock.close()
+except OSError:
+    reachable = False
+
+if reachable:
+    print(f"in a Docker container (sandbox mode {mode})")
+else:
+    print(f"nowhere: sandbox mode {mode} and Docker is not reachable, so exec is refused")
 PY
 }
 
@@ -102,15 +167,20 @@ JSON
 
     "$WIRKEN" skills trust-root "$(cat "$HERE/registry-root.pub")" >/dev/null 2>&1
 
-    if ! listening; then
+    local running
+    running="$(model_pid)"
+    if [ -z "$running" ]; then
+        # Something else on the port is not ours to adopt or to kill.
+        ! listening || die "port $PORT is busy and it is not hostile_model.py"
         python3 "$HERE/hostile_model.py" --port "$PORT" \
             >"$WIRKEN_DATA_DIR/hostile_model.log" 2>&1 &
-        printf '%s\n' "$!" > "$PIDFILE"
+        running=$!
     fi
+    printf '%s\n' "$running" > "$PIDFILE"
     wait_listening || die "the hostile model did not answer on port $PORT"
 
-    printf 'ready: scratch %s, hostile model on 127.0.0.1:%s\n' \
-        "$WIRKEN_DATA_DIR" "$PORT"
+    printf 'ready: scratch %s, hostile model on 127.0.0.1:%s, approved exec runs %s\n' \
+        "$WIRKEN_DATA_DIR" "$PORT" "$(exec_lands)"
 }
 
 # The approval gate attaches only when stdin is a terminal, so this
@@ -153,13 +223,14 @@ verify() {
     run_verify
 }
 
-# Stops the server this script started. A pattern kill is not worth
-# the blast radius: `pkill -f hostile_model.py` also matches any shell
-# whose own command line mentions it, this one included.
+# Stops whatever hostile_model.py is on the port, not only the pid
+# this script wrote: an `up` from another shell leaves a server whose
+# pidfile a later `down` has already removed with the scratch dir.
 down() {
-    if [ -f "$PIDFILE" ]; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null || true
-    fi
+    local running
+    running="$(model_pid)"
+    [ -n "$running" ] || running="$(cat "$PIDFILE" 2>/dev/null || true)"
+    [ -z "$running" ] || kill "$running" 2>/dev/null || true
     [ "$WIRKEN_DATA_DIR" = "$HERE/state" ] || die "refusing to remove $WIRKEN_DATA_DIR"
     rm -rf "${WIRKEN_DATA_DIR:?}"
     printf 'stopped: hostile model down, scratch removed\n'
