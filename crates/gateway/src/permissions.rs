@@ -1124,12 +1124,37 @@ impl PermissionStore {
 
     /// Revoke an approval.
     pub fn revoke(&self, action_key: &str, agent_id: &str) -> Result<(), GatewayError> {
+        self.revoke_reporting(action_key, agent_id).map(|_| ())
+    }
+
+    /// [`Self::revoke`], returning the window the removed row
+    /// carried.
+    ///
+    /// The DELETE leaves nothing behind, so a caller that wants to
+    /// record what it removed has to read the row first. `None` means
+    /// there was no row: a revoke naming a key that was never granted
+    /// succeeds, and the distinction is only recoverable here.
+    pub fn revoke_reporting(
+        &self,
+        action_key: &str,
+        agent_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, GatewayError> {
         let agent_id = canonical_agent_id(agent_id);
+        let removed: Option<DateTime<Utc>> = self
+            .conn
+            .query_row(
+                "SELECT expires_at FROM approvals WHERE action_key = ?1 AND agent_id = ?2",
+                params![action_key, agent_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc));
         self.conn.execute(
             "DELETE FROM approvals WHERE action_key = ?1 AND agent_id = ?2",
             params![action_key, agent_id],
         )?;
-        Ok(())
+        Ok(removed)
     }
 
     /// List all approvals for an agent.
@@ -1525,6 +1550,15 @@ pub fn approve_and_log_by_key_with_expiry(
             approved_via: None,
             adapter_id: adapter_id.map(str::to_string),
             sender_id: sender_id.map(str::to_string),
+            tier: tier_of_storable_key(&approval.action_key).map(|t| t.label().to_string()),
+            // A session-scoped grant's `expires_at` is the
+            // `MAX_UTC` sentinel rather than a window anything
+            // reads, so the row says `None` instead of a date a
+            // reader would take for a real expiry.
+            expires_at: match approval.scope {
+                ApprovalScope::Persisted => Some(approval.expires_at),
+                ApprovalScope::Session { .. } => None,
+            },
         },
     };
     log.append(handle, wirken_audit::TrustLevel::System, event)?;
@@ -1579,9 +1613,55 @@ pub fn emit_operator_approval(
             approved_via: Some(approved_via),
             adapter_id: adapter_id.map(str::to_string),
             sender_id: sender_id.map(str::to_string),
+            tier: tier_of_storable_key(action_key).map(|t| t.label().to_string()),
+            // One-shot: nothing was written to the store, so there
+            // is no window to name.
+            expires_at: None,
         },
     )?;
     Ok(())
+}
+
+/// Record an operator's revoke on the audit chain.
+///
+/// The store's DELETE leaves nothing behind, so this row is the only
+/// evidence the decision was taken. It names the window the removed
+/// row carried, which is how a reviewer sees a grant cut short rather
+/// than allowed to lapse, and `None` when no row was there at all,
+/// because a revoke against a key that was never granted is worth
+/// seeing and is indistinguishable afterwards.
+pub fn emit_permission_revoked(
+    log: &dyn wirken_audit::SessionLog,
+    handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
+    action_key: &str,
+    agent_id: &str,
+    revoked_by: &str,
+    removed_expires_at: Option<DateTime<Utc>>,
+) -> Result<(), GatewayError> {
+    log.append(
+        handle,
+        wirken_audit::TrustLevel::System,
+        wirken_audit::SessionEvent::PermissionRevoked {
+            action_key: action_key.to_string(),
+            agent_id: canonical_agent_id(agent_id).to_string(),
+            revoked_by: revoked_by.to_string(),
+            tier: tier_of_storable_key(action_key).map(|t| t.label().to_string()),
+            expires_at: removed_expires_at,
+        },
+    )
+    .map(|_| ())
+    .map_err(GatewayError::Audit)
+}
+
+/// The tier a stored action key resolves to.
+///
+/// Only Tier 2 keys are storable, so this answers `Some(Tier2)` for
+/// every key the gate can act on and `None` for one it cannot. A
+/// stored row whose key answers `None` is inert, which is what the
+/// sweep removes; recording the answer on the row is what lets a
+/// reviewer see that without re-deriving it.
+pub fn tier_of_storable_key(action_key: &str) -> Option<PermissionTier> {
+    is_storable_approval_key(action_key).then_some(PermissionTier::Tier2)
 }
 
 /// Append one audit row per grant the open-time sweep removed.
@@ -2602,6 +2682,8 @@ mod tier_tests {
                     approved_via: None,
                     adapter_id: None,
                     sender_id: None,
+                    tier: None,
+                    expires_at: None,
                 },
             )
             .unwrap();
@@ -2639,6 +2721,8 @@ mod tier_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
@@ -2672,6 +2756,8 @@ mod tier_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
@@ -2687,6 +2773,8 @@ mod tier_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
@@ -2705,6 +2793,8 @@ mod tier_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
@@ -2741,6 +2831,8 @@ mod tier_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();

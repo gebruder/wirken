@@ -241,6 +241,73 @@ pub fn load_permission_expiry_days(data_dir: &Path) -> u32 {
     }
 }
 
+/// Open the session log with the gateway's audit signing key, and
+/// the local operator's name for attributing what they do with it.
+///
+/// A row an operator writes from the CLI lands on the same chain as
+/// everything the gateway writes, so it has to be covered by the same
+/// chain-head signatures. Opening without the signer leaves those
+/// rows in an unsigned tail, which is exactly the part of the chain a
+/// same-uid rewrite can edit without `wirken sessions verify`
+/// noticing.
+///
+/// A missing key is a warning rather than a failure: refusing to
+/// record a revoke because the chain cannot be signed would lose the
+/// record entirely, which is worse than recording it unsigned and
+/// saying so.
+pub fn open_signed_session_log(
+    cfg: &GatewayConfig,
+) -> anyhow::Result<std::sync::Arc<wirken_audit::SqliteSessionLog>> {
+    use anyhow::Context;
+    let signer = match wirken_audit::AuditSigningKey::load_or_create(&cfg.data_dir) {
+        Ok(k) => Some(std::sync::Arc::new(k)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "this command will write to an unsigned audit chain: could not load \
+                 or generate the gateway audit signing key"
+            );
+            None
+        }
+    };
+    Ok(std::sync::Arc::new(match signer {
+        Some(s) => wirken_audit::SqliteSessionLog::open_with_signer(&cfg.audit_db_path(), s)
+            .context("Failed to open session log")?,
+        None => wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
+            .context("Failed to open session log")?,
+    }))
+}
+
+/// Seal the operator lane with a chain head, so the rows a command
+/// just wrote are covered by a signature rather than sitting in the
+/// unsigned tail until something else happens to close it.
+pub fn seal_operator_lane(log: &wirken_audit::SqliteSessionLog, session_id: &str) {
+    use wirken_audit::SessionLog as _;
+    let handle = log.handle_for(wirken_audit::SessionId::new(session_id.to_string()));
+    if let Err(e) = log.emit_chain_head(&handle, wirken_audit::ChainHeadReason::SessionEnd) {
+        tracing::warn!(
+            error = %e,
+            session_id,
+            "could not write the chain head for this operator action; the rows it \
+             wrote stay in the unsigned tail"
+        );
+    }
+}
+
+/// The local operator, for attributing a CLI action on the chain.
+///
+/// The OS user is the only identity a CLI invocation has: there is no
+/// login, and the permission store is reachable by anyone who can
+/// read the data directory. Recording it names who was at the
+/// keyboard as far as the machine knows, which is weaker than an
+/// authenticated actor and stronger than the literal string
+/// "operator" every row used to carry.
+pub fn local_operator() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "operator".to_string())
+}
+
 /// Open the permission store with the operator's configured default
 /// grant window. The single opening path for every CLI command, so a
 /// window set in `permissions.json` applies wherever a grant is
@@ -265,14 +332,14 @@ pub fn open_permission_store(
     // all.
     let report = store.take_sweep_report();
     if !report.is_empty() {
-        let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path())
-            .context("Failed to open session log to record the permission sweep")?;
+        let log = open_signed_session_log(cfg)?;
         let handle = wirken_audit::SessionLog::handle_for(
-            &log,
+            log.as_ref(),
             wirken_audit::SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()),
         );
-        emit_sweep_report(&report, &log, &handle)
+        emit_sweep_report(&report, log.as_ref(), &handle)
             .context("Failed to record the permission sweep in the audit chain")?;
+        seal_operator_lane(log.as_ref(), OPERATOR_PERMISSIONS_SESSION);
         eprintln!(
             "  Removed {} stored permission row(s) the gate cannot act on: {} whose action key \
              is Tier 1 or Tier 3, {} past their expiry. Recorded under the \

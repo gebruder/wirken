@@ -800,6 +800,47 @@ pub enum SessionEvent {
         /// Platform sender that drove the approved tool call.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+        /// Tier the approved action resolves to, matching
+        /// [`Self::PermissionDenied::tier`]. Only Tier 2 keys are
+        /// storable, so a persisted grant naming anything else is a
+        /// row the gate will never read; recording the tier is what
+        /// lets a reviewer see that from the chain rather than by
+        /// re-deriving it from the key.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
+        /// Window the grant carries. `None` for a session-scoped
+        /// grant, whose expiry is the `DateTime::<Utc>::MAX_UTC`
+        /// sentinel rather than a date anything reads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
+    },
+    /// An operator removed a stored grant.
+    ///
+    /// Distinct from [`Self::PermissionGrantExpired`], which is a
+    /// window running out, and from the sweep, which removes rows the
+    /// gate could never read. Nothing here ran out and nothing was
+    /// inert: somebody decided the grant should stop, and the row is
+    /// the only record that the decision was taken, because the
+    /// store's DELETE leaves nothing behind.
+    ///
+    /// `expires_at` is the window the removed row carried, so a
+    /// reviewer can see how much of a grant was cut short. `None`
+    /// when no row was there to remove, which is recorded rather
+    /// than skipped: a revoke naming a key that was never granted is
+    /// worth seeing, and it is indistinguishable afterwards from one
+    /// that never ran.
+    PermissionRevoked {
+        action_key: String,
+        agent_id: String,
+        /// Who asked. The local operator for a CLI revoke.
+        revoked_by: String,
+        /// Tier the revoked action resolves to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
+        /// Window the removed row carried, or `None` when there was
+        /// no row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
     },
     /// A persisted grant was written over a row that already
     /// existed for the same `(action_key, agent_id)`. Distinct from

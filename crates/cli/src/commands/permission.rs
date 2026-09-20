@@ -4,11 +4,13 @@ use std::collections::HashSet;
 use wirken_audit::{SessionId, SessionLog, SqliteSessionLog};
 use wirken_gateway::permissions::{
     ApprovalScope, OPERATOR_PERMISSIONS_SESSION, approve_and_log_by_key_with_expiry,
-    list_active_session_scoped_grants_for_agent,
+    emit_permission_revoked, list_active_session_scoped_grants_for_agent,
 };
 use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
 
-use super::{config, open_permission_store};
+use super::{
+    config, local_operator, open_permission_store, open_signed_session_log, seal_operator_lane,
+};
 
 /// Connect to `gateway-permissions.sock`, send one request, read
 /// one response, close. Mirrors the orchestrator-push client
@@ -326,11 +328,34 @@ pub async fn revoke(key: &str, agent: &str) -> Result<()> {
     let cfg = config();
     let store = open_permission_store(&cfg)?;
 
-    store
-        .revoke(key, agent)
+    // Read the window before the DELETE: afterwards there is nothing
+    // left to say how much of the grant was cut short.
+    let removed = store
+        .revoke_reporting(key, agent)
         .context(format!("Failed to revoke permission '{key}'"))?;
 
-    println!("  Permission '{key}' revoked for agent '{agent}'.");
+    let log = open_signed_session_log(&cfg)?;
+    let handle = log.handle_for(SessionId::new(OPERATOR_PERMISSIONS_SESSION.to_string()));
+    emit_permission_revoked(
+        log.as_ref(),
+        &handle,
+        key,
+        agent,
+        &local_operator(),
+        removed,
+    )
+    .context("Failed to record the revoke in the audit chain")?;
+    seal_operator_lane(log.as_ref(), OPERATOR_PERMISSIONS_SESSION);
+
+    match removed {
+        Some(until) => println!(
+            "  Permission '{key}' revoked for agent '{agent}' (its window ran to {}).",
+            until.format("%Y-%m-%d %H:%M:%S UTC")
+        ),
+        None => {
+            println!("  Permission '{key}' was not granted for agent '{agent}'; nothing to revoke.")
+        }
+    }
     Ok(())
 }
 
@@ -362,7 +387,8 @@ pub async fn approve(
 ) -> Result<()> {
     let cfg = config();
     let store = open_permission_store(&cfg)?;
-    let log = SqliteSessionLog::open(&cfg.audit_db_path()).context("Failed to open session log")?;
+    let log = open_signed_session_log(&cfg)?;
+    let operator = local_operator();
 
     match session {
         None => {
@@ -371,15 +397,16 @@ pub async fn approve(
                 &store,
                 key,
                 agent,
-                "operator",
+                &operator,
                 ApprovalScope::Persisted,
-                &log,
+                log.as_ref(),
                 &handle,
                 None,
                 None,
                 expires_in_days,
             )
             .context(format!("Failed to approve permission '{key}'"))?;
+            seal_operator_lane(log.as_ref(), OPERATOR_PERMISSIONS_SESSION);
             println!(
                 "  Approved '{}' for agent '{}' until {}.",
                 approval.action_key,
@@ -400,7 +427,16 @@ pub async fn approve(
                 session_id: session_id.to_string(),
             };
             let approval = approve_and_log_by_key_with_expiry(
-                &store, key, agent, "operator", scope, &log, &handle, None, None, None,
+                &store,
+                key,
+                agent,
+                &operator,
+                scope,
+                log.as_ref(),
+                &handle,
+                None,
+                None,
+                None,
             )
             .context(format!(
                 "Failed to approve permission '{key}' for session '{session_id}'"

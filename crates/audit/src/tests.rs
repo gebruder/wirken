@@ -1396,6 +1396,8 @@ mod session {
                 approved_via: Some(crate::session_log::ApprovalSource::Stdin),
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
@@ -2578,6 +2580,15 @@ fn every_session_event() -> Vec<SessionEvent> {
             approved_via: None,
             adapter_id: None,
             sender_id: None,
+            tier: None,
+            expires_at: None,
+        },
+        SessionEvent::PermissionRevoked {
+            action_key: String::new(),
+            agent_id: String::new(),
+            revoked_by: String::new(),
+            tier: None,
+            expires_at: None,
         },
         SessionEvent::PermissionRenewed {
             action_key: String::new(),
@@ -2901,6 +2912,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::BudgetExceeded { .. } => "BudgetExceeded",
         SessionEvent::PermissionDenied { .. } => "PermissionDenied",
         SessionEvent::PermissionApproved { .. } => "PermissionApproved",
+        SessionEvent::PermissionRevoked { .. } => "PermissionRevoked",
         SessionEvent::PermissionRenewed { .. } => "PermissionRenewed",
         SessionEvent::PermissionGrantExpired { .. } => "PermissionGrantExpired",
         SessionEvent::PermissionGrantPruned { .. } => "PermissionGrantPruned",
@@ -2948,7 +2960,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 53;
+const SESSION_EVENT_VARIANTS: usize = 54;
 
 /// The list covers the enum.
 #[test]
@@ -3290,6 +3302,8 @@ fn legacy_view_projects_native_session_payloads_into_detail() {
                 approved_via: Some(crate::ApprovalSource::Cli),
                 adapter_id: Some("slack".into()),
                 sender_id: Some("U07P53Y41FF".into()),
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();

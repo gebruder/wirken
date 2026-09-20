@@ -1124,6 +1124,8 @@ mod replay_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
@@ -1239,6 +1241,8 @@ mod replay_tests {
                 approved_via: None,
                 adapter_id: None,
                 sender_id: None,
+                tier: None,
+                expires_at: None,
             },
         )
         .unwrap();
