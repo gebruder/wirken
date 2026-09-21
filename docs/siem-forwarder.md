@@ -137,7 +137,7 @@ tool_result name=exec success=true agent=worker sandbox_mode=ExecOnly runtime=Do
 
 A tool that ran in the gateway's own process says nothing about a sandbox
 rather than saying `host`. See
-[audit](audit-cli.md#fields-added-since-1230) for the field on the row.
+[audit](audit-cli.md#fields-added-in-1240) for the field on the row.
 
 ### HMAC
 

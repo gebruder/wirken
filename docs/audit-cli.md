@@ -53,7 +53,7 @@ Zirkel pipeline variants (`CandidateScored`, `CandidateLlmScored`,
 `CandidateKept`, `CandidateSkipped`, `ThemeNamed`, `InterestsEdited`,
 `PerspectiveSkipped`, `PerspectiveExpansion`) carry per-pipeline identity.
 
-### Fields added since 1.23.0
+### Fields added in 1.24.0
 
 One row each, verbatim from a run.
 

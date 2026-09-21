@@ -10,15 +10,142 @@ tagged.
 
 ## [Unreleased]
 
-### Added
+## [1.24.0] - 2026-09-21
 
-- The webchat approval card shows what is being approved on its first
-  paint. `ApprovalRequest` carries the arguments the model sent and
-  what it said in the same message, so the card reads both off the
-  event. It used to show the action key where the command belonged
-  and swap the command in once the events poll had fetched the call
-  row from the chain, which meant a card could be decided on before
-  the command it was about had arrived.
+Approvals and the audit chain. An operator is now shown what a call
+actually is before being asked to allow it, on both surfaces; the
+decisions and the grants behind them land on a signed chain; and a
+redaction is a first-class operation that reseals the chain and signs
+what it cut, rather than an edit that leaves the log reading as
+tampered.
+
+### Security
+
+- A session-scoped grant dies with its session. `PermissionStore`
+  consults session liveness before serving one from its cache, so a
+  session closed from the CLI or aged out of its window answers
+  `NeedsApproval` on the very next check, in the running process, and
+  the dead entry is dropped on that first miss. The cache was the
+  only reader that never heard: closing a session marked the store
+  row expired and wrote a tombstone the next wake replays, and
+  neither reached a daemon already holding the grant, which went on
+  answering `Allowed` until the process restarted.
+
+- Refused approvals and operator revokes are on a signed chain.
+  `PermissionApprovalRefused` names the request, the action it was
+  raised for, the caller, the reason and the adapter, from all three
+  sites that refuse on authority grounds: a caller off the channel's
+  approver list, a page deciding a request raised on another channel,
+  and one deciding a request from another conversation. All three
+  previously left a warn-level log and nothing on the chain, so a
+  detection could not count attempts, which is the interesting
+  number. `PermissionRevoked` is likewise new: the CLI's revoke wrote
+  nothing at all and its `DELETE` leaves nothing behind, so the chain
+  is the only place the decision survives. It names the window the
+  removed row carried, so a grant cut short is distinguishable from
+  one allowed to lapse. Both lanes are signed now, where they were
+  not.
+
+- Every Sentinel identity column holds the field it is named after.
+  `extract_identity_for_sentinel` left `AdapterId`, `SenderId` and
+  `AgentId` empty for fourteen variants that carry those fields, so a
+  permission denial arrived with no channel and no sender, an
+  `http_request` row with no agent, and every hook, redaction, grant
+  and delivery row with nothing at all. Every variant that carries
+  one of the three now hands it over. `SenderId` is a platform sender
+  id or null and never an operator label: an import row's `actor`
+  used to land there, so that column reads null for `import_started`
+  and `import_completed` now, and a query reading a platform sender
+  out of it was reading a role name.
+
+- Both approval surfaces show the command and the model's own words
+  before asking. The CLI prompt showed the tool name and the tier,
+  which do not describe the call: every command carrying a shell
+  metacharacter classifies to the single key `shell::pipeline:`, so
+  `cat a | bash` and `cat b | bash` produced the same prompt. It now
+  shows the action key, the arguments the model sent, what the model
+  said in the same message, and the message the turn is replying to,
+  each on its own line above the `[y/N]`. Everything interpolated
+  there is model output or an inbound message, so escape sequences
+  are stripped and line breaks folded: an argument cannot repaint the
+  line above it or write a second line that looks like the question.
+  The webchat approval card reads the same three off the
+  `ApprovalRequest` event, so it draws them on its first paint; it
+  used to show the action key where the command belonged and swap the
+  command in once the events poll had fetched the call row, which
+  meant a card could be decided on before the command it was about
+  had arrived.
+
+- A redaction reseals the chain and is signed for what it cut.
+  Rewriting a row by hand moves every hash from that row onward, so
+  the head signed before it stops covering what is on disk: the log
+  reads as tampered and every row after the edit is unusable with it.
+  `SqliteSessionLog::redact` does the rewrite, re-hashes forward, and
+  mints a `ChainHeadReason::Redaction` head carrying the superseded
+  head's chain hash and signature. It refuses on an unsigned log,
+  where there would be no head to mint and nothing to tell a
+  redaction from tampering.
+
+  The head carries a `redaction` object naming the `seq`, the row's
+  `original_leaf_hash` and `redacted_leaf_hash`, the `operator` who
+  ordered it and the `reason`, so a reader holding that row and not
+  the payload it removed can still say which row changed, confirm a
+  copy held elsewhere is the one that was cut, see that the
+  replacement has not been swapped since, and read who asked and why.
+  Chain-head schema version 3 binds a digest of that record into the
+  signed message. The chain alone would not be enough: a redaction
+  head is the last row in its session, so whoever rewrites it can
+  recompute that row's own hashes with nothing after it to disagree.
+  Each head is verified under the layout it was signed with, so heads
+  on disk at version 2 still verify, and a record on one of those is
+  refused because no signature covers it.
+
+  This buys attribution, not invisibility. Anyone who can call it can
+  rewrite history, and the signing key is held by the process that
+  writes the chain. What it cannot do is rewrite quietly: exactly one
+  range shows as resealed, under a named key, with what was cut and
+  why on the head.
+
+### Changed
+
+- The webchat request handler is a router: one function per route,
+  dispatched on the request path with the query string taken off.
+  Three things the old matching broke come with it.
+  `GET /api/approvals?c=<conversation>` reaches its route, where the
+  old shape matched the request line up to the space after the path
+  and so answered 404 to the only request the page makes to it, which
+  left the approvals snapshot null: no "awaiting you elsewhere" chip,
+  no other-channel badge, no awaiting marker in the rail, and no
+  pending card restored after a reload however many decisions were
+  waiting. The About panel draws the capabilities of the conversation
+  it is open on rather than always the legacy one, so a turn running
+  in the conversation being viewed no longer reads as idle. And the
+  gateway config is carried on the router's shared state instead of
+  being read per request.
+
+- An `exec` result records where the command ran. The row carries a
+  `sandbox` object with the configured mode (`exec_only`, `gvisor`,
+  `off`), the runtime that actually ran it (`docker`, `gvisor`,
+  `host`) and the container id when there was one, written by the
+  branch that dispatched the command rather than read back from
+  configuration. An auditor could not previously tell a containerised
+  `exec` from a host one: both paths format their output identically
+  and no row named the difference. The two can disagree, which is why
+  both are on the row. Additive and defaulted; absent is what a tool
+  that runs in the gateway's own process records, and a refused call
+  records nothing at all, which is a different answer from `host`.
+  The SIEM typed summary and the webchat session projection carry it.
+
+- Every `Action` keys under a namespace of its own. Eight variants
+  fell through to the derived `Debug` form, which made the key a Rust
+  identifier that moved when a variant was renamed and, for
+  `NetworkRequest`, rendered as `NetworkRequest { domain: "x" }`,
+  braces and quotes included. They key as `network:<domain>`,
+  `workspace_file`, `channel_converse`, `web_search`, `http_request`,
+  `destructive_file_op`, `credential_access` and `cron_create`. None
+  of the eight was storable, so no stored grant is orphaned; what
+  changes is the key shown at the prompt and written to the chain on
+  every denial row.
 
 - What the model says alongside its tool calls is kept. Providers
   send the assistant's own text in the same message as its calls, and
@@ -26,125 +153,39 @@ tagged.
   and Bedrock, plus the two streaming ones) returned on the calls
   without reading it, so the sentence explaining the call was gone
   before anything could record it. `LlmResponse::ToolCalls` carries
-  it, `assistant_tool_calls` rows carry it as an additive defaulted
-  field, and both approval surfaces show it: the CLI prompt as "the
-  model said:" and the webchat approval card on its own line.
+  it and `assistant_tool_calls` rows carry it as an additive
+  defaulted field.
 
-- The CLI approval prompt says what is being approved before it asks.
-  It showed the tool name and the tier, which do not describe the
-  call: every command carrying a shell metacharacter classifies to
-  the single key `shell::pipeline:`, so `cat a | bash` and
-  `cat b | bash` produced the same prompt. It now shows the action
-  key the gate matched, the arguments the model sent, and the message
-  the turn is replying to, each on its own line above the `[y/N]`.
-  Everything interpolated is model output or an inbound message, so
-  escape sequences are stripped and line breaks are folded: an
-  argument cannot repaint the line above it or write a second line
-  that looks like the question.
+- `status_snapshot` reports gateway posture separately from the
+  escape hatches. A cadence value, the sandbox mode and whether a
+  skill registry root is pinned moved from `escape_hatches` to a
+  `posture` key: a hatch is a named environment variable that
+  switches a check off, and none of those three is one. Consumers
+  reading `escape_hatches` for those values read `posture` instead.
 
-- An `exec` tool result records where the command ran. The row now
-  carries a `sandbox` object with the configured mode (`exec_only`,
-  `gvisor`, `off`), the runtime that actually ran it (`docker`,
-  `gvisor`, `host`) and the container id when there was one, written
-  by the code that dispatched the command rather than read back from
-  configuration when the row is emitted. An auditor reading
-  `audit.db` could not previously tell a containerised `exec` from a
-  host one: both paths format their output identically, and no row
-  named the difference. The field is additive and defaulted, so rows
-  written before it reads back as absent, and absent is also what a
-  tool that runs inside the gateway's own process records. The SIEM
-  typed summary and the webchat session projection both carry it.
+### Docs
 
-### Added
+- Every event, field and behaviour added since 1.23.0 is documented
+  in the page that owns it, with a real row quoted per new field:
+  the event surface and redaction in [audit](docs/audit-cli.md), the
+  action-key namespaces and what an approval prompt shows in
+  [permissions](docs/permissions-and-identity.md), the identity
+  columns and the typed summary in
+  [SIEM](docs/siem-forwarder.md), where a call ran in
+  [sandbox properties](docs/sandbox-properties.md), and what WebChat
+  serves in [CLI](docs/cli.md).
 
-- `SqliteSessionLog::redact` rewrites one row and re-seals the chain
-  over it. Rewriting a row by hand moves every hash from that row
-  onward, so the head signed before it stops covering what is on
-  disk: the log reads as tampered and every row after the edit is
-  unusable with it. Redaction does the rewrite, re-hashes forward,
-  and mints a `ChainHeadReason::Redaction` head carrying the
-  superseded head's chain hash and signature, so the rewrite is
-  attributable rather than silent. It refuses on an unsigned log,
-  where there would be no head to mint and nothing to tell a
-  redaction from tampering.
+- The hostile-model demo runs from five verbs
+  (`scripts/demo/stage.sh up|ask|skills|verify|down`), and its
+  runbook carries the output of a full pass. The scripted model now
+  ships a plausible sentence with each tool call, so the demo shows
+  the cover next to the ask on both the prompt and the chain.
 
-  This buys attribution, not invisibility, and is not a way to make a
-  rewrite disappear: the redaction head names the hash the replaced
-  range used to end on and carries the signature made over it, so an
-  auditor holding the old head sees exactly one range resealed and by
-  whose key. `verify` treats a head a redaction names as accounted
-  for rather than invalid; every other head still has to match.
-
-  The head carries a `redaction` object naming what was cut: the
-  `seq`, the row's `original_leaf_hash` and `redacted_leaf_hash`, the
-  `operator` who ordered it and the `reason`. A reader holding that
-  row and not the payload it removed can still say which row changed,
-  confirm a copy held elsewhere is the one that was cut, see that the
-  replacement has not been swapped since, and read who asked and why.
-  The head's signature covers those five: chain-head schema version 3
-  binds a digest of the record into the signed message. The chain
-  alone would not be enough, because a redaction head is the last row
-  in its session and whoever rewrites it can recompute that row's own
-  hashes with nothing after it to disagree. Each head is verified
-  under the layout it was signed with, so heads already on disk at
-  version 2 still verify; a record on one of those is refused,
-  because no signature covers it.
-
-### Changed
-
-- Every `Action` has an explicit approval key. Eight variants fell
-  through to the derived `Debug` form, which made the key a Rust
-  identifier that changed with a rename and, for `NetworkRequest`,
-  rendered as `NetworkRequest { domain: "x" }`, braces and quotes
-  included. They key as `network:<domain>`, `workspace_file`,
-  `channel_converse`, `web_search`, `http_request`,
-  `destructive_file_op`, `credential_access` and `cron_create`. None
-  of the eight was storable (`is_storable_approval_key` admits only
-  the Tier 2 namespaces), so no stored grant is orphaned; what
-  changes is the key shown at the prompt and written to the chain on
-  every denial row. Thirteen corpus lines carried the old spellings
-  and are updated.
-
-### Fixed
-
-- The Sentinel and webhook envelopes carry the identity the row
-  holds. `extract_identity_for_sentinel` filled its `adapter_id`,
-  `sender_id` and `agent_id` columns from twenty variants and left
-  them empty for fourteen that carry the same fields, so a permission
-  denial arrived with no channel and no sender, a `http_request` row
-  with no agent, and every hook, redaction, grant and delivery row
-  with nothing at all. Every variant that carries one of the three
-  now hands it over.
-
-- Each Sentinel identity column holds the field it is named after and
-  nothing else. `SenderId` is a platform sender id or null; an
-  operator label never goes there. An import row's `actor` did, so
-  that column changes from the operator name to null for
-  `import_started` and `import_completed`; a query reading a platform
-  sender out of it was reading a role name. The label is still on the
-  row in `Event`, as are the other operator labels that were already
-  kept off these columns (`caller` on a refused approval,
-  `revoked_by` on a revocation, `approved_by` on a grant and its
-  renewal). An operator identity that needs a column of its own gets
-  one under its own name, covering every variant that carries such a
-  label rather than the one that prompted it.
-
-- The About panel draws the capabilities of the conversation it is
-  open on. It asked `/api/capabilities` with no key, so it always
-  showed the legacy conversation: a turn running in the conversation
-  being viewed read as idle, and a turn in the legacy one read as
-  busy. The panel now sends the conversation it was opened on and
-  follows a switch made while it is open.
-
-- `GET /api/approvals?c=<conversation>` reaches its route. The webchat
-  routes matched the request line up to the space after the path, so a
-  target carrying a query string named no route and answered 404. That
-  is the only request the page makes to this route, and with it
-  refused the page's approvals snapshot stayed null: no "awaiting you
-  elsewhere" chip, no other-channel badge, no awaiting marker in the
-  rail, and a pending card was not restored after a reload however
-  many decisions were waiting. Routes match on the path now, with the
-  query read off it.
+- Source comments across the workspace say what the code guarantees
+  rather than which work item shipped it, and the checks that read
+  the text of Rust source moved from the test binaries to
+  `scripts/source_lints.py`, where a rename cannot fail them and a
+  rewrite cannot pass them.
 
 ## [1.23.0] - 2026-09-20
 
