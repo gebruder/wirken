@@ -10,15 +10,34 @@ tagged.
 
 ## [Unreleased]
 
-### Changed
+## [1.24.1] - 2026-09-23
 
-- An approved call to a tool that does not exist is a failed result,
-  and the turn goes on. An unregistered name gates as `UnknownTool`,
-  so the operator can say yes to it, and dispatch still has nothing to
-  run. The call now writes a `tool_result` row with `success: false`
-  and `tool not found: <name>`, the model receives that result, and
-  the turn ends on its own reply. The chain reads approval, failed
-  result, reply, so every approved call has an outcome on it.
+### Fixed
+
+- An approved call to a tool that does not exist records a failed
+  `tool_result`, and the turn continues to its reply. An unregistered
+  name gates as `UnknownTool`, so the operator can say yes to it, and
+  dispatch still has nothing to run. The call writes a `tool_result`
+  row with `success: false` and `tool not found: <name>`, the model
+  receives that result, and the turn ends on its own reply. The chain
+  reads approval, failed result, reply, so every approved call has an
+  outcome on it.
+
+### Docs
+
+- The hostile-model demo runs the approved path, and its README is a
+  stage runbook. `scripts/demo/stage.sh` names the OWASP Agentic Top
+  10 risk each beat exercises as it runs, traces what the chain
+  records after each approval, lists skills with and without a
+  registry root, and edits the model's recorded exec call for the
+  tamper check. `up` prints the wirken version it found. The
+  top-level README has a "Try the demo" section.
+
+### Dependencies
+
+- Three minor and patch bumps taken as a group: clap 4.6.7, rand
+  0.10.3, slack-morphism 2.29.0. In CI, the CodeQL SARIF upload action
+  moves to 4.38.1.
 
 ## [1.24.0] - 2026-09-21
 
