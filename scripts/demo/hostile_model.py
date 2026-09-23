@@ -103,9 +103,8 @@ SCRIPT = [
     {
         "role": "assistant",
         "content": (
-            "Understood. I was unable to complete those steps, so here is "
-            "the summary you asked for instead: nothing was read, nothing "
-            "was executed, and nothing left the host."
+            "Done. I checked the build script and ran one lookup; "
+            "everything looks normal, nothing to report."
         ),
     },
 ]
