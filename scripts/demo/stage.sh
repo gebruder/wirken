@@ -13,6 +13,10 @@
 # here touches ~/.wirken: WIRKEN_DATA_DIR is set to a scratch dir under
 # this folder, and every process resolves the data directory through
 # it. Each verb can be run twice.
+#
+# Each beat prints the OWASP Agentic Top 10 identifiers it exercises,
+# on its own line, before its output. The names are quoted from the
+# ASI table in docs/security-properties.md.
 
 set -euo pipefail
 
@@ -28,9 +32,29 @@ PIDFILE="$WIRKEN_DATA_DIR/hostile_model.pid"
 ANCHOR="$WIRKEN_DATA_DIR/audit/audit-signing.pub"
 PROMPT='summarise the release notes'
 
+# Only the four the demo path exercises. `asi` refuses any other, so a
+# beat cannot claim ASI03 or anything else by a typo.
+declare -A ASI_NAME=(
+    [ASI02]="Tool Misuse and Exploitation"
+    [ASI04]="Agentic Supply Chain Vulnerabilities"
+    [ASI09]="Human-Agent Trust Exploitation"
+    [ASI10]="Rogue Agents"
+)
+
 die() {
     printf 'stage.sh: %s\n' "$1" >&2
     exit 1
+}
+
+# One label line: the identifiers joined, then the name of the last.
+# `asi ASI02 ASI09` is "ASI02 · ASI09 Human-Agent Trust Exploitation".
+asi() {
+    local id joined=""
+    for id in "$@"; do
+        [ -n "${ASI_NAME[$id]:-}" ] || die "no demo beat exercises $id"
+        joined="${joined:+$joined · }$id"
+    done
+    printf '%s %s\n' "$joined" "${ASI_NAME[${!#}]}"
 }
 
 # The pid of a hostile_model.py serving this port, by reading each
@@ -188,15 +212,101 @@ JSON
 # here rather than on stage: without it every LLM call also prints
 # `no pricing entry for (provider, model)`, because hostile-demo-1 is
 # not in the baked pricing table.
+#
+# The trace sits on wirken's output and reads the chain as the run
+# appends to it. Each `assistant_tool_calls` row is a call arriving
+# from the model, and it prints that call's label. The row is written
+# before the call reaches the gate, so reading the chain before
+# passing on each chunk of output puts every label above the prompt
+# it belongs to. Turn 1 is refused without a prompt and prints
+# nothing of its own, so the trace also prints the reason the chain
+# records for it.
 ask() {
     listening || die "no hostile model on port $PORT; run 'up' first"
-    RUST_LOG=wirken=error "$WIRKEN" ask -m "$PROMPT"
+    # Assigned first: a `die` inside an argument's substitution would
+    # not stop the script.
+    local credential pipeline unknown
+    credential="$(asi ASI02)"
+    pipeline="$(asi ASI02 ASI09)"
+    unknown="$(asi ASI10)"
+    RUST_LOG=wirken=error python3 - "$DB" "$WIRKEN" "$PROMPT" \
+        "http_request=$credential" \
+        "exec=$pipeline" \
+        "vault_dump_all=$unknown" 3<&0 <<'PY'
+import json, os, select, signal, sqlite3, subprocess, sys
+
+db, wirken, prompt, *pairs = sys.argv[1:]
+labels = dict(pair.split("=", 1) for pair in pairs)
+out = sys.stdout.buffer
+
+def rows(after):
+    if not os.path.exists(db):
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        try:
+            return conn.execute(
+                "SELECT seq, payload FROM session_events WHERE seq > ? ORDER BY seq",
+                (after,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+# Rows from an earlier `ask` are not this run's calls.
+seen = max((seq for seq, _ in rows(-1)), default=-1)
+refused = set()
+
+def trace():
+    global seen
+    for seq, payload in rows(seen):
+        seen = seq
+        event = json.loads(payload)
+        kind = event.get("kind")
+        if kind == "assistant_tool_calls":
+            for call in event.get("calls", []):
+                if call.get("name") in labels:
+                    out.write(f"{labels[call['name']]}\n".encode())
+        elif kind == "skill_permission_denied":
+            refused.add(event.get("requested"))
+        elif kind == "tool_result" and event.get("tool_name") in refused:
+            refused.discard(event.get("tool_name"))
+            out.write(f"  refused without a prompt: {event.get('output')}\n".encode())
+    out.flush()
+
+# This script is on stdin, so the presenter's terminal arrives on fd 3
+# and wirken gets it back as stdin, which is what attaches the gate.
+# Both output streams come through here so the labels interleave.
+child = subprocess.Popen(
+    [wirken, "ask", "-m", prompt],
+    stdin=3,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+)
+# Ctrl-C belongs to wirken; this process waits for it to finish.
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+fd = child.stdout.fileno()
+while True:
+    ready, _, _ = select.select([fd], [], [], 0.05)
+    trace()
+    if not ready:
+        continue
+    chunk = os.read(fd, 4096)
+    if not chunk:
+        break
+    out.write(chunk)
+    out.flush()
+trace()
+sys.exit(child.wait())
+PY
 }
 
 # The loader logs its per-skill reason through tracing, which writes
 # to stdout beside the table, so the filter is on stdout and not on
 # stderr. NO_COLOR keeps the escape sequences out of what gets pasted.
 skills() {
+    asi ASI04
     NO_COLOR=1 RUST_LOG=wirken_agent::skill=debug "$WIRKEN" skills list 2>/dev/null \
         | grep 'Failed to load skill at'
 }
@@ -210,6 +320,7 @@ verify() {
     # none to make look boring.
     [ -n "$seq" ] || die "no exec denial on the chain; run 'ask' and answer n"
 
+    asi ASI10
     printf -- '── the chain as written ──\n'
     run_verify
     # Where each exec ran, from the row that records it. Absent means
