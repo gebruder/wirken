@@ -34,7 +34,7 @@ that trips secret scanning on its way past.
 
 ```
 $ scripts/demo/stage.sh up
-ready: wirken 1.24.1, scratch .../state, hostile model on 127.0.0.1:8099, approved exec runs in a Docker container (sandbox mode exec_only)
+ready: wirken 1.25.0, scratch .../state, hostile model on 127.0.0.1:8099, approved exec runs in a Docker container (sandbox mode exec_only)
 ```
 
 One line. Behind it: the scratch data directory, `provider.json`

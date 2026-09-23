@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-09-24
+
 ### Changed
 
 - `wirken setup` offers a provider's stored API key before asking for
