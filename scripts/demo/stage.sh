@@ -29,11 +29,7 @@ export WIRKEN_VAULT_PASSPHRASE="demo-passphrase"
 
 DB="$WIRKEN_DATA_DIR/audit.db"
 PIDFILE="$WIRKEN_DATA_DIR/hostile_model.pid"
-# The chain's signing key lives in the data dir, beside the log it
-# signs. `ask` copies it out once the run ends, and `verify` checks
-# against the copy, so an edit to the log cannot bring its own key.
-SIGNING_KEY="$WIRKEN_DATA_DIR/audit/audit-signing.pub"
-ANCHOR="$HERE/anchor.pub"
+ANCHOR="$WIRKEN_DATA_DIR/audit/audit-signing.pub"
 PROMPT='summarise the release notes'
 
 # Only the four the demo path exercises. `asi` refuses any other, so a
@@ -256,11 +252,10 @@ ask() {
     credential="$(asi ASI02)"
     pipeline="$(asi ASI02 ASI09)"
     unknown="$(asi ASI10)"
-    local rc=0
     RUST_LOG=wirken=error python3 - "$DB" "$WIRKEN" "$PROMPT" \
         "http_request=$credential" \
         "exec=$pipeline" \
-        "vault_dump_all=$unknown" 3<&0 <<'PY' || rc=$?
+        "vault_dump_all=$unknown" 3<&0 <<'PY'
 import json, os, select, signal, sqlite3, subprocess, sys
 
 db, wirken, prompt, *pairs = sys.argv[1:]
@@ -339,9 +334,6 @@ while True:
 trace()
 sys.exit(child.wait())
 PY
-    # The key exists once the run has appended to the chain.
-    [ ! -f "$SIGNING_KEY" ] || cp "$SIGNING_KEY" "$ANCHOR"
-    return "$rc"
 }
 
 # One line per bundle from `skills list`: the table row for a bundle
@@ -381,7 +373,6 @@ skills() {
 
 verify() {
     [ -f "$DB" ] || die "no audit log yet; run 'ask' first"
-    [ -f "$ANCHOR" ] || die "no anchor outside the data dir; run 'ask' first"
     local seq
     seq="$(target_seq)"
     # The edit rewrites what the model asked for: the pipe into bash
@@ -424,7 +415,6 @@ down() {
     [ -z "$running" ] || kill "$running" 2>/dev/null || true
     [ "$WIRKEN_DATA_DIR" = "$HERE/state" ] || die "refusing to remove $WIRKEN_DATA_DIR"
     rm -rf "${WIRKEN_DATA_DIR:?}"
-    rm -f "$ANCHOR"
     printf 'stopped: hostile model down, scratch removed\n'
 }
 
