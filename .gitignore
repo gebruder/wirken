@@ -58,3 +58,4 @@ __pycache__/
 
 # Hostile-model demo scratch data dir
 scripts/demo/state/
+scripts/demo/anchor.pub

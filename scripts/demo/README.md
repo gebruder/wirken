@@ -497,18 +497,22 @@ bypass does not apply on this path.
 ## verify
 
 The first block runs `audit verify --require-signed --anchor` against
-the run's own signing key. Twenty-two rows and two signed heads: a
+`scripts/demo/anchor.pub`, a copy of the run's signing key that `ask`
+takes out of the data directory when the run ends. Twenty-two rows and two signed heads: a
 `SessionStart` on the first append and a `SessionEnd` the ask writes
 when it finishes, so nothing is left in an unsigned tail.
 
 The anchor warning is the honest line to read out, and it is louder
 under `--require-signed` than without it. It prints on the first block
 only; the second is the same check against the same anchor, so the
-script filters the repeat. The anchor in the anchor set
-is the key sitting in the same data directory as the log. A same-UID
-attacker who can rewrite the log can swap that key too, re-sign the
-rewritten chain, and pass. Pinning the claim needs an `--anchor` held
-off the machine. Everything this demo shows is the weaker claim the
+script filters the repeat. The copy outside the data directory does
+not silence it, and should not: `audit verify` warns on any anchor
+whose key is the one sitting in the data directory beside the log,
+whatever file it was read from, because it cannot tell a copy pinned
+before an edit from one taken after. The copy is also writable by the
+same user. A same-UID attacker who can rewrite the log can swap that
+key and the copy too, re-sign the rewritten chain, and pass. Pinning
+the claim needs an `--anchor` held off the machine. Everything this demo shows is the weaker claim the
 chain makes on its own.
 
 The second block is the edit. The row is the model's exec call, and
@@ -540,7 +544,7 @@ chain back. For the OK block again, run `down`, `up`, `ask`.
 ## down
 
 Kills the process whose pid `up` wrote, and removes the scratch
-directory. It refuses to remove anything that is not
+directory and `anchor.pub`. It refuses to remove anything that is not
 `scripts/demo/state`. A server started by hand rather than by `up` is
 the presenter's to stop.
 
@@ -554,6 +558,7 @@ skills/demo-tampered/       signed, then edited: refused at the floor
 skills/demo-selfsigned/     intact self-signature: refused once a root is set
 README.md                   this file
 state/                      scratch data dir, gitignored, created by `up`
+anchor.pub                  signing-key copy, gitignored, written by `ask`
 ```
 
 To rebuild the fixtures from scratch, sign both directories with
