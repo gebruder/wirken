@@ -11507,3 +11507,178 @@ fn calls_with_no_text_carry_none() {
     let (_, text) = calls_and_text(parse_anthropic_response(&body).unwrap().0);
     assert_eq!(text, None);
 }
+
+// ---------------------------------------------------------------------------
+// An approved call to a tool that does not exist. The name gates as
+// `UnknownTool`, the operator says yes, and dispatch still has nothing
+// to run. The turn carries on: the chain records the approval, then a
+// failed result naming the missing tool, then the model's reply to it.
+// ---------------------------------------------------------------------------
+mod approved_unknown_tool {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+    use crate::llm::LlmConfig;
+
+    /// Answers each chat completion with the next message in order.
+    async fn stub(messages: Vec<serde_json::Value>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for message in messages {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buf = vec![0u8; 16384];
+                // Headers, then as many body bytes as they declare.
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let length = text[..end]
+                            .lines()
+                            .find_map(|l| {
+                                l.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .map(|v| v.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                }
+                let finish = if message.get("tool_calls").is_some() {
+                    "tool_calls"
+                } else {
+                    "stop"
+                };
+                let body = serde_json::json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "stub",
+                    "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+        });
+        (format!("http://{addr}/v1"), task)
+    }
+
+    #[tokio::test]
+    async fn an_approved_unknown_tool_is_a_failed_result_and_the_turn_goes_on() {
+        let (base_url, server) = stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "One more lookup.",
+                "tool_calls": [{
+                    "id": "call_unknown",
+                    "type": "function",
+                    "function": {"name": "vault_dump_all", "arguments": "{\"scope\": \"*\"}"},
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Done without it."}),
+        ])
+        .await;
+
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let agent_id = "approved-unknown".to_string();
+        let mut agent = crate::runtime::Agent::new(
+            agent_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+        )
+        .unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        let gate = Arc::new(ScriptedGate::new(vec![ApprovalOutcome::Approved {
+            actor: None,
+        }]));
+        agent.set_approval_gate(gate.clone());
+
+        let result = agent
+            .process_message("summarise the release notes", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply, not an error");
+        server.await.unwrap();
+
+        assert_eq!(result.response, "Done without it.");
+        assert_eq!(
+            *gate.calls.lock().unwrap(),
+            vec!["vault_dump_all".to_string()],
+            "the operator is asked once, about the unknown name"
+        );
+
+        let events: Vec<SessionEvent> = log
+            .get_since(&log.handle_for(SessionId::new(agent_id)), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        let at = |pred: &dyn Fn(&SessionEvent) -> bool, what: &str| {
+            events
+                .iter()
+                .position(pred)
+                .unwrap_or_else(|| panic!("no {what} row: {events:?}"))
+        };
+        let approved = at(
+            &|e| matches!(e, SessionEvent::PermissionApproved { .. }),
+            "approval",
+        );
+        let failed = at(
+            &|e| {
+                matches!(
+                    e,
+                    SessionEvent::ToolResult { tool_name, output, success: false, .. }
+                        if tool_name == "vault_dump_all"
+                            && output == "tool not found: vault_dump_all"
+                )
+            },
+            "failed tool_result",
+        );
+        let reply = at(
+            &|e| {
+                matches!(e, SessionEvent::AssistantMessage { content, .. }
+                    if content == "Done without it.")
+            },
+            "reply",
+        );
+        assert!(
+            approved < failed && failed < reply,
+            "approval, then the failed result, then the reply: {events:?}"
+        );
+    }
+}

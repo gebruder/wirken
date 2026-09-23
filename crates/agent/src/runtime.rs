@@ -3845,6 +3845,16 @@ impl Agent {
                     Err(AgentError::Tool(msg)) => {
                         Ok(self.synthesize_validation_failure_result(&call.name, &msg))
                     }
+                    // Approval is not registration: an unregistered
+                    // name gates as `UnknownTool`, and once approved
+                    // it still has nothing to dispatch to. That is a
+                    // result for the model and a row for the chain,
+                    // not the end of the turn.
+                    Err(e @ AgentError::ToolNotFound(_)) => Ok(crate::tool::ToolResult {
+                        output: e.to_string(),
+                        success: false,
+                        sandbox: None,
+                    }),
                     Err(e) => Err(e),
                 }
             }

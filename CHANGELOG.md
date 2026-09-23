@@ -10,6 +10,16 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- An approved call to a tool that does not exist is a failed result,
+  and the turn goes on. An unregistered name gates as `UnknownTool`,
+  so the operator can say yes to it, and dispatch still has nothing to
+  run. The call now writes a `tool_result` row with `success: false`
+  and `tool not found: <name>`, the model receives that result, and
+  the turn ends on its own reply. The chain reads approval, failed
+  result, reply, so every approved call has an outcome on it.
+
 ## [1.24.0] - 2026-09-21
 
 Approvals and the audit chain. An operator is now shown what a call
