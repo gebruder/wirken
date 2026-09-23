@@ -86,6 +86,32 @@ pub(crate) fn unknown_sandbox_keys(val: &serde_json::Value) -> Vec<String> {
     unknown
 }
 
+/// The LLM config an agent row describes: its provider, endpoint and
+/// model, the Bedrock region its URL carries, and its tool-calling
+/// override. `wirken run` and `wirken ask` each built this from the row
+/// and drifted: `ask` dropped the override, so `agents set
+/// --tools-enabled false` reached the gateway and not a one-off ask.
+pub fn llm_config_for_agent(
+    agent_cfg: &wirken_gateway::agent_config::AgentConfig,
+) -> wirken_agent::llm::LlmConfig {
+    let mut llm = wirken_agent::llm::LlmConfig::from_provider(
+        &agent_cfg.provider,
+        &agent_cfg.base_url,
+        &agent_cfg.model,
+    );
+    if agent_cfg.provider == "bedrock" {
+        llm.region = agent_cfg
+            .base_url
+            .strip_prefix("https://bedrock-runtime.")
+            .and_then(|s| s.strip_suffix(".amazonaws.com"))
+            .map(String::from);
+    }
+    if let Some(tools_enabled) = agent_cfg.tools_enabled {
+        llm.tools_enabled = tools_enabled;
+    }
+    llm
+}
+
 pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
     let path = data_dir.join("sandbox.json");
     if !path.exists() {
@@ -827,6 +853,48 @@ pub fn read_secret(prompt: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn agent_row(
+        provider: &str,
+        base_url: &str,
+        tools: Option<bool>,
+    ) -> wirken_gateway::agent_config::AgentConfig {
+        wirken_gateway::agent_config::AgentConfig {
+            id: "work".into(),
+            name: "work".into(),
+            provider: provider.into(),
+            model: "some-model".into(),
+            base_url: base_url.into(),
+            api_key_credential: String::new(),
+            channels: Vec::new(),
+            allowed_subagents: Default::default(),
+            tools_enabled: tools,
+            preset: None,
+            channel_egress: Default::default(),
+        }
+    }
+
+    /// The override on the row reaches the config in both directions,
+    /// and no override keeps the provider default, which is on.
+    #[test]
+    fn an_agent_rows_tool_override_reaches_its_llm_config() {
+        let url = "http://localhost:11434/v1";
+        assert!(!llm_config_for_agent(&agent_row("ollama", url, Some(false))).tools_enabled);
+        assert!(llm_config_for_agent(&agent_row("ollama", url, Some(true))).tools_enabled);
+        assert!(llm_config_for_agent(&agent_row("ollama", url, None)).tools_enabled);
+    }
+
+    #[test]
+    fn a_bedrock_row_carries_its_region_from_the_url() {
+        let llm = llm_config_for_agent(&agent_row(
+            "bedrock",
+            "https://bedrock-runtime.eu-central-1.amazonaws.com",
+            None,
+        ));
+        assert_eq!(llm.region.as_deref(), Some("eu-central-1"));
+        let llm = llm_config_for_agent(&agent_row("openai", "https://api.openai.com/v1", None));
+        assert_eq!(llm.region, None);
+    }
 
     #[test]
     fn load_sandbox_config_missing_file_uses_default() {

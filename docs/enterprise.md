@@ -92,8 +92,7 @@ wirken host to each platform.
 `provider.json` points `base_url` at the inference host's tunnel address, not
 its public IP. Tools are on by default for every provider, `ollama`
 included. Local tool-calling support varies by model; if the model on the
-inference host loops on invented tool calls, turn tools off for the agent
-the gateway serves:
+inference host loops on invented tool calls, turn tools off for that agent:
 
 ```bash
 wirken agents set default --tools-enabled false

@@ -628,21 +628,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 None
             };
 
-            let mut llm = LlmConfig::from_provider(
-                &agent_cfg.provider,
-                &agent_cfg.base_url,
-                &agent_cfg.model,
-            );
-            if agent_cfg.provider == "bedrock" {
-                llm.region = agent_cfg
-                    .base_url
-                    .strip_prefix("https://bedrock-runtime.")
-                    .and_then(|s| s.strip_suffix(".amazonaws.com"))
-                    .map(String::from);
-            }
-            if let Some(override_val) = agent_cfg.tools_enabled {
-                llm.tools_enabled = override_val;
-            }
+            let llm = super::llm_config_for_agent(&agent_cfg);
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 

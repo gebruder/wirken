@@ -221,15 +221,7 @@ async fn send_with_agent_config(
     agent_cfg: &wirken_gateway::agent_config::AgentConfig,
     cfg: &wirken_gateway::config::GatewayConfig,
 ) -> Result<()> {
-    let mut llm_config =
-        LlmConfig::from_provider(&agent_cfg.provider, &agent_cfg.base_url, &agent_cfg.model);
-    if agent_cfg.provider == "bedrock" {
-        llm_config.region = agent_cfg
-            .base_url
-            .strip_prefix("https://bedrock-runtime.")
-            .and_then(|s| s.strip_suffix(".amazonaws.com"))
-            .map(String::from);
-    }
+    let llm_config = super::llm_config_for_agent(agent_cfg);
 
     // Stamp the slot name on `LlmRequest` / `LlmResponse` emits for
     // SIEM correlation. Empty `api_key_credential` on the agent

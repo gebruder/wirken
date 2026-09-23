@@ -30,6 +30,10 @@ tagged.
 - Choosing Ollama asks for its URL, with the local one as the default,
   in setup as well as in `agents add`.
 
+- `wirken ask` honors an agent's `--tools-enabled` override, as
+  `wirken run` does. Both build an agent's model config through one
+  function now.
+
 ### Docs
 
 - Tools are on by default for every provider, Ollama included, as they
