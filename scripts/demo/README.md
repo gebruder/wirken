@@ -167,6 +167,11 @@ chain would read as the model asking to look at a file. The last line
 of the first block is where that exec ran, straight off its result
 row. The anchor warning prints once; the second block leaves it out.
 
+Say: It warns me first, and the warning is correct. The signing key
+lives on this laptop, so this proves the log against a tampering
+model, not against a tampering me. In a real deployment the anchor
+lives on another machine. Now, intact. Now, one byte. Broken.
+
 ## down
 
 ```
