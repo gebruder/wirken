@@ -23,6 +23,7 @@ pub mod oauth_scope;
 pub mod permission;
 pub mod persona;
 pub mod preset;
+pub mod provider_pick;
 pub mod run;
 pub mod service;
 pub mod session;

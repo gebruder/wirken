@@ -459,14 +459,15 @@ enum AgentCommands {
         /// Display name (defaults to the id)
         #[arg(long)]
         name: Option<String>,
-        /// openai, anthropic, ollama, or custom
+        /// openai, anthropic, gemini, bedrock, ollama, tinfoil,
+        /// infomaniak, hetzner, or custom
         #[arg(long)]
         provider: Option<String>,
         /// Model id to run this agent against
         #[arg(long)]
         model: Option<String>,
         /// API base URL. Defaults to the provider's own; required for
-        /// custom.
+        /// bedrock, infomaniak and custom.
         #[arg(long)]
         base_url: Option<String>,
         /// Channels to bind, comma-separated
@@ -629,7 +630,8 @@ enum PersonaCommands {
         /// persona view surfaces a dangling-reference error at lookup.
         #[arg(long)]
         preset: Option<String>,
-        /// LLM provider (openai, anthropic, ollama, custom).
+        /// LLM provider (openai, anthropic, gemini, bedrock, ollama,
+        /// tinfoil, infomaniak, hetzner, custom).
         #[arg(long, default_value = "openai")]
         provider: String,
         /// Model id.

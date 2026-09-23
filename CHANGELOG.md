@@ -19,6 +19,17 @@ tagged.
   asks as before. Covers Anthropic, OpenAI, Gemini, Bedrock, Tinfoil,
   Infomaniak, Hetzner and custom endpoints.
 
+- `wirken agents add` offers the eleven providers `wirken setup` does,
+  from one menu the two commands share, where it offered four. Its
+  `--provider` flag takes gemini, bedrock, tinfoil, infomaniak and
+  hetzner alongside openai, anthropic, ollama and custom; bedrock and
+  infomaniak need `--base-url`. A key already stored for the provider
+  is offered and copied into the agent's own credential.
+  `agents set --model list` asks Gemini for Gemini's models.
+
+- Choosing Ollama asks for its URL, with the local one as the default,
+  in setup as well as in `agents add`.
+
 ### Docs
 
 - Tools are on by default for every provider, Ollama included, as they

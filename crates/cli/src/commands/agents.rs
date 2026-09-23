@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use dialoguer::{Input, Select};
+use dialoguer::Input;
 
 use wirken_gateway::agent_config::{AgentConfig, AgentConfigStore, ChannelEgress, SubagentCeiling};
 use wirken_gateway::permissions::PermissionTier;
@@ -41,17 +41,6 @@ impl AddArgs {
     }
 }
 
-/// The provider's own API base, for the providers whose endpoint is
-/// fixed. `custom` has none and must be given one.
-fn default_base_url(provider: &str) -> Option<&'static str> {
-    match provider {
-        "openai" => Some("https://api.openai.com/v1"),
-        "anthropic" => Some("https://api.anthropic.com/v1"),
-        "ollama" => Some("http://localhost:11434/v1"),
-        _ => None,
-    }
-}
-
 pub async fn add(args: AddArgs) -> Result<()> {
     let cfg = config();
     cfg.ensure_dirs()?;
@@ -73,70 +62,29 @@ pub async fn add(args: AddArgs) -> Result<()> {
         .default(id.clone())
         .interact_text()?;
 
-    let providers = &["OpenAI", "Anthropic", "Ollama (local)", "Custom endpoint"];
-    let provider_idx = Select::new()
-        .with_prompt("  LLM provider")
-        .items(providers)
-        .default(0)
-        .interact()?;
+    // The same menu setup asks, so every provider setup offers is
+    // offered here too.
+    let choice = super::provider_pick::pick(&cfg).await?;
+    let super::provider_pick::ProviderChoice {
+        provider,
+        model,
+        base_url,
+        key,
+        ..
+    } = choice;
 
-    // The key comes before the model because the model list comes from
-    // the provider, and asking for it needs the key. Nothing here
-    // carries a model name of its own: a name written into this file
-    // is a guess about someone else's catalogue that goes stale
-    // silently, and an operator who accepts the offered default gets a
-    // model that 404s at the first turn rather than at config time.
-    let (provider, base_url, needs_key) = match provider_idx {
-        0 => (
-            "openai".to_string(),
-            "https://api.openai.com/v1".to_string(),
-            true,
-        ),
-        1 => (
-            "anthropic".to_string(),
-            "https://api.anthropic.com/v1".to_string(),
-            true,
-        ),
-        2 => {
-            let url: String = Input::new()
-                .with_prompt("  Ollama URL")
-                .default("http://localhost:11434/v1".into())
-                .interact_text()?;
-            ("ollama".to_string(), url, false)
-        }
-        3 => {
-            let url: String = Input::new().with_prompt("  API base URL").interact_text()?;
-            ("custom".to_string(), url, true)
-        }
-        _ => unreachable!(),
-    };
-
-    let api_key = if needs_key {
-        Some(super::read_secret("  API key: ")?)
-    } else {
-        None
-    };
-
-    let models = match provider.as_str() {
-        "openai" => super::list_openai_models(&base_url, api_key.as_deref().unwrap_or("")).await,
-        "anthropic" => super::list_anthropic_models(api_key.as_deref().unwrap_or("")).await,
-        "ollama" => super::list_ollama_models(&base_url).await,
-        _ => super::list_openai_compatible_models(&base_url, api_key.as_deref().unwrap_or(""))
-            .await
-            .unwrap_or_default(),
-    };
-
-    let model = super::pick_model(models)?;
-
-    // Store API key in vault with agent-specific credential name
-    let api_key_credential = if let Some(api_key) = api_key {
+    // The agent keeps its own copy of the key, stored or typed, under
+    // its own name: `agents set --api-key` replaces the key under that
+    // name, which must not reach the key another agent or the default
+    // one runs on.
+    let api_key_credential = if let Some(key) = key {
         let cred_name = format!("{id}-{provider}-key");
         let pp = super::cached_vault_passphrase()?;
         let keychain = probe_keychain(&cfg.data_dir, move || pp);
         let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
             .context("Failed to open credential store")?;
 
-        let secret = VaultSecret::new(api_key);
+        let secret = VaultSecret::new(key.secret);
         let rotation_due = chrono::Utc::now() + chrono::Duration::days(90);
         store
             .store(&cred_name, &provider, &secret, None, Some(rotation_due))
@@ -240,18 +188,16 @@ async fn add_noninteractive(args: AddArgs) -> Result<()> {
         .model
         .ok_or_else(|| anyhow::anyhow!("--model is required when adding an agent from flags"))?;
 
-    if !matches!(
-        provider.as_str(),
-        "openai" | "anthropic" | "ollama" | "custom"
-    ) {
+    if !super::provider_pick::IDS.contains(&provider.as_str()) {
         anyhow::bail!(
-            "unknown --provider '{provider}'; expected openai, anthropic, ollama, or custom"
+            "unknown --provider '{provider}'; expected one of {}",
+            super::provider_pick::IDS.join(", ")
         );
     }
 
     let base_url = match args.base_url {
         Some(url) => url,
-        None => default_base_url(&provider)
+        None => super::provider_pick::default_base_url(&provider)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "--base-url is required for provider '{provider}', which has no fixed endpoint"
@@ -547,20 +493,12 @@ pub async fn set(
             // literal word as an id.
             updated.model = if m == "list" {
                 let key = resolve_api_key(&cfg, &existing.api_key_credential);
-                let models = match updated.provider.as_str() {
-                    "openai" => {
-                        super::list_openai_models(&updated.base_url, key.as_deref().unwrap_or(""))
-                            .await
-                    }
-                    "anthropic" => super::list_anthropic_models(key.as_deref().unwrap_or("")).await,
-                    "ollama" => super::list_ollama_models(&updated.base_url).await,
-                    _ => super::list_openai_compatible_models(
-                        &updated.base_url,
-                        key.as_deref().unwrap_or(""),
-                    )
-                    .await
-                    .unwrap_or_default(),
-                };
+                let models = super::provider_pick::list_models(
+                    &updated.provider,
+                    &updated.base_url,
+                    key.as_deref().unwrap_or(""),
+                )
+                .await;
                 super::pick_model(models)?
             } else {
                 m.to_string()
@@ -863,26 +801,5 @@ mod tests {
                 "a half-written command line must be reported, not completed by prompts: {args:?}",
             );
         }
-    }
-
-    #[test]
-    fn only_a_custom_endpoint_has_no_default_base_url() {
-        assert_eq!(
-            default_base_url("openai"),
-            Some("https://api.openai.com/v1")
-        );
-        assert_eq!(
-            default_base_url("anthropic"),
-            Some("https://api.anthropic.com/v1")
-        );
-        assert_eq!(
-            default_base_url("ollama"),
-            Some("http://localhost:11434/v1")
-        );
-        assert_eq!(
-            default_base_url("custom"),
-            None,
-            "a custom endpoint is the operator's to name",
-        );
     }
 }
