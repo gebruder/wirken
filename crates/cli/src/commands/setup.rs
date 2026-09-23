@@ -255,9 +255,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             }
             2 => {
                 // Anthropic
-                let api_key = super::read_secret("  API key: ")?;
+                let (api_key, fresh) = api_key_for(&cfg, &data, "anthropic", "  API key: ")?;
                 let models = super::list_anthropic_models(&api_key).await;
-                store_key(api_key, "anthropic", &cfg, &data)?;
+                if fresh {
+                    store_key(api_key, "anthropic", &cfg, &data)?;
+                }
                 let model = super::pick_model(models)?;
                 (
                     "anthropic".to_string(),
@@ -268,9 +270,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             }
             3 => {
                 // OpenAI
-                let api_key = super::read_secret("  API key: ")?;
+                let (api_key, fresh) = api_key_for(&cfg, &data, "openai", "  API key: ")?;
                 let models = super::list_openai_models("https://api.openai.com/v1", &api_key).await;
-                store_key(api_key, "openai", &cfg, &data)?;
+                if fresh {
+                    store_key(api_key, "openai", &cfg, &data)?;
+                }
                 let model = super::pick_model(models)?;
                 (
                     "openai".to_string(),
@@ -281,9 +285,11 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             }
             4 => {
                 // Google Gemini
-                let api_key = super::read_secret("  API key: ")?;
+                let (api_key, fresh) = api_key_for(&cfg, &data, "gemini", "  API key: ")?;
                 let models = super::list_gemini_models(&api_key).await;
-                store_key(api_key, "gemini", &cfg, &data)?;
+                if fresh {
+                    store_key(api_key, "gemini", &cfg, &data)?;
+                }
                 let model = super::pick_model(models)?;
                 (
                     "gemini".to_string(),
@@ -322,10 +328,12 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 );
                 println!("  See docs/reference/tinfoil.md for the trust model and model list.");
                 println!("  Get an API key at https://dash.tinfoil.sh");
-                let api_key = super::read_secret("  API key: ")?;
+                let (api_key, fresh) = api_key_for(&cfg, &data, "tinfoil", "  API key: ")?;
                 let models =
                     super::list_openai_models("https://inference.tinfoil.sh/v1", &api_key).await;
-                store_key(api_key, "tinfoil", &cfg, &data)?;
+                if fresh {
+                    store_key(api_key, "tinfoil", &cfg, &data)?;
+                }
                 let model = super::pick_model(models)?;
                 (
                     "tinfoil".to_string(),
@@ -388,10 +396,15 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 // operator retry or type a model id against the URL +
                 // token they just entered, so a wrong product_id isn't
                 // surfaced as the same message as a bad token.
-                let (base_url, api_key, models, manual_model) = loop {
+                let mut offer_stored = true;
+                let (base_url, api_key, fresh, models, manual_model) = loop {
                     let product_id: String =
                         Input::new().with_prompt("  Product ID").interact_text()?;
-                    let api_key = super::read_secret("  API token: ")?;
+                    let (api_key, fresh) = if std::mem::take(&mut offer_stored) {
+                        api_key_for(&cfg, &data, "infomaniak", "  API token: ")?
+                    } else {
+                        (super::read_secret("  API token: ")?, true)
+                    };
                     let base_url =
                         format!("https://api.infomaniak.com/2/ai/{product_id}/openai/v1");
 
@@ -400,7 +413,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                             Ok(models) if models.is_empty() => {
                                 "endpoint reachable but /models returned no entries".to_string()
                             }
-                            Ok(models) => break (base_url, api_key, models, None),
+                            Ok(models) => break (base_url, api_key, fresh, models, None),
                             Err(e) => e.to_string(),
                         };
 
@@ -413,7 +426,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                         continue;
                     }
                     let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
-                    break (base_url, api_key, Vec::new(), Some(model));
+                    break (base_url, api_key, fresh, Vec::new(), Some(model));
                 };
 
                 let model = if let Some(manual) = manual_model {
@@ -422,13 +435,15 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     // path; the empty models vec forces the free-text
                     // prompt, whose return we discard for the id the
                     // operator already typed.
-                    store_key(api_key.clone(), "infomaniak", &cfg, &data)?;
+                    if fresh {
+                        store_key(api_key.clone(), "infomaniak", &cfg, &data)?;
+                    }
                     manual
                 } else {
-                    {
+                    if fresh {
                         store_key(api_key, "infomaniak", &cfg, &data)?;
-                        super::pick_model(models)?
                     }
+                    super::pick_model(models)?
                 };
                 ("infomaniak".to_string(), model, base_url, false)
             }
@@ -451,15 +466,20 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                 // model id against the token they just entered, so a
                 // rejected token isn't surfaced as the same message as
                 // an endpoint that listed nothing.
-                let (api_key, models, manual_model) = loop {
-                    let api_key = super::read_secret("  API token: ")?;
+                let mut offer_stored = true;
+                let (api_key, fresh, models, manual_model) = loop {
+                    let (api_key, fresh) = if std::mem::take(&mut offer_stored) {
+                        api_key_for(&cfg, &data, "hetzner", "  API token: ")?
+                    } else {
+                        (super::read_secret("  API token: ")?, true)
+                    };
 
                     let summary =
                         match super::list_openai_compatible_models(base_url, &api_key).await {
                             Ok(models) if models.is_empty() => {
                                 "endpoint reachable but /models returned no entries".to_string()
                             }
-                            Ok(models) => break (api_key, models, None),
+                            Ok(models) => break (api_key, fresh, models, None),
                             Err(e) => e.to_string(),
                         };
 
@@ -472,7 +492,7 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                         continue;
                     }
                     let model: String = Input::new().with_prompt("  Model ID").interact_text()?;
-                    break (api_key, Vec::new(), Some(model));
+                    break (api_key, fresh, Vec::new(), Some(model));
                 };
 
                 let model = if let Some(manual) = manual_model {
@@ -481,13 +501,15 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     // path; the empty models vec forces the free-text
                     // prompt, whose return we discard for the id the
                     // operator already typed.
-                    store_key(api_key.clone(), "hetzner", &cfg, &data)?;
+                    if fresh {
+                        store_key(api_key.clone(), "hetzner", &cfg, &data)?;
+                    }
                     manual
                 } else {
-                    {
+                    if fresh {
                         store_key(api_key, "hetzner", &cfg, &data)?;
-                        super::pick_model(models)?
                     }
+                    super::pick_model(models)?
                 };
                 ("hetzner".to_string(), model, base_url.to_string(), false)
             }
@@ -499,12 +521,12 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
                     .default(true)
                     .interact()?;
                 let model = if has_key {
-                    let api_key = super::read_secret("  API key: ")?;
+                    let (api_key, fresh) = api_key_for(&cfg, &data, "custom", "  API key: ")?;
                     let models = super::list_openai_models(&url, &api_key).await;
-                    {
+                    if fresh {
                         store_key(api_key, "custom", &cfg, &data)?;
-                        super::pick_model(models)?
                     }
+                    super::pick_model(models)?
                 } else {
                     Input::new().with_prompt("  Model ID").interact_text()?
                 };
@@ -513,8 +535,13 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
             _ => unreachable!(),
         };
 
-        // Store API key in vault
-        if needs_key {
+        // Store API key in vault, unless the one already there was kept.
+        let stored = if needs_key {
+            offer_stored_key(&cfg, &data, &provider_name)?
+        } else {
+            None
+        };
+        if needs_key && stored.is_none() {
             let api_key = if provider_name == "bedrock" {
                 let access_key: String = Input::new()
                     .with_prompt("  AWS Access Key ID")
@@ -849,6 +876,61 @@ pub async fn run(install_service: bool, org_url: Option<String>) -> Result<()> {
 /// runsc availability and the operator's upgrade choice. Extracted
 /// so the decision is testable without driving the interactive
 /// dialog.
+/// A live key for this provider, if the vault holds one and the
+/// operator wants to keep it. Re-running setup to switch providers
+/// used to ask for a key the vault already had, and storing the answer
+/// reset the key's rotation date. The names are read first, which
+/// needs no passphrase, so a first setup is not asked for one here.
+/// An expired key reads as absent.
+fn offer_stored_key(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+    provider_name: &str,
+) -> Result<Option<String>> {
+    let name = format!("{provider_name}-api-key");
+    let names = CredentialStore::names(&cfg.vault_db_path()).unwrap_or_default();
+    if !names.contains(&name) {
+        return Ok(None);
+    }
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    let Some(key) = stored_api_key(&store, provider_name) else {
+        return Ok(None);
+    };
+    let keep = Confirm::new()
+        .with_prompt(format!("  Use the stored {provider_name} key?"))
+        .default(true)
+        .interact()?;
+    Ok(keep.then_some(key))
+}
+
+/// The provider's key as the vault holds it, or `None` when there is
+/// no key under that name or it has expired.
+fn stored_api_key(store: &CredentialStore, provider_name: &str) -> Option<String> {
+    store
+        .retrieve(&format!("{provider_name}-api-key"))
+        .ok()
+        .map(|(secret, _)| secret.expose().to_string())
+}
+
+/// The key to use for this provider and whether it is new: the stored
+/// one if the operator keeps it, otherwise what they type. A new key
+/// is the caller's to store once it has been tried against the
+/// provider.
+fn api_key_for(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    data: &std::path::Path,
+    provider_name: &str,
+    prompt: &str,
+) -> Result<(String, bool)> {
+    match offer_stored_key(cfg, data, provider_name)? {
+        Some(key) => Ok((key, false)),
+        None => Ok((super::read_secret(prompt)?, true)),
+    }
+}
+
 fn pick_setup_sandbox_mode(runsc_detected: bool, accept_upgrade: bool) -> &'static str {
     if runsc_detected && accept_upgrade {
         "gvisor"
@@ -1246,6 +1328,69 @@ async fn configure_channel_overrides(
 #[cfg(test)]
 mod setup_tests {
     use super::pick_setup_sandbox_mode;
+
+    mod stored_key {
+        use super::super::stored_api_key;
+        use wirken_vault::{CredentialStore, VaultSecret};
+
+        fn store() -> (tempfile::TempDir, CredentialStore) {
+            let tmp = tempfile::tempdir().unwrap();
+            let store = CredentialStore::open_with_key(
+                &tmp.path().join("vault.db"),
+                VaultSecret::new("0".repeat(64)),
+            )
+            .unwrap();
+            (tmp, store)
+        }
+
+        #[test]
+        fn a_live_key_is_offered() {
+            let (_tmp, store) = store();
+            store
+                .store(
+                    "anthropic-api-key",
+                    "anthropic",
+                    &VaultSecret::new("sk-stored".into()),
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                stored_api_key(&store, "anthropic").as_deref(),
+                Some("sk-stored")
+            );
+        }
+
+        #[test]
+        fn another_providers_key_is_not() {
+            let (_tmp, store) = store();
+            store
+                .store(
+                    "openai-api-key",
+                    "openai",
+                    &VaultSecret::new("sk-openai".into()),
+                    None,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(stored_api_key(&store, "anthropic"), None);
+        }
+
+        #[test]
+        fn an_expired_key_is_not() {
+            let (_tmp, store) = store();
+            store
+                .store(
+                    "anthropic-api-key",
+                    "anthropic",
+                    &VaultSecret::new("sk-old".into()),
+                    Some(chrono::Utc::now() - chrono::Duration::days(1)),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(stored_api_key(&store, "anthropic"), None);
+        }
+    }
 
     #[test]
     fn no_runsc_picks_exec_only() {
