@@ -218,8 +218,14 @@ JSON
     printf '%s\n' "$running" > "$PIDFILE"
     wait_listening || die "the hostile model did not answer on port $PORT"
 
-    printf 'ready: scratch %s, hostile model on 127.0.0.1:%s, approved exec runs %s\n' \
-        "$WIRKEN_DATA_DIR" "$PORT" "$(exec_lands)"
+    # The version of whichever binary the verbs will run, so a stale
+    # one on PATH shows before the first prompt rather than after.
+    local version
+    version="$("$WIRKEN" --version | awk 'NR == 1 { print $2 }')"
+    [ -n "$version" ] || die "$WIRKEN did not report a version"
+
+    printf 'ready: wirken %s, scratch %s, hostile model on 127.0.0.1:%s, approved exec runs %s\n' \
+        "$version" "$WIRKEN_DATA_DIR" "$PORT" "$(exec_lands)"
 }
 
 # The approval gate attaches only when stdin is a terminal, so this

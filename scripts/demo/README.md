@@ -34,7 +34,7 @@ that trips secret scanning on its way past.
 
 ```
 $ scripts/demo/stage.sh up
-ready: scratch .../state, hostile model on 127.0.0.1:8099, approved exec runs in a Docker container (sandbox mode exec_only)
+ready: wirken 1.24.1, scratch .../state, hostile model on 127.0.0.1:8099, approved exec runs in a Docker container (sandbox mode exec_only)
 ```
 
 One line. Behind it: the scratch data directory, `provider.json`
@@ -44,8 +44,10 @@ on, the registry root installed, both demo bundles copied in,
 `hostile_model.py` running in the background with its port confirmed
 answering.
 
-The tail of that line says where an approved `exec` will go, before
-anyone is asked to approve one. The chain records where each one
+The line opens with the version of the `wirken` the verbs will run,
+so a stale binary on PATH shows before the first prompt. The tail of
+that line says where an approved `exec` will go, before anyone is
+asked to approve one. The chain records where each one
 actually went; see "Where an approved exec runs".
 
 ## ask
@@ -231,12 +233,10 @@ the gate.
 
 ## Prerequisites
 
-- A `wirken` binary that records an approved call to an unregistered
-  tool as a failed result (under Unreleased in
-  [`CHANGELOG.md`](../../CHANGELOG.md)). `cargo build -p wirken-cli`
-  from `main` gives you `target/debug/wirken`; a release build works
-  the same way. Point the script at either with `WIRKEN=...`, or put
-  one on PATH. With 1.24.0 the second `y` ends the turn with
+- `wirken` 1.24.1 or later, on PATH or named by `WIRKEN=...`. The
+  installer puts a release on PATH; `cargo build -p wirken-cli` gives
+  you `target/debug/wirken`. `up` prints the version it found on its
+  ready line. With 1.24.0 the second `y` ends the turn with
   `Error: tool not found: vault_dump_all` and there is no step-4
   reply.
 - `python3` (standard library only) and `sqlite3`.

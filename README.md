@@ -102,6 +102,13 @@ schedule <name>` runs preset agents on a cron schedule with no human in the
 loop, under the same permission and audit controls). Service and scheduled
 modes are Linux and macOS only.
 
+## Try the demo
+
+1. Install wirken with `install.sh`, as above.
+2. Start Docker.
+3. `git clone https://github.com/gebruder/wirken && cd wirken`
+4. Run `scripts/demo/stage.sh up`, then `scripts/demo/stage.sh ask`; [scripts/demo/README.md](scripts/demo/README.md) is the runbook.
+
 ## Uninstall
 
 Removing the data directory destroys the audit log with it. Export first if
