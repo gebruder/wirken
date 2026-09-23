@@ -90,12 +90,13 @@ wirken host to each platform.
 ### Worked example: twelve people, self-hosted Qwen
 
 `provider.json` points `base_url` at the inference host's tunnel address, not
-its public IP. `provider: "ollama"` sets `tools_enabled: false` by default
-because local tool-calling support varies; override per agent if the build
-supports it:
+its public IP. Tools are on by default for every provider, `ollama`
+included. Local tool-calling support varies by model; if the model on the
+inference host loops on invented tool calls, turn tools off for the agent
+the gateway serves:
 
 ```bash
-wirken agents set default --tools-enabled true
+wirken agents set default --tools-enabled false
 ```
 
 The provider field is honored even when the base URL is remote, because

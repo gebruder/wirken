@@ -10,6 +10,22 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- `wirken setup` offers a provider's stored API key before asking for
+  one. When the vault holds a live `<provider>-api-key`, setup asks
+  whether to use it; keeping it skips the prompt and leaves the key and
+  its rotation date as they were. Declining, or a key that has expired,
+  asks as before. Covers Anthropic, OpenAI, Gemini, Bedrock, Tinfoil,
+  Infomaniak, Hetzner and custom endpoints.
+
+### Docs
+
+- Tools are on by default for every provider, Ollama included, as they
+  have been since 1.1.0. `docs/enterprise.md` and
+  `docs/troubleshooting.md` said Ollama defaulted to off, and now name
+  the per-agent override that turns them off.
+
 ## [1.24.1] - 2026-09-23
 
 ### Fixed

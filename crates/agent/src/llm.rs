@@ -24,7 +24,7 @@ pub struct LlmConfig {
     #[serde(default)]
     pub region: Option<String>,
     /// Whether to send tool definitions to the LLM. Defaults to true for
-    /// providers with reliable tool support, false for local models.
+    /// every provider; a per-agent override turns it off.
     #[serde(default = "default_tools_enabled")]
     pub tools_enabled: bool,
     /// Total context window in tokens. The [`crate::context::ContextEngine`]

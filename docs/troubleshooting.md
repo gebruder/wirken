@@ -47,7 +47,7 @@ An adapter process crashed. Check the logs with `RUST_LOG=wirken=debug wirken ru
 - Try with debug logging: `RUST_LOG=wirken=debug wirken ask -m "hello"`
 
 **With Ollama:**
-- Small local models (e.g., llama3.2) may hallucinate tool calls, causing the agent to loop without producing a response. Tools are disabled by default for Ollama to avoid this.
+- Small local models (e.g., llama3.2) may hallucinate tool calls, causing the agent to loop without producing a response. Tools are on by default for every provider, Ollama included; turn them off for an agent that `wirken run` serves with `wirken agents set <ID> --tools-enabled false`.
 - Non-streaming requests (used by channel adapters) wait for the full response before replying. This can take 10-30 seconds depending on your hardware. WebChat uses streaming and feels faster.
 - Verify Ollama is running: wirken prints the detected version at startup (e.g., `Ollama version: 0.19.0`).
 
