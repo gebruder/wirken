@@ -11819,3 +11819,155 @@ mod unanswered_approval {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A gated `exec` call owns the processes it starts. Each shape below
+// detaches a child that writes a heartbeat file for a few seconds:
+// background job, nohup, double fork, setsid. Once the call has
+// returned, no heartbeat may move. In the container all four end with
+// the PID namespace. On the host (`mode: off`) the process group is
+// killed, which reaches every shape but setsid: a new session leaves
+// the group by definition.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+mod exec_children_die_with_the_call {
+    use std::path::Path;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+
+    const IN_GROUP: &[&str] = &["beat-bg", "beat-nohup", "beat-doublefork"];
+    const ALL: &[&str] = &["beat-bg", "beat-nohup", "beat-doublefork", "beat-setsid"];
+
+    /// A loop that rewrites `name` ten times a second for five seconds.
+    fn beat(name: &str) -> String {
+        format!("i=0; while [ $i -lt 50 ]; do date +%s%N > {name}; i=$((i+1)); sleep 0.1; done")
+    }
+
+    /// One detached child per name, every standard stream redirected
+    /// so the call can return while they run.
+    fn command(names: &[&str]) -> String {
+        let mut cmd = String::new();
+        for name in names {
+            let b = beat(name);
+            cmd.push_str(&match *name {
+                "beat-bg" => format!("( {b} ) </dev/null >/dev/null 2>&1 & "),
+                "beat-nohup" => format!("nohup sh -c '{b}' </dev/null >/dev/null 2>&1 & "),
+                "beat-doublefork" => format!("( ( {b} ) </dev/null >/dev/null 2>&1 & ); "),
+                "beat-setsid" => format!("setsid sh -c '{b}' </dev/null >/dev/null 2>&1 & "),
+                other => panic!("unknown shape {other}"),
+            });
+        }
+        cmd.push_str("sleep 0.5; echo started");
+        cmd
+    }
+
+    fn read_beats(dir: &Path, names: &[&str]) -> Vec<Option<String>> {
+        names
+            .iter()
+            .map(|n| std::fs::read_to_string(dir.join(n)).ok())
+            .collect()
+    }
+
+    /// Every shape started (its file exists) and none is still beating.
+    async fn assert_no_survivors(dir: &Path, names: &[&str]) {
+        let before = read_beats(dir, names);
+        for (name, v) in names.iter().zip(&before) {
+            assert!(v.is_some(), "{name} never started; the test proves nothing");
+        }
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let after = read_beats(dir, names);
+        let moved: Vec<&&str> = names
+            .iter()
+            .zip(before.iter().zip(&after))
+            .filter(|(_, (b, a))| b != a)
+            .map(|(n, _)| n)
+            .collect();
+        assert!(
+            moved.is_empty(),
+            "children outlived the exec call: {moved:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_the_host() {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        use crate::tool::{ToolConfig, ToolRegistry};
+        let tmp = TempDir::new().unwrap();
+        let tools = ToolRegistry::new(
+            tmp.path().to_path_buf(),
+            ToolConfig {
+                sandbox: SandboxConfig {
+                    mode: SandboxMode::Off,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let args = serde_json::json!({ "command": command(IN_GROUP) }).to_string();
+        let result = tools.execute("exec", &args).await.unwrap();
+        assert!(result.output.contains("started"), "{}", result.output);
+        assert_no_survivors(tmp.path(), IN_GROUP).await;
+    }
+
+    #[tokio::test]
+    async fn on_the_host_after_a_timeout() {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        use crate::tool::{ToolConfig, ToolRegistry};
+        let tmp = TempDir::new().unwrap();
+        let tools = ToolRegistry::new(
+            tmp.path().to_path_buf(),
+            ToolConfig {
+                sandbox: SandboxConfig {
+                    mode: SandboxMode::Off,
+                    timeout_secs: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The shell outlives the deadline; the call is cut, and what it
+        // started goes with it.
+        let cmd = format!("{}; sleep 30", command(IN_GROUP));
+        let args = serde_json::json!({ "command": cmd }).to_string();
+        let result = tools.execute("exec", &args).await.unwrap();
+        assert!(result.output.contains("timed out"), "{}", result.output);
+        assert_no_survivors(tmp.path(), IN_GROUP).await;
+    }
+
+    #[tokio::test]
+    async fn in_the_container() {
+        use crate::sandbox::{
+            DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime,
+        };
+        if detect_runtime().await.is_none() {
+            eprintln!("skipping: Docker is not available on this host");
+            return;
+        }
+        if !detect_image("debian:bookworm-slim").await {
+            eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+            return;
+        }
+        let sandbox = DockerSandbox::new(SandboxConfig {
+            mode: SandboxMode::ExecOnly,
+            image: "debian:bookworm-slim".into(),
+            ..Default::default()
+        })
+        .expect("sandbox");
+        let tmp = TempDir::new().unwrap();
+        // The container runs as 1000:1000; let it write the beats.
+        std::fs::set_permissions(
+            tmp.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o777),
+        )
+        .unwrap();
+        let result = sandbox
+            .exec(&command(ALL), tmp.path(), None)
+            .await
+            .expect("exec runs");
+        assert!(result.output.contains("started"), "{}", result.output);
+        assert_no_survivors(tmp.path(), ALL).await;
+    }
+}

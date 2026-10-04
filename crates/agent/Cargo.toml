@@ -54,6 +54,11 @@ rusqlite = { workspace = true }
 # license is carved out for this crate in `deny.toml`.
 tinfoil = { git = "https://github.com/tinfoilsh/tinfoil-rs", tag = "v0.1.1" }
 
+[target.'cfg(unix)'.dependencies]
+# Host `exec` (`sandbox.json` mode off) signals the process group it
+# started once the call returns.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true }

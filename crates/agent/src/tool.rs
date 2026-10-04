@@ -746,14 +746,23 @@ impl ToolRegistry {
             ))
         })?;
 
-        let child = tokio::process::Command::new(&resolved.program)
-            .arg(resolved.arg_flag)
+        let mut cmd = tokio::process::Command::new(&resolved.program);
+        cmd.arg(resolved.arg_flag)
             .arg(&command)
             .current_dir(&self.workspace)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // The shell leads a process group of its own, so everything it
+        // starts and does not move out of the group (`&`, `nohup`, a
+        // double fork) can be ended with it. See `HostGroup`.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let child = cmd
             .spawn()
             .map_err(|e| AgentError::Tool(format!("exec failed: {e}")))?;
+        #[cfg(unix)]
+        let _group = HostGroup(child.id());
 
         // The same knob the container path reads, so a host exec
         // and a sandboxed one are cut at the same configured limit
@@ -1751,6 +1760,30 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
         // because the classifier reads tool names and arguments, never
         // tool output.
         _ => None,
+    }
+}
+
+/// The process group a host `exec` started, killed when the call
+/// returns on any path: completion, timeout, or error. A command does
+/// not leave work running after the call that was gated. A process
+/// that calls `setsid` leaves the group and is not reached; the
+/// container sandbox, where the whole PID namespace ends with the call,
+/// is the boundary that covers it.
+#[cfg(unix)]
+struct HostGroup(Option<u32>);
+
+#[cfg(unix)]
+impl Drop for HostGroup {
+    fn drop(&mut self) {
+        if let Some(pgid) = self.0.and_then(|id| libc::pid_t::try_from(id).ok()) {
+            // SAFETY: killpg takes no pointers. The group id is the
+            // leader's pid, which the kernel does not reuse while any
+            // member of the group is alive; with none alive this is
+            // ESRCH and a no-op.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
     }
 }
 

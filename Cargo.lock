@@ -6936,6 +6936,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "futures-util",
  "hmac 0.13.0",
+ "libc",
  "lru",
  "rand 0.10.3",
  "reqwest 0.13.5",

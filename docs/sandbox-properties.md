@@ -48,6 +48,26 @@ registered), the `exec` tool refuses to run rather than running the command
 on the host. Operators who want host execution must opt in by writing
 `"mode":"off"` explicitly.
 
+## Processes end with the call
+
+A gated `exec` call does not leave work running after it returns.
+
+- **`ExecOnly` and `GVisor`.** The command runs in its own container, and the
+  container is killed and removed on every return path (`kill_and_remove` in
+  [`sandbox.rs`](../crates/agent/src/sandbox.rs)). That ends every process
+  in its PID namespace, including children detached with `&`, `nohup`,
+  `setsid`, or a double fork.
+- **`Off` on Linux and macOS.** The shell leads its own process group, and
+  the group is killed when the call returns or times out (`HostGroup` in
+  [`tool.rs`](../crates/agent/src/tool.rs)). That ends children started with
+  `&`, `nohup`, or a double fork. A child that calls `setsid` starts a new
+  session, leaves the group, and keeps running.
+- **`Off` on Windows.** The shell is killed on timeout. Processes it started
+  are not tracked.
+
+The tests are `exec_children_die_with_the_call` in
+[`crates/agent/src/tests.rs`](../crates/agent/src/tests.rs).
+
 ## Where a call ran is on the row
 
 An `exec` result records where the command ran, written by the branch that
