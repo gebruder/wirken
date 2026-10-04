@@ -49,6 +49,14 @@ tagged.
   chain, so the hash cannot be recomputed offline, and it is never
   reported divergent.
 
+- `wirken sessions verify` never re-executes a workspace read today's
+  gates refuse. It used to re-run every recorded `read_file` and
+  `list_files` call directly, so a read refused when the session ran was
+  performed during verify and reported divergent. A recorded refusal
+  that today's gates also refuse now verifies; a recorded read that
+  succeeded under permissions that no longer hold is unverifiable, with
+  "policy now refuses this path" in the output.
+
 - An approval prompt nobody answers, or one the operator declines with
   a reason, reaches the model as a refusal: "Permission denied: ... This
   action was not executed." The model used to receive the bare text

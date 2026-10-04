@@ -101,19 +101,38 @@ pub fn wirken(data_dir: &Path) -> Command {
 /// reading anywhere in the workspace. `marker` goes in the body so a
 /// test can find it in the prompt.
 pub fn write_skill(dir: &Path, name: &str, tools: &[&str], marker: &str) {
+    write_skill_reading(dir, name, tools, &["<workspace>"], marker);
+}
+
+/// [`write_skill`] with the given `filesystem.read_paths`.
+pub fn write_skill_reading(
+    dir: &Path,
+    name: &str,
+    tools: &[&str],
+    read_paths: &[&str],
+    marker: &str,
+) {
     std::fs::create_dir_all(dir).unwrap();
     let allow = tools.join(", ");
+    let reads = read_paths
+        .iter()
+        .map(|p| format!("\"{p}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     std::fs::write(
         dir.join("SKILL.md"),
         format!(
             "---\nname: {name}\ndescription: test skill {name}\n\
              disable-model-invocation: false\npermissions:\n  tools:\n    \
              allow: [{allow}]\n  egress:\n    mode: deny\n  filesystem:\n    \
-             read_paths: [\"<workspace>\"]\n  inference:\n    \
+             read_paths: [{reads}]\n  inference:\n    \
              allow: [\"*\"]\n---\n\n# {name}\n\n{marker}\n"
         ),
     )
     .unwrap();
+    for stale in ["SKILL.sig", "SKILL.pub"] {
+        let _ = std::fs::remove_file(dir.join(stale));
+    }
     wirken_agent::bundled_skills::self_sign_skill_dir(dir).unwrap();
 }
 

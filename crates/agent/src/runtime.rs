@@ -1251,6 +1251,43 @@ impl Agent {
     /// gated by the tools axis instead). The path is absolutized against
     /// the agent's workspace so the comparison against the (already
     /// workspace-expanded) allow-set is apples to apples.
+    /// Whether today's gates would refuse this call, asked without
+    /// dispatching or recording anything: the sub-agent clamp, org
+    /// allow and deny lists, `tools.allow`, and the filesystem path
+    /// allowlists. These are the checks that decide whether a
+    /// workspace read runs, which is what `verify` needs before it
+    /// re-executes one.
+    fn gates_refuse(&self, name: &str, arguments: &str) -> bool {
+        use crate::skill_perms::GateDecision;
+        if let Some(ref allowed) = self.restrict_tools
+            && !allowed.contains(name)
+        {
+            return true;
+        }
+        if let Some(ref org) = self.org_permissions
+            && (org.blocked_tools.iter().any(|t| t == name)
+                || (!org.allowed_tools.is_empty() && !org.allowed_tools.iter().any(|t| t == name)))
+        {
+            return true;
+        }
+        if !matches!(
+            self.effective_permissions.gate_tool(name),
+            GateDecision::Allow
+        ) {
+            return true;
+        }
+        if let Some((axis, path)) = self.fs_axis_for_call(name, arguments) {
+            let decision = match axis {
+                FsAxis::Read => self.effective_permissions.gate_read_path(&path),
+                FsAxis::Write => self.effective_permissions.gate_write_path(&path),
+            };
+            if !matches!(decision, GateDecision::Allow) {
+                return true;
+            }
+        }
+        false
+    }
+
     fn fs_axis_for_call(&self, name: &str, arguments: &str) -> Option<(FsAxis, PathBuf)> {
         let axis = match name {
             "read_file" | "list_files" => FsAxis::Read,
@@ -4723,6 +4760,7 @@ impl Agent {
                 tools_hash_v1_rows: 0,
                 tools_not_attestable_rows: 0,
                 tools_hash_unrecomputable_rows: 0,
+                policy_refused_rows: 0,
             });
         }
 
@@ -4767,6 +4805,7 @@ impl Agent {
             .await;
         let mut tools_hash_v1_rows = 0usize;
         let mut tools_hash_unrecomputable_rows = 0usize;
+        let mut policy_refused_rows = 0usize;
         let mut tools_not_attestable_rows = 0usize;
 
         // Throwaway session log for dry-run fit() calls. Compaction
@@ -4816,6 +4855,7 @@ impl Agent {
                     call_id,
                     tool_name,
                     output,
+                    success,
                     ..
                 } => {
                     conv.add_tool_result(call_id, tool_name, output);
@@ -4844,9 +4884,25 @@ impl Agent {
                                     } if redact_call == call_id
                                 )
                         });
+                        let args = find_call_arguments(&rows, call_id);
                         if redacted {
                             events_unverifiable += 1;
-                        } else if let Some(args) = find_call_arguments(&rows, call_id) {
+                        } else if let Some(args) = args.as_deref()
+                            && self.gates_refuse(tool_name, args)
+                        {
+                            // Never re-execute a read the gate refuses
+                            // today. A recorded refusal is what the gate
+                            // produces now, so the two agree. A recorded
+                            // read that succeeded ran under permissions
+                            // that no longer hold, and re-running it is
+                            // the read today's policy refuses.
+                            if *success {
+                                policy_refused_rows += 1;
+                                events_unverifiable += 1;
+                            } else {
+                                events_verified += 1;
+                            }
+                        } else if let Some(args) = args {
                             // Re-execute and compare. The arguments live
                             // on the prior AssistantToolCalls event; we
                             // need to find them.
@@ -4999,6 +5055,7 @@ impl Agent {
             tools_hash_v1_rows,
             tools_not_attestable_rows,
             tools_hash_unrecomputable_rows,
+            policy_refused_rows,
         })
     }
 
@@ -5663,6 +5720,11 @@ pub struct VerifyReport {
     /// was set. Each is also counted in `events_unverifiable` unless
     /// its `messages_hash` diverged.
     pub tools_hash_unrecomputable_rows: usize,
+    /// How many deterministic tool results were not re-executed
+    /// because today's gates refuse the call while the recorded call
+    /// succeeded: policy now refuses this path. Each is also counted
+    /// in `events_unverifiable`.
+    pub policy_refused_rows: usize,
 }
 
 /// What a caller knows about a session that its chain does not carry.

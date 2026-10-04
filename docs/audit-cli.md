@@ -374,6 +374,14 @@ session shows as a `tools_hash` divergence. So does a session recorded by
 `wirken ask` at 1.25.0 or earlier, which offered every tool whatever its skills
 allowed. An edited row is a different finding: it breaks the chain.
 
+A deterministic read is re-executed only when today's gates allow it: the
+skills' `tools.allow` and filesystem path allowlists, org allow and deny
+lists, and a sub-agent's clamp. A read the gates refuse is never run. If the
+recorded call was refused as well, the two agree and the row verifies. If the
+recorded read succeeded, it ran under permissions that no longer hold, and
+the row is unverifiable, reported as `reads not re-executed (policy now
+refuses this path)`.
+
 Exit codes: `3` broken chain, `1` divergences, `6` a `tools_hash` that could
 not be recomputed, `2` unverifiable under `--strict`, `5` cross-check
 disagreement, `4` no such agent or no events.

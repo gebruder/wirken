@@ -540,6 +540,15 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             println!("        here. The hashes are reported unverifiable, not divergent.");
         }
     }
+    if report.policy_refused_rows > 0 {
+        println!(
+            "  reads not re-executed: {} (policy now refuses this path)",
+            report.policy_refused_rows,
+        );
+        println!("        Each read succeeded under the permissions the session ran with, and");
+        println!("        today's skills refuse it, so verify does not run it again. Those rows");
+        println!("        are counted unverifiable.");
+    }
     if report.tools_hash_v1_rows > 0 {
         println!(
             "  tools_hash v1 rows:  {} (of the LLM requests walked)",
