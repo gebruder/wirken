@@ -83,7 +83,10 @@ delivery channel without human signoff.
   when no honest check is available.
 - **Per-skill restricted tool lists.** The skill's `permissions` block is
   enforced at runtime by the gateway. Lyrik ships its own; operators can
-  review or tighten it before install.
+  review or tighten it before install. A run's agents attach only the run's
+  own skills, the staged Lyrik copy and the staged walks, and nothing from the
+  shared skills directory, so a shared skill's grants never widen a run:
+  reads anywhere in the target, writes only under `.lyrik`.
 - **Audit logs.** A per-run NDJSON `<run>/audit.log` for every dispatch
   decision, plus the signed hash-chained gateway chain for cross-session
   integrity. See [audit-cli.md](audit-cli.md).
@@ -204,10 +207,12 @@ order. The first finding's `summary`, `id` and `stable_id` survive as
 canonical. Findings without a file and line pass through unchanged, so a
 malformed input does not collapse against everything else under a default key.
 
-Exit `0` when at least one walk returned success with no permission denials;
-non-zero when any walk hit a permission denial, which is operator intent and
-never silently merged into partial success, or when every selected walk failed
-transiently. Either way a partial `findings.json` is produced.
+Exit `0` when at least one walk completed; non-zero when every selected walk
+failed transiently. A refused call does not fail a walk or the run: the
+refusal is on the chain, the model is told the step was not executed, and the
+walk carries on. Each walk's `lyrik.walk.completed` row lists what it skipped
+under `skipped`, as `tool (approval key)`, for example `exec (shell:git)`.
+Either way a `findings.json` is produced.
 
 **`bench_mode`**: defaults false. When true, `phase_0_signoff` and
 `high_severity_review` auto-approve so a run completes without an interactive

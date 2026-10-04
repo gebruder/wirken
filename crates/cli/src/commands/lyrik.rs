@@ -42,6 +42,26 @@ const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `use_fixture`, when supplied, skips the agent-runtime skill dispatch
 /// and copies the fixture findings.json into the run-state directory.
 /// Required until the agent dispatch is wired (slice 7b2).
+/// The skills a Lyrik agent attaches: the run's staged Lyrik copy and,
+/// when walks are selected, the staged walks. Nothing from the shared
+/// skills directory: a shared skill's permissions would widen the run's
+/// (the `notes` skill alone grants writes across the whole target),
+/// and the run's own skills already declare everything it does.
+fn lyrik_run_skills(
+    lyrik_staged_dir: &Path,
+    walks_staged_dir: Option<&Path>,
+) -> Result<Vec<wirken_agent::skill::Skill>> {
+    let mut skills = wirken_agent::SkillLoader::load_dir(lyrik_staged_dir)
+        .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?;
+    if let Some(dir) = walks_staged_dir {
+        skills.extend(
+            wirken_agent::SkillLoader::load_dir(dir)
+                .with_context(|| format!("load staged skills from {}", dir.display()))?,
+        );
+    }
+    Ok(skills)
+}
+
 pub async fn run(target: &Path, run_id: &str, use_fixture: Option<&Path>) -> Result<()> {
     if !target.is_dir() {
         anyhow::bail!("target is not a directory: {}", target.display());
@@ -475,19 +495,6 @@ async fn dispatch_via_agent_runtime(
     let perms_arc = Arc::new(Mutex::new(perms));
     agent.set_permissions(perms_arc.clone());
 
-    let skills_dir = cfg.data_dir.join("skills");
-    let skills_loaded = if skills_dir.is_dir() {
-        match agent.load_skills(&skills_dir) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!("load_skills({}) failed: {e}", skills_dir.display());
-                0
-            }
-        }
-    } else {
-        0
-    };
-
     // Stage and self-sign the bundled Lyrik skill into the run dir,
     // then merge it into the agent's loaded set. The `/lyrik` slash
     // invocation in the dispatch prompt resolves to this staged copy
@@ -500,9 +507,9 @@ async fn dispatch_via_agent_runtime(
     // pair gives tamper detection across the run and discards the key
     // after sign.
     let lyrik_staged_dir = stage_lyrik_skill(&run_dir).context("stage Lyrik skill")?;
-    let lyrik_staged_loaded = agent
-        .extend_skills(&lyrik_staged_dir)
-        .with_context(|| format!("extend agent skills from {}", lyrik_staged_dir.display()))?;
+    let lyrik_staged_loaded = wirken_agent::SkillLoader::load_dir(&lyrik_staged_dir)
+        .with_context(|| format!("load staged skills from {}", lyrik_staged_dir.display()))?
+        .len();
     audit.emit(
         "lyrik.skill.staged",
         serde_json::json!({
@@ -522,13 +529,17 @@ async fn dispatch_via_agent_runtime(
             ensure_walk_staging(&run_dir, &wc.walks).context("ensure per-walk staging dirs")?;
             let staged = stage_walk_skills(&wc.walks, &walks_source_dir, &run_dir)
                 .context("stage walk skills")?;
-            agent
-                .extend_skills(&staged)
-                .with_context(|| format!("extend agent skills from {}", staged.display()))?;
             Some(staged)
         }
         None => None,
     };
+    // Attached, not just loaded, so their permission blocks bound the
+    // run: tools, read paths across the target, writes under `.lyrik`.
+    let run_skills = lyrik_run_skills(&lyrik_staged_dir, walks_staged_dir.as_deref())?;
+    let skills_attached: Vec<String> = run_skills.iter().map(|s| s.name.clone()).collect();
+    agent
+        .attach_skills(run_skills, Vec::new())
+        .context("attach run skills")?;
 
     let effective_budget_tokens =
         wirken_agent::context::effective_budget(llm_config.context_window);
@@ -542,8 +553,7 @@ async fn dispatch_via_agent_runtime(
             "provider": pin.provider,
             "model": pin.model,
             "base_url": pin.base_url,
-            "skills_dir": skills_dir.display().to_string(),
-            "skills_loaded": skills_loaded,
+            "skills_attached": skills_attached,
             "walks_staged_dir": walks_staged_dir.as_ref().map(|p| p.display().to_string()),
             "walks": walks_cfg.as_ref().map(|c| c.walks.clone()),
             "max_concurrent_walks": walks_cfg.as_ref().map(|c| c.max_concurrent_walks),
@@ -606,7 +616,7 @@ async fn dispatch_via_agent_runtime(
                 session_log.clone(),
                 super::load_sandbox_config(&cfg.data_dir),
                 perms_arc.clone(),
-                skills_dir.clone(),
+                lyrik_staged_dir.clone(),
                 walks_staged_dir
                     .clone()
                     .expect("walks_staged_dir is Some when walks_cfg is Some"),
@@ -810,32 +820,16 @@ async fn dispatch_via_agent_runtime(
         );
     }
 
-    // Exit-code policy for per-walk dispatch. Permission denial in
-    // any walk is operator intent ("don't let this run"), routes to
-    // a non-zero exit even when other walks succeeded. All walks
-    // failed (transient) is also non-zero. Otherwise zero. The
-    // dedup pass writes findings.json unconditionally so a
-    // non-zero exit still leaves the partial artifact for review.
+    // Exit-code policy for per-walk dispatch. A refused call skips a
+    // step and is reported on that walk's `lyrik.walk.completed` row;
+    // it does not fail the run. All walks failed (transient) is
+    // non-zero. Otherwise zero. The dedup pass writes findings.json
+    // unconditionally so a non-zero exit still leaves the partial
+    // artifact for review.
     if let Some(outcomes) = walk_outcomes.as_ref() {
-        let any_denial = outcomes
-            .iter()
-            .any(|o| matches!(o.status, WalkStatus::PermissionDenial { .. }));
         let any_success = outcomes
             .iter()
             .any(|o| matches!(o.status, WalkStatus::Success));
-        if any_denial {
-            let denied_walks: Vec<&str> = outcomes
-                .iter()
-                .filter(|o| matches!(o.status, WalkStatus::PermissionDenial { .. }))
-                .map(|o| o.walk_name.as_str())
-                .collect();
-            anyhow::bail!(
-                "lyrik aborted by permission denial in {} walk(s): {}; \
-                 partial findings.json was written for review",
-                denied_walks.len(),
-                denied_walks.join(", ")
-            );
-        }
         if !any_success {
             anyhow::bail!(
                 "every selected walk failed (transient); see lyrik.walk.completed audit rows"
@@ -922,17 +916,19 @@ pub(super) struct WalkOutcome {
     pub status: WalkStatus,
     pub response_len: usize,
     pub denials: usize,
+    /// Each refused call in the walk's turn, as `tool (approval key)`.
+    /// The step was not taken; the walk carried on without it.
+    pub skipped: Vec<String>,
 }
 
-/// Outcome class. The runner collapses any
-/// [`WalkStatus::PermissionDenial`] into a non-zero exit; transient
-/// failures roll up under "partial success" when at least one walk
-/// produced findings (commit 2 wires that policy).
+/// Outcome class. A walk whose turn completed is a success, whatever
+/// it was refused along the way; its refusals are listed in
+/// [`WalkOutcome::skipped`]. Transient failures roll up under
+/// "partial success" when at least one walk produced findings.
 #[derive(Debug, Clone)]
 pub(super) enum WalkStatus {
     Success,
     TransientFailure { reason: String },
-    PermissionDenial { reason: String },
 }
 
 /// Run every selected walk concurrently, gated by a Semaphore
@@ -960,7 +956,7 @@ async fn dispatch_walks_concurrent(
     session_log: Arc<dyn wirken_audit::SessionLog>,
     sandbox: wirken_agent::sandbox::SandboxConfig,
     permissions: Arc<Mutex<PermissionStore>>,
-    skills_dir: PathBuf,
+    lyrik_staged_dir: PathBuf,
     walks_staged_dir: PathBuf,
     // `walk_seed_suffix`: per-walk seed/decline protocol text appended
     // to the prompt when a non-empty seed set was materialised. Empty
@@ -991,7 +987,7 @@ async fn dispatch_walks_concurrent(
         let session_log_t = session_log.clone();
         let sandbox_t = sandbox.clone();
         let permissions_t = permissions.clone();
-        let skills_dir_t = skills_dir.clone();
+        let lyrik_staged_dir_t = lyrik_staged_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
         let walk_name = name.clone();
         // Substitute the per-spawn walk name into the seed protocol
@@ -1023,6 +1019,7 @@ async fn dispatch_walks_concurrent(
                         },
                         response_len: 0,
                         denials: 0,
+                        skipped: Vec::new(),
                     };
                 }
             };
@@ -1032,22 +1029,22 @@ async fn dispatch_walks_concurrent(
             local_agent.set_agent_id(agent_id_t.clone());
             local_agent.set_permissions(permissions_t);
 
-            if skills_dir_t.is_dir()
-                && let Err(e) = local_agent.load_skills(&skills_dir_t)
-            {
-                tracing::warn!(
-                    "load_skills({}) failed in walk {walk_name}: {e}",
-                    skills_dir_t.display()
-                );
-            }
-            if let Err(e) = local_agent.extend_skills(&walks_staged_dir_t) {
+            let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|skills| {
+                    local_agent
+                        .attach_skills(skills, Vec::new())
+                        .map_err(|e| e.to_string())
+                });
+            if let Err(e) = attached {
                 return WalkOutcome {
                     walk_name: walk_name.clone(),
                     status: WalkStatus::TransientFailure {
-                        reason: format!("extend_skills: {e}"),
+                        reason: format!("attach_skills: {e}"),
                     },
                     response_len: 0,
                     denials: 0,
+                    skipped: Vec::new(),
                 };
             }
 
@@ -1055,23 +1052,21 @@ async fn dispatch_walks_concurrent(
             let inbound_id = format!("lyrik-walk-{}-{}", walk_name, uuid::Uuid::new_v4());
             match local_agent.process_message(&prompt, inbound_id).await {
                 Ok(r) => {
-                    let denial_count = r.denials.len();
-                    if denial_count > 0 {
-                        WalkOutcome {
-                            walk_name: walk_name.clone(),
-                            status: WalkStatus::PermissionDenial {
-                                reason: format!("{denial_count} denial(s)"),
-                            },
-                            response_len: r.response.len(),
-                            denials: denial_count,
-                        }
-                    } else {
-                        WalkOutcome {
-                            walk_name: walk_name.clone(),
-                            status: WalkStatus::Success,
-                            response_len: r.response.len(),
-                            denials: 0,
-                        }
+                    // A refused call is a step the walk did not take,
+                    // not the end of the run: the refusal is on the
+                    // chain, the model was told, and the turn went on.
+                    // The walk reports the steps it skipped.
+                    let skipped: Vec<String> = r
+                        .denials
+                        .iter()
+                        .map(|d| format!("{} ({})", d.tool_name, d.action.approval_key()))
+                        .collect();
+                    WalkOutcome {
+                        walk_name: walk_name.clone(),
+                        status: WalkStatus::Success,
+                        response_len: r.response.len(),
+                        denials: skipped.len(),
+                        skipped,
                     }
                 }
                 Err(AgentError::RateLimitExhausted { attempts }) => WalkOutcome {
@@ -1081,6 +1076,7 @@ async fn dispatch_walks_concurrent(
                     },
                     response_len: 0,
                     denials: 0,
+                    skipped: Vec::new(),
                 },
                 Err(e) => WalkOutcome {
                     walk_name: walk_name.clone(),
@@ -1089,6 +1085,7 @@ async fn dispatch_walks_concurrent(
                     },
                     response_len: 0,
                     denials: 0,
+                    skipped: Vec::new(),
                 },
             }
         });
@@ -1106,17 +1103,16 @@ async fn dispatch_walks_concurrent(
                 },
                 response_len: 0,
                 denials: 0,
+                skipped: Vec::new(),
             },
         };
         let status_label = match &outcome.status {
             WalkStatus::Success => "success",
             WalkStatus::TransientFailure { .. } => "transient_failure",
-            WalkStatus::PermissionDenial { .. } => "permission_denial",
         };
         let reason = match &outcome.status {
             WalkStatus::Success => None,
             WalkStatus::TransientFailure { reason } => Some(reason.clone()),
-            WalkStatus::PermissionDenial { reason } => Some(reason.clone()),
         };
         audit.emit(
             "lyrik.walk.completed",
@@ -1126,6 +1122,7 @@ async fn dispatch_walks_concurrent(
                 "reason": reason,
                 "response_len": outcome.response_len,
                 "denials": outcome.denials,
+                "skipped": outcome.skipped,
             }),
         )?;
         outcomes.push(outcome);

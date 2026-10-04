@@ -22,6 +22,16 @@ tagged.
   `egress.domains: ["*"]`. `web_search` and `generate_image`, which take
   no host from the model, are unchanged.
 
+- `wirken lyrik run` attaches the run's own skills, the staged Lyrik
+  copy and the staged walks, so their permission blocks bound every
+  agent in the run: the model is offered only their tools, reads stay
+  in the target and writes under `.lyrik`. It used to load the shared
+  skills directory and the staged skills into the prompt without
+  attaching any, which left every tool on offer and writes unbounded.
+  Nothing from the shared directory is attached: a shared skill's
+  grants would widen the run, as the `notes` skill's workspace-wide
+  writes would.
+
 - `wirken ask` attaches an agent's skills, so their permission blocks
   apply: the model is offered only the tools the attached skills'
   `tools.allow` names, and the filesystem, egress and inference axes are
@@ -72,6 +82,15 @@ tagged.
   `setsid` leaves the group and is not reached; the container modes end
   every process in the call's PID namespace, `setsid` included. On
   Windows the shell is killed on timeout only.
+
+### Changed
+
+- A call refused during a `wirken lyrik run` walk no longer fails the
+  run. The refusal is on the chain, the walk carries on without the
+  step, and its `lyrik.walk.completed` row lists the step under
+  `skipped`. The run exits non-zero only when every walk failed. The
+  dispatch row names the attached skills under `skills_attached` in
+  place of `skills_dir` and `skills_loaded`.
 
 ### Dependencies
 
