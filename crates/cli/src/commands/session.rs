@@ -393,29 +393,23 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
     // Look up the agent's static config. Falls back to the default
     // provider config if no per-agent record exists.
     let agent_config_path = cfg.agent_config_db_path();
-    let (workspace, llm_config, allowed_subagents) = if agent_config_path.exists()
+    // Every input to the tool set the model was offered is rebuilt
+    // here the way `wirken run` builds the agent: its model config
+    // (including a tools override), its skills attached with their
+    // permission blocks, and its sub-agent ceilings. Rebuilding any of
+    // them differently reports a divergence for a session that was
+    // recorded correctly.
+    let (workspace, llm_config, allowed_subagents, skills) = if agent_config_path.exists()
         && let Ok(store) = AgentConfigStore::open(&agent_config_path)
         && let Ok(agent_cfg) = store.get(&agent_id)
     {
-        let mut llm =
-            LlmConfig::from_provider(&agent_cfg.provider, &agent_cfg.base_url, &agent_cfg.model);
-        if agent_cfg.provider == "bedrock" {
-            llm.region = agent_cfg
-                .base_url
-                .strip_prefix("https://bedrock-runtime.")
-                .and_then(|s| s.strip_suffix(".amazonaws.com"))
-                .map(String::from);
-        }
-        // The sub-agent ceilings have to come along. A `v2`
-        // `tools_hash` covers `spawn_subagent`, which the agent is
-        // offered only when a ceiling is configured, so recomputing
-        // without them rebuilds a smaller set than the one the model
-        // saw and reports a divergence for a session that was
-        // recorded correctly.
+        // A `v2` `tools_hash` covers `spawn_subagent`, which the agent
+        // is offered only when a ceiling is configured.
         (
             cfg.agent_workspace(&agent_cfg.id),
-            llm,
+            super::llm_config_for_agent(&agent_cfg),
             agent_cfg.allowed_subagents.clone(),
+            super::skills_for_agent(&cfg, &agent_cfg)?,
         )
     } else {
         // Fall back to provider.json (the default agent's config).
@@ -437,8 +431,14 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             // The provider.json fallback has no AgentConfig row, so
             // it has no ceilings to carry.
             Default::default(),
+            super::skills_for_default_agent(&cfg),
         )
     };
+
+    // MCP tool definitions come from the running servers and are not
+    // on the chain, so with servers configured the offered tool set
+    // cannot be rebuilt offline.
+    let mcp_config = mcp_servers_configured(&cfg.mcp_config_path(&agent_id));
 
     // Open the session log.
     let session_log: Arc<dyn wirken_audit::SessionLog> = Arc::new(
@@ -468,7 +468,7 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             channel_overrides: HashMap::new(),
             api_key: None, // verify never calls the LLM
             api_key_credential: None,
-            skills: Vec::new(),
+            skills,
             wasm_skills: Vec::new(),
             mcp_client: None,
             identity: None, // verify never signs new attestations
@@ -501,7 +501,12 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
     println!("        CURRENT workspace, not the workspace state at the time of execution.");
     println!();
 
-    let report = agent.verify().await.context("verify failed")?;
+    let report = agent
+        .verify_with(wirken_agent::VerifyOptions {
+            tools_unrecomputable: mcp_config.is_some(),
+        })
+        .await
+        .context("verify failed")?;
 
     // Print the report.
     println!("  events_total:        {}", report.events_total);
@@ -519,6 +524,21 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
         println!("        This sub-agent session carries no binding row, so the tool set it");
         println!("        was offered is not recorded anywhere and the recorded tools_hash");
         println!("        has nothing to be checked against. Everything else still verified.");
+    }
+    if report.tools_hash_unrecomputable_rows > 0 {
+        println!(
+            "  tools_hash unverifiable: {} (of the LLM requests walked)",
+            report.tools_hash_unrecomputable_rows,
+        );
+        if let Some(path) = &mcp_config {
+            println!(
+                "        This agent has MCP servers configured ({}). Their tool",
+                path.display()
+            );
+            println!("        definitions come from the running servers and are not recorded on");
+            println!("        the chain, so the tool set the model was offered cannot be rebuilt");
+            println!("        here. The hashes are reported unverifiable, not divergent.");
+        }
     }
     if report.tools_hash_v1_rows > 0 {
         println!(
@@ -551,6 +571,10 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
     if !report.events_divergent.is_empty() {
         println!();
         println!("  Divergences:");
+        let tools_diverged = report
+            .events_divergent
+            .iter()
+            .any(|d| d.kind == "tools_hash");
         for d in &report.events_divergent {
             println!(
                 "    seq {} [{}]: expected {} found {}",
@@ -559,6 +583,17 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
                 truncate_for_display(&d.expected, 64),
                 truncate_for_display(&d.found, 64),
             );
+        }
+        if tools_diverged {
+            println!();
+            println!("  A tools_hash divergence means the tool set rebuilt from today's");
+            println!("  configuration differs from the one the session recorded. Possible causes:");
+            println!(
+                "    - the agent's skills, preset or tools setting changed since the session;"
+            );
+            println!("    - the session was recorded by `wirken ask` at 1.25.0 or earlier, which");
+            println!("      offered every tool whatever the loaded skills allowed.");
+            println!("  An edited row does not show here: it breaks the chain, reported above.");
         }
     }
 
@@ -633,6 +668,11 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
     if !report.events_divergent.is_empty() {
         std::process::exit(1);
     }
+    // Its own code: a hash that could not be recomputed is neither a
+    // broken chain nor a divergence, and passes for neither.
+    if report.tools_hash_unrecomputable_rows > 0 {
+        std::process::exit(6);
+    }
     if strict && report.events_unverifiable > 0 {
         std::process::exit(2);
     }
@@ -643,6 +683,15 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
         std::process::exit(5);
     }
     Ok(())
+}
+
+/// The MCP config at `path` when it names at least one server, the
+/// same test `wirken run` applies before starting the MCP proxy.
+fn mcp_servers_configured(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let val: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let servers = val.get("servers")?.as_object()?;
+    (!servers.is_empty()).then(|| path.to_path_buf())
 }
 
 fn truncate_for_display(s: &str, max: usize) -> String {

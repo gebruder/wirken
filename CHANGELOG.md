@@ -21,6 +21,24 @@ tagged.
   which used to replace them. `wirken ask` and `wirken run` build an
   agent's skill set through one function now.
 
+### Fixed
+
+- `wirken sessions verify` rebuilds the agent the way `wirken run` does:
+  its skills attached with their permission blocks, and its model
+  config including a tools override. It used to attach no skills, so
+  for any agent with skills it recomputed the full tool surface and
+  reported every `tools_hash` divergent on sessions recorded correctly.
+  Sessions recorded by `wirken ask` at 1.25.0 or earlier did offer the
+  full surface, so those report `tools_hash` divergence now; verify's
+  output names that as a possible cause, beside a changed skill set.
+  An edited row still shows as a broken chain, not a divergence.
+
+- For an agent with MCP servers configured, `wirken sessions verify`
+  reports each `tools_hash` as unverifiable, says why, and exits `6`.
+  MCP tool definitions come from the running servers and are not on the
+  chain, so the hash cannot be recomputed offline, and it is never
+  reported divergent.
+
 ## [1.25.0] - 2026-09-24
 
 ### Changed

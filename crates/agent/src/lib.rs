@@ -44,7 +44,7 @@ pub use recovery::{
 };
 pub use runtime::{
     Agent, DivergenceRecord, InboundContext, PARTIAL_RESULT_LOST_SENTINEL, ProcessResult,
-    VerifyReport,
+    VerifyOptions, VerifyReport,
 };
 pub use skill::SkillLoader;
 

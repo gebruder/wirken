@@ -365,8 +365,29 @@ message hashes at each `LlmRequest`, and re-executes deterministic tools
 (`read_file`, `list_files`) against the current workspace. Reports events as
 verified, unverifiable, or divergent.
 
-Exit codes: `3` broken chain, `1` divergences, `2` unverifiable under
-`--strict`, `5` cross-check disagreement, `4` no such agent or no events.
+The agent is rebuilt the way `wirken run` builds it: the same model config,
+including a tools override, and the same skills (its own, the shared set and
+its preset) attached with their permission blocks. The tool set each
+`LlmRequest` is recomputed against is the one the agent offers under today's
+configuration, so a change to its skills, preset or tools setting since the
+session shows as a `tools_hash` divergence. So does a session recorded by
+`wirken ask` at 1.25.0 or earlier, which offered every tool whatever its skills
+allowed. An edited row is a different finding: it breaks the chain.
+
+Exit codes: `3` broken chain, `1` divergences, `6` a `tools_hash` that could
+not be recomputed, `2` unverifiable under `--strict`, `5` cross-check
+disagreement, `4` no such agent or no events.
+
+#### Agents with MCP servers
+
+An MCP server's tool definitions come from the running server and are not
+recorded on the chain, and `verify` starts no servers. When the agent has MCP
+servers configured, each `tools_hash` is reported as unverifiable, with the
+reason in the output, and `verify` exits `6`. It never reports one divergent:
+a mismatch against a set it could not rebuild would not be a finding about the
+session. Recording the MCP tool definitions on the chain at session start,
+together with which command produced the session, is the format addition that
+makes these hashes verifiable; the chain does not carry either today.
 
 #### What a `tools_hash` attests
 

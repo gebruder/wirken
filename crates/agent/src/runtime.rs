@@ -4702,6 +4702,12 @@ impl Agent {
     /// `LlmResponse` events are always counted as
     /// `events_unverifiable` — we never re-call the model.
     pub async fn verify(&self) -> Result<VerifyReport, AgentError> {
+        self.verify_with(VerifyOptions::default()).await
+    }
+
+    /// [`Self::verify`] with what the caller knows about the session
+    /// that the chain does not record. See [`VerifyOptions`].
+    pub async fn verify_with(&self, opts: VerifyOptions) -> Result<VerifyReport, AgentError> {
         // 1. Chain integrity.
         let chain_status = self
             .session_log
@@ -4716,6 +4722,7 @@ impl Agent {
                 chain_status,
                 tools_hash_v1_rows: 0,
                 tools_not_attestable_rows: 0,
+                tools_hash_unrecomputable_rows: 0,
             });
         }
 
@@ -4759,6 +4766,7 @@ impl Agent {
             .snapshot_tool_defs_for(wirken_audit::ToolsHashVersion::V1)
             .await;
         let mut tools_hash_v1_rows = 0usize;
+        let mut tools_hash_unrecomputable_rows = 0usize;
         let mut tools_not_attestable_rows = 0usize;
 
         // Throwaway session log for dry-run fit() calls. Compaction
@@ -4941,6 +4949,16 @@ impl Agent {
                     // which is not a finding about the session.
                     if self.subagent_binding_missing {
                         tools_not_attestable_rows += 1;
+                    } else if opts.tools_unrecomputable {
+                        // The offered set included definitions this
+                        // verifier cannot rebuild, so a mismatch here
+                        // would be a difference from a set it chose,
+                        // not a finding. The row is unverifiable.
+                        tools_hash_unrecomputable_rows += 1;
+                        if event_ok {
+                            events_unverifiable += 1;
+                        }
+                        continue;
                     } else if &recomputed_tools != tools_hash {
                         divergences.push(DivergenceRecord {
                             seq: row.seq,
@@ -4980,6 +4998,7 @@ impl Agent {
             chain_status,
             tools_hash_v1_rows,
             tools_not_attestable_rows,
+            tools_hash_unrecomputable_rows,
         })
     }
 
@@ -5639,6 +5658,21 @@ pub struct VerifyReport {
     /// here says nothing at all about which tools that session
     /// offered.
     pub tools_not_attestable_rows: usize,
+    /// How many `LlmRequest` rows had their `tools_hash` reported as
+    /// unverifiable because [`VerifyOptions::tools_unrecomputable`]
+    /// was set. Each is also counted in `events_unverifiable` unless
+    /// its `messages_hash` diverged.
+    pub tools_hash_unrecomputable_rows: usize,
+}
+
+/// What a caller knows about a session that its chain does not carry.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct VerifyOptions {
+    /// The tools the session was offered included definitions the
+    /// verifier cannot rebuild, such as an MCP server's, which come
+    /// from the running server and are not on the chain. Each
+    /// `tools_hash` is then reported as unverifiable, never divergent.
+    pub tools_unrecomputable: bool,
 }
 
 impl VerifyReport {

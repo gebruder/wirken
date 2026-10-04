@@ -97,8 +97,9 @@ pub fn wirken(data_dir: &Path) -> Command {
     cmd
 }
 
-/// A signed skill at `dir` whose permissions allow exactly `tools`.
-/// `marker` goes in the body so a test can find it in the prompt.
+/// A signed skill at `dir` whose permissions allow exactly `tools`,
+/// reading anywhere in the workspace. `marker` goes in the body so a
+/// test can find it in the prompt.
 pub fn write_skill(dir: &Path, name: &str, tools: &[&str], marker: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let allow = tools.join(", ");
@@ -107,7 +108,8 @@ pub fn write_skill(dir: &Path, name: &str, tools: &[&str], marker: &str) {
         format!(
             "---\nname: {name}\ndescription: test skill {name}\n\
              disable-model-invocation: false\npermissions:\n  tools:\n    \
-             allow: [{allow}]\n  egress:\n    mode: deny\n  inference:\n    \
+             allow: [{allow}]\n  egress:\n    mode: deny\n  filesystem:\n    \
+             read_paths: [\"<workspace>\"]\n  inference:\n    \
              allow: [\"*\"]\n---\n\n# {name}\n\n{marker}\n"
         ),
     )

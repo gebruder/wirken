@@ -145,7 +145,7 @@ to distinct humans.
 
 ```bash
 wirken sessions list              # find the session id
-wirken sessions verify <id>       # exits 0 on an intact hash chain
+wirken sessions verify <id>       # exits 0 when the chain is intact and nothing diverges
 ```
 
 Each turn writes one `LlmRequest` carrying the provider and model, which is
