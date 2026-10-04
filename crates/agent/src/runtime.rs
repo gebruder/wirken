@@ -839,8 +839,8 @@ impl Agent {
     /// short-circuits trigger a gate consult instead of terminating
     /// the call. On `Approved` the runtime sets the one-shot bypass
     /// and retries the call once. On `Denied` or `Timeout` the call
-    /// fails with the operator's reason (or `"approval timeout"`)
-    /// surfaced to the LLM as the tool's failure output. The audit
+    /// fails with a refusal as the tool's failure output, carrying the
+    /// operator's reason when there is one. The audit
     /// row records `approved_via: Some(gate.source())` or
     /// `denied_via: Some(gate.source())` so SIEM detections can
     /// pivot per-surface.
@@ -3770,12 +3770,13 @@ impl Agent {
     ///   retry's outcome flows through to the caller.
     /// - **Gate returns `Denied { reason }`**: emits
     ///   `PermissionDenied { denied_via: Some(gate.source()), denial_reason: reason }`
-    ///   and returns a failed ToolResult whose output is the
-    ///   operator's reason verbatim (or the default deny message
-    ///   when reason is `None`). The LLM sees the operator's text.
+    ///   and returns a failed ToolResult stating the refusal with the
+    ///   operator's reason in it (or the default deny message when
+    ///   reason is `None`). The LLM sees the operator's text.
     /// - **Gate returns `Timeout`**: emits
     ///   `PermissionDenied { denied_via: Some(gate.source()), denial_reason: Some("approval timeout") }`
-    ///   and returns a failed ToolResult with the timeout message.
+    ///   and returns a failed ToolResult stating the refusal. The
+    ///   timeout is on the chain, not in the model's text.
     ///
     /// Both catch sites (`execute_and_record_tool` for the
     /// non-streaming dispatch and the inline catch at the streaming
@@ -3888,7 +3889,10 @@ impl Agent {
                         sender_id: self.current_inbound.sender_id.clone(),
                     },
                 )?;
-                let output = reason.unwrap_or_else(|| unmediated_deny_message(&ctx));
+                let output = match reason.as_deref() {
+                    Some(r) => refused_deny_message(&ctx, r),
+                    None => unmediated_deny_message(&ctx),
+                };
                 denials.push(ctx);
                 Ok(crate::tool::ToolResult {
                     output,
@@ -3897,7 +3901,17 @@ impl Agent {
                 })
             }
             Some(crate::approval_gate::ApprovalOutcome::Timeout) => {
-                let output = "approval timeout".to_string();
+                // The chain records why; the model reads a refusal. A
+                // bare "approval timeout" reads like a transport fault,
+                // which a model can report as an unreachable host and
+                // route around.
+                let reason = "approval timeout".to_string();
+                let output = format!(
+                    "Permission denied: '{}' requires {} approval and no operator \
+                     approved it. This action was not executed.",
+                    ctx.tool_name,
+                    ctx.requested_tier.label(),
+                );
                 self.log_event(
                     TrustLevel::System,
                     SessionEvent::PermissionDenied {
@@ -3908,7 +3922,7 @@ impl Agent {
                         agent_id: ctx.agent_id.clone(),
                         trigger: ctx.trigger_message.clone(),
                         denied_via: source,
-                        denial_reason: Some(output.clone()),
+                        denial_reason: Some(reason),
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
                     },
@@ -5391,6 +5405,19 @@ fn unmediated_deny_message(ctx: &PermissionDenialContext) -> String {
          This action was not executed.",
         ctx.tool_name,
         ctx.requested_tier.label(),
+    )
+}
+
+/// Model-facing text for a gate that refused with a reason. The
+/// reason is the operator's text or the surface's (`eof on stdin`),
+/// framed so the model reads a refusal rather than a fault.
+fn refused_deny_message(ctx: &PermissionDenialContext, reason: &str) -> String {
+    format!(
+        "Permission denied: '{}' requires {} approval and was refused ({}). \
+         This action was not executed.",
+        ctx.tool_name,
+        ctx.requested_tier.label(),
+        reason,
     )
 }
 

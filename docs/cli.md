@@ -70,7 +70,9 @@ approved before it asks; see
 for what is on those lines and why. A piped or redirected `wirken ask`
 gets no gate and short-circuits with a terminal deny, so a script does not
 hang on a prompt nobody will answer. `WIRKEN_ASK_APPROVAL_TIMEOUT_S` sets the
-read deadline (default 60).
+read deadline (default 60). A prompt left unanswered past the deadline is a
+denial: the model is told the action was refused and not executed, and the
+chain records a `PermissionDenied` row with `approval timeout` as its reason.
 
 ## wirken channel
 

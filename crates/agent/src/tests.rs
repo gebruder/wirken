@@ -11527,7 +11527,9 @@ mod approved_unknown_tool {
     use crate::llm::LlmConfig;
 
     /// Answers each chat completion with the next message in order.
-    async fn stub(messages: Vec<serde_json::Value>) -> (String, tokio::task::JoinHandle<()>) {
+    pub(super) async fn stub(
+        messages: Vec<serde_json::Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -11679,6 +11681,141 @@ mod approved_unknown_tool {
         assert!(
             approved < failed && failed < reply,
             "approval, then the failed result, then the reply: {events:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// An approval prompt that nobody answers. The gate times out, the call
+// resolves to deny, and the model reads a refusal: not a timeout, not a
+// transport error it could take for an unreachable host. The chain
+// carries the denial with the timeout as its reason.
+// ---------------------------------------------------------------------------
+mod unanswered_approval {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use super::approved_unknown_tool::stub;
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+    use crate::llm::LlmConfig;
+
+    async fn run_with(outcome: ApprovalOutcome) -> (String, Vec<SessionEvent>) {
+        let (base_url, server) = stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Fetching the package index.",
+                "tool_calls": [{
+                    "id": "call_fetch",
+                    "type": "function",
+                    "function": {
+                        "name": "exec",
+                        "arguments": "{\"command\": \"curl https://pypi.org/simple/requests/\"}",
+                    },
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Stopped."}),
+        ])
+        .await;
+
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let agent_id = "unanswered".to_string();
+        let mut agent = crate::runtime::Agent::new(
+            agent_id.clone(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+        )
+        .unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        agent.set_approval_gate(Arc::new(ScriptedGate::new(vec![outcome])));
+
+        agent
+            .process_message("install requests", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+
+        let events: Vec<SessionEvent> = log
+            .get_since(&log.handle_for(SessionId::new(agent_id)), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        let output = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ToolResult {
+                    tool_name,
+                    output,
+                    success: false,
+                    ..
+                } if tool_name == "exec" => Some(output.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no failed exec tool_result: {events:?}"));
+        (output, events)
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_prompt_reads_as_a_refusal() {
+        let (output, events) = run_with(ApprovalOutcome::Timeout).await;
+        assert!(
+            output.starts_with("Permission denied: 'exec'"),
+            "the model reads a refusal: {output}"
+        );
+        assert!(output.contains("was not executed"), "{output}");
+        assert!(
+            !output.to_ascii_lowercase().contains("timeout")
+                && !output.to_ascii_lowercase().contains("timed out"),
+            "the model never reads a timeout: {output}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SessionEvent::PermissionDenied { tool, denial_reason: Some(r), .. }
+                    if tool == "exec" && r == "approval timeout"
+            )),
+            "the chain records the denial and why: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_prompt_reads_as_a_refusal() {
+        let (output, events) = run_with(ApprovalOutcome::Denied {
+            reason: Some("eof on stdin".into()),
+            actor: None,
+        })
+        .await;
+        assert!(
+            output.starts_with("Permission denied: 'exec'"),
+            "the model reads a refusal: {output}"
+        );
+        assert!(output.contains("was not executed"), "{output}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                SessionEvent::PermissionDenied { tool, denial_reason: Some(r), .. }
+                    if tool == "exec" && r == "eof on stdin"
+            )),
+            "the chain records the denial and why: {events:?}"
         );
     }
 }
