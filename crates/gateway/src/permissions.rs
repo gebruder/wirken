@@ -327,7 +327,7 @@ impl Action {
 ///   agent session, never written to SQLite. Survives crashes only
 ///   if the session-log replay re-emits the `PermissionApproved`
 ///   audit event; otherwise it is gone with the process. See
-///   `~/code/wirken-ironcurtain/04-surpass.md` for the rationale
+///   `~/code/analysis/wirken-ironcurtain/04-surpass.md` for the rationale
 ///   (the "actually-useful version" of policy hot-swap framed for
 ///   wirken's single-process model).
 ///
