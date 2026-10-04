@@ -12,6 +12,16 @@ tagged.
 
 ### Security
 
+- Behavior change on fresh installs: with no skill allow-set declared,
+  `http_request` reaches no host. An agent with no skills attached,
+  which is where a fresh install starts, used to send `http_request` to
+  any host the model named, including one it assembled from a URL.
+  Every such request is now refused before any connection and recorded
+  as `SkillPermissionDenied`. A host is reachable when a loaded skill
+  names it in `egress.domains`, or when a skill declares
+  `egress.domains: ["*"]`. `web_search` and `generate_image`, which take
+  no host from the model, are unchanged.
+
 - `wirken ask` attaches an agent's skills, so their permission blocks
   apply: the model is offered only the tools the attached skills'
   `tools.allow` names, and the filesystem, egress and inference axes are
@@ -38,6 +48,28 @@ tagged.
   MCP tool definitions come from the running servers and are not on the
   chain, so the hash cannot be recomputed offline, and it is never
   reported divergent.
+
+- An approval prompt nobody answers, or one the operator declines with
+  a reason, reaches the model as a refusal: "Permission denied: ... This
+  action was not executed." The model used to receive the bare text
+  `approval timeout` or `eof on stdin`, which reads like a transport
+  fault and can be reported as an unreachable host. The chain is
+  unchanged: the `PermissionDenied` row still carries `approval
+  timeout` or the operator's reason.
+
+- With `sandbox.json` `mode: off`, a host `exec` kills the process
+  group it started when the call returns or times out, so children
+  started with `&`, `nohup` or a double fork end with the call. A host
+  command that timed out used to keep running. A child that calls
+  `setsid` leaves the group and is not reached; the container modes end
+  every process in the call's PID namespace, `setsid` included. On
+  Windows the shell is killed on timeout only.
+
+### Dependencies
+
+- wasmtime and wasmtime-wasi floor raised to 48.0.4 for
+  RUSTSEC-2026-0314 through RUSTSEC-2026-0326 (fuel accounting, GC
+  rooting, component lifting and WASI host panics).
 
 ## [1.25.0] - 2026-09-24
 
