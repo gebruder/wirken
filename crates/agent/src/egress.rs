@@ -69,7 +69,9 @@ use crate::skill_perms::{AllowSet, EffectiveProfile, EgressMode};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EgressEnforcement {
     /// Bypass — no checking. Used in `EffectiveProfile::Legacy` and as
-    /// the initial state before any skills are attached.
+    /// the initial state before any skills are attached. Applies to
+    /// `get`/`post` only: [`EgressClient::request`] (`http_request`)
+    /// refuses every host in this state.
     Unrestricted,
     /// Reject everything. Used when the resolved profile is
     /// `egress.mode = deny`.
@@ -105,6 +107,12 @@ impl EgressEnforcement {
             EgressEnforcement::Allowlist(set) => set.iter().any(|pat| host_matches(host, pat)),
         }
     }
+}
+
+fn host_of(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|s| s.to_string()))
 }
 
 fn host_matches(host: &str, pattern: &str) -> bool {
@@ -215,7 +223,8 @@ impl EgressClient {
         method: reqwest::Method,
         url: &str,
     ) -> Result<RequestBuilder, HttpAccessDenied> {
-        self.check_egress(url).map_err(HttpAccessDenied::Egress)?;
+        self.check_egress_declared(url)
+            .map_err(HttpAccessDenied::Egress)?;
         self.inner
             .check_and_reserve(url)
             .await
@@ -279,14 +288,32 @@ impl EgressClient {
             .map_err(HttpAccessDenied::RateLimit)
     }
 
-    fn check_egress(&self, url: &str) -> Result<(), EgressDenied> {
-        let host = url::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(|s| s.to_string()))
-            .ok_or_else(|| EgressDenied {
-                host: format!("<unparseable url: {url}>"),
+    /// [`Self::check_egress`] for a request whose host the model
+    /// chooses. `Unrestricted` means no skill declared an egress
+    /// allow-set, so no host has been approved and the request is
+    /// refused. An explicit `egress.domains: ["*"]` (`AllowAll`) still
+    /// admits any host.
+    fn check_egress_declared(&self, url: &str) -> Result<(), EgressDenied> {
+        self.check_egress(url)?;
+        let unrestricted = self
+            .enforcement
+            .read()
+            .map(|g| *g == EgressEnforcement::Unrestricted)
+            .unwrap_or(true);
+        if unrestricted {
+            return Err(EgressDenied {
+                host: host_of(url).unwrap_or_default(),
                 reason: EgressDenyReason::Profile,
-            })?;
+            });
+        }
+        Ok(())
+    }
+
+    fn check_egress(&self, url: &str) -> Result<(), EgressDenied> {
+        let host = host_of(url).ok_or_else(|| EgressDenied {
+            host: format!("<unparseable url: {url}>"),
+            reason: EgressDenyReason::Profile,
+        })?;
         // Overlay deny first. A phase-installed deny entry
         // short-circuits even when the base enforcement would have
         // allowed the host, and surfaces a `Phase` reason so the
@@ -450,6 +477,33 @@ mod tests {
     async fn client_default_state_is_unrestricted() {
         let c = EgressClient::new();
         assert!(c.get("https://anywhere.example.com/foo").await.is_ok());
+    }
+
+    /// `http_request` takes its host from the model. With no allowlist
+    /// declared (zero skills attached, or a fresh client) there is no
+    /// host the operator has approved, so the request is refused.
+    #[tokio::test]
+    async fn request_denies_when_no_allowlist_is_declared() {
+        let c = EgressClient::new();
+        let err = c
+            .request(reqwest::Method::GET, "https://mirror.example.net/simple/")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HttpAccessDenied::Egress(EgressDenied { ref host, .. }) if host == "mirror.example.net"
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_honors_explicit_wildcard() {
+        let c = EgressClient::new();
+        c.set_enforcement(EgressEnforcement::AllowAll);
+        assert!(
+            c.request(reqwest::Method::GET, "https://mirror.example.net/")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

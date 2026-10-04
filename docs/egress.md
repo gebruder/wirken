@@ -34,7 +34,9 @@ from `crates/agent/src/runtime.rs:2876`):
   model names a slot by string and never supplies a secret value.
 
 A request that clears all four still goes out through `EgressClient`, so the
-host allowset above applies on top.
+host allowset above applies on top. With no skills attached there is no
+allowset, and `http_request` refuses every host; only an explicit
+`egress.domains: ["*"]` admits a host no skill named.
 
 ### Credential-host binding
 
