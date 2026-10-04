@@ -13,8 +13,12 @@
 //! allowlist, deny-all egress, empty filesystem allowlists, empty inference
 //! allowlist). A skill without the block loads, but cannot do anything beyond
 //! emitting text through the prompt; the operator opts into capability by
-//! writing the block. The only path that produces `EffectiveProfile::Legacy`
-//! is the empty-attach case (no skills loaded at all).
+//! writing the block. `EffectiveProfile::Legacy` is the profile of an agent
+//! no skills have been attached to: before `Agent::attach_skills` runs, after
+//! an attach of an empty set, and after skills are only loaded into the prompt.
+//! `Agent::load_skills`, `extend_skills` and `extend_with_skills` do that last
+//! one: they add skill bodies without attaching their permission blocks, so an
+//! agent built only through them keeps `Legacy` with skills loaded.
 //!
 //! Wildcard `"*"` is supported on `tools`, `egress.domains`, and
 //! `inference.allow`. Filesystem wildcards are rejected: cap-std workspace
@@ -464,18 +468,20 @@ fn validate_host(s: &str) -> Result<(), PermissionsError> {
 
 /// Effective per-agent profile after attaching all skills. The agent's
 /// enforcement points consult this; `Legacy` short-circuits all checks
-/// (full surface) and is only reachable when the agent has zero skills
-/// attached. Post-migration-window the loader hard-fails on a missing
-/// `permissions:` block, so every loaded skill carries a profile and
-/// any non-empty attach produces `Resolved`.
+/// (full surface) and is the profile of an agent no skills have been
+/// attached to, whether or not skills were loaded into its prompt (see
+/// the module docs). Post-migration-window the loader hard-fails on a
+/// missing `permissions:` block, so every loaded skill carries a profile
+/// and any non-empty attach produces `Resolved`.
 // `Resolved` carries the whole `PermissionProfile` inline. Boxing it to
 // satisfy `large_enum_variant` would add an allocation to the common
 // path (every attached agent is `Resolved`) purely to shrink the rare
-// zero-skill `Legacy` case, so the payload stays inline by choice.
+// unattached `Legacy` case, so the payload stays inline by choice.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum EffectiveProfile {
-    /// Full surface, no checks. Reached only when zero skills are attached.
+    /// Full surface, no checks. Held by an agent no skills have been
+    /// attached to.
     #[default]
     Legacy,
     /// Union of declared profiles. Every enforcement point honors it.

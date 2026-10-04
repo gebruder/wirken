@@ -2990,8 +2990,8 @@ impl Agent {
         // shown only the allowed tools (see `snapshot_tool_defs`), but
         // we re-check at dispatch in case the LLM ignores the surface.
         // `EffectiveProfile::Legacy` short-circuits to full surface and
-        // is reachable only when zero skills are attached
-        // (`effective_for_skills`): every loaded skill carries a resolved
+        // is the profile of an agent no skills have been attached to
+        // (see `EffectiveProfile`): every loaded skill carries a resolved
         // profile, and a missing `permissions:` block resolves to
         // least-privilege rather than Legacy, so any non-empty attach
         // produces `Resolved`.

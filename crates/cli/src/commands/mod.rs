@@ -112,6 +112,43 @@ pub fn llm_config_for_agent(
     llm
 }
 
+/// The skills a configured agent is built with: its own skills
+/// directory, the shared one, then its persona's preset. `wirken run`,
+/// `wirken ask` and `wirken sessions verify` all build from this, so
+/// the permissions a session ran under are the ones verify rebuilds.
+/// A skills directory that fails to load contributes nothing; a
+/// dangling preset reference is an error.
+pub fn skills_for_agent(
+    cfg: &GatewayConfig,
+    agent_cfg: &wirken_gateway::agent_config::AgentConfig,
+) -> anyhow::Result<Vec<wirken_agent::skill::Skill>> {
+    let mut skills = Vec::new();
+    for dir in [
+        cfg.agent_skills_dir(&agent_cfg.id),
+        cfg.data_dir.join("skills"),
+    ] {
+        if dir.is_dir()
+            && let Ok(s) = wirken_agent::SkillLoader::load_dir(&dir)
+        {
+            skills.extend(s);
+        }
+    }
+    let presets_dir = cfg.data_dir.join("presets");
+    skills.extend(persona::resolve_for_construction(agent_cfg, &presets_dir)?);
+    Ok(skills)
+}
+
+/// The skills the `provider.json` default agent is built with: the
+/// shared skills directory.
+pub fn skills_for_default_agent(cfg: &GatewayConfig) -> Vec<wirken_agent::skill::Skill> {
+    let dir = cfg.data_dir.join("skills");
+    if dir.is_dir() {
+        wirken_agent::SkillLoader::load_dir(&dir).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn load_sandbox_config(data_dir: &Path) -> SandboxConfig {
     let path = data_dir.join("sandbox.json");
     if !path.exists() {

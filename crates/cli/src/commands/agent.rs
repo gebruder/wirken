@@ -182,10 +182,12 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         ));
     }
 
-    let skills_dir = cfg.data_dir.join("skills");
-    if skills_dir.is_dir() {
-        let _ = agent.load_skills(&skills_dir);
-    }
+    // Attached, not just loaded: the skills' permission blocks are
+    // what narrow the tool set, exactly as `wirken run` builds the
+    // same agent.
+    agent
+        .attach_skills(super::skills_for_default_agent(&cfg), Vec::new())
+        .context("attach skills")?;
 
     println!();
     let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());
@@ -274,29 +276,13 @@ async fn send_with_agent_config(
         ));
     }
 
-    let skills_dir = cfg.agent_skills_dir(&agent_cfg.id);
-    if skills_dir.is_dir() {
-        let _ = agent.load_skills(&skills_dir);
-    }
-    // Also load shared skills
-    let shared_skills = cfg.data_dir.join("skills");
-    if shared_skills.is_dir() {
-        let _ = agent.load_skills(&shared_skills);
-    }
-
-    // Resolve the persona's preset
-    // reference (if any) and merge its declared skills into the
-    // agent. The resolver hard-fails on a dangling reference or
-    // load failure so a misconfigured persona surfaces as an
-    // operator-actionable error rather than as silent skill
-    // absence.
-    let presets_dir = cfg.data_dir.join("presets");
-    let preset_skills = super::persona::resolve_for_construction(agent_cfg, &presets_dir)?;
-    if !preset_skills.is_empty() {
-        agent
-            .extend_with_skills(preset_skills)
-            .context("attach preset skills")?;
-    }
+    // The agent's own, shared and preset skills, attached so their
+    // permission blocks narrow the tool set exactly as `wirken run`
+    // builds the same agent. A dangling preset reference is an
+    // operator-actionable error, not silent skill absence.
+    agent
+        .attach_skills(super::skills_for_agent(cfg, agent_cfg)?, Vec::new())
+        .context("attach skills")?;
 
     println!();
     let inbound_id = format!("ask-{}", uuid::Uuid::new_v4());

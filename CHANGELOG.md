@@ -10,6 +10,17 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- `wirken ask` attaches an agent's skills, so their permission blocks
+  apply: the model is offered only the tools the attached skills'
+  `tools.allow` names, and the filesystem, egress and inference axes are
+  enforced. It used to load skill bodies into the prompt without
+  attaching them, which left the full tool surface on offer with skills
+  loaded. An agent's own skills also survive the shared-skills load,
+  which used to replace them. `wirken ask` and `wirken run` build an
+  agent's skill set through one function now.
+
 ## [1.25.0] - 2026-09-24
 
 ### Changed

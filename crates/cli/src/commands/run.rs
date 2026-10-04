@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use wirken_agent::factory::CacheMode;
 use wirken_agent::llm::LlmConfig;
-use wirken_agent::{AgentFactory, AgentStaticConfig, SkillLoader, session_id_for};
+use wirken_agent::{AgentFactory, AgentStaticConfig, session_id_for};
 use wirken_audit::{ActorKind, AlarmLog, AuditEvent, AuditWriter, SiemConfig, SiemTarget};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
@@ -632,31 +632,13 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let workspace = cfg.agent_workspace(&agent_cfg.id);
             std::fs::create_dir_all(&workspace)?;
 
-            // Load per-agent skills + shared skills.
-            let mut skills = Vec::new();
-            let agent_skills = cfg.agent_skills_dir(&agent_cfg.id);
-            if agent_skills.is_dir()
-                && let Ok(s) = SkillLoader::load_dir(&agent_skills)
-            {
-                skills.extend(s);
-            }
-            let shared_skills = cfg.data_dir.join("skills");
-            if shared_skills.is_dir()
-                && let Ok(s) = SkillLoader::load_dir(&shared_skills)
-            {
-                skills.extend(s);
-            }
-
-            // Merge preset skills into the
-            // static config. A dangling reference or load failure
-            // hard-fails daemon startup so a misconfigured persona
-            // cannot silently route channel traffic to an agent with
-            // no skills. The operator sees the same message
-            // `wirken ask` would print and applies one of the two
-            // recovery hints before the daemon will start.
-            let presets_dir = cfg.data_dir.join("presets");
-            let preset_skills = super::persona::resolve_for_construction(&agent_cfg, &presets_dir)?;
-            skills.extend(preset_skills);
+            // Per-agent, shared and preset skills. A dangling preset
+            // reference or load failure hard-fails daemon startup so a
+            // misconfigured persona cannot silently route channel
+            // traffic to an agent with no skills. The operator sees the
+            // same message `wirken ask` would print and applies one of
+            // the two recovery hints before the daemon will start.
+            let skills = super::skills_for_agent(&cfg, &agent_cfg)?;
 
             // Bind channels to this agent
             for channel in &agent_cfg.channels {
@@ -749,13 +731,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let workspace = cfg.data_dir.join("workspace");
         std::fs::create_dir_all(&workspace)?;
 
-        let mut skills = Vec::new();
-        let skills_dir = cfg.data_dir.join("skills");
-        if skills_dir.is_dir()
-            && let Ok(s) = SkillLoader::load_dir(&skills_dir)
-        {
-            skills.extend(s);
-        }
+        let skills = super::skills_for_default_agent(&cfg);
 
         // Bind any channels not already routed
         for adapter in registry.lock().await.list() {
