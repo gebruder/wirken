@@ -123,6 +123,11 @@ port and address rules, and the known CONNECT/SNI limit are in
 [egress.md](egress.md#sandbox-egress). Everything else in the hardening table
 above is unchanged on that path.
 
+This axis is separate from the skill-set allow-set that governs
+`http_request`. Both default to no reach: a channel with no egress policy
+gives `exec` no network, and an agent whose skills declare no allow-set gives
+`http_request` no host ([egress.md](egress.md#what-egressdomains-covers)).
+
 Two `sandbox.json` keys matter here:
 
 ```json

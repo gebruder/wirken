@@ -13,7 +13,16 @@ The skill-set `egress.domains` allowlist is a defense-in-depth control on a spec
 
 Each call resolves the request host against the agent's effective `egress.domains` allowset (the union of every loaded skill's `egress.domains` declaration). Hosts not in the allowset are denied pre-flight, before any TCP connection and without consuming the rate-limit budget. Wildcard `"*"` is supported on the allowset; `"*.example.com"` style suffix patterns are also supported.
 
-Source: `crates/agent/src/egress.rs:281-317` (host-based check), `crates/agent/src/skill_perms.rs:964-1010` (allowset resolution).
+With no skill allow-set declared, which is an agent with no skills attached
+and the state of a fresh install, `http_request` reaches no host: every
+request is refused pre-flight and recorded as `SkillPermissionDenied`. A host
+becomes reachable only when a loaded skill names it, or when a skill declares
+`egress.domains: ["*"]`. `web_search` and `generate_image` do not take a host
+from the model: `web_search` posts to DuckDuckGo and `generate_image` to the
+configured provider's image endpoint. With no skills attached those two are
+not restricted.
+
+Source: `crates/agent/src/egress.rs:296-345` (host-based check, and the no-allow-set refusal for `http_request`), `crates/agent/src/skill_perms.rs:964-1010` (allowset resolution).
 
 ## The `http_request` gate
 
@@ -198,6 +207,6 @@ The same gap appears in [security-properties.md](security-properties.md) under T
 
 ## Source references
 
-- `EgressClient` scope and host check: `crates/agent/src/egress.rs:167-318`.
+- `EgressClient` scope and host check: `crates/agent/src/egress.rs:176-346`.
 - Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:964-1010`, matching at `crates/agent/src/skill_perms.rs:583-599`.
 - Threat-model row: [security-properties.md](security-properties.md), row `T11` (Unexpected RCE and code attacks).
