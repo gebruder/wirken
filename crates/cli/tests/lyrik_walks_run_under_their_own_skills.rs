@@ -125,6 +125,25 @@ fn a_refused_exec_is_skipped_and_writes_stay_under_lyrik() {
     // The walk reports the step it skipped, and completed.
     let audit =
         std::fs::read_to_string(target.join(format!(".lyrik/state/runs/{RUN}/audit.log"))).unwrap();
+    // The dispatch row keeps its keys: where the run's skills come
+    // from, how many it attached, and which.
+    let dispatch: serde_json::Value = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|e| e["event"] == "lyrik.dispatch.started")
+        .unwrap_or_else(|| panic!("no dispatch.started row:\n{audit}"));
+    assert!(
+        dispatch["detail"]["skills_dir"]
+            .as_str()
+            .is_some_and(|d| d.ends_with("lyrik-skill")),
+        "{dispatch}"
+    );
+    assert_eq!(dispatch["detail"]["skills_loaded"], 2, "{dispatch}");
+    assert_eq!(
+        dispatch["detail"]["skills_attached"],
+        serde_json::json!(["lyrik", "sink-walk"]),
+        "{dispatch}"
+    );
     let completed: serde_json::Value = audit
         .lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())

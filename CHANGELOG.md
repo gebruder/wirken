@@ -89,8 +89,9 @@ tagged.
   run. The refusal is on the chain, the walk carries on without the
   step, and its `lyrik.walk.completed` row lists the step under
   `skipped`. The run exits non-zero only when every walk failed. The
-  dispatch row names the attached skills under `skills_attached` in
-  place of `skills_dir` and `skills_loaded`.
+  `lyrik.dispatch.started` row adds `skills_attached`, naming the
+  attached skills; `skills_dir` is now the run's staged Lyrik directory
+  and `skills_loaded` the number of skills attached.
 
 - A walk staged for `wirken lyrik run` opens with the rules it runs
   under: every write goes under the walk's staging directory, and a

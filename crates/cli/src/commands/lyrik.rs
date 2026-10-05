@@ -612,6 +612,11 @@ async fn dispatch_via_agent_runtime(
             "provider": pin.provider,
             "model": pin.model,
             "base_url": pin.base_url,
+            // `skills_dir` and `skills_loaded` keep their place in the
+            // row: the directory the run's skills come from and how
+            // many it attached. `skills_attached` names them.
+            "skills_dir": lyrik_staged_dir.display().to_string(),
+            "skills_loaded": skills_attached.len(),
             "skills_attached": skills_attached,
             "walks_staged_dir": walks_staged_dir.as_ref().map(|p| p.display().to_string()),
             "walks": walks_cfg.as_ref().map(|c| c.walks.clone()),
