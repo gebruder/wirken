@@ -14,6 +14,9 @@ tagged.
 
 - wasmtime and wasmtime-wasi move to 49.0.2 together. The minimum Rust
   version rises to 1.96, which wasmtime 49 requires.
+- feed-rs 3.0.0 for Zirkel's feed parsing. Its breaking changes are to
+  types Zirkel does not read (author and contributor parsing, and
+  `Send + Sync` on its extension traits).
 - lru 0.18.5, thiserror 2.0.21, wat 1.261.0.
 
 ## [1.26.0] - 2026-10-05
