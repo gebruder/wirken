@@ -46,7 +46,7 @@ cargo clippy -p wirken-ipc --all-targets --target x86_64-pc-windows-gnu \
     -- -D clippy::undocumented_unsafe_blocks
 ```
 
-The comment has to state an invariant that actually holds. Most of the `unsafe` in this tree was `std::env::set_var` in tests, where none did: the soundness condition is that no other thread touches the environment, and a test binary's other threads touch it all the time. Those blocks are gone, replaced by functions that take the value as an argument. What remains is three `libc::geteuid()` calls, one `env::remove_var` that runs before anything is spawned, the `cfg(windows)` Win32 calls, and two integration-test binaries that each hold a single test so the single-thread claim is a fact.
+The comment has to state an invariant that actually holds. Most of the `unsafe` in this tree was `std::env::set_var` in tests, where none did: the soundness condition is that no other thread touches the environment, and a test binary's other threads touch it all the time. Those blocks are gone, replaced by functions that take the value as an argument. What remains is three `libc::geteuid()` calls, one `libc::killpg` that ends a host `exec`'s process group (the group id is the leader's pid, which the kernel does not reuse while any member of the group is alive), one `env::remove_var` that runs before anything is spawned, the `cfg(windows)` Win32 calls, and two integration-test binaries that each hold a single test so the single-thread claim is a fact.
 
 If you cannot write a true invariant, the block does not get a comment. It gets replaced.
 
