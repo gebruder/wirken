@@ -207,6 +207,39 @@ pub fn walk_exec_commands(walk_name: &str) -> &'static [&'static str] {
     }
 }
 
+/// The binaries `commands` need, by their first word, deduplicated in
+/// first-seen order: `["git log", "git blame", "cargo test"]` needs
+/// `git` and `cargo`.
+pub fn binaries_for(commands: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in commands {
+        if let Some(bin) = c.split_whitespace().next()
+            && !out.iter().any(|b| b == bin)
+        {
+            out.push(bin.to_string());
+        }
+    }
+    out
+}
+
+/// What the run says about the `exec` sandbox before the first prompt.
+/// `missing` is the binaries the sandbox lacks, or `None` when it could
+/// not be asked. Nothing to say when everything is there.
+pub fn sandbox_banner(where_exec_runs: &str, missing: Option<&[String]>) -> Option<String> {
+    match missing {
+        Some([]) => None,
+        Some(missing) => Some(format!(
+            "  {where_exec_runs} has no {}: an approved command that needs it will fail. \
+             Set `image` in sandbox.json to one that has it.",
+            missing.join(" or ")
+        )),
+        None => Some(format!(
+            "  {where_exec_runs} could not be checked for the commands below; an approved \
+             command may fail there."
+        )),
+    }
+}
+
 /// The rules a walk runs under inside `wirken lyrik run`, placed ahead
 /// of the operator's walk text. They take precedence over a location
 /// the walk text names, such as a harness in the project's test tree.
@@ -387,6 +420,29 @@ mod tests {
         });
         let err = parse_walks_config(&cfg, tmp.path()).unwrap_err();
         assert!(err.to_string().contains(">= 1"));
+    }
+
+    #[test]
+    fn binaries_are_the_first_word_of_each_command_once() {
+        assert_eq!(
+            binaries_for(&["git log", "git blame", "cargo test"]),
+            vec!["git".to_string(), "cargo".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_banner_names_what_the_sandbox_lacks_and_is_silent_otherwise() {
+        let image = "The exec sandbox image `debian:bookworm-slim`";
+        let missing = vec!["git".to_string()];
+        let line = sandbox_banner(image, Some(&missing)).unwrap();
+        assert!(line.contains("`debian:bookworm-slim` has no git"), "{line}");
+        assert!(line.contains("sandbox.json"), "{line}");
+        assert_eq!(sandbox_banner(image, Some(&[])), None);
+        assert!(
+            sandbox_banner(image, None)
+                .unwrap()
+                .contains("could not be checked")
+        );
     }
 
     #[test]

@@ -215,7 +215,10 @@ about to run, one prompt at a time across concurrent walks; an answer covers
 that one call and nothing is stored for later runs. Without a terminal every
 such command is refused. A refused command is a skipped step, not a failed
 walk. An approved command runs in the `exec` sandbox, so the sandbox image
-needs `git` or `cargo` for these walks; the default image has neither.
+needs `git` or `cargo` for these walks; the default image has neither. Before
+the first prompt the run asks the sandbox which of the binaries its walks need
+are missing, and names them, so no one approves a command that can only fail.
+With `mode: off` it checks the host `PATH` instead.
 
 Dedup on the merged output: findings sharing `(location.file,
 location.line_start)` collapse to one; `framing` becomes the sorted unique

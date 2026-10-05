@@ -104,7 +104,9 @@ tagged.
   call; nothing is stored across runs and no key is pre-approved. Each
   staged walk lists the commands it runs, and the run prints them
   before it starts. Without a terminal every such command is refused
-  and skipped.
+  and skipped. Before the first prompt the run checks the `exec`
+  sandbox for the binaries those commands need and names any it lacks:
+  the default image has neither `git` nor `cargo`.
 
 ### Dependencies
 

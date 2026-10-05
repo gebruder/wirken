@@ -42,6 +42,48 @@ const DRIVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `use_fixture`, when supplied, skips the agent-runtime skill dispatch
 /// and copies the fixture findings.json into the run-state directory.
 /// Required until the agent dispatch is wired (slice 7b2).
+/// Which of `binaries` the place `exec` runs does not have: the host
+/// `PATH` under sandbox mode off, otherwise the configured sandbox
+/// image, asked through the same sandbox an approved command runs in.
+/// `None` when it cannot be asked, such as no container runtime.
+async fn binaries_missing_for_exec(
+    sandbox: &wirken_agent::sandbox::SandboxConfig,
+    workspace: &Path,
+    binaries: &[String],
+) -> Option<Vec<String>> {
+    if binaries.is_empty() {
+        return Some(Vec::new());
+    }
+    if sandbox.mode == wirken_agent::sandbox::SandboxMode::Off {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        return Some(
+            binaries
+                .iter()
+                .filter(|b| !std::env::split_paths(&path).any(|d| d.join(b.as_str()).is_file()))
+                .cloned()
+                .collect(),
+        );
+    }
+    let probe = format!(
+        "for b in {}; do command -v \"$b\" >/dev/null 2>&1 || echo \"$b\"; done; echo probed",
+        binaries.join(" ")
+    );
+    let docker = wirken_agent::sandbox::DockerSandbox::new(sandbox.clone()).ok()?;
+    let result = docker.exec(&probe, workspace, None).await.ok()?;
+    if !result.output.lines().any(|l| l.trim() == "probed") {
+        return None;
+    }
+    Some(
+        result
+            .output
+            .lines()
+            .map(str::trim)
+            .filter(|l| binaries.iter().any(|b| b == l))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 /// The skills a Lyrik agent attaches: the run's staged Lyrik copy and,
 /// when walks are selected, the staged walks. Nothing from the shared
 /// skills directory: a shared skill's permissions would widen the run's
@@ -993,6 +1035,25 @@ async fn dispatch_walks_concurrent(
         .collect();
     if !asks.is_empty() {
         if approval_gate.is_some() {
+            // Said before anything is asked: an approved command that
+            // needs a binary the sandbox lacks can only fail.
+            let needed: Vec<&str> = walks
+                .iter()
+                .flat_map(|w| super::lyrik_walks::walk_exec_commands(w).iter().copied())
+                .collect();
+            let binaries = super::lyrik_walks::binaries_for(&needed);
+            let missing = binaries_missing_for_exec(&sandbox, &target, &binaries).await;
+            let where_exec_runs = match sandbox.mode {
+                wirken_agent::sandbox::SandboxMode::Off => {
+                    "The host (sandbox mode off)".to_string()
+                }
+                _ => format!("The exec sandbox image `{}`", sandbox.image),
+            };
+            if let Some(line) =
+                super::lyrik_walks::sandbox_banner(&where_exec_runs, missing.as_deref())
+            {
+                eprintln!("{line}");
+            }
             eprintln!(
                 "  This run asks before each of these commands runs: {}",
                 asks.join("; ")
@@ -2716,5 +2777,37 @@ mod tests {
             }
             other => panic!("expected Ok, got {other:?}"),
         }
+    }
+
+    /// The default image has neither binary the walks' commands need,
+    /// and the probe says so before anyone is asked to approve one.
+    #[tokio::test]
+    async fn the_default_sandbox_image_is_reported_without_git_or_cargo() {
+        use wirken_agent::sandbox::{SandboxConfig, detect_image, detect_runtime};
+        if detect_runtime().await.is_none() {
+            eprintln!("skipping: Docker is not available on this host");
+            return;
+        }
+        if !detect_image("debian:bookworm-slim").await {
+            eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::set_permissions(
+            tmp.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o777),
+        )
+        .unwrap();
+        let sandbox = SandboxConfig {
+            image: "debian:bookworm-slim".into(),
+            ..Default::default()
+        };
+        let missing = super::binaries_missing_for_exec(
+            &sandbox,
+            tmp.path(),
+            &["git".to_string(), "cargo".to_string(), "sh".to_string()],
+        )
+        .await;
+        assert_eq!(missing, Some(vec!["git".to_string(), "cargo".to_string()]));
     }
 }
