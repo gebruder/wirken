@@ -241,7 +241,7 @@ jobs:
 
       # Release is created as a draft. The maintainer downloads
       # checksums.sha256 from the draft, signs it offline with the
-      # Ed25519 release signing key (see docs/release-signing.md), and
+      # Ed25519 release signing key (see docs/signing.md), and
       # uploads checksums.sha256.sig to the draft before publishing.
       # CI does not hold the signing key.
       - name: Create draft GitHub Release
@@ -265,7 +265,7 @@ jobs:
             3. Upload `checksums.sha256.sig` to this draft.
             4. Publish the release.
 
-            See `docs/release-signing.md` for the full procedure.
+            See `docs/signing.md` for the full procedure.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -276,7 +276,7 @@ jobs:
   # independent trust root (build-origin via a transparency log) beside
   # the offline-maintainer ed25519 signature; the two compose and
   # neither substitutes for the other. Verify with `slsa-verifier`
-  # (see docs/release-signing.md).
+  # (see docs/signing.md).
   #
   # This reusable workflow is pinned by release TAG, not by commit SHA:
   # the generator verifies that it was itself invoked at a semantic tag
