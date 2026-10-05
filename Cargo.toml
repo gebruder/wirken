@@ -26,9 +26,9 @@ members = [
 [workspace.package]
 version = "1.26.0"
 edition = "2024"
-# Floor is set by the wasmtime family: 48.x uses `cfg_select!`, which
-# stabilized in 1.95. Verified by the MSRV job in ci.yml, not by hand.
-rust-version = "1.95.0"
+# Floor is set by the wasmtime family: 49.x declares rust-version 1.96.
+# Verified by the MSRV job in ci.yml, not by hand.
+rust-version = "1.96.0"
 license = "MIT"
 repository = "https://github.com/gebruder/wirken"
 description = "Team-scale AI agent orchestration with per-channel process isolation, encrypted credential vault, and per-session hash-chained audit log."
@@ -93,14 +93,14 @@ capnp = "0.27"
 # inside the vulnerable range and must be skipped. Floor raised to
 # 48.0.4 per RUSTSEC-2026-0314 through -0326 (fuel accounting, GC
 # rooting, component lifting and WASI host panics); the last of them
-# are fixed in 48.0.4.
+# are fixed in 48.0.4, and on the 49 line in 49.0.2, the floor now.
 #
 # The two crates share an API surface and a mismatched pair does not
 # compile, so they are declared together here and inherited by the
 # member rather than pinned in separate files. Move both or neither;
 # a diff that touches one line and not the next is the bug.
-wasmtime = "48.0.4"
-wasmtime-wasi = "48.0.4"
+wasmtime = "49.0.2"
+wasmtime-wasi = "49.0.2"
 bollard = "0.21"
 
 # CLI

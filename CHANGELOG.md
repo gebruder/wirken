@@ -12,6 +12,8 @@ tagged.
 
 ### Dependencies
 
+- wasmtime and wasmtime-wasi move to 49.0.2 together. The minimum Rust
+  version rises to 1.96, which wasmtime 49 requires.
 - lru 0.18.5, thiserror 2.0.21, wat 1.261.0.
 
 ## [1.26.0] - 2026-10-05
