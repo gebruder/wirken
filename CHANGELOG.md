@@ -108,6 +108,12 @@ tagged.
   sandbox for the binaries those commands need and names any it lacks:
   the default image has neither `git` nor `cargo`.
 
+- The approval prompt in `wirken lyrik run` is the walk's name and the
+  exact command, `wirken lyrik: sink-walk wants to run:` and then
+  `git log -p -- src/auth.c`, and nothing else. It used to show the
+  staged walk text as the message being replied to. `wirken ask` keeps
+  its full prompt.
+
 ### Dependencies
 
 - wasmtime and wasmtime-wasi floor raised to 48.0.4 for

@@ -211,7 +211,8 @@ modified.
 `exec` (`crypto-walk`: `cargo audit`; `fuzz-walk`: `cargo test`; `sink-walk`:
 `git log`, `git blame`), and the run prints the same list before it starts.
 With stdin on a terminal, the operator is asked at the moment each command is
-about to run, one prompt at a time across concurrent walks; an answer covers
+about to run, one prompt at a time across concurrent walks, in a prompt that
+is the walk's name and the exact command and nothing else; an answer covers
 that one call and nothing is stored for later runs. Without a terminal every
 such command is refused. A refused command is a skipped step, not a failed
 walk. An approved command runs in the `exec` sandbox, so the sandbox image

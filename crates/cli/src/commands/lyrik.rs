@@ -542,16 +542,16 @@ async fn dispatch_via_agent_runtime(
     // concurrent walks, and each answer covers that one call. Without
     // one, every command that needs approval is refused, and the walk
     // records the step as skipped.
-    let approval_gate: Option<Arc<dyn wirken_agent::approval_gate::ApprovalGate>> =
-        if super::oauth_scope::stdin_is_tty() {
-            Some(Arc::new(super::stdin_approval::OneAtATime::new(
-                super::stdin_approval::StdinApprovalGate::new(),
-            )))
-        } else {
-            None
-        };
-    if let Some(gate) = &approval_gate {
-        agent.set_approval_gate(gate.clone());
+    let terminal = super::oauth_scope::stdin_is_tty().then(|| {
+        Arc::new(super::stdin_approval::OneAtATime::new(
+            super::stdin_approval::StdinApprovalGate::new(),
+        ))
+    });
+    if let Some(terminal) = &terminal {
+        agent.set_approval_gate(Arc::new(super::stdin_approval::LyrikPromptGate::new(
+            "lyrik",
+            terminal.clone(),
+        )));
     }
 
     // Stage and self-sign the bundled Lyrik skill into the run dir,
@@ -680,7 +680,7 @@ async fn dispatch_via_agent_runtime(
                     .clone()
                     .expect("walks_staged_dir is Some when walks_cfg is Some"),
                 walk_seed_suffix,
-                approval_gate.clone(),
+                terminal.clone(),
                 audit,
             )
             .await?;
@@ -1022,7 +1022,9 @@ async fn dispatch_walks_concurrent(
     // to the prompt when a non-empty seed set was materialised. Empty
     // string when the scanner pass produced no seeds.
     walk_seed_suffix: String,
-    approval_gate: Option<Arc<dyn wirken_agent::approval_gate::ApprovalGate>>,
+    terminal: Option<
+        Arc<super::stdin_approval::OneAtATime<super::stdin_approval::StdinApprovalGate>>,
+    >,
     audit: &mut AuditLogger,
 ) -> Result<Vec<WalkOutcome>> {
     // What the run may ask, before the first prompt.
@@ -1034,7 +1036,7 @@ async fn dispatch_walks_concurrent(
         })
         .collect();
     if !asks.is_empty() {
-        if approval_gate.is_some() {
+        if terminal.is_some() {
             // Said before anything is asked: an approved command that
             // needs a binary the sandbox lacks can only fail.
             let needed: Vec<&str> = walks
@@ -1089,7 +1091,7 @@ async fn dispatch_walks_concurrent(
         let session_log_t = session_log.clone();
         let sandbox_t = sandbox.clone();
         let permissions_t = permissions.clone();
-        let approval_gate_t = approval_gate.clone();
+        let terminal_t = terminal.clone();
         let lyrik_staged_dir_t = lyrik_staged_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
         let walk_name = name.clone();
@@ -1131,8 +1133,10 @@ async fn dispatch_walks_concurrent(
             // grants.
             local_agent.set_agent_id(agent_id_t.clone());
             local_agent.set_permissions(permissions_t);
-            if let Some(gate) = approval_gate_t {
-                local_agent.set_approval_gate(gate);
+            if let Some(terminal) = terminal_t {
+                local_agent.set_approval_gate(Arc::new(
+                    super::stdin_approval::LyrikPromptGate::new(&walk_name, terminal),
+                ));
             }
 
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))

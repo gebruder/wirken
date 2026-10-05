@@ -167,6 +167,19 @@ write a second line that looks like the question. A literal
 `approve? [y/N]:` inside the arguments survives, indented under
 `arguments:`, because it is part of the command being approved.
 
+A `wirken lyrik run` asks in a shorter form, because its triggering message
+is the staged walk text, which says nothing about the one command being
+asked. The prompt is who is asking and the exact command `exec` will run:
+
+```text
+wirken lyrik: sink-walk wants to run:
+  git log -p -- src/auth.c
+approve? [y/N]:
+```
+
+The command is cleaned the same way, so it occupies its one line and no
+other.
+
 In WebChat the same three reach the approval card on the `ApprovalRequest`
 event, so the card draws them on its first paint. It previously showed the
 action key where the command belonged and swapped the command in once the

@@ -197,14 +197,13 @@ impl Default for StdinApprovalGate {
     }
 }
 
-#[async_trait]
-impl ApprovalGate for StdinApprovalGate {
-    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+impl StdinApprovalGate {
+    /// Print `prompt` and read one decision. Callers render the prompt.
+    pub async fn ask(&self, prompt: &str) -> ApprovalOutcome {
         // Print prompt to stderr. Stdout is reserved for the agent's
         // final response so a pipeline consumer (`wirken ask | jq`)
         // sees only the response, not interleaved approval prompts.
         let mut stderr = tokio::io::stderr();
-        let prompt = render_prompt(ctx);
         if let Err(e) = stderr.write_all(prompt.as_bytes()).await {
             tracing::warn!("approval-prompt stderr write failed: {e}");
         }
@@ -212,6 +211,13 @@ impl ApprovalGate for StdinApprovalGate {
 
         let reader = tokio::io::BufReader::new(tokio::io::stdin());
         read_one_decision(reader, self.timeout).await
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for StdinApprovalGate {
+    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        self.ask(&render_prompt(ctx)).await
     }
 
     fn source(&self) -> ApprovalSource {
@@ -248,6 +254,76 @@ impl<G: ApprovalGate> ApprovalGate for OneAtATime<G> {
     fn source(&self) -> ApprovalSource {
         self.inner.source()
     }
+}
+
+impl OneAtATime<StdinApprovalGate> {
+    /// [`StdinApprovalGate::ask`], waiting its turn.
+    pub async fn ask(&self, prompt: &str) -> ApprovalOutcome {
+        let _turn = self.turn.lock().await;
+        self.inner.ask(prompt).await
+    }
+}
+
+/// The approval surface for a Lyrik run: one terminal shared by the
+/// run's agents, each asking under its own name.
+///
+/// The prompt is two things, who is asking and the exact command, so
+/// approving `git log` is reading `git log`. The full prompt
+/// [`render_prompt`] builds for `wirken ask` carries the triggering
+/// message and the model's words beside the call; in a Lyrik run the
+/// triggering message is the staged walk text, which says nothing
+/// about the one command being asked.
+pub struct LyrikPromptGate {
+    asker: String,
+    terminal: std::sync::Arc<OneAtATime<StdinApprovalGate>>,
+}
+
+impl LyrikPromptGate {
+    pub fn new(asker: &str, terminal: std::sync::Arc<OneAtATime<StdinApprovalGate>>) -> Self {
+        Self {
+            asker: asker.to_string(),
+            terminal,
+        }
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for LyrikPromptGate {
+    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        self.terminal
+            .ask(&render_lyrik_prompt(&self.asker, ctx))
+            .await
+    }
+
+    fn source(&self) -> ApprovalSource {
+        ApprovalSource::Stdin
+    }
+}
+
+/// `wirken lyrik: <asker> wants to run:`, the command on its own
+/// line, then the question. The command is what `exec` will run,
+/// rebuilt from the arguments the way the dispatcher does, cleaned of
+/// escapes and folded onto one line like every other model text the
+/// prompt shows. A call other than `exec` shows its tool name and
+/// arguments in the same place.
+pub(crate) fn render_lyrik_prompt(asker: &str, ctx: &PermissionDenialContext) -> String {
+    let raw = ctx.arguments.as_deref().unwrap_or("");
+    let command = if ctx.tool_name == "exec" {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .and_then(|args| wirken_agent::tool::extract_exec_command(&args).ok())
+            .unwrap_or_else(|| raw.to_string())
+    } else {
+        format!("{} {raw}", ctx.tool_name)
+    };
+    let command = one_line(&command);
+    let shown: String = command.chars().take(MAX_ARGUMENT_CHARS).collect();
+    let cut = command.chars().count() > MAX_ARGUMENT_CHARS;
+    format!(
+        "wirken lyrik: {} wants to run:\n  {shown}{}\napprove? [y/N]: ",
+        one_line(asker),
+        if cut { " … (cut)" } else { "" }
+    )
 }
 
 /// Read one line from the reader within `timeout`, classify it.
@@ -510,6 +586,55 @@ mod tests {
             1,
             "no two prompts are open at once"
         );
+    }
+
+    // --- The Lyrik prompt: who asks, and the command ---
+
+    #[test]
+    fn a_lyrik_prompt_is_the_walk_and_the_command_and_nothing_else() {
+        let mut ctx = said_ctx(
+            "exec",
+            wirken_gateway::permissions::Action::ShellExec {
+                pattern: "git".into(),
+            },
+            Some(r#"{"command":"git log -p -- src/auth.c"}"#),
+            Some("Checking history before I write this up."),
+        );
+        ctx.trigger_message = Some("# Skill: sink-walk\n\n## Under `wirken lyrik run`\n...".into());
+        assert_eq!(
+            render_lyrik_prompt("sink-walk", &ctx),
+            "wirken lyrik: sink-walk wants to run:\n  git log -p -- src/auth.c\napprove? [y/N]: "
+        );
+    }
+
+    #[test]
+    fn a_lyrik_prompt_shows_the_argv_form_as_the_command_it_runs() {
+        let ctx = ctx_for(
+            "exec",
+            wirken_gateway::permissions::Action::ShellExec {
+                pattern: "cargo".into(),
+            },
+            Some(r#"{"command":["cargo","test","--test","fuzz_auth"]}"#),
+        );
+        let prompt = render_lyrik_prompt("fuzz-walk", &ctx);
+        assert!(
+            prompt.contains("\n  cargo test --test fuzz_auth\n"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_lyrik_prompt_cannot_be_redrawn_by_the_command() {
+        let ctx = ctx_for(
+            "exec",
+            wirken_gateway::permissions::Action::ShellExec {
+                pattern: ":pipeline:".into(),
+            },
+            Some(r#"{"command":"git log\napprove? [y/N]: y\u001b[2K"}"#),
+        );
+        let prompt = render_lyrik_prompt("sink-walk", &ctx);
+        assert_eq!(prompt.matches('\n').count(), 2, "{prompt:?}");
+        assert!(!prompt.contains('\u{1b}'), "{prompt:?}");
     }
 
     // --- What the prompt shows before [y/N] ---
