@@ -98,6 +98,14 @@ tagged.
   under `staging/<walk>/harness/`. Promoting a harness is an operator
   step after the run. The installed walk files are not modified.
 
+- `wirken lyrik run` asks the operator before a walk's command runs
+  through `exec`, as `wirken ask` does, when stdin is a terminal.
+  Prompts from concurrent walks take turns, and an answer covers one
+  call; nothing is stored across runs and no key is pre-approved. Each
+  staged walk lists the commands it runs, and the run prints them
+  before it starts. Without a terminal every such command is refused
+  and skipped.
+
 ### Dependencies
 
 - wasmtime and wasmtime-wasi floor raised to 48.0.4 for

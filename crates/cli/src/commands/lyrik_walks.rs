@@ -194,10 +194,40 @@ pub fn wrap_with_wirken_frontmatter(walk_name: &str, source: &str) -> String {
     )
 }
 
+/// The commands a walk's text has it run through `exec`, as the
+/// command words an operator will be asked about. Listed in the staged
+/// walk and printed before a run starts, so what will be asked is
+/// known before the first prompt. A walk not listed here runs none.
+pub fn walk_exec_commands(walk_name: &str) -> &'static [&'static str] {
+    match walk_name {
+        "crypto-walk" => &["cargo audit"],
+        "fuzz-walk" => &["cargo test"],
+        "sink-walk" => &["git log", "git blame"],
+        _ => &[],
+    }
+}
+
 /// The rules a walk runs under inside `wirken lyrik run`, placed ahead
 /// of the operator's walk text. They take precedence over a location
 /// the walk text names, such as a harness in the project's test tree.
 fn run_section(walk_name: &str) -> String {
+    let commands = walk_exec_commands(walk_name);
+    let exec_line = if commands.is_empty() {
+        "- This walk runs no commands through `exec`. Any command it tries is put \
+         to the operator first, and a refused one is a step skipped."
+            .to_string()
+    } else {
+        format!(
+            "- Commands this walk runs through `exec`: {}. The operator is asked \
+             before each one runs, and a refused one is a step skipped: record that \
+             it was skipped and carry on.",
+            commands
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     format!(
         "## Under `wirken lyrik run`\n\n\
          These rules take precedence over any location named below.\n\n\
@@ -206,7 +236,8 @@ fn run_section(walk_name: &str) -> String {
          dispatch prompt. A write anywhere else is refused.\n\
          - A harness or test this walk would place in the project's test tree goes \
          under `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/` instead. \
-         Promoting it into the test tree is an operator step after the run.\n"
+         Promoting it into the test tree is an operator step after the run.\n\
+         {exec_line}\n"
     )
 }
 
@@ -356,6 +387,14 @@ mod tests {
         });
         let err = parse_walks_config(&cfg, tmp.path()).unwrap_err();
         assert!(err.to_string().contains(">= 1"));
+    }
+
+    #[test]
+    fn the_staged_walk_lists_the_commands_it_will_ask_for() {
+        let sink = wrap_with_wirken_frontmatter("sink-walk", "body\n");
+        assert!(sink.contains("`git log`, `git blame`"), "{sink}");
+        let doc = wrap_with_wirken_frontmatter("doc-walk", "body\n");
+        assert!(doc.contains("runs no commands through `exec`"), "{doc}");
     }
 
     #[test]

@@ -495,6 +495,23 @@ async fn dispatch_via_agent_runtime(
     let perms_arc = Arc::new(Mutex::new(perms));
     agent.set_permissions(perms_arc.clone());
 
+    // `exec` stays gated. With a terminal, the operator is asked at the
+    // moment a command is about to run, one prompt at a time across
+    // concurrent walks, and each answer covers that one call. Without
+    // one, every command that needs approval is refused, and the walk
+    // records the step as skipped.
+    let approval_gate: Option<Arc<dyn wirken_agent::approval_gate::ApprovalGate>> =
+        if super::oauth_scope::stdin_is_tty() {
+            Some(Arc::new(super::stdin_approval::OneAtATime::new(
+                super::stdin_approval::StdinApprovalGate::new(),
+            )))
+        } else {
+            None
+        };
+    if let Some(gate) = &approval_gate {
+        agent.set_approval_gate(gate.clone());
+    }
+
     // Stage and self-sign the bundled Lyrik skill into the run dir,
     // then merge it into the agent's loaded set. The `/lyrik` slash
     // invocation in the dispatch prompt resolves to this staged copy
@@ -621,6 +638,7 @@ async fn dispatch_via_agent_runtime(
                     .clone()
                     .expect("walks_staged_dir is Some when walks_cfg is Some"),
                 walk_seed_suffix,
+                approval_gate.clone(),
                 audit,
             )
             .await?;
@@ -962,8 +980,31 @@ async fn dispatch_walks_concurrent(
     // to the prompt when a non-empty seed set was materialised. Empty
     // string when the scanner pass produced no seeds.
     walk_seed_suffix: String,
+    approval_gate: Option<Arc<dyn wirken_agent::approval_gate::ApprovalGate>>,
     audit: &mut AuditLogger,
 ) -> Result<Vec<WalkOutcome>> {
+    // What the run may ask, before the first prompt.
+    let asks: Vec<String> = walks
+        .iter()
+        .filter_map(|w| {
+            let commands = super::lyrik_walks::walk_exec_commands(w);
+            (!commands.is_empty()).then(|| format!("{w}: {}", commands.join(", ")))
+        })
+        .collect();
+    if !asks.is_empty() {
+        if approval_gate.is_some() {
+            eprintln!(
+                "  This run asks before each of these commands runs: {}",
+                asks.join("; ")
+            );
+        } else {
+            eprintln!(
+                "  stdin is not a terminal, so these commands are refused and \
+                 skipped: {}",
+                asks.join("; ")
+            );
+        }
+    }
     use tokio::sync::Semaphore;
 
     let permits = std::cmp::max(1, std::cmp::min(max_concurrent, walks.len() as u32));
@@ -987,6 +1028,7 @@ async fn dispatch_walks_concurrent(
         let session_log_t = session_log.clone();
         let sandbox_t = sandbox.clone();
         let permissions_t = permissions.clone();
+        let approval_gate_t = approval_gate.clone();
         let lyrik_staged_dir_t = lyrik_staged_dir.clone();
         let walks_staged_dir_t = walks_staged_dir.clone();
         let walk_name = name.clone();
@@ -1028,6 +1070,9 @@ async fn dispatch_walks_concurrent(
             // grants.
             local_agent.set_agent_id(agent_id_t.clone());
             local_agent.set_permissions(permissions_t);
+            if let Some(gate) = approval_gate_t {
+                local_agent.set_approval_gate(gate);
+            }
 
             let attached = lyrik_run_skills(&lyrik_staged_dir_t, Some(&walks_staged_dir_t))
                 .map_err(|e| format!("{e:#}"))

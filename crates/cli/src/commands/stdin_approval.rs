@@ -219,6 +219,37 @@ impl ApprovalGate for StdinApprovalGate {
     }
 }
 
+/// A gate that asks one question at a time. Concurrent callers wait
+/// their turn, so the prompts of agents running in parallel, such as a
+/// Lyrik run's walks, never interleave on one terminal. Each prompt
+/// names the call and the message it answers, which says which walk
+/// is asking.
+pub struct OneAtATime<G> {
+    inner: G,
+    turn: tokio::sync::Mutex<()>,
+}
+
+impl<G> OneAtATime<G> {
+    pub fn new(inner: G) -> Self {
+        Self {
+            inner,
+            turn: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait]
+impl<G: ApprovalGate> ApprovalGate for OneAtATime<G> {
+    async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+        let _turn = self.turn.lock().await;
+        self.inner.request_approval(ctx).await
+    }
+
+    fn source(&self) -> ApprovalSource {
+        self.inner.source()
+    }
+}
+
 /// Read one line from the reader within `timeout`, classify it.
 /// Generic over [`AsyncBufRead`] so tests pass a `Cursor` or a
 /// duplex half without real stdin.
@@ -420,6 +451,64 @@ mod tests {
                     .ok()
                     .as_deref()
             )
+        );
+    }
+
+    // --- One question at a time ---
+
+    /// Records how many requests are inside it at once.
+    struct Counting {
+        inside: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ApprovalGate for Counting {
+        async fn request_approval(&self, _ctx: &PermissionDenialContext) -> ApprovalOutcome {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.inside.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(now, SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.inside.fetch_sub(1, SeqCst);
+            ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }
+        }
+
+        fn source(&self) -> ApprovalSource {
+            ApprovalSource::Stdin
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_are_asked_one_at_a_time() {
+        let gate = std::sync::Arc::new(OneAtATime::new(Counting {
+            inside: 0.into(),
+            most: 0.into(),
+        }));
+        let asks: Vec<_> = (0..4)
+            .map(|_| {
+                let gate = gate.clone();
+                tokio::spawn(async move {
+                    let ctx = ctx_for(
+                        "exec",
+                        wirken_gateway::permissions::Action::ShellExec {
+                            pattern: "git".into(),
+                        },
+                        Some(r#"{"command":"git log"}"#),
+                    );
+                    gate.request_approval(&ctx).await
+                })
+            })
+            .collect();
+        for ask in asks {
+            ask.await.unwrap();
+        }
+        assert_eq!(
+            gate.inner.most.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "no two prompts are open at once"
         );
     }
 

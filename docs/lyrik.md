@@ -207,6 +207,16 @@ is an operator step after the run. The staged frontmatter's `write_paths`,
 `<workspace>/.lyrik`, is what enforces it; the installed walk files are not
 modified.
 
+`exec` stays gated. The staged section lists the commands a walk runs through
+`exec` (`crypto-walk`: `cargo audit`; `fuzz-walk`: `cargo test`; `sink-walk`:
+`git log`, `git blame`), and the run prints the same list before it starts.
+With stdin on a terminal, the operator is asked at the moment each command is
+about to run, one prompt at a time across concurrent walks; an answer covers
+that one call and nothing is stored for later runs. Without a terminal every
+such command is refused. A refused command is a skipped step, not a failed
+walk. An approved command runs in the `exec` sandbox, so the sandbox image
+needs `git` or `cargo` for these walks; the default image has neither.
+
 Dedup on the merged output: findings sharing `(location.file,
 location.line_start)` collapse to one; `framing` becomes the sorted unique
 union; `tier` rises to the highest; `dedup_disagreement: true` when input
