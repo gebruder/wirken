@@ -19,6 +19,13 @@ tagged.
   else exported to start the gateway is not passed on, and its stdin is
   `/dev/null` rather than the terminal approval answers are typed into.
 
+### Docs
+
+- `docs/security-properties.md` states the exec perimeter: a process an
+  approved `exec` starts in the container modes cannot invoke gateway
+  actions, shown by a test that binds the gateway's sockets on the host
+  and probes for them from inside the sandbox.
+
 ### Dependencies
 
 - wasmtime and wasmtime-wasi move to 49.0.2 together. The minimum Rust

@@ -12156,3 +12156,109 @@ mod host_exec_inherits_nothing {
         assert_eq!(result.output.trim(), "/dev/null", "{}", result.output);
     }
 }
+
+// ---------------------------------------------------------------------------
+// A process inside the exec sandbox cannot invoke gateway actions.
+//
+// The gateway's sockets are bound for real on the host, in the layout
+// a data dir has, with the agent's workspace beside them. An approved
+// exec in the default container then tries every route to the
+// gateway it could have: the socket paths, the data dir around its
+// workspace, the `wirken` binary, and anything key-like in its
+// environment. Each is absent from where it runs.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+mod exec_sandbox_holds_no_gateway_principal {
+    use tempfile::TempDir;
+
+    const SOCKETS: &[&str] = &[
+        "gateway.sock",
+        "gateway-hooks.sock",
+        "gateway-permissions.sock",
+        "mcp-proxy.sock",
+        "orchestrator.sock",
+    ];
+
+    #[tokio::test]
+    async fn the_gateway_is_out_of_reach_from_the_container() {
+        use crate::sandbox::{
+            DockerSandbox, SandboxConfig, SandboxMode, detect_image, detect_runtime,
+        };
+        if detect_runtime().await.is_none() {
+            eprintln!("skipping: Docker is not available on this host");
+            return;
+        }
+        if !detect_image("debian:bookworm-slim").await {
+            eprintln!("skipping: debian:bookworm-slim is not pulled on this host");
+            return;
+        }
+
+        let data = TempDir::new().unwrap();
+        let sockets = data.path().join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        // Real listeners, so a path that resolved would be connectable.
+        let _listeners: Vec<std::os::unix::net::UnixListener> = SOCKETS
+            .iter()
+            .map(|s| std::os::unix::net::UnixListener::bind(sockets.join(s)).unwrap())
+            .collect();
+        std::fs::write(data.path().join("vault.db"), b"not a real vault").unwrap();
+        let workspace = data.path().join("agents/default/workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::set_permissions(
+            &workspace,
+            std::os::unix::fs::PermissionsExt::from_mode(0o777),
+        )
+        .unwrap();
+
+        let mut probe = String::new();
+        for s in SOCKETS {
+            let path = sockets.join(s);
+            probe.push_str(&format!(
+                "[ -e '{p}' ] && echo 'REACHED {p}'; ",
+                p = path.display()
+            ));
+        }
+        probe.push_str(&format!(
+            "[ -e '{d}' ] && echo 'REACHED {d}'; \
+             [ -e /workspace/../../../vault.db ] && echo 'REACHED vault via workspace'; \
+             command -v wirken >/dev/null && echo 'REACHED wirken'; \
+             env | grep -iE '^(WIRKEN|[A-Z_]*(KEY|TOKEN|SECRET|PASSPHRASE|PASSWORD))' \
+               | sed 's/^/REACHED env /'; \
+             echo probed",
+            d = data.path().join("vault.db").display()
+        ));
+
+        // Control: on the host, where the gateway's paths exist, the
+        // same probe finds every socket. A probe that found nothing
+        // anywhere would prove nothing in the container.
+        let on_host = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .unwrap();
+        let on_host = String::from_utf8_lossy(&on_host.stdout);
+        for s in SOCKETS {
+            assert!(
+                on_host.contains(&format!("REACHED {}", sockets.join(s).display())),
+                "{on_host}"
+            );
+        }
+
+        let sandbox = DockerSandbox::new(SandboxConfig {
+            mode: SandboxMode::ExecOnly,
+            image: "debian:bookworm-slim".into(),
+            ..Default::default()
+        })
+        .expect("sandbox");
+        let result = sandbox
+            .exec(&probe, &workspace, None)
+            .await
+            .expect("exec runs");
+        assert!(result.output.contains("probed"), "{}", result.output);
+        assert!(
+            !result.output.contains("REACHED"),
+            "a process in the sandbox reached the gateway:\n{}",
+            result.output
+        );
+    }
+}
