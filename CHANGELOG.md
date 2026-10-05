@@ -25,6 +25,11 @@ tagged.
   approved `exec` starts in the container modes cannot invoke gateway
   actions, shown by a test that binds the gateway's sockets on the host
   and probes for them from inside the sandbox.
+- The `sandbox.json` `mode: off` escape hatch says what a process a
+  host `exec` starts can do as the operator: push to any channel
+  through `orchestrator.sock`, answer pending approvals through
+  `gateway-permissions.sock`, connect as a hook, write persisted grants,
+  and read the keys the signed sockets check.
 
 ### Dependencies
 
