@@ -11871,6 +11871,12 @@ mod exec_children_die_with_the_call {
 
     /// Every shape started (its file exists) and none is still beating.
     async fn assert_no_survivors(dir: &Path, names: &[&str]) {
+        // SIGKILL is delivered asynchronously: a child in the middle of
+        // `date > beat` when the group is killed can finish that one
+        // write after the call has returned. Let delivery settle before
+        // the first reading, so the check is for a beat that keeps
+        // going, which is a survivor, and not for the last one.
+        tokio::time::sleep(Duration::from_millis(300)).await;
         let before = read_beats(dir, names);
         for (name, v) in names.iter().zip(&before) {
             assert!(v.is_some(), "{name} never started; the test proves nothing");
