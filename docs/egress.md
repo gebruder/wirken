@@ -26,12 +26,12 @@ Source: `crates/agent/src/egress.rs:296-345` (host-based check, and the no-allow
 
 ## The `http_request` gate
 
-`http_request` is Tier 1, so the interactive approval flow adds no prompt.
-Authorization is the skill's own permissions block plus an operator-set
-credential binding, and every failure is a refusal recorded as
-`SkillPermissionDenied`, never an escalation to a prompt. Four checks run
-before the request is built (`crates/agent/src/http_tool.rs::gate`, called
-from `crates/agent/src/runtime.rs:2876`):
+`http_request` is Tier 1, so the interactive approval flow adds no prompt
+while the session has read nothing restricting. Authorization is the skill's
+own permissions block plus an operator-set credential binding, and every
+failure of those is a refusal recorded as `SkillPermissionDenied`. Four checks
+run before the request is built (`crates/agent/src/http_tool.rs::gate`, called
+from `crates/agent/src/runtime.rs:3100`):
 
 - **Method.** `GET`, `HEAD`, `POST` only.
 - **`tools.allow`** must contain `http_request`.
@@ -43,7 +43,16 @@ from `crates/agent/src/runtime.rs:2876`):
   model names a slot by string and never supplies a secret value.
 
 A request that clears all four still goes out through `EgressClient`, so the
-host allowset above applies on top. With no skills attached there is no
+host allowset above applies on top.
+
+Once the session has read something restricting, which is every read label but
+`aggregated_external` (workspace files, either channel's memory, an imported
+archive), a request whose host clears the allowset goes to the operator first,
+as sandboxed `exec` egress does. The operator is asked about the destination
+at Tier 3 (`NetworkRequest`, keyed by host), the answer is recorded as
+`PermissionApproved` or `PermissionDenied`, and an approval covers that one
+call. With no operator reachable, cron or a headless sub-agent, the request is
+refused. With no skills attached there is no
 allowset, and `http_request` refuses every host; only an explicit
 `egress.domains: ["*"]` admits a host no skill named.
 

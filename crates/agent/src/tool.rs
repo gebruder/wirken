@@ -644,6 +644,12 @@ impl ToolRegistry {
 
     /// Update the egress enforcement policy on the registry's HTTP
     /// client. Called by the agent at `attach_skills` time.
+    /// Whether an `http_request` to `url` would clear the egress
+    /// allowlist. See [`crate::egress::EgressClient::request_would_pass`].
+    pub fn http_request_would_pass(&self, url: &str) -> bool {
+        self.http.request_would_pass(url)
+    }
+
     pub fn set_egress_enforcement(&self, enforcement: crate::egress::EgressEnforcement) {
         self.http.set_enforcement(enforcement);
     }

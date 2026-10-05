@@ -293,6 +293,13 @@ impl EgressClient {
     /// allow-set, so no host has been approved and the request is
     /// refused. An explicit `egress.domains: ["*"]` (`AllowAll`) still
     /// admits any host.
+    /// Whether [`Self::request`] would let a request to `url` out, by
+    /// host. Asked before an operator is, so no one is asked about a
+    /// request the allowlist would refuse anyway.
+    pub fn request_would_pass(&self, url: &str) -> bool {
+        self.check_egress_declared(url).is_ok()
+    }
+
     fn check_egress_declared(&self, url: &str) -> Result<(), EgressDenied> {
         self.check_egress(url)?;
         let unrestricted = self

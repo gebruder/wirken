@@ -12,6 +12,14 @@ tagged.
 
 ### Security
 
+- After a session reads something restricting (a workspace file, either
+  channel's memory, an imported archive), `http_request` asks the
+  operator before it goes out, the rule sandboxed `exec` egress already
+  applied. The question is the destination host at Tier 3, an approval
+  covers one call, and with no operator reachable the request is
+  refused. A session that has read nothing restricting is not asked.
+  Behavior change: an `http_request` after a `read_file` now prompts.
+
 - A host `exec` (`sandbox.json` `mode: off`) no longer inherits the
   gateway's environment or stdin. It starts from an empty environment
   plus an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`,

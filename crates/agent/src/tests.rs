@@ -12268,3 +12268,208 @@ mod exec_sandbox_holds_no_gateway_principal {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// After a restricting read, `http_request` goes to the operator before
+// it goes out, the rule sandboxed `exec` egress applies. A session that
+// has read nothing restricting is not asked. With no operator
+// reachable, the request is refused.
+// ---------------------------------------------------------------------------
+mod http_request_after_a_restricting_read {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+
+    use super::approved_unknown_tool::stub;
+    use crate::approval_gate::ApprovalOutcome;
+    use crate::approval_gate::test_support::ScriptedGate;
+    use crate::llm::LlmConfig;
+
+    /// A target that counts the requests that reached it.
+    async fn target() -> (u16, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counted = hits.clone();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                    )
+                    .await;
+            }
+        });
+        (port, hits)
+    }
+
+    fn call(id: &str, name: &str, args: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": args.to_string()},
+            }],
+        })
+    }
+
+    struct Run {
+        hits: usize,
+        gate_calls: Vec<String>,
+        events: Vec<SessionEvent>,
+    }
+
+    async fn run(read_first: bool, gate: Option<ApprovalOutcome>) -> Run {
+        let (port, hits) = target().await;
+        let url = format!("http://localhost:{port}/x");
+        let mut script = Vec::new();
+        if read_first {
+            script.push(call(
+                "call_read",
+                "read_file",
+                serde_json::json!({"path": "notes.txt"}),
+            ));
+        }
+        script.push(call(
+            "call_http",
+            "http_request",
+            serde_json::json!({"method": "GET", "url": url}),
+        ));
+        script.push(serde_json::json!({"role": "assistant", "content": "Done."}));
+        let (base_url, server) = stub(script).await;
+
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "private notes").unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = crate::runtime::Agent::new(
+            "reader".into(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+            },
+            Some("unused".into()),
+            None,
+            log.clone() as Arc<dyn SessionLog>,
+        )
+        .unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        let profile = crate::skill_perms::parse_block(
+            "tools:\n  allow: [read_file, http_request]\negress:\n  mode: allowlist\n  domains: [localhost]\nfilesystem:\n  read_paths: [\"<workspace>\"]\ninference:\n  allow: [\"*\"]\n",
+            tmp.path(),
+            None,
+        )
+        .unwrap();
+        agent
+            .attach_skills(
+                vec![crate::skill::Skill {
+                    name: "reader".into(),
+                    description: "reads and fetches".into(),
+                    required_bins: vec![],
+                    body: "Read, then fetch.".into(),
+                    path: tmp.path().join("SKILL.md"),
+                    available: true,
+                    permissions: profile,
+                    disable_model_invocation: false,
+                }],
+                Vec::new(),
+            )
+            .unwrap();
+        let scripted = gate.map(|o| Arc::new(ScriptedGate::new(vec![o])));
+        if let Some(g) = &scripted {
+            agent.set_approval_gate(g.clone());
+        }
+
+        agent
+            .process_message("summarise my notes", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+
+        let events = log
+            .get_since(&log.handle_for(SessionId::new("reader".to_string())), 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect();
+        Run {
+            hits: hits.load(Ordering::SeqCst),
+            gate_calls: scripted
+                .map(|g| g.calls.lock().unwrap().clone())
+                .unwrap_or_default(),
+            events,
+        }
+    }
+
+    fn denied_for_host(events: &[SessionEvent]) -> bool {
+        events.iter().any(|e| {
+            matches!(e, SessionEvent::PermissionDenied { tool, action_key, .. }
+                if tool == "http_request" && action_key.contains("localhost"))
+        })
+    }
+
+    #[tokio::test]
+    async fn the_operator_is_asked_and_a_denial_keeps_the_request_in() {
+        let r = run(
+            true,
+            Some(ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.gate_calls, vec!["http_request".to_string()]);
+        assert_eq!(r.hits, 0, "nothing went out");
+        assert!(denied_for_host(&r.events), "{:?}", r.events);
+    }
+
+    #[tokio::test]
+    async fn an_approval_lets_the_one_request_out() {
+        let r = run(true, Some(ApprovalOutcome::Approved { actor: None })).await;
+        assert_eq!(r.gate_calls, vec!["http_request".to_string()]);
+        assert_eq!(r.hits, 1);
+        assert!(r.events.iter().any(|e| matches!(
+            e,
+            SessionEvent::PermissionApproved { action_key, .. } if action_key.contains("localhost")
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_session_that_read_nothing_restricting_is_not_asked() {
+        let r = run(
+            false,
+            Some(ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }),
+        )
+        .await;
+        assert!(r.gate_calls.is_empty(), "{:?}", r.gate_calls);
+        assert_eq!(r.hits, 1);
+    }
+
+    #[tokio::test]
+    async fn with_no_operator_reachable_it_is_refused() {
+        let r = run(true, None).await;
+        assert_eq!(r.hits, 0, "nothing went out");
+        assert!(denied_for_host(&r.events), "{:?}", r.events);
+    }
+}

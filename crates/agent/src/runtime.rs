@@ -1251,6 +1251,22 @@ impl Agent {
     /// gated by the tools axis instead). The path is absolutized against
     /// the agent's workspace so the comparison against the (already
     /// workspace-expanded) allow-set is apples to apples.
+    /// Labels this session has observed that restrict egress, sorted.
+    /// A poisoned lock reads as the most restricting label, so failing
+    /// to read the set cannot look like nothing sensitive was seen.
+    fn restricting_basis(&self) -> Vec<String> {
+        let Ok(seen) = self.observed_sensitivity.read() else {
+            return vec![crate::tool::ReadSensitivity::Workspace.as_str().to_string()];
+        };
+        let mut basis: Vec<String> = seen
+            .iter()
+            .filter(|s| s.restricts_egress())
+            .map(|s| s.as_str().to_string())
+            .collect();
+        basis.sort();
+        basis
+    }
+
     /// Whether today's gates would refuse this call, asked without
     /// dispatching or recording anything: the sub-agent clamp, org
     /// allow and deny lists, `tools.allow`, and the filesystem path
@@ -3098,6 +3114,49 @@ impl Agent {
                 success: false,
                 sandbox: None,
             });
+        }
+
+        // A session that has read something restricting does not send
+        // a request out without the operator: the rule sandboxed `exec`
+        // egress applies, at the same point, after the allowlist has
+        // cleared the host. The operator is asked about the destination
+        // at Tier 3 through the ordinary denial path, which records the
+        // answer and retries the call once with a bypass for exactly
+        // this host. No operator reachable means refused.
+        if name == "http_request" {
+            let basis = self.restricting_basis();
+            let url = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|a| a.get("url").and_then(|u| u.as_str()).map(str::to_string));
+            if !basis.is_empty()
+                && let Some(url) = url
+                && self.tools.http_request_would_pass(&url)
+            {
+                let host = url::Url::parse(&url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .unwrap_or_default();
+                let action = wirken_gateway::permissions::Action::NetworkRequest { domain: host };
+                if self.approval_bypass.as_ref() == Some(&action) {
+                    self.approval_bypass = None;
+                } else {
+                    tracing::info!(
+                        "http_request escalated to the operator after reading {}",
+                        basis.join(", ")
+                    );
+                    return Err(AgentError::PermissionDeniedCtx(Box::new(
+                        PermissionDenialContext {
+                            tool_name: name.to_string(),
+                            action,
+                            requested_tier: wirken_gateway::permissions::PermissionTier::Tier3,
+                            agent_id: self.audited_agent_id(),
+                            trigger_message: self.current_trigger.clone(),
+                            arguments: Some(arguments.to_string()),
+                            assistant_text: self.current_assistant_text.clone(),
+                        },
+                    )));
+                }
+            }
         }
 
         // Filesystem gate: inner tighter check on top of
