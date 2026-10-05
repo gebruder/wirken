@@ -36,8 +36,9 @@ tagged.
 - The `sandbox.json` `mode: off` escape hatch says what a process a
   host `exec` starts can do as the operator: push to any channel
   through `orchestrator.sock`, answer pending approvals through
-  `gateway-permissions.sock`, connect as a hook, write persisted grants,
-  and read the keys the signed sockets check.
+  `gateway-permissions.sock`, register its own hook key and connect as a
+  hook, write persisted grants, and read the keys the signed sockets
+  check.
 - `docs/security-properties.md` states that the agent's reply goes only
   to the conversation it answers, and that a send to another channel or
   DM exists only as an MCP connector tool at Tier 3; two hostile-corpus
