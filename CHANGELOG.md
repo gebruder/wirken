@@ -10,6 +10,10 @@ tagged.
 
 ## [Unreleased]
 
+### Dependencies
+
+- lru 0.18.5, thiserror 2.0.21, wat 1.261.0.
+
 ## [1.26.0] - 2026-10-05
 
 ### Security
