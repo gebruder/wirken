@@ -371,7 +371,7 @@ its preset) attached with their permission blocks. The tool set each
 `LlmRequest` is recomputed against is the one the agent offers under today's
 configuration, so a change to its skills, preset or tools setting since the
 session shows as a `tools_hash` divergence. So does a session recorded by
-`wirken ask` at 1.25.0 or earlier, which offered every tool whatever its skills
+`wirken ask` before 1.26.0, which offered every tool whatever its skills
 allowed. An edited row is a different finding: it breaks the chain.
 
 A deterministic read is re-executed only when today's gates allow it: the

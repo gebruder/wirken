@@ -600,7 +600,7 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             println!(
                 "    - the agent's skills, preset or tools setting changed since the session;"
             );
-            println!("    - the session was recorded by `wirken ask` at 1.25.0 or earlier, which");
+            println!("    - the session was recorded by `wirken ask` before 1.26.0, which");
             println!("      offered every tool whatever the loaded skills allowed.");
             println!("  An edited row does not show here: it breaks the chain, reported above.");
         }

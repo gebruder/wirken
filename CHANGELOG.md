@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-10-05
+
 ### Security
 
 - Behavior change on fresh installs: with no skill allow-set declared,
@@ -48,7 +50,7 @@ tagged.
   config including a tools override. It used to attach no skills, so
   for any agent with skills it recomputed the full tool surface and
   reported every `tools_hash` divergent on sessions recorded correctly.
-  Sessions recorded by `wirken ask` at 1.25.0 or earlier did offer the
+  Sessions recorded by `wirken ask` before 1.26.0 did offer the
   full surface, so those report `tools_hash` divergence now; verify's
   output names that as a possible cause, beside a changed skill set.
   An edited row still shows as a broken chain, not a divergence.
