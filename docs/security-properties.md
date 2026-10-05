@@ -1,6 +1,6 @@
 # Security properties
 
-Three mapping tables plus the escape-hatch inventory. Every mechanism named
+Three mapping tables, the exec perimeter, and the escape-hatch inventory. Every mechanism named
 here is owned by another page; the cells say what the control is and link to
 where it is described, rather than restating it.
 
@@ -13,6 +13,9 @@ where it is described, rather than restating it.
 
 Every rating sits on the same floor: a process running at the wirken UID is
 outside the model.
+
+Wirken makes no claim about tracking data through the model and gates the
+action edge instead.
 
 ## OWASP Agentic AI Threats and Mitigations
 
