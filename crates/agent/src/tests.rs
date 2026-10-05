@@ -12094,3 +12094,65 @@ mod memory_is_not_policy {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A host `exec` (`mode: off`) does not inherit the gateway's
+// environment or its stdin. What the gateway was started with, the
+// vault passphrase among it, is not the command's to read, and stdin
+// under `wirken ask` is the operator's terminal.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+mod host_exec_inherits_nothing {
+    use tempfile::TempDir;
+
+    fn host_tools(dir: &std::path::Path) -> crate::tool::ToolRegistry {
+        use crate::sandbox::{SandboxConfig, SandboxMode};
+        crate::tool::ToolRegistry::new(
+            dir.to_path_buf(),
+            crate::tool::ToolConfig {
+                sandbox: SandboxConfig {
+                    mode: SandboxMode::Off,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_allowlisted_variables_reach_the_command() {
+        let tmp = TempDir::new().unwrap();
+        let result = host_tools(tmp.path())
+            .execute("exec", r#"{"command":"env"}"#)
+            .await
+            .unwrap();
+        // What the shell itself sets on start, beside the allowlist.
+        const SHELL_SET: &[&str] = &["PWD", "SHLVL", "_", "OLDPWD"];
+        for line in result.output.lines() {
+            let Some((name, _)) = line.split_once('=') else {
+                continue;
+            };
+            assert!(
+                crate::tool::HOST_EXEC_ENV_ALLOWLIST.contains(&name) || SHELL_SET.contains(&name),
+                "{name} reached the command from the gateway's environment:\n{}",
+                result.output
+            );
+        }
+        assert!(
+            result.output.contains("PATH="),
+            "a command still finds programs"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stdin_is_closed() {
+        let tmp = TempDir::new().unwrap();
+        let result = host_tools(tmp.path())
+            .execute("exec", r#"{"command":"readlink /proc/self/fd/0"}"#)
+            .await
+            .unwrap();
+        assert_eq!(result.output.trim(), "/dev/null", "{}", result.output);
+    }
+}

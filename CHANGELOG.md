@@ -10,6 +10,15 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- A host `exec` (`sandbox.json` `mode: off`) no longer inherits the
+  gateway's environment or stdin. It starts from an empty environment
+  plus an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`,
+  `LC_ALL`, `TERM`, `TMPDIR`), so `WIRKEN_VAULT_PASSPHRASE` and anything
+  else exported to start the gateway is not passed on, and its stdin is
+  `/dev/null` rather than the terminal approval answers are typed into.
+
 ### Dependencies
 
 - wasmtime and wasmtime-wasi move to 49.0.2 together. The minimum Rust

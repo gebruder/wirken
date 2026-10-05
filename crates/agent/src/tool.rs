@@ -750,9 +750,23 @@ impl ToolRegistry {
         cmd.arg(resolved.arg_flag)
             .arg(&command)
             .current_dir(&self.workspace)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // The gateway's environment is not the command's. It can carry
+        // the vault passphrase and anything else the operator exported
+        // to start the gateway, so the command starts from nothing and
+        // gets back only what a shell needs to find programs and run
+        // them. Stdin is closed for the same reason: under
+        // `wirken ask` it is the operator's terminal, where approval
+        // answers are typed.
+        cmd.env_clear();
+        for name in HOST_EXEC_ENV_ALLOWLIST {
+            if let Some(value) = std::env::var_os(name) {
+                cmd.env(name, value);
+            }
+        }
         // The shell leads a process group of its own, so everything it
         // starts and does not move out of the group (`&`, `nohup`, a
         // double fork) can be ended with it. See `HostGroup`.
@@ -1762,6 +1776,34 @@ pub fn tool_to_read_sensitivity(tool_name: &str) -> Option<ReadSensitivity> {
         _ => None,
     }
 }
+
+/// Environment variables a host `exec` keeps from the gateway's
+/// environment. Everything else is dropped. See [`ToolRegistry`]'s
+/// `exec_command`.
+#[cfg(not(windows))]
+pub const HOST_EXEC_ENV_ALLOWLIST: &[&str] = &[
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
+];
+
+/// Environment variables a host `exec` keeps on Windows, where a shell
+/// cannot start without the system locations.
+#[cfg(windows)]
+pub const HOST_EXEC_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERNAME",
+];
 
 /// The process group a host `exec` started, killed when the call
 /// returns on any path: completion, timeout, or error. A command does

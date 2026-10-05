@@ -65,6 +65,13 @@ A gated `exec` call does not leave work running after it returns.
 - **`Off` on Windows.** The shell is killed on timeout. Processes it started
   are not tracked.
 
+Under `Off` the command does not inherit the gateway's environment: it starts
+from an empty one plus an allowlist (`PATH`, `HOME`, `USER`, `LOGNAME`,
+`LANG`, `LC_ALL`, `TERM`, `TMPDIR`; on Windows the system locations a shell
+needs), so a passphrase or key the gateway was started with is not passed on.
+Its stdin is `/dev/null`, not the operator's terminal. The command still runs
+as the gateway's user and can read whatever that user can.
+
 The tests are `exec_children_die_with_the_call` in
 [`crates/agent/src/tests.rs`](../crates/agent/src/tests.rs).
 
