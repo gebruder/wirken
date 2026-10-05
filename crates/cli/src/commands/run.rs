@@ -1784,15 +1784,24 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // daily digest, and pushes via this socket. The gateway forwards
     // each push to the live adapter writer for the named channel.
     //
-    // Posture: 0600 file perms is the primary gate; SO_PEERCRED on
-    // accept is defense-in-depth in case the perms are accidentally
-    // permissive. JSON line in, JSON line out — no capnp, no
-    // handshake, no signature. See crates/ipc/src/orchestrator.rs.
+    // Posture: 0600 file perms and SO_PEERCRED on accept, then the
+    // operator handshake (crates/ipc/src/operator.rs): the caller signs
+    // a fresh challenge with the operator key. That attributes every
+    // push to a key on the audit trail and refuses a same-UID process
+    // that does not hold the key. It is not confidentiality: a process
+    // at this UID can read the key file and sign. JSON lines after.
     //
     // Linux/macOS only — Windows uses named pipes for the gateway
     // capnp path but the orchestrator-push JSON-line socket has no
     // analog and would have to be redesigned. Out of scope for the
     // tier-2 Windows release.
+    // The operator key the orchestrator and permissions sockets accept,
+    // pinned for the life of this gateway. A key written to the file
+    // after startup is not accepted until the next one.
+    #[cfg(unix)]
+    let operator_key = wirken_ipc::operator::OperatorKey::load_or_create(&cfg.data_dir)
+        .context("load the operator key")?
+        .verifying_key();
     #[cfg(unix)]
     let orchestrator_socket_path = cfg.socket_dir().join("orchestrator.sock");
     #[cfg(unix)]
@@ -1825,6 +1834,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let orchestrator_dispatcher = dispatcher.clone();
     #[cfg(unix)]
     let orchestrator_audit = audit.clone();
+    #[cfg(unix)]
+    let orchestrator_operator_key = operator_key;
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
     #[cfg(unix)]
@@ -1886,7 +1897,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let disp = orchestrator_dispatcher.clone();
                     let au = orchestrator_audit.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_orchestrator_push(stream, disp, au).await {
+                        if let Err(e) =
+                            handle_orchestrator_push(stream, disp, au, orchestrator_operator_key)
+                                .await
+                        {
                             tracing::error!("orchestrator push handler error: {e}");
                         }
                     });
@@ -1901,14 +1915,16 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // --- Permissions accept loop (operator decisions) ---
     //
     // Mirror of the orchestrator-push loop above. Same trust model
-    // (SO_PEERCRED + 0o600), same JSON-line protocol, different
-    // request shape. Per-connection handler in
+    // (SO_PEERCRED + 0o600, then the operator handshake), same
+    // JSON-line protocol, different request shape. Per-connection handler in
     // `handle_permissions_request` reads one JSON request, looks up
     // the queue, writes one JSON response, closes.
     #[cfg(unix)]
     let permissions_queue_for_loop = pending_approval_queue.clone();
     #[cfg(unix)]
     let permissions_audit = audit.clone();
+    #[cfg(unix)]
+    let permissions_operator_key = operator_key;
     #[cfg(unix)]
     let permissions_session_log = session_log.clone();
     // SAFETY: `geteuid` is always-safe FFI; documented as never
@@ -1941,7 +1957,15 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let au = permissions_audit.clone();
                     let slog = permissions_session_log.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_permissions_request(stream, q, au, slog).await {
+                        if let Err(e) = handle_permissions_request(
+                            stream,
+                            q,
+                            au,
+                            slog,
+                            permissions_operator_key,
+                        )
+                        .await
+                        {
                             tracing::error!("permissions handler error: {e}");
                         }
                     });
@@ -2721,14 +2745,43 @@ async fn serve_egress_loop(
 async fn handle_permissions_request(
     stream: UnixStream,
     queue: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
-    _audit: Arc<AuditWriter>,
+    audit: Arc<AuditWriter>,
     _session_log: Arc<dyn wirken_audit::SessionLog>,
+    operator_key: ed25519_dalek::VerifyingKey,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use wirken_ipc::permissions::{PermissionsRequest, PermissionsResponse};
 
     let (reader, mut writer) = stream.into_split();
     let mut br = BufReader::new(reader);
+    let key_id = match wirken_ipc::operator::handshake_as_gateway(
+        &mut br,
+        &mut writer,
+        &operator_key,
+        wirken_ipc::operator::PERMISSIONS_SOCKET,
+    )
+    .await
+    {
+        Ok(key_id) => key_id,
+        Err(e) => {
+            tracing::warn!("permissions: refusing caller: {e}");
+            let _ = audit
+                .log(
+                    AuditEvent::new(
+                        ActorKind::Service,
+                        "gateway",
+                        "permissions.request.refused",
+                        "permissions",
+                    )
+                    .with_detail(serde_json::json!({
+                        "reason": "operator_handshake",
+                        "handshake": e.reason(),
+                    })),
+                )
+                .await;
+            return Ok(());
+        }
+    };
     let mut line = String::new();
     let n = br
         .read_line(&mut line)
@@ -2739,7 +2792,7 @@ async fn handle_permissions_request(
     }
 
     let response = match serde_json::from_str::<PermissionsRequest>(line.trim_end()) {
-        Ok(req) => process_permissions_request(req, &queue),
+        Ok(req) => process_permissions_request(req, &queue, &key_id),
         Err(e) => PermissionsResponse::Error {
             message: format!("invalid request JSON: {e}"),
         },
@@ -2762,9 +2815,14 @@ async fn handle_permissions_request(
 }
 
 #[cfg(unix)]
+/// `key_id` is the operator key the caller signed with. A decision's
+/// actor carries it beside the name the caller gave, so the chain
+/// records who decided by a key the gateway verified, not only by a
+/// name the caller chose.
 fn process_permissions_request(
     req: wirken_ipc::permissions::PermissionsRequest,
     queue: &wirken_gateway::pending_approvals::PendingApprovalQueue,
+    key_id: &str,
 ) -> wirken_ipc::permissions::PermissionsResponse {
     use wirken_gateway::pending_approvals::PendingDecision;
     use wirken_ipc::permissions::{
@@ -2811,7 +2869,7 @@ fn process_permissions_request(
             let result = queue.resolve(
                 &request_id,
                 PendingDecision::Allow {
-                    actor: Some(approved_by),
+                    actor: Some(format!("{approved_by} (operator key {key_id})")),
                 },
             );
             PermissionsResponse::Decision {
@@ -2834,7 +2892,7 @@ fn process_permissions_request(
                 &request_id,
                 PendingDecision::Deny {
                     reason,
-                    actor: Some(denied_by),
+                    actor: Some(format!("{denied_by} (operator key {key_id})")),
                 },
             );
             PermissionsResponse::Decision {
@@ -2862,10 +2920,39 @@ async fn handle_orchestrator_push(
     stream: UnixStream,
     dispatcher: Arc<OutboundDispatcher>,
     audit: Arc<AuditWriter>,
+    operator_key: ed25519_dalek::VerifyingKey,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (reader, mut writer) = stream.into_split();
     let mut br = BufReader::new(reader);
+    let key_id = match wirken_ipc::operator::handshake_as_gateway(
+        &mut br,
+        &mut writer,
+        &operator_key,
+        wirken_ipc::operator::ORCHESTRATOR_SOCKET,
+    )
+    .await
+    {
+        Ok(key_id) => key_id,
+        Err(e) => {
+            tracing::warn!("orchestrator: refusing caller: {e}");
+            let _ = audit
+                .log(
+                    AuditEvent::new(
+                        ActorKind::Service,
+                        "gateway",
+                        "orchestrator.push.refused",
+                        "orchestrator",
+                    )
+                    .with_detail(serde_json::json!({
+                        "reason": "operator_handshake",
+                        "handshake": e.reason(),
+                    })),
+                )
+                .await;
+            return Ok(());
+        }
+    };
     let mut line = String::new();
     let n = br
         .read_line(&mut line)
@@ -2919,7 +3006,10 @@ async fn handle_orchestrator_push(
                             )
                             .with_channel(&req.channel)
                             .with_session(&req.conversation_id)
-                            .with_detail(serde_json::json!({ "content": &req.text })),
+                            .with_detail(serde_json::json!({
+                                "content": &req.text,
+                                "operator_key": &key_id,
+                            })),
                         )
                         .await;
                     OrchestratorPushResponse {

@@ -28,6 +28,19 @@ async fn permissions_rpc(req: &PermissionsRequest) -> Result<PermissionsResponse
         .await
         .with_context(|| format!("permissions IPC: connect {}", path.display()))?;
     let (reader, mut writer) = stream.into_split();
+    let mut br = BufReader::new(reader);
+    // The gateway accepts a decision only from the operator key, and
+    // records it against that key.
+    let key = wirken_ipc::operator::OperatorKey::load_or_create(&cfg.data_dir)
+        .context("permissions IPC: load the operator key")?;
+    wirken_ipc::operator::handshake_as_operator(
+        &mut br,
+        &mut writer,
+        &key,
+        wirken_ipc::operator::PERMISSIONS_SOCKET,
+    )
+    .await
+    .context("permissions IPC: operator handshake")?;
 
     let body = serde_json::to_string(req).context("permissions IPC: serialize request")?;
     writer
@@ -43,7 +56,6 @@ async fn permissions_rpc(req: &PermissionsRequest) -> Result<PermissionsResponse
         .await
         .context("permissions IPC: shutdown write side")?;
 
-    let mut br = BufReader::new(reader);
     let mut line = String::new();
     br.read_line(&mut line)
         .await

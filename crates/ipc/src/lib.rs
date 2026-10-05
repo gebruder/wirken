@@ -1,6 +1,7 @@
 mod auth;
 mod channel;
 mod error;
+pub mod operator;
 pub mod orchestrator;
 pub mod permissions;
 pub mod principal;

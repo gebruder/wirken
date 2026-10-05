@@ -52,6 +52,11 @@ use wirken_zirkel::schema::AGGREGATOR_MIGRATIONS;
 /// Spin up a fake "gateway" that accepts one push, captures it, and
 /// replies with `{ ok: true }`. Returns a join handle that yields the
 /// received request.
+/// The operator key the fake gateway pins and the push signs with.
+fn operator_key() -> wirken_ipc::operator::OperatorKey {
+    wirken_ipc::operator::OperatorKey::from_bytes(&[9u8; 32])
+}
+
 fn spawn_fake_gateway(
     socket_path: std::path::PathBuf,
     captured: Arc<Mutex<Option<OrchestratorPushRequest>>>,
@@ -64,6 +69,17 @@ fn spawn_fake_gateway(
         };
         let (reader, mut writer) = stream.into_split();
         let mut br = BufReader::new(reader);
+        if wirken_ipc::operator::handshake_as_gateway(
+            &mut br,
+            &mut writer,
+            &operator_key().verifying_key(),
+            wirken_ipc::operator::ORCHESTRATOR_SOCKET,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
         let mut line = String::new();
         if br.read_line(&mut line).await.is_err() {
             return;
@@ -246,9 +262,15 @@ async fn render_push_record_keepskip_round_trip() {
     let captured = Arc::new(Mutex::new(None));
     let server = spawn_fake_gateway(socket_path.clone(), captured.clone());
 
-    push(&socket_path, "signal", "+15551234567", &rendered.text)
-        .await
-        .expect("push succeeds");
+    push(
+        &socket_path,
+        &operator_key(),
+        "signal",
+        "+15551234567",
+        &rendered.text,
+    )
+    .await
+    .expect("push succeeds");
     server.await.unwrap();
 
     let req = captured

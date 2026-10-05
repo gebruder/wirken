@@ -5,6 +5,10 @@
 //! line-delimited JSON [`OrchestratorPushRequest`], reads one
 //! [`OrchestratorPushResponse`], and disconnects.
 //!
+//! Before the request, the operator handshake: the gateway accepts a
+//! push only when it is signed with the operator key
+//! (`crates/ipc/src/operator.rs`).
+//!
 //! See `crates/ipc/src/orchestrator.rs` for the wire types and the
 //! "this is not an adapter" trust posture; see
 //! `crates/cli/src/commands/run.rs` for the server side.
@@ -15,6 +19,9 @@ use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use wirken_ipc::operator::{
+    ORCHESTRATOR_SOCKET, OperatorHandshakeError, OperatorKey, handshake_as_operator,
+};
 use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
 
 #[derive(Debug, Error)]
@@ -33,6 +40,8 @@ pub enum PushError {
     NoResponse,
     #[error("gateway rejected push: {0}")]
     Rejected(String),
+    #[error("{0}")]
+    Handshake(#[from] OperatorHandshakeError),
 }
 
 /// Push one outbound message to the running gateway.
@@ -44,11 +53,12 @@ pub enum PushError {
 /// recipient."
 pub async fn push(
     socket_path: &Path,
+    key: &OperatorKey,
     channel: &str,
     conversation_id: &str,
     text: &str,
 ) -> Result<(), PushError> {
-    push_with_reply_to(socket_path, channel, conversation_id, text, "").await
+    push_with_reply_to(socket_path, key, channel, conversation_id, text, "").await
 }
 
 /// Same as [`push`] but lets the caller set `reply_to_id` (Slack
@@ -56,6 +66,7 @@ pub async fn push(
 /// "no thread."
 pub async fn push_with_reply_to(
     socket_path: &Path,
+    key: &OperatorKey,
     channel: &str,
     conversation_id: &str,
     text: &str,
@@ -68,6 +79,8 @@ pub async fn push_with_reply_to(
             source: e,
         })?;
     let (reader, mut writer) = stream.into_split();
+    let mut br = BufReader::new(reader);
+    handshake_as_operator(&mut br, &mut writer, key, ORCHESTRATOR_SOCKET).await?;
 
     let req = OrchestratorPushRequest {
         channel: channel.to_string(),
@@ -82,7 +95,6 @@ pub async fn push_with_reply_to(
     // blocking; we still hold the read half.
     writer.shutdown().await.ok();
 
-    let mut br = BufReader::new(reader);
     let mut resp_line = String::new();
     let n = br.read_line(&mut resp_line).await?;
     if n == 0 {
@@ -106,6 +118,11 @@ mod tests {
 
     /// Spin up a fake server on a temp socket that reads one JSON
     /// line and writes back a fixed response.
+    /// The key the fake gateway pins, and the one the tests push with.
+    fn key() -> OperatorKey {
+        OperatorKey::from_bytes(&[7u8; 32])
+    }
+
     async fn spawn_fake_server(
         socket_path: std::path::PathBuf,
         response: OrchestratorPushResponse,
@@ -115,6 +132,14 @@ mod tests {
             let (stream, _) = listener.accept().await.ok()?;
             let (reader, mut writer) = stream.into_split();
             let mut br = BufReader::new(reader);
+            wirken_ipc::operator::handshake_as_gateway(
+                &mut br,
+                &mut writer,
+                &key().verifying_key(),
+                ORCHESTRATOR_SOCKET,
+            )
+            .await
+            .ok()?;
             let mut line = String::new();
             br.read_line(&mut line).await.ok()?;
             let req: OrchestratorPushRequest = serde_json::from_str(line.trim_end()).ok()?;
@@ -139,7 +164,9 @@ mod tests {
         )
         .await;
 
-        push(&sock, "signal", "+15551234567", "hi").await.unwrap();
+        push(&sock, &key(), "signal", "+15551234567", "hi")
+            .await
+            .unwrap();
         let req = server.await.unwrap().expect("server received request");
         assert_eq!(req.channel, "signal");
         assert_eq!(req.conversation_id, "+15551234567");
@@ -160,7 +187,7 @@ mod tests {
         )
         .await;
 
-        let err = push(&sock, "signal", "+15551234567", "hi")
+        let err = push(&sock, &key(), "signal", "+15551234567", "hi")
             .await
             .unwrap_err();
         match err {
@@ -184,7 +211,7 @@ mod tests {
         )
         .await;
 
-        push_with_reply_to(&sock, "slack", "C123", "hello", "1234.5678")
+        push_with_reply_to(&sock, &key(), "slack", "C123", "hello", "1234.5678")
             .await
             .unwrap();
         let req = server.await.unwrap().unwrap();
@@ -192,10 +219,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_push_signed_with_another_key_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let sock = dir.path().join("orch.sock");
+        let server = spawn_fake_server(
+            sock.clone(),
+            OrchestratorPushResponse {
+                ok: true,
+                error: None,
+            },
+        )
+        .await;
+        let err = push(&sock, &OperatorKey::generate(), "signal", "+1", "hi")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                PushError::Handshake(OperatorHandshakeError::Refused(_))
+            ),
+            "{err:?}"
+        );
+        assert!(
+            server.await.unwrap().is_none(),
+            "no request reached the gateway"
+        );
+    }
+
+    #[tokio::test]
     async fn missing_socket_returns_connect_error() {
         let dir = TempDir::new().unwrap();
         let sock = dir.path().join("does-not-exist.sock");
-        let err = push(&sock, "signal", "+1", "hi").await.unwrap_err();
+        let err = push(&sock, &key(), "signal", "+1", "hi").await.unwrap_err();
         assert!(matches!(err, PushError::Connect { .. }));
     }
 }

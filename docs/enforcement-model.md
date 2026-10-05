@@ -280,9 +280,17 @@ and no shared state between channel processes.
 
 ## Orchestrator push
 
-The gateway exposes a push socket (`<data_dir>/sockets/orchestrator.sock` on
-unix, a named pipe on windows) used by `wirken zirkel run`'s digest push and
-similar callers to deliver outbound messages without going through the
-per-adapter Ed25519 handshake. Because the socket bypasses adapter
-authentication, every accepted connection has its peer credentials checked
-against the gateway's own identity.
+The gateway exposes a push socket (`<data_dir>/sockets/orchestrator.sock`,
+unix only) used by `wirken zirkel run`'s digest push and similar callers to
+deliver outbound messages without going through the per-adapter handshake.
+Every accepted connection has its peer credentials checked against the
+gateway's own identity, then runs the operator handshake: the caller signs a
+fresh challenge with the operator key (`<data_dir>/operator/operator.key`),
+and the gateway accepts only the key it pinned at startup. Each push is
+recorded with the key's id, and a caller without the key is refused with an
+`orchestrator.push.refused` row. `gateway-permissions.sock`, which
+`wirken permissions pending` uses to answer pending approvals, takes the same
+handshake, and a decision's actor carries the key id. The handshake is for
+attribution and for refusing a same-UID process that does not hold the key,
+not confidentiality: a process running as the gateway's user can read the key
+file and sign.

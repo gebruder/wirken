@@ -12,6 +12,20 @@ tagged.
 
 ### Security
 
+- `orchestrator.sock` and `gateway-permissions.sock` take a signed
+  handshake, as `gateway.sock` does. The caller signs a fresh challenge
+  with the operator key, created on first use at
+  `<data_dir>/operator/operator.key`, and the gateway accepts only the
+  key it pinned at startup. Each orchestrator push is recorded with the
+  key's id, and an approval or denial made through
+  `wirken permissions pending` carries it in its actor. A caller that
+  does not sign is refused with an `orchestrator.push.refused` or
+  `permissions.request.refused` row. The reason is attribution on the
+  chain and refusal of same-UID processes that do not hold the key, not
+  confidentiality: a process running as the gateway's user can read the
+  key file. Breaking for callers of the two sockets: a `wirken-zirkel`
+  or CLI built before this change is refused by a gateway built after.
+
 - After a session reads something restricting (a workspace file, either
   channel's memory, an imported archive), `http_request` asks the
   operator before it goes out, the rule sandboxed `exec` egress already

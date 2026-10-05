@@ -13,9 +13,11 @@
 //! text, and they authenticate over Ed25519. An orchestrator pushing
 //! a digest to the operator's own thread is not crossing a trust
 //! boundary — it lives in the same data dir, runs under the same
-//! UID, and reads the same vault. SO_PEERCRED + 0600 file perms is
-//! the gate. Wire format is line-delimited JSON; no capnp, no
-//! handshake, no signature.
+//! UID, and reads the same vault. SO_PEERCRED + 0600 file perms admit
+//! the connection, then the operator handshake (`crate::operator`):
+//! the push is signed with the operator key, so it is recorded against
+//! that key and a same-UID process without it is refused. No capnp;
+//! line-delimited JSON after the handshake.
 
 use serde::{Deserialize, Serialize};
 

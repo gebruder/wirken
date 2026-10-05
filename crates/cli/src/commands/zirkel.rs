@@ -169,6 +169,7 @@ pub async fn run() -> Result<()> {
                 #[cfg(unix)]
                 push_digest_for_run(
                     &cfg.socket_dir().join("orchestrator.sock"),
+                    &cfg.data_dir,
                     &zirkel_db,
                     &summary.run_id,
                     &binding,
@@ -702,6 +703,7 @@ fn apply_aggregator_migrations(conn: &mut Connection) -> rusqlite::Result<()> {
 #[cfg(unix)]
 async fn push_digest_for_run(
     orchestrator_socket: &std::path::Path,
+    data_dir: &std::path::Path,
     zirkel_db: &std::path::Path,
     run_id: &str,
     binding: &Binding,
@@ -733,8 +735,13 @@ async fn push_digest_for_run(
         binding.conversation_id,
     );
 
+    // The gateway takes a push only when it is signed with the
+    // operator key, and records the push against it.
+    let key = wirken_ipc::operator::OperatorKey::load_or_create(data_dir)
+        .map_err(|e| anyhow!("load the operator key: {e}"))?;
     match push_to_gateway(
         orchestrator_socket,
+        &key,
         &binding.channel,
         &binding.conversation_id,
         &rendered.text,

@@ -16,10 +16,13 @@
 //! Operator-tool RPC does NOT cross a trust boundary. The CLI
 //! subcommand process lives in the same data dir, runs under the
 //! same UID, and reads the same vault as the gateway. SO_PEERCRED
-//! plus 0600 file perms is the gate. Wire format is line-delimited
-//! JSON; no capnp, no handshake, no signature. This precedent is
-//! documented at `crates/ipc/src/orchestrator.rs`; permissions-IPC
-//! matches it.
+//! plus 0600 file perms admit the connection, then the operator
+//! handshake (`crate::operator`): the caller signs a challenge with
+//! the operator key. That attributes each decision to a key and
+//! refuses a same-UID process without it; it is not confidentiality
+//! against a process that can read the key file. Wire format after
+//! the handshake is line-delimited JSON, matching
+//! `crates/ipc/src/orchestrator.rs`.
 
 use serde::{Deserialize, Serialize};
 
