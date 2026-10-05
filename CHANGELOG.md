@@ -92,6 +92,12 @@ tagged.
   dispatch row names the attached skills under `skills_attached` in
   place of `skills_dir` and `skills_loaded`.
 
+- A walk staged for `wirken lyrik run` opens with the rules it runs
+  under: every write goes under the walk's staging directory, and a
+  harness the walk text would put in the project's test tree goes
+  under `staging/<walk>/harness/`. Promoting a harness is an operator
+  step after the run. The installed walk files are not modified.
+
 ### Dependencies
 
 - wasmtime and wasmtime-wasi floor raised to 48.0.4 for

@@ -179,12 +179,34 @@ pub fn stage_walk_skills(
 /// source (Claude-style `name:` / `description:`) and writes a
 /// fresh one. The original description is preserved when present
 /// so the slash interceptor still surfaces a useful one-liner.
+///
+/// Ahead of the body goes [`run_section`], which tells the model
+/// where a run's writes go. The `write_paths` above is what makes
+/// that true; the section is so the walk does not spend its turn on
+/// writes the gate refuses.
 pub fn wrap_with_wirken_frontmatter(walk_name: &str, source: &str) -> String {
     let (orig_description, body) = strip_leading_frontmatter(source);
     let description =
         orig_description.unwrap_or_else(|| format!("Per-walk Lyrik dispatch: {walk_name}"));
+    let section = run_section(walk_name);
     format!(
-        "---\nname: {walk_name}\ndescription: {description}\ndisable-model-invocation: true\npermissions:\n  tools:\n    allow: [exec, read_file, write_file, list_files]\n  egress:\n    mode: deny\n  filesystem:\n    read_paths: [\"<workspace>\"]\n    write_paths: [\"<workspace>/.lyrik\"]\n  inference:\n    allow: [\"*\"]\n---\n\n{body}"
+        "---\nname: {walk_name}\ndescription: {description}\ndisable-model-invocation: true\npermissions:\n  tools:\n    allow: [exec, read_file, write_file, list_files]\n  egress:\n    mode: deny\n  filesystem:\n    read_paths: [\"<workspace>\"]\n    write_paths: [\"<workspace>/.lyrik\"]\n  inference:\n    allow: [\"*\"]\n---\n\n{section}\n{body}"
+    )
+}
+
+/// The rules a walk runs under inside `wirken lyrik run`, placed ahead
+/// of the operator's walk text. They take precedence over a location
+/// the walk text names, such as a harness in the project's test tree.
+fn run_section(walk_name: &str) -> String {
+    format!(
+        "## Under `wirken lyrik run`\n\n\
+         These rules take precedence over any location named below.\n\n\
+         - Everything this walk writes goes under \
+         `.lyrik/state/runs/<run-id>/staging/{walk_name}/`, with the run-id from the \
+         dispatch prompt. A write anywhere else is refused.\n\
+         - A harness or test this walk would place in the project's test tree goes \
+         under `.lyrik/state/runs/<run-id>/staging/{walk_name}/harness/` instead. \
+         Promoting it into the test tree is an operator step after the run.\n"
     )
 }
 
@@ -334,6 +356,20 @@ mod tests {
         });
         let err = parse_walks_config(&cfg, tmp.path()).unwrap_err();
         assert!(err.to_string().contains(">= 1"));
+    }
+
+    #[test]
+    fn wrap_puts_run_rules_ahead_of_the_walk_text() {
+        let src = "---\nname: fuzz-walk\ndescription: d\n---\n\nHarnesses live in the project's test tree.\n";
+        let wrapped = wrap_with_wirken_frontmatter("fuzz-walk", src);
+        let rules = wrapped
+            .find("## Under `wirken lyrik run`")
+            .expect("run rules present");
+        let walk = wrapped.find("Harnesses live").expect("walk text kept");
+        assert!(rules < walk, "the rules come before the walk text");
+        assert!(wrapped.contains(".lyrik/state/runs/<run-id>/staging/fuzz-walk/harness/"));
+        // The gate says the same thing the text does.
+        assert!(wrapped.contains("write_paths: [\"<workspace>/.lyrik\"]"));
     }
 
     #[test]

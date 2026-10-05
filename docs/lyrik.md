@@ -199,6 +199,14 @@ the run-level session id (`lyrik-<run-id>`), so all walk turns land in one
 signed audit chain however many run in parallel. Per-walk staging lives under
 `.lyrik/state/runs/<run-id>/staging/<walk-name>/`.
 
+The staged copy of a walk opens with a short section ahead of the installed
+walk text: everything the walk writes goes under its staging directory, and a
+harness the walk text would put in the project's test tree goes under
+`staging/<walk-name>/harness/` instead. Promoting a harness into the test tree
+is an operator step after the run. The staged frontmatter's `write_paths`,
+`<workspace>/.lyrik`, is what enforces it; the installed walk files are not
+modified.
+
 Dedup on the merged output: findings sharing `(location.file,
 location.line_start)` collapse to one; `framing` becomes the sorted unique
 union; `tier` rises to the highest; `dedup_disagreement: true` when input
