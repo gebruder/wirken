@@ -23,8 +23,9 @@ tagged.
   `permissions.request.refused` row. The reason is attribution on the
   chain and refusal of same-UID processes that do not hold the key, not
   confidentiality: a process running as the gateway's user can read the
-  key file. Breaking for callers of the two sockets: a `wirken-zirkel`
-  or CLI built before this change is refused by a gateway built after.
+  key file. Callers of `orchestrator.sock` and `gateway-permissions.sock`
+  must be the same build as the gateway; restart `wirken run` after
+  upgrading.
 
 - After a session reads something restricting (a workspace file, either
   channel's memory, an imported archive), `http_request` asks the
