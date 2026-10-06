@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -106,8 +106,7 @@ impl OperatorKey {
     }
 
     pub fn generate() -> Self {
-        let mut secret = [0u8; 32];
-        rand::rng().fill_bytes(&mut secret);
+        let secret: [u8; 32] = rand::rng().random();
         Self::from_bytes(&secret)
     }
 
@@ -258,8 +257,7 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut nonce = [0u8; NONCE_SIZE];
-    rand::rng().fill_bytes(&mut nonce);
+    let nonce: [u8; NONCE_SIZE] = rand::rng().random();
     write_line(
         writer,
         &Challenge {
@@ -317,12 +315,12 @@ fn hex_decode<const N: usize>(s: &str) -> Option<[u8; N]> {
     if s.len() != N * 2 {
         return None;
     }
-    let mut out = [0u8; N];
-    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
-        let pair = std::str::from_utf8(chunk).ok()?;
-        out[i] = u8::from_str_radix(pair, 16).ok()?;
-    }
-    Some(out)
+    let bytes: Vec<u8> = s
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<_>>()?;
+    bytes.try_into().ok()
 }
 
 #[cfg(test)]
