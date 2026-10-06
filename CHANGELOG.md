@@ -62,7 +62,11 @@ tagged.
 ### Dependencies
 
 - wasmtime and wasmtime-wasi move to 49.0.2 together. The minimum Rust
-  version rises to 1.96, which wasmtime 49 requires.
+  version rises to 1.96, which wasmtime 49 requires. No path an
+  operator can run loads a Wasm skill, so its soak is the in-tree
+  end-to-end tests in `crates/agent/src/wasm_sandbox_e2e_tests.rs`
+  (`signature_covers_the_wasm_bytes`, `stdout_reaches_the_caller`,
+  `stderr_is_reported_when_the_module_traps`), green on wasmtime 49.
 - feed-rs 3.0.0 for Zirkel's feed parsing. Its breaking changes are to
   types Zirkel does not read (author and contributor parsing, and
   `Send + Sync` on its extension traits).
