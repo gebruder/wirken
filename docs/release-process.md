@@ -88,6 +88,12 @@ fix into this release or defer it explicitly in the CHANGELOG. Patch and
 non-0.x-minor dependabot bumps fold cleanly; 0.x-minor and major bumps take a
 soak cycle.
 
+A soak cycle is the operator's end-to-end run on main that exercises the
+bumped crate's path, done before the tag. It is a run, not a wait: a feed
+parser bump soaks on a real `wirken zirkel run` fetch. Where the crate has no
+path an operator can run, the in-tree end-to-end tests that exercise it are
+its soak, and the CHANGELOG entry for the bump names them.
+
 **What gates a tag.** Three surfaces, not interchangeable:
 
 - **Code-scanning findings (CodeQL).** A critical or high finding blocks until
