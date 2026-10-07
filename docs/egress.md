@@ -22,7 +22,7 @@ from the model: `web_search` posts to DuckDuckGo and `generate_image` to the
 configured provider's image endpoint. With no skills attached those two are
 not restricted.
 
-Source: `crates/agent/src/egress.rs:296-345` (host-based check, and the no-allow-set refusal for `http_request`), `crates/agent/src/skill_perms.rs:1000-1046` (allowset resolution).
+Source: `EgressClient::check_egress` (host-based check) and `EgressClient::check_egress_declared` (the no-allow-set refusal for `http_request`) in `crates/agent/src/egress.rs`; `merge` in `crates/agent/src/skill_perms.rs` (allowset resolution).
 
 ## The `http_request` gate
 
@@ -31,7 +31,7 @@ while the session has read nothing restricting. Authorization is the skill's
 own permissions block plus an operator-set credential binding, and every
 failure of those is a refusal recorded as `SkillPermissionDenied`. Four checks
 run before the request is built (`crates/agent/src/http_tool.rs::gate`, called
-from `crates/agent/src/runtime.rs:3100`):
+from `Agent::execute_tool` in `crates/agent/src/runtime.rs`):
 
 - **Method.** `GET`, `HEAD`, `POST` only.
 - **`tools.allow`** must contain `http_request`.
@@ -216,6 +216,6 @@ The same gap appears in [security-properties.md](security-properties.md) under T
 
 ## Source references
 
-- `EgressClient` scope and host check: `crates/agent/src/egress.rs:176-346`.
-- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:1000-1046`, matching at `crates/agent/src/skill_perms.rs:619-635`.
+- `EgressClient` scope and host check: `EgressClient`, `EgressClient::check_egress` and `EgressClient::check_egress_declared` in `crates/agent/src/egress.rs`.
+- Allowset and wildcard resolution: `merge` and `union_allow` in `crates/agent/src/skill_perms.rs`, matching in `host_in_set` and `host_matches` in the same file.
 - Threat-model row: [security-properties.md](security-properties.md), row `T11` (Unexpected RCE and code attacks).

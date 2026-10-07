@@ -110,10 +110,10 @@ way the same validation runs: `^[a-z][a-z0-9-]{0,63}$`, 1 to 64 characters,
 lowercase ASCII letters, digits and hyphens only, starting with a letter so a
 name cannot be confused with a numeric flag in CLI rendering. No uppercase,
 underscores, dots, slashes or non-ASCII, so a name is one token on every
-filesystem and in every shell. `crates/agent/src/skill.rs:396-421`.
+filesystem and in every shell. `validate_name` in `crates/agent/src/skill.rs`.
 
 **`description`** (required). Non-empty, at most 1024 characters, counted by
-Unicode scalar rather than bytes. `crates/agent/src/skill.rs:425-439`.
+Unicode scalar rather than bytes. `validate_description` in `crates/agent/src/skill.rs`.
 
 **`permissions`** (optional). When omitted the loader applies
 `PermissionProfile::default()`: least-privilege deny-all on every axis, empty
@@ -123,7 +123,7 @@ anything beyond emitting text through the prompt; capability is something the
 operator opts into by writing the block.
 
 When present it must conform to `PermissionProfile`
-(`crates/agent/src/skill_perms.rs:35-106`). Axes: `tools`, `egress`,
+(`PermissionProfile` in `crates/agent/src/skill_perms.rs`). Axes: `tools`, `egress`,
 `filesystem`, `inference`, plus `credentials` and `http` for
 [`http_request`](egress.md#the-http_request-gate). Wildcard `"*"` is supported
 on `tools`, `egress.domains` and `inference.allow`; filesystem wildcards are
@@ -135,13 +135,14 @@ Filesystem paths are absolute, or start with one of three prefixes:
 (`WIRKEN_DATA_DIR` when set, `~/.wirken` otherwise), both resolved at load
 time, and `<workspace>` for the agent's workspace, resolved when the skill
 is attached. The Zirkel preset grants `<data_dir>/zirkel`, so its store
-follows the data directory. `crates/agent/src/skill_perms.rs:425-481`,
-`:608-623`.
+follows the data directory. `resolve_paths`, `expand_data_dir`,
+`expand_home` and `expand_workspace_set` in `crates/agent/src/skill_perms.rs`.
 
 **`metadata.wirken.requires.bins`** (optional). Host binaries the skill needs
 on `PATH`. The loader checks each via `which`; if any are missing the skill is
 marked `available: false` and is not exposed to the LLM, but the bundle still
-loads so `wirken skills list` shows it. `crates/agent/src/skill.rs:359-387`.
+loads so `wirken skills list` shows it. `extract_required_bins` and
+`check_bins_available` in `crates/agent/src/skill.rs`.
 
 **`metadata.openclaw.*`** continues to load without error but is silently
 ignored; `metadata.wirken.*` is the only recognized location. Migrate with
@@ -155,7 +156,8 @@ wraps third-party skills. The per-build nonce already defeats literal-marker
 collisions in the rendered prompt, but carrying the tokens through to the LLM
 still gives the model a confusable surface, and no legitimate field needs to
 write them. The name matters because `build_prompt` renders it as a heading
-inside the envelope. `crates/agent/src/skill.rs:179-193`, `:448-488`.
+inside the envelope. `envelope_collision_check`, called from
+`SkillLoader::load_file`, in `crates/agent/src/skill.rs`.
 
 ## Invocation
 
