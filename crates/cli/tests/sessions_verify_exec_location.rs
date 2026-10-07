@@ -102,6 +102,74 @@ fn verify_says_so_when_the_prompt_and_the_run_disagree() {
         report.contains("and the exec ran under mode off on host (seq 1)."),
         "{report}"
     );
+    assert!(
+        report.contains("Recorded 1 on the 'gateway-verify' lane"),
+        "{report}"
+    );
+    assert_eq!(findings(data.path()), 1);
+
+    // A second verify finds the same disagreement and records nothing new.
+    let again = text(&verify(data.path()));
+    assert!(
+        again.contains("Already recorded on the 'gateway-verify' lane."),
+        "{again}"
+    );
+    assert_eq!(findings(data.path()), 1, "recorded once");
+
+    // The row says what was told and what ran, for the SIEM.
+    let log = SqliteSessionLog::open(&data.path().join("audit.db")).unwrap();
+    let rows = log
+        .get_since(
+            &log.handle_for(SessionId::new("gateway-verify".to_string())),
+            0,
+        )
+        .unwrap();
+    let finding = rows
+        .iter()
+        .find_map(|r| match &r.event {
+            SessionEvent::ExecLocationDisagreement {
+                verified_session_id,
+                approval_seq,
+                result_seq,
+                told,
+                ran,
+                agent_id,
+                ..
+            } => Some((
+                verified_session_id.clone(),
+                *approval_seq,
+                *result_seq,
+                told.text.clone(),
+                ran.runtime,
+                agent_id.clone(),
+            )),
+            _ => None,
+        })
+        .expect("a finding row");
+    assert_eq!(
+        finding,
+        (
+            "narrow".to_string(),
+            0,
+            1,
+            TOLD.to_string(),
+            SandboxRuntimeLabel::Host,
+            "narrow".to_string()
+        )
+    );
+}
+
+/// `ExecLocationDisagreement` rows on the verify lane.
+fn findings(data: &Path) -> usize {
+    let log = SqliteSessionLog::open(&data.join("audit.db")).unwrap();
+    log.get_since(
+        &log.handle_for(SessionId::new("gateway-verify".to_string())),
+        0,
+    )
+    .unwrap()
+    .iter()
+    .filter(|r| matches!(r.event, SessionEvent::ExecLocationDisagreement { .. }))
+    .count()
 }
 
 #[test]
@@ -115,4 +183,5 @@ fn verify_is_clean_when_they_agree() {
     let report = text(&out);
     assert_eq!(out.status.code(), Some(0), "{report}");
     assert!(!report.contains("exec_location"), "{report}");
+    assert_eq!(findings(data.path()), 0, "nothing recorded");
 }

@@ -55,6 +55,12 @@ tagged.
   verify` pairs each approval with the next `exec` result and reports
   an `exec_location` divergence, exit `1`, when the mode differs or
   one says the host and the other a container.
+- An `exec_location` divergence that `wirken sessions verify` finds
+  is recorded as an `exec_location_disagreement` event on the
+  `gateway-verify` lane, once per approval, and the SIEM forwarder
+  sends it by default. The approval rows it is drawn from are not in
+  the default set, so a SOC sees the finding without opting in to
+  them. The verified session is not written to.
 
 ### Dependencies
 

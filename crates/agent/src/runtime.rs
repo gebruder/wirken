@@ -4828,6 +4828,7 @@ impl Agent {
                 tools_not_attestable_rows: 0,
                 tools_hash_unrecomputable_rows: 0,
                 policy_refused_rows: 0,
+                exec_location_findings: Vec::new(),
             });
         }
 
@@ -4839,7 +4840,7 @@ impl Agent {
         let events_total = rows.len();
         // What the operator was told about an `exec` against where it
         // ran. Read off the chain alone, so it needs no replay.
-        let exec_location_divergences = exec_location_disagreements(&rows);
+        let exec_location_findings = exec_location_findings(&rows);
 
         // Build a fresh conversation that we'll mutate in lockstep
         // with the replay so each LlmRequest sees the same
@@ -5116,7 +5117,11 @@ impl Agent {
             }
         }
 
-        divergences.extend(exec_location_divergences);
+        divergences.extend(
+            exec_location_findings
+                .iter()
+                .map(ExecLocationFinding::divergence),
+        );
         Ok(VerifyReport {
             events_total,
             events_verified,
@@ -5127,6 +5132,7 @@ impl Agent {
             tools_not_attestable_rows,
             tools_hash_unrecomputable_rows,
             policy_refused_rows,
+            exec_location_findings,
         })
     }
 
@@ -5796,6 +5802,10 @@ pub struct VerifyReport {
     /// succeeded: policy now refuses this path. Each is also counted
     /// in `events_unverifiable`.
     pub policy_refused_rows: usize,
+    /// Approvals whose prompt disagreed with where the `exec` ran, in
+    /// full. Each is also an `exec_location` entry in
+    /// `events_divergent`; the caller records these for the SIEM.
+    pub exec_location_findings: Vec<ExecLocationFinding>,
 }
 
 /// What a caller knows about a session that its chain does not carry.
@@ -5833,6 +5843,41 @@ impl VerifyReport {
     }
 }
 
+/// An approval whose prompt said one place for an `exec` while the
+/// command ran in another, as `verify` found it on the chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecLocationFinding {
+    pub approval_seq: u64,
+    pub result_seq: u64,
+    pub told: wirken_audit::ExecLocation,
+    pub ran: wirken_audit::SandboxProvenance,
+    pub agent_id: String,
+    pub adapter_id: Option<String>,
+    pub sender_id: Option<String>,
+}
+
+impl ExecLocationFinding {
+    fn divergence(&self) -> DivergenceRecord {
+        fn label<T: serde::Serialize>(value: &T) -> String {
+            serde_json::to_value(value)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        }
+        DivergenceRecord {
+            seq: self.approval_seq,
+            kind: "exec_location".to_string(),
+            expected: self.told.text.clone(),
+            found: format!(
+                "ran under mode {} on {} (seq {})",
+                label(&self.ran.mode),
+                label(&self.ran.runtime),
+                self.result_seq
+            ),
+        }
+    }
+}
+
 /// Approvals whose prompt said one place for an `exec` while the
 /// command ran in another.
 ///
@@ -5843,45 +5888,55 @@ impl VerifyReport {
 /// and the other a container. A result with no sandbox record (a call
 /// refused before dispatch, or a row older than the field) ran
 /// nowhere, so there is nothing to compare.
-pub(crate) fn exec_location_disagreements(
+pub fn exec_location_findings(
     rows: &[wirken_audit::StoredSessionEvent],
-) -> Vec<DivergenceRecord> {
+) -> Vec<ExecLocationFinding> {
     use wirken_audit::{SandboxModeLabel, SandboxRuntimeLabel, SessionEvent};
 
-    fn label<T: serde::Serialize>(value: &T) -> String {
-        serde_json::to_value(value)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_default()
+    struct Told {
+        seq: u64,
+        location: wirken_audit::ExecLocation,
+        agent_id: String,
+        adapter_id: Option<String>,
+        sender_id: Option<String>,
     }
 
     let mut out = Vec::new();
-    let mut told: Option<(u64, wirken_audit::ExecLocation)> = None;
+    let mut told: Option<Told> = None;
     for row in rows {
         match &row.event {
             SessionEvent::PermissionApproved {
                 exec_location: Some(location),
+                agent_id,
+                adapter_id,
+                sender_id,
                 ..
-            } => told = Some((row.seq, location.clone())),
+            } => {
+                told = Some(Told {
+                    seq: row.seq,
+                    location: location.clone(),
+                    agent_id: agent_id.clone(),
+                    adapter_id: adapter_id.clone(),
+                    sender_id: sender_id.clone(),
+                })
+            }
             SessionEvent::ToolResult {
                 tool_name, sandbox, ..
             } if tool_name == "exec" => {
-                let (Some((seq, location)), Some(ran)) = (told.take(), sandbox.as_ref()) else {
+                let (Some(t), Some(ran)) = (told.take(), sandbox.as_ref()) else {
                     continue;
                 };
-                let told_host = location.mode == SandboxModeLabel::Off;
+                let told_host = t.location.mode == SandboxModeLabel::Off;
                 let ran_host = ran.runtime == SandboxRuntimeLabel::Host;
-                if ran.mode != location.mode || ran_host != told_host {
-                    out.push(DivergenceRecord {
-                        seq,
-                        kind: "exec_location".to_string(),
-                        expected: location.text,
-                        found: format!(
-                            "ran under mode {} on {} (seq {})",
-                            label(&ran.mode),
-                            label(&ran.runtime),
-                            row.seq
-                        ),
+                if ran.mode != t.location.mode || ran_host != told_host {
+                    out.push(ExecLocationFinding {
+                        approval_seq: t.seq,
+                        result_seq: row.seq,
+                        told: t.location,
+                        ran: ran.clone(),
+                        agent_id: t.agent_id,
+                        adapter_id: t.adapter_id,
+                        sender_id: t.sender_id,
                     });
                 }
             }
@@ -5889,6 +5944,18 @@ pub(crate) fn exec_location_disagreements(
         }
     }
     out
+}
+
+/// [`exec_location_findings`] as divergences, the way `verify`
+/// reports them.
+#[cfg(test)]
+pub(crate) fn exec_location_disagreements(
+    rows: &[wirken_audit::StoredSessionEvent],
+) -> Vec<DivergenceRecord> {
+    exec_location_findings(rows)
+        .iter()
+        .map(ExecLocationFinding::divergence)
+        .collect()
 }
 
 /// One mismatch encountered by [`Agent::verify`].

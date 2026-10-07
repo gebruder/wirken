@@ -603,6 +603,18 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
             println!("    {}", d.expected);
             println!("  and the exec {}.", d.found);
         }
+        if !report.exec_location_findings.is_empty() {
+            match record_exec_location_findings(&cfg, session_id, &report.exec_location_findings) {
+                Ok(0) => println!("  Already recorded on the '{VERIFY_FINDINGS_SESSION}' lane."),
+                Ok(n) => println!(
+                    "  Recorded {n} on the '{VERIFY_FINDINGS_SESSION}' lane, which the SIEM \
+                     forwarder sends by default."
+                ),
+                Err(e) => eprintln!(
+                    "  Could not record the finding on the '{VERIFY_FINDINGS_SESSION}' lane: {e}"
+                ),
+            }
+        }
         if tools_diverged {
             println!();
             println!("  A tools_hash divergence means the tool set rebuilt from today's");
@@ -702,6 +714,62 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
         std::process::exit(5);
     }
     Ok(())
+}
+
+/// The lane `sessions verify` records its findings on. A sentinel lane
+/// like `gateway-permissions`: the session it verified stays as it was
+/// recorded, and the SIEM forwarder picks the rows up from here.
+pub const VERIFY_FINDINGS_SESSION: &str = "gateway-verify";
+
+/// Record each exec-location finding on the verify lane once. A second
+/// verify of the same session finds the same disagreements and writes
+/// nothing new. Returns how many rows were written.
+fn record_exec_location_findings(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    verified_session_id: &str,
+    findings: &[wirken_agent::ExecLocationFinding],
+) -> Result<usize> {
+    use wirken_audit::{SessionEvent, SessionId, SessionLog as _, TrustLevel};
+
+    let log = super::open_signed_session_log(cfg)?;
+    let handle = log.handle_for(SessionId::new(VERIFY_FINDINGS_SESSION.to_string()));
+    let recorded: std::collections::HashSet<(String, u64)> = log
+        .get_since(&handle, 0)?
+        .into_iter()
+        .filter_map(|row| match row.event {
+            SessionEvent::ExecLocationDisagreement {
+                verified_session_id,
+                approval_seq,
+                ..
+            } => Some((verified_session_id, approval_seq)),
+            _ => None,
+        })
+        .collect();
+    let mut written = 0;
+    for f in findings {
+        if recorded.contains(&(verified_session_id.to_string(), f.approval_seq)) {
+            continue;
+        }
+        log.append(
+            &handle,
+            TrustLevel::System,
+            SessionEvent::ExecLocationDisagreement {
+                verified_session_id: verified_session_id.to_string(),
+                approval_seq: f.approval_seq,
+                result_seq: f.result_seq,
+                told: f.told.clone(),
+                ran: f.ran.clone(),
+                agent_id: f.agent_id.clone(),
+                adapter_id: f.adapter_id.clone(),
+                sender_id: f.sender_id.clone(),
+            },
+        )?;
+        written += 1;
+    }
+    if written > 0 {
+        super::seal_operator_lane(&log, VERIFY_FINDINGS_SESSION);
+    }
+    Ok(written)
 }
 
 /// The MCP config at `path` when it names at least one server, the

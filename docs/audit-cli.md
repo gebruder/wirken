@@ -400,6 +400,14 @@ container on the other. Both lines are printed in full. A result with no
 prompt is not on the result row, so only the mode and the host-or-container
 question are checked.
 
+Each disagreement is also recorded, once, as an `exec_location_disagreement`
+row on the `gateway-verify` lane: the verified session, the approval and
+result rows, what the operator was told, where the command ran, and the
+approval's agent, adapter and sender. The verified session is not written
+to. A second `verify` of the same session finds the same rows and writes
+nothing new. The SIEM forwarder sends these rows by default; see
+[siem-forwarder](siem-forwarder.md#variant-policy).
+
 Exit codes: `3` broken chain, `1` divergences, `6` a `tools_hash` that could
 not be recomputed, `2` unverifiable under `--strict`, `5` cross-check
 disagreement, `4` no such agent or no events.

@@ -473,6 +473,7 @@ impl OtelProjector {
             SessionEvent::PermissionApproved { .. } => Vec::new(),
             // A refused decision, not a timed operation.
             SessionEvent::PermissionApprovalRefused { .. } => Vec::new(),
+            SessionEvent::ExecLocationDisagreement { .. } => Vec::new(),
             // Grant bookkeeping outside any run.
             SessionEvent::PermissionRevoked { .. } => Vec::new(),
             // Grant bookkeeping outside any run.

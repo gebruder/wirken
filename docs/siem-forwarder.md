@@ -66,7 +66,13 @@ Default forward: `AssistantToolCalls`, `ToolResult`, `HttpFetch`,
 `EgressHookDispatched`, `ToolOutputRedacted`, `BudgetExceeded`,
 `SandboxEgressVerdict`, `SandboxEgressUnsupported`, `MemoryEntryWritten`,
 `CrossChannelMemoryRead`, `ImportStarted`, `ImportCompleted`,
-`ImportedChatRead`, `ImportedChatSearched`.
+`ImportedChatRead`, `ImportedChatSearched`, `ExecLocationDisagreement`.
+
+`ExecLocationDisagreement` is written by `wirken sessions verify`, not by a
+running turn, to the `gateway-verify` lane. It is forwarded by default
+because the `PermissionApproved` rows it is drawn from are not. The
+forwarder reads every session, lanes included, from its cursor, so a finding
+recorded while the gateway is stopped is sent when it next starts.
 
 Default exclude, opt-in only: `UserMessage` and `AssistantMessage` (message
 bodies, PII), `LlmRequest` and `LlmResponse` (token accounting),

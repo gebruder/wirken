@@ -120,6 +120,9 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         // Same reason as the spawn row: it records what a child was
         // granted, from the child's own side.
         SessionEvent::SubagentSessionBound { .. } => true,
+        // An operator told one place for an exec that ran in another.
+        // Forwarded because the approval rows it is drawn from are not.
+        SessionEvent::ExecLocationDisagreement { .. } => true,
         SessionEvent::SubagentResult { .. } => true,
         SessionEvent::ChainHead { .. } => true,
         SessionEvent::McpEntryVerified { .. } => true,
@@ -237,6 +240,7 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionApproved { .. } => "permission_approved",
         SessionEvent::PermissionRevoked { .. } => "permission_revoked",
         SessionEvent::PermissionApprovalRefused { .. } => "permission_approval_refused",
+        SessionEvent::ExecLocationDisagreement { .. } => "exec_location_disagreement",
         SessionEvent::PermissionRenewed { .. } => "permission_renewed",
         SessionEvent::PermissionGrantExpired { .. } => "permission_grant_expired",
         SessionEvent::PermissionGrantPruned { .. } => "permission_grant_pruned",
@@ -722,6 +726,48 @@ mod tests {
         };
         assert!(should_forward(&ev, &cfg));
         assert_eq!(variant_kind_for(&ev), "budget_exceeded");
+    }
+
+    #[test]
+    fn an_exec_location_disagreement_is_default_forwarded_and_approvals_are_not() {
+        let cfg = config_default();
+        let told = crate::session_log::ExecLocation {
+            mode: crate::session_log::SandboxModeLabel::ExecOnly,
+            text: "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)".into(),
+        };
+        let finding = SessionEvent::ExecLocationDisagreement {
+            verified_session_id: "slackbot/slack/D0AQ1PPAGEP".into(),
+            approval_seq: 12,
+            result_seq: 14,
+            told: told.clone(),
+            ran: crate::session_log::SandboxProvenance {
+                mode: crate::session_log::SandboxModeLabel::Off,
+                runtime: crate::session_log::SandboxRuntimeLabel::Host,
+                container_id: None,
+            },
+            agent_id: "slackbot".into(),
+            adapter_id: Some("slack".into()),
+            sender_id: Some("U07P53Y41FF".into()),
+        };
+        assert!(should_forward(&finding, &cfg));
+        assert_eq!(variant_kind_for(&finding), "exec_location_disagreement");
+
+        // The approval row carrying the same `told` is not in the
+        // default set, which is why the finding is its own event.
+        let approval = SessionEvent::PermissionApproved {
+            action_key: "shell:ls".into(),
+            agent_id: "slackbot".into(),
+            approved_by: "davi".into(),
+            scope: crate::session_log::ApprovalScopeKind::OneShot,
+            session_id: None,
+            approved_via: None,
+            adapter_id: None,
+            sender_id: None,
+            tier: None,
+            expires_at: None,
+            exec_location: Some(told),
+        };
+        assert!(!should_forward(&approval, &cfg));
     }
 
     #[test]

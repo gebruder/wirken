@@ -4211,6 +4211,8 @@ pub fn session_events(
             // approvals route is where the page learns a request is still
             // open.
             SessionEvent::PermissionApprovalRefused { .. } => None,
+            // Written to the verify lane, which no conversation shows.
+            SessionEvent::ExecLocationDisagreement { .. } => None,
             // An operator removed a grant out of band, with no turn to draw
             // it against.
             SessionEvent::PermissionRevoked { .. } => None,

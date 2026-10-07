@@ -1012,6 +1012,33 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         adapter_id: Option<String>,
     },
+    /// `wirken sessions verify` found an approval whose prompt said one
+    /// place for an `exec` while the command ran in another.
+    ///
+    /// Written by verify to the `gateway-verify` lane, not to the
+    /// session it verified, which stays as it was recorded. The pair it
+    /// names is the approval row's [`ExecLocation`] and the next `exec`
+    /// result's [`SandboxProvenance`] on that session. Forwarded to a
+    /// SIEM by default, so the finding reaches a SOC without the
+    /// approval rows, which are not.
+    ExecLocationDisagreement {
+        /// The session the approval and the exec are on.
+        verified_session_id: String,
+        /// The approval row, by its sequence number on that session.
+        approval_seq: u64,
+        /// The `exec` result row it was paired with.
+        result_seq: u64,
+        /// What the approval prompt told the operator.
+        told: ExecLocation,
+        /// Where the command ran.
+        ran: SandboxProvenance,
+        /// The agent the approval was for.
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        adapter_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+    },
     /// An operator removed a stored grant.
     ///
     /// Distinct from [`Self::PermissionGrantExpired`], which is a

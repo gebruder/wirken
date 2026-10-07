@@ -686,6 +686,17 @@ fn extract_identity_for_sentinel(
         // `revoked_by` is an operator label, off the sender column for
         // the same reason as the refusal's caller above.
         SessionEvent::PermissionRevoked { agent_id, .. } => (None, None, Some(agent_id.clone())),
+        // The approval's own attribution, carried over from its row.
+        SessionEvent::ExecLocationDisagreement {
+            agent_id,
+            adapter_id,
+            sender_id,
+            ..
+        } => (
+            adapter_id.clone(),
+            sender_id.clone(),
+            Some(agent_id.clone()),
+        ),
         SessionEvent::PermissionRenewed {
             agent_id,
             adapter_id,
@@ -907,6 +918,8 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::PermissionApprovalRefused { .. } => debug_summary(event),
         // An action key and who revoked it.
         SessionEvent::PermissionRevoked { .. } => debug_summary(event),
+        // What the prompt said and where the exec ran.
+        SessionEvent::ExecLocationDisagreement { .. } => debug_summary(event),
         // An action key and the two expiries.
         SessionEvent::PermissionRenewed { .. } => debug_summary(event),
         // An action key and when it lapsed.

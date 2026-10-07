@@ -3178,6 +3178,23 @@ fn every_session_event() -> Vec<SessionEvent> {
             reason: ApprovalRefusalReason::UnauthorizedActor,
             adapter_id: None,
         },
+        SessionEvent::ExecLocationDisagreement {
+            verified_session_id: String::new(),
+            approval_seq: 0,
+            result_seq: 0,
+            told: crate::session_log::ExecLocation {
+                mode: crate::session_log::SandboxModeLabel::ExecOnly,
+                text: String::new(),
+            },
+            ran: crate::session_log::SandboxProvenance {
+                mode: crate::session_log::SandboxModeLabel::Off,
+                runtime: crate::session_log::SandboxRuntimeLabel::Host,
+                container_id: None,
+            },
+            agent_id: String::new(),
+            adapter_id: None,
+            sender_id: None,
+        },
         SessionEvent::PermissionRenewed {
             action_key: String::new(),
             agent_id: String::new(),
@@ -3505,6 +3522,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::PermissionApproved { .. } => "PermissionApproved",
         SessionEvent::PermissionRevoked { .. } => "PermissionRevoked",
         SessionEvent::PermissionApprovalRefused { .. } => "PermissionApprovalRefused",
+        SessionEvent::ExecLocationDisagreement { .. } => "ExecLocationDisagreement",
         SessionEvent::PermissionRenewed { .. } => "PermissionRenewed",
         SessionEvent::PermissionGrantExpired { .. } => "PermissionGrantExpired",
         SessionEvent::PermissionGrantPruned { .. } => "PermissionGrantPruned",
@@ -3552,7 +3570,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 55;
+const SESSION_EVENT_VARIANTS: usize = 56;
 
 /// The list covers the enum.
 #[test]
