@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-10-07
+
 ### Security
 
 - `orchestrator.sock` and `gateway-permissions.sock` take a signed

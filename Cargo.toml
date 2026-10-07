@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.26.0"
+version = "1.27.0"
 edition = "2024"
 # Floor is set by the wasmtime family: 49.x declares rust-version 1.96.
 # Verified by the MSRV job in ci.yml, not by hand.
