@@ -22,6 +22,15 @@ tagged.
   adapter sends down its existing `encode_failed` path. The module
   doc named Discord's 100 bytes as the smallest cap. Reported by
   Fazal.
+- Stopping `wirken run` stops the turns in flight. Shutdown aborted
+  the accept loops and left each accepted connection's task running,
+  so a turn waiting on an approval or a model call kept going after
+  `gateway.stop`: it appended to its session after the shutdown
+  `SessionEnd` head had sealed it, and held the process open until the
+  turn ended, up to the 300-second approval timeout. Every connection
+  task (adapters, webchat, orchestrator, permissions, hooks) is now
+  tracked, aborted and waited out before the seal. A turn cut this way
+  stops where it was waiting, as it would in a crash.
 
 ### Dependencies
 

@@ -1474,6 +1474,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     ));
     let webchat_pending = pending_approval_queue.clone();
     let webchat_registry = sse_approval_registry.clone();
+    // Every task an accept loop spawns for one connection is tracked
+    // here, so shutdown can stop it before sealing the session chains.
+    let connection_tasks = super::connection_tasks::ConnectionTasks::new();
+    let webchat_connection_tasks = connection_tasks.clone();
     let webchat_handle = tokio::spawn(async move {
         if let Err(e) = super::webchat::serve(
             webchat_port,
@@ -1484,6 +1488,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             webchat_registry,
             webchat_status_inputs,
             webchat_detector,
+            webchat_connection_tasks,
         )
         .await
         {
@@ -1602,6 +1607,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let gateway_expected_principal = Principal::Uid(unsafe { libc::geteuid() });
     #[cfg(unix)]
     let hooks_expected_principal = gateway_expected_principal.clone();
+    let accept_connection_tasks = connection_tasks.clone();
     let accept_handle = tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -1672,7 +1678,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let pend = accept_pending.clone();
                     let apprv = accept_approvers.clone();
 
-                    tokio::spawn(async move {
+                    accept_connection_tasks.spawn(async move {
                         if let Err(e) = handle_adapter_connection(
                             stream, reg, fact, au, sess, rtr, det, disp, pend, apprv,
                         )
@@ -1703,6 +1709,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     #[cfg_attr(not(unix), allow(unused_variables))]
     let hooks_accept_audit = audit.clone();
     let hooks_accept_session_log = session_log.clone();
+    let hooks_connection_tasks = connection_tasks.clone();
     let hooks_accept_handle = tokio::spawn(async move {
         loop {
             match hooks_listener.accept().await {
@@ -1763,7 +1770,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let disp = hooks_accept_dispatcher.clone();
                     let edisp = hooks_accept_egress_dispatcher.clone();
                     let slog = hooks_accept_session_log.clone();
-                    tokio::spawn(async move {
+                    hooks_connection_tasks.spawn(async move {
                         if let Err(e) = handle_hook_connection(stream, reg, disp, edisp, slog).await
                         {
                             tracing::error!("Hook connection error: {e}");
@@ -1842,6 +1849,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     #[cfg(unix)]
     let expected_principal = Principal::Uid(unsafe { libc::geteuid() });
     #[cfg(unix)]
+    let orchestrator_connection_tasks = connection_tasks.clone();
+    #[cfg(unix)]
     let orchestrator_handle = tokio::spawn(async move {
         loop {
             match orchestrator_listener.accept().await {
@@ -1897,7 +1906,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     }
                     let disp = orchestrator_dispatcher.clone();
                     let au = orchestrator_audit.clone();
-                    tokio::spawn(async move {
+                    orchestrator_connection_tasks.spawn(async move {
                         if let Err(e) = handle_orchestrator_push(
                             stream,
                             disp,
@@ -1938,6 +1947,8 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     #[cfg(unix)]
     let permissions_expected_principal = Principal::Uid(unsafe { libc::geteuid() });
     #[cfg(unix)]
+    let permissions_connection_tasks = connection_tasks.clone();
+    #[cfg(unix)]
     let permissions_handle = tokio::spawn(async move {
         loop {
             match permissions_listener.accept().await {
@@ -1962,7 +1973,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let q = permissions_queue_for_loop.clone();
                     let au = permissions_audit.clone();
                     let slog = permissions_session_log.clone();
-                    tokio::spawn(async move {
+                    permissions_connection_tasks.spawn(async move {
                         if let Err(e) = handle_permissions_request(
                             stream,
                             q,
@@ -2011,6 +2022,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     permissions_handle.abort();
     webchat_handle.abort();
     scheduler_handle.abort();
+
+    // With the accept loops stopped no new connection task starts.
+    // Stop the ones running, and wait until each has: a turn still in
+    // flight would otherwise append after the SessionEnd heads below,
+    // and hold the audit writer open past the flush.
+    connection_tasks.shutdown().await;
 
     // Emit a SessionEnd ChainHead per active session so a clean
     // shutdown leaves a signed terminal head rather than an

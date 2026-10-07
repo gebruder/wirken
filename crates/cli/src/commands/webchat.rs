@@ -2534,6 +2534,7 @@ pub async fn serve(
     sse_registry: Arc<SseApprovalRegistry>,
     status_inputs: StatusInputs,
     detector: Arc<InjectionDetector>,
+    connection_tasks: super::connection_tasks::ConnectionTasks,
 ) -> Result<()> {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     tracing::info!("WebChat listening on http://127.0.0.1:{port}");
@@ -2562,7 +2563,7 @@ pub async fn serve(
         let (mut stream, _) = listener.accept().await?;
         let shared = shared.clone();
 
-        tokio::spawn(async move {
+        connection_tasks.spawn(async move {
             let mut buf = vec![0u8; 65536];
             let n = match stream.read(&mut buf).await {
                 Ok(n) if n > 0 => n,
