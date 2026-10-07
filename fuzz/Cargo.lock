@@ -4942,7 +4942,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-agent"
-version = "1.27.0"
+version = "1.27.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4980,7 +4980,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-audit"
-version = "1.27.0"
+version = "1.27.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5014,7 +5014,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-gateway"
-version = "1.27.0"
+version = "1.27.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5043,7 +5043,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-ipc"
-version = "1.27.0"
+version = "1.27.1"
 dependencies = [
  "async-trait",
  "capnp",
@@ -5060,7 +5060,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-mcp-proxy"
-version = "1.27.0"
+version = "1.27.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5084,7 +5084,7 @@ dependencies = [
 
 [[package]]
 name = "wirken-vault"
-version = "1.27.0"
+version = "1.27.1"
 dependencies = [
  "argon2",
  "chacha20poly1305",

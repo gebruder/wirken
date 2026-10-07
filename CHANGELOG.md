@@ -10,6 +10,8 @@ tagged.
 
 ## [Unreleased]
 
+## [1.27.1] - 2026-10-07
+
 ### Fixed
 
 - Approval-button payloads are checked against a length budget. The
@@ -18,7 +20,12 @@ tagged.
   refuses a payload over the smallest declared callback-data cap,
   Telegram's 64 bytes, with `EncodeError::ExceedsBudget`, which every
   adapter sends down its existing `encode_failed` path. The module
-  doc named Discord's 100 bytes as the smallest cap.
+  doc named Discord's 100 bytes as the smallest cap. Reported by
+  Fazal.
+
+### Dependencies
+
+- tokio 1.53.2, uuid 1.27.0, libc 0.2.190.
 
 ## [1.27.0] - 2026-10-07
 
