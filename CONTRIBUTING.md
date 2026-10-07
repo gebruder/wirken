@@ -30,6 +30,8 @@ Ways a run comes back green without the change having been exercised.
 
 **A fixture holding a value production never sends proves nothing about production.** The SSE approval gate's tests set the denial context's `agent_id` to a bare `"default"`. The runtime passes a full session id there. The gate reconstructed a session id from that field, which was correct only for the fixture's value, so four tests agreed with a lookup that missed every time in production. When a fixture stands in for a value the runtime computes, take the value the runtime computes.
 
+**A gate test constructs its context through the runtime, not by hand.** The webchat approval gate passed from 1.20.0 to 1.27.0 on a fixture whose `agent_id` the runtime stopped producing in 3309846. The fixture had been corrected to the session id the runtime computed at the time; when 3309846 put the logical agent id in that field instead, the hand-built context kept the old shape, the gate's tests kept agreeing with it, and every webchat approval failed closed. A value copied from the runtime goes stale when the runtime changes. A test that drives the runtime to the gate, as `webchat_approval_reaches_the_page` in `crates/agent/src/tests.rs` does, cannot.
+
 ## Unsafe code
 
 Every `unsafe` block carries a `SAFETY:` comment stating the invariant that makes it sound. CI enforces it:
