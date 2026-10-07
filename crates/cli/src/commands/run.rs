@@ -23,6 +23,7 @@ use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
 use wirken_gateway::router::{RouteBinding, Router};
 use wirken_gateway::session::SessionStore;
 // Only `handle_orchestrator_push` uses these, and it is unix-only.
+use wirken_ipc::orchestrator::DeliveryStatus;
 #[cfg(unix)]
 use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
 use wirken_ipc::wirken_capnp::frame;
@@ -1897,9 +1898,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let disp = orchestrator_dispatcher.clone();
                     let au = orchestrator_audit.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_orchestrator_push(stream, disp, au, orchestrator_operator_key)
-                                .await
+                        if let Err(e) = handle_orchestrator_push(
+                            stream,
+                            disp,
+                            au,
+                            orchestrator_operator_key,
+                            wirken_ipc::orchestrator::DELIVERY_WAIT,
+                        )
+                        .await
                         {
                             tracing::error!("orchestrator push handler error: {e}");
                         }
@@ -2338,6 +2344,7 @@ async fn handle_adapter_connection(
         detector,
         pending_approvals,
         approver_registry,
+        dispatcher.clone(),
     )
     .await
 }
@@ -2921,6 +2928,7 @@ async fn handle_orchestrator_push(
     dispatcher: Arc<OutboundDispatcher>,
     audit: Arc<AuditWriter>,
     operator_key: ed25519_dalek::VerifyingKey,
+    delivery_wait: std::time::Duration,
 ) -> Result<()> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let (reader, mut writer) = stream.into_split();
@@ -2964,10 +2972,7 @@ async fn handle_orchestrator_push(
     let req: OrchestratorPushRequest = match serde_json::from_str(line.trim_end()) {
         Ok(r) => r,
         Err(e) => {
-            let resp = OrchestratorPushResponse {
-                ok: false,
-                error: Some(format!("invalid request JSON: {e}")),
-            };
+            let resp = OrchestratorPushResponse::rejected(format!("invalid request JSON: {e}"));
             let _ = write_orchestrator_response(&mut writer, &resp).await;
             return Ok(());
         }
@@ -2993,8 +2998,14 @@ async fn handle_orchestrator_push(
                     &outbound_target,
                 ));
             }
-            let mut w = w.lock().await;
-            match w.write_message(&reply).await {
+            // Waiting before the write, so a result that comes back
+            // before this task is scheduled again still lands.
+            let delivery = dispatcher.expect_delivery(&outbound_target);
+            // The writer is shared with the adapter's own replies and
+            // heartbeats, so it is held for the write and not for the
+            // wait.
+            let written = w.lock().await.write_message(&reply).await;
+            match written {
                 Ok(()) => {
                     let _ = audit
                         .log(
@@ -3012,21 +3023,22 @@ async fn handle_orchestrator_push(
                             })),
                         )
                         .await;
-                    OrchestratorPushResponse {
-                        ok: true,
-                        error: None,
-                    }
+                    OrchestratorPushResponse::handed_off(
+                        dispatcher
+                            .wait_for_delivery(&outbound_target, delivery, delivery_wait)
+                            .await,
+                    )
                 }
-                Err(e) => OrchestratorPushResponse {
-                    ok: false,
-                    error: Some(format!("write to adapter failed: {e}")),
-                },
+                Err(e) => {
+                    dispatcher.forget_delivery(&outbound_target);
+                    OrchestratorPushResponse::rejected(format!("write to adapter failed: {e}"))
+                }
             }
         }
-        None => OrchestratorPushResponse {
-            ok: false,
-            error: Some(format!("no adapter connected on channel '{}'", req.channel)),
-        },
+        None => OrchestratorPushResponse::rejected(format!(
+            "no adapter connected on channel '{}'",
+            req.channel
+        )),
     };
 
     write_orchestrator_response(&mut writer, &resp).await?;
@@ -3071,6 +3083,7 @@ async fn message_loop(
     detector: Arc<InjectionDetector>,
     pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
+    dispatcher: Arc<OutboundDispatcher>,
 ) -> Result<()> {
     loop {
         let msg = match reader.read_message().await {
@@ -3555,26 +3568,35 @@ async fn message_loop(
                     );
                     continue;
                 };
-                let event = if success {
+                let (event, status) = if success {
                     tracing::debug!("Delivery confirmed: {msg_id}");
-                    wirken_audit::SessionEvent::DeliveryConfirmed {
-                        target: target.clone(),
-                        message_id: msg_id,
-                        adapter_id: Some(adapter_id.to_string()),
-                    }
+                    (
+                        wirken_audit::SessionEvent::DeliveryConfirmed {
+                            target: target.clone(),
+                            message_id: msg_id.clone(),
+                            adapter_id: Some(adapter_id.to_string()),
+                        },
+                        DeliveryStatus::Delivered { message_id: msg_id },
+                    )
                 } else {
                     tracing::warn!("Delivery failed for adapter '{adapter_id}': {error}");
-                    wirken_audit::SessionEvent::DeliveryFailed {
-                        target: target.clone(),
-                        error,
-                        adapter_id: Some(adapter_id.to_string()),
-                    }
+                    (
+                        wirken_audit::SessionEvent::DeliveryFailed {
+                            target: target.clone(),
+                            error: error.clone(),
+                            adapter_id: Some(adapter_id.to_string()),
+                        },
+                        DeliveryStatus::Failed { error },
+                    )
                 };
                 let log = factory.session_log();
                 let handle = log.handle_for(wirken_audit::SessionId::new(session));
                 if let Err(e) = log.append(&handle, wirken_audit::TrustLevel::System, event) {
                     tracing::warn!(error = %e, "failed to append delivery row");
                 }
+                // After the row, so a push told its result can find
+                // it on the chain.
+                dispatcher.resolve_delivery(&target, status);
             }
 
             InboundAction::ApprovalDecision {
@@ -4600,5 +4622,137 @@ mod delivery_correlation_tests {
         ] {
             assert_eq!(verify_delivery_handle(KEY, &forged, "slack"), None);
         }
+    }
+}
+
+/// A push waits for its frame's delivery result and answers with it.
+///
+/// The orchestrator socket is driven by a real operator client and the
+/// adapter by the far end of a socket pair: it reads the frame, takes
+/// the correlation handle, and answers through the dispatcher the way
+/// `message_loop` does on a verified `OutboundResult`.
+#[cfg(all(test, unix))]
+mod orchestrator_delivery_tests {
+    use super::{delivery_mac_key, handle_orchestrator_push, verify_delivery_handle};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::sync::Mutex;
+    use wirken_audit::AuditWriter;
+    use wirken_gateway::outbound_dispatcher::OutboundDispatcher;
+    use wirken_ipc::operator::{ORCHESTRATOR_SOCKET, OperatorKey, handshake_as_operator};
+    use wirken_ipc::orchestrator::{
+        DeliveryStatus, OrchestratorPushRequest, OrchestratorPushResponse,
+    };
+    use wirken_ipc::wirken_capnp::frame;
+    use wirken_ipc::{split_stream, test_pair};
+
+    /// Push one digest to `slack`; the adapter answers `answer`, or
+    /// nothing when `None`. Returns the gateway's response.
+    async fn push(answer: Option<DeliveryStatus>, wait: Duration) -> OrchestratorPushResponse {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (audit, _audit_task) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
+        let dispatcher = Arc::new(OutboundDispatcher::new());
+
+        let (adapter_end, gateway_end) = test_pair().unwrap();
+        let (_gateway_reader, gateway_writer) = split_stream(gateway_end);
+        dispatcher.register("slack", Arc::new(Mutex::new(gateway_writer)));
+        let (mut adapter_reader, _adapter_writer) = split_stream(adapter_end);
+        let adapter_dispatcher = dispatcher.clone();
+        let adapter = tokio::spawn(async move {
+            let msg = adapter_reader.read_message().await.unwrap();
+            let handle = {
+                let root = msg.get_root::<frame::Reader<'_>>().unwrap();
+                match root.which().unwrap() {
+                    frame::Outbound(o) => o
+                        .unwrap()
+                        .get_correlation_id()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                    _ => panic!("expected an outbound frame"),
+                }
+            };
+            let (_session, target) =
+                verify_delivery_handle(delivery_mac_key(), &handle, "slack").expect("handle");
+            if let Some(status) = answer {
+                assert!(adapter_dispatcher.resolve_delivery(&target, status));
+            }
+        });
+
+        let key = OperatorKey::generate();
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let gateway = tokio::spawn(handle_orchestrator_push(
+            server,
+            dispatcher,
+            Arc::new(audit),
+            key.verifying_key(),
+            wait,
+        ));
+
+        let (reader, mut writer) = client.into_split();
+        let mut br = BufReader::new(reader);
+        handshake_as_operator(&mut br, &mut writer, &key, ORCHESTRATOR_SOCKET)
+            .await
+            .unwrap();
+        let req = OrchestratorPushRequest {
+            channel: "slack".into(),
+            conversation_id: "C0123ABCDEF".into(),
+            text: "Daily digest".into(),
+            reply_to_id: String::new(),
+        };
+        let mut line = serde_json::to_string(&req).unwrap();
+        line.push('\n');
+        writer.write_all(line.as_bytes()).await.unwrap();
+        writer.shutdown().await.ok();
+        let mut resp = String::new();
+        br.read_line(&mut resp).await.unwrap();
+
+        adapter.await.unwrap();
+        gateway.await.unwrap().unwrap();
+        serde_json::from_str(resp.trim_end()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_refused_frame_is_answered_with_the_adapter_reason() {
+        let resp = push(
+            Some(DeliveryStatus::Failed {
+                error: "Slack API error: channel_not_found".into(),
+            }),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(resp.ok, "the frame reached the adapter");
+        assert_eq!(
+            resp.delivery,
+            Some(DeliveryStatus::Failed {
+                error: "Slack API error: channel_not_found".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivered_frame_is_answered_with_the_platform_id() {
+        let resp = push(
+            Some(DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into(),
+            }),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            resp.delivery,
+            Some(DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn no_result_within_the_wait_is_answered_as_unknown() {
+        let resp = push(None, Duration::from_millis(100)).await;
+        assert!(resp.ok);
+        assert_eq!(resp.delivery, Some(DeliveryStatus::Unknown));
     }
 }

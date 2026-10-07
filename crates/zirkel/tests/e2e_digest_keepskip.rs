@@ -41,7 +41,7 @@ use tokio::sync::Mutex;
 
 use wirken_agent::inbound_interceptor::{InboundInterceptor, InterceptResult, InterceptorContext};
 use wirken_audit::SessionEvent;
-use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
+use wirken_ipc::orchestrator::{DeliveryStatus, OrchestratorPushRequest, OrchestratorPushResponse};
 use wirken_zirkel::binding::{Binding, record as record_binding};
 use wirken_zirkel::digest::{RenderOptions, load_run, render};
 use wirken_zirkel::digest_log::{Decision, most_recent_unresolved, record_sent};
@@ -87,10 +87,9 @@ fn spawn_fake_gateway(
         if let Ok(req) = serde_json::from_str::<OrchestratorPushRequest>(line.trim_end()) {
             *captured.lock().await = Some(req);
         }
-        let resp = OrchestratorPushResponse {
-            ok: true,
-            error: None,
-        };
+        let resp = OrchestratorPushResponse::handed_off(DeliveryStatus::Delivered {
+            message_id: "1789645555.016219".into(),
+        });
         let mut out = serde_json::to_string(&resp).unwrap();
         out.push('\n');
         let _ = writer.write_all(out.as_bytes()).await;

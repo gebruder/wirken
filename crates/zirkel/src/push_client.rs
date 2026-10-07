@@ -22,7 +22,7 @@ use tokio::net::UnixStream;
 use wirken_ipc::operator::{
     ORCHESTRATOR_SOCKET, OperatorHandshakeError, OperatorKey, handshake_as_operator,
 };
-use wirken_ipc::orchestrator::{OrchestratorPushRequest, OrchestratorPushResponse};
+use wirken_ipc::orchestrator::{DeliveryStatus, OrchestratorPushRequest, OrchestratorPushResponse};
 
 #[derive(Debug, Error)]
 pub enum PushError {
@@ -46,18 +46,18 @@ pub enum PushError {
 
 /// Push one outbound message to the running gateway.
 ///
-/// On success the gateway has handed the frame to the live adapter
-/// writer for `channel`; the adapter is responsible for the actual
-/// delivery to the third-party platform. A successful return here
-/// therefore means "queued for the adapter," not "delivered to the
-/// recipient."
+/// `Ok` means the gateway handed the frame to the live adapter for
+/// `channel`, and carries what the adapter reported back for it:
+/// delivered with the platform's message id, failed with the adapter's
+/// reason, or unknown when no report reached the gateway in time. `Err`
+/// means the frame never reached an adapter.
 pub async fn push(
     socket_path: &Path,
     key: &OperatorKey,
     channel: &str,
     conversation_id: &str,
     text: &str,
-) -> Result<(), PushError> {
+) -> Result<DeliveryStatus, PushError> {
     push_with_reply_to(socket_path, key, channel, conversation_id, text, "").await
 }
 
@@ -71,7 +71,7 @@ pub async fn push_with_reply_to(
     conversation_id: &str,
     text: &str,
     reply_to_id: &str,
-) -> Result<(), PushError> {
+) -> Result<DeliveryStatus, PushError> {
     let stream = UnixStream::connect(socket_path)
         .await
         .map_err(|e| PushError::Connect {
@@ -102,7 +102,9 @@ pub async fn push_with_reply_to(
     }
     let resp: OrchestratorPushResponse = serde_json::from_str(resp_line.trim_end())?;
     if resp.ok {
-        Ok(())
+        // A gateway that answers `ok` without a delivery field reports
+        // nothing about delivery, which is what `Unknown` says.
+        Ok(resp.delivery.unwrap_or(DeliveryStatus::Unknown))
     } else {
         Err(PushError::Rejected(
             resp.error.unwrap_or_else(|| "(no message)".into()),
@@ -157,16 +159,21 @@ mod tests {
         let sock = dir.path().join("orch.sock");
         let server = spawn_fake_server(
             sock.clone(),
-            OrchestratorPushResponse {
-                ok: true,
-                error: None,
-            },
+            OrchestratorPushResponse::handed_off(DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into(),
+            }),
         )
         .await;
 
-        push(&sock, &key(), "signal", "+15551234567", "hi")
+        let status = push(&sock, &key(), "signal", "+15551234567", "hi")
             .await
             .unwrap();
+        assert_eq!(
+            status,
+            DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into()
+            }
+        );
         let req = server.await.unwrap().expect("server received request");
         assert_eq!(req.channel, "signal");
         assert_eq!(req.conversation_id, "+15551234567");
@@ -180,10 +187,7 @@ mod tests {
         let sock = dir.path().join("orch.sock");
         let _server = spawn_fake_server(
             sock.clone(),
-            OrchestratorPushResponse {
-                ok: false,
-                error: Some("no adapter connected on channel 'signal'".into()),
-            },
+            OrchestratorPushResponse::rejected("no adapter connected on channel 'signal'"),
         )
         .await;
 
@@ -204,10 +208,9 @@ mod tests {
         let sock = dir.path().join("orch.sock");
         let server = spawn_fake_server(
             sock.clone(),
-            OrchestratorPushResponse {
-                ok: true,
-                error: None,
-            },
+            OrchestratorPushResponse::handed_off(DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into(),
+            }),
         )
         .await;
 
@@ -224,10 +227,9 @@ mod tests {
         let sock = dir.path().join("orch.sock");
         let server = spawn_fake_server(
             sock.clone(),
-            OrchestratorPushResponse {
-                ok: true,
-                error: None,
-            },
+            OrchestratorPushResponse::handed_off(DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into(),
+            }),
         )
         .await;
         let err = push(&sock, &OperatorKey::generate(), "signal", "+1", "hi")
@@ -243,6 +245,28 @@ mod tests {
         assert!(
             server.await.unwrap().is_none(),
             "no request reached the gateway"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_delivery_comes_back_with_the_adapter_reason() {
+        let dir = TempDir::new().unwrap();
+        let sock = dir.path().join("orch.sock");
+        let _server = spawn_fake_server(
+            sock.clone(),
+            OrchestratorPushResponse::handed_off(DeliveryStatus::Failed {
+                error: "Slack API error: channel_not_found".into(),
+            }),
+        )
+        .await;
+        let status = push(&sock, &key(), "slack", "C0123ABCDEF", "hi")
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            DeliveryStatus::Failed {
+                error: "Slack API error: channel_not_found".into()
+            }
         );
     }
 

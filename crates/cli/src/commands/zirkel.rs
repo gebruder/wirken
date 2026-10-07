@@ -21,6 +21,8 @@ use wirken_zirkel::binding::{
 };
 // Reached only from `push_digest_for_run`, which is unix-only.
 #[cfg(unix)]
+use wirken_ipc::orchestrator::DeliveryStatus;
+#[cfg(unix)]
 use wirken_zirkel::digest::{RenderOptions, load_run as load_digest_run, render as render_digest};
 #[cfg(unix)]
 use wirken_zirkel::digest_log::record_sent;
@@ -155,9 +157,12 @@ pub async fn run() -> Result<()> {
     // binding = no push (and no warning — this is the legitimate
     // headless-test-fetch path).
     //
-    // Push first, record the digest second: a failed push must not
-    // leave a phantom digest_log entry that the keep/skip
-    // interceptor would later resolve against an unsent message.
+    // Push first, record the digest second: a digest the platform
+    // refused must not leave a phantom digest_log entry that the
+    // keep/skip interceptor would later resolve against a message the
+    // operator never got. One whose delivery is unknown is recorded.
+    // The exit code is the outcome's: 0 delivered, 1 failed, 2
+    // unknown.
     let cfg = super::config();
     let zirkel_db = data_dir.join("zirkel").join("aggregator.db");
     if zirkel_db.exists() {
@@ -167,14 +172,23 @@ pub async fn run() -> Result<()> {
             Some(binding) => {
                 println!();
                 #[cfg(unix)]
-                push_digest_for_run(
-                    &cfg.socket_dir().join("orchestrator.sock"),
-                    &cfg.data_dir,
-                    &zirkel_db,
-                    &summary.run_id,
-                    &binding,
-                )
-                .await?;
+                {
+                    let outcome = push_digest_for_run(
+                        &cfg.socket_dir().join("orchestrator.sock"),
+                        &cfg.data_dir,
+                        &zirkel_db,
+                        &summary.run_id,
+                        &binding,
+                    )
+                    .await?;
+                    println!("{}", outcome.status_line(&binding.channel));
+                    let code = outcome.exit_code();
+                    if code != 0 {
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                        std::process::exit(code);
+                    }
+                }
                 #[cfg(not(unix))]
                 {
                     let _ = (&cfg, &zirkel_db, &summary.run_id, &binding);
@@ -700,6 +714,55 @@ fn apply_aggregator_migrations(conn: &mut Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// How a run's digest push ended. One value drives both the status
+/// line and the exit code, so the two cannot disagree.
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DigestPush {
+    /// The run kept nothing, so there was nothing to send.
+    Empty,
+    /// The platform accepted the digest.
+    Delivered { message_id: String },
+    /// The digest did not reach the platform, or the platform refused
+    /// it. `reason` is the adapter's or the gateway's.
+    Failed { reason: String },
+    /// The adapter took the digest and reported no result in time.
+    Unknown,
+}
+
+#[cfg(unix)]
+impl DigestPush {
+    fn status_line(&self, channel: &str) -> String {
+        match self {
+            DigestPush::Empty => "  Digest: no candidates this run; nothing to push.".to_string(),
+            DigestPush::Delivered { message_id } => {
+                format!("  Digest delivered ({channel} message {message_id}).")
+            }
+            DigestPush::Failed { reason } => format!("  Digest not delivered: {reason}"),
+            DigestPush::Unknown => format!(
+                "  Digest delivery unknown: the {channel} adapter took it and reported no result within {} s.",
+                wirken_ipc::orchestrator::DELIVERY_WAIT.as_secs()
+            ),
+        }
+    }
+
+    /// 0 delivered (or nothing to send), 1 failed, 2 unknown.
+    fn exit_code(&self) -> i32 {
+        match self {
+            DigestPush::Empty | DigestPush::Delivered { .. } => 0,
+            DigestPush::Failed { .. } => 1,
+            DigestPush::Unknown => 2,
+        }
+    }
+
+    /// A digest that may have arrived is recorded as sent, so a reply
+    /// to it resolves; one that did not arrive is not, so no reply can
+    /// resolve against a message the operator never got.
+    fn records_as_sent(&self) -> bool {
+        matches!(self, DigestPush::Delivered { .. } | DigestPush::Unknown)
+    }
+}
+
 #[cfg(unix)]
 async fn push_digest_for_run(
     orchestrator_socket: &std::path::Path,
@@ -707,14 +770,13 @@ async fn push_digest_for_run(
     zirkel_db: &std::path::Path,
     run_id: &str,
     binding: &Binding,
-) -> Result<()> {
+) -> Result<DigestPush> {
     let mut conn = Connection::open(zirkel_db)
         .map_err(|e| anyhow!("open zirkel db at {}: {e}", zirkel_db.display()))?;
     let (rows, themes) =
         load_digest_run(&conn, run_id).map_err(|e| anyhow!("load digest rows: {e}"))?;
     if rows.is_empty() {
-        println!("  Digest: no candidates this run; nothing to push.");
-        return Ok(());
+        return Ok(DigestPush::Empty);
     }
     let opts = RenderOptions {
         date: Some(chrono::Local::now().format("%Y-%m-%d").to_string()),
@@ -739,7 +801,7 @@ async fn push_digest_for_run(
     // operator key, and records the push against it.
     let key = wirken_ipc::operator::OperatorKey::load_or_create(data_dir)
         .map_err(|e| anyhow!("load the operator key: {e}"))?;
-    match push_to_gateway(
+    let outcome = match push_to_gateway(
         orchestrator_socket,
         &key,
         &binding.channel,
@@ -748,34 +810,30 @@ async fn push_digest_for_run(
     )
     .await
     {
-        Ok(()) => {
-            // Record only after the gateway accepted the push.
-            record_sent(
-                &mut conn,
-                run_id,
-                &binding.agent_id,
-                &rendered.ordered_candidate_ids,
-            )
-            .map_err(|e| anyhow!("record digest: {e}"))?;
-            println!("  Digest pushed.");
-            Ok(())
-        }
-        Err(PushError::Connect { path, .. }) => {
-            println!(
-                "  Digest push skipped: gateway socket {} not reachable. Is `wirken run` started?",
-                path
-            );
-            Ok(())
-        }
-        Err(PushError::Rejected(msg)) => {
-            // The gateway is up but couldn't deliver — most often
-            // the bound channel's adapter isn't connected. Surface
-            // but don't fail the whole run.
-            println!("  Digest push rejected by gateway: {msg}");
-            Ok(())
-        }
-        Err(e) => Err(anyhow!("digest push failed: {e}")),
+        Ok(DeliveryStatus::Delivered { message_id }) => DigestPush::Delivered { message_id },
+        Ok(DeliveryStatus::Failed { error }) => DigestPush::Failed { reason: error },
+        Ok(DeliveryStatus::Unknown) => DigestPush::Unknown,
+        Err(PushError::Connect { path, .. }) => DigestPush::Failed {
+            reason: format!("gateway socket {path} not reachable. Is `wirken run` started?"),
+        },
+        // Most often the bound channel's adapter is not connected.
+        Err(PushError::Rejected(msg)) => DigestPush::Failed {
+            reason: format!("refused by the gateway: {msg}"),
+        },
+        Err(e) => DigestPush::Failed {
+            reason: e.to_string(),
+        },
+    };
+    if outcome.records_as_sent() {
+        record_sent(
+            &mut conn,
+            run_id,
+            &binding.agent_id,
+            &rendered.ordered_candidate_ids,
+        )
+        .map_err(|e| anyhow!("record digest: {e}"))?;
     }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -822,5 +880,183 @@ mod key_posture_tests {
             ("govinfo-gov", KeyedSource::Unreadable("b".into())),
         ];
         assert_eq!(key_decision(&p).unwrap_err().len(), 2);
+    }
+}
+
+/// What a digest push prints, exits with and records, for each answer
+/// the gateway can give. The gateway is a fake that speaks the real
+/// handshake and wire format; the gateway side of the wait is covered
+/// in `run.rs`.
+#[cfg(all(test, unix))]
+mod digest_push_tests {
+    use super::{DigestPush, apply_aggregator_migrations, push_digest_for_run};
+    use rusqlite::{Connection, params};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use wirken_ipc::operator::{ORCHESTRATOR_SOCKET, OperatorKey, handshake_as_gateway};
+    use wirken_ipc::orchestrator::{DeliveryStatus, OrchestratorPushResponse};
+    use wirken_zirkel::binding::Binding;
+    use wirken_zirkel::digest_log::most_recent_unresolved;
+
+    const RUN: &str = "run-1";
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        binding: Binding,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let mut conn = Connection::open(dir.path().join("aggregator.db")).unwrap();
+            apply_aggregator_migrations(&mut conn).unwrap();
+            conn.execute(
+                "INSERT INTO candidates (source_name, url, body, run_id, title, \
+                 llm_relevance_score, llm_why_surfaced) \
+                 VALUES ('arxiv-cs-cr', 'https://example.org/a', '', ?1, 'A paper', 90, 'matched')",
+                params![RUN],
+            )
+            .unwrap();
+            Fixture {
+                dir,
+                binding: Binding {
+                    agent_id: "default".into(),
+                    channel: "slack".into(),
+                    conversation_id: "D0AQ1PPAGEP".into(),
+                },
+            }
+        }
+
+        fn db(&self) -> std::path::PathBuf {
+            self.dir.path().join("aggregator.db")
+        }
+
+        fn sock(&self) -> std::path::PathBuf {
+            self.dir.path().join("orchestrator.sock")
+        }
+
+        /// A gateway pinning this fixture's operator key, answering one
+        /// push with `resp`.
+        fn serve(&self, resp: OrchestratorPushResponse) -> tokio::task::JoinHandle<()> {
+            let key = OperatorKey::load_or_create(self.dir.path()).unwrap();
+            let listener = UnixListener::bind(self.sock()).unwrap();
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut br = BufReader::new(reader);
+                handshake_as_gateway(
+                    &mut br,
+                    &mut writer,
+                    &key.verifying_key(),
+                    ORCHESTRATOR_SOCKET,
+                )
+                .await
+                .unwrap();
+                let mut line = String::new();
+                br.read_line(&mut line).await.unwrap();
+                let mut out = serde_json::to_string(&resp).unwrap();
+                out.push('\n');
+                writer.write_all(out.as_bytes()).await.unwrap();
+                writer.shutdown().await.ok();
+            })
+        }
+
+        async fn push(&self) -> DigestPush {
+            push_digest_for_run(
+                &self.sock(),
+                self.dir.path(),
+                &self.db(),
+                RUN,
+                &self.binding,
+            )
+            .await
+            .unwrap()
+        }
+
+        fn recorded(&self) -> bool {
+            let conn = Connection::open(self.db()).unwrap();
+            most_recent_unresolved(&conn, "default").unwrap().is_some()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_digest_says_why_exits_1_and_is_not_recorded() {
+        let f = Fixture::new();
+        let gateway = f.serve(OrchestratorPushResponse::handed_off(
+            DeliveryStatus::Failed {
+                error: "Slack API error: channel_not_found".into(),
+            },
+        ));
+        let outcome = f.push().await;
+        gateway.await.unwrap();
+        let line = outcome.status_line("slack");
+        assert_eq!(
+            line,
+            "  Digest not delivered: Slack API error: channel_not_found"
+        );
+        assert!(!line.contains("pushed"));
+        assert_eq!(outcome.exit_code(), 1);
+        assert!(!f.recorded(), "a refused digest is not recorded as sent");
+    }
+
+    #[tokio::test]
+    async fn a_delivered_digest_names_the_message_exits_0_and_is_recorded() {
+        let f = Fixture::new();
+        let gateway = f.serve(OrchestratorPushResponse::handed_off(
+            DeliveryStatus::Delivered {
+                message_id: "1789645555.016219".into(),
+            },
+        ));
+        let outcome = f.push().await;
+        gateway.await.unwrap();
+        assert_eq!(
+            outcome.status_line("slack"),
+            "  Digest delivered (slack message 1789645555.016219)."
+        );
+        assert_eq!(outcome.exit_code(), 0);
+        assert!(f.recorded());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_delivery_says_so_exits_2_and_is_recorded() {
+        let f = Fixture::new();
+        let gateway = f.serve(OrchestratorPushResponse::handed_off(
+            DeliveryStatus::Unknown,
+        ));
+        let outcome = f.push().await;
+        gateway.await.unwrap();
+        assert!(
+            outcome
+                .status_line("slack")
+                .starts_with("  Digest delivery unknown: the slack adapter took it")
+        );
+        assert_eq!(outcome.exit_code(), 2);
+        assert!(f.recorded(), "a digest that may have arrived is recorded");
+    }
+
+    #[tokio::test]
+    async fn a_gateway_refusal_exits_1_and_is_not_recorded() {
+        let f = Fixture::new();
+        let gateway = f.serve(OrchestratorPushResponse::rejected(
+            "no adapter connected on channel 'slack'",
+        ));
+        let outcome = f.push().await;
+        gateway.await.unwrap();
+        assert_eq!(
+            outcome.status_line("slack"),
+            "  Digest not delivered: refused by the gateway: no adapter connected on channel 'slack'"
+        );
+        assert_eq!(outcome.exit_code(), 1);
+        assert!(!f.recorded());
+    }
+
+    #[tokio::test]
+    async fn no_gateway_exits_1_and_is_not_recorded() {
+        let f = Fixture::new();
+        let outcome = f.push().await;
+        assert!(matches!(outcome, DigestPush::Failed { .. }));
+        assert!(outcome.status_line("slack").contains("not reachable"));
+        assert_eq!(outcome.exit_code(), 1);
+        assert!(!f.recorded());
     }
 }

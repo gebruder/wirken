@@ -57,6 +57,19 @@ tagged.
   schema asks for an integer and some models quote it (`"80"`), which
   failed the parse and left the item unscored. A fraction, a sign, a
   word or an empty string still fails.
+- `wirken zirkel run` reports delivery, not handoff. It printed
+  `Digest pushed.` once the gateway handed the frame to the adapter,
+  including for a digest Slack then refused. The gateway now waits up
+  to 30 seconds for the adapter's delivery result on the frame's
+  correlation handle and answers with it, and the run prints
+  `Digest delivered (<channel> message <id>).`, `Digest not delivered:
+  <reason>` with the adapter's or gateway's reason, or `Digest delivery
+  unknown` when no result came. Exit codes follow the line: 0
+  delivered, 1 failed, 2 unknown. A failed digest is not recorded as
+  sent; an unknown one is. A gateway that is not running, or has no
+  adapter on the bound channel, now exits 1 where it exited 0. The
+  `orchestrator.sock` response carries a `delivery` field, so
+  `zirkel run` and `wirken run` must be the same build.
 
 ### Docs
 

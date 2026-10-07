@@ -201,6 +201,22 @@ The orchestrator digest push is Linux and macOS only: it goes over the
 orchestrator push socket, a same-user JSON-line boundary with no Windows
 analog. On Windows the run completes and reports the push as skipped.
 
+A bound run reports what the platform did with the digest, not that the
+gateway handed it on. The gateway waits up to 30 seconds for the adapter's
+delivery result, and `zirkel run` prints one of three lines with a matching
+exit code:
+
+| Line | Exit | Recorded as sent |
+|---|---|---|
+| `Digest delivered (<channel> message <id>).` | 0 | yes |
+| `Digest not delivered: <reason>` | 1 | no |
+| `Digest delivery unknown: ...` | 2 | yes |
+
+The reason on a failure is the adapter's (`Slack API error: channel_not_found`)
+or the gateway's (no adapter connected, gateway not running). A digest that is
+not recorded as sent cannot be answered with keep/skip. A run with nothing to
+send, or with no binding, exits 0.
+
 ## Trust posture
 
 Zirkel inherits Wirken's per-skill permissions block. The aggregator and
