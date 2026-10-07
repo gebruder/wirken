@@ -81,7 +81,7 @@ routes messages to the agent, and serves a WebChat UI at
 `http://localhost:18790`:
 
 ```
-  wirken v1.27.1
+  wirken v1.28.0
   ──────
 
   Provider: ollama/llama3.2
