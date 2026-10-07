@@ -12376,6 +12376,7 @@ mod http_request_after_a_restricting_read {
             "tools:\n  allow: [read_file, http_request]\negress:\n  mode: allowlist\n  domains: [localhost]\nfilesystem:\n  read_paths: [\"<workspace>\"]\ninference:\n  allow: [\"*\"]\n",
             tmp.path(),
             None,
+            None,
         )
         .unwrap();
         agent

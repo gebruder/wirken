@@ -42,6 +42,18 @@ tagged.
   else exported to start the gateway is not passed on, and its stdin is
   `/dev/null` rather than the terminal approval answers are typed into.
 
+### Fixed
+
+- `wirken zirkel run` honours `WIRKEN_DATA_DIR`. The 1.23.0 entry said
+  every process does; `zirkel run` did not. Its store is
+  `<data_dir>/zirkel/aggregator.db`, but the Zirkel preset granted
+  `~/.wirken/zirkel`, so with the data directory moved the store was
+  outside the grant and the run refused to start. Skill filesystem
+  paths take a `<data_dir>` prefix, resolved the way the gateway
+  resolves its own data directory, and the preset grants
+  `<data_dir>/zirkel`. An installed preset keeps the old grant until
+  `wirken preset install zirkel` is run again.
+
 ### Docs
 
 - `docs/security-properties.md` states the exec perimeter: a process an

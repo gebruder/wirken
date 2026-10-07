@@ -531,7 +531,7 @@ fn parsed_host_is_stable_across_reparse() {
 // ---- profile helpers -----------------------------------------------------
 
 fn perms(yaml: &str) -> PhasedEffective {
-    let profile = parse_block(yaml, Path::new("/tmp"), None).unwrap();
+    let profile = parse_block(yaml, Path::new("/tmp"), None, None).unwrap();
     PhasedEffective::from_base(EffectiveProfile::Resolved(profile))
 }
 

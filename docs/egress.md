@@ -22,7 +22,7 @@ from the model: `web_search` posts to DuckDuckGo and `generate_image` to the
 configured provider's image endpoint. With no skills attached those two are
 not restricted.
 
-Source: `crates/agent/src/egress.rs:296-345` (host-based check, and the no-allow-set refusal for `http_request`), `crates/agent/src/skill_perms.rs:964-1010` (allowset resolution).
+Source: `crates/agent/src/egress.rs:296-345` (host-based check, and the no-allow-set refusal for `http_request`), `crates/agent/src/skill_perms.rs:1000-1046` (allowset resolution).
 
 ## The `http_request` gate
 
@@ -217,5 +217,5 @@ The same gap appears in [security-properties.md](security-properties.md) under T
 ## Source references
 
 - `EgressClient` scope and host check: `crates/agent/src/egress.rs:176-346`.
-- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:964-1010`, matching at `crates/agent/src/skill_perms.rs:583-599`.
+- Allowset and wildcard resolution: `crates/agent/src/skill_perms.rs:1000-1046`, matching at `crates/agent/src/skill_perms.rs:619-635`.
 - Threat-model row: [security-properties.md](security-properties.md), row `T11` (Unexpected RCE and code attacks).

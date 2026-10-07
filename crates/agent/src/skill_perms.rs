@@ -38,6 +38,12 @@ const WILDCARD: &str = "*";
 /// `read_paths: ["<workspace>"]` rather than hard-coding a per-user path
 /// that the skill bundle cannot know.
 pub const WORKSPACE_TOKEN: &str = "<workspace>";
+/// Token in `filesystem.{read,write}_paths` that resolves to the data
+/// directory at load time: `WIRKEN_DATA_DIR` when set, `~/.wirken`
+/// otherwise. A preset that keeps state beside the operator's other
+/// wirken state declares `<data_dir>/<rel>`, so the grant follows the
+/// data directory instead of naming the default one.
+pub const DATA_DIR_TOKEN: &str = "<data_dir>";
 
 /// Resolved profile after parse + validation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -240,7 +246,9 @@ pub enum PermissionsError {
     MixedWildcard { axis: String },
     #[error("filesystem.write_paths entry '{0}' is inside skill bundle root")]
     WritePathInsideSkillRoot(PathBuf),
-    #[error("filesystem path '{0}' must be absolute (use '~/' for home-relative)")]
+    #[error(
+        "filesystem path '{0}' must be absolute (use '~/' for home-relative, '<data_dir>/' for the data directory)"
+    )]
     NonAbsolutePath(PathBuf),
     #[error("invalid host pattern: '{0}'")]
     InvalidHost(String),
@@ -262,16 +270,18 @@ pub enum MergeError {
 ///
 /// `skill_root` is the directory containing SKILL.md; used to reject
 /// `write_paths` entries inside the bundle. `home` is the user's home for
-/// `~/` expansion; `None` keeps `~`-prefixed paths literal (and they will
-/// fail the absolute-path check downstream).
+/// `~/` expansion and `data_dir` the data directory for `<data_dir>`
+/// expansion; `None` keeps the prefix literal (and the path will fail
+/// the absolute-path check downstream).
 pub fn parse_block(
     yaml: &str,
     skill_root: &Path,
     home: Option<&Path>,
+    data_dir: Option<&Path>,
 ) -> Result<PermissionProfile, PermissionsError> {
     let block: PermissionsBlock =
         serde_yaml::from_str(yaml).map_err(|e| PermissionsError::Yaml(e.to_string()))?;
-    resolve_block(block, skill_root, home)
+    resolve_block(block, skill_root, home, data_dir)
 }
 
 /// Validate and convert a deserialized block to a resolved profile.
@@ -279,6 +289,7 @@ pub fn resolve_block(
     block: PermissionsBlock,
     skill_root: &Path,
     home: Option<&Path>,
+    data_dir: Option<&Path>,
 ) -> Result<PermissionProfile, PermissionsError> {
     let tools = match block.tools {
         Some(t) => ToolPolicy {
@@ -308,8 +319,18 @@ pub fn resolve_block(
 
     let filesystem = match block.filesystem {
         Some(f) => {
-            let write_paths = resolve_paths(&f.write_paths, home, /*allow_wildcard=*/ false)?;
-            let read_paths = resolve_paths(&f.read_paths, home, /*allow_wildcard=*/ false)?;
+            let write_paths = resolve_paths(
+                &f.write_paths,
+                home,
+                data_dir,
+                /*allow_wildcard=*/ false,
+            )?;
+            let read_paths = resolve_paths(
+                &f.read_paths,
+                home,
+                data_dir,
+                /*allow_wildcard=*/ false,
+            )?;
             let canonical_root = canonicalize_or(skill_root);
             for p in &write_paths {
                 if p.starts_with(&canonical_root) {
@@ -404,6 +425,7 @@ fn iter_set(allow: &AllowSet) -> Box<dyn Iterator<Item = &String> + '_> {
 fn resolve_paths(
     raw: &[String],
     home: Option<&Path>,
+    data_dir: Option<&Path>,
     allow_wildcard: bool,
 ) -> Result<BTreeSet<PathBuf>, PermissionsError> {
     let mut out = BTreeSet::new();
@@ -421,13 +443,27 @@ fn resolve_paths(
             out.insert(PathBuf::from(entry));
             continue;
         }
-        let expanded = expand_home(entry, home);
+        let expanded = match expand_data_dir(entry, data_dir) {
+            Some(p) => p,
+            None => expand_home(entry, home),
+        };
         if !expanded.is_absolute() {
             return Err(PermissionsError::NonAbsolutePath(expanded));
         }
         out.insert(expanded);
     }
     Ok(out)
+}
+
+fn expand_data_dir(entry: &str, data_dir: Option<&Path>) -> Option<PathBuf> {
+    let data_dir = data_dir?;
+    if entry == DATA_DIR_TOKEN {
+        return Some(data_dir.to_path_buf());
+    }
+    entry
+        .strip_prefix(DATA_DIR_TOKEN)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .map(|rest| data_dir.join(rest))
 }
 
 fn expand_home(entry: &str, home: Option<&Path>) -> PathBuf {
@@ -1048,9 +1084,13 @@ mod tests {
         Some(Path::new("/home/testuser"))
     }
 
+    fn data_dir() -> Option<&'static Path> {
+        Some(Path::new("/srv/wirken-data"))
+    }
+
     #[test]
     fn empty_block_is_default_deny() {
-        let p = parse_block("{}", &root(), home()).unwrap();
+        let p = parse_block("{}", &root(), home(), data_dir()).unwrap();
         assert_eq!(p, PermissionProfile::default());
         assert!(matches!(p.tools.allow, AllowSet::Set(ref s) if s.is_empty()));
         assert!(matches!(p.egress.mode, EgressMode::Deny));
@@ -1073,7 +1113,7 @@ inference:
   allow: ["ollama", "privatemode"]
   default: "ollama"
 "#;
-        let p = parse_block(yaml, &root(), home()).unwrap();
+        let p = parse_block(yaml, &root(), home(), data_dir()).unwrap();
         assert!(p.tools.allow.allows("read_file"));
         assert!(p.tools.allow.allows("write_file"));
         assert!(!p.tools.allow.allows("exec"));
@@ -1093,8 +1133,47 @@ inference:
     }
 
     #[test]
+    fn data_dir_token_resolves_to_the_data_directory() {
+        let yaml = r#"
+filesystem:
+  write_paths: ["<data_dir>/zirkel"]
+  read_paths: ["<data_dir>", "<workspace>"]
+"#;
+        let p = parse_block(yaml, &root(), home(), data_dir()).unwrap();
+        assert_eq!(
+            p.filesystem.write_paths,
+            BTreeSet::from([PathBuf::from("/srv/wirken-data/zirkel")]),
+            "the grant follows the data directory, not the home directory"
+        );
+        assert!(
+            p.filesystem
+                .read_paths
+                .contains(&PathBuf::from("/srv/wirken-data"))
+        );
+        assert!(
+            p.filesystem
+                .read_paths
+                .contains(&PathBuf::from(WORKSPACE_TOKEN))
+        );
+    }
+
+    #[test]
+    fn data_dir_token_needs_a_separator() {
+        let yaml = r#"filesystem: { write_paths: ["<data_dir>zirkel"] }"#;
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
+        assert!(matches!(err, PermissionsError::NonAbsolutePath(_)));
+    }
+
+    #[test]
+    fn data_dir_token_without_a_data_dir_is_refused() {
+        let yaml = r#"filesystem: { write_paths: ["<data_dir>/zirkel"] }"#;
+        let err = parse_block(yaml, &root(), home(), None).unwrap_err();
+        assert!(matches!(err, PermissionsError::NonAbsolutePath(_)));
+    }
+
+    #[test]
     fn wildcard_tools_passes_anything() {
-        let p = parse_block(r#"tools: { allow: ["*"] }"#, &root(), home()).unwrap();
+        let p = parse_block(r#"tools: { allow: ["*"] }"#, &root(), home(), data_dir()).unwrap();
         assert!(matches!(p.tools.allow, AllowSet::Wildcard));
         assert!(p.tools.allow.allows("anything_at_all"));
     }
@@ -1102,53 +1181,53 @@ inference:
     #[test]
     fn mixed_wildcard_rejected() {
         let yaml = r#"tools: { allow: ["*", "read_file"] }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::MixedWildcard { .. }));
     }
 
     #[test]
     fn invalid_egress_mode_rejected() {
         let yaml = r#"egress: { mode: "foo" }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::InvalidEgressMode(_)));
     }
 
     #[test]
     fn deny_with_domains_rejected() {
         let yaml = r#"egress: { mode: "deny", domains: ["foo.com"] }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::DenyWithDomains));
     }
 
     #[test]
     fn filesystem_wildcard_rejected() {
         let yaml = r#"filesystem: { write_paths: ["*"] }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::FilesystemWildcard));
     }
 
     #[test]
     fn relative_filesystem_path_rejected() {
         let yaml = r#"filesystem: { write_paths: ["relative/path"] }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::NonAbsolutePath(_)));
     }
 
     #[test]
     fn invalid_host_rejected() {
         let yaml = r#"egress: { mode: "allowlist", domains: ["http://foo.com"] }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::InvalidHost(_)));
 
         let yaml = r#"egress: { mode: "allowlist", domains: ["foo.com:8080"] }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::InvalidHost(_)));
     }
 
     #[test]
     fn wildcard_host_label_accepted() {
         let yaml = r#"egress: { mode: "allowlist", domains: ["*.example.com"] }"#;
-        let p = parse_block(yaml, &root(), home()).unwrap();
+        let p = parse_block(yaml, &root(), home(), data_dir()).unwrap();
         // Wildcard label is treated as a literal entry; matching is
         // string-equality at this layer. The HTTP wrapper does the
         // glob matching itself.
@@ -1163,7 +1242,7 @@ inference:
             "filesystem: {{ write_paths: [\"{}/inside\"] }}",
             root.display()
         );
-        let err = parse_block(&inside, root, None).unwrap_err();
+        let err = parse_block(&inside, root, None, None).unwrap_err();
         assert!(matches!(err, PermissionsError::WritePathInsideSkillRoot(_)));
     }
 
@@ -1174,7 +1253,7 @@ inference:
   allow: ["ollama"]
   default: "openai"
 "#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::DefaultNotInAllow(_)));
     }
 
@@ -1185,19 +1264,19 @@ inference:
   allow: ["*"]
   default: "anything"
 "#;
-        let p = parse_block(yaml, &root(), home()).unwrap();
+        let p = parse_block(yaml, &root(), home(), data_dir()).unwrap();
         assert_eq!(p.inference.default.as_deref(), Some("anything"));
     }
 
     #[test]
     fn unknown_field_rejected() {
         let yaml = r#"unknown_axis: { foo: bar }"#;
-        let err = parse_block(yaml, &root(), home()).unwrap_err();
+        let err = parse_block(yaml, &root(), home(), data_dir()).unwrap_err();
         assert!(matches!(err, PermissionsError::Yaml(_)));
     }
 
     fn profile_with(yaml: &str) -> PermissionProfile {
-        parse_block(yaml, &root(), home()).unwrap()
+        parse_block(yaml, &root(), home(), data_dir()).unwrap()
     }
 
     #[test]
@@ -1371,7 +1450,7 @@ filesystem:
   read_paths: ["<workspace>"]
   write_paths: ["<workspace>/.lyrik", "<workspace>/notes"]
 "#;
-        let p = parse_block(yaml, &root(), home()).unwrap();
+        let p = parse_block(yaml, &root(), home(), data_dir()).unwrap();
         assert!(
             p.filesystem
                 .read_paths
@@ -1396,7 +1475,7 @@ filesystem:
   read_paths: ["<workspace>"]
   write_paths: ["<workspace>/.lyrik"]
 "#;
-        let p = parse_block(yaml, &root(), home()).unwrap();
+        let p = parse_block(yaml, &root(), home(), data_dir()).unwrap();
         let workspace = Path::new("/home/x/code/repo");
         let eff = EffectiveProfile::Resolved(p).expand_workspace(workspace);
         assert!(eff.allows_read_path(Path::new("/home/x/code/repo/foo.rs")));

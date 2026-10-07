@@ -8,7 +8,7 @@ permissions:
   egress:
     mode: deny
   filesystem:
-    read_paths: ["~/.wirken/zirkel"]
+    read_paths: ["<data_dir>/zirkel"]
     write_paths: []
   inference:
     allow: ["ollama", "privatemode"]

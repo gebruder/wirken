@@ -222,6 +222,9 @@ impl SkillLoader {
         validate_description(&description, path)?;
 
         let home = std::env::var("HOME").ok().map(PathBuf::from);
+        // The same resolution the gateway uses for its own state, so a
+        // `<data_dir>` grant names the directory this process writes.
+        let data_dir = wirken_gateway::config::default_data_dir();
         // A1: missing `permissions:` block is no longer a load error.
         // It falls back to `PermissionProfile::default()`, which is
         // least-privilege on every axis (empty tool allowlist,
@@ -231,9 +234,10 @@ impl SkillLoader {
         // the prompt; the operator opts into capability by writing
         // the block.
         let permissions = match frontmatter.permissions {
-            Some(block) => resolve_block(block, skill_root, home.as_deref()).map_err(|e| {
-                AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
-            })?,
+            Some(block) => resolve_block(block, skill_root, home.as_deref(), Some(&data_dir))
+                .map_err(|e| {
+                    AgentError::SkillLoad(format!("permissions block in {}: {e}", path.display()))
+                })?,
             None => PermissionProfile::default(),
         };
 
