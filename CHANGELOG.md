@@ -53,6 +53,10 @@ tagged.
   resolves its own data directory, and the preset grants
   `<data_dir>/zirkel`. An installed preset keeps the old grant until
   `wirken preset install zirkel` is run again.
+- Zirkel scoring takes a score sent as a string of digits. The tool
+  schema asks for an integer and some models quote it (`"80"`), which
+  failed the parse and left the item unscored. A fraction, a sign, a
+  word or an empty string still fails.
 
 ### Docs
 

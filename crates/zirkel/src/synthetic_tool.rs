@@ -80,9 +80,50 @@ pub fn score_candidate_tool() -> ToolDef {
 /// Output shape for [`score_candidate_tool`].
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct ScoreCandidateArgs {
+    #[serde(deserialize_with = "integer_or_digit_string")]
     pub score: u32,
     pub why_surfaced: String,
     pub matched_keyword: String,
+}
+
+/// A JSON integer, or a string of decimal digits.
+///
+/// The tool schema asks for an integer, and some models send the same
+/// number quoted (`"80"`). The digits are the same value either way.
+/// Nothing looser is taken: a fraction, a sign, a word or an empty
+/// string is still a parse failure.
+fn integer_or_digit_string<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = u32;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an integer, or a string of decimal digits")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<u32, E> {
+            u32::try_from(v)
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Unsigned(v), &self))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<u32, E> {
+            u32::try_from(v).map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(v), &self))
+        }
+
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<u32, E> {
+            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(E::invalid_value(serde::de::Unexpected::Str(v), &self));
+            }
+            v.parse()
+                .map_err(|_| E::invalid_value(serde::de::Unexpected::Str(v), &self))
+        }
+    }
+
+    deserializer.deserialize_any(Visitor)
 }
 
 /// Tool def for `zirkel_name_theme` — used by the theme naming pass.
@@ -278,6 +319,33 @@ mod tests {
         assert_eq!(parsed.score, 75);
         assert_eq!(parsed.matched_keyword, "BIPA");
         assert!(parsed.why_surfaced.contains("biometric"));
+    }
+
+    #[test]
+    fn score_args_take_the_score_as_a_digit_string() {
+        let json = r#"{"score": "80", "why_surfaced": "w", "matched_keyword": "privacy"}"#;
+        let parsed: ScoreCandidateArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.score, 80);
+    }
+
+    #[test]
+    fn score_args_refuse_a_score_that_is_not_a_whole_number() {
+        for score in [
+            r#""80.5""#,
+            r#""high""#,
+            r#""""#,
+            r#""-1""#,
+            "-1",
+            "80.5",
+            r#"" 80""#,
+        ] {
+            let json =
+                format!(r#"{{"score": {score}, "why_surfaced": "w", "matched_keyword": "k"}}"#);
+            assert!(
+                serde_json::from_str::<ScoreCandidateArgs>(&json).is_err(),
+                "score {score} must not parse"
+            );
+        }
     }
 
     #[test]
