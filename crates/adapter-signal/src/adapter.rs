@@ -961,6 +961,26 @@ enum GatewayBoundAction {
     Skip,
 }
 
+/// The approval message body, plain text.
+pub(crate) fn approval_body(fields: &convert::ApprovalRequestFields, prefix: &str) -> String {
+    let mut body = format!(
+        "Agent {} requests {} (tier {}).\nAction: {}",
+        fields.triggering_agent, fields.tool_name, fields.requested_tier, fields.action_key,
+    );
+    if !fields.exec_location.is_empty() {
+        body.push_str(&format!("\nWhere: {}", fields.exec_location));
+    }
+    body.push_str(&format!(
+        "\nTrigger: {}\nReply !approve {prefix} to approve or !deny {prefix} [reason] to deny.",
+        if fields.trigger_message.is_empty() {
+            "(none)"
+        } else {
+            fields.trigger_message.as_str()
+        },
+    ));
+    body
+}
+
 /// Render the approval prompt in the configured conversation,
 /// register the prefix in the adapter's prefix map, and on send
 /// failure emit an `ApprovalRequestFailed` frame so the gateway
@@ -989,23 +1009,7 @@ async fn send_approval_request(
             .push(fields.request_id.clone());
     }
 
-    let body = format!(
-        "Agent {} requests {} (tier {}).\n\
-         Action: {}\n\
-         Trigger: {}\n\
-         Reply !approve {} to approve or !deny {} [reason] to deny.",
-        fields.triggering_agent,
-        fields.tool_name,
-        fields.requested_tier,
-        fields.action_key,
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            fields.trigger_message.clone()
-        },
-        prefix,
-        prefix,
-    );
+    let body = approval_body(&fields, &prefix);
 
     if let Err(e) = adapter
         .send_message(&fields.target_conversation_id, &body)

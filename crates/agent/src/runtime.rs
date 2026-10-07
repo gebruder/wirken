@@ -3153,6 +3153,7 @@ impl Agent {
                             trigger_message: self.current_trigger.clone(),
                             arguments: Some(arguments.to_string()),
                             assistant_text: self.current_assistant_text.clone(),
+                            exec_location: None,
                         },
                     )));
                 }
@@ -3426,6 +3427,7 @@ impl Agent {
                                 trigger_message: self.current_trigger.clone(),
                                 arguments: Some(arguments.to_string()),
                                 assistant_text: self.current_assistant_text.clone(),
+                                exec_location: (name == "exec").then(|| self.tools.exec_location()),
                             },
                         )));
                     }

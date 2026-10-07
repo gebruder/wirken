@@ -2883,6 +2883,7 @@ fn process_permissions_request(
                     age_seconds: d.age_seconds,
                 },
                 trigger_message: d.trigger_message,
+                exec_location: d.exec_location,
             });
             PermissionsResponse::PendingShow { entry: detail }
         }

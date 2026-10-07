@@ -462,6 +462,9 @@ pub struct ApprovalRequestFields {
     pub triggering_agent: String,
     pub trigger_message: String,
     pub target_conversation_id: String,
+    /// Where an `exec` runs if approved. Empty for other tools, and
+    /// from a gateway that predates the field.
+    pub exec_location: String,
 }
 
 pub fn parse_approval_request(
@@ -501,6 +504,11 @@ pub fn parse_approval_request(
                 .to_str()
                 .map_err(|e| capnp::Error::failed(format!("trigger_message not utf8: {e}")))?
                 .to_string();
+            let exec_location = r
+                .get_exec_location()?
+                .to_str()
+                .map_err(|e| capnp::Error::failed(format!("exec_location not utf8: {e}")))?
+                .to_string();
             let target_conversation_id = r
                 .get_target_conversation_id()?
                 .to_str()
@@ -513,6 +521,7 @@ pub fn parse_approval_request(
                 requested_tier,
                 triggering_agent,
                 trigger_message,
+                exec_location,
                 target_conversation_id,
             })
         }

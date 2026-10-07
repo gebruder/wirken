@@ -311,6 +311,12 @@ struct ApprovalRequest {
   # default in Cap'n Proto); consumers that do not read this field
   # are unaffected.
   serviceUrl @7 :Text;
+  # Where the command runs if approved, for an `exec`: the line every
+  # approval surface shows, built by the gateway from the settings the
+  # exec will use ("runs in sandbox container (...)" or "runs on this
+  # host as <user>"). Empty for other tools. An adapter that does not
+  # read it is unaffected.
+  execLocation @8 :Text;
 }
 
 struct ApprovalDecisionKind {

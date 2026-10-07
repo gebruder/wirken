@@ -40,9 +40,9 @@ it refused the page's approvals snapshot stayed null, which meant no
 in the rail, and no pending card restored after a reload however many
 decisions were waiting.
 
-The approval card shows the action key, the arguments the model sent and
-what the model said in the same message, all off the `ApprovalRequest`
-event. See
+The approval card shows the action key, the arguments the model sent,
+what the model said in the same message and, for an `exec`, where it runs
+if approved, all off the `ApprovalRequest` event. See
 [permissions](permissions-and-identity.md#what-an-approval-prompt-shows).
 
 The About panel draws the capabilities of the conversation it is open on.

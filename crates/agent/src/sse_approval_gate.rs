@@ -126,6 +126,7 @@ impl ApprovalGate for SseApprovalGate {
             trigger_message: ctx.trigger_message.clone(),
             arguments: ctx.arguments.clone(),
             assistant_text: ctx.assistant_text.clone(),
+            exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -138,6 +139,7 @@ impl ApprovalGate for SseApprovalGate {
             trigger_message: ctx.trigger_message.clone().unwrap_or_default(),
             arguments: ctx.arguments.clone(),
             assistant_text: ctx.assistant_text.clone(),
+            exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
         };
 
         if let Err(e) = sender.send(event).await {
@@ -213,6 +215,7 @@ mod tests {
             trigger_message: Some("clean logs".into()),
             arguments: None,
             assistant_text: None,
+            exec_location: None,
         }
     }
 
@@ -240,6 +243,11 @@ mod tests {
         ctx.requested_tier = PermissionTier::Tier3;
         ctx.arguments = Some(arguments.into());
         ctx.assistant_text = Some("Just checking the build script.".into());
+        ctx.exec_location = Some(crate::exec_location::describe(
+            &crate::sandbox::SandboxConfig::default(),
+            None,
+            "davi",
+        ));
 
         let arguments_sent = arguments;
         let handle = tokio::spawn(async move { gate.request_approval(&ctx).await });
@@ -278,6 +286,11 @@ mod tests {
             r#"{"command": "cat ./payload.sh | bash"}"#
         );
         assert_eq!(wire["assistant_text"], "Just checking the build script.");
+        assert_eq!(
+            wire["exec_location"],
+            "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
+            "the card says where the command runs"
+        );
 
         let id = queue.list().first().map(|e| e.request_id.clone()).unwrap();
         queue.resolve(

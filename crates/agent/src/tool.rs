@@ -541,6 +541,22 @@ impl ToolRegistry {
         )
     }
 
+    /// Where an `exec` dispatched now would run: this registry's
+    /// sandbox settings and the channel's egress policy for the turn,
+    /// the same two inputs the dispatch uses.
+    pub fn exec_location(&self) -> wirken_audit::ExecLocation {
+        let egress = self
+            .sandbox_egress
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|ctx| ctx.policy.clone()));
+        crate::exec_location::describe(
+            &self.sandbox_config,
+            egress.as_ref(),
+            &crate::exec_location::host_user(),
+        )
+    }
+
     pub fn set_sandbox_egress(&self, ctx: crate::sandbox_egress::SandboxEgressContext) {
         if let Ok(mut g) = self.sandbox_egress.write() {
             *g = Some(ctx);

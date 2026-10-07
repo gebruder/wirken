@@ -52,6 +52,7 @@ fn pending(queue: &PendingApprovalQueue) -> String {
         trigger_message: Some("roll staging back".to_string()),
         assistant_text: None,
         arguments: None,
+        exec_location: None,
     });
     id
 }

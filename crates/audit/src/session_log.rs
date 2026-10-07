@@ -537,6 +537,18 @@ pub struct SandboxProvenance {
     pub container_id: Option<String>,
 }
 
+/// Where an approved `exec` would run, as the approval prompt told the
+/// operator before they decided.
+///
+/// `mode` is the sandbox mode the text was built from, so the claim
+/// can be checked against the [`SandboxProvenance`] the command later
+/// ran under. `text` is the line the operator read, verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecLocation {
+    pub mode: SandboxModeLabel,
+    pub text: String,
+}
+
 /// What a redaction cut, by whom, and why.
 ///
 /// Carried on the [`ChainHeadReason::Redaction`] head so a reader knows

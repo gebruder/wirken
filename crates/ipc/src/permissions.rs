@@ -110,6 +110,9 @@ pub struct PendingDetail {
     /// when the agent loop captured one; `None` for system-driven
     /// or subagent-driven calls.
     pub trigger_message: Option<String>,
+    /// Where an `exec` runs if approved. `None` for other tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_location: Option<String>,
 }
 
 /// Per-decision outcome. `Accepted` means the queue accepted the

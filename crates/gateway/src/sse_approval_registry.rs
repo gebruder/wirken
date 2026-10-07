@@ -86,6 +86,10 @@ pub enum SseEvent {
         /// an unknown key, and an older gateway sends none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         assistant_text: Option<String>,
+        /// Where an `exec` runs if approved, the same line every
+        /// approval surface shows. Absent for other tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exec_location: Option<String>,
     },
     /// Gateway → browser. Fires after the operator POSTs to
     /// /api/approvals/{request_id}. Distinct from
@@ -271,6 +275,7 @@ mod tests {
             triggering_agent: "default".into(),
             trigger_message: "clean logs".into(),
             assistant_text: None,
+            exec_location: None,
             arguments: None,
         };
         let line = ev.to_sse_line();

@@ -129,6 +129,7 @@ impl ApprovalGate for SignalApprovalGate {
             trigger_message: ctx.trigger_message.clone(),
             assistant_text: None,
             arguments: None,
+            exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
         };
         let (request_id, rx) = self.queue.register(request);
 
@@ -143,6 +144,12 @@ impl ApprovalGate for SignalApprovalGate {
             req.set_triggering_agent(&ctx.agent_id);
             req.set_trigger_message(ctx.trigger_message.as_deref().unwrap_or(""));
             req.set_target_conversation_id(&target_conversation);
+            req.set_exec_location(
+                ctx.exec_location
+                    .as_ref()
+                    .map(|l| l.text.as_str())
+                    .unwrap_or(""),
+            );
         }
 
         {
@@ -209,6 +216,7 @@ mod tests {
             trigger_message: Some("clean old logs".into()),
             arguments: None,
             assistant_text: None,
+            exec_location: None,
         }
     }
 

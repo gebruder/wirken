@@ -151,6 +151,12 @@ pub(crate) fn render_prompt(ctx: &PermissionDenialContext) -> String {
         }
     }
 
+    // Where the command runs if approved. Built by the gateway from its
+    // own sandbox settings, not model output, so it is printed as is.
+    if let Some(location) = &ctx.exec_location {
+        let _ = writeln!(prompt, "  where:      {}", location.text);
+    }
+
     if let Some(said) = ctx.assistant_text.as_deref().filter(|t| !t.is_empty()) {
         let cleaned = clean(said);
         let shown: String = cleaned.chars().take(MAX_ARGUMENT_CHARS).collect();
@@ -666,7 +672,61 @@ mod tests {
             trigger_message: Some("summarise the release notes".into()),
             arguments: arguments.map(str::to_string),
             assistant_text: said.map(str::to_string),
+            exec_location: None,
         }
+    }
+
+    /// An `exec` prompt says where the command runs, for each sandbox
+    /// mode, before it asks.
+    #[test]
+    fn the_exec_prompt_says_where_the_command_runs() {
+        use wirken_agent::exec_location::describe;
+        use wirken_agent::sandbox::{SandboxConfig, SandboxMode};
+        for (mode, line) in [
+            (
+                SandboxMode::ExecOnly,
+                "  where:      runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n",
+            ),
+            (
+                SandboxMode::GVisor,
+                "  where:      runs in sandbox container (gvisor, read-only root, workspace at /workspace, no network)\n",
+            ),
+            (
+                SandboxMode::Off,
+                "  where:      runs on this host as davi\n",
+            ),
+        ] {
+            let config = SandboxConfig {
+                mode,
+                ..SandboxConfig::default()
+            };
+            let mut ctx = ctx_for(
+                "exec",
+                wirken_gateway::permissions::Action::ShellExec {
+                    pattern: "ls".into(),
+                },
+                Some(r#"{"command": "ls ~"}"#),
+            );
+            ctx.exec_location = Some(describe(&config, None, "davi"));
+            let prompt = render_prompt(&ctx);
+            assert!(prompt.contains(line), "{mode:?}: {prompt}");
+            assert!(
+                prompt.find("  where:").unwrap() < prompt.find("approve? [y/N]").unwrap(),
+                "said before the question"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_for_another_tool_has_no_where_line() {
+        let ctx = ctx_for(
+            "http_request",
+            wirken_gateway::permissions::Action::NetworkRequest {
+                domain: "example.com".into(),
+            },
+            Some(r#"{"url": "https://example.com"}"#),
+        );
+        assert!(!render_prompt(&ctx).contains("where:"));
     }
 
     /// The shell case is the one the action key cannot describe: a

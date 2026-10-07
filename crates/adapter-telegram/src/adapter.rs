@@ -291,6 +291,31 @@ async fn handle_outbound(mut reader: IpcFrameReader, bot: Bot, writer: Arc<Mutex
     }
 }
 
+/// The approval message body. HTML, since the message is sent with
+/// `ParseMode::Html`; every field is escaped.
+pub(crate) fn approval_text(fields: &convert::ApprovalRequestFields) -> String {
+    let mut text = format!(
+        "Agent <b>{}</b> requests <b>{}</b> (tier: <b>{}</b>).\n\
+         Action: <code>{}</code>",
+        html_escape(&fields.triggering_agent),
+        html_escape(&fields.tool_name),
+        html_escape(&fields.requested_tier),
+        html_escape(&fields.action_key),
+    );
+    if !fields.exec_location.is_empty() {
+        text.push_str(&format!("\nWhere: {}", html_escape(&fields.exec_location)));
+    }
+    text.push_str(&format!(
+        "\nTrigger: <i>{}</i>",
+        if fields.trigger_message.is_empty() {
+            "(none)".to_string()
+        } else {
+            html_escape(&fields.trigger_message)
+        }
+    ));
+    text
+}
+
 /// Render an approval message in the configured chat and ship it
 /// with an inline keyboard carrying Approve / Deny buttons.
 /// `callback_data` format: `req:<uuid>:allow` and `req:<uuid>:deny`.
@@ -306,20 +331,7 @@ async fn send_approval_request(
     writer: &Arc<Mutex<IpcFrameWriter>>,
     fields: convert::ApprovalRequestFields,
 ) {
-    let text = format!(
-        "Agent <b>{}</b> requests <b>{}</b> (tier: <b>{}</b>).\n\
-         Action: <code>{}</code>\n\
-         Trigger: <i>{}</i>",
-        html_escape(&fields.triggering_agent),
-        html_escape(&fields.tool_name),
-        html_escape(&fields.requested_tier),
-        html_escape(&fields.action_key),
-        if fields.trigger_message.is_empty() {
-            "(none)".to_string()
-        } else {
-            html_escape(&fields.trigger_message)
-        },
-    );
+    let text = approval_text(&fields);
 
     // Encode the approval payloads under the cross-adapter
     // convention from `wirken_adapter_core::approval`. Encoding

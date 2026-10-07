@@ -386,6 +386,7 @@ const HTML: &str = r#"<!DOCTYPE html>
   .approval-age { font-size: 11.5px; color: rgba(233,233,237,.5); white-space: nowrap; margin-left: auto; }
   .approval-cmd { font-family: var(--mono); font-size: 13px; line-height: 1.5; background: rgba(0,0,0,.4); padding: 10px 12px; border-radius: 7px; overflow-x: auto; white-space: pre; }
   .approval-note { font-size: 11.5px; color: rgba(233,233,237,.5); }
+  .approval-where { font-size: 12.5px; line-height: 1.45; color: rgba(233,233,237,.82); }
   .approval-said { margin-top: 6px; font-size: 12.5px; line-height: 1.45; }
   .approval-said-label { color: rgba(233,233,237,.5); margin-right: 6px; }
   .approval-said-text { color: rgba(233,233,237,.82); }
@@ -863,6 +864,11 @@ function renderApproval(ev) {
                   : 'action key as computed by the gate') + ' · tool ' + (ev.tool_name || ''));
   card.appendChild(cmd);
   card.appendChild(note);
+  // Where the command runs if approved: a container or this host.
+  // The gateway builds the line from the settings the exec will use.
+  if (ev.exec_location) {
+    card.appendChild(el('div', 'approval-where', ev.exec_location));
+  }
   // What the model said in the same message as the call. Its own
   // statement of intent, which the arguments do not carry. Absent
   // when the model sent calls and no text.
@@ -3846,7 +3852,8 @@ fn approvals_snapshot_for(
             let detail = queue.show(&entry.request_id);
             let trigger = detail.as_ref().and_then(|d| d.trigger_message.clone());
             let args = detail.as_ref().and_then(|d| d.arguments.clone());
-            let said = detail.and_then(|d| d.assistant_text);
+            let said = detail.as_ref().and_then(|d| d.assistant_text.clone());
+            let location = detail.and_then(|d| d.exec_location);
             mine.push(json!({
                 "request_id": entry.request_id,
                 "agent_id": entry.agent_id,
@@ -3864,6 +3871,7 @@ fn approvals_snapshot_for(
                 // off the SSE event.
                 "arguments": args,
                 "assistant_text": said,
+                "exec_location": location,
             }));
         } else {
             let channel = session_channel(&entry.agent_id)
@@ -6423,6 +6431,7 @@ mod tests {
             trigger_message: Some(trigger.into()),
             assistant_text: None,
             arguments: None,
+            exec_location: None,
         }
     }
 

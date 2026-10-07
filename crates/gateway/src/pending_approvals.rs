@@ -66,6 +66,9 @@ pub struct PendingRequest {
     /// reload shows what the live one showed.
     pub arguments: Option<String>,
     pub assistant_text: Option<String>,
+    /// Where an `exec` runs if approved, as every surface states it.
+    /// `None` for other tools.
+    pub exec_location: Option<String>,
 }
 
 /// Per-entry shape kept in the queue. The receiver half of the
@@ -103,6 +106,7 @@ pub struct PendingDetail {
     /// message.
     pub arguments: Option<String>,
     pub assistant_text: Option<String>,
+    pub exec_location: Option<String>,
     pub requested_at: DateTime<Utc>,
     pub age_seconds: u64,
 }
@@ -256,6 +260,7 @@ impl PendingApprovalQueue {
             trigger_message: e.request.trigger_message.clone(),
             arguments: e.request.arguments.clone(),
             assistant_text: e.request.assistant_text.clone(),
+            exec_location: e.request.exec_location.clone(),
             requested_at: e.requested_at,
             age_seconds: now.saturating_duration_since(e.requested_instant).as_secs(),
         })
@@ -283,6 +288,7 @@ mod tests {
             trigger_message: Some("user said something".into()),
             assistant_text: None,
             arguments: None,
+            exec_location: None,
         }
     }
 
@@ -437,6 +443,18 @@ mod tests {
         assert_eq!(
             parse_cli_timeout(Some("0")),
             Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn show_carries_where_an_exec_runs() {
+        let q = PendingApprovalQueue::new();
+        let mut request = req("ls");
+        request.exec_location = Some("runs on this host as davi".into());
+        let (id, _rx) = q.register(request);
+        assert_eq!(
+            q.show(&id).unwrap().exec_location.as_deref(),
+            Some("runs on this host as davi")
         );
     }
 }

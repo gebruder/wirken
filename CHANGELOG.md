@@ -36,6 +36,19 @@ tagged.
   adapter that had already exited, still left a row saying the reply
   went out. Pushes already recorded only after a successful write.
 
+### Changed
+
+- An approval prompt for `exec` says where the command runs if
+  approved: `runs in sandbox container (exec_only, read-only root,
+  workspace at /workspace, no network)`, with the mode and network in
+  force, or `runs on this host as <user>` under `mode: off`. The line
+  comes from the settings the `exec` will use, the agent's loaded
+  sandbox configuration and the channel's egress policy, not from
+  `sandbox.json` on disk. It is on the CLI prompt, `wirken permissions
+  pending show`, the webchat card, and the Telegram and Signal
+  messages; the `ApprovalRequest` frame carries it in a new
+  `execLocation` field. Lyrik's compact prompt is unchanged.
+
 ### Dependencies
 
 - tokio 1.53.2, uuid 1.27.0, libc 0.2.190.

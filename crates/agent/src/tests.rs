@@ -4741,6 +4741,7 @@ fn denial_context_display() {
         trigger_message: Some("fetch that URL".into()),
         arguments: None,
         assistant_text: None,
+        exec_location: None,
     };
 
     let display = format!("{ctx}");
@@ -12472,5 +12473,105 @@ mod http_request_after_a_restricting_read {
         let r = run(true, None).await;
         assert_eq!(r.hits, 0, "nothing went out");
         assert!(denied_for_host(&r.events), "{:?}", r.events);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The approval gate is told where an `exec` would run, from the agent's
+// own sandbox settings, before it asks. Another tool carries no location.
+// ---------------------------------------------------------------------------
+mod exec_location_reaches_the_gate {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use tempfile::TempDir;
+    use wirken_audit::{ApprovalSource, SessionLog, SqliteSessionLog};
+
+    use crate::approval_gate::{ApprovalGate, ApprovalOutcome};
+    use crate::error::PermissionDenialContext;
+    use crate::llm::LlmConfig;
+
+    /// Keeps every context it is asked about and refuses, so nothing
+    /// runs.
+    #[derive(Default)]
+    struct Recording {
+        asked: Mutex<Vec<PermissionDenialContext>>,
+    }
+
+    #[async_trait]
+    impl ApprovalGate for Recording {
+        async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
+            self.asked.lock().unwrap().push(ctx.clone());
+            ApprovalOutcome::Denied {
+                reason: None,
+                actor: None,
+            }
+        }
+        fn source(&self) -> ApprovalSource {
+            ApprovalSource::Cli
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exec_reaches_the_gate_with_where_it_would_run() {
+        let (base_url, server) = super::approved_unknown_tool::stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Listing it.",
+                "tool_calls": [{
+                    "id": "call_ls",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{\"command\": \"ls ~\"}"},
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Not allowed."}),
+        ])
+        .await;
+
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = crate::runtime::Agent::new(
+            "where".to_string(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+            },
+            Some("unused".into()),
+            None,
+            log as Arc<dyn SessionLog>,
+        )
+        .unwrap();
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+        let gate = Arc::new(Recording::default());
+        agent.set_approval_gate(gate.clone());
+
+        agent
+            .process_message("what is in my home directory?", "msg-1".into())
+            .await
+            .expect("the turn ends with a reply");
+        server.await.unwrap();
+
+        let asked = gate.asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "asked once, about the exec");
+        assert_eq!(asked[0].tool_name, "exec");
+        let location = asked[0]
+            .exec_location
+            .as_ref()
+            .expect("a location for exec");
+        assert_eq!(location.mode, wirken_audit::SandboxModeLabel::ExecOnly);
+        assert_eq!(
+            location.text,
+            "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)"
+        );
     }
 }

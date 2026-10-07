@@ -70,6 +70,7 @@ impl ApprovalGate for CliApprovalGate {
             trigger_message: ctx.trigger_message.clone(),
             assistant_text: None,
             arguments: None,
+            exec_location: ctx.exec_location.as_ref().map(|l| l.text.clone()),
         };
         let (request_id, rx) = self.queue.register(request);
         tracing::info!(
@@ -131,6 +132,7 @@ mod tests {
             trigger_message: Some("operator request".into()),
             arguments: None,
             assistant_text: None,
+            exec_location: None,
         }
     }
 

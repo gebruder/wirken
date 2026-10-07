@@ -8,6 +8,7 @@ pub mod context;
 pub mod conversation;
 pub mod egress;
 pub mod error;
+pub mod exec_location;
 pub mod factory;
 pub mod http_tool;
 pub mod identity;

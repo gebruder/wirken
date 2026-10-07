@@ -34,6 +34,11 @@ pub struct PermissionDenialContext {
     /// thinks it is doing, which is the pair a decision is made on.
     /// `None` where the model sent calls and no text.
     pub assistant_text: Option<String>,
+    /// Where the command runs if approved, for an `exec`. Every
+    /// approval surface shows its `text`, so the operator knows before
+    /// deciding whether the command reaches a container or this host.
+    /// `None` for every other tool.
+    pub exec_location: Option<wirken_audit::ExecLocation>,
 }
 
 impl std::fmt::Display for PermissionDenialContext {

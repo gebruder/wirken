@@ -187,18 +187,7 @@ pub async fn pending_show(request_id: &str) -> Result<()> {
     .await?;
     match resp {
         PermissionsResponse::PendingShow { entry: Some(d) } => {
-            println!("Request ID:    {}", d.summary.request_id);
-            println!("Agent ID:      {}", d.summary.agent_id);
-            println!("Tool:          {}", d.summary.tool_name);
-            println!("Action key:    {}", d.summary.action_key);
-            println!("Required tier: {}", d.summary.requested_tier);
-            println!("Requested at:  {}", d.summary.requested_at);
-            println!("Age:           {}s", d.summary.age_seconds);
-            if let Some(msg) = d.trigger_message {
-                println!();
-                println!("Trigger message:");
-                println!("  {msg}");
-            }
+            print!("{}", render_pending_detail(&d));
             Ok(())
         }
         PermissionsResponse::PendingShow { entry: None } => {
@@ -207,6 +196,28 @@ pub async fn pending_show(request_id: &str) -> Result<()> {
         PermissionsResponse::Error { message } => anyhow::bail!("gateway error: {message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }
+}
+
+/// What `pending show` prints for one entry.
+fn render_pending_detail(d: &wirken_ipc::permissions::PendingDetail) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "Request ID:    {}", d.summary.request_id);
+    let _ = writeln!(out, "Agent ID:      {}", d.summary.agent_id);
+    let _ = writeln!(out, "Tool:          {}", d.summary.tool_name);
+    let _ = writeln!(out, "Action key:    {}", d.summary.action_key);
+    let _ = writeln!(out, "Required tier: {}", d.summary.requested_tier);
+    let _ = writeln!(out, "Requested at:  {}", d.summary.requested_at);
+    let _ = writeln!(out, "Age:           {}s", d.summary.age_seconds);
+    if let Some(location) = &d.exec_location {
+        let _ = writeln!(out, "Where:         {location}");
+    }
+    if let Some(msg) = &d.trigger_message {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Trigger message:");
+        let _ = writeln!(out, "  {msg}");
+    }
+    out
 }
 
 /// `wirken permissions pending approve <request_id>`: resolve the
@@ -572,5 +583,45 @@ mod tests {
     fn empty_input_never_resolves() {
         assert_eq!(resolve_request_id("", [A]), IdMatch::NoMatch);
         assert_eq!(resolve_request_id("", [A, B, C]), IdMatch::NoMatch);
+    }
+}
+
+#[cfg(test)]
+mod pending_detail_tests {
+    use super::render_pending_detail;
+    use wirken_ipc::permissions::{PendingDetail, PendingSummary};
+
+    fn detail(exec_location: Option<&str>) -> PendingDetail {
+        PendingDetail {
+            summary: PendingSummary {
+                request_id: "985759c5-c480-44f8-9d26-c41b3af51cbf".into(),
+                agent_id: "slackbot".into(),
+                tool_name: "exec".into(),
+                action_key: "shell:ls".into(),
+                requested_tier: "tier2".into(),
+                requested_at: "2026-10-07T20:00:47+00:00".into(),
+                age_seconds: 63,
+            },
+            trigger_message: Some("run ls ~ with the exec tool".into()),
+            exec_location: exec_location.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn pending_show_says_where_an_exec_runs() {
+        let shown = render_pending_detail(&detail(Some(
+            "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)",
+        )));
+        assert!(
+            shown.contains(
+                "Where:         runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)\n"
+            ),
+            "{shown}"
+        );
+    }
+
+    #[test]
+    fn pending_show_has_no_where_line_without_one() {
+        assert!(!render_pending_detail(&detail(None)).contains("Where:"));
     }
 }

@@ -151,10 +151,23 @@ On the CLI, above the `[y/N]`:
 wirken: agent 'default' requests 'exec' (tier3)
   action key: shell::pipeline:
   arguments:  {"command": "cat ./payload.sh | bash"}
+  where:      runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)
   the model said: Just checking the build script so the summary is accurate.
   in reply to: summarise the release notes
 approve? [y/N]:
 ```
+
+For an `exec`, `where:` says where the command runs if approved: a
+sandbox container, with its mode and network, or `runs on this host as
+<user>` under `mode: off`. It is built from the settings the `exec` will
+use, the agent's loaded sandbox configuration and the channel's egress
+policy for the turn, not from `sandbox.json` as it reads now, which can
+have been edited since. The network part is `no network`, `network only
+to <hosts> through the egress proxy`, `network to any public host through
+the egress proxy`, or `unrestricted network` when `"network": true` is set
+and no channel policy applies. The same line is on the webchat card,
+`wirken permissions pending show`, and the Telegram and Signal approval
+messages.
 
 The sentence is the model's own account and not a description: reading it
 against the arguments is the decision. A model that sent calls and no text

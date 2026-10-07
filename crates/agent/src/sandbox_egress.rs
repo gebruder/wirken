@@ -512,6 +512,7 @@ impl SandboxEgressContext {
             // destination, which the action already names.
             arguments: None,
             assistant_text: None,
+            exec_location: None,
         };
         let approved = matches!(
             gate.request_approval(&ctx).await,
