@@ -57,11 +57,15 @@
 //! decision   := "allow" | "deny"
 //! ```
 //!
-//! Worst-case encoded length is `4 + 36 + 1 + 5 = 46` bytes, well
-//! under the smallest channel cap in scope ([`DISCORD_CUSTOM_ID_MAX`]
-//! at 100 bytes). The `"req:"` prefix is a version marker: a future
-//! encoding can ship under `"req2:"` so adapters can co-deploy
-//! mixed-version button populations without a breaking switch.
+//! Worst-case encoded length is `4 + 36 + 1 + 5 = 46` bytes, under
+//! the smallest channel cap the module declares
+//! ([`TELEGRAM_CALLBACK_DATA_MAX`] at 64 bytes). [`encode`] refuses a
+//! payload longer than [`ENCODED_PAYLOAD_MAX`], the minimum of the
+//! declared caps, so an encoded button fits every declared cap.
+//!
+//! The `"req:"` prefix is a version marker: a future encoding can
+//! ship under `"req2:"` so adapters can co-deploy mixed-version
+//! button populations without a breaking switch.
 //!
 //! Decode parses right-to-left at the trailing decision separator,
 //! not left-to-right. The current `request_id` shape (canonical UUID)
@@ -72,9 +76,7 @@
 use std::fmt;
 
 /// Hard cap on Discord interactive-component `custom_id` length, in
-/// bytes. The encoded payload must fit within this budget on every
-/// adapter we ship a button-native approval gate for; Discord is the
-/// tightest of the set.
+/// bytes.
 pub const DISCORD_CUSTOM_ID_MAX: usize = 100;
 
 /// Hard cap on Slack block-kit `action_id` length, in bytes. Slack
@@ -86,6 +88,27 @@ pub const SLACK_ACTION_ID_MAX: usize = 255;
 /// the shared encoding documents the per-channel budgets in one
 /// place.
 pub const TELEGRAM_CALLBACK_DATA_MAX: usize = 64;
+
+/// The longest payload [`encode`] returns: the smallest of the
+/// per-channel caps above, so one encoding fits each of them. A cap
+/// added above belongs in this minimum too.
+pub const ENCODED_PAYLOAD_MAX: usize = min_of(&[
+    DISCORD_CUSTOM_ID_MAX,
+    SLACK_ACTION_ID_MAX,
+    TELEGRAM_CALLBACK_DATA_MAX,
+]);
+
+const fn min_of(caps: &[usize]) -> usize {
+    let mut min = usize::MAX;
+    let mut i = 0;
+    while i < caps.len() {
+        if caps[i] < min {
+            min = caps[i];
+        }
+        i += 1;
+    }
+    min
+}
 
 /// Version prefix on the encoded payload. A future encoding can
 /// ship under `"req2:"` without colliding with this one.
@@ -138,6 +161,9 @@ pub enum EncodeError {
     /// composite identifier formats; current callers must pass a
     /// canonical UUID.
     RequestIdContainsColon,
+    /// The encoded payload is `len` bytes, over [`ENCODED_PAYLOAD_MAX`]
+    /// (`max`). A platform would refuse or truncate the button.
+    ExceedsBudget { len: usize, max: usize },
 }
 
 impl fmt::Display for EncodeError {
@@ -146,6 +172,12 @@ impl fmt::Display for EncodeError {
             EncodeError::EmptyRequestId => write!(f, "request_id is empty"),
             EncodeError::RequestIdContainsColon => {
                 write!(f, "request_id must not contain ':' under this encoding")
+            }
+            EncodeError::ExceedsBudget { len, max } => {
+                write!(
+                    f,
+                    "encoded payload is {len} bytes, over the {max}-byte budget"
+                )
             }
         }
     }
@@ -199,11 +231,18 @@ pub fn encode(payload: &ApprovalPayload) -> Result<String, EncodeError> {
     if payload.request_id.contains(':') {
         return Err(EncodeError::RequestIdContainsColon);
     }
-    Ok(format!(
+    let encoded = format!(
         "{PAYLOAD_PREFIX}{}:{}",
         payload.request_id,
         payload.decision.as_str()
-    ))
+    );
+    if encoded.len() > ENCODED_PAYLOAD_MAX {
+        return Err(EncodeError::ExceedsBudget {
+            len: encoded.len(),
+            max: ENCODED_PAYLOAD_MAX,
+        });
+    }
+    Ok(encoded)
 }
 
 /// Decode an inbound platform callback-data string into an
@@ -339,6 +378,48 @@ mod tests {
             decision: Decision::Allow,
         };
         assert_eq!(encode(&p), Err(EncodeError::RequestIdContainsColon));
+    }
+
+    #[test]
+    fn the_budget_is_the_smallest_declared_cap() {
+        assert_eq!(ENCODED_PAYLOAD_MAX, TELEGRAM_CALLBACK_DATA_MAX);
+        assert_eq!(ENCODED_PAYLOAD_MAX, 64);
+    }
+
+    #[test]
+    fn encode_rejects_a_payload_over_the_budget() {
+        // 60 chars: "req:" + 60 + ":allow" is 70 bytes, ":deny" 69.
+        for (decision, len) in [(Decision::Allow, 70), (Decision::Deny, 69)] {
+            let p = ApprovalPayload {
+                request_id: "a".repeat(60),
+                decision,
+            };
+            assert_eq!(encode(&p), Err(EncodeError::ExceedsBudget { len, max: 64 }));
+        }
+    }
+
+    #[test]
+    fn encode_takes_a_payload_at_the_budget_exactly() {
+        // 54 chars: "req:" + 54 + ":allow" is 64 bytes.
+        let p = ApprovalPayload {
+            request_id: "a".repeat(54),
+            decision: Decision::Allow,
+        };
+        assert_eq!(encode(&p).unwrap().len(), 64);
+        let p = ApprovalPayload {
+            request_id: "a".repeat(55),
+            decision: Decision::Allow,
+        };
+        assert_eq!(
+            encode(&p),
+            Err(EncodeError::ExceedsBudget { len: 65, max: 64 })
+        );
+    }
+
+    #[test]
+    fn a_canonical_uuid_still_encodes_for_both_decisions() {
+        assert_eq!(encode(&allow_payload()).unwrap().len(), 46);
+        assert_eq!(encode(&deny_payload()).unwrap().len(), 45);
     }
 
     #[test]

@@ -10,6 +10,16 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- Approval-button payloads are checked against a length budget. The
+  encoded `req:<request_id>:<decision>` string was never measured; a
+  test asserted the cap for a canonical UUID only. `encode` now
+  refuses a payload over the smallest declared callback-data cap,
+  Telegram's 64 bytes, with `EncodeError::ExceedsBudget`, which every
+  adapter sends down its existing `encode_failed` path. The module
+  doc named Discord's 100 bytes as the smallest cap.
+
 ## [1.27.0] - 2026-10-07
 
 ### Security
