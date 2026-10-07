@@ -12530,6 +12530,7 @@ mod exec_location_reaches_the_gate {
 
         let tmp = TempDir::new().unwrap();
         let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let log_for_rows = log.clone();
         let mut agent = crate::runtime::Agent::new(
             "where".to_string(),
             tmp.path().to_path_buf(),
@@ -12573,5 +12574,164 @@ mod exec_location_reaches_the_gate {
             location.text,
             "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)"
         );
+
+        // The operator's refusal is on the chain with what they were told.
+        let rows = log_for_rows
+            .get_since(
+                &log_for_rows.handle_for(wirken_audit::SessionId::new("where".to_string())),
+                0,
+            )
+            .unwrap();
+        let recorded = rows
+            .iter()
+            .find_map(|r| match &r.event {
+                wirken_audit::SessionEvent::PermissionDenied {
+                    denied_via: Some(_),
+                    exec_location,
+                    ..
+                } => Some(exec_location.clone()),
+                _ => None,
+            })
+            .expect("an operator denial row");
+        assert_eq!(recorded.as_ref(), Some(location));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `verify` pairs an approval's stated exec location with the next exec
+// result and reports where they disagree.
+// ---------------------------------------------------------------------------
+mod exec_location_disagreements {
+    use tempfile::TempDir;
+    use wirken_audit::{
+        ApprovalScopeKind, ApprovalSource, ExecLocation, SandboxModeLabel, SandboxProvenance,
+        SandboxRuntimeLabel, SessionEvent, SessionId, SessionLog, SqliteSessionLog, TrustLevel,
+    };
+
+    use crate::runtime::exec_location_disagreements;
+
+    const EXEC_ONLY: &str = "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)";
+
+    fn told(mode: SandboxModeLabel, text: &str) -> SessionEvent {
+        SessionEvent::PermissionApproved {
+            action_key: "shell:ls".into(),
+            agent_id: "slackbot".into(),
+            approved_by: "davi".into(),
+            scope: ApprovalScopeKind::OneShot,
+            session_id: None,
+            approved_via: Some(ApprovalSource::Cli),
+            adapter_id: None,
+            sender_id: None,
+            tier: Some("tier2".into()),
+            expires_at: None,
+            exec_location: Some(ExecLocation {
+                mode,
+                text: text.into(),
+            }),
+        }
+    }
+
+    fn ran(sandbox: Option<(SandboxModeLabel, SandboxRuntimeLabel)>) -> SessionEvent {
+        SessionEvent::ToolResult {
+            call_id: "call_ls".into(),
+            tool_name: "exec".into(),
+            output: "bin\n".into(),
+            success: true,
+            sandbox: sandbox.map(|(mode, runtime)| SandboxProvenance {
+                mode,
+                runtime,
+                container_id: None,
+            }),
+            agent_id: "slackbot".into(),
+            adapter_id: None,
+            sender_id: None,
+        }
+    }
+
+    fn check(events: Vec<SessionEvent>) -> Vec<crate::runtime::DivergenceRecord> {
+        let tmp = TempDir::new().unwrap();
+        let log = SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap();
+        let handle = log.handle_for(SessionId::new("slackbot/slack/D0AQ1PPAGEP".to_string()));
+        for e in events {
+            log.append(&handle, TrustLevel::System, e).unwrap();
+        }
+        exec_location_disagreements(&log.get_since(&handle, 0).unwrap())
+    }
+
+    #[test]
+    fn a_container_that_ran_in_a_container_agrees() {
+        let found = check(vec![
+            told(SandboxModeLabel::ExecOnly, EXEC_ONLY),
+            ran(Some((
+                SandboxModeLabel::ExecOnly,
+                SandboxRuntimeLabel::Docker,
+            ))),
+        ]);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_container_that_ran_on_the_host_disagrees() {
+        let found = check(vec![
+            told(SandboxModeLabel::ExecOnly, EXEC_ONLY),
+            ran(Some((SandboxModeLabel::Off, SandboxRuntimeLabel::Host))),
+        ]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, "exec_location");
+        assert_eq!(found[0].seq, 0, "names the approval row");
+        assert_eq!(found[0].expected, EXEC_ONLY);
+        assert!(
+            found[0].found.starts_with("ran under mode off on host"),
+            "{}",
+            found[0].found
+        );
+    }
+
+    #[test]
+    fn the_right_mode_on_the_host_still_disagrees() {
+        // The sandbox failing open: configured exec_only, run on the host.
+        let found = check(vec![
+            told(SandboxModeLabel::ExecOnly, EXEC_ONLY),
+            ran(Some((
+                SandboxModeLabel::ExecOnly,
+                SandboxRuntimeLabel::Host,
+            ))),
+        ]);
+        assert_eq!(found.len(), 1, "{found:?}");
+    }
+
+    #[test]
+    fn a_host_approval_that_ran_on_the_host_agrees() {
+        let found = check(vec![
+            told(SandboxModeLabel::Off, "runs on this host as davi"),
+            ran(Some((SandboxModeLabel::Off, SandboxRuntimeLabel::Host))),
+        ]);
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn nothing_that_ran_has_nothing_to_compare() {
+        assert!(check(vec![told(SandboxModeLabel::ExecOnly, EXEC_ONLY)]).is_empty());
+        assert!(
+            check(vec![told(SandboxModeLabel::ExecOnly, EXEC_ONLY), ran(None)]).is_empty(),
+            "a refused call has no sandbox record"
+        );
+    }
+
+    #[test]
+    fn each_approval_pairs_with_its_own_exec() {
+        let found = check(vec![
+            told(SandboxModeLabel::ExecOnly, EXEC_ONLY),
+            ran(Some((
+                SandboxModeLabel::ExecOnly,
+                SandboxRuntimeLabel::Docker,
+            ))),
+            told(SandboxModeLabel::ExecOnly, EXEC_ONLY),
+            ran(Some((SandboxModeLabel::Off, SandboxRuntimeLabel::Host))),
+            // An exec with no approval before it pairs with nothing.
+            ran(Some((SandboxModeLabel::Off, SandboxRuntimeLabel::Host))),
+        ]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].seq, 2, "the second approval");
     }
 }

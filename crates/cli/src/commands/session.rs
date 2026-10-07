@@ -593,6 +593,16 @@ pub async fn verify(session_id: &str, strict: bool, with_parent: bool) -> Result
                 truncate_for_display(&d.found, 64),
             );
         }
+        for d in report
+            .events_divergent
+            .iter()
+            .filter(|d| d.kind == "exec_location")
+        {
+            println!();
+            println!("  The approval at seq {} told the operator:", d.seq);
+            println!("    {}", d.expected);
+            println!("  and the exec {}.", d.found);
+        }
         if tools_diverged {
             println!();
             println!("  A tools_hash divergence means the tool set rebuilt from today's");

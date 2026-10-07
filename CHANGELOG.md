@@ -48,6 +48,13 @@ tagged.
   pending show`, the webchat card, and the Telegram and Signal
   messages; the `ApprovalRequest` frame carries it in a new
   `execLocation` field. Lyrik's compact prompt is unchanged.
+- The chain records what an `exec` approval prompt said. An operator's
+  `permission_approved` and `permission_denied` rows carry
+  `exec_location`, the sandbox mode and the line shown, beside the
+  result row's record of where the command ran. `wirken sessions
+  verify` pairs each approval with the next `exec` result and reports
+  an `exec_location` divergence, exit `1`, when the mode differs or
+  one says the host and the other a container.
 
 ### Dependencies
 

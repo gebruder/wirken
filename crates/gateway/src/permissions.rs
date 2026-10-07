@@ -1635,6 +1635,7 @@ pub fn approve_and_log_by_key_with_expiry(
                 ApprovalScope::Persisted => Some(approval.expires_at),
                 ApprovalScope::Session { .. } => None,
             },
+            exec_location: None,
         },
     };
     log.append(handle, wirken_audit::TrustLevel::System, event)?;
@@ -1676,6 +1677,7 @@ pub fn emit_operator_approval(
     handle: &wirken_audit::SessionHandle<wirken_audit::OwnSession>,
     adapter_id: Option<&str>,
     sender_id: Option<&str>,
+    exec_location: Option<&wirken_audit::ExecLocation>,
 ) -> Result<(), GatewayError> {
     log.append(
         handle,
@@ -1693,6 +1695,7 @@ pub fn emit_operator_approval(
             // One-shot: nothing was written to the store, so there
             // is no window to name.
             expires_at: None,
+            exec_location: exec_location.cloned(),
         },
     )?;
     Ok(())
@@ -2580,6 +2583,38 @@ mod tier_tests {
     /// list`, and with the `one-shot bypass` the runtime logs on the
     /// same approval.
     #[test]
+    fn an_operator_approval_records_what_the_prompt_said() {
+        use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
+        let audit_tmp = tempfile::NamedTempFile::new().unwrap();
+        let log = SqliteSessionLog::open(audit_tmp.path()).unwrap();
+        let handle = log.handle_for(SessionId::new("slackbot/slack/D0AQ1PPAGEP".to_string()));
+        let told = wirken_audit::ExecLocation {
+            mode: wirken_audit::SandboxModeLabel::ExecOnly,
+            text: "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)".into(),
+        };
+        super::emit_operator_approval(
+            "shell:ls",
+            "slackbot",
+            "davi",
+            wirken_audit::ApprovalSource::Cli,
+            &log,
+            &handle,
+            None,
+            None,
+            Some(&told),
+        )
+        .unwrap();
+        let events = log.get_since(&handle, 0).unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event,
+                SessionEvent::PermissionApproved { exec_location: Some(l), .. } if *l == told
+            )),
+            "{events:?}"
+        );
+    }
+
+    #[test]
     fn emit_operator_approval_records_one_shot_and_stores_nothing() {
         use wirken_audit::{SessionEvent, SessionId, SessionLog, SqliteSessionLog};
         let perms_tmp = tempfile::NamedTempFile::new().unwrap();
@@ -2598,6 +2633,7 @@ mod tier_tests {
             &handle,
             Some("slack"),
             Some("U07P53Y41FF"),
+            None,
         )
         .unwrap();
 
@@ -2804,6 +2840,7 @@ mod tier_tests {
                     sender_id: None,
                     tier: None,
                     expires_at: None,
+                    exec_location: None,
                 },
             )
             .unwrap();
@@ -2843,6 +2880,7 @@ mod tier_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -2878,6 +2916,7 @@ mod tier_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -2895,6 +2934,7 @@ mod tier_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -2915,6 +2955,7 @@ mod tier_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -2953,6 +2994,7 @@ mod tier_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();

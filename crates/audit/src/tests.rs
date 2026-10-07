@@ -1092,6 +1092,7 @@ mod session {
                     denial_reason: None,
                     adapter_id: None,
                     sender_id: None,
+                    exec_location: None,
                 },
             ),
             (
@@ -1344,6 +1345,7 @@ mod session {
                 denial_reason: Some("looks dangerous".into()),
                 adapter_id: None,
                 sender_id: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -1401,6 +1403,7 @@ mod session {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -3146,6 +3149,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             denial_reason: None,
             adapter_id: None,
             sender_id: None,
+            exec_location: None,
         },
         SessionEvent::PermissionApproved {
             action_key: String::new(),
@@ -3158,6 +3162,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             sender_id: None,
             tier: None,
             expires_at: None,
+            exec_location: None,
         },
         SessionEvent::PermissionRevoked {
             action_key: String::new(),
@@ -3617,6 +3622,7 @@ fn find_permission_denials_matches_on_the_logical_agent_id() {
             denial_reason: None,
             adapter_id: None,
             sender_id: None,
+            exec_location: None,
         },
     )
     .unwrap();
@@ -3891,6 +3897,7 @@ fn legacy_view_projects_native_session_payloads_into_detail() {
                 sender_id: Some("U07P53Y41FF".into()),
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();

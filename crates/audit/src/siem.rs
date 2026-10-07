@@ -1135,6 +1135,7 @@ mod identity_tests {
                 sender_id: Some("U123".into()),
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
             SessionEvent::PermissionRenewed {
                 action_key: "shell:ls".into(),
@@ -1159,6 +1160,7 @@ mod identity_tests {
                 denial_reason: Some(LABEL.into()),
                 adapter_id: Some("slack".into()),
                 sender_id: Some("U123".into()),
+                exec_location: None,
             },
             // `actor_id` on a bridged legacy row.
             SessionEvent::AuditLegacy {
@@ -1347,6 +1349,7 @@ mod identity_tests {
                     denial_reason: None,
                     adapter_id: adapter(),
                     sender_id: sender(),
+                    exec_location: None,
                 },
                 Some("slack"),
                 Some("U123"),
@@ -1364,6 +1367,7 @@ mod identity_tests {
                     sender_id: sender(),
                     tier: None,
                     expires_at: None,
+                    exec_location: None,
                 },
                 Some("slack"),
                 Some("U123"),

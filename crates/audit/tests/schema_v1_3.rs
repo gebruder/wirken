@@ -623,6 +623,7 @@ fn snapshot_permission_denied_carries_denial_source_with_optional_tier() {
         denial_reason: None,
         adapter_id: None,
         sender_id: None,
+        exec_location: None,
     };
     let v = to_value(&ev);
     assert_keys_present(&v, &["denial_source"]);

@@ -1125,6 +1125,7 @@ mod replay_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();
@@ -1242,6 +1243,7 @@ mod replay_tests {
                 sender_id: None,
                 tier: None,
                 expires_at: None,
+                exec_location: None,
             },
         )
         .unwrap();

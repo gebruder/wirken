@@ -910,6 +910,11 @@ pub enum SessionEvent {
         /// source and `None` semantics as `adapter_id`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+        /// What the approval prompt told the operator about where the
+        /// `exec` would run, when an operator was asked about one.
+        /// `None` for other tools and for denials no operator saw.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exec_location: Option<ExecLocation>,
     },
     /// Operator approved a Tier 2 action. `scope` distinguishes
     /// SQLite-persisted approvals (the default) from session-scoped
@@ -966,6 +971,13 @@ pub enum SessionEvent {
         /// sentinel rather than a date anything reads.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
+        /// What the approval prompt told the operator about where the
+        /// `exec` would run. The chain records what the operator was
+        /// told as well as what ran; `sessions verify` compares this
+        /// with the next `exec` result's [`SandboxProvenance`] and
+        /// reports a disagreement. `None` for other tools.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exec_location: Option<ExecLocation>,
     },
     /// An approval attempt was refused because the caller had no
     /// authority to make it.

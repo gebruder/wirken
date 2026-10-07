@@ -3273,6 +3273,7 @@ impl Agent {
                         denial_reason: None,
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
+                        exec_location: None,
                     },
                 )?;
                 return Ok(crate::tool::ToolResult {
@@ -3357,6 +3358,7 @@ impl Agent {
                             denial_reason: None,
                             adapter_id: self.current_inbound.adapter_id.clone(),
                             sender_id: self.current_inbound.sender_id.clone(),
+                            exec_location: None,
                         },
                     )?;
                     return Ok(crate::tool::ToolResult {
@@ -3908,6 +3910,7 @@ impl Agent {
                         &self.session_handle,
                         self.current_inbound.adapter_id.as_deref(),
                         self.current_inbound.sender_id.as_deref(),
+                        ctx.exec_location.as_ref(),
                     ) {
                         tracing::warn!(
                             error = %e,
@@ -3985,6 +3988,7 @@ impl Agent {
                         denial_reason,
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
+                        exec_location: ctx.exec_location.clone(),
                     },
                 )?;
                 let output = match reason.as_deref() {
@@ -4023,6 +4027,7 @@ impl Agent {
                         denial_reason: Some(reason),
                         adapter_id: self.current_inbound.adapter_id.clone(),
                         sender_id: self.current_inbound.sender_id.clone(),
+                        exec_location: ctx.exec_location.clone(),
                     },
                 )?;
                 denials.push(ctx);
@@ -4068,6 +4073,7 @@ impl Agent {
                 denial_reason: None,
                 adapter_id: self.current_inbound.adapter_id.clone(),
                 sender_id: self.current_inbound.sender_id.clone(),
+                exec_location: None,
             },
         )?;
         Ok(())
@@ -4831,6 +4837,9 @@ impl Agent {
             .get_since(&self.session_handle, 0)
             .map_err(|e| AgentError::SessionLog(e.to_string()))?;
         let events_total = rows.len();
+        // What the operator was told about an `exec` against where it
+        // ran. Read off the chain alone, so it needs no replay.
+        let exec_location_divergences = exec_location_disagreements(&rows);
 
         // Build a fresh conversation that we'll mutate in lockstep
         // with the replay so each LlmRequest sees the same
@@ -5107,6 +5116,7 @@ impl Agent {
             }
         }
 
+        divergences.extend(exec_location_divergences);
         Ok(VerifyReport {
             events_total,
             events_verified,
@@ -5821,6 +5831,64 @@ impl VerifyReport {
                     | wirken_audit::SessionVerifyResult::Empty
             )
     }
+}
+
+/// Approvals whose prompt said one place for an `exec` while the
+/// command ran in another.
+///
+/// An approval row carrying an [`wirken_audit::ExecLocation`] is paired
+/// with the next `exec` result on the session: an approval is spent on
+/// the very next attempt of the call it was asked about. The two
+/// disagree when the sandbox mode differs, or when one says the host
+/// and the other a container. A result with no sandbox record (a call
+/// refused before dispatch, or a row older than the field) ran
+/// nowhere, so there is nothing to compare.
+pub(crate) fn exec_location_disagreements(
+    rows: &[wirken_audit::StoredSessionEvent],
+) -> Vec<DivergenceRecord> {
+    use wirken_audit::{SandboxModeLabel, SandboxRuntimeLabel, SessionEvent};
+
+    fn label<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_value(value)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    let mut out = Vec::new();
+    let mut told: Option<(u64, wirken_audit::ExecLocation)> = None;
+    for row in rows {
+        match &row.event {
+            SessionEvent::PermissionApproved {
+                exec_location: Some(location),
+                ..
+            } => told = Some((row.seq, location.clone())),
+            SessionEvent::ToolResult {
+                tool_name, sandbox, ..
+            } if tool_name == "exec" => {
+                let (Some((seq, location)), Some(ran)) = (told.take(), sandbox.as_ref()) else {
+                    continue;
+                };
+                let told_host = location.mode == SandboxModeLabel::Off;
+                let ran_host = ran.runtime == SandboxRuntimeLabel::Host;
+                if ran.mode != location.mode || ran_host != told_host {
+                    out.push(DivergenceRecord {
+                        seq,
+                        kind: "exec_location".to_string(),
+                        expected: location.text,
+                        found: format!(
+                            "ran under mode {} on {} (seq {})",
+                            label(&ran.mode),
+                            label(&ran.runtime),
+                            row.seq
+                        ),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// One mismatch encountered by [`Agent::verify`].

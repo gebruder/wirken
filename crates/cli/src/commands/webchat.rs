@@ -6011,6 +6011,7 @@ mod tests {
                     denial_reason: Some("approval timeout".into()),
                     adapter_id: None,
                     sender_id: None,
+                    exec_location: None,
                 },
             ),
             (
@@ -6077,6 +6078,7 @@ mod tests {
                     sender_id: None,
                     tier: Some("tier2".into()),
                     expires_at: Some(stamp("2026-10-20T00:00:00Z")),
+                    exec_location: None,
                 },
             ),
             (

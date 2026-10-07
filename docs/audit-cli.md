@@ -87,6 +87,14 @@ what was granted and for how long without a lookup against the store:
 {"kind":"permission_approved","action_key":"shell:ls","agent_id":"default","approved_by":"operator","scope":"persisted","approved_via":{"kind":"stdin"},"adapter_id":"slack","sender_id":"U04ABCD9","tier":"tier2","expires_at":"2026-10-21T09:00:00Z"}
 ```
 
+For an `exec`, an operator's approval and an operator's denial
+(`denied_via` set) also carry `exec_location`: the sandbox mode and the
+exact line the approval prompt showed.
+
+```json
+"exec_location":{"mode":"exec_only","text":"runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)"}
+```
+
 `permission_revoked` is the operator taking one back:
 
 ```json
@@ -381,6 +389,16 @@ recorded call was refused as well, the two agree and the row verifies. If the
 recorded read succeeded, it ran under permissions that no longer hold, and
 the row is unverifiable, reported as `reads not re-executed (policy now
 refuses this path)`.
+
+An approval for an `exec` records what the prompt told the operator about
+where the command would run (`exec_location`, below), and the result row
+records where it ran (`sandbox`). `verify` pairs each such approval with the
+next `exec` result in the session and reports an `exec_location` divergence
+when they disagree: a different sandbox mode, or the host on one side and a
+container on the other. Both lines are printed in full. A result with no
+`sandbox` record ran nowhere and is not compared. The network part of the
+prompt is not on the result row, so only the mode and the host-or-container
+question are checked.
 
 Exit codes: `3` broken chain, `1` divergences, `6` a `tools_hash` that could
 not be recomputed, `2` unverifiable under `--strict`, `5` cross-check
