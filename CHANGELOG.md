@@ -31,6 +31,10 @@ tagged.
   task (adapters, webchat, orchestrator, permissions, hooks) is now
   tracked, aborted and waited out before the seal. A turn cut this way
   stops where it was waiting, as it would in a crash.
+- An agent reply's `message.outbound` row is written after the reply
+  is handed to the adapter, not before. A send that failed, as to an
+  adapter that had already exited, still left a row saying the reply
+  went out. Pushes already recorded only after a successful write.
 
 ### Dependencies
 

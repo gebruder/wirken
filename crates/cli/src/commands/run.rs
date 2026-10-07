@@ -3078,6 +3078,28 @@ async fn write_orchestrator_response(
     Ok(())
 }
 
+/// Hand the agent's reply to the adapter, then record it.
+///
+/// `message.outbound` says the gateway gave the reply to the adapter,
+/// so it is written once the write has succeeded. A write that fails
+/// leaves no row and ends the connection, as it did before; the
+/// reply itself is on the session chain as the assistant message.
+async fn send_reply_then_record<A: capnp::message::Allocator>(
+    writer: &Mutex<IpcFrameWriter>,
+    audit: &AuditWriter,
+    reply: &capnp::message::Builder<A>,
+    outbound_event: AuditEvent,
+) -> Result<()> {
+    writer
+        .lock()
+        .await
+        .write_message(reply)
+        .await
+        .context("Failed to send outbound to adapter")?;
+    audit.log(outbound_event).await?;
+    Ok(())
+}
+
 /// Main message loop: read inbound from adapter, route to agent, send response back.
 ///
 /// `authenticated_channel` is the channel string the adapter is
@@ -3498,19 +3520,15 @@ async fn message_loop(
                 // `target` field stays a stable resource handle and the
                 // body lives under `detail.content`.
                 let outbound_target = format!("{channel}:out:{}", uuid::Uuid::new_v4());
-                audit
-                    .log(
-                        AuditEvent::new(
-                            ActorKind::Agent,
-                            &agent_id,
-                            "message.outbound",
-                            &outbound_target,
-                        )
-                        .with_channel(&channel)
-                        .with_session(&conversation_id)
-                        .with_detail(serde_json::json!({ "content": &response })),
-                    )
-                    .await?;
+                let outbound_event = AuditEvent::new(
+                    ActorKind::Agent,
+                    &agent_id,
+                    "message.outbound",
+                    &outbound_target,
+                )
+                .with_channel(&channel)
+                .with_session(&conversation_id)
+                .with_detail(serde_json::json!({ "content": &response }));
 
                 // Send response back to adapter. `reply_to_id`
                 // carries the inbound's thread root (Slack's
@@ -3542,10 +3560,7 @@ async fn message_loop(
                     ));
                 }
 
-                let mut w = writer.lock().await;
-                w.write_message(&reply)
-                    .await
-                    .context("Failed to send outbound to adapter")?;
+                send_reply_then_record(&writer, &audit, &reply, outbound_event).await?;
             }
 
             InboundAction::Heartbeat(seq) => {
@@ -4771,5 +4786,92 @@ mod orchestrator_delivery_tests {
         let resp = push(None, Duration::from_millis(100)).await;
         assert!(resp.ok);
         assert_eq!(resp.delivery, Some(DeliveryStatus::Unknown));
+    }
+}
+
+/// The reply's `message.outbound` row follows a successful send, and
+/// a failed send leaves none.
+#[cfg(test)]
+mod reply_outbound_tests {
+    use super::send_reply_then_record;
+    use tokio::sync::Mutex;
+    use wirken_audit::{ActorKind, AuditEvent, AuditLog, AuditQuery, AuditWriter};
+    use wirken_ipc::wirken_capnp::frame;
+    use wirken_ipc::{split_stream, test_pair};
+
+    fn reply() -> capnp::message::Builder<capnp::message::HeapAllocator> {
+        let mut reply = capnp::message::Builder::new_default();
+        {
+            let fb = reply.init_root::<frame::Builder<'_>>();
+            let mut outbound = fb.init_outbound();
+            outbound.set_conversation_id("D0AQ1PPAGEP");
+            outbound.set_text("the reply");
+        }
+        reply
+    }
+
+    fn event() -> AuditEvent {
+        AuditEvent::new(
+            ActorKind::Agent,
+            "slackbot",
+            "message.outbound",
+            "slack:out:test",
+        )
+        .with_channel("slack")
+    }
+
+    /// Run one send against a peer that is open or already gone, and
+    /// return the result and the `message.outbound` rows recorded.
+    async fn send(peer_open: bool) -> (anyhow::Result<()>, usize) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = tmp.path().join("audit.db");
+        let (audit, audit_task) = AuditWriter::new(&db).unwrap();
+
+        let (gateway_end, adapter_end) = test_pair().unwrap();
+        let (_gateway_reader, gateway_writer) = split_stream(gateway_end);
+        let (mut adapter_reader, adapter_writer) = split_stream(adapter_end);
+        if !peer_open {
+            drop(adapter_reader);
+            drop(adapter_writer);
+            let result =
+                send_reply_then_record(&Mutex::new(gateway_writer), &audit, &reply(), event())
+                    .await;
+            drop(audit);
+            audit_task.await.unwrap();
+            return (result, outbound_rows(&db));
+        }
+        let result =
+            send_reply_then_record(&Mutex::new(gateway_writer), &audit, &reply(), event()).await;
+        adapter_reader
+            .read_message()
+            .await
+            .expect("the adapter got the frame");
+        drop(audit);
+        audit_task.await.unwrap();
+        (result, outbound_rows(&db))
+    }
+
+    fn outbound_rows(db: &std::path::Path) -> usize {
+        AuditLog::open(db)
+            .unwrap()
+            .query(&AuditQuery::default())
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event.action == "message.outbound")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_sent_reply_is_recorded() {
+        let (result, rows) = send(true).await;
+        assert!(result.is_ok());
+        assert_eq!(rows, 1);
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_could_not_be_sent_is_not_recorded() {
+        let (result, rows) = send(false).await;
+        assert!(result.is_err(), "the write to a closed adapter fails");
+        assert_eq!(rows, 0, "no row claims a reply that never left");
     }
 }
