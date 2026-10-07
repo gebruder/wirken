@@ -11,8 +11,12 @@ pub struct PermissionDenialContext {
     pub action: Action,
     /// The tier required for this action.
     pub requested_tier: PermissionTier,
-    /// The agent that attempted the action.
+    /// The agent that attempted the action: the logical agent id, as
+    /// every audit row carries it. Not a session id.
     pub agent_id: String,
+    /// The session the call is on, `{agent}/{channel}/{conversation}`.
+    /// What a surface keys a per-conversation stream or a decision on.
+    pub session_id: String,
     /// The inbound user message that triggered the agent's tool call attempt.
     pub trigger_message: Option<String>,
     /// The arguments the model sent for this call, as it sent them.

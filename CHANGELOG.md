@@ -35,6 +35,16 @@ tagged.
   is handed to the adapter, not before. A send that failed, as to an
   adapter that had already exited, still left a row saying the reply
   went out. Pushes already recorded only after a successful write.
+- Webchat approvals reach the page. From 1.20.0 through 1.27.0 every
+  approval raised on webchat failed closed without being shown: the
+  approval context's `agent_id` became the logical agent id in 1.20.0,
+  and the webchat gate kept looking the page's stream up by it, under
+  a key no stream is registered by. The context and the pending queue
+  now carry the call's `session_id`, and the gate, the restored cards,
+  the per-conversation filter, and the decision route's ownership
+  check use it. Pending requests from other channels also showed as
+  channel `unknown` in webchat's "awaiting elsewhere" count; they show
+  their channel again.
 
 ### Changed
 

@@ -4742,6 +4742,7 @@ fn denial_context_display() {
         arguments: None,
         assistant_text: None,
         exec_location: None,
+        session_id: String::new(),
     };
 
     let display = format!("{ctx}");
@@ -12733,5 +12734,132 @@ mod exec_location_disagreements {
         ]);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].seq, 2, "the second approval");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A webchat approval reaches the page. The context is built by the
+// runtime, for an agent shaped the way the factory wakes a webchat one:
+// the session id as `Agent::id`, the logical agent id set apart. The
+// gate's own tests build the context by hand, and from 1.20.0 to 1.27.0
+// they passed on a shape the runtime had stopped producing.
+// ---------------------------------------------------------------------------
+mod webchat_approval_reaches_the_page {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+    use wirken_audit::{SessionId, SessionLog, SqliteSessionLog};
+    use wirken_gateway::pending_approvals::{PendingApprovalQueue, PendingDecision};
+    use wirken_gateway::sse_approval_registry::{SseApprovalRegistry, SseEvent};
+
+    use crate::llm::LlmConfig;
+    use crate::sse_approval_gate::SseApprovalGate;
+
+    const SESSION: &str = "default/webchat/webchat-default";
+
+    #[tokio::test]
+    async fn an_exec_from_webchat_reaches_the_stream_and_the_queue() {
+        let (base_url, server) = super::approved_unknown_tool::stub(vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "Listing it.",
+                "tool_calls": [{
+                    "id": "call_ls",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{\"command\": \"ls ~\"}"},
+                }],
+            }),
+            serde_json::json!({"role": "assistant", "content": "Not allowed."}),
+        ])
+        .await;
+
+        let tmp = TempDir::new().unwrap();
+        let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
+        let mut agent = crate::runtime::Agent::new(
+            SESSION.to_string(),
+            tmp.path().to_path_buf(),
+            LlmConfig {
+                provider: "custom".into(),
+                model: "stub".into(),
+                base_url,
+                max_tokens: 256,
+                temperature: 0.0,
+                region: None,
+                tools_enabled: true,
+                context_window: 32_000,
+            },
+            Some("unused".into()),
+            None,
+            log as Arc<dyn SessionLog>,
+        )
+        .unwrap();
+        // What `AgentFactory::wake` does: the config key the agent was
+        // looked up under, which is what every audit row carries.
+        agent.set_agent_id("default");
+        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+            wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
+                .unwrap(),
+        )));
+
+        // What /api/chat does on entry: a stream registered under the
+        // turn's session id.
+        let queue = Arc::new(PendingApprovalQueue::new());
+        let registry = Arc::new(SseApprovalRegistry::new());
+        let (tx, mut rx) = mpsc::channel::<SseEvent>(8);
+        registry.register(SessionId::new(SESSION.to_string()), tx);
+        agent.set_approval_gate(Arc::new(SseApprovalGate::with_timeout(
+            queue.clone(),
+            registry,
+            Duration::from_secs(30),
+        )));
+
+        let turn = tokio::spawn(async move {
+            agent
+                .process_message("what is in my home directory?", "msg-1".into())
+                .await
+        });
+
+        let event = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the card reaches the page instead of the gate failing closed")
+            .expect("an event");
+        let request_id = match event {
+            SseEvent::ApprovalRequest {
+                request_id,
+                tool_name,
+                exec_location,
+                ..
+            } => {
+                assert_eq!(tool_name, "exec");
+                assert_eq!(
+                    exec_location.as_deref(),
+                    Some(
+                        "runs in sandbox container (exec_only, read-only root, workspace at /workspace, no network)"
+                    )
+                );
+                request_id
+            }
+            other => panic!("expected ApprovalRequest, got {other:?}"),
+        };
+        let entry = queue
+            .show(&request_id)
+            .expect("the request is in the queue");
+        assert_eq!(
+            entry.session_id, SESSION,
+            "the page finds it by its session"
+        );
+        assert_eq!(entry.agent_id, "default");
+
+        queue.resolve(
+            &request_id,
+            PendingDecision::Deny {
+                reason: None,
+                actor: Some("webchat".into()),
+            },
+        );
+        turn.await.unwrap().expect("the turn ends with a reply");
+        server.await.unwrap();
     }
 }

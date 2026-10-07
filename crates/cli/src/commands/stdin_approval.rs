@@ -673,6 +673,7 @@ mod tests {
             arguments: arguments.map(str::to_string),
             assistant_text: said.map(str::to_string),
             exec_location: None,
+            session_id: String::new(),
         }
     }
 

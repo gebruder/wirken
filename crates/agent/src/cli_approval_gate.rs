@@ -64,6 +64,7 @@ impl ApprovalGate for CliApprovalGate {
     async fn request_approval(&self, ctx: &PermissionDenialContext) -> ApprovalOutcome {
         let request = PendingRequest {
             agent_id: ctx.agent_id.clone(),
+            session_id: ctx.session_id.clone(),
             tool_name: ctx.tool_name.clone(),
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
@@ -133,6 +134,7 @@ mod tests {
             arguments: None,
             assistant_text: None,
             exec_location: None,
+            session_id: String::new(),
         }
     }
 

@@ -56,7 +56,11 @@ pub enum PendingDecision {
 /// `PermissionDenialContext` plus a minted timestamp.
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
+    /// The logical agent id, for display.
     pub agent_id: String,
+    /// The session the request was raised on. What a surface matches a
+    /// request to a conversation or a channel by.
+    pub session_id: String,
     pub tool_name: String,
     pub action_key: String,
     pub requested_tier: String,
@@ -98,6 +102,7 @@ pub enum ResolveResult {
 pub struct PendingDetail {
     pub request_id: String,
     pub agent_id: String,
+    pub session_id: String,
     pub tool_name: String,
     pub action_key: String,
     pub requested_tier: String,
@@ -116,6 +121,7 @@ pub struct PendingDetail {
 pub struct PendingSummary {
     pub request_id: String,
     pub agent_id: String,
+    pub session_id: String,
     pub tool_name: String,
     pub action_key: String,
     pub requested_tier: String,
@@ -235,6 +241,7 @@ impl PendingApprovalQueue {
             .map(|(id, e)| PendingSummary {
                 request_id: id.clone(),
                 agent_id: e.request.agent_id.clone(),
+                session_id: e.request.session_id.clone(),
                 tool_name: e.request.tool_name.clone(),
                 action_key: e.request.action_key.clone(),
                 requested_tier: e.request.requested_tier.clone(),
@@ -254,6 +261,7 @@ impl PendingApprovalQueue {
         Some(PendingDetail {
             request_id: request_id.to_string(),
             agent_id: e.request.agent_id.clone(),
+            session_id: e.request.session_id.clone(),
             tool_name: e.request.tool_name.clone(),
             action_key: e.request.action_key.clone(),
             requested_tier: e.request.requested_tier.clone(),
@@ -289,6 +297,7 @@ mod tests {
             assistant_text: None,
             arguments: None,
             exec_location: None,
+            session_id: String::new(),
         }
     }
 

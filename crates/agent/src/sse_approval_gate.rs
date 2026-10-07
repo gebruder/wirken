@@ -98,19 +98,16 @@ impl ApprovalGate for SseApprovalGate {
         // the absence path is checked so a future webchat
         // architecture change doesn't silently lose decisions.
         //
-        // The key is `ctx.agent_id` verbatim. On this surface the
-        // agent is always woken through `AgentFactory::wake`, which
-        // passes the canonical session id from `session_id_for` as
-        // `Agent::id`, and `dispatch_tool` clones that into
-        // `agent_id`. Deriving a session id here instead — by
-        // appending the channel and conversation segments the value
-        // already carries — produced a key the /api/chat handler
-        // never registers, so every lookup missed and every Tier 3
-        // call on webchat became a silent deny-by-timeout.
-        let session_id = wirken_audit::SessionId::new(ctx.agent_id.clone());
+        // The key is `ctx.session_id`, the session /api/chat registers
+        // its stream under. Not `ctx.agent_id`: that is the logical
+        // agent id ("default"), which no stream is registered under,
+        // so keying on it missed every lookup and made every webchat
+        // approval a silent fail-closed.
+        let session_id = wirken_audit::SessionId::new(ctx.session_id.clone());
         let Some(sender) = self.registry.sender_for(&session_id) else {
             tracing::warn!(
                 agent = %ctx.agent_id,
+                session = %ctx.session_id,
                 tool = %ctx.tool_name,
                 "sse approval gate: no live SSE stream for session; failing closed. \
                  (NeedsApproval should only fire mid-/api/chat which registers a sender.)"
@@ -120,6 +117,7 @@ impl ApprovalGate for SseApprovalGate {
 
         let request = PendingRequest {
             agent_id: ctx.agent_id.clone(),
+            session_id: ctx.session_id.clone(),
             tool_name: ctx.tool_name.clone(),
             action_key: ctx.action.approval_key(),
             requested_tier: ctx.requested_tier.label().to_string(),
@@ -205,13 +203,14 @@ mod tests {
                 pattern: name.into(),
             },
             requested_tier: PermissionTier::Tier2,
-            // What the runtime actually puts here. `Agent::id` on
-            // the webchat path is the canonical session id built by
-            // `session_id_for`, not a bare agent id, and
-            // `dispatch_tool` clones it straight into this field.
-            // A fixture holding "default" made every test in this
-            // module agree with a gate that reconstructed the id.
-            agent_id: "default/webchat/webchat-default".into(),
+            // The shape the runtime builds: the logical agent id, and
+            // the session the call is on. This fixture used to hold the
+            // session id in `agent_id`, which the runtime stopped
+            // producing in 3309846; the tests agreed with each other and
+            // not with the runtime. `exec_location_reaches_the_gate` in
+            // `tests.rs` builds the context through the runtime.
+            agent_id: "default".into(),
+            session_id: "default/webchat/webchat-default".into(),
             trigger_message: Some("clean logs".into()),
             arguments: None,
             assistant_text: None,
@@ -402,7 +401,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(tool_name, "exec");
-                assert_eq!(triggering_agent, "default/webchat/webchat-default");
+                assert_eq!(triggering_agent, "default");
                 request_id.clone()
             }
             other => panic!("expected ApprovalRequest, got {other:?}"),
@@ -477,16 +476,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lookup_uses_the_denial_context_id_verbatim() {
-        // The gate must look the sender up under exactly the id the
-        // /api/chat handler registered. It previously appended
-        // "/webchat/webchat-default" to `ctx.agent_id`, which on the
-        // real path is already a full session id; the lookup missed
-        // every time and the browser never received a card.
-        // Registering under an id that is not the module's default
-        // literal is what makes reconstruction observable: any
-        // formatting applied to `ctx.agent_id` produces a key that
-        // is not this one.
+    async fn lookup_uses_the_denial_context_session_id_verbatim() {
+        // The gate must look the sender up under exactly the session
+        // id the /api/chat handler registered, `ctx.session_id`, and
+        // not under anything derived from `ctx.agent_id`. Registering
+        // under an id that is not the module's default literal is what
+        // makes a reconstruction observable.
         let session = "other-agent/webchat/webchat-default";
         let queue = Arc::new(PendingApprovalQueue::new());
         let registry = Arc::new(SseApprovalRegistry::new());
@@ -494,7 +489,8 @@ mod tests {
         registry.register(wirken_audit::SessionId::new(session.to_string()), tx);
 
         let mut c = ctx("read_imported_chat");
-        c.agent_id = session.to_string();
+        c.agent_id = "other-agent".to_string();
+        c.session_id = session.to_string();
 
         let gate = SseApprovalGate::new(queue.clone(), registry);
         let gate_task = tokio::spawn(async move { gate.request_approval(&c).await });
@@ -509,7 +505,7 @@ mod tests {
                 triggering_agent,
                 ..
             } => {
-                assert_eq!(triggering_agent, session);
+                assert_eq!(triggering_agent, "other-agent");
                 queue.resolve(
                     &request_id,
                     PendingDecision::Deny {

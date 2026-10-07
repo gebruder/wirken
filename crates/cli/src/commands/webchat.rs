@@ -3733,7 +3733,7 @@ fn events_route_allowed(session_id: &str) -> bool {
 fn approval_belongs_to_webchat(queue: &PendingApprovalQueue, request_id: &str) -> Option<bool> {
     queue
         .show(request_id)
-        .map(|d| session_channel(&d.agent_id) == Some("webchat"))
+        .map(|d| session_channel(&d.session_id) == Some("webchat"))
 }
 
 /// Whether a pending approval was raised in the given webchat session.
@@ -3743,7 +3743,7 @@ fn approval_belongs_to_conversation(
     request_id: &str,
     session_id: &str,
 ) -> Option<bool> {
-    queue.show(request_id).map(|d| d.agent_id == session_id)
+    queue.show(request_id).map(|d| d.session_id == session_id)
 }
 
 /// The list rows the page draws its rail from: each active session
@@ -3839,10 +3839,10 @@ fn approvals_snapshot_for(
     let mut elsewhere = Vec::new();
     let mut by_channel: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
     for entry in queue.list() {
-        if session_channel(&entry.agent_id) == Some("webchat") {
-            if viewing.as_deref().is_some_and(|v| v != entry.agent_id) {
+        if session_channel(&entry.session_id) == Some("webchat") {
+            if viewing.as_deref().is_some_and(|v| v != entry.session_id) {
                 elsewhere.push(json!({
-                    "conversation": conversation_of(&entry.agent_id),
+                    "conversation": conversation_of(&entry.session_id),
                     "requested_tier": entry.requested_tier,
                     "requested_at": entry.requested_at.to_rfc3339(),
                     "age_seconds": entry.age_seconds,
@@ -3856,7 +3856,9 @@ fn approvals_snapshot_for(
             let location = detail.and_then(|d| d.exec_location);
             mine.push(json!({
                 "request_id": entry.request_id,
-                "agent_id": entry.agent_id,
+                // The page keys a restored card to its conversation by
+                // this field, so it carries the session id.
+                "agent_id": entry.session_id,
                 "tool_name": entry.tool_name,
                 "action_key": entry.action_key,
                 "requested_tier": entry.requested_tier,
@@ -3874,7 +3876,7 @@ fn approvals_snapshot_for(
                 "exec_location": location,
             }));
         } else {
-            let channel = session_channel(&entry.agent_id)
+            let channel = session_channel(&entry.session_id)
                 .unwrap_or("unknown")
                 .to_string();
             *by_channel.entry(channel).or_insert(0) += 1;
@@ -6426,9 +6428,12 @@ mod tests {
         assert!(HTML.contains(".tool-row .glyph.neutral { color: var(--accent-300); }"));
     }
 
-    fn pending(agent_id: &str, trigger: &str) -> wirken_gateway::pending_approvals::PendingRequest {
+    fn pending(
+        session_id: &str,
+        trigger: &str,
+    ) -> wirken_gateway::pending_approvals::PendingRequest {
         wirken_gateway::pending_approvals::PendingRequest {
-            agent_id: agent_id.into(),
+            agent_id: "default".into(),
             tool_name: "exec".into(),
             action_key: "shell:psql".into(),
             requested_tier: "tier3".into(),
@@ -6436,6 +6441,7 @@ mod tests {
             assistant_text: None,
             arguments: None,
             exec_location: None,
+            session_id: session_id.into(),
         }
     }
 

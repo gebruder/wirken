@@ -504,6 +504,11 @@ impl SandboxEgressContext {
             },
             requested_tier: wirken_gateway::permissions::PermissionTier::Tier3,
             agent_id: self.attribution.agent_id.clone(),
+            session_id: self
+                .audit
+                .as_ref()
+                .map(|a| a.handle.id().to_string())
+                .unwrap_or_default(),
             trigger_message: Some(format!(
                 "sandbox egress to {host}:{port} after reading {}",
                 basis.join(", ")

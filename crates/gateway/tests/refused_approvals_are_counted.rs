@@ -53,6 +53,7 @@ fn pending(queue: &PendingApprovalQueue) -> String {
         assistant_text: None,
         arguments: None,
         exec_location: None,
+        session_id: SESSION.to_string(),
     });
     id
 }
