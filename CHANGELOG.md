@@ -52,6 +52,20 @@ tagged.
   and SHA-256 of its message, never the message itself. What a restart
   loses, and on which platforms it can forward a message twice, is in
   `docs/channels.md`.
+- An inbound message with an empty platform id is never taken for a repeat
+  of the one before it. Teams and WhatsApp send an empty id when the
+  platform supplies none, and the agent's repeat check compared ids as
+  given, so of two such messages in a row the second was answered with the
+  first one's stored reply instead of running a turn.
+- A WhatsApp webhook POST is answered with 200 once its signature checks
+  out, before the message is forwarded to the gateway, as Teams does. The
+  200 used to follow the forward, so a slow gateway held Meta's request
+  open, and a kill between the two left Meta a POST to retry, which the
+  restarted adapter forwarded a second time.
+- A Matrix sync response that does not parse, or has no `next_batch`, is
+  retried from the same sync token. The token used to be cleared, so the
+  next request was an initial sync and recent DMs and mentions were
+  forwarded again.
 
 ## [1.28.0] - 2026-10-08
 
