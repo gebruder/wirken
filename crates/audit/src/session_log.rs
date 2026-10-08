@@ -3081,7 +3081,7 @@ impl SqliteSessionLog {
             }
 
             // Decode the signing key and signature.
-            let pk_bytes = match decode_hex(&signing_key_id.0) {
+            let pk_bytes = match crate::hex::decode(&signing_key_id.0) {
                 Ok(b) if b.len() == 32 => b,
                 _ => {
                     result.first_invalid = Some(InvalidSignatureDetail {
@@ -3106,7 +3106,7 @@ impl SqliteSessionLog {
                 }
             };
 
-            let sig_bytes = match decode_hex(&signature.0) {
+            let sig_bytes = match crate::hex::decode(&signature.0) {
                 Ok(b) if b.len() == 64 => b,
                 _ => {
                     result.first_invalid = Some(InvalidSignatureDetail {
@@ -3855,16 +3855,6 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
         write!(&mut s, "{b:02x}").expect("write to String");
     }
     s
-}
-
-fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
 }
 
 fn trust_to_str(t: TrustLevel) -> &'static str {

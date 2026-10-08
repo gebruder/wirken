@@ -122,7 +122,7 @@ impl AuditSigningKey {
                 secret_path.display()
             ))
         })?;
-        let bytes = hex_decode(hex.trim()).map_err(|e| {
+        let bytes = crate::hex::decode(hex.trim()).map_err(|e| {
             AuditError::SiemConfig(format!(
                 "decode audit signing key {}: {e}",
                 secret_path.display()
@@ -336,16 +336,6 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("hex decode: {e}")))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +354,17 @@ mod tests {
         let a = AuditSigningKey::load_or_create(tmp.path()).unwrap();
         let b = AuditSigningKey::load_or_create(tmp.path()).unwrap();
         assert_eq!(a.public_key_bytes(), b.public_key_bytes());
+    }
+
+    #[test]
+    fn load_from_rejects_non_ascii_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit-signing.key");
+        std::fs::write(&path, "a\u{e9}a").unwrap();
+        let err = AuditSigningKey::load_from(&path)
+            .err()
+            .expect("non-ASCII key file is an error");
+        assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
     }
 
     #[test]

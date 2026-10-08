@@ -10,6 +10,13 @@ tagged.
 
 ## [Unreleased]
 
+### Fixed
+
+- `wirken audit verify` reports a chain head whose signature or
+  signing key field is not ASCII hex as an invalid signature at that
+  head, through `first_invalid`, and exits 1. Such a field panicked
+  the verifier.
+
 ## [1.28.0] - 2026-10-08
 
 ### Fixed

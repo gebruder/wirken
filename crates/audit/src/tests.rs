@@ -2550,6 +2550,59 @@ mod chain_head_signing {
         }
     }
 
+    /// A ChainHead whose signature field holds non-ASCII text, with the
+    /// row's hashes recomputed so the chain check passes, is reported
+    /// as an invalid signature at that head. `"a\u{e9}a"` is four bytes
+    /// with a character spanning offsets 1..3.
+    #[test]
+    fn non_ascii_signature_hex_is_reported_as_first_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("audit.db");
+        let signer = Arc::new(AuditSigningKey::generate());
+        let log = AuditLog::open_with_signer(&db_path, signer.clone()).unwrap();
+        let inner = log.session_log();
+        let handle = inner.handle_for(SessionId::new("non-ascii-sig"));
+        inner
+            .append(&handle, TrustLevel::User, user_msg("first"))
+            .unwrap();
+
+        let conn = inner.raw_conn_for_test().lock().unwrap();
+        let (id, payload, prev_hash): (i64, String, String) = conn
+            .query_row(
+                "SELECT id, payload, prev_hash FROM session_events
+                 WHERE session_id = 'non-ascii-sig' AND seq = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let mut payload_json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        payload_json["signature"] = serde_json::Value::String("a\u{e9}a".into());
+        let new_payload = serde_json::to_string(&payload_json).unwrap();
+        let new_leaf = sha256_hex(new_payload.as_bytes());
+        let new_chain = chain_hash(&prev_hash, &new_leaf);
+        conn.execute(
+            "UPDATE session_events
+             SET payload = ?1, leaf_hash = ?2, hash = ?3
+             WHERE id = ?4",
+            params![new_payload, new_leaf, new_chain, id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sigres = inner.verify_signatures(&handle).unwrap();
+        let detail = sigres.first_invalid.expect("first_invalid is set");
+        assert_eq!(detail.seq, 1);
+        assert_eq!(detail.reason, "signature is not 64 bytes of hex");
+
+        match log.verify().unwrap() {
+            VerifyResult::SignatureInvalid { seq, reason, .. } => {
+                assert_eq!(seq, 1);
+                assert_eq!(reason, "signature is not 64 bytes of hex");
+            }
+            other => panic!("expected SignatureInvalid, got {other:?}"),
+        }
+    }
+
     /// Removing every ChainHead row from a session is a hard fail
     /// under --require-signed. Without --require-signed the verifier
     /// reports the session as transition-era.

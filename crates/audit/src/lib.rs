@@ -1,6 +1,7 @@
 pub mod alarm_log;
 mod error;
 mod event;
+pub mod hex;
 mod legacy_compat;
 mod log;
 pub mod otel_exporter;
