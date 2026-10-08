@@ -160,36 +160,12 @@ impl MatrixAdapter {
         let mut since: Option<String> = None;
 
         loop {
-            let mut sync_url = format!(
-                "{}/_matrix/client/v3/sync?timeout=30000",
-                self.homeserver_url
-            );
-            if let Some(ref token) = since {
-                sync_url.push_str(&format!("&since={token}"));
-            }
-
-            let resp = http
-                .get(&sync_url)
-                .header("Authorization", format!("Bearer {access_token}"))
-                .send()
-                .await;
-
-            let sync_json: serde_json::Value = match resp {
-                Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
-                Ok(r) => {
-                    let status = r.status();
-                    tracing::warn!("Sync returned {status}, retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-                Err(e) => {
-                    tracing::error!("Sync error: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
+            let Some(sync_json) =
+                sync_once(&http, &self.homeserver_url, &access_token, &mut since).await
+            else {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
             };
-
-            since = sync_json["next_batch"].as_str().map(|s| s.to_string());
 
             // Process room events
             if let Some(rooms) = sync_json["rooms"]["join"].as_object() {
@@ -303,6 +279,56 @@ pub(crate) fn is_room_dm(summary: &serde_json::Value) -> bool {
         .get("m.joined_member_count")
         .and_then(|v| v.as_i64())
         .is_some_and(|n| n == 2)
+}
+
+/// One `/sync` request from `since`. A response that parses and names
+/// its `next_batch` moves `since` there and comes back to be processed.
+/// Anything else, a failed request, a non-2xx status, a body that does
+/// not parse or has no `next_batch`, comes back as `None` with `since`
+/// where it was, so the caller retries from the same token rather than
+/// falling back to an initial sync, which replays recent messages.
+pub(crate) async fn sync_once(
+    http: &reqwest::Client,
+    homeserver_url: &str,
+    access_token: &str,
+    since: &mut Option<String>,
+) -> Option<serde_json::Value> {
+    let mut sync_url = format!("{homeserver_url}/_matrix/client/v3/sync?timeout=30000");
+    if let Some(token) = since.as_deref() {
+        sync_url.push_str(&format!("&since={token}"));
+    }
+
+    let resp = http
+        .get(&sync_url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await;
+
+    let body: serde_json::Value = match resp {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(body) => body,
+            Err(e) => {
+                tracing::warn!("Sync body did not parse, retrying from the same token: {e}");
+                return None;
+            }
+        },
+        Ok(r) => {
+            let status = r.status();
+            tracing::warn!("Sync returned {status}, retrying");
+            return None;
+        }
+        Err(e) => {
+            tracing::error!("Sync error: {e}");
+            return None;
+        }
+    };
+
+    let Some(next_batch) = body["next_batch"].as_str() else {
+        tracing::warn!("Sync response has no next_batch, retrying from the same token");
+        return None;
+    };
+    *since = Some(next_batch.to_string());
+    Some(body)
 }
 
 /// Parse a sync timeline event into a MatrixInbound.

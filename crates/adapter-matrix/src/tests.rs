@@ -737,3 +737,106 @@ fn classify_send_error_falls_back_to_http_when_no_errcode() {
         "matrix_api_error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sync token
+// ---------------------------------------------------------------------------
+
+/// A homeserver on a loopback port that answers each `/sync` with the
+/// next of `bodies` (status 200) and records each request line.
+async fn scripted_homeserver(
+    bodies: Vec<&'static str>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0, "request ended before its headers");
+                request.extend_from_slice(&buf[..n]);
+            }
+            let line = String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            log.lock().unwrap().push(line);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    (base, seen)
+}
+
+/// A sync body that does not parse, or parses without a `next_batch`,
+/// leaves the token where it was, and the next request asks from it.
+/// Resetting it would turn the next request into an initial sync, which
+/// replays recent messages.
+#[tokio::test]
+async fn a_sync_body_that_does_not_parse_keeps_the_since_token() {
+    let (base, seen) = scripted_homeserver(vec![
+        r#"{"next_batch":"s1","rooms":{}}"#,
+        "<html>gateway timeout</html>",
+        r#"{"rooms":{}}"#,
+        r#"{"next_batch":"s2","rooms":{}}"#,
+    ])
+    .await;
+    let http = reqwest::Client::new();
+    let mut since = None;
+
+    assert!(
+        crate::adapter::sync_once(&http, &base, "t", &mut since)
+            .await
+            .is_some()
+    );
+    assert_eq!(since.as_deref(), Some("s1"));
+
+    assert!(
+        crate::adapter::sync_once(&http, &base, "t", &mut since)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        since.as_deref(),
+        Some("s1"),
+        "an unparseable body keeps the token"
+    );
+
+    assert!(
+        crate::adapter::sync_once(&http, &base, "t", &mut since)
+            .await
+            .is_none()
+    );
+    assert_eq!(
+        since.as_deref(),
+        Some("s1"),
+        "a body without next_batch keeps it"
+    );
+
+    assert!(
+        crate::adapter::sync_once(&http, &base, "t", &mut since)
+            .await
+            .is_some()
+    );
+    assert_eq!(since.as_deref(), Some("s2"));
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(!seen[0].contains("since="), "{seen:?}");
+    for line in &seen[1..] {
+        assert!(
+            line.contains("&since=s1 "),
+            "every retry asks from s1: {seen:?}"
+        );
+    }
+}
