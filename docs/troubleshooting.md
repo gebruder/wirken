@@ -35,7 +35,7 @@ An adapter process exited, or its connection to the gateway ended, and the gatew
 wirken audit log --action adapter.restart -n 10
 ```
 
-When the connection's message loop panicked, `adapter.disconnect` carries `"reason": "panic"` and a `connection.panic` row carries the panic message. Repeated `process_exited` restarts usually mean the adapter cannot start. Check the logs with `RUST_LOG=wirken=debug wirken run`. Common causes:
+When the connection's message loop panicked, `adapter.disconnect` carries `"reason": "panic"` and a `connection.panic` row carries where the panic was raised (`location`) and the length and SHA-256 of its message. The message itself is not recorded, since a slicing panic quotes the text it was slicing; it appears only on the gateway's stderr. Repeated `process_exited` restarts usually mean the adapter cannot start. Check the logs with `RUST_LOG=wirken=debug wirken run`. Common causes:
 - Invalid bot token (re-enter with `wirken channel add <channel>`)
 - Network connectivity (the adapter can't reach the platform API)
 - Token expired (rotate with `wirken credentials rotate <name>`)

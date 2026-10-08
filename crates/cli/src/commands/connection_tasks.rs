@@ -14,24 +14,58 @@
 //! sealed, so nothing appends after a seal.
 //!
 //! A task that panics is recorded when it is reaped: an error log line
-//! and a `connection.panic` row carrying the kind of connection and the
-//! panic message. Reaping happens on the next spawn and at shutdown, so
-//! the row follows the panic by as long as the next connection takes
-//! to arrive.
+//! and a `connection.panic` row carrying the kind of connection, where
+//! the panic was raised, and the length and SHA-256 of its message. The
+//! message itself is never recorded: a slicing panic quotes the string
+//! it was slicing, which can be message text. Reaping happens on the
+//! next spawn and at shutdown, so the row follows the panic by as long
+//! as the next connection takes to arrive.
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Once};
 
+use sha2::{Digest, Sha256};
 use tokio::task::{Id, JoinError, JoinSet};
 use wirken_audit::{ActorKind, AuditEvent, AuditWriter};
 
-/// Longest panic message, in bytes, carried into the audit row. A
-/// slicing panic quotes the string it was slicing, which can be message
-/// text; the bound keeps one panic from writing an arbitrary amount of
-/// it to the chain.
-const PANIC_MESSAGE_MAX: usize = 512;
+/// Where each panic in a tokio task was raised, by task id. The hook
+/// [`install_panic_location_hook`] installs fills it; recording a panic
+/// takes the entry.
+static PANIC_LOCATIONS: LazyLock<Mutex<HashMap<Id, String>>> = LazyLock::new(Mutex::default);
+
+/// Panics in tasks this module never reaps leave their entries behind.
+/// Past this many the map is cleared rather than left to grow.
+const PANIC_LOCATIONS_MAX: usize = 256;
+
+/// Chain a hook in front of the current panic hook that notes where a
+/// panic inside a tokio task was raised. The previous hook still runs,
+/// so the panic is reported on stderr as before. Installed once per
+/// process.
+fn install_panic_location_hook() {
+    static INSTALLED: Once = Once::new();
+    INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let (Some(id), Some(location)) = (tokio::task::try_id(), info.location()) {
+                let mut map = PANIC_LOCATIONS.lock().unwrap_or_else(|e| e.into_inner());
+                if map.len() >= PANIC_LOCATIONS_MAX {
+                    map.clear();
+                }
+                map.insert(
+                    id,
+                    format!(
+                        "{}:{}",
+                        source_path_without_build_prefix(location.file()),
+                        location.line()
+                    ),
+                );
+            }
+            previous(info);
+        }));
+    });
+}
 
 #[derive(Clone)]
 pub struct ConnectionTasks {
@@ -43,6 +77,7 @@ pub struct ConnectionTasks {
 
 impl ConnectionTasks {
     pub fn new(audit: Arc<AuditWriter>) -> Self {
+        install_panic_location_hook();
         Self {
             set: Arc::default(),
             kinds: Arc::default(),
@@ -96,20 +131,16 @@ impl ConnectionTasks {
             Err(e) => e.id(),
         };
         let kind = self.kinds.lock().unwrap().remove(&id).unwrap_or("unknown");
+        let location = PANIC_LOCATIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         let err = result.err()?;
         if !err.is_panic() {
             return None;
         }
-        let message = panic_message(err.into_panic());
-        tracing::error!(kind, "connection task panicked: {message}");
-        Some(
-            AuditEvent::new(ActorKind::Service, "gateway", "connection.panic", kind).with_detail(
-                serde_json::json!({
-                    "kind": kind,
-                    "panic": message,
-                }),
-            ),
-        )
+        let facts = PanicFacts::of(location, err.into_panic().as_ref());
+        Some(facts.event(kind))
     }
 
     #[cfg(test)]
@@ -118,18 +149,78 @@ impl ConnectionTasks {
     }
 }
 
-/// The message a panic was raised with, cut to [`PANIC_MESSAGE_MAX`]
-/// bytes at a character boundary.
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    let full = if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        return "<panic payload is not a string>".to_string();
-    };
-    let cut = full.floor_char_boundary(PANIC_MESSAGE_MAX);
-    full.get(..cut).unwrap_or_default().to_string()
+/// What is recorded about a panic: where it was raised and the length
+/// and SHA-256 of its message, never the message.
+struct PanicFacts {
+    location: Option<String>,
+    payload_len: Option<usize>,
+    payload_sha256: Option<String>,
+}
+
+impl PanicFacts {
+    /// A payload that is not a string, which `panic_any` can raise, has
+    /// no length or digest.
+    fn of(location: Option<String>, payload: &(dyn Any + Send)) -> Self {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        Self {
+            location,
+            payload_len: message.map(str::len),
+            payload_sha256: message.map(|m| {
+                Sha256::digest(m.as_bytes())
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            }),
+        }
+    }
+
+    /// Log the panic and build its `connection.panic` row.
+    fn event(&self, kind: &'static str) -> AuditEvent {
+        tracing::error!(
+            kind,
+            location = self.location.as_deref().unwrap_or("unknown"),
+            payload_len = self.payload_len,
+            payload_sha256 = self.payload_sha256.as_deref().unwrap_or("none"),
+            "connection task panicked"
+        );
+        AuditEvent::new(ActorKind::Service, "gateway", "connection.panic", kind).with_detail(
+            serde_json::json!({
+                "kind": kind,
+                "location": self.location,
+                "payload_len": self.payload_len,
+                "payload_sha256": self.payload_sha256,
+            }),
+        )
+    }
+}
+
+/// A source path as a panic location reports it, without the part that
+/// names the machine it was built on. A workspace path is relative
+/// already. A dependency's path starts with the builder's Cargo home and
+/// is cut to the crate directory; a standard library path is cut to
+/// `library/`. Any other absolute path keeps its file name only.
+fn source_path_without_build_prefix(file: &str) -> String {
+    let path = file.replace('\\', "/");
+    let absolute = path.starts_with('/') || path.get(1..3) == Some(":/");
+    if !absolute {
+        return path;
+    }
+    for marker in ["/.cargo/registry/src/", "/.cargo/git/checkouts/"] {
+        if let Some((_, rest)) = path.split_once(marker) {
+            // The first component is the registry index or the checkout
+            // name, which is build-machine state; the crate follows it.
+            if let Some((_, from_crate)) = rest.split_once('/') {
+                return from_crate.to_string();
+            }
+        }
+    }
+    if let Some((_, rest)) = path.split_once("/library/") {
+        return format!("library/{rest}");
+    }
+    path.rsplit('/').next().unwrap_or_default().to_string()
 }
 
 #[cfg(test)]
@@ -229,7 +320,16 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].target, "adapter");
         assert_eq!(rows[0].detail["kind"].as_str(), Some("adapter"));
-        assert_eq!(rows[0].detail["panic"].as_str(), Some("boom at 7"));
+        assert_eq!(rows[0].detail["payload_len"].as_u64(), Some(9));
+        assert_eq!(
+            rows[0].detail["payload_sha256"].as_str(),
+            Some(sha256_hex("boom at 7").as_str())
+        );
+        let location = rows[0].detail["location"].as_str().unwrap();
+        assert!(
+            location.starts_with("crates/cli/src/commands/connection_tasks.rs:"),
+            "{location}"
+        );
     }
 
     #[tokio::test]
@@ -245,21 +345,84 @@ mod tests {
         let rows = panic_rows(&tmp);
         assert_eq!(rows.len(), 1, "the aborted task is not a panic: {rows:?}");
         assert_eq!(rows[0].detail["kind"].as_str(), Some("hooks"));
-        assert_eq!(rows[0].detail["panic"].as_str(), Some("static message"));
+        assert_eq!(rows[0].detail["payload_len"].as_u64(), Some(14));
+    }
+
+    fn sha256_hex(s: &str) -> String {
+        Sha256::digest(s.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// Nothing the panic said reaches the log: not in a row, not in the
+    /// database files on disk.
+    #[tokio::test]
+    async fn a_panic_message_never_reaches_the_audit_log() {
+        const MARKER: &str = "MARKER-7f3a9c-panic-text";
+        let (tasks, tmp, handle) = new_tasks();
+        tasks.spawn("webchat", async {
+            panic!("slicing failed inside `{MARKER}` of a message");
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tasks.shutdown().await;
+        drop(tasks);
+        handle.await.unwrap();
+
+        let rows = AuditLog::open(&tmp.path().join("audit.db"))
+            .unwrap()
+            .query(&AuditQuery::default())
+            .unwrap();
+        assert!(rows.iter().any(|r| r.event.action == "connection.panic"));
+        for row in &rows {
+            let json = serde_json::to_string(&row.event).unwrap();
+            assert!(!json.contains(MARKER), "{json}");
+        }
+        for entry in std::fs::read_dir(tmp.path()).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(
+                !bytes.windows(MARKER.len()).any(|w| w == MARKER.as_bytes()),
+                "the marker is in a file under the audit directory"
+            );
+        }
     }
 
     #[test]
-    fn a_long_panic_message_is_cut_at_a_character_boundary() {
-        let long = format!(
-            "{}\u{e9}{}",
-            "a".repeat(PANIC_MESSAGE_MAX - 1),
-            "b".repeat(100)
-        );
-        let cut = panic_message(Box::new(long));
-        assert_eq!(cut, "a".repeat(PANIC_MESSAGE_MAX - 1));
+    fn a_non_string_payload_has_no_length_or_digest() {
+        let facts = PanicFacts::of(None, &42u32);
+        assert!(facts.payload_len.is_none());
+        assert!(facts.payload_sha256.is_none());
+    }
+
+    #[test]
+    fn a_location_keeps_no_build_machine_path() {
         assert_eq!(
-            panic_message(Box::new(42u32)),
-            "<panic payload is not a string>"
+            source_path_without_build_prefix("crates/agent/src/slash.rs"),
+            "crates/agent/src/slash.rs"
+        );
+        assert_eq!(
+            source_path_without_build_prefix(
+                "/home/someone/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/teloxide-0.17.0/src/lib.rs"
+            ),
+            "teloxide-0.17.0/src/lib.rs"
+        );
+        assert_eq!(
+            source_path_without_build_prefix(
+                "/home/someone/.cargo/git/checkouts/tinfoil-rs-0a1b2c/abc1234/src/client.rs"
+            ),
+            "abc1234/src/client.rs"
+        );
+        assert_eq!(
+            source_path_without_build_prefix("/rustc/b940084d7/library/core/src/str/mod.rs"),
+            "library/core/src/str/mod.rs"
+        );
+        assert_eq!(
+            source_path_without_build_prefix("C:\\Users\\someone\\build\\x.rs"),
+            "x.rs"
+        );
+        assert_eq!(
+            source_path_without_build_prefix("/home/someone/elsewhere/y.rs"),
+            "y.rs"
         );
     }
 }

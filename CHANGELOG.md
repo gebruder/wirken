@@ -48,8 +48,9 @@ tagged.
   back in, stayed up but cut off and the channel stayed down until
   `wirken run` restarted. A panicked connection task is now recorded rather
   than discarded: `adapter.disconnect` carries `"reason": "panic"`, and a
-  `connection.panic` row carries the panic message, cut to 512 bytes. What a
-  restart loses, and on which platforms it can forward a message twice, is in
+  `connection.panic` row carries where the panic was raised and the length
+  and SHA-256 of its message, never the message itself. What a restart
+  loses, and on which platforms it can forward a message twice, is in
   `docs/channels.md`.
 
 ## [1.28.0] - 2026-10-08

@@ -4413,7 +4413,7 @@ mod adapter_restart_tests {
     }
 
     #[tokio::test]
-    async fn the_panic_message_is_recorded_when_the_task_is_reaped() {
+    async fn the_panic_is_recorded_when_the_task_is_reaped() {
         let gw = Gateway::new();
         let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], BACKOFF);
         next_pid(&mut pids).await;
@@ -4426,9 +4426,10 @@ mod adapter_restart_tests {
         assert_eq!(panics.len(), 1, "{panics:?}");
         assert_eq!(panics[0].detail["kind"].as_str(), Some("adapter"));
         assert_eq!(
-            panics[0].detail["panic"].as_str(),
-            Some("message loop panicked")
+            panics[0].detail["payload_len"].as_u64(),
+            Some("message loop panicked".len() as u64)
         );
+        assert!(panics[0].detail["location"].is_string(), "{panics:?}");
     }
 
     #[tokio::test]
