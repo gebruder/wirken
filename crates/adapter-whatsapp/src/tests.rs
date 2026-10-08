@@ -604,3 +604,101 @@ fn classify_send_error_maps_missing_code_to_generic_api_error() {
         "whatsapp_api_error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Webhook acknowledgement order
+// ---------------------------------------------------------------------------
+
+/// The 200 goes back to Meta before the message is written to the
+/// gateway. The gateway writer is held locked while the webhook is
+/// handled, so a handler that forwards first cannot answer at all.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_webhook_is_acknowledged_before_the_message_is_forwarded() {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+
+    // Test-only value, not a production secret.
+    let secret = "whatsapp_test_hmac_key"; // CodeQL:hardcoded-credential-ok
+    let body = serde_json::json!({
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "id": "123456",
+            "changes": [{
+                "value": {
+                    "messaging_product": "whatsapp",
+                    "metadata": {
+                        "display_phone_number": "15551234567",
+                        "phone_number_id": "987654"
+                    },
+                    "contacts": [{ "profile": { "name": "Alice" }, "wa_id": "15559876543" }],
+                    "messages": [{
+                        "from": "15559876543",
+                        "id": "wamid.order",
+                        "timestamp": "1711900000",
+                        "text": { "body": "Hello wirken!" },
+                        "type": "text"
+                    }]
+                },
+                "field": "messages"
+            }]
+        }]
+    })
+    .to_string();
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(body.as_bytes());
+    let signature: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let request = format!(
+        "POST /webhook HTTP/1.1\r\nHost: localhost\r\nX-Hub-Signature-256: sha256={signature}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+
+    // The gateway side of the adapter's IPC connection.
+    let (adapter_end, gateway_end) = tokio::net::UnixStream::pair().unwrap();
+    let adapter_end: wirken_ipc::BoxStream = Box::new(adapter_end);
+    let (_unused_reader, ipc_writer) = wirken_ipc::split_stream(adapter_end);
+    let (mut gateway_reader, _gateway_writer) = wirken_ipc::split_stream(gateway_end);
+    let writer = Arc::new(Mutex::new(ipc_writer));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let held = writer.clone().lock_owned().await;
+    let handler = tokio::spawn({
+        let writer = writer.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            super::adapter::handle_webhook(&mut stream, "verify", secret, writer)
+                .await
+                .unwrap();
+        }
+    });
+
+    let mut meta = tokio::net::TcpStream::connect(addr).await.unwrap();
+    meta.write_all(request.as_bytes()).await.unwrap();
+    let mut response = [0u8; 15];
+    tokio::time::timeout(Duration::from_secs(5), meta.read_exact(&mut response))
+        .await
+        .expect("the 200 arrives while the gateway writer is still locked")
+        .unwrap();
+    assert_eq!(&response, b"HTTP/1.1 200 OK");
+
+    // Only now can the handler forward.
+    drop(held);
+    let frame = tokio::time::timeout(Duration::from_secs(5), gateway_reader.read_message())
+        .await
+        .expect("the message is forwarded once the writer is free")
+        .unwrap();
+    let root = frame.get_root::<frame::Reader<'_>>().unwrap();
+    assert!(matches!(root.which().unwrap(), frame::Inbound(_)));
+    handler.await.unwrap();
+}

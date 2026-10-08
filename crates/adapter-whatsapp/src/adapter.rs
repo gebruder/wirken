@@ -113,7 +113,7 @@ impl WhatsAppAdapter {
 }
 
 /// Handle an incoming webhook request from Meta.
-async fn handle_webhook(
+pub(crate) async fn handle_webhook(
     stream: &mut tokio::net::TcpStream,
     verify_token: &str,
     app_secret: &str,
@@ -152,6 +152,15 @@ async fn handle_webhook(
 
         let json: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
 
+        // Acknowledge before forwarding, as Teams does: once the
+        // signature has passed, the POST is answered whatever the
+        // gateway does with it, so a slow or stopped gateway cannot hold
+        // Meta's request open into a retry, and a kill after this point
+        // loses the message rather than having Meta deliver it twice.
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes()).await;
+        let _ = stream.flush().await;
+
         // Two extractors over the same payload, two output types:
         // text messages route through `frame::Inbound`, button
         // presses through `frame::ApprovalDecision`. Folding both
@@ -173,9 +182,6 @@ async fn handle_webhook(
         for press in extract_button_replies(&json) {
             forward_approval_decision(&press, &writer).await;
         }
-
-        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let _ = stream.write_all(resp.as_bytes()).await;
     } else {
         let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = stream.write_all(resp.as_bytes()).await;

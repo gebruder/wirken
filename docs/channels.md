@@ -394,10 +394,10 @@ credentials into the vault:
 The adapter listens on `127.0.0.1:3979` for webhook POSTs and replies through
 the Cloud API.
 
-**After a restart.** Each webhook POST is answered with 200 only after the
-message is written to the gateway. An adapter killed between the two leaves
-the POST unanswered; Meta retries it (Meta's behaviour, not checked in the
-adapter) and the restarted adapter forwards it again.
+**After a restart.** Each webhook POST is answered with 200 as soon as its
+signature checks out, before the message is written to the gateway, as Teams
+does. An adapter killed between the two loses that message rather than
+leaving Meta a POST to retry, so a restart does not forward it twice.
 
 ## Platform-side state
 
