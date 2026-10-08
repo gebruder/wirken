@@ -11995,7 +11995,11 @@ mod exec_children_die_with_the_call {
     }
 
     /// One detached child per name, every standard stream redirected
-    /// so the call can return while they run.
+    /// so the call can return while they run. The call returns once
+    /// every child has written its first beat, not after a fixed sleep,
+    /// which a loaded runner can outlast before a child gets going. The
+    /// wait gives up after ten seconds in all, and a child that never
+    /// started is then reported by the check rather than hanging it.
     fn command(names: &[&str]) -> String {
         let mut cmd = String::new();
         for name in names {
@@ -12008,7 +12012,10 @@ mod exec_children_die_with_the_call {
                 other => panic!("unknown shape {other}"),
             });
         }
-        cmd.push_str("sleep 0.5; echo started");
+        cmd.push_str(&format!(
+            "i=0; for f in {}; do while [ ! -e $f ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done; done; echo started",
+            names.join(" ")
+        ));
         cmd
     }
 
