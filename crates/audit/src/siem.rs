@@ -278,7 +278,7 @@ pub fn build_datadog_payload(events: &[AuditEvent], config: &SiemConfig) -> Vec<
                 ),
                 "hostname": hostname(),
                 "service": config.service,
-                "status": action_to_severity(&e.action),
+                "status": severity(&e.action, &e.detail),
                 "timestamp": e.ts.timestamp_millis(),
                 "wirken": {
                     "actor_kind": actor_kind_label(e.actor_kind),
@@ -418,7 +418,7 @@ pub fn build_datadog_typed_entry(
         ),
         "hostname": hostname(),
         "service": config.service,
-        "status": "info",
+        "status": typed_severity(&event.event),
         "timestamp": event.ts.timestamp_millis(),
         "wirken": {
             "kind": kind,
@@ -1019,6 +1019,39 @@ pub fn compute_webhook_signature(secret: &[u8], body: &[u8]) -> String {
     s
 }
 
+/// Datadog severity for a legacy audit row. An adapter's disconnect and
+/// restart rows take their level from why they happened: a panic, or a
+/// spawn that failed, is an error, a process that exited on its own a
+/// warning, and a connection that ended an ordinary event. Every other
+/// row takes its level from the action.
+fn severity(action: &str, detail: &serde_json::Value) -> &'static str {
+    match action {
+        "connection.panic" => "error",
+        "adapter.disconnect" => match detail["reason"].as_str() {
+            Some("panic") => "error",
+            _ => "info",
+        },
+        "adapter.restart" => match detail["cause"].as_str() {
+            Some("connection_panicked" | "spawn_failed") => "error",
+            Some("process_exited") => "warn",
+            _ => "info",
+        },
+        _ => action_to_severity(action),
+    }
+}
+
+/// Datadog severity for a typed event. A legacy row that an include list
+/// brings onto the typed pipe keeps the level the legacy pipe gives it;
+/// every other typed event is `info`.
+fn typed_severity(event: &crate::session_log::SessionEvent) -> &'static str {
+    match event {
+        crate::session_log::SessionEvent::AuditLegacy { action, detail, .. } => {
+            severity(action, detail)
+        }
+        _ => "info",
+    }
+}
+
 /// Map audit action to syslog-compatible severity for Datadog.
 fn action_to_severity(action: &str) -> &'static str {
     if action.contains("error") || action.contains("fail") {
@@ -1038,6 +1071,110 @@ fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "wirken".into())
+}
+
+#[cfg(test)]
+mod severity_tests {
+    use super::*;
+    use crate::event::ActorKind;
+    use crate::session_log::{HashHex, SessionEvent, SessionId, StoredSessionEvent, TrustLevel};
+
+    fn datadog() -> SiemConfig {
+        SiemConfig {
+            target: SiemTarget::Datadog,
+            endpoint: "http://127.0.0.1:0/x".into(),
+            api_key: String::new(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        }
+    }
+
+    /// Adapter rows, each with the Datadog status it must forward at.
+    fn cases() -> Vec<(&'static str, serde_json::Value, &'static str)> {
+        vec![
+            (
+                "adapter.disconnect",
+                serde_json::json!({"reason": "panic"}),
+                "error",
+            ),
+            (
+                "adapter.disconnect",
+                serde_json::json!({"reason": "ended"}),
+                "info",
+            ),
+            (
+                "adapter.restart",
+                serde_json::json!({"cause": "connection_panicked"}),
+                "error",
+            ),
+            (
+                "adapter.restart",
+                serde_json::json!({"cause": "connection_ended"}),
+                "info",
+            ),
+            (
+                "adapter.restart",
+                serde_json::json!({"cause": "process_exited"}),
+                "warn",
+            ),
+            (
+                "adapter.restart",
+                serde_json::json!({"cause": "spawn_failed"}),
+                "error",
+            ),
+            (
+                "connection.panic",
+                serde_json::json!({"kind": "webchat"}),
+                "error",
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_legacy_pipe_takes_the_level_from_the_cause() {
+        for (action, detail, want) in cases() {
+            let event = AuditEvent::new(ActorKind::Service, "gateway", action, "telegram")
+                .with_detail(detail.clone());
+            let payload = build_datadog_payload(&[event], &datadog());
+            assert_eq!(
+                payload[0]["status"].as_str(),
+                Some(want),
+                "{action} {detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_typed_pipe_gives_a_legacy_row_the_same_level() {
+        for (action, detail, want) in cases() {
+            let stored = StoredSessionEvent {
+                id: 1,
+                session_id: SessionId::new("gateway"),
+                seq: 0,
+                ts: chrono::Utc::now(),
+                trust: TrustLevel::System,
+                event: SessionEvent::AuditLegacy {
+                    actor_kind: ActorKind::Service,
+                    actor_id: "gateway".into(),
+                    action: action.into(),
+                    target: "telegram".into(),
+                    channel: None,
+                    detail: detail.clone(),
+                },
+                leaf_hash: HashHex(String::new()),
+                prev_hash: HashHex(String::new()),
+                hash: HashHex(String::new()),
+            };
+            let entry = build_datadog_typed_entry(&stored, &datadog());
+            assert_eq!(entry["status"].as_str(), Some(want), "{action} {detail}");
+        }
+    }
 }
 
 #[cfg(test)]

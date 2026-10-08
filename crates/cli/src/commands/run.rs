@@ -2219,6 +2219,8 @@ where
 struct AdapterLifeline {
     /// Notified by [`ConnectionTeardown`] when the connection ends.
     ended: tokio::sync::Notify,
+    /// Set with that notification when the connection ended in a panic.
+    panicked: std::sync::atomic::AtomicBool,
     /// When the current connection authenticated. The restart loop
     /// takes it to decide whether the connection lasted long enough to
     /// reset the backoff.
@@ -2283,6 +2285,9 @@ async fn supervise_adapter<S>(
             _ = std::future::ready(()) => {}
         }
         *lifeline.connected_at.lock().unwrap() = None;
+        lifeline
+            .panicked
+            .store(false, std::sync::atomic::Ordering::Release);
 
         let (cause, exit) = match spawn() {
             Ok(mut child) => {
@@ -2296,8 +2301,15 @@ async fn supervise_adapter<S>(
                         // then returns the status it already has.
                         let _ = child.kill().await;
                         let status = child.wait().await;
+                        let panicked = lifeline
+                            .panicked
+                            .swap(false, std::sync::atomic::Ordering::Acquire);
                         (
-                            "connection_ended",
+                            if panicked {
+                                "connection_panicked"
+                            } else {
+                                "connection_ended"
+                            },
                             status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
                         )
                     }
@@ -2378,18 +2390,18 @@ impl Drop for ConnectionTeardown {
         // First, and synchronously: nothing should be able to route a
         // message to this connection after the loop has left it.
         self.dispatcher.unregister(&self.channel);
+        let panicked = std::thread::panicking();
         if let Some(lifeline) = &self.lifeline {
+            lifeline
+                .panicked
+                .store(panicked, std::sync::atomic::Ordering::Release);
             lifeline.ended.notify_one();
         }
 
         // Dropped during an unwind means the message loop panicked;
         // the panic message itself is recorded when the connection task
         // is reaped (`connection.panic`).
-        let reason = if std::thread::panicking() {
-            "panic"
-        } else {
-            "ended"
-        };
+        let reason = if panicked { "panic" } else { "ended" };
         let adapter_id = std::mem::take(&mut self.adapter_id);
         let channel = std::mem::take(&mut self.channel);
         let fingerprint = std::mem::take(&mut self.pubkey_fingerprint);
@@ -4299,9 +4311,13 @@ mod adapter_restart_tests {
         }
 
         /// Stand in for the adapter dialing in: a connection task that
-        /// holds the real teardown guard and panics when the returned
-        /// sender fires.
+        /// holds the real teardown guard and, when the returned sender
+        /// fires, panics or returns.
         fn connect(&self) -> oneshot::Sender<()> {
+            self.connect_ending(true)
+        }
+
+        fn connect_ending(&self, panics: bool) -> oneshot::Sender<()> {
             let (tx, rx) = oneshot::channel::<()>();
             let lifeline = self.lifeline.clone();
             let teardown = ConnectionTeardown {
@@ -4319,7 +4335,9 @@ mod adapter_restart_tests {
                 let _teardown = teardown;
                 *lifeline.connected_at.lock().unwrap() = Some(Instant::now());
                 let _ = rx.await;
-                panic!("message loop panicked");
+                if panics {
+                    panic!("message loop panicked");
+                }
             });
             tx
         }
@@ -4397,7 +4415,7 @@ mod adapter_restart_tests {
         assert_eq!(restarts.len(), 2, "{restarts:?}");
         for (row, (attempt, delay_ms)) in restarts.iter().zip([(1, 100), (2, 200)]) {
             assert_eq!(row.target, "telegram");
-            assert_eq!(row.detail["cause"].as_str(), Some("connection_ended"));
+            assert_eq!(row.detail["cause"].as_str(), Some("connection_panicked"));
             assert_eq!(row.detail["attempt"].as_u64(), Some(attempt));
             assert_eq!(row.detail["delay_ms"].as_u64(), Some(delay_ms));
             assert!(row.detail["connected_ms"].is_u64(), "{row:?}");
@@ -4438,6 +4456,24 @@ mod adapter_restart_tests {
             Some("message loop panicked".len() as u64)
         );
         assert!(panics[0].detail["location"].is_string(), "{panics:?}");
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_ends_without_a_panic_restarts_as_ended() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], BACKOFF);
+        next_pid(&mut pids).await;
+        gw.connect_ending(false).send(()).unwrap();
+        next_pid(&mut pids).await;
+        supervisor.abort();
+        let _ = supervisor.await;
+
+        let restarts = gw.rows("adapter.restart").await;
+        assert_eq!(restarts.len(), 1, "{restarts:?}");
+        assert_eq!(
+            restarts[0].detail["cause"].as_str(),
+            Some("connection_ended")
+        );
     }
 
     #[tokio::test]

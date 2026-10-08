@@ -99,6 +99,17 @@ typed pipe needs its own stream with its own column schema. Builders:
 `crates/audit/src/siem.rs:267-534`; transport selection at
 `siem_typed.rs:476-520`.
 
+Datadog is the one target with a severity field, `status`. An adapter's
+`adapter.disconnect` and `adapter.restart` rows take it from why they
+happened: `error` for a panic (`reason: "panic"`, `cause:
+"connection_panicked"`) and for `cause: "spawn_failed"`, `warn` for `cause:
+"process_exited"`, `info` for a connection that ended. `connection.panic` is
+`error`. Other legacy rows are `error` when the action names a failure, `warn`
+for denials, threat flags, auth and credential actions, and `info` otherwise.
+Typed entries are `info`, except a legacy row an include list brings onto the
+typed pipe, which keeps its legacy level. Splunk, Sentinel and webhook entries
+carry the row's `reason` or `cause` but no level of their own.
+
 Sentinel ingestion uses the Logs Ingestion API over a Data Collection Rule.
 The operator configures DCE, DCR and custom table out of band; `api_key` must
 be an Azure AD bearer token scoped for `https://monitor.azure.com/.default`.
