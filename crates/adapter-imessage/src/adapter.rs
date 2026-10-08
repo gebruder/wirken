@@ -461,11 +461,7 @@ async fn send_approval_request(
     writer: &Arc<Mutex<IpcFrameWriter>>,
     approval_map: &ApprovalPrefixMap,
 ) {
-    let prefix = if fields.request_id.len() >= 8 {
-        fields.request_id[..8].to_ascii_lowercase()
-    } else {
-        fields.request_id.to_ascii_lowercase()
-    };
+    let prefix = approval_prefix(&fields.request_id);
 
     let prompt = format!(
         "Agent {} requests {} (tier {}).\n\
@@ -536,6 +532,16 @@ async fn emit_approval_failure(
     if let Err(send_err) = w.write_message(&failure).await {
         tracing::error!("imessage approval: failed to send ApprovalRequestFailed: {send_err}");
     }
+}
+
+/// The prefix an operator types after `!approve` / `!deny`: the first
+/// eight bytes of `request_id`, lower-cased. An id shorter than that,
+/// or one whose eighth byte falls inside a character, is used whole.
+pub(crate) fn approval_prefix(request_id: &str) -> String {
+    request_id
+        .get(..8)
+        .unwrap_or(request_id)
+        .to_ascii_lowercase()
 }
 
 /// Classify a BlueBubbles REST API error response into a stable

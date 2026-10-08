@@ -588,3 +588,23 @@ fn classify_send_error_maps_bluebubbles_4006_status_to_chat_not_found() {
         "chat_not_found"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Approval prefix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn approval_prefix_takes_eight_bytes_lowercased() {
+    use crate::adapter::approval_prefix;
+    assert_eq!(approval_prefix("ABCDEF0123456789"), "abcdef01");
+    assert_eq!(approval_prefix("abc"), "abc");
+}
+
+#[test]
+fn approval_prefix_keeps_an_id_split_mid_character_whole() {
+    use crate::adapter::approval_prefix;
+    // Byte 8 falls inside the two-byte character at offsets 7..9.
+    let id = "aaaaaaa\u{e9}a";
+    assert!(!id.is_char_boundary(8));
+    assert_eq!(approval_prefix(id), id);
+}
