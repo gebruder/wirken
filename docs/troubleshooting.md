@@ -27,9 +27,15 @@ rm ~/.wirken/sockets/gateway.sock
 wirken run
 ```
 
-**"Adapter exited"**
+**"Adapter '<id>' process_exited" or "Adapter '<id>' connection_ended"**
 
-An adapter process crashed. Check the logs with `RUST_LOG=wirken=debug wirken run`. Common causes:
+An adapter process exited, or its connection to the gateway ended, and the gateway is restarting it. Each restart writes an `adapter.restart` row with the attempt number, the cause, the exit status and the delay before the next spawn, which doubles up to 60 seconds while the adapter keeps failing:
+
+```bash
+wirken audit log --action adapter.restart -n 10
+```
+
+When the connection's message loop panicked, `adapter.disconnect` carries `"reason": "panic"` and a `connection.panic` row carries the panic message. Repeated `process_exited` restarts usually mean the adapter cannot start. Check the logs with `RUST_LOG=wirken=debug wirken run`. Common causes:
 - Invalid bot token (re-enter with `wirken channel add <channel>`)
 - Network connectivity (the adapter can't reach the platform API)
 - Token expired (rotate with `wirken credentials rotate <name>`)

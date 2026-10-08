@@ -157,7 +157,10 @@ the detector does, so the row is written either way. A scanner panic emits
 `threat.detected` stays false, and the message proceeds exactly as an
 unflagged one does. The per-connection teardown runs from a drop guard, so an
 unwind anywhere else in the loop still unregisters the writer, marks the
-adapter disconnected and writes the `adapter.disconnect` row.
+adapter disconnected and writes the `adapter.disconnect` row, with
+`"reason": "panic"`. The guard also tells the adapter's restart loop, which
+kills and respawns the adapter process, and the panic message is recorded as
+a `connection.panic` row once the task is reaped.
 
 Patterns are compiled into the binary, so adding one requires recompilation.
 The detector is stateless and shared across all adapter connections.

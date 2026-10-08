@@ -21,8 +21,10 @@ platform has no table primitive.
 
 **Limits that hold on every adapter.** One platform workspace, tenant or
 homeserver per adapter process; a second needs a second registered channel
-with a distinct name. Tokens are loaded once at adapter startup, so rotating
-one requires restarting the adapter. Permissions are scoped per agent, not per
+with a distinct name. Tokens are loaded once when the adapter process starts,
+so a rotated one takes effect at the next start: a restart of `wirken run`, or
+an automatic restart after the adapter's gateway connection ends. No command
+restarts one adapter on demand. Permissions are scoped per agent, not per
 platform user: any sender who can reach the bot inherits every Tier 2 approval
 that agent already holds. See
 [permissions-and-identity.md](permissions-and-identity.md).
@@ -150,7 +152,9 @@ Two revocation cases behave differently. On HTTP 401 from the outbound API the
 adapter clears its cached access token and re-acquires from the App ID and
 password, which is the handled case. If the client secret is rotated in Azure
 while the vault holds the old one, acquisition fails and every outbound loops
-on 401 until the adapter is restarted with the new secret.
+on 401 until the vault holds the new secret and `wirken run` is restarted. The
+401 loop does not end the adapter's gateway connection, so the automatic
+restart does not cover it.
 
 ## Matrix
 
@@ -178,8 +182,9 @@ tooling, `formatted_body` as semantic HTML with `format:
 bot participates in must be unencrypted.
 
 There is no `M_UNKNOWN_TOKEN` detection branch: an invalidated access token
-surfaces as generic sync errors. Restart the adapter to re-login from the
-vault-stored password.
+surfaces as generic sync errors. Restart `wirken run` to log in again from the
+vault-stored password. Sync errors do not end the adapter's gateway
+connection, so the automatic restart does not cover them.
 
 **After a restart.** The sync token is held in memory only, so every start of
 the adapter, a restart included, begins with an initial sync, and its
@@ -225,7 +230,8 @@ ls -l /tmp/signal-cli.sock   # srw------- , owned by you
 echo '{"jsonrpc":"2.0","method":"version","id":1}' | socat - UNIX-CONNECT:/tmp/signal-cli.sock
 ```
 
-Keep it under a supervisor. Then:
+Keep it under a supervisor such as systemd or launchd: `wirken run` restarts
+its own adapter processes, not signal-cli. Then:
 
 ```bash
 wirken channel add signal
@@ -281,7 +287,10 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
   and lost to wirken. This is a signal-cli architecture property. Keep the
   daemon supervised so restart windows stay short; the daemon's stdout shows
   `Envelope from:` for the lost message, which distinguishes "adapter never
-  saw it" from the adapter's own `not in allowlist or empty`.
+  saw it" from the adapter's own `not in allowlist or empty`. The same holds
+  while the gateway restarts the adapter process: the new process subscribes
+  afresh and is not sent what arrived in between, so a restart loses those
+  messages rather than forwarding any twice.
 - **Approval is coarse.** Tier 2 shell approvals key on the first token of the
   command; finer-grained patterns are not supported.
 - **Approvals pending at a restart are lost.** The prefix map behind

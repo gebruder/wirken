@@ -66,8 +66,16 @@ extraction on windows).
 
 **Process management.** The gateway spawns adapters with
 `tokio::process::Command`; each is the same binary invoked as
-`wirken adapter <channel>`. Dead adapters are detected by EOF plus heartbeat
-timeout and restarted with exponential backoff.
+`wirken adapter <channel>`. An adapter does not dial back in once its gateway
+connection is gone, so the gateway restarts the process instead. It does so
+when the process exits, and when its connection ends: end of stream, a read
+error, or a panic in the connection's message loop. A process still running
+is killed, an `adapter.restart` audit row records the attempt, the cause and
+the delay, and the process is spawned again after that delay. The delay
+doubles from 1 s to 60 s and returns to 1 s once a connection has lasted
+60 s. Heartbeats are echoed, not timed: an adapter whose connection stays open
+while it stops forwarding is not detected. What a restart loses, per adapter,
+is in [channels.md](channels.md).
 
 **Tradeoff.** More processes than a monolith, at roughly 3-8MB each. A
 personal gateway runs three to five adapters, not five hundred.
