@@ -129,7 +129,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 /// Hex decoding into a buffer sized up front, so the returned `Vec`
 /// is the only heap copy of the decoded bytes. On error the partial
 /// buffer is zeroed before it drops.
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     // Slicing below is by byte offset; a multi-byte character would
     // put a slice boundary inside it and panic.
     if !hex.is_ascii() {

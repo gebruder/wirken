@@ -451,7 +451,7 @@ pub use linux::LinuxKeychain;
 
 mod age_file {
     use super::*;
-    use crate::crypto::{decrypt, encrypt, hex_encode};
+    use crate::crypto::{decrypt, encrypt, hex_decode, hex_encode};
     use std::fs;
     use std::path::PathBuf;
 
@@ -649,7 +649,8 @@ mod age_file {
             let wrapping_key = self.derive_wrapping_key(&salt)?;
             let aad = format!("wirken/keychain/aux/{name}");
             let secret = decrypt(&aad, &encrypted, &wrapping_key)?;
-            hex_decode_bytes(secret.expose())
+            hex_decode(secret.expose())
+                .map_err(|e| VaultError::Keychain(format!("aux key hex decode: {e}")))
         }
 
         fn delete_aux_key(&self, name: &str) -> Result<(), VaultError> {
@@ -669,17 +670,33 @@ mod age_file {
         }
     }
 
-    fn hex_decode_bytes(hex: &str) -> Result<Vec<u8>, VaultError> {
-        if !hex.len().is_multiple_of(2) {
-            return Err(VaultError::Keychain("aux key hex has odd length".into()));
+    #[cfg(test)]
+    mod aux_hex_tests {
+        use super::*;
+        use crate::keychain::Keychain;
+
+        /// An aux key file that decrypts to non-ASCII text is an error
+        /// on retrieve. `"a\u{e9}a"` is four bytes with a character
+        /// spanning offsets 1..3.
+        #[test]
+        fn non_ascii_aux_key_hex_is_an_error() {
+            let dir = tempfile::tempdir().unwrap();
+            let kc = AgeFileKeychain::new(dir.path().join("keychain"), "correct horse".into());
+            kc.store_aux_key("k", &[1, 2, 3]).unwrap();
+
+            let salt = fs::read(kc.aux_salt_file("k")).unwrap();
+            let wrapping_key = kc.derive_wrapping_key(&salt).unwrap();
+            let forged = encrypt(
+                "wirken/keychain/aux/k",
+                &VaultSecret::new("a\u{e9}a".into()),
+                &wrapping_key,
+            )
+            .unwrap();
+            fs::write(kc.aux_key_file("k"), forged).unwrap();
+
+            let err = kc.retrieve_aux_key("k").unwrap_err();
+            assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
         }
-        let mut out = Vec::with_capacity(hex.len() / 2);
-        for i in (0..hex.len()).step_by(2) {
-            let byte = u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|e| VaultError::Keychain(format!("aux key hex decode: {e}")))?;
-            out.push(byte);
-        }
-        Ok(out)
     }
 
     #[cfg(all(test, unix))]
