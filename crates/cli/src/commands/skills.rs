@@ -115,7 +115,12 @@ pub async fn install(name: &str) -> Result<()> {
                 // Write sig/pub files for future local verification
                 std::fs::write(skill_dir.join("SKILL.sig"), sig_hex)?;
                 std::fs::write(skill_dir.join("SKILL.pub"), key_hex)?;
-                println!("  Signature valid (signer: {}...)", &signer[..16]);
+                #[allow(
+                    clippy::string_slice,
+                    reason = "signer is key hex the ASCII-checked decoder accepted as 32 bytes: 64 ASCII chars"
+                )]
+                let short = &signer[..16];
+                println!("  Signature valid (signer: {short}...)");
             }
             VerifyResult::Invalid => {
                 // Remove the skill — signature didn't verify
@@ -289,7 +294,12 @@ pub async fn sign(dir: &str, root_key: Option<&str>) -> Result<()> {
 
     let sig = skill_registry::sign_skill(skill_dir, &signing_key)?;
     println!("  Signed: {}/SKILL.md", dir);
-    println!("  Signature: {}...{}", &sig[..16], &sig[sig.len() - 16..]);
+    #[allow(
+        clippy::string_slice,
+        reason = "the signature is hex this binary just encoded: 128 ASCII chars"
+    )]
+    let (head, tail) = (&sig[..16], &sig[sig.len() - 16..]);
+    println!("  Signature: {head}...{tail}");
     println!("  Public key: {pub_hex}");
     Ok(())
 }
@@ -404,6 +414,10 @@ async fn fetch_index() -> Result<SkillIndex> {
         .context("Failed to parse skill index")
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "cut is walked back to a char boundary before slicing"
+)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -583,11 +597,23 @@ fn split_frontmatter(content: &str) -> Result<(&str, String, bool)> {
     if !trimmed.starts_with("---") {
         anyhow::bail!("no frontmatter to migrate (file has no leading `---`)");
     }
+    #[allow(
+        clippy::string_slice,
+        reason = "the text starts with ASCII \"---\" and the end offset is from find(\"---\")"
+    )]
     let rest = &trimmed[3..];
     let end = rest
         .find("---")
         .ok_or_else(|| anyhow::anyhow!("unclosed frontmatter (no closing `---`)"))?;
+    #[allow(
+        clippy::string_slice,
+        reason = "the text starts with ASCII \"---\" and the end offset is from find(\"---\")"
+    )]
     let yaml = rest[..end].trim_matches('\n');
+    #[allow(
+        clippy::string_slice,
+        reason = "the text starts with ASCII \"---\" and the end offset is from find(\"---\")"
+    )]
     let body = rest[end + 3..].trim_start_matches('\n').to_string();
     Ok((yaml, body, true))
 }

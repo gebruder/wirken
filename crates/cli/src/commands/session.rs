@@ -781,6 +781,10 @@ fn mcp_servers_configured(path: &std::path::Path) -> Option<std::path::PathBuf> 
     (!servers.is_empty()).then(|| path.to_path_buf())
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "end is walked back to a char boundary before slicing"
+)]
 fn truncate_for_display(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()

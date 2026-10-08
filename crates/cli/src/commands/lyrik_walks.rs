@@ -284,13 +284,22 @@ fn strip_leading_frontmatter(source: &str) -> (Option<String>, &str) {
     if !trimmed.starts_with("---") {
         return (None, trimmed);
     }
+    #[allow(clippy::string_slice, reason = "the text starts with ASCII \"---\"")]
     let after_open = &trimmed[3..];
     // The frontmatter terminator is `\n---` followed by newline or end.
     let close_idx = match after_open.find("\n---") {
         Some(i) => i,
         None => return (None, trimmed),
     };
+    #[allow(
+        clippy::string_slice,
+        reason = "close_idx is from find(\"\\n---\"), an ASCII pattern of 4 bytes"
+    )]
     let block = &after_open[..close_idx];
+    #[allow(
+        clippy::string_slice,
+        reason = "close_idx is from find(\"\\n---\"), an ASCII pattern of 4 bytes"
+    )]
     let after_close = &after_open[close_idx + 4..];
     let body_start = after_close.trim_start_matches('\n');
 

@@ -322,7 +322,15 @@ pub fn parse_stable_id(s: &str) -> Result<StableId<'_>, String> {
     let sep_idx = s
         .find(sep)
         .ok_or_else(|| format!("missing \"::\" separator between framing and path: {s:?}"))?;
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     let framing = &s[..sep_idx];
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     let rest = &s[sep_idx + sep.len()..];
 
     if framing.is_empty() {
@@ -338,7 +346,15 @@ pub fn parse_stable_id(s: &str) -> Result<StableId<'_>, String> {
     let last_colon = rest
         .rfind(':')
         .ok_or_else(|| format!("missing line separator after path: {s:?}"))?;
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     let rel_file = &rest[..last_colon];
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     let line_str = &rest[last_colon + 1..];
 
     if rel_file.is_empty() {

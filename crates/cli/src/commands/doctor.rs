@@ -122,6 +122,10 @@ pub async fn run() -> Result<()> {
                     {
                         McpVerifyResult::Valid { signer } => {
                             signed += 1;
+                            #[allow(
+                                clippy::string_slice,
+                                reason = "signer is key hex the ASCII-checked decoder accepted as 32 bytes: 64 ASCII chars"
+                            )]
                             details.push(format!("{name}: valid (signer {}...)", &signer[..16]));
                         }
                         McpVerifyResult::Invalid => {

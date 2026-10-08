@@ -2041,17 +2041,33 @@ fn rewrite_top_level_run_id(body: &str, new_run_id: &str) -> Result<String> {
         .find(KEY)
         .ok_or_else(|| anyhow::anyhow!("fixture has no top-level run_id field"))?;
     let after_key = key_at + KEY.len();
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     let q1 = body[after_key..]
         .find('"')
         .ok_or_else(|| anyhow::anyhow!("malformed run_id (no opening quote)"))?;
     let value_start = after_key + q1 + 1;
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     let q2 = body[value_start..]
         .find('"')
         .ok_or_else(|| anyhow::anyhow!("malformed run_id (no closing quote)"))?;
     let value_end = value_start + q2;
     let mut out = String::with_capacity(body.len() + new_run_id.len());
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     out.push_str(&body[..value_start]);
     out.push_str(new_run_id);
+    #[allow(
+        clippy::string_slice,
+        reason = "offsets come from find on ASCII patterns, so they are char boundaries"
+    )]
     out.push_str(&body[value_end..]);
     Ok(out)
 }

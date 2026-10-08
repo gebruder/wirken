@@ -144,6 +144,10 @@ pub fn classify(result: Result<(LlmResponse, Option<Usage>), AgentError>) -> Res
     }
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "end is walked back to a char boundary before slicing"
+)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.into()

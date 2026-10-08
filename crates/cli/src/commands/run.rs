@@ -3909,6 +3909,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "cut is walked back to a char boundary before slicing"
+)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();

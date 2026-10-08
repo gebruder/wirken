@@ -726,6 +726,10 @@ fn parse_rfc3339(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     Ok(dt.with_timezone(&chrono::Utc))
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "cut is walked back to a char boundary before slicing"
+)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();

@@ -209,11 +209,12 @@ pub fn sign(server: &str, agent: Option<&str>) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("write {}: {e}", mcp_path.display()))?;
 
     println!("  Signed: {server} in {}", mcp_path.display());
-    println!(
-        "  Signature: {}...{}",
-        &signature[..16],
-        &signature[signature.len() - 16..]
-    );
+    #[allow(
+        clippy::string_slice,
+        reason = "the signature is hex this binary just encoded: 128 ASCII chars"
+    )]
+    let (head, tail) = (&signature[..16], &signature[signature.len() - 16..]);
+    println!("  Signature: {head}...{tail}");
     println!("  Public key: {signer_pub}");
     Ok(())
 }
@@ -282,6 +283,10 @@ pub fn verify(server: Option<&str>, agent: Option<&str>) -> Result<()> {
         };
         let result = verify_mcp_entry(name, entry, sig, key, delegation, bundled_root.as_ref());
         let label = match &result {
+            #[allow(
+                clippy::string_slice,
+                reason = "signer is key hex the ASCII-checked decoder accepted as 32 bytes: 64 ASCII chars"
+            )]
             McpVerifyResult::Valid { signer } => format!("valid (signer {}...)", &signer[..16]),
             McpVerifyResult::Invalid => {
                 had_invalid = true;
