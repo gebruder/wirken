@@ -103,8 +103,8 @@ Datadog is the one target with a severity field, `status`. An adapter's
 `adapter.disconnect` and `adapter.restart` rows take it from why they
 happened: `error` for a panic (`reason: "panic"`, `cause:
 "connection_panicked"`) and for `cause: "spawn_failed"`, `warn` for `cause:
-"process_exited"`, `info` for a connection that ended. `connection.panic` is
-`error`. Other legacy rows are `error` when the action names a failure, `warn`
+"process_exited"`, `info` for a connection that ended. `connection.panic` and
+`adapter.restart_abandoned` are `error`. Other legacy rows are `error` when the action names a failure, `warn`
 for denials, threat flags, auth and credential actions, and `info` otherwise.
 Typed entries are `info`, except a legacy row an include list brings onto the
 typed pipe, which keeps its legacy level. Splunk, Sentinel and webhook entries
@@ -137,6 +137,12 @@ three now hands it over. An import row's `actor` used to land in
 `SenderId`; that column reads null for `import_started` and
 `import_completed` now, and a query reading a platform sender out of it
 was reading a role name.
+
+A legacy row that an include list brings onto the typed pipe fills none of
+the three, with one exception: an adapter's lifecycle rows,
+`adapter.connect`, `adapter.disconnect`, `adapter.restart` and
+`adapter.restart_abandoned`, fill `AdapterId` from their target, which is the
+adapter id.
 
 If an operator identity ever needs a column of its own it gets one under
 its own name, covering every variant that carries such a label rather

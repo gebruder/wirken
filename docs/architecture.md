@@ -73,7 +73,11 @@ error, or a panic in the connection's message loop. A process still running
 is killed, an `adapter.restart` audit row records the attempt, the cause and
 the delay, and the process is spawned again after that delay. The delay
 doubles from 1 s to 60 s and returns to 1 s once a connection has lasted
-60 s. Heartbeats are echoed, not timed: an adapter whose connection stays open
+60 s. A process that connects and drops is restarted without limit. One that
+never connects is not: after 8 runs in a row that end without connecting,
+which takes about two minutes, an `adapter.restart_abandoned` row records the
+count and the last cause and exit, the gateway logs one error, and the
+adapter stays down until `wirken run` is restarted. Heartbeats are echoed, not timed: an adapter whose connection stays open
 while it stops forwarding is not detected. What a restart loses, per adapter,
 is in [channels.md](channels.md).
 

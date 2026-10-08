@@ -795,8 +795,16 @@ fn extract_identity_for_sentinel(
         SessionEvent::SubagentSpawned { .. } => (None, None, None),
         // The child's id and status; the same.
         SessionEvent::SubagentResult { .. } => (None, None, None),
-        // An actor and a channel in the legacy shape, not the three.
-        SessionEvent::AuditLegacy { .. } => (None, None, None),
+        // An actor and a channel in the legacy shape, not the three,
+        // except on an adapter's lifecycle rows, whose target is the
+        // adapter id.
+        SessionEvent::AuditLegacy { action, target, .. } => match action.as_str() {
+            "adapter.connect"
+            | "adapter.disconnect"
+            | "adapter.restart"
+            | "adapter.restart_abandoned" => (Some(target.clone()), None, None),
+            _ => (None, None, None),
+        },
         // A hook id and its signature status; none of the three.
         SessionEvent::HookRegistered { .. } => (None, None, None),
         // A hook id and an error; none of the three.
@@ -1026,7 +1034,7 @@ pub fn compute_webhook_signature(secret: &[u8], body: &[u8]) -> String {
 /// row takes its level from the action.
 fn severity(action: &str, detail: &serde_json::Value) -> &'static str {
     match action {
-        "connection.panic" => "error",
+        "connection.panic" | "adapter.restart_abandoned" => "error",
         "adapter.disconnect" => match detail["reason"].as_str() {
             Some("panic") => "error",
             _ => "info",
@@ -1131,6 +1139,11 @@ mod severity_tests {
             (
                 "connection.panic",
                 serde_json::json!({"kind": "webchat"}),
+                "error",
+            ),
+            (
+                "adapter.restart_abandoned",
+                serde_json::json!({"attempts": 8}),
                 "error",
             ),
         ]
@@ -1826,6 +1839,34 @@ mod identity_tests {
                     skill_id: "demo".into(),
                     phase_name: "review".into(),
                     reason: PhaseExitReason::TurnEnd,
+                },
+                None,
+                None,
+                None,
+            ),
+            // An adapter's lifecycle row names the adapter as its target.
+            (
+                SessionEvent::AuditLegacy {
+                    actor_kind: crate::event::ActorKind::Service,
+                    actor_id: "gateway".into(),
+                    action: "adapter.restart_abandoned".into(),
+                    target: "slack".into(),
+                    channel: Some("slack".into()),
+                    detail: serde_json::json!({"attempts": 8}),
+                },
+                Some("slack"),
+                None,
+                None,
+            ),
+            // Any other legacy row's target is not an adapter.
+            (
+                SessionEvent::AuditLegacy {
+                    actor_kind: crate::event::ActorKind::User,
+                    actor_id: "an-operator".into(),
+                    action: "config.changed".into(),
+                    target: "provider.json".into(),
+                    channel: Some("cli".into()),
+                    detail: serde_json::json!({}),
                 },
                 None,
                 None,

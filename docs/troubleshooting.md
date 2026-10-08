@@ -40,6 +40,16 @@ When the connection's message loop panicked, the restart's cause is `connection_
 - Network connectivity (the adapter can't reach the platform API)
 - Token expired (rotate with `wirken credentials rotate <name>`)
 
+**"Adapter '<id>' ended 8 runs in a row without connecting ... it is no longer restarted"**
+
+The adapter process exited 8 times in a row before it ever connected to the gateway, so the gateway stopped restarting it. An `adapter.restart_abandoned` row carries the count and the last cause and exit status:
+
+```bash
+wirken audit log --action adapter.restart_abandoned -n 5
+```
+
+Fix what stops it from starting, usually one of the causes above, then restart `wirken run`. An adapter that does connect and later drops is restarted without limit and never reaches this state.
+
 ## Agent doesn't respond
 
 **On a messaging channel:**

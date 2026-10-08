@@ -2240,12 +2240,21 @@ struct RestartBackoff {
     /// A connection that lasted this long sets the delay back to
     /// `first`.
     reset_after: std::time::Duration,
+    /// This many runs in a row that end without ever connecting stop
+    /// the loop. A run that connects, however briefly, sets the count
+    /// back to zero, so a run that connects and then drops is restarted
+    /// without bound.
+    abandon_after: u32,
 }
 
 const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
     first: std::time::Duration::from_secs(1),
     cap: std::time::Duration::from_secs(60),
     reset_after: std::time::Duration::from_secs(60),
+    // With the delays above, eight runs span about two minutes: time
+    // for a dependency such as signal-cli to come up, and no time
+    // wasted on a credential or setting that will not fix itself.
+    abandon_after: 8,
 };
 
 /// Keep one adapter process running for as long as this future is.
@@ -2258,6 +2267,12 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// before the next spawn. The delay doubles from `backoff.first` to
 /// `backoff.cap` and goes back to `first` after a connection that
 /// lasted `backoff.reset_after`.
+///
+/// A process that never connects is not restarted for ever. After
+/// `backoff.abandon_after` runs in a row that end without connecting,
+/// an `adapter.restart_abandoned` row records the count and the last
+/// cause and exit, one error line says so, and the loop returns. Only a
+/// restart of `wirken run` starts it again.
 ///
 /// Dropping the future stops the loop; a child it holds is killed on
 /// drop. Shutdown aborts the task running it before it stops the
@@ -2275,6 +2290,7 @@ async fn supervise_adapter<S>(
 {
     let mut delay = backoff.first;
     let mut attempt: u64 = 0;
+    let mut unconnected_runs: u32 = 0;
     loop {
         // A teardown that landed while no child was running belongs to
         // the previous child; it must not end this one. A permit, if
@@ -2327,6 +2343,40 @@ async fn supervise_adapter<S>(
         if connected_for.is_some_and(|d| d >= backoff.reset_after) {
             delay = backoff.first;
             attempt = 0;
+        }
+        if connected_for.is_some() {
+            unconnected_runs = 0;
+        } else {
+            unconnected_runs += 1;
+        }
+        if unconnected_runs >= backoff.abandon_after {
+            tracing::error!(
+                "Adapter '{adapter_id}' ended {unconnected_runs} runs in a row without connecting \
+                 (last: {cause}, {exit}); it is no longer restarted. Fix its configuration and \
+                 restart `wirken run`."
+            );
+            if let Err(e) = audit
+                .log(
+                    AuditEvent::new(
+                        ActorKind::Service,
+                        "gateway",
+                        "adapter.restart_abandoned",
+                        adapter_id,
+                    )
+                    .with_channel(channel)
+                    .with_detail(serde_json::json!({
+                        "attempts": unconnected_runs,
+                        "last_cause": cause,
+                        "last_exit": exit,
+                    })),
+                )
+                .await
+            {
+                tracing::error!(
+                    "adapter.restart_abandoned audit write failed for '{adapter_id}': {e}"
+                );
+            }
+            return;
         }
         attempt += 1;
         let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
@@ -4253,7 +4303,18 @@ mod adapter_restart_tests {
         first: Duration::from_millis(100),
         cap: Duration::from_millis(400),
         reset_after: Duration::from_secs(60),
+        abandon_after: 8,
     };
+
+    /// Short delays for the tests that run a process eight times or more.
+    const FAST: RestartBackoff = RestartBackoff {
+        first: Duration::from_millis(10),
+        cap: Duration::from_millis(40),
+        ..BACKOFF
+    };
+
+    const EXITS: &[&str] = &["sh", "-c", "exit 3"];
+    const STAYS_UP: &[&str] = &["sleep", "600"];
 
     /// The gateway-side pieces one adapter's restart touches, on a
     /// scratch audit log.
@@ -4293,11 +4354,27 @@ mod adapter_restart_tests {
             argv: &'static [&'static str],
             backoff: RestartBackoff,
         ) -> (JoinHandle<()>, mpsc::UnboundedReceiver<u32>) {
+            self.supervise_each(move |_| argv, backoff)
+        }
+
+        /// [`Self::supervise`] with the command chosen per run: run `n`,
+        /// counting from 0, starts `argv_for(n)`.
+        fn supervise_each<A>(
+            &self,
+            argv_for: A,
+            backoff: RestartBackoff,
+        ) -> (JoinHandle<()>, mpsc::UnboundedReceiver<u32>)
+        where
+            A: Fn(usize) -> &'static [&'static str] + Send + Sync + 'static,
+        {
             let (tx, rx) = mpsc::unbounded_channel();
             let lifeline = self.lifeline.clone();
             let audit = self.audit.clone();
             let handle = tokio::spawn(async move {
+                let mut runs = 0;
                 let spawn = || {
+                    let argv = argv_for(runs);
+                    runs += 1;
                     let child = tokio::process::Command::new(argv[0])
                         .args(&argv[1..])
                         .kill_on_drop(true)
@@ -4345,6 +4422,17 @@ mod adapter_restart_tests {
         /// Every row with `action`, read once everything holding the
         /// writer has let go of it.
         async fn rows(self, action: &str) -> Vec<AuditEvent> {
+            let action = action.to_string();
+            self.rows_all()
+                .await
+                .into_iter()
+                .filter(|e| e.action == action)
+                .collect()
+        }
+
+        /// Every row, read once everything holding the writer has let
+        /// go of it.
+        async fn rows_all(self) -> Vec<AuditEvent> {
             self.tasks.shutdown().await;
             // Teardown rows are written from tasks of their own.
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4358,7 +4446,6 @@ mod adapter_restart_tests {
                 .unwrap()
                 .into_iter()
                 .map(|e| e.event)
-                .filter(|e| e.action == action)
                 .collect()
         }
     }
@@ -4521,6 +4608,87 @@ mod adapter_restart_tests {
             assert_eq!(row.detail["exit"].as_str(), Some("exit status: 3"));
             assert!(row.detail["connected_ms"].is_null());
         }
+    }
+
+    /// Waits for the restart loop to return by itself.
+    async fn returns(supervisor: JoinHandle<()>) {
+        tokio::time::timeout(Duration::from_secs(5), supervisor)
+            .await
+            .expect("the restart loop stops")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn eight_runs_that_never_connect_abandon_the_adapter() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(EXITS, FAST);
+        for _ in 0..8 {
+            next_pid(&mut pids).await;
+        }
+        returns(supervisor).await;
+        assert!(pids.recv().await.is_none(), "no ninth run");
+
+        let tasks_rows = gw.rows_all().await;
+        let restarts = tasks_rows
+            .iter()
+            .filter(|e| e.action == "adapter.restart")
+            .count();
+        assert_eq!(restarts, 7, "a restart between each pair of runs");
+        let abandoned: Vec<_> = tasks_rows
+            .iter()
+            .filter(|e| e.action == "adapter.restart_abandoned")
+            .collect();
+        assert_eq!(abandoned.len(), 1, "{tasks_rows:?}");
+        let row = abandoned[0];
+        assert_eq!(row.target, "telegram");
+        assert_eq!(row.channel.as_deref(), Some("telegram"));
+        assert_eq!(row.detail["attempts"].as_u64(), Some(8));
+        assert_eq!(row.detail["last_cause"].as_str(), Some("process_exited"));
+        assert_eq!(row.detail["last_exit"].as_str(), Some("exit status: 3"));
+    }
+
+    #[tokio::test]
+    async fn a_run_that_connects_resets_the_count() {
+        let gw = Gateway::new();
+        // Runs 1 to 5 exit at once, run 6 stays up and connects, and
+        // the eight after it exit again.
+        let (supervisor, mut pids) =
+            gw.supervise_each(|n| if n == 5 { STAYS_UP } else { EXITS }, FAST);
+        for _ in 0..5 {
+            next_pid(&mut pids).await;
+        }
+        next_pid(&mut pids).await;
+        gw.connect_ending(false).send(()).unwrap();
+        for _ in 0..8 {
+            next_pid(&mut pids).await;
+        }
+        returns(supervisor).await;
+        assert!(pids.recv().await.is_none(), "fourteen runs and no more");
+
+        let abandoned = gw.rows("adapter.restart_abandoned").await;
+        assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+        assert_eq!(abandoned[0].detail["attempts"].as_u64(), Some(8));
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_the_unconnected_runs_respawns_nothing() {
+        let gw = Gateway::new();
+        let backoff = RestartBackoff {
+            first: Duration::from_millis(200),
+            ..BACKOFF
+        };
+        let (supervisor, mut pids) = gw.supervise(EXITS, backoff);
+        for _ in 0..3 {
+            next_pid(&mut pids).await;
+        }
+        // What shutdown does to the task running the loop.
+        supervisor.abort();
+        let _ = supervisor.await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(pids.try_recv().is_err(), "nothing was respawned");
+
+        let abandoned = gw.rows("adapter.restart_abandoned").await;
+        assert!(abandoned.is_empty(), "{abandoned:?}");
     }
 
     #[tokio::test]
