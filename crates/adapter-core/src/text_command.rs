@@ -106,6 +106,10 @@ pub fn parse_command(body: &str) -> Option<CommandKind> {
 /// `!deny`. Returns `None` if the remainder does not start with
 /// whitespace + hex token. The prefix is lower-cased on the way
 /// out so the handler's prefix-map lookup is canonical.
+#[allow(
+    clippy::string_slice,
+    reason = "prefix_end is from char_indices, a char boundary"
+)]
 fn parse_prefix(rest: &str) -> Option<String> {
     let after_cmd = rest.strip_prefix(|c: char| c.is_ascii_whitespace())?;
     let prefix_end = after_cmd
@@ -126,6 +130,10 @@ fn parse_prefix(rest: &str) -> Option<String> {
 /// anyway.
 fn rest_after_prefix<'a>(rest: &'a str, prefix: &str) -> &'a str {
     let after_cmd = rest.trim_start();
+    #[allow(
+        clippy::string_slice,
+        reason = "parse_prefix accepted rest as one ASCII space then this ASCII prefix"
+    )]
     let after_prefix = &after_cmd[prefix.len()..];
     after_prefix.trim_start()
 }

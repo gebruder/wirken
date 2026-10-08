@@ -31,6 +31,10 @@
 //! perfect-parser-over-hostile-input that fails silently on a single
 //! missed character; HTML mode collapses that surface.
 
+// Slicing a str off a character boundary panics. Each slice that
+// stays carries an allow naming why its offsets are boundaries.
+#![cfg_attr(not(test), deny(clippy::string_slice))]
+
 pub mod approval;
 pub mod text_command;
 
@@ -286,7 +290,15 @@ fn replace_links(input: &str) -> String {
             && bytes[close + 1] == b'('
             && let Some(paren_close) = find_byte(bytes, b')', close + 2)
         {
+            #[allow(
+                clippy::string_slice,
+                reason = "i, close and paren_close index ASCII bytes found by find_byte"
+            )]
             let text = &input[i + 1..close];
+            #[allow(
+                clippy::string_slice,
+                reason = "i, close and paren_close index ASCII bytes found by find_byte"
+            )]
             let url = &input[close + 2..paren_close];
             out.push_str(text);
             if !url.is_empty() {
@@ -304,6 +316,10 @@ fn replace_links(input: &str) -> String {
         // garbage. Walking to the next `is_char_boundary` and slicing
         // the &str preserves codepoints intact.
         let next = next_char_boundary(input, i);
+        #[allow(
+            clippy::string_slice,
+            reason = "i is a char boundary by the loop invariant; next is from next_char_boundary"
+        )]
         out.push_str(&input[i..next]);
         i = next;
     }
@@ -1010,6 +1026,10 @@ fn heading_close_tag(depth: usize) -> &'static str {
 /// the body. Matches CommonMark's loose form (any positive integer
 /// followed by `.` and a space). Returns `None` if the prefix is
 /// not present.
+#[allow(
+    clippy::string_slice,
+    reason = "i is past ASCII digits, '.' and ' ', so i + 2 is a char boundary"
+)]
 fn strip_numbered(line: &str) -> Option<&str> {
     let t = line.trim_start();
     let bytes = t.as_bytes();
@@ -1082,6 +1102,10 @@ fn apply_inline_html(input: &str, tags: &HtmlInlineTags) -> String {
             && let Some(close) = find_byte(bytes, b'`', i + 1)
         {
             out.push_str(tags.code.0);
+            #[allow(
+                clippy::string_slice,
+                reason = "i and close index ASCII delimiter bytes found by byte search"
+            )]
             out.push_str(&escaped[i + 1..close]);
             out.push_str(tags.code.1);
             i = close + 1;
@@ -1094,7 +1118,15 @@ fn apply_inline_html(input: &str, tags: &HtmlInlineTags) -> String {
             && bytes[close + 1] == b'('
             && let Some(paren_close) = find_byte(bytes, b')', close + 2)
         {
+            #[allow(
+                clippy::string_slice,
+                reason = "i, close and paren_close index ASCII bytes found by find_byte"
+            )]
             let text = &escaped[i + 1..close];
+            #[allow(
+                clippy::string_slice,
+                reason = "i, close and paren_close index ASCII bytes found by find_byte"
+            )]
             let url = &escaped[close + 2..paren_close];
             if url.is_empty() {
                 out.push_str(text);
@@ -1116,6 +1148,10 @@ fn apply_inline_html(input: &str, tags: &HtmlInlineTags) -> String {
             && let Some(close) = find_doubled(bytes, bytes[i], i + 2)
         {
             out.push_str(tags.bold.0);
+            #[allow(
+                clippy::string_slice,
+                reason = "i and close index ASCII delimiter bytes found by byte search"
+            )]
             out.push_str(&escaped[i + 2..close]);
             out.push_str(tags.bold.1);
             i = close + 2;
@@ -1128,6 +1164,10 @@ fn apply_inline_html(input: &str, tags: &HtmlInlineTags) -> String {
             && let Some(close) = find_doubled(bytes, b'~', i + 2)
         {
             out.push_str(tags.strike.0);
+            #[allow(
+                clippy::string_slice,
+                reason = "i and close index ASCII delimiter bytes found by byte search"
+            )]
             out.push_str(&escaped[i + 2..close]);
             out.push_str(tags.strike.1);
             i = close + 2;
@@ -1143,12 +1183,20 @@ fn apply_inline_html(input: &str, tags: &HtmlInlineTags) -> String {
             && (close + 1 >= bytes.len() || bytes[close + 1] != bytes[i])
         {
             out.push_str(tags.italic.0);
+            #[allow(
+                clippy::string_slice,
+                reason = "i and close index ASCII delimiter bytes found by byte search"
+            )]
             out.push_str(&escaped[i + 1..close]);
             out.push_str(tags.italic.1);
             i = close + 1;
             continue;
         }
         let next = next_char_boundary(&escaped, i);
+        #[allow(
+            clippy::string_slice,
+            reason = "i is a char boundary by the loop invariant; next is from next_char_boundary"
+        )]
         out.push_str(&escaped[i..next]);
         i = next;
     }
@@ -1236,7 +1284,15 @@ fn replace_links_slack(input: &str) -> String {
             && bytes[close + 1] == b'('
             && let Some(paren_close) = find_byte(bytes, b')', close + 2)
         {
+            #[allow(
+                clippy::string_slice,
+                reason = "i, close and paren_close index ASCII bytes found by find_byte"
+            )]
             let text = &input[i + 1..close];
+            #[allow(
+                clippy::string_slice,
+                reason = "i, close and paren_close index ASCII bytes found by find_byte"
+            )]
             let url = &input[close + 2..paren_close];
             if url.is_empty() {
                 // No URL — render the bracket text plain. A bare `[x]()`
@@ -1256,6 +1312,10 @@ fn replace_links_slack(input: &str) -> String {
             continue;
         }
         let next = next_char_boundary(input, i);
+        #[allow(
+            clippy::string_slice,
+            reason = "i is a char boundary by the loop invariant; next is from next_char_boundary"
+        )]
         out.push_str(&input[i..next]);
         i = next;
     }

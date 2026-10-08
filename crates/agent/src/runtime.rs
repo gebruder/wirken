@@ -5469,6 +5469,10 @@ pub(crate) fn default_system_prompt() -> String {
         .to_string()
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "end is walked back to a char boundary before slicing"
+)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()

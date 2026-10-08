@@ -1124,6 +1124,10 @@ pub async fn detect_gvisor() -> bool {
     false
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "a simple UUID string is 32 ASCII hex digits"
+)]
 fn short_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }

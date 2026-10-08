@@ -149,9 +149,9 @@ impl LlmClient {
             }
 
             // Process complete SSE lines
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+            while let Some((block, rest)) = buffer.split_once("\n\n") {
+                let event_block = block.to_string();
+                buffer = rest.to_string();
 
                 for line in event_block.lines() {
                     if let Some(data) = sse_field(line, "data") {
@@ -412,9 +412,9 @@ impl LlmClient {
                 )));
             }
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+            while let Some((block, rest)) = buffer.split_once("\n\n") {
+                let event_block = block.to_string();
+                buffer = rest.to_string();
 
                 let mut event_type = "";
                 let mut event_data = String::new();

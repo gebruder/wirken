@@ -1,3 +1,7 @@
+// Slicing a str off a character boundary panics. Each slice that
+// stays carries an allow naming why its offsets are boundaries.
+#![cfg_attr(not(test), deny(clippy::string_slice))]
+
 pub mod adapter_registry;
 pub mod agent_config;
 pub mod approver_registry;

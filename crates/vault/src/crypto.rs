@@ -140,6 +140,10 @@ pub(crate) fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     }
     let mut out = Vec::with_capacity(hex.len() / 2);
     for i in (0..hex.len()).step_by(2) {
+        #[allow(
+            clippy::string_slice,
+            reason = "hex is checked ASCII above, so every offset is a char boundary"
+        )]
         match u8::from_str_radix(&hex[i..i + 2], 16) {
             Ok(b) => out.push(b),
             Err(e) => {

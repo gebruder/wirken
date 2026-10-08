@@ -1590,6 +1590,10 @@ fn parse_ddg_html(html: &str, max: usize) -> Vec<SearchResult> {
     results
 }
 
+#[allow(
+    clippy::string_slice,
+    reason = "both offsets come from str::find, so they are char boundaries"
+)]
 fn extract_between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
     let start_idx = text.find(start)? + start.len();
     let remaining = &text[start_idx..];

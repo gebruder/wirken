@@ -251,12 +251,20 @@ fn parse_wasm_skill_metadata(
         return (dir_name, String::new(), None);
     }
 
+    #[allow(
+        clippy::string_slice,
+        reason = "the content starts with ASCII \"---\" and end is from find(\"---\")"
+    )]
     let rest = &content[3..];
     let end = match rest.find("---") {
         Some(e) => e,
         None => return (dir_name, String::new(), None),
     };
 
+    #[allow(
+        clippy::string_slice,
+        reason = "the content starts with ASCII \"---\" and end is from find(\"---\")"
+    )]
     let yaml_str = rest[..end].trim();
     let frontmatter: serde_json::Value =
         serde_yaml::from_str(yaml_str).unwrap_or(serde_json::Value::Null);

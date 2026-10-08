@@ -156,6 +156,10 @@ fn floor_char_boundary(text: &str, end: usize) -> usize {
 /// is not a character boundary panics. `start` is always a boundary
 /// already: it comes from [`Lowered::find`], from `str::find` on the
 /// original, or from a scan that only stops on ASCII.
+#[allow(
+    clippy::string_slice,
+    reason = "start is a char boundary per the doc above; end is floored to one"
+)]
 fn evidence(text: &str, start: usize, max_len: usize) -> &str {
     let end = floor_char_boundary(text, start.saturating_add(max_len));
     &text[start..end.max(start)]
@@ -309,6 +313,10 @@ impl InjectionDetector {
 
                 // Only check blobs >= 24 chars (18 decoded bytes)
                 if len >= 24 {
+                    #[allow(
+                        clippy::string_slice,
+                        reason = "start indexes an ASCII byte and i the byte after an ASCII run, both boundaries"
+                    )]
                     let candidate = &text[start..i];
                     if let Some(decoded) = try_decode_base64(candidate)
                         && contains_suspicious_content(&decoded)

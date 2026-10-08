@@ -640,6 +640,10 @@ fn host_matches(host: &str, pattern: &str) -> bool {
     if let Some(suffix) = pattern.strip_prefix("*.")
         && let Some(dotidx) = host.find('.')
     {
+        #[allow(
+            clippy::string_slice,
+            reason = "idx + 1 is just past an ASCII '.' found by find"
+        )]
         return &host[dotidx + 1..] == suffix;
     }
     false

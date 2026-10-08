@@ -346,12 +346,24 @@ pub fn parse_frontmatter(content: &str) -> Result<(SkillFrontmatter, String), Ag
     }
 
     // Find the closing ---
+    #[allow(
+        clippy::string_slice,
+        reason = "the content starts with ASCII \"---\" and end is from find(\"---\")"
+    )]
     let rest = &content[3..];
     let end = rest
         .find("---")
         .ok_or_else(|| AgentError::SkillLoad("unclosed frontmatter".into()))?;
 
+    #[allow(
+        clippy::string_slice,
+        reason = "the content starts with ASCII \"---\" and end is from find(\"---\")"
+    )]
     let yaml_str = &rest[..end].trim();
+    #[allow(
+        clippy::string_slice,
+        reason = "the content starts with ASCII \"---\" and end is from find(\"---\")"
+    )]
     let body = rest[end + 3..].trim().to_string();
 
     let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_str)
