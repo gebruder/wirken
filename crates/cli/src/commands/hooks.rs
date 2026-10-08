@@ -7,7 +7,7 @@
 //! `<data_dir>/sockets/gateway-hooks.sock`. The gateway looks the
 //! presented pubkey up in the table this command writes to.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wirken_gateway::hook_registry::HookRegistry;
 use wirken_ipc::HookType;
 
@@ -39,13 +39,11 @@ fn parse_pubkey_hex(hex: &str) -> Result<[u8; 32]> {
             cleaned.len()
         );
     }
-    let mut out = [0u8; 32];
-    for (i, byte) in out.iter_mut().enumerate() {
-        let off = i * 2;
-        *byte = u8::from_str_radix(&cleaned[off..off + 2], 16)
-            .with_context(|| format!("invalid hex at byte {i}"))?;
-    }
-    Ok(out)
+    let bytes =
+        wirken_audit::hex::decode(cleaned).map_err(|e| anyhow::anyhow!("public key hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("public key must be 32 bytes"))
 }
 
 pub fn register(hook_id: &str, pubkey_hex: &str, hook_type: &str) -> Result<()> {
@@ -98,6 +96,19 @@ mod tests {
     #[test]
     fn parse_pubkey_hex_rejects_wrong_length() {
         assert!(parse_pubkey_hex("deadbeef").is_err());
+    }
+
+    #[test]
+    fn parse_pubkey_hex_rejects_non_ascii() {
+        // 64 bytes, the expected length, with every two-byte slice
+        // splitting a character.
+        let bad = format!("a{}a", "\u{e9}".repeat(31));
+        assert_eq!(bad.len(), 64);
+        let err = parse_pubkey_hex(&bad).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("non-ASCII hex string"),
+            "{err:#}"
+        );
     }
 
     #[test]

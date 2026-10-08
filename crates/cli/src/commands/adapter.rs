@@ -272,13 +272,20 @@ pub async fn run(channel: &str) -> Result<()> {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        anyhow::bail!("odd-length hex string");
+    wirken_audit::hex::decode(hex).map_err(|e| anyhow::anyhow!("hex decode: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hex_decode;
+
+    #[test]
+    fn hex_decode_rejects_non_ascii() {
+        // Four bytes, with a character spanning offsets 1..3.
+        let err = hex_decode("a\u{e9}a").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("non-ASCII hex string"),
+            "{err:#}"
+        );
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| anyhow::anyhow!("hex decode: {e}"))
-        })
-        .collect()
 }
