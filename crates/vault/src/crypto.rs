@@ -5,7 +5,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
 };
 use rand::Rng;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Nonce size for XChaCha20-Poly1305 (24 bytes).
 const NONCE_SIZE: usize = 24;
@@ -114,18 +114,41 @@ pub fn generate_key() -> VaultSecret {
     VaultSecret::new(hex)
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// Lowercase hex encoding into a buffer sized up front, so the
+/// returned `String` is the only heap copy of the encoded bytes.
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(char::from(DIGITS[usize::from(b >> 4)]));
+        out.push(char::from(DIGITS[usize::from(b & 0x0f)]));
+    }
+    out
 }
 
+/// Hex decoding into a buffer sized up front, so the returned `Vec`
+/// is the only heap copy of the decoded bytes. On error the partial
+/// buffer is zeroed before it drops.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+    // Slicing below is by byte offset; a multi-byte character would
+    // put a slice boundary inside it and panic.
+    if !hex.is_ascii() {
+        return Err("non-ASCII hex string".into());
+    }
     if !hex.len().is_multiple_of(2) {
         return Err("odd-length hex string".into());
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for i in (0..hex.len()).step_by(2) {
+        match u8::from_str_radix(&hex[i..i + 2], 16) {
+            Ok(b) => out.push(b),
+            Err(e) => {
+                out.zeroize();
+                return Err(e.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Derive a 32-byte key from a passphrase using Argon2id.
@@ -149,4 +172,29 @@ pub fn derive_key_from_passphrase(
     let hex = hex_encode(&*output);
     // output zeroed on drop by Zeroizing
     Ok(VaultSecret::new(hex))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_buffers_are_exactly_sized() {
+        let bytes: Vec<u8> = (0..=255).collect();
+
+        let hex = hex_encode(&bytes);
+        assert_eq!(hex.capacity(), hex.len());
+        let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, expected);
+
+        let decoded = hex_decode(&hex).unwrap();
+        assert_eq!(decoded.capacity(), decoded.len());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn hex_decode_rejects_non_ascii() {
+        // Even byte length, with a character spanning offsets 1..3.
+        assert!(hex_decode("a\u{e9}a").is_err());
+    }
 }

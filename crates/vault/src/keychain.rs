@@ -451,7 +451,7 @@ pub use linux::LinuxKeychain;
 
 mod age_file {
     use super::*;
-    use crate::crypto::{decrypt, encrypt};
+    use crate::crypto::{decrypt, encrypt, hex_encode};
     use std::fs;
     use std::path::PathBuf;
 
@@ -623,7 +623,7 @@ mod age_file {
             let aad = format!("wirken/keychain/aux/{name}");
             // The aux key is raw bytes; hex-encode through VaultSecret
             // for the AEAD-string interface and unhex on retrieve.
-            let hex = hex_encode_bytes(key);
+            let hex = hex_encode(key);
             let encrypted = encrypt(&aad, &VaultSecret::new(hex), &wrapping_key)?;
 
             let key_path = self.aux_key_file(name);
@@ -667,10 +667,6 @@ mod age_file {
         fn aux_salt_file(&self, name: &str) -> PathBuf {
             self.path.join(format!("aux-{name}.salt"))
         }
-    }
-
-    fn hex_encode_bytes(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     fn hex_decode_bytes(hex: &str) -> Result<Vec<u8>, VaultError> {
