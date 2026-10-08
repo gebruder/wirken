@@ -233,7 +233,9 @@ fn detect_google(provider: &str, credential: &str, error_text: &str) -> Option<M
 ///   - `... insufficient permissions ...`           -> None
 ///   - `... requires `read:user` ...` (no "scope")  -> None
 fn extract_quoted_scope(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
+    // ASCII lowercasing keeps every byte offset, so an index found in
+    // `lower` is the same position in `text`.
+    let lower = text.to_ascii_lowercase();
     let scope_idx = lower.find("scope")?;
     let tail = &text[scope_idx..];
     // Single-quote first.
@@ -283,6 +285,16 @@ fn extract_google_scope(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_quoted_scope_survives_text_whose_lowercase_changes_length() {
+        // `\u{130}` is two bytes and lowercases to three, so an offset
+        // found in the lowercased text runs past `scope` here.
+        let text = format!("{}scope\u{e9} 'repo'", "\u{130}".repeat(6));
+        assert_eq!(extract_quoted_scope(&text), Some("repo".into()));
+        let short = format!("{}scope", "\u{130}".repeat(6));
+        assert_eq!(extract_quoted_scope(&short), None);
+    }
 
     // ---------------------------------------------------------------
     // Display
