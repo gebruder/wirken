@@ -2569,7 +2569,7 @@ pub async fn serve(
         let (mut stream, _) = listener.accept().await?;
         let shared = shared.clone();
 
-        connection_tasks.spawn(async move {
+        connection_tasks.spawn("webchat", async move {
             let mut buf = vec![0u8; 65536];
             let n = match stream.read(&mut buf).await {
                 Ok(n) if n > 0 => n,

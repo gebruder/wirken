@@ -1476,7 +1476,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let webchat_registry = sse_approval_registry.clone();
     // Every task an accept loop spawns for one connection is tracked
     // here, so shutdown can stop it before sealing the session chains.
-    let connection_tasks = super::connection_tasks::ConnectionTasks::new();
+    let connection_tasks = super::connection_tasks::ConnectionTasks::new(audit.clone());
     let webchat_connection_tasks = connection_tasks.clone();
     let webchat_handle = tokio::spawn(async move {
         if let Err(e) = super::webchat::serve(
@@ -1678,7 +1678,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let pend = accept_pending.clone();
                     let apprv = accept_approvers.clone();
 
-                    accept_connection_tasks.spawn(async move {
+                    accept_connection_tasks.spawn("adapter", async move {
                         if let Err(e) = handle_adapter_connection(
                             stream, reg, fact, au, sess, rtr, det, disp, pend, apprv,
                         )
@@ -1770,7 +1770,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let disp = hooks_accept_dispatcher.clone();
                     let edisp = hooks_accept_egress_dispatcher.clone();
                     let slog = hooks_accept_session_log.clone();
-                    hooks_connection_tasks.spawn(async move {
+                    hooks_connection_tasks.spawn("hooks", async move {
                         if let Err(e) = handle_hook_connection(stream, reg, disp, edisp, slog).await
                         {
                             tracing::error!("Hook connection error: {e}");
@@ -1906,7 +1906,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     }
                     let disp = orchestrator_dispatcher.clone();
                     let au = orchestrator_audit.clone();
-                    orchestrator_connection_tasks.spawn(async move {
+                    orchestrator_connection_tasks.spawn("orchestrator", async move {
                         if let Err(e) = handle_orchestrator_push(
                             stream,
                             disp,
@@ -1973,7 +1973,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let q = permissions_queue_for_loop.clone();
                     let au = permissions_audit.clone();
                     let slog = permissions_session_log.clone();
-                    permissions_connection_tasks.spawn(async move {
+                    permissions_connection_tasks.spawn("permissions", async move {
                         if let Err(e) = handle_permissions_request(
                             stream,
                             q,
@@ -2227,6 +2227,14 @@ impl Drop for ConnectionTeardown {
         // message to this connection after the loop has left it.
         self.dispatcher.unregister(&self.channel);
 
+        // Dropped during an unwind means the message loop panicked;
+        // the panic message itself is recorded when the connection task
+        // is reaped (`connection.panic`).
+        let reason = if std::thread::panicking() {
+            "panic"
+        } else {
+            "ended"
+        };
         let adapter_id = std::mem::take(&mut self.adapter_id);
         let channel = std::mem::take(&mut self.channel);
         let fingerprint = std::mem::take(&mut self.pubkey_fingerprint);
@@ -2250,6 +2258,7 @@ impl Drop for ConnectionTeardown {
                     .with_channel(&channel)
                     .with_detail(serde_json::json!({
                         "adapter_pubkey_fingerprint": fingerprint,
+                        "reason": reason,
                     })),
                 )
                 .await
@@ -3983,6 +3992,69 @@ mod inventory_tests {
         let trimmed = trim_command_for_inventory(&cmd);
         assert!(trimmed.starts_with("..."));
         assert!(trimmed.chars().count() <= MCP_INVENTORY_WIDTH);
+    }
+}
+
+#[cfg(test)]
+mod connection_teardown_tests {
+    use super::{AdapterRegistry, ConnectionTeardown, OutboundDispatcher};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use wirken_audit::{AuditEvent, AuditLog, AuditQuery, AuditWriter};
+
+    /// Run a connection task that holds a teardown guard and either
+    /// returns or panics, then return the `adapter.disconnect` row.
+    async fn disconnect_row(panics: bool) -> AuditEvent {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = tmp.path().join("audit.db");
+        let (writer, handle) = AuditWriter::new(&db).unwrap();
+        let audit = Arc::new(writer);
+        let registry = Arc::new(Mutex::new(
+            AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap(),
+        ));
+        let dispatcher = Arc::new(OutboundDispatcher::new());
+
+        let teardown = ConnectionTeardown {
+            adapter_id: "telegram".into(),
+            channel: "telegram".into(),
+            pubkey_fingerprint: "fp".into(),
+            registry,
+            dispatcher,
+            audit: audit.clone(),
+        };
+        let result = tokio::spawn(async move {
+            let _teardown = teardown;
+            if panics {
+                panic!("message loop panicked");
+            }
+        })
+        .await;
+        assert_eq!(result.is_err(), panics);
+
+        // The row is written from a task the guard spawns.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(audit);
+        handle.await.unwrap();
+        AuditLog::open(&db)
+            .unwrap()
+            .query(&AuditQuery::default())
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event)
+            .find(|e| e.action == "adapter.disconnect")
+            .expect("adapter.disconnect row")
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_during_a_panic_says_so() {
+        let row = disconnect_row(true).await;
+        assert_eq!(row.detail["reason"].as_str(), Some("panic"));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_disconnect_says_ended() {
+        let row = disconnect_row(false).await;
+        assert_eq!(row.detail["reason"].as_str(), Some("ended"));
     }
 }
 
