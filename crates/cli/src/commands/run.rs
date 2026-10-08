@@ -1695,10 +1695,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let pend = accept_pending.clone();
                     let apprv = accept_approvers.clone();
                     let lines = accept_lifelines.clone();
+                    let adapter_id = super::connection_tasks::AdapterIdSlot::default();
+                    let slot = adapter_id.clone();
 
-                    accept_connection_tasks.spawn("adapter", async move {
+                    accept_connection_tasks.spawn_adapter(adapter_id, async move {
                         if let Err(e) = handle_adapter_connection(
-                            stream, reg, fact, au, sess, rtr, det, disp, pend, apprv, lines,
+                            stream, reg, fact, au, sess, rtr, det, disp, pend, apprv, lines, slot,
                         )
                         .await
                         {
@@ -2437,6 +2439,7 @@ async fn handle_adapter_connection(
     pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
     lifelines: Lifelines,
+    adapter_id_slot: super::connection_tasks::AdapterIdSlot,
 ) -> Result<()> {
     let (mut reader, mut writer) = split_stream(stream);
 
@@ -2474,6 +2477,8 @@ async fn handle_adapter_connection(
     };
 
     tracing::info!("Adapter '{adapter_id}' authenticated on channel '{authenticated_channel}'");
+    // A panic from here on is recorded against this adapter.
+    let _ = adapter_id_slot.set(adapter_id.clone());
     registry.lock().await.set_connected(&adapter_id, true);
     // An adapter added after start has no restart loop and no lifeline.
     let lifeline = lifelines.get(&adapter_id).cloned();
@@ -4308,7 +4313,9 @@ mod adapter_restart_tests {
                 audit: self.audit.clone(),
                 lifeline: Some(lifeline.clone()),
             };
-            self.tasks.spawn("adapter", async move {
+            let slot = super::super::connection_tasks::AdapterIdSlot::default();
+            let _ = slot.set("telegram".into());
+            self.tasks.spawn_adapter(slot, async move {
                 let _teardown = teardown;
                 *lifeline.connected_at.lock().unwrap() = Some(Instant::now());
                 let _ = rx.await;
@@ -4413,7 +4420,7 @@ mod adapter_restart_tests {
     }
 
     #[tokio::test]
-    async fn the_panic_is_recorded_when_the_task_is_reaped() {
+    async fn the_panic_is_recorded_against_the_adapter() {
         let gw = Gateway::new();
         let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], BACKOFF);
         next_pid(&mut pids).await;
@@ -4425,6 +4432,7 @@ mod adapter_restart_tests {
         let panics = gw.rows("connection.panic").await;
         assert_eq!(panics.len(), 1, "{panics:?}");
         assert_eq!(panics[0].detail["kind"].as_str(), Some("adapter"));
+        assert_eq!(panics[0].detail["adapter_id"].as_str(), Some("telegram"));
         assert_eq!(
             panics[0].detail["payload_len"].as_u64(),
             Some("message loop panicked".len() as u64)

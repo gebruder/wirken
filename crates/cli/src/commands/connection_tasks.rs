@@ -13,18 +13,23 @@
 //! the accept loops are stopped and before the session chains are
 //! sealed, so nothing appends after a seal.
 //!
-//! A task that panics is recorded when it is reaped: an error log line
-//! and a `connection.panic` row carrying the kind of connection, where
-//! the panic was raised, and the length and SHA-256 of its message. The
-//! message itself is never recorded: a slicing panic quotes the string
-//! it was slicing, which can be message text. Reaping happens on the
-//! next spawn and at shutdown, so the row follows the panic by as long
-//! as the next connection takes to arrive.
+//! A task that panics is recorded as it unwinds: each connection future
+//! runs under `catch_unwind` inside its own task, and a panic becomes an
+//! error log line and a `connection.panic` row carrying the kind of
+//! connection, the adapter id once the connection has authenticated as
+//! one, where the panic was raised, and the length and SHA-256 of its
+//! message. The message itself is never recorded: a slicing panic quotes
+//! the string it was slicing, which can be message text. Reaping a
+//! finished task, on the next spawn and at shutdown, records any panic
+//! that got past the catch.
 
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, LazyLock, Mutex, Once};
+use std::panic::AssertUnwindSafe;
+use std::pin::Pin;
+use std::sync::{Arc, LazyLock, Mutex, Once, OnceLock};
+use std::task::{Context, Poll};
 
 use sha2::{Digest, Sha256};
 use tokio::task::{Id, JoinError, JoinSet};
@@ -67,6 +72,11 @@ fn install_panic_location_hook() {
     });
 }
 
+/// The adapter id an adapter connection authenticates as, set by the
+/// connection once its handshake has passed, so a panic after that names
+/// the adapter.
+pub type AdapterIdSlot = Arc<OnceLock<String>>;
+
 #[derive(Clone)]
 pub struct ConnectionTasks {
     set: Arc<Mutex<JoinSet<()>>>,
@@ -92,6 +102,34 @@ impl ConnectionTasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        self.spawn_recording(kind, None, task);
+    }
+
+    /// [`Self::spawn`] for an adapter connection, which fills `adapter_id`
+    /// once it knows who it is talking to.
+    pub fn spawn_adapter<F>(&self, adapter_id: AdapterIdSlot, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.spawn_recording("adapter", Some(adapter_id), task);
+    }
+
+    fn spawn_recording<F>(&self, kind: &'static str, adapter_id: Option<AdapterIdSlot>, task: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let audit = self.audit.clone();
+        let task = async move {
+            let Err(payload) = CatchUnwind(Box::pin(task)).await else {
+                return;
+            };
+            let location = take_panic_location(tokio::task::id());
+            let adapter_id = adapter_id.and_then(|slot| slot.get().cloned());
+            let event = PanicFacts::of(location, payload.as_ref()).event(kind, adapter_id);
+            if let Err(e) = audit.log(event).await {
+                tracing::error!("connection.panic audit write failed: {e}");
+            }
+        };
         let mut set = self.set.lock().unwrap();
         while let Some(result) = set.try_join_next_with_id() {
             if let Some(event) = self.reaped(result) {
@@ -131,21 +169,45 @@ impl ConnectionTasks {
             Err(e) => e.id(),
         };
         let kind = self.kinds.lock().unwrap().remove(&id).unwrap_or("unknown");
-        let location = PANIC_LOCATIONS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
+        let location = take_panic_location(id);
         let err = result.err()?;
         if !err.is_panic() {
             return None;
         }
         let facts = PanicFacts::of(location, err.into_panic().as_ref());
-        Some(facts.event(kind))
+        Some(facts.event(kind, None))
     }
 
     #[cfg(test)]
     fn tracked(&self) -> usize {
         self.set.lock().unwrap().len()
+    }
+}
+
+/// Take the location the panic hook noted for a panic in task `id`.
+fn take_panic_location(id: Id) -> Option<String> {
+    PANIC_LOCATIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&id)
+}
+
+/// A future that resolves to `Err` with the payload of a panic raised
+/// while polling `F`, instead of unwinding out of the task.
+struct CatchUnwind<F>(Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = Result<F::Output, Box<dyn Any + Send>>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = self.0.as_mut();
+        // Unwind-safe in the sense that matters: after a panic the inner
+        // future is never polled again, only dropped.
+        match std::panic::catch_unwind(AssertUnwindSafe(|| inner.poll(cx))) {
+            Ok(Poll::Pending) => Poll::Pending,
+            Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+            Err(payload) => Poll::Ready(Err(payload)),
+        }
     }
 }
 
@@ -177,18 +239,22 @@ impl PanicFacts {
         }
     }
 
-    /// Log the panic and build its `connection.panic` row.
-    fn event(&self, kind: &'static str) -> AuditEvent {
+    /// Log the panic and build its `connection.panic` row. The row's
+    /// target is the adapter id when there is one, else the kind.
+    fn event(&self, kind: &'static str, adapter_id: Option<String>) -> AuditEvent {
         tracing::error!(
             kind,
+            adapter_id = adapter_id.as_deref().unwrap_or("none"),
             location = self.location.as_deref().unwrap_or("unknown"),
             payload_len = self.payload_len,
             payload_sha256 = self.payload_sha256.as_deref().unwrap_or("none"),
             "connection task panicked"
         );
-        AuditEvent::new(ActorKind::Service, "gateway", "connection.panic", kind).with_detail(
+        let target = adapter_id.clone().unwrap_or_else(|| kind.to_string());
+        AuditEvent::new(ActorKind::Service, "gateway", "connection.panic", &target).with_detail(
             serde_json::json!({
                 "kind": kind,
+                "adapter_id": adapter_id,
                 "location": self.location,
                 "payload_len": self.payload_len,
                 "payload_sha256": self.payload_sha256,
@@ -304,7 +370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_panicked_task_is_recorded_when_reaped() {
+    async fn a_panicked_task_is_recorded() {
         let (tasks, tmp, handle) = new_tasks();
         tasks.spawn("adapter", async { panic!("boom at {}", 7) });
         // Let the panicking task run to completion, then reap it.
@@ -346,6 +412,65 @@ mod tests {
         assert_eq!(rows.len(), 1, "the aborted task is not a panic: {rows:?}");
         assert_eq!(rows[0].detail["kind"].as_str(), Some("hooks"));
         assert_eq!(rows[0].detail["payload_len"].as_u64(), Some(14));
+    }
+
+    /// The panic row is written as the task unwinds, ahead of anything
+    /// that happens on any connection afterwards. A row written only when
+    /// the task is reaped would come after the event below, which no
+    /// spawn precedes.
+    #[tokio::test]
+    async fn a_webchat_panic_is_on_the_chain_before_the_next_connection_event() {
+        let (tasks, tmp, handle) = new_tasks();
+        let audit = tasks.audit.clone();
+        tasks.spawn("webchat", async { panic!("request handler panicked") });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        audit
+            .log(AuditEvent::new(
+                ActorKind::Service,
+                "gateway",
+                "adapter.connect",
+                "telegram",
+            ))
+            .await
+            .unwrap();
+        drop(audit);
+        tasks.shutdown().await;
+        drop(tasks);
+        handle.await.unwrap();
+
+        let mut rows = AuditLog::open(&tmp.path().join("audit.db"))
+            .unwrap()
+            .query(&AuditQuery::default())
+            .unwrap();
+        rows.sort_by_key(|r| r.id);
+        let actions: Vec<&str> = rows.iter().map(|r| r.event.action.as_str()).collect();
+        assert_eq!(
+            actions,
+            ["connection.panic", "adapter.connect"],
+            "{actions:?}"
+        );
+        assert_eq!(rows[0].event.detail["kind"].as_str(), Some("webchat"));
+    }
+
+    #[tokio::test]
+    async fn an_adapter_panic_names_the_adapter_once_it_is_known() {
+        let (tasks, tmp, handle) = new_tasks();
+        let slot = AdapterIdSlot::default();
+        let known = slot.clone();
+        tasks.spawn_adapter(slot, async move {
+            known.set("telegram".to_string()).unwrap();
+            panic!("message loop panicked");
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tasks.shutdown().await;
+        drop(tasks);
+        handle.await.unwrap();
+
+        let rows = panic_rows(&tmp);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].target, "telegram");
+        assert_eq!(rows[0].detail["kind"].as_str(), Some("adapter"));
+        assert_eq!(rows[0].detail["adapter_id"].as_str(), Some("telegram"));
     }
 
     fn sha256_hex(s: &str) -> String {
