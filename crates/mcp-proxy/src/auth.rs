@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use reqwest::header::HeaderValue;
 use wirken_vault::CredentialStore;
+use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
 use crate::oauth::{OAuthCredential, refresh_oauth_token};
@@ -72,16 +73,27 @@ impl AuthProvider for NoAuth {
     }
 }
 
-/// Build a `Bearer <token>` header value without leaving an owned
-/// copy of `token` sitting on the heap after we return. `format!`
-/// allocates, `HeaderValue::from_str` copies into its own buffer, and
-/// the `format!` String drops immediately at the end of the statement.
+/// Build a `Bearer <token>` header value. The string is assembled in
+/// an exactly-sized `Zeroizing<String>`, so the intermediate copy is a
+/// single allocation that is zeroed when this returns. The header is
+/// marked sensitive, which redacts it from `Debug` output and keeps it
+/// out of the HTTP/2 HPACK table.
+///
+/// Not zeroed: the `Bytes` buffer `HeaderValue` copies the value into,
+/// and the copies reqwest makes in its send buffers. Both are freed
+/// with the token still in them.
 fn bearer_header(token: &str) -> Result<HeaderValue, ProxyError> {
-    HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| {
+    const PREFIX: &str = "Bearer ";
+    let mut value = Zeroizing::new(String::with_capacity(PREFIX.len() + token.len()));
+    value.push_str(PREFIX);
+    value.push_str(token);
+    let mut header = HeaderValue::from_str(&value).map_err(|e| {
         ProxyError::Vault(format!(
             "invalid bearer token for Authorization header: {e}"
         ))
-    })
+    })?;
+    header.set_sensitive(true);
+    Ok(header)
 }
 
 /// Bearer-token provider. The vault entry stores the raw token as
@@ -119,8 +131,7 @@ impl AuthProvider for BearerAuth {
             ))
         })?;
         // `secret.expose()` returns a `&str` backed by the zeroized
-        // `VaultSecret`. The `format!` temporary inside `bearer_header`
-        // lives only for the duration of that expression.
+        // `VaultSecret`; `bearer_header` zeroes its own intermediate.
         let header = bearer_header(secret.expose())?;
         Ok(Some(header))
     }

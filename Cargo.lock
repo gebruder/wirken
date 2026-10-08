@@ -7065,6 +7065,7 @@ dependencies = [
  "wirken-gateway",
  "wirken-ipc",
  "wirken-vault",
+ "zeroize",
 ]
 
 [[package]]

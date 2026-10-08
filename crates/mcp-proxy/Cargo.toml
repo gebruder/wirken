@@ -28,6 +28,7 @@ open = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
