@@ -16,6 +16,21 @@ tagged.
   signing key field is not ASCII hex as an invalid signature at that
   head, through `first_invalid`, and exits 1. Such a field panicked
   the verifier.
+- A `/<skill>` invocation followed by a multi-byte whitespace
+  character, such as U+3000 or a no-break space, is parsed as an
+  invocation with the text after that character as its remainder. The
+  slash parser sliced one byte past the whitespace and panicked. On an
+  adapter channel the panic ended that adapter's connection task: the
+  gateway process stayed up, and the adapter, which is spawned once
+  and does not reconnect, delivered nothing more until `wirken run`
+  was restarted. On webchat it ended the one request.
+- The summary line of a typed Datadog SIEM entry names a sandbox
+  container id by its first 12 bytes only when those end on a
+  character boundary, and names it whole otherwise. A non-ASCII id
+  panicked the typed forwarder task, which stopped typed forwarding
+  until restart and again on every restart, since the worker re-reads
+  from the first row. Ids the sandbox records are ASCII hex; the case needs a row
+  written another way.
 
 ## [1.28.0] - 2026-10-08
 
