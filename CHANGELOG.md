@@ -39,6 +39,18 @@ tagged.
   connection task for that agent. The proxy process stayed up; the
   agent's proxy connection, opened once at `wirken run` start and not
   reopened, failed every MCP tool call until restart.
+- An adapter whose process exits or whose gateway connection ends, including
+  through a panic in the connection's message loop, is restarted: the
+  gateway kills the process if it is still running, writes an
+  `adapter.restart` audit row with the attempt, cause and delay, and spawns
+  it again after a delay that doubles from 1 s to 60 s and resets after a
+  connection that lasted 60 s. Previously the adapter, which does not dial
+  back in, stayed up but cut off and the channel stayed down until
+  `wirken run` restarted. A panicked connection task is now recorded rather
+  than discarded: `adapter.disconnect` carries `"reason": "panic"`, and a
+  `connection.panic` row carries the panic message, cut to 512 bytes. What a
+  restart loses, and on which platforms it can forward a message twice, is in
+  `docs/channels.md`.
 
 ## [1.28.0] - 2026-10-08
 
