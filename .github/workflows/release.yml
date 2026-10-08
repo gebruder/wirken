@@ -84,6 +84,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # The action adds the target to the toolchain it installed; cargo
+      # builds with the one rust-toolchain.toml names, so add it there.
+      - name: Add target to the pinned toolchain
+        run: rustup target add ${{ matrix.target }}
+
       - name: Install Cap'n Proto compiler
         run: brew install capnp
 
@@ -120,6 +125,11 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
         with:
           targets: x86_64-pc-windows-msvc
+
+      # The action adds the target to the toolchain it installed; cargo
+      # builds with the one rust-toolchain.toml names, so add it there.
+      - name: Add target to the pinned toolchain
+        run: rustup target add x86_64-pc-windows-msvc
 
       # See `windows-smoke.yml` for why this is not
       # `choco install capnproto -y`. A release build in particular

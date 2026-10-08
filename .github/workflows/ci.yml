@@ -121,6 +121,10 @@ jobs:
   fuzz:
     name: Fuzz
     runs-on: ubuntu-latest
+    # rust-toolchain.toml pins a stable release; this job needs nightly,
+    # and RUSTUP_TOOLCHAIN takes precedence over the file.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # cargo-fuzz needs nightly: libFuzzer arrives through
@@ -228,4 +232,8 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-msrv-${{ hashFiles('**/Cargo.lock') }}
+      # rust-toolchain.toml would otherwise select its own version over
+      # the one installed above.
       - run: cargo check --workspace --locked
+        env:
+          RUSTUP_TOOLCHAIN: ${{ steps.floor.outputs.version }}

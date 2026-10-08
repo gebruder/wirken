@@ -18,6 +18,10 @@ jobs:
     name: cargo fuzz session_event (60s)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # rust-toolchain.toml pins a stable release; cargo-fuzz needs
+    # nightly, and RUSTUP_TOOLCHAIN takes precedence over the file.
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install nightly Rust

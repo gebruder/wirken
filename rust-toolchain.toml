@@ -1,0 +1,6 @@
+# The toolchain CI formats, lints, tests and releases with. A job that
+# needs another one (the MSRV floor, nightly for fuzzing) sets
+# RUSTUP_TOOLCHAIN, which takes precedence over this file.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
