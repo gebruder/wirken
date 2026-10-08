@@ -15,10 +15,9 @@ pub fn decode(hex: &str) -> Result<Vec<u8>, String> {
         return Err("odd-length hex string".into());
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        if let [hi, lo] = *pair {
-            out.push((nibble(hi)? << 4) | nibble(lo)?);
-        }
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for &[hi, lo] in pairs {
+        out.push((nibble(hi)? << 4) | nibble(lo)?);
     }
     Ok(out)
 }
