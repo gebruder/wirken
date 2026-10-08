@@ -90,6 +90,18 @@ CANARY_TITLE = "CANARYTITLE"
 CANARY_FILENAME = "CANARYFILENAME.pdf"
 
 
+# Every entry carries this timestamp. `writestr` given a bare name
+# stamps the current time at two-second resolution, so two builds that
+# straddle a tick produce different bytes and a different archive hash.
+ENTRY_DATE_TIME = (2020, 1, 1, 0, 0, 0)
+
+
+def write_entry(z: zipfile.ZipFile, name: str, data: str | bytes) -> None:
+    info = zipfile.ZipInfo(name, date_time=ENTRY_DATE_TIME)
+    info.external_attr = 0o600 << 16
+    z.writestr(info, data, compress_type=z.compression)
+
+
 def build_archive(path: pathlib.Path) -> None:
     """An archive where every field is populated and most are hostile."""
     rows = []
@@ -108,15 +120,15 @@ def build_archive(path: pathlib.Path) -> None:
         row.update(BENIGN_NUMBERS)
         rows.append(row)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("conversations.json", json.dumps(rows))
-        z.writestr(f"attachments/{CANARY_FILENAME}", b"%PDF-1.4 body")
+        write_entry(z, "conversations.json", json.dumps(rows))
+        write_entry(z, f"attachments/{CANARY_FILENAME}", b"%PDF-1.4 body")
 
 
 def build_null_archive(path: pathlib.Path) -> None:
     """The fixture shape this suite exists to reject: fields set to null."""
     rows = [{"verified_phone_number": None, "sender": "human"} for _ in range(4)]
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("conversations.json", json.dumps(rows))
+        write_entry(z, "conversations.json", json.dumps(rows))
 
 
 def report_for(builder) -> str:
