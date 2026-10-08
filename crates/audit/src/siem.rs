@@ -841,7 +841,7 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
                     p.mode, p.runtime
                 ));
                 if let Some(id) = &p.container_id {
-                    line.push_str(&format!(" container={}", &id[..id.len().min(12)]));
+                    line.push_str(&format!(" container={}", id.get(..12).unwrap_or(id)));
                 }
             }
             line
@@ -1754,6 +1754,15 @@ mod identity_tests {
             !host.contains("container="),
             "there is no container to name: {host}"
         );
+
+        // Byte 12 falls inside the two-byte character at 11..13: the
+        // id is named whole rather than cut mid-character.
+        let split = typed_summary(&row(Some(SandboxProvenance {
+            mode: SandboxModeLabel::ExecOnly,
+            runtime: SandboxRuntimeLabel::Docker,
+            container_id: Some("aaaaaaaaaaa\u{e9}b".into()),
+        })));
+        assert!(split.contains("container=aaaaaaaaaaa\u{e9}b"), "{split}");
 
         // A tool that ran in this process says nothing, rather than
         // saying host.
