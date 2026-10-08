@@ -237,11 +237,23 @@ fn extract_quoted_scope(text: &str) -> Option<String> {
     // `lower` is the same position in `text`.
     let lower = text.to_ascii_lowercase();
     let scope_idx = lower.find("scope")?;
+    #[allow(
+        clippy::string_slice,
+        reason = "scope_idx is where find matched ASCII \"scope\" in an ASCII-lowercased copy of the same bytes"
+    )]
     let tail = &text[scope_idx..];
     // Single-quote first.
     if let Some(start) = tail.find('\'') {
+        #[allow(
+            clippy::string_slice,
+            reason = "start and end index ASCII quote characters found by find"
+        )]
         let after = &tail[start + 1..];
         if let Some(end) = after.find('\'') {
+            #[allow(
+                clippy::string_slice,
+                reason = "start and end index ASCII quote characters found by find"
+            )]
             let token = &after[..end];
             if !token.is_empty() {
                 return Some(token.to_string());
@@ -250,8 +262,16 @@ fn extract_quoted_scope(text: &str) -> Option<String> {
     }
     // Backtick fallback.
     if let Some(start) = tail.find('`') {
+        #[allow(
+            clippy::string_slice,
+            reason = "start and end index ASCII quote characters found by find"
+        )]
         let after = &tail[start + 1..];
         if let Some(end) = after.find('`') {
+            #[allow(
+                clippy::string_slice,
+                reason = "start and end index ASCII quote characters found by find"
+            )]
             let token = &after[..end];
             if !token.is_empty() {
                 return Some(token.to_string());
@@ -270,11 +290,19 @@ fn extract_quoted_scope(text: &str) -> Option<String> {
 fn extract_google_scope(text: &str) -> Option<String> {
     const PREFIX: &str = "https://www.googleapis.com/auth/";
     let start = text.find(PREFIX)?;
+    #[allow(
+        clippy::string_slice,
+        reason = "start is where find matched the ASCII PREFIX in text"
+    )]
     let tail = &text[start..];
     // Scope URL terminates at whitespace, a quote, or a comma.
     let end = tail
         .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == ')')
         .unwrap_or(tail.len());
+    #[allow(
+        clippy::string_slice,
+        reason = "end is from find on a char, or tail.len()"
+    )]
     let scope = &tail[..end];
     if scope.len() <= PREFIX.len() {
         return None;
