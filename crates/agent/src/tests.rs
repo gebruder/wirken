@@ -1971,6 +1971,14 @@ mod wake {
     }
 
     fn make_factory(agent_id: &str, log: Arc<dyn SessionLog>) -> (Arc<AgentFactory>, TempDir) {
+        make_factory_with_llm(agent_id, log, LlmConfig::ollama("test"))
+    }
+
+    fn make_factory_with_llm(
+        agent_id: &str,
+        log: Arc<dyn SessionLog>,
+        llm_config: LlmConfig,
+    ) -> (Arc<AgentFactory>, TempDir) {
         let tmp = TempDir::new().unwrap();
         let mut configs = HashMap::new();
         configs.insert(
@@ -1978,7 +1986,7 @@ mod wake {
             AgentStaticConfig {
                 agent_id: agent_id.to_string(),
                 workspace: tmp.path().to_path_buf(),
-                llm_config: LlmConfig::ollama("test"),
+                llm_config,
                 channel_overrides: std::collections::HashMap::new(),
                 api_key: None,
                 api_key_credential: None,
@@ -2320,6 +2328,87 @@ mod wake {
             .await
             .unwrap();
         assert!(result.response.contains("did not complete"));
+    }
+
+    /// A model on a loopback port speaking ollama's `/api/chat`, which
+    /// answers request N with `reply N`. Returns the base URL and the
+    /// count of requests served.
+    async fn counting_ollama() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = served.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                // Read the whole request before answering it.
+                let mut request = Vec::new();
+                let mut buf = [0u8; 8192];
+                let body_start = loop {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "request ended before its headers");
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(i) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..body_start]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map(|v| v.trim().parse().unwrap())
+                    .unwrap_or(0);
+                while request.len() < body_start + length {
+                    let n = socket.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "request ended before its body");
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let body = serde_json::json!({
+                    "model": "counting",
+                    "message": {"role": "assistant", "content": format!("reply {n}")},
+                    "done": true,
+                })
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (base_url, served)
+    }
+
+    /// An inbound without a platform id is never taken for a repeat of
+    /// the one before it: two in a row are two turns, both answered by
+    /// the model.
+    #[tokio::test]
+    async fn empty_inbound_ids_are_never_a_repeat() {
+        let (base_url, served) = counting_ollama().await;
+        let log = make_log();
+        let llm = LlmConfig {
+            base_url,
+            ..LlmConfig::ollama("counting")
+        };
+        let (factory, _tmp) = make_factory_with_llm("agent-empty-id", log, llm);
+        let agent_arc = factory
+            .wake("agent-empty-id", "agent-empty-id/test/conv-1")
+            .unwrap();
+        let mut agent = agent_arc.lock().await;
+
+        let first = agent.process_message("first", String::new()).await.unwrap();
+        let second = agent
+            .process_message("second", String::new())
+            .await
+            .unwrap();
+        assert_eq!(first.response, "reply 1");
+        assert_eq!(second.response, "reply 2");
+        assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     // ---- WIRKEN_CACHE_MODE=drop ------------------------------------

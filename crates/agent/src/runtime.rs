@@ -2203,6 +2203,11 @@ impl Agent {
     /// gets a clear "previous turn did not complete, please retry"
     /// rather than re-running the side effects.
     fn dedup_inbound(&self, inbound_id: &str) -> Result<Option<ProcessResult>, AgentError> {
+        // An empty id says the platform gave none, so it identifies
+        // nothing: two such inbounds are two messages, never a repeat.
+        if inbound_id.is_empty() {
+            return Ok(None);
+        }
         let last_idx = self
             .session_log
             .last_index(&self.session_handle)

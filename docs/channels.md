@@ -33,9 +33,10 @@ that agent already holds. See
 gateway connection ends (see [architecture.md](architecture.md)). A restart
 loses what the adapter held in memory, and on some platforms it can forward
 a message a second time; the sections below say which. The agent recognizes a
-repeat only when it is the latest message in its conversation: it answers
-from the session log instead of running a second turn, and the stored reply
-is sent again. A repeat of an older message runs a new turn.
+repeat only when it is the latest message in its conversation and carries a
+platform message id: it answers from the session log instead of running a
+second turn, and the stored reply is sent again. A repeat of an older message
+runs a new turn.
 
 ## Telegram
 
