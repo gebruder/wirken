@@ -29,8 +29,16 @@ tagged.
   character boundary, and names it whole otherwise. A non-ASCII id
   panicked the typed forwarder task, which stopped typed forwarding
   until restart and again on every restart, since the worker re-reads
-  from the first row. Ids the sandbox records are ASCII hex; the case needs a row
-  written another way.
+  from the first row. Ids the sandbox records are ASCII hex; the case
+  needs a row written another way.
+- The scope hint read from an OAuth MCP server's error text is located
+  in an ASCII-lowercased copy, whose byte offsets match the original.
+  Unicode lowercasing changes the length of some characters, so an
+  error message containing them before the word `scope` could put the
+  offset inside a character or past the end and panic the MCP proxy's
+  connection task for that agent. The proxy process stayed up; the
+  agent's proxy connection, opened once at `wirken run` start and not
+  reopened, failed every MCP tool call until restart.
 
 ## [1.28.0] - 2026-10-08
 
