@@ -328,6 +328,15 @@ mod tests {
     use super::*;
     use tokio::io::{BufReader, duplex, split};
 
+    #[test]
+    fn hex_decode_rejects_non_ascii() {
+        // 64 bytes, the expected length, with every two-byte chunk
+        // splitting a character.
+        let hex = format!("a{}a", "\u{e9}".repeat(31));
+        assert_eq!(hex.len(), 64);
+        assert!(hex_decode::<32>(&hex).is_none());
+    }
+
     /// Run both sides over an in-memory pipe.
     async fn handshake(
         operator_key: &OperatorKey,
