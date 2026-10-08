@@ -326,14 +326,52 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn hex_decode_fixed<const N: usize>(hex: &str) -> Result<[u8; N], String> {
-    if hex.len() != N * 2 {
-        return Err(format!("expected {} hex chars, got {}", N * 2, hex.len()));
+/// Decode exactly `N` bytes of hex.
+pub(crate) fn hex_decode_fixed<const N: usize>(hex: &str) -> Result<[u8; N], String> {
+    let bytes = wirken_audit::hex::decode(hex)?;
+    let len = bytes.len();
+    bytes
+        .try_into()
+        .map_err(|_| format!("expected {N} bytes, got {len}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An auth response whose public key or signature is non-ASCII
+    /// text of the expected byte length is refused with an error.
+    /// Every two-byte slice of `a`, then `\u{e9}` repeated, then `a`
+    /// splits a character.
+    #[tokio::test]
+    async fn authenticate_refuses_non_ascii_pubkey_or_signature() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let mut reg = ProxyRegistry::new();
+        reg.register_identity("work", signing_key.verifying_key());
+        let registry = Arc::new(Mutex::new(reg));
+
+        let good_pub = hex_encode(&signing_key.verifying_key().to_bytes());
+        let good_sig = "00".repeat(64);
+        let bad_pub = format!("a{}a", "\u{e9}".repeat(31));
+        let bad_sig = format!("a{}a", "\u{e9}".repeat(63));
+        assert_eq!((bad_pub.len(), bad_sig.len()), (64, 128));
+
+        for (public_key, signature) in [(bad_pub, good_sig), (good_pub, bad_sig)] {
+            let response = AuthResponse {
+                kind: AuthResponseKind::AuthResponse,
+                agent_id: "work".into(),
+                public_key,
+                signature,
+            };
+            let mut line = serde_json::to_vec(&response).unwrap();
+            line.push(b'\n');
+            let mut reader = BufReader::new(line.as_slice());
+            let mut writer = Vec::new();
+
+            let err = authenticate(&mut reader, &mut writer, &registry)
+                .await
+                .expect_err("non-ASCII auth response");
+            assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
+        }
     }
-    let mut out = [0u8; N];
-    for i in 0..N {
-        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|e| format!("hex decode: {e}"))?;
-    }
-    Ok(out)
 }

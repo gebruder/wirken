@@ -301,16 +301,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, ProxyError> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(ProxyError::Config("odd-length hex string".into()));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|e| ProxyError::Config(format!("hex decode: {e}")))
-        })
-        .collect()
+    wirken_audit::hex::decode(hex).map_err(|e| ProxyError::Config(format!("hex decode: {e}")))
 }
 
 // Test helpers: keep StdioTransportTag / HttpTransportTag visible so
@@ -356,6 +347,23 @@ mod tests {
             signer_key_delegation: None,
             tool_costs: Default::default(),
         }
+    }
+
+    #[test]
+    fn non_ascii_signature_or_key_hex_is_invalid() {
+        let cfg = stdio_entry();
+        let key_hex = hex_encode(&random_signing_key().verifying_key().to_bytes());
+        let sig_hex = "00".repeat(64);
+        // Four bytes, with a character spanning offsets 1..3.
+        let bad = "a\u{e9}a";
+        assert_eq!(
+            verify_mcp_entry("foo", &cfg, Some(bad), Some(&key_hex), None, None),
+            McpVerifyResult::Invalid
+        );
+        assert_eq!(
+            verify_mcp_entry("foo", &cfg, Some(&sig_hex), Some(bad), None, None),
+            McpVerifyResult::Invalid
+        );
     }
 
     #[test]

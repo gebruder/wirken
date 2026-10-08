@@ -168,7 +168,7 @@ fn load_agent_pubkey(data_dir: &Path, agent_id: &str) -> Result<Option<Verifying
     }
     let hex = std::fs::read_to_string(&path)
         .map_err(|e| ProxyError::Protocol(format!("read {}: {e}", path.display())))?;
-    let bytes = hex_decode_32(hex.trim()).map_err(|e| {
+    let bytes = crate::server::hex_decode_fixed::<32>(hex.trim()).map_err(|e| {
         ProxyError::Protocol(format!(
             "parse {}: expected 64 hex chars for Ed25519 public key: {e}",
             path.display()
@@ -181,18 +181,6 @@ fn load_agent_pubkey(data_dir: &Path, agent_id: &str) -> Result<Option<Verifying
         ))
     })?;
     Ok(Some(key))
-}
-
-fn hex_decode_32(hex: &str) -> Result<[u8; 32], String> {
-    if hex.len() != 64 {
-        return Err(format!("expected 64 hex chars, got {}", hex.len()));
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|e| format!("hex decode: {e}"))?;
-    }
-    Ok(out)
 }
 
 fn open_vault(data_dir: &Path) -> Option<CredentialStore> {
@@ -284,5 +272,24 @@ async fn load_for_agent(
         Err(e) => {
             tracing::warn!("MCP load failed for agent '{agent_id}': {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_agent_pubkey;
+
+    #[test]
+    fn non_ascii_identity_pub_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("agents").join("a");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 64 bytes, the expected length, with every two-byte slice
+        // splitting a character.
+        let hex = format!("a{}a", "\u{e9}".repeat(31));
+        assert_eq!(hex.len(), 64);
+        std::fs::write(dir.join("identity.pub"), hex).unwrap();
+        let err = load_agent_pubkey(tmp.path(), "a").expect_err("non-ASCII identity.pub");
+        assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
     }
 }
