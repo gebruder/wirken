@@ -929,11 +929,26 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     }
 
     // --- Spawn adapter processes ---
+    //
+    // Each adapter process runs under a restart loop: when its process
+    // exits or its gateway connection ends, the loop kills what is left,
+    // records an `adapter.restart` row and respawns it after a backoff.
+    // The connection signals its end through the adapter's lifeline.
     let exe = std::env::current_exe()?;
     let mut adapter_handles = Vec::new();
+    let adapters = registry.lock().await.list();
+    let lifelines: Lifelines = Arc::new(
+        adapters
+            .iter()
+            .map(|a| (a.adapter_id.clone(), Arc::default()))
+            .collect(),
+    );
 
-    for adapter_entry in registry.lock().await.list() {
+    for adapter_entry in adapters {
         let adapter_id = adapter_entry.adapter_id.clone();
+        let channel = adapter_entry.channel.clone();
+        let lifeline = lifelines.get(&adapter_id).cloned().unwrap_or_default();
+        let restart_audit = audit.clone();
         let sock = socket_path.clone();
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
@@ -943,25 +958,26 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             // Small delay to let the listener start
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            tracing::info!("Spawning adapter: {adapter_id}");
-            let result = Command::new(&exe)
-                .arg("adapter")
-                .arg(&adapter_id)
-                .env("WIRKEN_DATA_DIR", &data_dir)
-                .env("WIRKEN_SOCKET", &sock)
-                .env("WIRKEN_VAULT_PASSPHRASE", &vp)
-                .kill_on_drop(true)
-                .spawn();
-
-            match result {
-                Ok(mut child) => {
-                    let status = child.wait().await;
-                    tracing::info!("Adapter {adapter_id} exited: {status:?}");
-                }
-                Err(e) => {
-                    tracing::error!("Failed to spawn adapter {adapter_id}: {e}");
-                }
-            }
+            let spawn = || {
+                tracing::info!("Spawning adapter: {adapter_id}");
+                Command::new(&exe)
+                    .arg("adapter")
+                    .arg(&adapter_id)
+                    .env("WIRKEN_DATA_DIR", &data_dir)
+                    .env("WIRKEN_SOCKET", &sock)
+                    .env("WIRKEN_VAULT_PASSPHRASE", &vp)
+                    .kill_on_drop(true)
+                    .spawn()
+            };
+            supervise_adapter(
+                &adapter_id,
+                &channel,
+                spawn,
+                &lifeline,
+                &restart_audit,
+                ADAPTER_RESTART_BACKOFF,
+            )
+            .await;
         });
         adapter_handles.push(handle);
     }
@@ -1600,6 +1616,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let accept_dispatcher = dispatcher.clone();
     let accept_pending = pending_approval_queue.clone();
     let accept_approvers = approver_registry.clone();
+    let accept_lifelines = lifelines.clone();
 
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
@@ -1677,10 +1694,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let disp = accept_dispatcher.clone();
                     let pend = accept_pending.clone();
                     let apprv = accept_approvers.clone();
+                    let lines = accept_lifelines.clone();
 
                     accept_connection_tasks.spawn("adapter", async move {
                         if let Err(e) = handle_adapter_connection(
-                            stream, reg, fact, au, sess, rtr, det, disp, pend, apprv,
+                            stream, reg, fact, au, sess, rtr, det, disp, pend, apprv, lines,
                         )
                         .await
                         {
@@ -2193,6 +2211,136 @@ where
     result
 }
 
+/// What an adapter's restart loop hears from that adapter's gateway
+/// connection.
+#[derive(Default)]
+struct AdapterLifeline {
+    /// Notified by [`ConnectionTeardown`] when the connection ends.
+    ended: tokio::sync::Notify,
+    /// When the current connection authenticated. The restart loop
+    /// takes it to decide whether the connection lasted long enough to
+    /// reset the backoff.
+    connected_at: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+/// One lifeline per adapter registered at start, by adapter id.
+type Lifelines = Arc<HashMap<String, Arc<AdapterLifeline>>>;
+
+/// Delays between restarts of one adapter process.
+#[derive(Clone, Copy, Debug)]
+struct RestartBackoff {
+    /// The delay before the first restart.
+    first: std::time::Duration,
+    /// The longest delay; each restart doubles the last one up to here.
+    cap: std::time::Duration,
+    /// A connection that lasted this long sets the delay back to
+    /// `first`.
+    reset_after: std::time::Duration,
+}
+
+const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
+    first: std::time::Duration::from_secs(1),
+    cap: std::time::Duration::from_secs(60),
+    reset_after: std::time::Duration::from_secs(60),
+};
+
+/// Keep one adapter process running for as long as this future is.
+///
+/// Spawns the process with `spawn`, then waits for whichever comes
+/// first: the process exiting, or its gateway connection ending. On the
+/// second the process is killed, since every adapter keeps running
+/// after it loses the gateway and none dials back in. Either way an
+/// `adapter.restart` row records the attempt, the cause and the delay
+/// before the next spawn. The delay doubles from `backoff.first` to
+/// `backoff.cap` and goes back to `first` after a connection that
+/// lasted `backoff.reset_after`.
+///
+/// Dropping the future stops the loop; a child it holds is killed on
+/// drop. Shutdown aborts the task running it before it stops the
+/// connection tasks, so a connection ending at shutdown respawns
+/// nothing.
+async fn supervise_adapter<S>(
+    adapter_id: &str,
+    channel: &str,
+    mut spawn: S,
+    lifeline: &AdapterLifeline,
+    audit: &AuditWriter,
+    backoff: RestartBackoff,
+) where
+    S: FnMut() -> std::io::Result<tokio::process::Child>,
+{
+    let mut delay = backoff.first;
+    let mut attempt: u64 = 0;
+    loop {
+        // A teardown that landed while no child was running belongs to
+        // the previous child; it must not end this one. A permit, if
+        // one is stored, is taken here; otherwise the ready branch wins.
+        tokio::select! {
+            biased;
+            _ = lifeline.ended.notified() => {}
+            _ = std::future::ready(()) => {}
+        }
+        *lifeline.connected_at.lock().unwrap() = None;
+
+        let (cause, exit) = match spawn() {
+            Ok(mut child) => {
+                tokio::select! {
+                    status = child.wait() => (
+                        "process_exited",
+                        status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
+                    ),
+                    _ = lifeline.ended.notified() => {
+                        // `kill` waits for the process to exit; `wait`
+                        // then returns the status it already has.
+                        let _ = child.kill().await;
+                        let status = child.wait().await;
+                        (
+                            "connection_ended",
+                            status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
+                        )
+                    }
+                }
+            }
+            Err(e) => ("spawn_failed", e.to_string()),
+        };
+
+        let connected_for = lifeline
+            .connected_at
+            .lock()
+            .unwrap()
+            .take()
+            .map(|t| t.elapsed());
+        if connected_for.is_some_and(|d| d >= backoff.reset_after) {
+            delay = backoff.first;
+            attempt = 0;
+        }
+        attempt += 1;
+        let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        tracing::warn!(
+            "Adapter '{adapter_id}' {cause} ({exit}); restart {attempt} in {delay_ms} ms"
+        );
+        if let Err(e) = audit
+            .log(
+                AuditEvent::new(ActorKind::Service, "gateway", "adapter.restart", adapter_id)
+                    .with_channel(channel)
+                    .with_detail(serde_json::json!({
+                        "attempt": attempt,
+                        "delay_ms": delay_ms,
+                        "cause": cause,
+                        "exit": exit,
+                        "connected_ms": connected_for
+                            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                    })),
+            )
+            .await
+        {
+            tracing::error!("adapter.restart audit write failed for '{adapter_id}': {e}");
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(backoff.cap);
+    }
+}
+
 /// Per-connection teardown that runs whether [`message_loop`] returns
 /// or unwinds.
 ///
@@ -2219,6 +2367,8 @@ struct ConnectionTeardown {
     registry: Arc<Mutex<AdapterRegistry>>,
     dispatcher: Arc<OutboundDispatcher>,
     audit: Arc<AuditWriter>,
+    /// The adapter's restart loop, told the connection has ended.
+    lifeline: Option<Arc<AdapterLifeline>>,
 }
 
 impl Drop for ConnectionTeardown {
@@ -2226,6 +2376,9 @@ impl Drop for ConnectionTeardown {
         // First, and synchronously: nothing should be able to route a
         // message to this connection after the loop has left it.
         self.dispatcher.unregister(&self.channel);
+        if let Some(lifeline) = &self.lifeline {
+            lifeline.ended.notify_one();
+        }
 
         // Dropped during an unwind means the message loop panicked;
         // the panic message itself is recorded when the connection task
@@ -2283,6 +2436,7 @@ async fn handle_adapter_connection(
     dispatcher: Arc<OutboundDispatcher>,
     pending_approvals: Arc<wirken_gateway::pending_approvals::PendingApprovalQueue>,
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
+    lifelines: Lifelines,
 ) -> Result<()> {
     let (mut reader, mut writer) = split_stream(stream);
 
@@ -2321,6 +2475,11 @@ async fn handle_adapter_connection(
 
     tracing::info!("Adapter '{adapter_id}' authenticated on channel '{authenticated_channel}'");
     registry.lock().await.set_connected(&adapter_id, true);
+    // An adapter added after start has no restart loop and no lifeline.
+    let lifeline = lifelines.get(&adapter_id).cloned();
+    if let Some(lifeline) = &lifeline {
+        *lifeline.connected_at.lock().unwrap() = Some(std::time::Instant::now());
+    }
 
     let pubkey_fingerprint = adapter_pubkey_fingerprint(&pub_key);
 
@@ -2354,6 +2513,7 @@ async fn handle_adapter_connection(
         registry: registry.clone(),
         dispatcher: dispatcher.clone(),
         audit: audit.clone(),
+        lifeline,
     };
 
     // Message loop. `_teardown` drops as this returns, on the value
@@ -4021,6 +4181,7 @@ mod connection_teardown_tests {
             registry,
             dispatcher,
             audit: audit.clone(),
+            lifeline: None,
         };
         let result = tokio::spawn(async move {
             let _teardown = teardown;
@@ -4055,6 +4216,297 @@ mod connection_teardown_tests {
     async fn an_ordinary_disconnect_says_ended() {
         let row = disconnect_row(false).await;
         assert_eq!(row.detail["reason"].as_str(), Some("ended"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod adapter_restart_tests {
+    use super::super::connection_tasks::ConnectionTasks;
+    use super::{
+        AdapterLifeline, AdapterRegistry, ConnectionTeardown, OutboundDispatcher, RestartBackoff,
+        supervise_adapter,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::{Mutex, mpsc, oneshot};
+    use tokio::task::JoinHandle;
+    use wirken_audit::{AuditEvent, AuditLog, AuditQuery, AuditWriter};
+
+    const BACKOFF: RestartBackoff = RestartBackoff {
+        first: Duration::from_millis(100),
+        cap: Duration::from_millis(400),
+        reset_after: Duration::from_secs(60),
+    };
+
+    /// The gateway-side pieces one adapter's restart touches, on a
+    /// scratch audit log.
+    struct Gateway {
+        tmp: tempfile::TempDir,
+        audit: Arc<AuditWriter>,
+        flush: JoinHandle<()>,
+        registry: Arc<Mutex<AdapterRegistry>>,
+        dispatcher: Arc<OutboundDispatcher>,
+        tasks: ConnectionTasks,
+        lifeline: Arc<AdapterLifeline>,
+    }
+
+    impl Gateway {
+        fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let (writer, flush) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
+            let audit = Arc::new(writer);
+            let registry = Arc::new(Mutex::new(
+                AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap(),
+            ));
+            Self {
+                tasks: ConnectionTasks::new(audit.clone()),
+                tmp,
+                audit,
+                flush,
+                registry,
+                dispatcher: Arc::new(OutboundDispatcher::new()),
+                lifeline: Arc::default(),
+            }
+        }
+
+        /// Run the restart loop over a process started from `argv`.
+        /// Each spawned pid arrives on the returned channel.
+        fn supervise(
+            &self,
+            argv: &'static [&'static str],
+            backoff: RestartBackoff,
+        ) -> (JoinHandle<()>, mpsc::UnboundedReceiver<u32>) {
+            let (tx, rx) = mpsc::unbounded_channel();
+            let lifeline = self.lifeline.clone();
+            let audit = self.audit.clone();
+            let handle = tokio::spawn(async move {
+                let spawn = || {
+                    let child = tokio::process::Command::new(argv[0])
+                        .args(&argv[1..])
+                        .kill_on_drop(true)
+                        .spawn()?;
+                    let _ = tx.send(child.id().expect("a running child has a pid"));
+                    Ok(child)
+                };
+                supervise_adapter("telegram", "telegram", spawn, &lifeline, &audit, backoff).await;
+            });
+            (handle, rx)
+        }
+
+        /// Stand in for the adapter dialing in: a connection task that
+        /// holds the real teardown guard and panics when the returned
+        /// sender fires.
+        fn connect(&self) -> oneshot::Sender<()> {
+            let (tx, rx) = oneshot::channel::<()>();
+            let lifeline = self.lifeline.clone();
+            let teardown = ConnectionTeardown {
+                adapter_id: "telegram".into(),
+                channel: "telegram".into(),
+                pubkey_fingerprint: "fp".into(),
+                registry: self.registry.clone(),
+                dispatcher: self.dispatcher.clone(),
+                audit: self.audit.clone(),
+                lifeline: Some(lifeline.clone()),
+            };
+            self.tasks.spawn("adapter", async move {
+                let _teardown = teardown;
+                *lifeline.connected_at.lock().unwrap() = Some(Instant::now());
+                let _ = rx.await;
+                panic!("message loop panicked");
+            });
+            tx
+        }
+
+        /// Every row with `action`, read once everything holding the
+        /// writer has let go of it.
+        async fn rows(self, action: &str) -> Vec<AuditEvent> {
+            self.tasks.shutdown().await;
+            // Teardown rows are written from tasks of their own.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let db = self.tmp.path().join("audit.db");
+            drop(self.tasks);
+            drop(self.audit);
+            self.flush.await.unwrap();
+            AuditLog::open(&db)
+                .unwrap()
+                .query(&AuditQuery::default())
+                .unwrap()
+                .into_iter()
+                .map(|e| e.event)
+                .filter(|e| e.action == action)
+                .collect()
+        }
+    }
+
+    /// Whether a process with `pid` still exists.
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    async fn next_pid(pids: &mut mpsc::UnboundedReceiver<u32>) -> u32 {
+        tokio::time::timeout(Duration::from_secs(5), pids.recv())
+            .await
+            .expect("the adapter is spawned again")
+            .expect("the restart loop is running")
+    }
+
+    /// Restart rows in the order the restarts happened.
+    fn by_attempt(mut rows: Vec<AuditEvent>) -> Vec<AuditEvent> {
+        rows.sort_by_key(|e| e.detail["attempt"].as_u64());
+        rows
+    }
+
+    #[tokio::test]
+    async fn a_panicked_connection_kills_and_respawns_its_adapter_with_a_doubling_delay() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], BACKOFF);
+
+        let first = next_pid(&mut pids).await;
+        gw.connect().send(()).unwrap();
+        let second = next_pid(&mut pids).await;
+        assert!(
+            !alive(first),
+            "the process whose connection panicked is killed"
+        );
+        assert!(alive(second), "a new process runs in its place");
+
+        // The new process connects, and that connection panics too.
+        gw.connect().send(()).unwrap();
+        let third = next_pid(&mut pids).await;
+        assert!(!alive(second));
+        assert!(alive(third));
+        assert!(
+            !supervisor.is_finished(),
+            "the gateway side is still running"
+        );
+        supervisor.abort();
+        let _ = supervisor.await;
+
+        let restarts = by_attempt(gw.rows("adapter.restart").await);
+        assert_eq!(restarts.len(), 2, "{restarts:?}");
+        for (row, (attempt, delay_ms)) in restarts.iter().zip([(1, 100), (2, 200)]) {
+            assert_eq!(row.target, "telegram");
+            assert_eq!(row.detail["cause"].as_str(), Some("connection_ended"));
+            assert_eq!(row.detail["attempt"].as_u64(), Some(attempt));
+            assert_eq!(row.detail["delay_ms"].as_u64(), Some(delay_ms));
+            assert!(row.detail["connected_ms"].is_u64(), "{row:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_disconnect_row_says_the_connection_panicked() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], BACKOFF);
+        next_pid(&mut pids).await;
+        gw.connect().send(()).unwrap();
+        next_pid(&mut pids).await;
+        supervisor.abort();
+        let _ = supervisor.await;
+
+        let disconnects = gw.rows("adapter.disconnect").await;
+        assert_eq!(disconnects.len(), 1, "{disconnects:?}");
+        assert_eq!(disconnects[0].detail["reason"].as_str(), Some("panic"));
+    }
+
+    #[tokio::test]
+    async fn the_panic_message_is_recorded_when_the_task_is_reaped() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], BACKOFF);
+        next_pid(&mut pids).await;
+        gw.connect().send(()).unwrap();
+        next_pid(&mut pids).await;
+        supervisor.abort();
+        let _ = supervisor.await;
+
+        let panics = gw.rows("connection.panic").await;
+        assert_eq!(panics.len(), 1, "{panics:?}");
+        assert_eq!(panics[0].detail["kind"].as_str(), Some("adapter"));
+        assert_eq!(
+            panics[0].detail["panic"].as_str(),
+            Some("message loop panicked")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_lasted_resets_the_delay() {
+        let gw = Gateway::new();
+        let backoff = RestartBackoff {
+            reset_after: Duration::ZERO,
+            ..BACKOFF
+        };
+        let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], backoff);
+        next_pid(&mut pids).await;
+        gw.connect().send(()).unwrap();
+        next_pid(&mut pids).await;
+        gw.connect().send(()).unwrap();
+        next_pid(&mut pids).await;
+        supervisor.abort();
+        let _ = supervisor.await;
+
+        let restarts = gw.rows("adapter.restart").await;
+        assert_eq!(restarts.len(), 2, "{restarts:?}");
+        for row in &restarts {
+            assert_eq!(row.detail["attempt"].as_u64(), Some(1));
+            assert_eq!(row.detail["delay_ms"].as_u64(), Some(100));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exiting_process_is_respawned_up_to_the_capped_delay() {
+        let gw = Gateway::new();
+        let (supervisor, mut pids) = gw.supervise(&["sh", "-c", "exit 3"], BACKOFF);
+        for _ in 0..5 {
+            next_pid(&mut pids).await;
+        }
+        supervisor.abort();
+        let _ = supervisor.await;
+
+        let restarts = by_attempt(gw.rows("adapter.restart").await);
+        let delays: Vec<u64> = restarts
+            .iter()
+            .map(|r| r.detail["delay_ms"].as_u64().unwrap())
+            .collect();
+        assert_eq!(&delays[..4], &[100, 200, 400, 400], "{restarts:?}");
+        for row in &restarts {
+            assert_eq!(row.detail["cause"].as_str(), Some("process_exited"));
+            assert_eq!(row.detail["exit"].as_str(), Some("exit status: 3"));
+            assert!(row.detail["connected_ms"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_the_backoff_respawns_nothing() {
+        let gw = Gateway::new();
+        let backoff = RestartBackoff {
+            first: Duration::from_secs(1),
+            ..BACKOFF
+        };
+        let (supervisor, mut pids) = gw.supervise(&["sleep", "600"], backoff);
+        let first = next_pid(&mut pids).await;
+        gw.connect().send(()).unwrap();
+
+        // Once the process is gone the loop records the restart and
+        // waits out its one-second backoff.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(first) {
+            assert!(Instant::now() < deadline, "the process was not killed");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // What shutdown does to the task running the loop.
+        supervisor.abort();
+        let _ = supervisor.await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(pids.try_recv().is_err(), "nothing was respawned");
+
+        let restarts = gw.rows("adapter.restart").await;
+        assert_eq!(restarts.len(), 1, "{restarts:?}");
+        assert_eq!(restarts[0].detail["delay_ms"].as_u64(), Some(1000));
     }
 }
 
