@@ -2,6 +2,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use wirken_audit::hex::decode as hex_decode;
 
 use crate::error::GatewayError;
 
@@ -526,16 +527,6 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,6 +726,47 @@ mod tests {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    /// `"a\u{e9}a"` is four bytes with a character spanning offsets
+    /// 1..3: even length, so only an ASCII check keeps it from being
+    /// sliced mid-character.
+    const NON_ASCII_HEX: &str = "a\u{e9}a";
+
+    #[test]
+    fn non_ascii_skill_sig_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("non-ascii-sig");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "body").unwrap();
+        sign_skill(&skill_dir, &random_signing_key()).unwrap();
+        std::fs::write(skill_dir.join("SKILL.sig"), NON_ASCII_HEX).unwrap();
+
+        let err = verify_skill_self_signed(&skill_dir).expect_err("non-ASCII SKILL.sig");
+        assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
+    }
+
+    #[test]
+    fn non_ascii_registry_entry_hex_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("non-ascii-entry");
+        std::fs::create_dir(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "body").unwrap();
+        let signing_key = random_signing_key();
+        let sig_hex = sign_skill(&skill_dir, &signing_key).unwrap();
+        let key_hex = hex_encode(&signing_key.verifying_key().to_bytes());
+
+        assert!(verify_skill_with_expected_key(&skill_dir, NON_ASCII_HEX, &key_hex).is_err());
+        assert!(verify_skill_with_expected_key(&skill_dir, &sig_hex, NON_ASCII_HEX).is_err());
+    }
+
+    #[test]
+    fn non_ascii_root_pubkey_of_hex_length_is_rejected() {
+        // 64 bytes, the length check's expectation, with every
+        // two-byte slice splitting a character.
+        let hex = format!("a{}a", "\u{e9}".repeat(31));
+        assert_eq!(hex.len(), 64);
+        assert!(parse_pubkey_hex(&hex).is_none());
     }
 
     #[test]
