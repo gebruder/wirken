@@ -31,11 +31,7 @@ pub async fn list(agent_id: Option<&str>) -> Result<()> {
 
     for job in &jobs {
         let state = if job.paused { "pause" } else { "  ok " };
-        let msg = if job.message.len() > 40 {
-            format!("{}...", &job.message[..37])
-        } else {
-            job.message.clone()
-        };
+        let msg = short_message(&job.message);
         println!(
             "  {:20}  {:12}  {:20}  {:6}  {}  {}",
             job.id, job.agent_id, job.schedule, job.run_count, state, msg
@@ -94,4 +90,31 @@ pub async fn resume(id: &str) -> Result<()> {
     store.resume(id)?;
     println!("  Resumed cron job: {id}");
     Ok(())
+}
+
+/// `message` as listed: a message over 40 bytes is cut to at most 37,
+/// at a character boundary, with `...` appended.
+fn short_message(message: &str) -> String {
+    if message.len() <= 40 {
+        return message.to_string();
+    }
+    let cut = message.floor_char_boundary(37);
+    format!("{}...", message.get(..cut).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_message;
+
+    #[test]
+    fn short_message_cuts_at_a_character_boundary() {
+        assert_eq!(short_message("short"), "short");
+        assert_eq!(
+            short_message(&"a".repeat(41)),
+            format!("{}...", "a".repeat(37))
+        );
+        // Byte 37 falls inside the two-byte character at 36..38.
+        let message = format!("{}\u{e9}{}", "a".repeat(36), "a".repeat(10));
+        assert_eq!(short_message(&message), format!("{}...", "a".repeat(36)));
+    }
 }
