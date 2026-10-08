@@ -4771,6 +4771,31 @@ mod identity_tests {
     use super::TempDir;
     use crate::identity::{AgentIdentity, identity_dir, verify};
 
+    /// Four bytes, with a character spanning offsets 1..3.
+    const NON_ASCII_HEX: &str = "a\u{e9}a";
+
+    #[test]
+    fn load_from_rejects_non_ascii_key_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("identity.key");
+        std::fs::write(&path, NON_ASCII_HEX).unwrap();
+        let err = AgentIdentity::load_from("a", &path)
+            .err()
+            .expect("non-ASCII key file is an error");
+        assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
+    }
+
+    #[test]
+    fn load_public_key_rejects_non_ascii_pub_file() {
+        let tmp = TempDir::new().unwrap();
+        let dir = identity_dir(tmp.path(), "a");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("identity.pub"), NON_ASCII_HEX).unwrap();
+        let err = crate::identity::load_public_key(tmp.path(), "a")
+            .expect_err("non-ASCII pub file is an error");
+        assert!(format!("{err}").contains("non-ASCII hex string"), "{err}");
+    }
+
     #[test]
     fn generate_produces_distinct_keys() {
         let a = AgentIdentity::generate("a");
@@ -5041,6 +5066,40 @@ mod attestation_tests {
                 assert_eq!(attestations_unpinned, 1);
             }
             other => panic!("expected Ok with unpinned counts, got {other:?}"),
+        }
+    }
+
+    /// An attestation whose signature field is not ASCII hex is
+    /// reported as broken at that row.
+    #[test]
+    fn non_ascii_attestation_signature_is_broken() {
+        let (log, h) = fresh_log_with_events(2);
+        let signer = AgentIdentity::generate("signer");
+        let head = log.get_range(&h, 1..2).unwrap().remove(0);
+        // Four bytes, with a character spanning offsets 1..3.
+        let seq = log
+            .append(
+                &h,
+                TrustLevel::System,
+                SessionEvent::Attestation {
+                    chain_head_seq: 1,
+                    chain_head_hash: head.hash,
+                    signature: wirken_audit::HexBytes("a\u{e9}a".into()),
+                    signer_pubkey: wirken_audit::HashHex::from_bytes(&signer.public_key_bytes()),
+                },
+            )
+            .unwrap();
+
+        match verify_session_attestations(&log, &h, &signer.verifying_key()).unwrap() {
+            AttestationVerifyResult::Broken {
+                attestation_seq,
+                reason,
+                ..
+            } => {
+                assert_eq!(attestation_seq, seq);
+                assert!(reason.contains("non-ASCII hex string"), "{reason}");
+            }
+            other => panic!("expected Broken, got {other:?}"),
         }
     }
 

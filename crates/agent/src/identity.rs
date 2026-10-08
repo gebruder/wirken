@@ -99,7 +99,7 @@ impl AgentIdentity {
         let hex = std::fs::read_to_string(secret_path).map_err(|e| {
             AgentError::Identity(format!("read identity key {}: {e}", secret_path.display()))
         })?;
-        let bytes = hex_decode(hex.trim()).map_err(|e| {
+        let bytes = wirken_audit::hex::decode(hex.trim()).map_err(|e| {
             AgentError::Identity(format!(
                 "decode identity key {}: {e}",
                 secret_path.display()
@@ -171,7 +171,7 @@ pub fn load_public_key(
     }
     let hex = std::fs::read_to_string(&path)
         .map_err(|e| AgentError::Identity(format!("read {}: {e}", path.display())))?;
-    let bytes = hex_decode(hex.trim())
+    let bytes = wirken_audit::hex::decode(hex.trim())
         .map_err(|e| AgentError::Identity(format!("{}: {e}", path.display())))?;
     if bytes.len() != 32 {
         return Err(AgentError::Identity(format!(
@@ -247,14 +247,4 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(&mut s, "{b:02x}").expect("write to String");
     }
     s
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("hex decode: {e}")))
-        .collect()
 }

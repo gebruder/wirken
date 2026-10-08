@@ -209,7 +209,7 @@ pub fn verify_session_attestations<L: SessionLog + ?Sized>(
         // Reconstruct the signed message and verify the signature.
         let signed_msg =
             build_signed_message(session.id().as_str(), *chain_head_seq, chain_head_hash);
-        let sig_bytes = match decode_hex(&signature.0) {
+        let sig_bytes = match wirken_audit::hex::decode(&signature.0) {
             Ok(b) if b.len() == 64 => b,
             Ok(b) => {
                 return Ok(AttestationVerifyResult::Broken {
@@ -263,16 +263,6 @@ fn build_signed_message(
     out.extend_from_slice(&chain_head_seq.to_le_bytes());
     out.extend_from_slice(hash_bytes);
     out
-}
-
-fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
 }
 
 fn map_audit_err(e: AuditError) -> AgentError {

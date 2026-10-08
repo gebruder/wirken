@@ -94,7 +94,7 @@ impl McpProxyClient {
         // 2. Sign (domain || agent_id || nonce) so the server's
         //    verification binds to this agent_id cryptographically,
         //    not only through the pubkey-registration lookup.
-        let nonce = hex_decode(&challenge.nonce)
+        let nonce = wirken_audit::hex::decode(&challenge.nonce)
             .map_err(|e| AgentError::Mcp(format!("challenge nonce decode: {e}")))?;
         let signed = handshake_signed_payload(agent_id, &nonce);
         let signature = identity.sign(&signed);
@@ -345,14 +345,4 @@ fn hex_encode(bytes: &[u8]) -> String {
         write!(&mut s, "{b:02x}").expect("write to String");
     }
     s
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("odd-length hex string".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
 }
