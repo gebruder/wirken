@@ -73,10 +73,9 @@ pub fn parse<'a>(message: &str, skills: &'a [Skill]) -> SlashResult<'a> {
     };
     // Skill name is the prefix up to the first whitespace. Empty name
     // (a bare `/`) is not an invocation — pass through.
-    let (name, rest) = match after_slash.find(char::is_whitespace) {
-        Some(idx) => (&after_slash[..idx], &after_slash[idx + 1..]),
-        None => (after_slash, ""),
-    };
+    let (name, rest) = after_slash
+        .split_once(char::is_whitespace)
+        .unwrap_or((after_slash, ""));
     if name.is_empty() {
         return SlashResult::None;
     }
@@ -152,6 +151,21 @@ mod tests {
                 assert_eq!(remainder, "audit src/");
             }
             other => panic!("expected Invoked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multi_byte_whitespace_after_the_name_splits_the_remainder() {
+        let s = vec![skill("lyrik")];
+        // U+3000 is three bytes, U+00A0 two.
+        for message in ["/lyrik\u{3000}audit src/", "/lyrik\u{a0}audit src/"] {
+            match parse(message, &s) {
+                SlashResult::Invoked { skill, remainder } => {
+                    assert_eq!(skill.name, "lyrik");
+                    assert_eq!(remainder, "audit src/");
+                }
+                other => panic!("expected Invoked for {message:?}, got {other:?}"),
+            }
         }
     }
 
