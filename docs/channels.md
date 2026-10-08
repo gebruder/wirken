@@ -27,6 +27,14 @@ platform user: any sender who can reach the bot inherits every Tier 2 approval
 that agent already holds. See
 [permissions-and-identity.md](permissions-and-identity.md).
 
+**Restarts.** `wirken run` restarts an adapter process when it exits or its
+gateway connection ends (see [architecture.md](architecture.md)). A restart
+loses what the adapter held in memory, and on some platforms it can forward
+a message a second time; the sections below say which. The agent recognizes a
+repeat only when it is the latest message in its conversation: it answers
+from the session log instead of running a second turn, and the stored reply
+is sent again. A repeat of an older message runs a new turn.
+
 ## Telegram
 
 ```bash
@@ -42,6 +50,11 @@ ships with `parse_mode=HTML`, chosen because the escape surface is three
 characters rather than the fifteen-plus with positional rules in MarkdownV2.
 Replies target the message the user replied to; root messages are not
 auto-replied-to.
+
+**After a restart.** Telegram counts a batch of updates as delivered only when
+the next `getUpdates` call passes an offset past it. An adapter killed between
+receiving a batch and that next call is sent the batch again after the
+restart and forwards it again, approval button presses included.
 
 ## Discord
 
@@ -99,6 +112,14 @@ opaque bearers. Changing app scopes leaves the existing bot token carrying its
 original scopes until the app is reinstalled and a new `xoxb-` is issued.
 There is no revocation-detection branch: a revoked token surfaces as
 `invalid_auth` on outbound calls and a failed WebSocket upgrade inbound.
+
+**After a restart.** The Socket Mode envelope is acknowledged once the adapter
+has queued the message, and the message is written to the gateway from that
+queue separately, so the two are not ordered. An adapter killed after the
+gateway write and before the acknowledgement leaves the envelope
+unacknowledged; Slack redelivers it (Slack's behaviour, not checked in the
+adapter) and the restarted adapter forwards it again. A message acknowledged
+but not yet written is lost instead.
 
 ## Microsoft Teams
 
@@ -159,6 +180,15 @@ bot participates in must be unencrypted.
 There is no `M_UNKNOWN_TOKEN` detection branch: an invalidated access token
 surfaces as generic sync errors. Restart the adapter to re-login from the
 vault-stored password.
+
+**After a restart.** The sync token is held in memory only, so every start of
+the adapter, a restart included, begins with an initial sync, and its
+timeline events are forwarded like any others. Recent DMs and mentions in
+each joined room reach the agent again; how many depends on the homeserver's
+default timeline limit, which the adapter does not set. A ✅ or ❌ reaction to
+an approval prompt sent before the restart is no longer matched and is
+dropped, and the request waits out its timeout. Each start also logs in
+without a device id, which creates a new device on the homeserver.
 
 ## Signal
 
@@ -254,6 +284,10 @@ echo "+15551234567,+15559876543,group-abc-xyz=" \
   saw it" from the adapter's own `not in allowlist or empty`.
 - **Approval is coarse.** Tier 2 shell approvals key on the first token of the
   command; finer-grained patterns are not supported.
+- **Approvals pending at a restart are lost.** The prefix map behind
+  `!approve <prefix>` is held in memory. After the adapter restarts, a prefix
+  from an earlier prompt is answered with `no pending request matching
+  prefix` and the request waits out its timeout.
 - **No rate limiting on the adapter.** An allowlisted sender spamming messages
   spams the LLM and the API bill. Add external rate limiting if more than a
   handful of people can reach it.
@@ -291,6 +325,11 @@ The adapter listens on `127.0.0.1:3980`. Chat needs to reach that over HTTPS,
 so for local testing put `ngrok http 3980` in front and paste the forwarding
 URL into the endpoint field.
 
+**After a restart.** Each POST is answered with 200 only after the message is
+written to the gateway. An adapter killed between the two leaves the POST
+unanswered; if Chat retries it (Chat's behaviour, not checked in the
+adapter), the restarted adapter forwards it again.
+
 ## iMessage (BlueBubbles)
 
 ```bash
@@ -319,6 +358,15 @@ reaches the loopback listener. Do not expose the port directly.
 Uninstalling wirken does not remove the webhook registration; delete it in the
 BlueBubbles server's webhook settings.
 
+**After a restart.** The adapter registers its webhook on every start, a
+restart included. If BlueBubbles keeps a registration per call for the same
+URL (BlueBubbles' behaviour, not checked in the adapter), each message is then
+posted, and forwarded, once per registration; check the server's webhook
+settings after a restart. Each POST is answered with 200 only after the
+message is written to the gateway, so a POST cut off by a kill may be
+retried and forwarded again. `!approve <prefix>` for a prompt sent before the
+restart is no longer matched and is dropped without a reply.
+
 ## WhatsApp
 
 Targets the [Meta Cloud API](https://developers.facebook.com/docs/whatsapp/cloud-api).
@@ -335,6 +383,11 @@ credentials into the vault:
 
 The adapter listens on `127.0.0.1:3979` for webhook POSTs and replies through
 the Cloud API.
+
+**After a restart.** Each webhook POST is answered with 200 only after the
+message is written to the gateway. An adapter killed between the two leaves
+the POST unanswered; Meta retries it (Meta's behaviour, not checked in the
+adapter) and the restarted adapter forwards it again.
 
 ## Platform-side state
 
