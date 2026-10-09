@@ -86,6 +86,14 @@ tagged.
   start. New flags `--app-id`, `--homeserver` and `--username` take the
   values without a prompt, falling back to `WIRKEN_TEAMS_APP_ID`,
   `WIRKEN_MATRIX_HOMESERVER` and `WIRKEN_MATRIX_USERNAME`.
+- `wirken channel add imessage` stores the BlueBubbles server password
+  as `imessage-server-password` alongside `imessage-token`, and the
+  server URL as `imessage-bluebubbles-url`, with the names and channel
+  value `wirken setup` writes. Before, it stored only the token and the
+  adapter refused to start. `--bluebubbles-url`, falling back to
+  `WIRKEN_IMESSAGE_BLUEBUBBLES_URL`, takes the URL without a prompt;
+  with no terminal and no URL given, the default
+  `http://localhost:1234` is stored.
 
 - `wirken audit verify` reports a chain head whose signature or
   signing key field is not ASCII hex as an invalid signature at that

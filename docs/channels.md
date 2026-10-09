@@ -363,7 +363,10 @@ wirken channel add imessage
 
 Needs [BlueBubbles Server](https://bluebubbles.app) on a Mac with iMessage
 configured. Supply the server password and URL (default
-`http://localhost:1234`). The adapter registers a webhook with BlueBubbles,
+`http://localhost:1234`). To skip the prompts, pass the password with `--token`
+or `WIRKEN_IMESSAGE_TOKEN` and the URL with `--bluebubbles-url` or
+`WIRKEN_IMESSAGE_BLUEBUBBLES_URL`; with no terminal and no URL given, the
+default is stored. The adapter registers a webhook with BlueBubbles,
 sends replies through its REST API, and filters out messages from yourself
 (`isFromMe`). It listens on `127.0.0.1:3981`.
 

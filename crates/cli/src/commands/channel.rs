@@ -42,6 +42,7 @@ pub struct AddFlags {
     pub app_id: Option<String>,
     pub homeserver: Option<String>,
     pub username: Option<String>,
+    pub bluebubbles_url: Option<String>,
 }
 
 pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
@@ -55,6 +56,7 @@ pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
         "google-chat" => add_google_chat(&cfg, &data, flags).await,
         "teams" => add_teams(&cfg, &data, flags).await,
         "matrix" => add_matrix(&cfg, &data, flags).await,
+        "imessage" => add_imessage(&cfg, &data, flags).await,
         _ => add_simple(channel, &cfg, &data, flags).await,
     }
 }
@@ -314,6 +316,81 @@ pub fn store_matrix_account(
             None,
         )
         .context("Failed to store username")
+}
+
+/// The BlueBubbles server URL when none is given.
+const DEFAULT_BLUEBUBBLES_URL: &str = "http://localhost:1234";
+
+/// iMessage needs the BlueBubbles server password, stored as both
+/// `imessage-token` and `imessage-server-password`, and the server URL,
+/// as the setup wizard writes them. Collect both before registering, so
+/// a refused value leaves nothing half-written.
+async fn add_imessage(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
+    let password = resolve_with_validation(
+        "BlueBubbles server password",
+        flags.token,
+        "WIRKEN_IMESSAGE_TOKEN",
+        true,
+        validate_non_empty,
+    )?;
+    let url = resolve_bluebubbles_url(flags.bluebubbles_url)?;
+
+    register_channel("imessage", &password, cfg, data).await?;
+
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    store_imessage_server(&store, &url, &password)?;
+
+    println!("  imessage: credentials encrypted.");
+    println!("  Channel 'imessage' added.");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
+    Ok(())
+}
+
+/// The BlueBubbles server URL from `--bluebubbles-url`, then
+/// `WIRKEN_IMESSAGE_BLUEBUBBLES_URL`, then a prompt offering the default.
+/// Without a terminal to prompt on, the default.
+fn resolve_bluebubbles_url(flag: Option<String>) -> Result<String> {
+    let given = flag.or_else(|| std::env::var("WIRKEN_IMESSAGE_BLUEBUBBLES_URL").ok());
+    if let Some(url) = given
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+    {
+        return Ok(url);
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Ok(DEFAULT_BLUEBUBBLES_URL.to_string());
+    }
+    Ok(dialoguer::Input::new()
+        .with_prompt("  BlueBubbles server URL")
+        .default(DEFAULT_BLUEBUBBLES_URL.to_string())
+        .interact_text()?)
+}
+
+/// Write the BlueBubbles server URL and password under the names and
+/// channel the adapter reads. Shared by `wirken channel add imessage`
+/// and the setup wizard.
+pub fn store_imessage_server(store: &CredentialStore, url: &str, password: &str) -> Result<()> {
+    store
+        .store(
+            "imessage-bluebubbles-url",
+            "imessage",
+            &VaultSecret::new(url.to_string()),
+            None,
+            None,
+        )
+        .context("Failed to store BlueBubbles URL")?;
+    store
+        .store(
+            "imessage-server-password",
+            "imessage",
+            &VaultSecret::new(password.to_string()),
+            None,
+            None,
+        )
+        .context("Failed to store server password")
 }
 
 /// Google Chat needs two vault entries before the adapter will run:
@@ -994,6 +1071,7 @@ mod tests {
             app_id: None,
             homeserver: None,
             username: None,
+            bluebubbles_url: None,
         }
     }
 

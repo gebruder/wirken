@@ -213,6 +213,10 @@ enum LyrikCommands {
 }
 
 #[derive(Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process from argv; `Add` carries one optional flag per channel field"
+)]
 enum ChannelCommands {
     /// Add a new channel
     Add {
@@ -249,6 +253,11 @@ enum ChannelCommands {
         /// Reads WIRKEN_MATRIX_USERNAME if not supplied.
         #[arg(long)]
         username: Option<String>,
+        /// iMessage: BlueBubbles server URL (default http://localhost:1234);
+        /// --token is the server password. Reads
+        /// WIRKEN_IMESSAGE_BLUEBUBBLES_URL if not supplied.
+        #[arg(long)]
+        bluebubbles_url: Option<String>,
     },
     /// List configured channels
     List,
@@ -1178,6 +1187,7 @@ async fn main() -> Result<()> {
                 app_id,
                 homeserver,
                 username,
+                bluebubbles_url,
             } => {
                 commands::channel::add(
                     &channel,
@@ -1190,6 +1200,7 @@ async fn main() -> Result<()> {
                         app_id,
                         homeserver,
                         username,
+                        bluebubbles_url,
                     },
                 )
                 .await

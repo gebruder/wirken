@@ -1,4 +1,5 @@
-//! A vault populated only by `wirken channel add` starts the adapter.
+//! A vault populated only by `wirken channel add` starts the adapter,
+//! for every adapter `channel add` configures from flags.
 //!
 //! `channel add` runs non-interactively from flags into an empty data
 //! directory. Every credential it wrote is then handed to the adapter
@@ -17,15 +18,50 @@ use wirken_vault::{AgeFileKeychain, CredentialStore};
 
 const PASSPHRASE: &str = "test-passphrase";
 
-/// `wirken channel add <adapter> <flags>` and, for each name it must
-/// write, the channel value `wirken setup` writes for it.
+/// `wirken channel add <adapter> <flags>`, with `env` set, and for each
+/// name it must write, the channel value `wirken setup` writes for it.
 struct Case {
     adapter: &'static str,
     flags: &'static [&'static str],
+    env: &'static [(&'static str, &'static str)],
     writes: &'static [(&'static str, &'static str)],
+    values: &'static [(&'static str, &'static str)],
 }
 
+// Low-entropy fixtures, so the secret scanner does not read them as
+// real tokens. Signal is absent: `channel add signal` only prompts.
 const CASES: &[Case] = &[
+    Case {
+        adapter: "telegram",
+        flags: &["--token", "fake_token_value"],
+        env: &[],
+        writes: &[
+            ("telegram-token", "telegram"),
+            ("telegram-adapter-key", "telegram"),
+        ],
+        values: &[],
+    },
+    Case {
+        adapter: "discord",
+        flags: &["--token", "fake_token_value"],
+        env: &[],
+        writes: &[
+            ("discord-token", "discord"),
+            ("discord-adapter-key", "discord"),
+        ],
+        values: &[],
+    },
+    Case {
+        adapter: "slack",
+        flags: &["--token", "xoxb-aaaa"],
+        env: &[("WIRKEN_SLACK_APP_TOKEN", "xapp-aaaa")],
+        writes: &[
+            ("slack-token", "slack"),
+            ("slack-app-token", "slack"),
+            ("slack-adapter-key", "slack"),
+        ],
+        values: &[],
+    },
     Case {
         adapter: "teams",
         flags: &[
@@ -34,11 +70,13 @@ const CASES: &[Case] = &[
             "--app-id",
             "00000000-0000-0000-0000-000000000000",
         ],
+        env: &[],
         writes: &[
             ("teams-token", "teams"),
             ("teams-app-id", "teams"),
             ("teams-adapter-key", "teams"),
         ],
+        values: &[],
     },
     Case {
         adapter: "matrix",
@@ -50,12 +88,82 @@ const CASES: &[Case] = &[
             "--username",
             "@wirken:localhost",
         ],
+        env: &[],
         writes: &[
             ("matrix-token", "matrix"),
             ("matrix-homeserver", "matrix"),
             ("matrix-username", "matrix"),
             ("matrix-adapter-key", "matrix"),
         ],
+        values: &[],
+    },
+    Case {
+        adapter: "whatsapp",
+        flags: &[
+            "--token",
+            "fake_token_value",
+            "--phone-number-id",
+            "123456789012345",
+            "--verify-token",
+            "my_verify_token",
+            "--app-secret",
+            "00000000000000000000000000000000",
+        ],
+        env: &[],
+        writes: &[
+            ("whatsapp-token", "whatsapp"),
+            ("whatsapp-phone-number-id", "whatsapp"),
+            ("whatsapp-verify-token", "whatsapp"),
+            ("whatsapp-app-secret", "whatsapp"),
+            ("whatsapp-adapter-key", "whatsapp"),
+        ],
+        values: &[],
+    },
+    Case {
+        adapter: "google-chat",
+        flags: &[
+            "--token",
+            "fake_token_value",
+            "--project-number",
+            "123456789012",
+        ],
+        env: &[],
+        writes: &[
+            ("google-chat-token", "google-chat"),
+            ("google-chat-project-number", "google-chat"),
+            ("google-chat-adapter-key", "google-chat"),
+        ],
+        values: &[],
+    },
+    Case {
+        adapter: "imessage",
+        flags: &[
+            "--token",
+            "fake_password",
+            "--bluebubbles-url",
+            "http://127.0.0.1:1",
+        ],
+        env: &[],
+        writes: &[
+            ("imessage-token", "imessage"),
+            ("imessage-server-password", "imessage"),
+            ("imessage-bluebubbles-url", "imessage"),
+            ("imessage-adapter-key", "imessage"),
+        ],
+        values: &[],
+    },
+    // No URL and no terminal: the default URL is stored.
+    Case {
+        adapter: "imessage",
+        flags: &["--token", "fake_password"],
+        env: &[],
+        writes: &[
+            ("imessage-token", "imessage"),
+            ("imessage-server-password", "imessage"),
+            ("imessage-bluebubbles-url", "imessage"),
+            ("imessage-adapter-key", "imessage"),
+        ],
+        values: &[("imessage-bluebubbles-url", "http://localhost:1234")],
     },
 ];
 
@@ -79,7 +187,9 @@ fn a_vault_populated_only_by_channel_add_starts_the_adapter() {
     for Case {
         adapter,
         flags,
+        env,
         writes,
+        values,
     } in CASES
     {
         let data = tempfile::tempdir().unwrap();
@@ -87,6 +197,7 @@ fn a_vault_populated_only_by_channel_add_starts_the_adapter() {
             .env("WIRKEN_VAULT_PASSPHRASE", PASSPHRASE)
             .args(["channel", "add", adapter])
             .args(*flags)
+            .envs(env.iter().copied())
             .output()
             .unwrap();
         assert!(
@@ -104,6 +215,12 @@ fn a_vault_populated_only_by_channel_add_starts_the_adapter() {
         let mut expected = writes.to_vec();
         expected.sort();
         assert_eq!(written, expected, "{adapter}");
+        for (name, value) in *values {
+            assert!(
+                contents.iter().any(|(n, _, v)| n == name && v == value),
+                "{adapter}: {name} is not {value}"
+            );
+        }
 
         let entries: Vec<(String, String)> = contents
             .into_iter()

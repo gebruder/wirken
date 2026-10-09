@@ -610,27 +610,7 @@ async fn setup_imessage_channel(
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
-    let url_secret = wirken_vault::VaultSecret::new(bb_url);
-    store
-        .store(
-            "imessage-bluebubbles-url",
-            "imessage",
-            &url_secret,
-            None,
-            None,
-        )
-        .context("Failed to store BlueBubbles URL")?;
-
-    let pw_secret = wirken_vault::VaultSecret::new(server_password);
-    store
-        .store(
-            "imessage-server-password",
-            "imessage",
-            &pw_secret,
-            None,
-            None,
-        )
-        .context("Failed to store server password")?;
+    super::channel::store_imessage_server(&store, &bb_url, &server_password)?;
 
     println!("  imessage: credentials encrypted.");
     Ok(())
