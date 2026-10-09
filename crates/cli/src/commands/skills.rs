@@ -176,7 +176,9 @@ pub async fn list() -> Result<()> {
 
     if skills.is_empty() {
         println!("  No skills installed.");
-        println!("  Search with: wirken skills search <query>");
+        println!(
+            "  `wirken setup` installs the bundled skills; sign your own with `wirken skills sign <dir>`."
+        );
         return Ok(());
     }
 
@@ -421,9 +423,9 @@ pub async fn verify(dir: &str, strict: bool) -> Result<()> {
             println!("  Signer: {signer}");
             if outcome == VerifyOutcome::Fail {
                 println!(
-                    "  --strict: refusing self-signed bundle. Install via \
-                     `wirken skills install <name>` so the registry index pins \
-                     the expected signer key."
+                    "  --strict: refusing self-signed bundle. A bundle is anchored when its \
+                     signer is delegated by a registry root (`wirken skills sign --root-key`) \
+                     and the loading host trusts that root (`wirken skills trust-root`)."
                 );
             } else {
                 tracing::warn!(
@@ -432,10 +434,10 @@ pub async fn verify(dir: &str, strict: bool) -> Result<()> {
                     skill_dir.display()
                 );
                 println!(
-                    "  Note: this only checks the bundle is internally consistent. To check \
-                     the signer key matches a trusted publisher, use \
-                     `wirken skills install <name>` against the registry, which pins the \
-                     expected key from the registry index entry, or re-run with --strict."
+                    "  Note: this only checks the bundle is internally consistent. To tie the \
+                     signer to a publisher, trust that publisher's registry root with \
+                     `wirken skills trust-root` and load bundles it delegated, or re-run \
+                     with --strict."
                 );
             }
         }
@@ -463,6 +465,20 @@ pub async fn verify(dir: &str, strict: bool) -> Result<()> {
     Ok(())
 }
 
+/// What `search` and `install` report when the index is not there. At
+/// the default URL that is the state today: no public index is published.
+fn missing_index_message(url: &str) -> String {
+    if url == DEFAULT_INDEX_URL {
+        format!(
+            "No skill index at {url} (HTTP 404): no public skill index is published yet, \
+             so there is nothing to search or install. Set WIRKEN_SKILLS_INDEX to read \
+             another index."
+        )
+    } else {
+        format!("No skill index at {url} (HTTP 404, set by WIRKEN_SKILLS_INDEX).")
+    }
+}
+
 async fn fetch_index() -> Result<SkillIndex> {
     let url = std::env::var("WIRKEN_SKILLS_INDEX").unwrap_or_else(|_| DEFAULT_INDEX_URL.into());
 
@@ -473,13 +489,11 @@ async fn fetch_index() -> Result<SkillIndex> {
         .await
         .context(format!("Failed to fetch skill index from {url}"))?;
 
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("{}", missing_index_message(&url));
+    }
     if !resp.status().is_success() {
-        // Return empty index if registry is unavailable
-        tracing::warn!(
-            "Skill index unavailable (HTTP {}), using empty index",
-            resp.status()
-        );
-        return Ok(SkillIndex { skills: vec![] });
+        anyhow::bail!("Skill index at {url} answered HTTP {}", resp.status());
     }
 
     resp.json::<SkillIndex>()
@@ -732,6 +746,28 @@ fn empty_permissions_stub() -> serde_yaml::Value {
         "tools:\n  allow: []\negress:\n  mode: allowlist\n  domains: []\nfilesystem:\n  write_paths: []\n  read_paths: []\ninference:\n  allow: []\n",
     )
     .expect("static permissions stub parses as YAML")
+}
+
+#[cfg(test)]
+mod missing_index_tests {
+    use super::{DEFAULT_INDEX_URL, missing_index_message};
+
+    #[test]
+    fn the_default_index_reports_that_none_is_published() {
+        let msg = missing_index_message(DEFAULT_INDEX_URL);
+        assert!(msg.contains(DEFAULT_INDEX_URL), "{msg}");
+        assert!(
+            msg.contains("no public skill index is published yet"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn another_index_is_named_without_the_publication_claim() {
+        let msg = missing_index_message("http://127.0.0.1:1/index.json");
+        assert!(msg.contains("http://127.0.0.1:1/index.json"), "{msg}");
+        assert!(!msg.contains("published"), "{msg}");
+    }
 }
 
 #[cfg(test)]

@@ -244,10 +244,16 @@ wirken skills sign ./my-skill/
 wirken skills verify ./my-skill/
 ```
 
-Registry skills are verified against the registry-provided Ed25519 key before
-installation, and again at every load. What the signature covers, what the
-unsigned bypass does and does not admit, and how an operator registry root
-changes the gate: [signing.md](signing.md#skill-signing).
+**No public skill index is published yet.** `search` and `install` read the
+index at `https://raw.githubusercontent.com/gebruder/wirken-skills/main/index.json`,
+or the URL in `WIRKEN_SKILLS_INDEX`. That URL returns 404 today, so both stop
+with an error naming it. The bundled skills come from `wirken setup`; your own
+go in `<data_dir>/skills/` and are signed with `wirken skills sign`.
+
+Skills installed from an index are verified against the Ed25519 key the index
+gives for them before installation, and again at every load. What the
+signature covers, what the unsigned bypass does and does not admit, and how an
+operator registry root changes the gate: [signing.md](signing.md#skill-signing).
 
 ## Coming from OpenClaw
 

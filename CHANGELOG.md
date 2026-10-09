@@ -79,6 +79,14 @@ tagged.
 
 ### Fixed
 
+- `wirken skills search` and `wirken skills install` stop with an error
+  naming the index URL when there is no index there (HTTP 404), and with
+  the URL and status on any other failure. At the default URL the error
+  says no public skill index is published yet, which is the case today.
+  Before, a missing index read as an empty one and `install` reported
+  the skill as not found in the registry. `docs/skills.md` and
+  `docs/cli.md` say the same.
+
 - `wirken skills install` writes the index entry's
   `signer_key_delegation` to `SKILL.deleg` beside `SKILL.sig` and
   `SKILL.pub`, so a skill installed from the registry loads under a

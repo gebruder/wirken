@@ -147,6 +147,10 @@ wirken skills trust-root <PUBKEY_HEX>
 wirken skills migrate [PATH] [--dry-run]
 ```
 
+`search` and `install` read the skill index at
+`https://raw.githubusercontent.com/gebruder/wirken-skills/main/index.json`, or
+`WIRKEN_SKILLS_INDEX` when set. No public index is published yet: that URL
+returns 404, and both commands stop with an error naming it.
 `--strict` on `verify` treats a self-signed bundle as a failure and exits 1.
 `trust-root` installs an operator root so the loader requires delegation.
 `migrate` rewrites deprecated `metadata.openclaw.*` keys, backing each file up

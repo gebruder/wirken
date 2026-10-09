@@ -98,3 +98,28 @@ fn an_installed_skill_loads_under_the_root_only_with_its_delegation() {
     assert!(row("delegated-skill"), "{listed}");
     assert!(!row("plain-skill"), "{listed}");
 }
+
+/// With no index at the URL, `install` and `search` stop with an error
+/// naming it, instead of reading a missing index as an empty one.
+#[test]
+fn a_missing_index_is_an_error_naming_its_url() {
+    let registry = tempfile::tempdir().unwrap();
+    let url = format!("{}/index.json", serve_dir(registry.path().to_path_buf()));
+    let data = tempfile::tempdir().unwrap();
+    for args in [
+        &["skills", "install", "anything"][..],
+        &["skills", "search", "x"],
+    ] {
+        let out = wirken(data.path())
+            .env("WIRKEN_SKILLS_INDEX", &url)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("No skill index at {url} (HTTP 404")),
+            "{args:?}: {stderr}"
+        );
+    }
+}
