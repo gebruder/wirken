@@ -511,10 +511,7 @@ async fn setup_teams_channel(
     let keychain = wirken_vault::probe_keychain(data, move || pp);
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
-    let secret = wirken_vault::VaultSecret::new(app_id);
-    store
-        .store("teams-app-id", "teams", &secret, None, None)
-        .context("Failed to store Teams app ID")?;
+    super::channel::store_teams_app_id(&store, &app_id)?;
 
     println!("  teams: app ID and password encrypted.");
     Ok(())
@@ -543,15 +540,7 @@ async fn setup_matrix_channel(
     let store = wirken_vault::CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
         .context("Failed to open credential store")?;
 
-    let hs_secret = wirken_vault::VaultSecret::new(homeserver);
-    store
-        .store("matrix-homeserver", "matrix", &hs_secret, None, None)
-        .context("Failed to store homeserver URL")?;
-
-    let user_secret = wirken_vault::VaultSecret::new(username);
-    store
-        .store("matrix-username", "matrix", &user_secret, None, None)
-        .context("Failed to store username")?;
+    super::channel::store_matrix_account(&store, &homeserver, &username)?;
 
     println!("  matrix: credentials encrypted, E2EE enabled.");
     Ok(())

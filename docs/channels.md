@@ -145,7 +145,9 @@ App ID and App Password from an
 [Azure Bot registration](https://portal.azure.com/#create/Microsoft.AzureBot).
 Register the bot, note the App ID, create a client secret, and point the
 messaging endpoint at your instance (or a tunnel for testing). The adapter
-listens on `127.0.0.1:3978`.
+listens on `127.0.0.1:3978`. To skip the prompts, pass the App Password with
+`--token` or `WIRKEN_TEAMS_TOKEN` and the App ID with `--app-id` or
+`WIRKEN_TEAMS_APP_ID`.
 
 Vault entries: `teams-token` (app password), `teams-app-id`,
 `teams-adapter-key`. The adapter exchanges the pair for a Bot Framework access
@@ -179,7 +181,9 @@ username and password. HTTPS is enforced for every non-localhost homeserver:
 an `http://` URL outside localhost fails at adapter startup with an explicit
 error. The adapter uses the Client-Server API with long-polling sync and
 performs `m.login.password` at startup, caching the access token in memory;
-the password stays in the vault.
+the password stays in the vault. To skip the prompts, pass `--homeserver`,
+`--username` and `--token` (the password), or set `WIRKEN_MATRIX_HOMESERVER`,
+`WIRKEN_MATRIX_USERNAME` and `WIRKEN_MATRIX_TOKEN`.
 
 Vault entries: `matrix-token` (the password), `matrix-homeserver`,
 `matrix-username`, `matrix-adapter-key`.

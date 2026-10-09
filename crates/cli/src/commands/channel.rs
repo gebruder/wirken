@@ -39,6 +39,9 @@ pub struct AddFlags {
     pub verify_token: Option<String>,
     pub app_secret: Option<String>,
     pub project_number: Option<String>,
+    pub app_id: Option<String>,
+    pub homeserver: Option<String>,
+    pub username: Option<String>,
 }
 
 pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
@@ -50,6 +53,8 @@ pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
         "slack" => add_slack(&cfg, &data, flags).await,
         "signal" => add_signal(&cfg, &data).await,
         "google-chat" => add_google_chat(&cfg, &data, flags).await,
+        "teams" => add_teams(&cfg, &data, flags).await,
+        "matrix" => add_matrix(&cfg, &data, flags).await,
         _ => add_simple(channel, &cfg, &data, flags).await,
     }
 }
@@ -193,6 +198,122 @@ async fn add_simple(
     println!("  Channel '{channel}' added.");
     println!("  `wirken run` starts its adapter; restart it if it is already running.");
     Ok(())
+}
+
+/// Teams needs the App Password, stored as `teams-token`, and the App
+/// ID before the adapter will run. Collect both before registering, so a
+/// refused value leaves nothing half-written.
+async fn add_teams(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
+    let password = resolve_with_validation(
+        "Microsoft App Password",
+        flags.token,
+        "WIRKEN_TEAMS_TOKEN",
+        true,
+        validate_non_empty,
+    )?;
+    let app_id = resolve_with_validation(
+        "Microsoft App ID",
+        flags.app_id,
+        "WIRKEN_TEAMS_APP_ID",
+        false,
+        validate_non_empty,
+    )?;
+
+    register_channel("teams", &password, cfg, data).await?;
+
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    store_teams_app_id(&store, &app_id)?;
+
+    println!("  teams: app ID and password encrypted.");
+    println!("  Channel 'teams' added.");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
+    Ok(())
+}
+
+/// Write the Teams App ID under the name and channel the adapter reads.
+/// Shared by `wirken channel add teams` and the setup wizard.
+pub fn store_teams_app_id(store: &CredentialStore, app_id: &str) -> Result<()> {
+    store
+        .store(
+            "teams-app-id",
+            "teams",
+            &VaultSecret::new(app_id.to_string()),
+            None,
+            None,
+        )
+        .context("Failed to store Teams app ID")
+}
+
+/// Matrix needs the account password, stored as `matrix-token`, the
+/// homeserver URL and the username before the adapter will run. Collect
+/// all three before registering, so a refused value leaves nothing
+/// half-written.
+async fn add_matrix(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
+    let homeserver = resolve_with_validation(
+        "Matrix homeserver URL (e.g., https://matrix.org)",
+        flags.homeserver,
+        "WIRKEN_MATRIX_HOMESERVER",
+        false,
+        validate_non_empty,
+    )?;
+    let username = resolve_with_validation(
+        "Matrix username (e.g., @wirken:matrix.org)",
+        flags.username,
+        "WIRKEN_MATRIX_USERNAME",
+        false,
+        validate_non_empty,
+    )?;
+    let password = resolve_with_validation(
+        "Matrix password",
+        flags.token,
+        "WIRKEN_MATRIX_TOKEN",
+        true,
+        validate_non_empty,
+    )?;
+
+    register_channel("matrix", &password, cfg, data).await?;
+
+    let pp = super::cached_vault_passphrase()?;
+    let keychain = probe_keychain(data, move || pp);
+    let store = CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref())
+        .context("Failed to open credential store")?;
+    store_matrix_account(&store, &homeserver, &username)?;
+
+    println!("  matrix: credentials encrypted.");
+    println!("  Channel 'matrix' added.");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
+    Ok(())
+}
+
+/// Write the Matrix homeserver URL and username under the names and
+/// channel the adapter reads. Shared by `wirken channel add matrix` and
+/// the setup wizard.
+pub fn store_matrix_account(
+    store: &CredentialStore,
+    homeserver: &str,
+    username: &str,
+) -> Result<()> {
+    store
+        .store(
+            "matrix-homeserver",
+            "matrix",
+            &VaultSecret::new(homeserver.to_string()),
+            None,
+            None,
+        )
+        .context("Failed to store homeserver URL")?;
+    store
+        .store(
+            "matrix-username",
+            "matrix",
+            &VaultSecret::new(username.to_string()),
+            None,
+            None,
+        )
+        .context("Failed to store username")
 }
 
 /// Google Chat needs two vault entries before the adapter will run:
@@ -870,6 +991,9 @@ mod tests {
             verify_token: Some("my_verify_token".into()),
             app_secret: Some("00000000000000000000000000000000".into()),
             project_number: None,
+            app_id: None,
+            homeserver: None,
+            username: None,
         }
     }
 

@@ -237,6 +237,18 @@ enum ChannelCommands {
         /// audience. Reads WIRKEN_GOOGLE_CHAT_PROJECT_NUMBER if not supplied.
         #[arg(long)]
         project_number: Option<String>,
+        /// Teams: Microsoft App ID of the Azure Bot registration; --token
+        /// is its App Password. Reads WIRKEN_TEAMS_APP_ID if not supplied.
+        #[arg(long)]
+        app_id: Option<String>,
+        /// Matrix: homeserver URL; --token is the account password.
+        /// Reads WIRKEN_MATRIX_HOMESERVER if not supplied.
+        #[arg(long)]
+        homeserver: Option<String>,
+        /// Matrix: bot account username (e.g. @wirken:matrix.org).
+        /// Reads WIRKEN_MATRIX_USERNAME if not supplied.
+        #[arg(long)]
+        username: Option<String>,
     },
     /// List configured channels
     List,
@@ -1163,6 +1175,9 @@ async fn main() -> Result<()> {
                 verify_token,
                 app_secret,
                 project_number,
+                app_id,
+                homeserver,
+                username,
             } => {
                 commands::channel::add(
                     &channel,
@@ -1172,6 +1187,9 @@ async fn main() -> Result<()> {
                         verify_token,
                         app_secret,
                         project_number,
+                        app_id,
+                        homeserver,
+                        username,
                     },
                 )
                 .await

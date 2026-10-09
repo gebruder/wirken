@@ -79,6 +79,14 @@ tagged.
 
 ### Fixed
 
+- `wirken channel add teams` stores the App ID as `teams-app-id`, and
+  `wirken channel add matrix` stores `matrix-homeserver` and
+  `matrix-username`, with the names and channel values `wirken setup`
+  writes. Before, both stored only the token and the adapter refused to
+  start. New flags `--app-id`, `--homeserver` and `--username` take the
+  values without a prompt, falling back to `WIRKEN_TEAMS_APP_ID`,
+  `WIRKEN_MATRIX_HOMESERVER` and `WIRKEN_MATRIX_USERNAME`.
+
 - `wirken audit verify` reports a chain head whose signature or
   signing key field is not ASCII hex as an invalid signature at that
   head, through `first_invalid`, and exits 1. Such a field panicked
