@@ -66,6 +66,19 @@ tagged.
   retried from the same sync token. The token used to be cleared, so the
   next request was an initial sync and recent DMs and mentions were
   forwarded again.
+- An adapter that ends 8 runs in a row without ever connecting to the
+  gateway is no longer restarted: an `adapter.restart_abandoned` row records
+  the count and the last cause and exit, forwarded to SIEM at `error`, and
+  the gateway logs one error naming the adapter. Only a restart of
+  `wirken run` starts it again. An adapter that connects and then drops is
+  still restarted without limit. On the typed SIEM pipe, an adapter's
+  lifecycle rows fill the `AdapterId` column from their target.
+- `wirken channel list` shows each adapter's state from the audit log:
+  `connected`, `disconnected (since <time>)`, `restarting (attempt n)`,
+  `abandoned (attempts n)` or `no record`, with the time the deciding row
+  was written. It used to read the registry's in-memory `connected` flag,
+  which is only ever set inside the gateway, so it printed `disconnected`
+  for every adapter. The webchat status page reads the same states.
 
 ## [1.28.0] - 2026-10-08
 
