@@ -68,7 +68,9 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::error::ProxyError;
-use crate::mcp_config::{HttpTransportTag, McpAuth, McpServerConfig, StdioTransportTag};
+use crate::mcp_config::{
+    HttpTransportTag, McpAuth, McpServerConfig, SandboxMount, StdioSandbox, StdioTransportTag,
+};
 
 /// Compile-time-bundled hex-encoded Ed25519 public key of the wirken
 /// MCP-anchor root. Empty string means "no root anchor configured
@@ -161,7 +163,11 @@ pub fn hash_mcp_entry(name: &str, config: &McpServerConfig) -> Vec<u8> {
     };
     match config {
         McpServerConfig::Stdio {
-            command, args, env, ..
+            command,
+            args,
+            env,
+            sandbox,
+            ..
         } => {
             hasher.update(b"stdio\0");
             write_len_prefixed(&mut hasher, name.as_bytes());
@@ -179,6 +185,9 @@ pub fn hash_mcp_entry(name: &str, config: &McpServerConfig) -> Vec<u8> {
             for k in keys {
                 write_len_prefixed(&mut hasher, k.as_bytes());
             }
+            if let Some(sandbox) = sandbox {
+                hash_sandbox(&mut hasher, sandbox);
+            }
         }
         McpServerConfig::Http { url, auth, .. } => {
             hasher.update(b"http\0");
@@ -194,6 +203,82 @@ pub fn hash_mcp_entry(name: &str, config: &McpServerConfig) -> Vec<u8> {
     }
     hasher.update(&cost_suffix);
     hasher.finalize().to_vec()
+}
+
+/// The sandbox block's part of the signed hash.
+///
+/// Absent, the block contributes nothing, so an entry signed before it
+/// existed keeps its signature. Present, every field is covered: an
+/// entry signed with one set of hosts, mounts, limits or env-delivered
+/// secrets, or with the sandbox on, does not verify after any of them
+/// change. Lists are hashed sorted, so reordering is not a change.
+fn hash_sandbox(hasher: &mut Sha256, sandbox: &StdioSandbox) {
+    hasher.update(b"sandbox\0");
+    match sandbox {
+        StdioSandbox::Off(_) => hasher.update(b"off\0"),
+        StdioSandbox::Container(c) => {
+            hasher.update(b"container\0");
+            write_opt(hasher, c.image.as_deref());
+            write_opt(hasher, c.install_dir.as_deref());
+            let mut hosts: Vec<&str> = c
+                .egress
+                .iter()
+                .flat_map(|e| e.hosts.iter().map(String::as_str))
+                .collect();
+            hosts.sort_unstable();
+            hosts.dedup();
+            write_list(hasher, &hosts);
+            let mut mounts: Vec<&SandboxMount> = c.mounts.iter().collect();
+            mounts.sort_by(|a, b| {
+                (&a.target, &a.source, a.writable).cmp(&(&b.target, &b.source, b.writable))
+            });
+            hasher.update((mounts.len() as u32).to_le_bytes());
+            for m in mounts {
+                write_len_prefixed(hasher, m.source.as_bytes());
+                write_len_prefixed(hasher, m.target.as_bytes());
+                hasher.update([u8::from(m.writable)]);
+            }
+            hasher.update([u8::from(c.scratch)]);
+            write_opt_u64(hasher, c.limits.memory_mb);
+            write_opt_u64(hasher, c.limits.pids);
+            write_opt_u64(hasher, c.limits.cpus.map(f64::to_bits));
+            let mut in_env: Vec<&str> = c.secrets_in_env.iter().map(String::as_str).collect();
+            in_env.sort_unstable();
+            in_env.dedup();
+            write_list(hasher, &in_env);
+        }
+        StdioSandbox::Invalid(value) => {
+            hasher.update(b"invalid\0");
+            write_len_prefixed(hasher, value.to_string().as_bytes());
+        }
+    }
+}
+
+fn write_opt(hasher: &mut Sha256, value: Option<&str>) {
+    match value {
+        Some(v) => {
+            hasher.update([1]);
+            write_len_prefixed(hasher, v.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn write_opt_u64(hasher: &mut Sha256, value: Option<u64>) {
+    match value {
+        Some(v) => {
+            hasher.update([1]);
+            hasher.update(v.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn write_list(hasher: &mut Sha256, items: &[&str]) {
+    hasher.update((items.len() as u32).to_le_bytes());
+    for item in items {
+        write_len_prefixed(hasher, item.as_bytes());
+    }
 }
 
 fn write_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
@@ -341,6 +426,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            sandbox: None,
         }
     }
 
@@ -440,6 +526,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            sandbox: None,
         };
         let cfg_b = McpServerConfig::Stdio {
             transport: None,
@@ -450,6 +537,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            sandbox: None,
         };
 
         let key = random_signing_key();
@@ -479,6 +567,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            sandbox: None,
         };
         let cfg_b = McpServerConfig::Stdio {
             transport: None,
@@ -489,6 +578,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            sandbox: None,
         };
 
         let key = random_signing_key();
@@ -616,6 +706,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: Default::default(),
+            sandbox: None,
         };
         let mut with_empty_map = std::collections::HashMap::new();
         with_empty_map.clear();
@@ -628,6 +719,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: with_empty_map,
+            sandbox: None,
         };
         assert_eq!(hash_mcp_entry("vendor", &a), hash_mcp_entry("vendor", &b));
     }
@@ -649,6 +741,7 @@ mod tests {
             signer_key: None,
             signer_key_delegation: None,
             tool_costs: costs,
+            sandbox: None,
         };
         let none = base(Default::default());
         let one: std::collections::HashMap<String, u64> = [("provision".to_string(), 600_000u64)]
@@ -697,5 +790,136 @@ mod tests {
             Some(root.verifying_key())
         );
         assert_eq!(parse_bundled_mcp_pubkey(""), None);
+    }
+
+    fn parse(json: &str) -> McpServerConfig {
+        serde_json::from_str(json).unwrap()
+    }
+
+    const GITHUB: &str = r#"{"command":"npx","args":["-y","@modelcontextprotocol/server-github"],"env":{"GITHUB_TOKEN":"vault:github-token","LOG":"info"}"#;
+
+    /// An entry with no sandbox block hashes exactly as it did before the
+    /// block existed, so signatures made then still verify. The value is
+    /// the hash this entry had before the field was added.
+    #[test]
+    fn an_entry_without_a_sandbox_block_hashes_as_before() {
+        let hash = hash_mcp_entry("github", &parse(&format!("{GITHUB}}}")));
+        assert_eq!(
+            hex_encode(&hash),
+            "c0a29cc8d33889e9f487d7aa5db45496e479c7dc00416354405fc744476dfd89"
+        );
+    }
+
+    fn sandboxed(block: &str) -> McpServerConfig {
+        parse(&format!(r#"{GITHUB},"sandbox":{block}}}"#))
+    }
+
+    const BLOCK: &str = r#"{"image":"node:22-slim","install_dir":"/srv/mcp/github","egress":{"hosts":["api.github.com","*.githubusercontent.com"]},"mounts":[{"source":"/srv/data","target":"/data"}],"secrets_in_env":["GITHUB_TOKEN"]}"#;
+
+    fn signed(config: McpServerConfig, key: &SigningKey) -> McpServerConfig {
+        let signature = sign_mcp_entry("github", &config, key);
+        let signer = hex_encode(&key.verifying_key().to_bytes());
+        match config {
+            McpServerConfig::Stdio {
+                transport,
+                command,
+                args,
+                env,
+                signer_key_delegation,
+                tool_costs,
+                sandbox,
+                ..
+            } => McpServerConfig::Stdio {
+                transport,
+                command,
+                args,
+                env,
+                signature: Some(signature),
+                signer_key: Some(signer),
+                signer_key_delegation,
+                tool_costs,
+                sandbox,
+            },
+            other => other,
+        }
+    }
+
+    /// Verify `config` under the signature and key `signed_entry` carries.
+    fn verify_with(signed_entry: &McpServerConfig, config: &McpServerConfig) -> McpVerifyResult {
+        let McpServerConfig::Stdio {
+            signature,
+            signer_key,
+            ..
+        } = signed_entry
+        else {
+            unreachable!()
+        };
+        verify_mcp_entry(
+            "github",
+            config,
+            signature.as_deref(),
+            signer_key.as_deref(),
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn changing_the_sandbox_of_a_signed_entry_fails_verification() {
+        let key = random_signing_key();
+        let entry = signed(sandboxed(BLOCK), &key);
+        assert!(matches!(
+            verify_with(&entry, &entry),
+            McpVerifyResult::Valid { .. }
+        ));
+
+        let wider_egress = BLOCK.replace(
+            r#""api.github.com","#,
+            r#""api.github.com","attacker.example","#,
+        );
+        let wider_mounts = BLOCK.replace(
+            r#"{"source":"/srv/data","target":"/data"}"#,
+            r#"{"source":"/srv/data","target":"/data","writable":true}"#,
+        );
+        let extra_mount = BLOCK.replace(
+            r#""mounts":["#,
+            r#""mounts":[{"source":"/home","target":"/home"},"#,
+        );
+        for (what, block) in [
+            ("an added egress host", wider_egress.as_str()),
+            ("a mount made writable", wider_mounts.as_str()),
+            ("an added mount", extra_mount.as_str()),
+            ("the sandbox turned off", r#""off""#),
+        ] {
+            assert_eq!(
+                verify_with(&entry, &sandboxed(block)),
+                McpVerifyResult::Invalid,
+                "{what} still verified"
+            );
+        }
+        // Removing the block is a change too.
+        assert_eq!(
+            verify_with(&entry, &parse(&format!("{GITHUB}}}"))),
+            McpVerifyResult::Invalid
+        );
+    }
+
+    #[test]
+    fn reordering_sandbox_lists_does_not_change_the_hash() {
+        let reordered = r#"{"image":"node:22-slim","install_dir":"/srv/mcp/github","egress":{"hosts":["*.githubusercontent.com","api.github.com"]},"mounts":[{"source":"/srv/data","target":"/data"}],"secrets_in_env":["GITHUB_TOKEN"]}"#;
+        assert_eq!(
+            hash_mcp_entry("github", &sandboxed(BLOCK)),
+            hash_mcp_entry("github", &sandboxed(reordered))
+        );
+    }
+
+    #[test]
+    fn off_and_an_invalid_block_hash_apart_from_each_other_and_from_none() {
+        let none = hash_mcp_entry("github", &parse(&format!("{GITHUB}}}")));
+        let off = hash_mcp_entry("github", &sandboxed(r#""off""#));
+        let invalid = hash_mcp_entry("github", &sandboxed(r#""none""#));
+        assert_ne!(none, off);
+        assert_ne!(none, invalid);
+        assert_ne!(off, invalid);
     }
 }

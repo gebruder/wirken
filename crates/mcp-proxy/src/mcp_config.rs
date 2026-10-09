@@ -144,7 +144,107 @@ pub enum McpServerConfig {
         /// See [`Self::Http::tool_costs`].
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         tool_costs: HashMap<String, u64>,
+        /// Where the server runs: a container described by the block,
+        /// or `"off"` for the host. Inside the signed envelope, so it
+        /// cannot be widened on a signed entry without re-signing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sandbox: Option<StdioSandbox>,
     },
+}
+
+/// Where a stdio server runs.
+///
+/// Untagged so `"sandbox": "off"` and `"sandbox": { ... }` are both
+/// accepted. Any other shape is kept as [`StdioSandbox::Invalid`]
+/// rather than failing the whole file, so one malformed entry is
+/// refused on its own and the rest of `mcp.json` still loads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum StdioSandbox {
+    /// Run on the host, uncontained, as every stdio server did before
+    /// the sandbox existed. An explicit operator choice.
+    Off(SandboxOff),
+    /// Run in a container.
+    Container(ContainerSandbox),
+    /// Neither shape. Refused at start.
+    Invalid(serde_json::Value),
+}
+
+/// The literal `"off"`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxOff {
+    Off,
+}
+
+/// A stdio server's container. Everything not declared is closed:
+/// no network, no mounts beyond `install_dir`, and the exec sandbox's
+/// limits plus one CPU.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ContainerSandbox {
+    /// Image the server runs in, carrying its runtime (Node, Python,
+    /// ...). Required: a block without one is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Host directory the server was installed into, mounted
+    /// read-only at [`INSTALL_DIR_TARGET`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_dir: Option<String>,
+    /// Hosts the server may reach. Absent or empty means no network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<SandboxEgress>,
+    /// Further host paths, read-only unless `writable`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<SandboxMount>,
+    /// A writable scratch directory at [`SCRATCH_TARGET`], kept on the
+    /// host under `<data_dir>/mcp-scratch/<agent>/<server>`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scratch: bool,
+    /// Overrides for the container's limits.
+    #[serde(default, skip_serializing_if = "SandboxLimits::is_default")]
+    pub limits: SandboxLimits,
+    /// `vault:` values delivered as environment variables instead of
+    /// files. Every other `vault:` value arrives as a file and its
+    /// variable is set to `<NAME>_FILE` holding the file's path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets_in_env: Vec<String>,
+}
+
+/// Where the install directory appears inside the container.
+pub const INSTALL_DIR_TARGET: &str = "/opt/mcp";
+/// Where the scratch directory appears inside the container.
+pub const SCRATCH_TARGET: &str = "/scratch";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxEgress {
+    /// Domain patterns, as for exec egress: `api.github.com` or
+    /// `*.datadoghq.com`.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxMount {
+    pub source: String,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SandboxLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pids: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<f64>,
+}
+
+impl SandboxLimits {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl McpServerConfig {
@@ -332,6 +432,89 @@ mod tests {
                 other => panic!("expected oauth2, got {other:?}"),
             },
             _ => panic!("expected http"),
+        }
+    }
+
+    fn sandbox_of(json: &str) -> Option<StdioSandbox> {
+        let config: McpConfig = serde_json::from_str(json).unwrap();
+        match config.servers.into_values().next().unwrap() {
+            McpServerConfig::Stdio { sandbox, .. } => sandbox,
+            McpServerConfig::Http { .. } => panic!("expected stdio"),
+        }
+    }
+
+    #[test]
+    fn a_stdio_entry_without_a_sandbox_block_has_none() {
+        assert_eq!(sandbox_of(r#"{"servers":{"a":{"command":"x"}}}"#), None);
+    }
+
+    #[test]
+    fn off_parses_as_off() {
+        assert_eq!(
+            sandbox_of(r#"{"servers":{"a":{"command":"x","sandbox":"off"}}}"#),
+            Some(StdioSandbox::Off(SandboxOff::Off))
+        );
+    }
+
+    #[test]
+    fn a_container_block_parses_every_field() {
+        let sandbox = sandbox_of(
+            r#"{"servers":{"a":{"command":"node","sandbox":{
+                "image":"node:22-slim","install_dir":"/srv/mcp/a",
+                "egress":{"hosts":["api.github.com"]},
+                "mounts":[{"source":"/srv/data","target":"/data","writable":true}],
+                "scratch":true,
+                "limits":{"memory_mb":256,"pids":64,"cpus":0.5},
+                "secrets_in_env":["TOKEN"]}}}}"#,
+        );
+        let Some(StdioSandbox::Container(c)) = sandbox else {
+            panic!("expected a container block, got {sandbox:?}");
+        };
+        assert_eq!(c.image.as_deref(), Some("node:22-slim"));
+        assert_eq!(c.install_dir.as_deref(), Some("/srv/mcp/a"));
+        assert_eq!(c.egress.unwrap().hosts, ["api.github.com"]);
+        assert_eq!(
+            c.mounts,
+            [SandboxMount {
+                source: "/srv/data".into(),
+                target: "/data".into(),
+                writable: true,
+            }]
+        );
+        assert!(c.scratch);
+        assert_eq!(c.limits.memory_mb, Some(256));
+        assert_eq!(c.limits.pids, Some(64));
+        assert_eq!(c.limits.cpus, Some(0.5));
+        assert_eq!(c.secrets_in_env, ["TOKEN"]);
+    }
+
+    #[test]
+    fn a_block_without_an_image_still_parses_so_it_can_be_refused() {
+        let sandbox = sandbox_of(r#"{"servers":{"a":{"command":"x","sandbox":{}}}}"#);
+        assert_eq!(
+            sandbox,
+            Some(StdioSandbox::Container(ContainerSandbox::default()))
+        );
+    }
+
+    #[test]
+    fn a_malformed_block_is_kept_and_the_file_still_loads() {
+        let config: McpConfig = serde_json::from_str(
+            r#"{"servers":{
+                "bad":{"command":"x","sandbox":"none"},
+                "typed":{"command":"x","sandbox":{"mounts":"not-a-list"}},
+                "good":{"command":"y"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(config.servers.len(), 3);
+        for name in ["bad", "typed"] {
+            let McpServerConfig::Stdio { sandbox, .. } = &config.servers[name] else {
+                panic!("expected stdio");
+            };
+            assert!(
+                matches!(sandbox, Some(StdioSandbox::Invalid(_))),
+                "{name}: {sandbox:?}"
+            );
         }
     }
 }
