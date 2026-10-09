@@ -15,6 +15,7 @@ pub mod otel_projector;
 pub mod pricing;
 mod session_log;
 pub mod siem;
+pub mod siem_legacy_shim;
 pub mod siem_typed;
 pub mod signing;
 pub mod user_resolver;

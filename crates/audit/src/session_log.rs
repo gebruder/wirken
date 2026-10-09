@@ -3424,6 +3424,16 @@ impl SqliteSessionLog {
         Ok(out)
     }
 
+    /// The highest row id in the log, or 0 for an empty one.
+    pub fn last_event_id(&self) -> Result<i64, AuditError> {
+        let conn = self.conn.lock().expect("session log mutex");
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM session_events",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Forwarder sweep: all stored events whose global `id` is greater
     /// than `after_id`, ordered by `id`, capped at `limit` rows. One
     /// indexed range scan over the `session_events` primary key, across

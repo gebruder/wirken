@@ -19,9 +19,10 @@ tagged.
   `last_cause`, `last_exit`). The typed SIEM pipe forwards all four by
   default, with `AdapterId` set. They replace the legacy `adapter.connect`,
   `adapter.disconnect`, `adapter.restart` and `adapter.restart_abandoned`
-  rows, so the legacy pipe no longer carries them: a deployment that
-  forwards only the legacy pipe receives no adapter lifecycle events until
-  it enables typed forwarding. Every typed entry now carries a level:
+  rows on the chain. A deployment that forwards only the legacy pipe still
+  receives them in that old legacy shape, through a deprecated shim that
+  renders the typed events at forward time; nothing is written twice. Every
+  typed entry now carries a level:
   `status` on Datadog, `level` on Splunk and webhook entries, and a `Level`
   column on Sentinel rows, which a typed Sentinel DCR has to declare to
   store. The adapter events take theirs from the variant and cause:
@@ -31,6 +32,15 @@ tagged.
   `spawn_failed`; `adapter_restart_abandoned` is `error`. Every other typed
   event is `info`. `wirken channel list` and the webchat status read both
   shapes, so an existing log keeps reading.
+
+### Deprecated
+
+- The legacy SIEM pipe's adapter lifecycle rows (`adapter.connect`,
+  `adapter.disconnect`, `adapter.restart`, `adapter.restart_abandoned`).
+  With typed forwarding off, a shim renders the typed events in that shape;
+  with typed forwarding on, only the typed events are forwarded. The typed
+  events are the supported path. On Datadog the shim's rows forward at
+  `info`.
 
 ### Fixed
 

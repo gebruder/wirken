@@ -120,10 +120,28 @@ legacy level, and every other typed event is `info`.
 On the legacy pipe only Datadog carries a level, `status`. `connection.panic`
 is `error`. Other legacy rows are `error` when the action names a failure,
 `warn` for denials, threat flags, auth and credential actions, and `info`
-otherwise. An adapter's connection and restarts are typed events, not legacy
-rows, so they reach a SIEM only through the typed pipe; the `adapter.connect`,
-`adapter.disconnect`, `adapter.restart` and `adapter.restart_abandoned` rows
-in a log written before the typed events forward by action, as `info`.
+otherwise.
+
+### Adapter lifecycle on the legacy pipe (deprecated)
+
+An adapter's connection and restarts are typed events, and the typed pipe is
+the supported way to receive them. A deployment with typed forwarding off
+still receives them on the legacy pipe, through a deprecated shim: while
+typed forwarding is off, the gateway reads `adapter_connect`,
+`adapter_disconnect`, `adapter_restart` and `adapter_restart_abandoned` off
+the chain and forwards each in the legacy shape the rows had before they were
+typed. The action is `adapter.connect`, `adapter.disconnect`,
+`adapter.restart` or `adapter.restart_abandoned`; the target is the adapter
+id, and the detail carries `adapter_id` and the same fields as before
+(`reason`; `attempt`, `cause`, `exit`, `delay_ms`, `connected_ms`; `attempts`,
+`last_cause`, `last_exit`). On Datadog these rows forward at `info`; the level
+by cause is on the typed events.
+
+The shim writes nothing: the chain holds the typed events only. It forwards
+the events written after the gateway starts, and once more as the gateway
+stops, so the disconnects written at shutdown go out. A deployment with typed
+forwarding on receives the typed events and never this shape. Source:
+`crates/audit/src/siem_legacy_shim.rs`.
 
 `Level` is a new column on the typed Sentinel stream. A DCR whose stream
 declaration predates it does not list it, and Azure Monitor stores only the

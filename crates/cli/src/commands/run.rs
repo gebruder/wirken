@@ -263,6 +263,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // wired (config has either a custom include/exclude list or, for
     // Sentinel, a `sentinel_typed` endpoint). Otherwise no overhead.
     let typed_siem_handle = maybe_spawn_typed_siem(&cfg, siem_config.as_ref()).await;
+    let legacy_lifecycle_shim = maybe_spawn_legacy_lifecycle_shim(&cfg, siem_config.as_ref());
 
     audit
         .log(AuditEvent::new(
@@ -2138,6 +2139,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     if let Some(mut typed) = typed_siem_handle {
         typed.shutdown();
         typed.join().await;
+    }
+    // The deprecated shim's last pass sends the adapter disconnects
+    // written during shutdown.
+    if let Some(mut shim) = legacy_lifecycle_shim {
+        shim.shutdown();
+        shim.join().await;
     }
 
     // Cleanup sockets
@@ -4930,6 +4937,43 @@ async fn maybe_spawn_typed_siem(
         log,
         sink,
         cfg_ref.clone(),
+    ))
+}
+
+/// Spawn the deprecated shim that forwards adapter lifecycle events in
+/// their old legacy shape, for a deployment with SIEM forwarding and
+/// typed forwarding off. A typed deployment receives the typed events
+/// and never this shape. See `wirken_audit::siem_legacy_shim`.
+fn maybe_spawn_legacy_lifecycle_shim(
+    cfg: &wirken_gateway::config::GatewayConfig,
+    siem_config: Option<&SiemConfig>,
+) -> Option<wirken_audit::siem_legacy_shim::LegacyLifecycleShim> {
+    let config = siem_config?;
+    if !wirken_audit::siem_legacy_shim::wanted(config) {
+        return None;
+    }
+    let forwarder = match wirken_audit::SiemForwarder::new(config.clone()) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("SIEM: legacy lifecycle shim not spawned: {e}");
+            return None;
+        }
+    };
+    let log = match wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()) {
+        Ok(l) => Arc::new(l),
+        Err(e) => {
+            tracing::warn!("SIEM: legacy lifecycle shim not spawned: open session log: {e}");
+            return None;
+        }
+    };
+    tracing::info!(
+        "SIEM: adapter lifecycle events forwarded in the deprecated legacy shape; \
+         enable typed forwarding to receive them as typed events"
+    );
+    Some(wirken_audit::siem_legacy_shim::LegacyLifecycleShim::spawn(
+        log,
+        forwarder,
+        wirken_audit::TYPED_POLL_INTERVAL,
     ))
 }
 
