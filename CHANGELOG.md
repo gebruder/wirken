@@ -10,6 +10,28 @@ tagged.
 
 ## [Unreleased]
 
+### Changed
+
+- An adapter's connection and restarts are typed audit events on the
+  `gateway-adapters` lane: `adapter_connect`, `adapter_disconnect`
+  (`reason`), `adapter_restart` (`attempt`, `cause`, `exit`, `delay_ms`,
+  `connected_for_ms`) and `adapter_restart_abandoned` (`attempts`,
+  `last_cause`, `last_exit`). The typed SIEM pipe forwards all four by
+  default, with `AdapterId` set. They replace the legacy `adapter.connect`,
+  `adapter.disconnect`, `adapter.restart` and `adapter.restart_abandoned`
+  rows, so the legacy pipe no longer carries them: a deployment that
+  forwards only the legacy pipe receives no adapter lifecycle events until
+  it enables typed forwarding. Every typed entry now carries a level:
+  `status` on Datadog, `level` on Splunk and webhook entries, and a `Level`
+  column on Sentinel rows, which a typed Sentinel DCR has to declare to
+  store. The adapter events take theirs from the variant and cause:
+  `adapter_connect` is `info`; `adapter_disconnect` is `info`, or `error`
+  on a panic; `adapter_restart` is `info` for `connection_ended`, `warn` for
+  `process_exited` and `error` for `connection_panicked` and
+  `spawn_failed`; `adapter_restart_abandoned` is `error`. Every other typed
+  event is `info`. `wirken channel list` and the webchat status read both
+  shapes, so an existing log keeps reading.
+
 ### Fixed
 
 - `wirken audit verify` reports a chain head whose signature or
@@ -41,13 +63,13 @@ tagged.
   reopened, failed every MCP tool call until restart.
 - An adapter whose process exits or whose gateway connection ends, including
   through a panic in the connection's message loop, is restarted: the
-  gateway kills the process if it is still running, writes an
-  `adapter.restart` audit row with the attempt, cause and delay, and spawns
+  gateway kills the process if it is still running, records an
+  `adapter_restart` audit event with the attempt, cause and delay, and spawns
   it again after a delay that doubles from 1 s to 60 s and resets after a
   connection that lasted 60 s. Previously the adapter, which does not dial
   back in, stayed up but cut off and the channel stayed down until
   `wirken run` restarted. A panicked connection task is now recorded rather
-  than discarded: `adapter.disconnect` carries `"reason": "panic"`, and a
+  than discarded: `adapter_disconnect` carries `"reason": "panic"`, and a
   `connection.panic` row carries where the panic was raised and the length
   and SHA-256 of its message, never the message itself. What a restart
   loses, and on which platforms it can forward a message twice, is in
@@ -67,12 +89,11 @@ tagged.
   next request was an initial sync and recent DMs and mentions were
   forwarded again.
 - An adapter that ends 8 runs in a row without ever connecting to the
-  gateway is no longer restarted: an `adapter.restart_abandoned` row records
-  the count and the last cause and exit, forwarded to SIEM at `error`, and
-  the gateway logs one error naming the adapter. Only a restart of
-  `wirken run` starts it again. An adapter that connects and then drops is
-  still restarted without limit. On the typed SIEM pipe, an adapter's
-  lifecycle rows fill the `AdapterId` column from their target.
+  gateway is no longer restarted: an `adapter_restart_abandoned` event
+  records the count and the last cause and exit, forwarded to SIEM at
+  `error`, and the gateway logs one error naming the adapter. Only a
+  restart of `wirken run` starts it again. An adapter that connects and then
+  drops is still restarted without limit.
 - `wirken channel list` shows each adapter's state from the audit log:
   `connected`, `disconnected (since <time>)`, `restarting (attempt n)`,
   `abandoned (attempts n)` or `no record`, with the time the deciding row
