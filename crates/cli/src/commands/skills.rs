@@ -218,6 +218,73 @@ pub async fn trust_root(pubkey_hex: &str) -> Result<()> {
     Ok(())
 }
 
+/// Read an offline root's Ed25519 private seed: 64 hex characters.
+fn read_root_seed(path: &str) -> Result<SigningKey> {
+    let root_hex = zeroize::Zeroizing::new(
+        std::fs::read_to_string(path).with_context(|| format!("read root key {path}"))?,
+    );
+    let root_bytes = zeroize::Zeroizing::new(skill_registry::hex_decode_public(root_hex.trim())?);
+    let arr: [u8; 32] = root_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("root key must be a 32-byte Ed25519 seed (64 hex chars)"))?;
+    Ok(SigningKey::from_bytes(&arr))
+}
+
+/// `wirken skills sign-index`: delegate every registry index entry's
+/// signer key under the offline registry root, reading each entry's
+/// SKILL.md from a local checkout of the registry. Prints the signed
+/// index to stdout and touches nothing else.
+pub fn sign_index(
+    index_path: &str,
+    root_key: &str,
+    skills_dir: &str,
+    url_prefix: &str,
+) -> Result<()> {
+    let body =
+        std::fs::read_to_string(index_path).with_context(|| format!("read index {index_path}"))?;
+    let mut index: SkillIndex =
+        serde_json::from_str(&body).with_context(|| format!("parse index {index_path}"))?;
+    let root = read_root_seed(root_key)?;
+    let checkout = std::path::Path::new(skills_dir);
+
+    skill_registry::sign_index(&mut index, &root, |entry| {
+        let rel = entry.url.strip_prefix(url_prefix).ok_or_else(|| {
+            wirken_gateway::error::GatewayError::Config(format!(
+                "'{}' url {} does not start with {url_prefix}",
+                entry.name, entry.url
+            ))
+        })?;
+        let rel = std::path::Path::new(rel);
+        if !rel
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(wirken_gateway::error::GatewayError::Config(format!(
+                "'{}' url path {} leaves the checkout",
+                entry.name,
+                rel.display()
+            )));
+        }
+        let path = checkout.join(rel);
+        std::fs::read(&path).map_err(|e| {
+            wirken_gateway::error::GatewayError::Config(format!(
+                "'{}' read {}: {e}",
+                entry.name,
+                path.display()
+            ))
+        })
+    })?;
+
+    println!("{}", serde_json::to_string_pretty(&index)?);
+    eprintln!(
+        "  Signed {} entries under registry root {}",
+        index.skills.len(),
+        skill_registry::hex_encode_public(&root.verifying_key().to_bytes())
+    );
+    Ok(())
+}
+
 pub async fn sign(dir: &str, root_key: Option<&str>) -> Result<()> {
     let skill_dir = std::path::Path::new(dir);
     if !skill_dir.join("SKILL.md").exists() {
@@ -274,15 +341,7 @@ pub async fn sign(dir: &str, root_key: Option<&str>) -> Result<()> {
     // Used only for installs that opted into a registry root. Without
     // `--root-key`, self-signing is unchanged (the floor).
     if let Some(root_path) = root_key {
-        let root_hex = std::fs::read_to_string(root_path)
-            .with_context(|| format!("read root key {root_path}"))?;
-        let root_bytes = skill_registry::hex_decode_public(root_hex.trim())?;
-        if root_bytes.len() != 32 {
-            anyhow::bail!("root key must be a 32-byte Ed25519 seed (64 hex chars)");
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&root_bytes);
-        let root_signing = SigningKey::from_bytes(&arr);
+        let root_signing = read_root_seed(root_path)?;
         skill_registry::delegate_sign_skill(skill_dir, &signing_key, &root_signing)?;
         let root_pub = skill_registry::hex_encode_public(&root_signing.verifying_key().to_bytes());
         println!("  Signed (delegated): {}/SKILL.md", dir);

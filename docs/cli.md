@@ -141,6 +141,7 @@ wirken skills search <QUERY>
 wirken skills install <NAME>
 wirken skills list
 wirken skills sign <DIR> [--root-key <OFFLINE_ROOT_SEED>]
+wirken skills sign-index <INDEX> --root-key <OFFLINE_ROOT_SEED> --skills-dir <CHECKOUT> [--url-prefix <URL>]
 wirken skills verify <DIR> [--strict]
 wirken skills trust-root <PUBKEY_HEX>
 wirken skills migrate [PATH] [--dry-run]

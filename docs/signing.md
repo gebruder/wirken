@@ -56,6 +56,15 @@ a signature on the host. See [skills.md](skills.md) for the operator side.
 at build time, that key must also carry a `signer_key_delegation` signature by
 the bundled root. `skill_registry.rs:398-458`.
 
+**Signing the registry index.** `scripts/sign-skills-index.sh`, which runs
+`wirken skills sign-index`, signs the index offline under the registry root.
+For each entry it checks the entry's signature against the `SKILL.md` in a
+local checkout of the registry, writes `signer_key_delegation` and adds
+`sha256` where the entry has none; any entry that fails the check refuses the
+whole index. `wirken-registry-pubkey.pub` and `wirken-mcp-pubkey.pub` ship
+empty, so a build carries no bundled anchor until a root public key is
+committed there.
+
 **Verification at load.** Every `SkillLoader::load_file` runs the gate first,
 on the raw on-disk bytes, before any frontmatter parse, path templating or
 binary probe. It branches on whether an operator registry root is installed:

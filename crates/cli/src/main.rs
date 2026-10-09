@@ -587,6 +587,29 @@ enum SkillCommands {
         #[arg(long)]
         root_key: Option<String>,
     },
+    /// Sign a registry index under the registry root, offline. For each
+    /// entry, checks its signature against the SKILL.md in a local
+    /// checkout of the registry, writes `signer_key_delegation` (the
+    /// root's signature over the entry's `signer_key`) and adds
+    /// `sha256` where the entry has none. Prints the signed index to
+    /// stdout. See scripts/sign-skills-index.sh.
+    SignIndex {
+        /// Path to the registry's index.json
+        index: String,
+        /// Path to the registry root's Ed25519 private seed (hex)
+        #[arg(long)]
+        root_key: String,
+        /// Local checkout of the registry that entry URLs point into
+        #[arg(long)]
+        skills_dir: String,
+        /// Prefix stripped from each entry's `url` to find its SKILL.md
+        /// under --skills-dir
+        #[arg(
+            long,
+            default_value = "https://raw.githubusercontent.com/gebruder/wirken-skills/main/"
+        )]
+        url_prefix: String,
+    },
     /// Install an operator registry root public key to anchor skill
     /// identity. Once set, the loader requires every skill's signer to
     /// be delegated by this root (strict): self-signed-only bundles no
@@ -1314,6 +1337,12 @@ async fn main() -> Result<()> {
             SkillCommands::Sign { dir, root_key } => {
                 commands::skills::sign(&dir, root_key.as_deref()).await
             }
+            SkillCommands::SignIndex {
+                index,
+                root_key,
+                skills_dir,
+                url_prefix,
+            } => commands::skills::sign_index(&index, &root_key, &skills_dir, &url_prefix),
             SkillCommands::TrustRoot { pubkey } => commands::skills::trust_root(&pubkey).await,
             SkillCommands::Verify { dir, strict } => commands::skills::verify(&dir, strict).await,
             SkillCommands::Migrate { path, dry_run } => {

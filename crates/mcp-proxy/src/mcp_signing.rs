@@ -84,7 +84,14 @@ pub const BUNDLED_MCP_PUBKEY_HEX: &str = include_str!("wirken-mcp-pubkey.pub");
 /// content does not parse as a 32-byte hex Ed25519 key (corrupt
 /// bundle; treated as no-anchor and a runtime warn).
 pub fn bundled_mcp_pubkey() -> Option<VerifyingKey> {
-    let trimmed = BUNDLED_MCP_PUBKEY_HEX.trim();
+    parse_bundled_mcp_pubkey(BUNDLED_MCP_PUBKEY_HEX)
+}
+
+/// Parse the contents of `wirken-mcp-pubkey.pub` the way the build
+/// does: 64 hex characters, surrounding whitespace ignored. Split out so
+/// a key generated for the file can be checked before it is committed.
+pub fn parse_bundled_mcp_pubkey(contents: &str) -> Option<VerifyingKey> {
+    let trimmed = contents.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -679,5 +686,16 @@ mod tests {
         let a = build(vec![("alpha", 1), ("beta", 2), ("gamma", 3)]);
         let b = build(vec![("gamma", 3), ("alpha", 1), ("beta", 2)]);
         assert_eq!(hash_mcp_entry("vendor", &a), hash_mcp_entry("vendor", &b));
+    }
+
+    #[test]
+    fn a_root_key_written_as_the_pub_file_parses_as_the_build_reads_it() {
+        let root = random_signing_key();
+        let contents = format!("{}\n", hex_encode(&root.verifying_key().to_bytes()));
+        assert_eq!(
+            parse_bundled_mcp_pubkey(&contents),
+            Some(root.verifying_key())
+        );
+        assert_eq!(parse_bundled_mcp_pubkey(""), None);
     }
 }

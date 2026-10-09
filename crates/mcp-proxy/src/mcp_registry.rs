@@ -398,6 +398,10 @@ fn pre_spawn_verify(
             //  - No anchor configured: pre-anchor parity, allow.
             //  - Anchor configured + bypass set: allow with attribution.
             //  - Anchor configured + bypass unset: refuse.
+            //
+            // The no-anchor branch exists only while
+            // `wirken-mcp-pubkey.pub` ships empty. Once a bundled anchor
+            // ships, it has no reason to exist.
             if bundled_root.is_none() {
                 PreSpawnDecision::Spawn {
                     signer: "<no-anchor>".to_string(),

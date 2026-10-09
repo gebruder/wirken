@@ -24,7 +24,14 @@ pub const BUNDLED_REGISTRY_PUBKEY_HEX: &str = include_str!("wirken-registry-pubk
 /// content does not parse as a 32-byte hex Ed25519 key (corrupt
 /// bundle; treated as no-anchor and a runtime warn).
 pub fn bundled_registry_pubkey() -> Option<VerifyingKey> {
-    let trimmed = BUNDLED_REGISTRY_PUBKEY_HEX.trim();
+    parse_bundled_registry_pubkey(BUNDLED_REGISTRY_PUBKEY_HEX)
+}
+
+/// Parse the contents of `wirken-registry-pubkey.pub` the way the build
+/// does: 64 hex characters, surrounding whitespace ignored. Split out so
+/// a key generated for the file can be checked before it is committed.
+pub fn parse_bundled_registry_pubkey(contents: &str) -> Option<VerifyingKey> {
+    let trimmed = contents.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -165,6 +172,11 @@ pub struct SkillEntry {
     /// trust path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_key_delegation: Option<String>,
+    /// Hex-encoded SHA-256 of the entry's `SKILL.md`, which for a
+    /// SKILL.md-only bundle is also the hash its `signature` covers.
+    /// Written by [`sign_index`]; absent on indexes signed before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 /// The registry index — a list of published skills.
@@ -513,6 +525,69 @@ pub enum VerifyResult {
     Unsigned,
 }
 
+/// Delegate every entry's `signer_key` under the registry `root` and fill
+/// in `sha256` where an entry lacks it. `skill_md` returns the bytes of an
+/// entry's `SKILL.md` from a local checkout of the registry, so the root
+/// key never needs a network.
+///
+/// The root delegates a key only after the entry's own `signature` has
+/// verified against that `SKILL.md`, the check `wirken skills install`
+/// makes, so a delegation never vouches for an entry that would fail
+/// install. An unsigned entry, a signature that does not verify, or a
+/// stored `sha256` that does not match refuses the whole index.
+pub fn sign_index(
+    index: &mut SkillIndex,
+    root: &SigningKey,
+    skill_md: impl Fn(&SkillEntry) -> Result<Vec<u8>, GatewayError>,
+) -> Result<(), GatewayError> {
+    for entry in &mut index.skills {
+        let (Some(sig_hex), Some(key_hex)) = (&entry.signature, &entry.signer_key) else {
+            return Err(GatewayError::Config(format!(
+                "entry '{}' has no signature or signer_key; sign it with `wirken skills sign` first",
+                entry.name
+            )));
+        };
+        let bytes = skill_md(entry)?;
+        let digest = Sha256::digest(&bytes);
+
+        let key_bytes = hex_decode(key_hex.trim())
+            .map_err(|e| GatewayError::Config(format!("'{}' signer_key: {e}", entry.name)))?;
+        let key_arr: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
+            GatewayError::Config(format!("'{}' signer_key is not 32 bytes", entry.name))
+        })?;
+        let signer = VerifyingKey::from_bytes(&key_arr)
+            .map_err(|e| GatewayError::Config(format!("'{}' signer_key: {e}", entry.name)))?;
+        let sig_bytes = hex_decode(sig_hex.trim())
+            .map_err(|e| GatewayError::Config(format!("'{}' signature: {e}", entry.name)))?;
+        let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+            GatewayError::Config(format!("'{}' signature is not 64 bytes", entry.name))
+        })?;
+        if signer
+            .verify_strict(&digest, &Signature::from_bytes(&sig_arr))
+            .is_err()
+        {
+            return Err(GatewayError::Config(format!(
+                "'{}' signature does not verify against its SKILL.md; not delegating",
+                entry.name
+            )));
+        }
+
+        let digest_hex = hex_encode(&digest);
+        match &entry.sha256 {
+            Some(stored) if !stored.trim().eq_ignore_ascii_case(&digest_hex) => {
+                return Err(GatewayError::Config(format!(
+                    "'{}' sha256 in the index does not match its SKILL.md",
+                    entry.name
+                )));
+            }
+            Some(_) => {}
+            None => entry.sha256 = Some(digest_hex),
+        }
+        entry.signer_key_delegation = Some(hex_encode(&root.sign(&key_arr).to_bytes()));
+    }
+    Ok(())
+}
+
 /// Public hex encode (for CLI).
 pub fn hex_encode_public(bytes: &[u8]) -> String {
     hex_encode(bytes)
@@ -822,6 +897,7 @@ mod tests {
                     signature: None,
                     signer_key: None,
                     signer_key_delegation: None,
+                    sha256: None,
                 },
                 SkillEntry {
                     name: "github".into(),
@@ -832,6 +908,7 @@ mod tests {
                     signature: None,
                     signer_key: None,
                     signer_key_delegation: None,
+                    sha256: None,
                 },
                 SkillEntry {
                     name: "tmux".into(),
@@ -842,6 +919,7 @@ mod tests {
                     signature: None,
                     signer_key: None,
                     signer_key_delegation: None,
+                    sha256: None,
                 },
             ],
         };
@@ -1006,5 +1084,105 @@ mod tests {
             VerifyResult::Invalid => {}
             other => panic!("expected Invalid after wasm injection, got {other:?}"),
         }
+    }
+
+    /// An index entry for a SKILL.md-only bundle signed by `signer`, as
+    /// a registry publishes it before the root signs the index.
+    fn published_entry(dir: &Path, signer: &SigningKey) -> SkillEntry {
+        std::fs::write(dir.join("SKILL.md"), "---\nname: demo\n---\nbody\n").unwrap();
+        let signature = sign_skill(dir, signer).unwrap();
+        SkillEntry {
+            name: "demo".into(),
+            description: "demo skill".into(),
+            version: "1.0.0".into(),
+            author: "someone".into(),
+            url: "https://example.invalid/demo/SKILL.md".into(),
+            signature: Some(signature),
+            signer_key: Some(hex_encode(&signer.verifying_key().to_bytes())),
+            signer_key_delegation: None,
+            sha256: None,
+        }
+    }
+
+    fn read_skill_md(dir: &Path) -> impl Fn(&SkillEntry) -> Result<Vec<u8>, GatewayError> + '_ {
+        move |_| {
+            std::fs::read(dir.join("SKILL.md")).map_err(|e| GatewayError::Config(e.to_string()))
+        }
+    }
+
+    #[test]
+    fn a_signed_index_verifies_at_install_under_its_root_only() {
+        let tmp = TempDir::new().unwrap();
+        let root = random_signing_key();
+        let mut index = SkillIndex {
+            skills: vec![published_entry(tmp.path(), &random_signing_key())],
+        };
+        sign_index(&mut index, &root, read_skill_md(tmp.path())).unwrap();
+
+        let entry = &index.skills[0];
+        let digest = hex_encode(&Sha256::digest(
+            std::fs::read(tmp.path().join("SKILL.md")).unwrap(),
+        ));
+        assert_eq!(entry.sha256.as_deref(), Some(digest.as_str()));
+
+        // What `wirken skills install` runs, with this root bundled.
+        let verify = |bundled: &VerifyingKey| {
+            verify_skill_with_expected_key_and_delegation(
+                tmp.path(),
+                entry.signature.as_deref().unwrap(),
+                entry.signer_key.as_deref().unwrap(),
+                entry.signer_key_delegation.as_deref(),
+                Some(bundled),
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            verify(&root.verifying_key()),
+            VerifyResult::Valid { .. }
+        ));
+        assert!(matches!(
+            verify(&random_signing_key().verifying_key()),
+            VerifyResult::Invalid
+        ));
+    }
+
+    #[test]
+    fn sign_index_refuses_what_install_would_refuse() {
+        let root = random_signing_key();
+
+        let tmp = TempDir::new().unwrap();
+        let mut unsigned = published_entry(tmp.path(), &random_signing_key());
+        unsigned.signature = None;
+        let mut index = SkillIndex {
+            skills: vec![unsigned],
+        };
+        assert!(sign_index(&mut index, &root, read_skill_md(tmp.path())).is_err());
+
+        let tmp = TempDir::new().unwrap();
+        let mut index = SkillIndex {
+            skills: vec![published_entry(tmp.path(), &random_signing_key())],
+        };
+        std::fs::write(tmp.path().join("SKILL.md"), "tampered").unwrap();
+        assert!(sign_index(&mut index, &root, read_skill_md(tmp.path())).is_err());
+        assert!(index.skills[0].signer_key_delegation.is_none());
+
+        let tmp = TempDir::new().unwrap();
+        let mut stale = published_entry(tmp.path(), &random_signing_key());
+        stale.sha256 = Some("00".repeat(32));
+        let mut index = SkillIndex {
+            skills: vec![stale],
+        };
+        assert!(sign_index(&mut index, &root, read_skill_md(tmp.path())).is_err());
+    }
+
+    #[test]
+    fn a_root_key_written_as_the_pub_file_parses_as_the_build_reads_it() {
+        let root = random_signing_key();
+        let contents = format!("{}\n", hex_encode(&root.verifying_key().to_bytes()));
+        assert_eq!(
+            parse_bundled_registry_pubkey(&contents),
+            Some(root.verifying_key())
+        );
+        assert_eq!(parse_bundled_registry_pubkey(""), None);
     }
 }

@@ -30,6 +30,15 @@ tagged.
   OAuth tokens back as before. The proxy still receives the vault
   passphrase in its environment and clears it at startup.
 
+### Added
+
+- `wirken skills sign-index` and `scripts/sign-skills-index.sh` sign a
+  registry index offline under the registry root. Each entry's signature
+  is checked against the `SKILL.md` in a local checkout of the registry
+  before the root writes its `signer_key_delegation`, and `sha256` is
+  added where the entry has none. No root key ships;
+  `wirken-registry-pubkey.pub` stays empty until one is committed.
+
 ### Changed
 
 - The README's architecture diagram no longer lists Wasm as a tool
