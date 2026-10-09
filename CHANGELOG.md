@@ -32,6 +32,9 @@ tagged.
 
 ### Changed
 
+- The README's architecture diagram no longer lists Wasm as a tool
+  sandbox. Wasm skills are not loaded on the default path.
+
 - An adapter's connection and restarts are typed audit events on the
   `gateway-adapters` lane: `adapter_connect`, `adapter_disconnect`
   (`reason`), `adapter_restart` (`attempt`, `cause`, `exit`, `delay_ms`,

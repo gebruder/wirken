@@ -157,7 +157,7 @@ graph TD
         Agent --> Tools
 
         subgraph Execution
-            Tools --> Sandbox[Docker / gVisor / Wasm]
+            Tools --> Sandbox[Docker / gVisor]
         end
     end
 
