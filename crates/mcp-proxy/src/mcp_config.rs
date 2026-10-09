@@ -148,7 +148,7 @@ pub enum McpServerConfig {
         /// or `"off"` for the host. Inside the signed envelope, so it
         /// cannot be widened on a signed entry without re-signing.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        sandbox: Option<StdioSandbox>,
+        sandbox: Option<Box<StdioSandbox>>,
     },
 }
 
@@ -438,7 +438,7 @@ mod tests {
     fn sandbox_of(json: &str) -> Option<StdioSandbox> {
         let config: McpConfig = serde_json::from_str(json).unwrap();
         match config.servers.into_values().next().unwrap() {
-            McpServerConfig::Stdio { sandbox, .. } => sandbox,
+            McpServerConfig::Stdio { sandbox, .. } => sandbox.map(|b| *b),
             McpServerConfig::Http { .. } => panic!("expected stdio"),
         }
     }
@@ -512,7 +512,7 @@ mod tests {
                 panic!("expected stdio");
             };
             assert!(
-                matches!(sandbox, Some(StdioSandbox::Invalid(_))),
+                matches!(sandbox.as_deref(), Some(StdioSandbox::Invalid(_))),
                 "{name}: {sandbox:?}"
             );
         }
