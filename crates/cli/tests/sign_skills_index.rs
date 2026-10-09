@@ -56,12 +56,10 @@ impl Registry {
     fn sign(&self) -> Output {
         Command::new("sh")
             .arg(script())
+            .arg("--root-key")
+            .arg(self.dir.path().join("registry-root.seed"))
             .arg(self.index())
             .arg(self.checkout())
-            .env(
-                "WIRKEN_REGISTRY_ROOT_KEY",
-                self.dir.path().join("registry-root.seed"),
-            )
             .env("WIRKEN_BIN", env!("CARGO_BIN_EXE_wirken"))
             .env("WIRKEN_DATA_DIR", self.dir.path().join("data"))
             .output()
