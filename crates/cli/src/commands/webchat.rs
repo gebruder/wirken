@@ -5567,18 +5567,23 @@ mod tests {
             .await
             .register("telegram", &[7u8; 32], "telegram")
             .unwrap();
-        let (writer, flush) = wirken_audit::AuditWriter::new(&cfg.audit_db_path()).unwrap();
-        writer
-            .log(wirken_audit::AuditEvent::new(
-                wirken_audit::ActorKind::Service,
-                "gateway",
-                "adapter.connect",
-                "telegram",
-            ))
-            .await
+        {
+            use wirken_audit::SessionLog;
+            let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).unwrap();
+            let lane = log.handle_for(wirken_audit::SessionId::new(
+                wirken_audit::ADAPTER_LIFECYCLE_SESSION,
+            ));
+            log.append(
+                &lane,
+                wirken_audit::TrustLevel::System,
+                wirken_audit::SessionEvent::AdapterConnect {
+                    adapter_id: "telegram".into(),
+                    channel: "telegram".into(),
+                    pubkey_fingerprint: "fp".into(),
+                },
+            )
             .unwrap();
-        drop(writer);
-        flush.await.unwrap();
+        }
 
         let snap = status_snapshot(&cfg, 18790, &inputs, false).await;
         let adapter = &snap["adapters"][0];

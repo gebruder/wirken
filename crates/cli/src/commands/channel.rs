@@ -992,22 +992,16 @@ mod tests {
     /// time the deciding row was written.
     #[tokio::test]
     async fn list_prints_each_adapter_state_from_the_audit_log() {
-        let none = || serde_json::json!({});
-        let statuses = crate::commands::adapter_state::tests::statuses(&[
-            ("adapter.connect", "telegram", none()),
-            ("adapter.connect", "slack", none()),
-            ("adapter.disconnect", "slack", none()),
-            ("adapter.connect", "discord", none()),
-            (
-                "adapter.restart",
-                "discord",
-                serde_json::json!({"attempt": 3}),
-            ),
-            (
-                "adapter.restart_abandoned",
-                "matrix",
-                serde_json::json!({"attempts": 8}),
-            ),
+        use crate::commands::adapter_state::tests::{
+            abandoned, connect, disconnect, restart, statuses,
+        };
+        let statuses = statuses(vec![
+            connect("telegram"),
+            connect("slack"),
+            disconnect("slack"),
+            connect("discord"),
+            restart("discord", 3),
+            abandoned("matrix", 8),
         ])
         .await;
         let entries: Vec<(String, String)> = ["telegram", "slack", "discord", "matrix", "signal"]

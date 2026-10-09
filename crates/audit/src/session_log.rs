@@ -3351,6 +3351,41 @@ impl SqliteSessionLog {
             .collect()
     }
 
+    /// The newest event for each value of the payload field `field`,
+    /// among the events whose kind is one of `kinds`, oldest first. An
+    /// adapter's connection state is read this way: the newest
+    /// lifecycle event per `adapter_id`. A row that does not parse is
+    /// left out.
+    pub fn latest_events_per_field(
+        &self,
+        kinds: &[&str],
+        field: &str,
+    ) -> Result<Vec<StoredSessionEvent>, AuditError> {
+        if kinds.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = format!("$.{field}");
+        let placeholders = (2..kinds.len() + 2)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, session_id, seq, ts, trust, payload, leaf_hash, prev_hash, hash
+             FROM session_events
+             WHERE id IN (
+                 SELECT MAX(id) FROM session_events
+                 WHERE json_extract(payload, '$.kind') IN ({placeholders})
+                 GROUP BY json_extract(payload, ?1)
+             )
+             ORDER BY id ASC"
+        );
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&path];
+        params.extend(kinds.iter().map(|k| k as &dyn rusqlite::ToSql));
+        let conn = self.conn.lock().expect("session log mutex");
+        let rows = collect_rows(&conn, &sql, &params)?;
+        Ok(rows.into_iter().filter_map(|r| parse_row(r).ok()).collect())
+    }
+
     /// The newest legacy audit row for each target, among the rows
     /// whose action is one of `actions`, oldest first. An adapter's
     /// connection state is read this way: the newest lifecycle row per
