@@ -39,6 +39,7 @@ use wirken_ipc::{IpcFrameReader, IpcFrameWriter, split_stream};
 use wirken_ipc::{Principal, Stream};
 use wirken_vault::{CredentialStore, probe_keychain};
 
+use super::adapter_handoff::{self, Handoff};
 use super::config;
 
 /// Host-side `http_request` credential resolver backed by the vault.
@@ -938,9 +939,30 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // exits or its gateway connection ends, the loop kills what is left,
     // records an `adapter.restart` row and respawns it after a backoff.
     // The connection signals its end through the adapter's lifeline.
+    //
+    // On every spawn the gateway reads the adapter's own credentials
+    // from the vault and hands them over on the child's stdin; the
+    // child gets no vault passphrase and never opens the vault.
     let exe = std::env::current_exe()?;
     let mut adapter_handles = Vec::new();
     let adapters = registry.lock().await.list();
+    let adapter_vault: Option<Arc<std::sync::Mutex<CredentialStore>>> = if adapters.is_empty() {
+        None
+    } else {
+        let keychain = probe_keychain(&cfg.data_dir, || {
+            prompt_vault_passphrase(&mut vault_passphrase)
+        });
+        match CredentialStore::open(&cfg.vault_db_path(), keychain.as_ref()) {
+            Ok(store) => Some(Arc::new(std::sync::Mutex::new(store))),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "vault unavailable; adapters start with no credentials"
+                );
+                None
+            }
+        }
+    };
     let lifelines: Lifelines = Arc::new(
         adapters
             .iter()
@@ -956,7 +978,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let sock = socket_path.clone();
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
-        let vp = vault_passphrase.clone().unwrap_or_default();
+        let vault = adapter_vault.clone();
 
         let handle = tokio::spawn(async move {
             // Small delay to let the listener start
@@ -964,14 +986,17 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
             let spawn = || {
                 tracing::info!("Spawning adapter: {adapter_id}");
-                Command::new(&exe)
-                    .arg("adapter")
-                    .arg(&adapter_id)
-                    .env("WIRKEN_DATA_DIR", &data_dir)
-                    .env("WIRKEN_SOCKET", &sock)
-                    .env("WIRKEN_VAULT_PASSPHRASE", &vp)
-                    .kill_on_drop(true)
-                    .spawn()
+                let handoff = match vault.as_ref().map(|v| v.lock()) {
+                    Some(Ok(store)) => Handoff::resolve(&store, &adapter_id),
+                    Some(Err(_)) => {
+                        tracing::error!("vault mutex poisoned; adapter starts with no credentials");
+                        Handoff::default()
+                    }
+                    None => Handoff::default(),
+                };
+                let mut cmd = Command::new(&exe);
+                adapter_handoff::configure_adapter_command(&mut cmd, &adapter_id, &data_dir, &sock);
+                adapter_handoff::spawn_with_handoff(&mut cmd, handoff)
             };
             supervise_adapter(
                 &adapter_id,

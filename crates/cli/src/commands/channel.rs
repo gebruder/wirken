@@ -178,7 +178,7 @@ async fn add_signal(cfg: &GatewayConfig, data: &std::path::Path) -> Result<()> {
 
     println!("  signal: credentials encrypted.");
     println!("  Channel 'signal' added.");
-    println!("  Start the adapter with: wirken adapter signal");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
     Ok(())
 }
 
@@ -191,7 +191,7 @@ async fn add_simple(
     let token = resolve_token(channel, flags.token.as_deref(), true)?;
     register_channel(channel, &token, cfg, data).await?;
     println!("  Channel '{channel}' added.");
-    println!("  Start the adapter with: wirken adapter {channel}");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
     Ok(())
 }
 
@@ -223,7 +223,7 @@ async fn add_google_chat(
 
     println!("  google-chat: project number encrypted.");
     println!("  Channel 'google-chat' added.");
-    println!("  Start the adapter with: wirken adapter google-chat");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
     Ok(())
 }
 
@@ -270,7 +270,7 @@ async fn add_slack(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags)
     register_adapter_identity("slack", cfg, &store)?;
     println!("  slack: tokens encrypted, adapter keypair generated, registered.");
     println!("  Channel 'slack' added.");
-    println!("  Start the adapter with: wirken adapter slack");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
     Ok(())
 }
 
@@ -293,7 +293,7 @@ async fn add_whatsapp(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFla
     register_adapter_identity("whatsapp", cfg, &store)?;
     println!("  whatsapp: credentials encrypted, adapter keypair generated, registered.");
     println!("  Channel 'whatsapp' added.");
-    println!("  Start the adapter with: wirken adapter whatsapp");
+    println!("  `wirken run` starts its adapter; restart it if it is already running.");
     Ok(())
 }
 

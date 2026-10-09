@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -15,7 +16,8 @@ use wirken_adapter_teams::TeamsAdapter;
 use wirken_adapter_telegram::TelegramAdapter;
 use wirken_gateway::config::GatewayConfig;
 use wirken_ipc::AdapterIdentity;
-use wirken_vault::{CredentialStore, probe_keychain};
+
+use super::adapter_handoff::Handoff;
 
 /// Run an adapter process. Called by the gateway daemon.
 pub async fn run(channel: &str) -> Result<()> {
@@ -33,25 +35,27 @@ pub async fn run(channel: &str) -> Result<()> {
         socket_path.display()
     );
 
-    // Load credentials from vault
-    let keychain = probe_keychain(&data_dir, || {
-        super::vault_passphrase_source().unwrap_or_default()
-    });
-    let store = CredentialStore::open(&data_dir.join("vault.db"), keychain.as_ref())
-        .context("Failed to open credential store")?;
+    // The gateway writes this adapter's credentials to stdin at spawn
+    // and closes the pipe. The adapter never opens the vault, so it
+    // holds no passphrase and no other channel's credentials.
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        anyhow::bail!(
+            "`wirken adapter` is started by `wirken run`, which hands it its credentials \
+             on stdin; it does not read the vault itself"
+        );
+    }
+    let mut creds = Handoff::read_from(stdin.lock())?;
 
-    // Get bot token
-    let token_name = format!("{channel}-token");
-    let (token_secret, _) = store.retrieve(&token_name).context(format!(
-        "No token found for '{channel}'. Run `wirken channel add {channel}`."
-    ))?;
-    let bot_token = token_secret.expose().to_string();
+    let bot_token = required(
+        &mut creds,
+        &format!("{channel}-token"),
+        format!("No token found for '{channel}'. Run `wirken channel add {channel}`."),
+    )?;
 
-    // Get adapter secret key
-    let key_name = format!("{channel}-adapter-key");
-    let (key_secret, _) = store
-        .retrieve(&key_name)
-        .context(format!("No adapter key found for '{channel}'."))?;
+    let key_secret = creds
+        .take(&format!("{channel}-adapter-key"))
+        .with_context(|| format!("No adapter key found for '{channel}'."))?;
 
     let key_hex = key_secret.expose();
     let key_bytes = hex_decode(key_hex).context("Invalid adapter key")?;
@@ -83,11 +87,11 @@ pub async fn run(channel: &str) -> Result<()> {
         }
         "slack" => {
             // Slack Socket Mode requires an app token in addition to the bot token
-            let app_token_name = format!("{channel}-app-token");
-            let (app_token_secret, _) = store
-                .retrieve(&app_token_name)
-                .context("No app token found for 'slack'. Run `wirken channel add slack`.")?;
-            let app_token = app_token_secret.expose().to_string();
+            let app_token = required(
+                &mut creds,
+                &format!("{channel}-app-token"),
+                "No app token found for 'slack'. Run `wirken channel add slack`.",
+            )?;
 
             let adapter = SlackAdapter::new(identity, bot_token, app_token);
             adapter
@@ -97,11 +101,11 @@ pub async fn run(channel: &str) -> Result<()> {
         }
         "teams" => {
             // Teams needs App ID in addition to App Password (bot token)
-            let app_id_name = format!("{channel}-app-id");
-            let (app_id_secret, _) = store
-                .retrieve(&app_id_name)
-                .context("No app ID found for 'teams'. Run `wirken channel add teams`.")?;
-            let app_id = app_id_secret.expose().to_string();
+            let app_id = required(
+                &mut creds,
+                &format!("{channel}-app-id"),
+                "No app ID found for 'teams'. Run `wirken channel add teams`.",
+            )?;
 
             let listen_port: u16 = std::env::var("WIRKEN_TEAMS_PORT")
                 .unwrap_or_else(|_| "3978".into())
@@ -116,18 +120,17 @@ pub async fn run(channel: &str) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("Teams adapter error: {e}"))?;
         }
         "matrix" => {
-            // Matrix needs homeserver URL and username from vault
-            let hs_name = format!("{channel}-homeserver");
-            let (hs_secret, _) = store
-                .retrieve(&hs_name)
-                .context("No homeserver URL for 'matrix'. Run `wirken channel add matrix`.")?;
-            let homeserver = hs_secret.expose().to_string();
-
-            let user_name = format!("{channel}-username");
-            let (user_secret, _) = store
-                .retrieve(&user_name)
-                .context("No username for 'matrix'.")?;
-            let username = user_secret.expose().to_string();
+            // Matrix needs homeserver URL and username
+            let homeserver = required(
+                &mut creds,
+                &format!("{channel}-homeserver"),
+                "No homeserver URL for 'matrix'. Run `wirken channel add matrix`.",
+            )?;
+            let username = required(
+                &mut creds,
+                &format!("{channel}-username"),
+                "No username for 'matrix'.",
+            )?;
 
             let state_dir = data_dir.join("matrix-state");
 
@@ -138,23 +141,21 @@ pub async fn run(channel: &str) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("Matrix adapter error: {e}"))?;
         }
         "whatsapp" => {
-            let app_secret_name = format!("{channel}-app-secret");
-            let (app_secret_val, _) = store
-                .retrieve(&app_secret_name)
-                .context("No app secret found for 'whatsapp'.")?;
-            let app_secret = app_secret_val.expose().to_string();
-
-            let phone_id_name = format!("{channel}-phone-number-id");
-            let (phone_id_val, _) = store
-                .retrieve(&phone_id_name)
-                .context("No phone number ID found for 'whatsapp'.")?;
-            let phone_number_id = phone_id_val.expose().to_string();
-
-            let verify_token_name = format!("{channel}-verify-token");
-            let (verify_val, _) = store
-                .retrieve(&verify_token_name)
-                .context("No verify token found for 'whatsapp'.")?;
-            let verify_token = verify_val.expose().to_string();
+            let app_secret = required(
+                &mut creds,
+                &format!("{channel}-app-secret"),
+                "No app secret found for 'whatsapp'.",
+            )?;
+            let phone_number_id = required(
+                &mut creds,
+                &format!("{channel}-phone-number-id"),
+                "No phone number ID found for 'whatsapp'.",
+            )?;
+            let verify_token = required(
+                &mut creds,
+                &format!("{channel}-verify-token"),
+                "No verify token found for 'whatsapp'.",
+            )?;
 
             let listen_port: u16 = std::env::var("WIRKEN_WHATSAPP_PORT")
                 .unwrap_or_else(|_| "3979".into())
@@ -178,25 +179,19 @@ pub async fn run(channel: &str) -> Result<()> {
         "signal" => {
             #[cfg(unix)]
             {
-                let endpoint_name = format!("{channel}-endpoint");
-                let endpoint = store
-                    .retrieve(&endpoint_name)
-                    .map(|(s, _)| s.expose().to_string())
-                    .unwrap_or_else(|_| "/tmp/signal-cli.sock".into());
+                let endpoint = optional(&mut creds, &format!("{channel}-endpoint"))
+                    .unwrap_or_else(|| "/tmp/signal-cli.sock".into());
 
-                let phone_name = format!("{channel}-phone-number");
-                let (phone_val, _) = store
-                    .retrieve(&phone_name)
-                    .context("No phone number found for 'signal'.")?;
-                let phone_number = phone_val.expose().to_string();
+                let phone_number = required(
+                    &mut creds,
+                    &format!("{channel}-phone-number"),
+                    "No phone number found for 'signal'.",
+                )?;
 
                 // Fail-closed sender allowlist. Missing vault entry = empty list
                 // = every inbound message is dropped. See docs/channels/signal.md.
-                let allowed_name = format!("{channel}-allowed-senders");
-                let allowlist_csv = store
-                    .retrieve(&allowed_name)
-                    .map(|(s, _)| s.expose().to_string())
-                    .unwrap_or_default();
+                let allowlist_csv =
+                    optional(&mut creds, &format!("{channel}-allowed-senders")).unwrap_or_default();
                 let allowlist = SignalAllowlist::from_csv(&allowlist_csv)
                     .map_err(|e| anyhow::anyhow!("Signal adapter: invalid allowlist entry: {e}"))?;
 
@@ -209,7 +204,7 @@ pub async fn run(channel: &str) -> Result<()> {
             }
             #[cfg(not(unix))]
             {
-                let _ = (&store, &socket_path, &identity);
+                let _ = (&creds, &socket_path, &identity);
                 anyhow::bail!(
                     "Signal adapter requires a unix-domain socket to signal-cli; not supported on this platform"
                 );
@@ -221,12 +216,12 @@ pub async fn run(channel: &str) -> Result<()> {
                 .parse()
                 .unwrap_or(3980);
 
-            let project_name = format!("{channel}-project-number");
-            let (project_val, _) = store.retrieve(&project_name).context(
+            let app_project_number = required(
+                &mut creds,
+                &format!("{channel}-project-number"),
                 "No project number found for 'google-chat'. Run `wirken channel add google-chat`. \
                  The project number is the inbound JWT audience required by Google Chat webhooks.",
             )?;
-            let app_project_number = project_val.expose().to_string();
 
             let adapter =
                 GoogleChatAdapter::new(identity, bot_token, app_project_number, listen_port)
@@ -237,17 +232,14 @@ pub async fn run(channel: &str) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("Google Chat adapter error: {e}"))?;
         }
         "imessage" => {
-            let url_name = format!("{channel}-bluebubbles-url");
-            let bb_url = store
-                .retrieve(&url_name)
-                .map(|(s, _)| s.expose().to_string())
-                .unwrap_or_else(|_| "http://localhost:1234".into());
+            let bb_url = optional(&mut creds, &format!("{channel}-bluebubbles-url"))
+                .unwrap_or_else(|| "http://localhost:1234".into());
 
-            let pw_name = format!("{channel}-server-password");
-            let (pw_val, _) = store
-                .retrieve(&pw_name)
-                .context("No BlueBubbles server password found for 'imessage'.")?;
-            let server_password = pw_val.expose().to_string();
+            let server_password = required(
+                &mut creds,
+                &format!("{channel}-server-password"),
+                "No BlueBubbles server password found for 'imessage'.",
+            )?;
 
             let listen_port: u16 = std::env::var("WIRKEN_IMESSAGE_PORT")
                 .unwrap_or_else(|_| "3981".into())
@@ -269,6 +261,19 @@ pub async fn run(channel: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Take a credential the adapter cannot start without.
+fn required(creds: &mut Handoff, name: &str, missing: impl Into<String>) -> Result<String> {
+    creds
+        .take(name)
+        .map(|secret| secret.expose().to_string())
+        .with_context(|| missing.into())
+}
+
+/// Take a credential the adapter has a default for.
+fn optional(creds: &mut Handoff, name: &str) -> Option<String> {
+    creds.take(name).map(|secret| secret.expose().to_string())
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>> {

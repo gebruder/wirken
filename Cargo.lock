@@ -6992,6 +6992,7 @@ dependencies = [
  "wirken-mcp-proxy",
  "wirken-vault",
  "wirken-zirkel",
+ "zeroize",
 ]
 
 [[package]]

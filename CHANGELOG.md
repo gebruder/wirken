@@ -10,6 +10,18 @@ tagged.
 
 ## [Unreleased]
 
+### Security
+
+- Adapter processes no longer open the vault. On every spawn and
+  respawn the gateway reads the adapter's own credentials (its token,
+  its adapter key and its channel's entries) by name, writes them to
+  the child's stdin and closes the pipe; the adapter reads them once
+  into a buffer it zeroes. The child's environment no longer carries
+  `WIRKEN_VAULT_PASSPHRASE`, including one inherited from the gateway's
+  environment, so an adapter process can no longer decrypt another
+  channel's credentials or a provider key. `wirken adapter <channel>`
+  is started by `wirken run`; run from a terminal it exits and says so.
+
 ### Changed
 
 - An adapter's connection and restarts are typed audit events on the
