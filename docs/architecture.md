@@ -124,7 +124,8 @@ it zeroes and passes the values to its constructor. Credentials are never
 written to environment variables or command lines, and the adapter's
 environment carries no vault passphrase. The MCP proxy opens the vault itself,
 limited to the credentials its `mcp.json` configs reference, and refuses any
-other name. See [credentials.md](credentials.md).
+other name; that limit is in the store's interface, since the proxy holds the
+vault's device key. See [credentials.md](credentials.md).
 
 ## 3. Permissions
 

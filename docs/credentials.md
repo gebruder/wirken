@@ -26,8 +26,10 @@ feature keep it in the OS keychain. Two kinds of credentials live in it:
   servers and the `credential` of HTTP servers' bearer and OAuth auth.
   It reads those and writes refreshed OAuth tokens back. Any other
   name is refused and logged at error with the scope `mcp-proxy` and
-  the name. It still receives the vault passphrase from `wirken run`
-  in its environment and clears it at startup.
+  the name. The limit is in the store's interface, not the key: the
+  proxy still receives the vault passphrase from `wirken run` in its
+  environment, clears it at startup and holds the vault's device key,
+  so code running inside the proxy could still read the vault file.
 - **`wirken` commands** that manage credentials (`credentials`,
   `channel add`, `setup`, `mcp authorize`) open the full vault in the
   operator's own process.

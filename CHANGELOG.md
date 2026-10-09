@@ -18,17 +18,18 @@ tagged.
   the child's stdin and closes the pipe; the adapter reads them once
   into a buffer it zeroes. The child's environment no longer carries
   `WIRKEN_VAULT_PASSPHRASE`, including one inherited from the gateway's
-  environment, so an adapter process can no longer decrypt another
-  channel's credentials or a provider key. `wirken adapter <channel>`
+  environment, so an adapter process no longer holds the passphrase or
+  any credential outside its own set. `wirken adapter <channel>`
   is started by `wirken run`; run from a terminal it exits and says so.
 - The MCP proxy opens the vault limited to the credentials its loaded
   `mcp.json` configs reference: the `vault:` env values of stdio servers
   and the bearer and OAuth credentials of HTTP servers. A read or write
   of any other name is refused and logged at error with the scope and
-  the name, so the proxy can no longer decrypt a channel's credentials
-  or a provider key. It reads its own credentials and writes refreshed
-  OAuth tokens back as before. The proxy still receives the vault
-  passphrase in its environment and clears it at startup.
+  the name. It reads its own credentials and writes refreshed OAuth
+  tokens back as before. The limit is in the store's interface: the
+  proxy still receives the vault passphrase in its environment, clears
+  it at startup and holds the vault's device key, so it does not stop
+  code running inside the proxy from reading the vault file.
 
 ### Added
 
