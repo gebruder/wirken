@@ -214,7 +214,7 @@ pub(crate) fn spawn_with_handoff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wirken_vault::probe_keychain;
+    use wirken_vault::AgeFileKeychain;
 
     /// What each adapter retrieved from the vault itself before the
     /// hand-off, read off the pre-change `adapter.rs`.
@@ -291,8 +291,8 @@ mod tests {
     /// MCP bearer token and an OAuth entry. `telegram-token` is stored
     /// with an empty channel, as `wirken credentials add` leaves it.
     fn full_vault(dir: &Path) -> CredentialStore {
-        let kc = probe_keychain(dir, || "test-passphrase".to_string());
-        let store = CredentialStore::open(&dir.join("vault.db"), kc.as_ref()).unwrap();
+        let kc = AgeFileKeychain::new(dir.join("keychain"), "test-passphrase".into());
+        let store = CredentialStore::open(&dir.join("vault.db"), &kc).unwrap();
         for (adapter, names) in BEFORE {
             for name in *names {
                 let channel = if *name == "telegram-token" {
@@ -361,8 +361,8 @@ mod tests {
     #[test]
     fn resolve_leaves_out_missing_and_expired_names() {
         let dir = tempfile::tempdir().unwrap();
-        let kc = probe_keychain(dir.path(), || "test-passphrase".to_string());
-        let store = CredentialStore::open(&dir.path().join("vault.db"), kc.as_ref()).unwrap();
+        let kc = AgeFileKeychain::new(dir.path().join("keychain"), "test-passphrase".into());
+        let store = CredentialStore::open(&dir.path().join("vault.db"), &kc).unwrap();
         let past = chrono::Utc::now() - chrono::Duration::hours(1);
         store
             .store(
