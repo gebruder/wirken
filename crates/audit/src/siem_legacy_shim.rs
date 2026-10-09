@@ -119,8 +119,10 @@ pub fn legacy_row(stored: &StoredSessionEvent) -> Option<AuditEvent> {
 
 /// One pass: read the rows after `cursor`, forward the lifecycle events
 /// among them in the legacy shape, and move `cursor` past every row
-/// read. A failed forward is logged by the forwarder and dropped, as
-/// the legacy pipe drops a failed batch.
+/// read. Each row carries its typed event's level, which Datadog sends
+/// as `status`; the other targets have no level field. A failed forward
+/// is logged by the forwarder and dropped, as the legacy pipe drops a
+/// failed batch.
 pub async fn run_one_pass(
     log: &SqliteSessionLog,
     forwarder: &SiemForwarder,
@@ -133,10 +135,11 @@ pub async fn run_one_pass(
         return Ok(());
     };
     let new_high = last.id;
-    let legacy: Vec<AuditEvent> = rows.iter().filter_map(legacy_row).collect();
-    if !legacy.is_empty() {
-        forwarder.forward(&legacy).await;
-    }
+    let legacy: Vec<(AuditEvent, &'static str)> = rows
+        .iter()
+        .filter_map(|r| Some((legacy_row(r)?, crate::siem::typed_level(&r.event))))
+        .collect();
+    forwarder.forward_at_levels(&legacy).await;
     *cursor = new_high;
     Ok(())
 }
@@ -345,9 +348,9 @@ mod tests {
         (endpoint, bodies)
     }
 
-    fn webhook(endpoint: &str, typed: bool) -> SiemConfig {
+    fn config(target: SiemTarget, endpoint: &str, typed: bool) -> SiemConfig {
         SiemConfig {
-            target: SiemTarget::Webhook,
+            target,
             endpoint: endpoint.into(),
             api_key: String::new(),
             service: "wirken".into(),
@@ -361,12 +364,16 @@ mod tests {
         }
     }
 
-    /// Run the pipes `config` gets, the way the gateway decides them,
-    /// over a log the four events are written to after they start, and
-    /// return every entry the receiver got.
+    /// Run the pipes a webhook `config` gets, the way the gateway decides
+    /// them, over a log the four events are written to after they
+    /// start, and return every entry the receiver got.
     async fn delivered(typed: bool) -> Vec<serde_json::Value> {
+        delivered_to(SiemTarget::Webhook, typed).await
+    }
+
+    async fn delivered_to(target: SiemTarget, typed: bool) -> Vec<serde_json::Value> {
         let (endpoint, bodies) = receiver().await;
-        let config = webhook(&endpoint, typed);
+        let config = config(target, &endpoint, typed);
         let log = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
 
         let mut shim = wanted(&config).then(|| {
@@ -421,10 +428,36 @@ mod tests {
             assert_eq!(entry["target"], "telegram");
             assert_eq!(entry["detail"]["adapter_id"], "telegram");
             assert!(entry.get("kind").is_none(), "no typed entry: {entry}");
+            // The webhook legacy shape has no level field.
+            assert!(entry.get("level").is_none(), "{entry}");
+            assert!(entry.get("status").is_none(), "{entry}");
         }
         assert_eq!(entries[1]["detail"]["reason"], "panic");
         assert_eq!(entries[2]["detail"]["attempt"], 2);
         assert_eq!(entries[3]["detail"]["attempts"], 8);
+    }
+
+    /// On Datadog the shim's rows carry the typed event's level as
+    /// `status`: an adapter panic arrives at `error`, not `info`.
+    #[tokio::test]
+    async fn a_legacy_only_datadog_configuration_receives_a_panic_at_error() {
+        let entries = delivered_to(SiemTarget::Datadog, false).await;
+        let status_of = |action: &str| {
+            entries
+                .iter()
+                .find(|e| e["wirken"]["action"] == action)
+                .map(|e| e["status"].clone())
+                .unwrap_or_else(|| panic!("no {action} entry in {entries:?}"))
+        };
+        let disconnect = entries
+            .iter()
+            .find(|e| e["wirken"]["action"] == "adapter.disconnect")
+            .unwrap();
+        assert_eq!(disconnect["wirken"]["detail"]["reason"], "panic");
+        assert_eq!(disconnect["status"], "error");
+        assert_eq!(status_of("adapter.connect"), "info");
+        assert_eq!(status_of("adapter.restart"), "error", "connection_panicked");
+        assert_eq!(status_of("adapter.restart_abandoned"), "error");
     }
 
     #[tokio::test]

@@ -134,8 +134,11 @@ typed. The action is `adapter.connect`, `adapter.disconnect`,
 `adapter.restart` or `adapter.restart_abandoned`; the target is the adapter
 id, and the detail carries `adapter_id` and the same fields as before
 (`reason`; `attempt`, `cause`, `exit`, `delay_ms`, `connected_ms`; `attempts`,
-`last_cause`, `last_exit`). On Datadog these rows forward at `info`; the level
-by cause is on the typed events.
+`last_cause`, `last_exit`). On Datadog each row carries its typed event's
+level as `status`: `error` for a panic, a failed spawn and an abandoned
+restart, `warn` for a process that exited, `info` for a connection that
+ended and for a connect. Splunk, Sentinel and webhook legacy shapes have no
+level field and are unchanged.
 
 The shim writes nothing: the chain holds the typed events only. It forwards
 the events written after the gateway starts, and once more as the gateway

@@ -192,13 +192,40 @@ impl SiemForwarder {
         }
     }
 
+    /// [`Self::forward`] for rows whose level is already decided. On
+    /// Datadog each row goes out with its own level as `status`; every
+    /// other target has no level field and gets the rows as `forward`
+    /// sends them.
+    pub(crate) async fn forward_at_levels(&self, events: &[(AuditEvent, &'static str)]) {
+        if events.is_empty() {
+            return;
+        }
+        let result = match self.config.target {
+            SiemTarget::Datadog => {
+                self.post_datadog(&build_datadog_payload_at(events, &self.config))
+                    .await
+            }
+            _ => {
+                let rows: Vec<AuditEvent> = events.iter().map(|(e, _)| e.clone()).collect();
+                return self.forward(&rows).await;
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!("SIEM forward failed: {e}");
+        }
+    }
+
     async fn forward_datadog(&self, events: &[AuditEvent]) -> Result<(), String> {
-        let logs = build_datadog_payload(events, &self.config);
+        self.post_datadog(&build_datadog_payload(events, &self.config))
+            .await
+    }
+
+    async fn post_datadog(&self, logs: &[serde_json::Value]) -> Result<(), String> {
         self.http
             .post(&self.config.endpoint)
             .header("DD-API-KEY", &self.config.api_key)
             .header("Content-Type", "application/json")
-            .json(&logs)
+            .json(logs)
             .send()
             .await
             .map_err(|e| format!("Datadog: {e}"))?;
@@ -267,31 +294,45 @@ impl SiemForwarder {
 pub fn build_datadog_payload(events: &[AuditEvent], config: &SiemConfig) -> Vec<serde_json::Value> {
     events
         .iter()
-        .map(|e| {
-            let channel_tag = e.channel.as_deref().unwrap_or("");
-            serde_json::json!({
-                "message": format!("{} {} {}", e.action, e.target, e.actor_id),
-                "ddsource": "wirken",
-                "ddtags": format!(
-                    "service:{},env:{},action:{},channel:{}",
-                    config.service, config.environment, e.action, channel_tag
-                ),
-                "hostname": hostname(),
-                "service": config.service,
-                "status": severity(&e.action, &e.detail),
-                "timestamp": e.ts.timestamp_millis(),
-                "wirken": {
-                    "actor_kind": actor_kind_label(e.actor_kind),
-                    "actor_id": e.actor_id,
-                    "action": e.action,
-                    "target": e.target,
-                    "channel": e.channel,
-                    "session": e.session,
-                    "detail": e.detail,
-                }
-            })
-        })
+        .map(|e| datadog_entry(e, severity(&e.action, &e.detail), config))
         .collect()
+}
+
+/// [`build_datadog_payload`] for rows whose level is already decided,
+/// each sent with that level as `status`.
+pub(crate) fn build_datadog_payload_at(
+    events: &[(AuditEvent, &'static str)],
+    config: &SiemConfig,
+) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .map(|(e, status)| datadog_entry(e, status, config))
+        .collect()
+}
+
+fn datadog_entry(e: &AuditEvent, status: &str, config: &SiemConfig) -> serde_json::Value {
+    let channel_tag = e.channel.as_deref().unwrap_or("");
+    serde_json::json!({
+        "message": format!("{} {} {}", e.action, e.target, e.actor_id),
+        "ddsource": "wirken",
+        "ddtags": format!(
+            "service:{},env:{},action:{},channel:{}",
+            config.service, config.environment, e.action, channel_tag
+        ),
+        "hostname": hostname(),
+        "service": config.service,
+        "status": status,
+        "timestamp": e.ts.timestamp_millis(),
+        "wirken": {
+            "actor_kind": actor_kind_label(e.actor_kind),
+            "actor_id": e.actor_id,
+            "action": e.action,
+            "target": e.target,
+            "channel": e.channel,
+            "session": e.session,
+            "detail": e.detail,
+        }
+    })
 }
 
 /// Build the Splunk HEC body (one newline-delimited JSON object per

@@ -39,8 +39,10 @@ tagged.
   `adapter.disconnect`, `adapter.restart`, `adapter.restart_abandoned`).
   With typed forwarding off, a shim renders the typed events in that shape;
   with typed forwarding on, only the typed events are forwarded. The typed
-  events are the supported path. On Datadog the shim's rows forward at
-  `info`.
+  events are the supported path. On Datadog the shim's rows carry the
+  typed event's level as `status`: `error` for a panic, `spawn_failed` and
+  an abandoned restart, `warn` for `process_exited`, `info` for an ended
+  connection and a connect.
 
 ### Fixed
 
