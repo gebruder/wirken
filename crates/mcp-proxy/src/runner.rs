@@ -2,6 +2,7 @@
 //!
 //! Called by the CLI's hidden `wirken mcp-proxy` subcommand.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -11,11 +12,11 @@ use tokio::sync::Mutex;
 use wirken_audit::{SessionLog, SqliteSessionLog};
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::config::GatewayConfig;
-use wirken_vault::{CredentialStore, probe_keychain};
+use wirken_vault::{CredentialStore, ScopedCredentialStore, probe_keychain};
 
 use crate::error::ProxyError;
 use crate::mcp_config::McpConfig;
-use crate::mcp_registry::{ProxyRegistry, SharedVault};
+use crate::mcp_registry::{ProxyRegistry, SharedVault, vault_names};
 use crate::server;
 
 /// Run the MCP proxy. Reads configuration from the standard wirken
@@ -43,12 +44,30 @@ pub async fn run() -> Result<(), ProxyError> {
         socket_path.display()
     );
 
-    // Open the credential vault. The vault handle stays in this process
-    // for the lifetime of the proxy and is never sent to the agent.
-    // Wrapped in `Arc<Mutex<Option<_>>>` so the auth providers,
-    // BearerAuth and OAuth2Auth, can hold a long-lived reference and
-    // refresh tokens on the request path.
-    let vault: SharedVault = Arc::new(StdMutex::new(open_vault(&data_dir)));
+    // Every agent's MCP config (per-agent or shared fallback), read
+    // before the vault opens so the vault can be limited to the names
+    // they reference. The shared config also loads under "default" for
+    // unbound channels. Nothing here spawns or awaits, which
+    // `open_vault`'s environment scrub depends on.
+    let mut identity_agent_ids = list_agent_ids(&data_dir);
+    if !identity_agent_ids.iter().any(|id| id == "default") {
+        identity_agent_ids.push("default".to_string());
+    }
+    let configs: Vec<(String, McpConfig)> = identity_agent_ids
+        .iter()
+        .filter_map(|id| load_config(id, &data_dir).map(|c| (id.clone(), c)))
+        .collect();
+    let vault_names: BTreeSet<String> = configs
+        .iter()
+        .flat_map(|(_, config)| vault_names(config))
+        .collect();
+
+    // Open the credential vault limited to those names. The handle
+    // stays in this process for the lifetime of the proxy and is never
+    // sent to the agent. Wrapped in `Arc<Mutex<Option<_>>>` so the auth
+    // providers, BearerAuth and OAuth2Auth, can hold a long-lived
+    // reference and refresh tokens on the request path.
+    let vault: SharedVault = Arc::new(StdMutex::new(open_vault(&data_dir, vault_names)));
     if vault.lock().expect("vault mutex").is_none() {
         tracing::warn!(
             "credential vault unavailable; vault:-prefixed env values and auth credentials will not be resolved"
@@ -79,44 +98,15 @@ pub async fn run() -> Result<(), ProxyError> {
         }
     };
 
-    // Load each agent's MCP config (per-agent or shared fallback).
-    let agent_ids = list_agent_ids(&data_dir);
-    let mut identity_agent_ids: Vec<String> = Vec::new();
-    if agent_ids.is_empty() {
-        // No multi-agent setup. Load the shared mcp.json under "default".
+    for (agent_id, config) in &configs {
         load_for_agent(
             &mut registry,
-            "default",
-            &data_dir,
+            agent_id,
+            config,
             vault.clone(),
             audit.as_ref(),
         )
         .await;
-        identity_agent_ids.push("default".to_string());
-    } else {
-        for agent_id in &agent_ids {
-            load_for_agent(
-                &mut registry,
-                agent_id,
-                &data_dir,
-                vault.clone(),
-                audit.as_ref(),
-            )
-            .await;
-            identity_agent_ids.push(agent_id.clone());
-        }
-        // Also load the shared config under "default" for unbound channels.
-        if !agent_ids.iter().any(|id| id == "default") {
-            load_for_agent(
-                &mut registry,
-                "default",
-                &data_dir,
-                vault.clone(),
-                audit.as_ref(),
-            )
-            .await;
-            identity_agent_ids.push("default".to_string());
-        }
     }
 
     // Load each agent's Ed25519 public key from disk and register it
@@ -183,7 +173,9 @@ fn load_agent_pubkey(data_dir: &Path, agent_id: &str) -> Result<Option<Verifying
     Ok(Some(key))
 }
 
-fn open_vault(data_dir: &Path) -> Option<CredentialStore> {
+/// Open the vault limited to `names`, the credentials the loaded MCP
+/// configs reference. Any other name is refused and logged.
+fn open_vault(data_dir: &Path, names: BTreeSet<String>) -> Option<ScopedCredentialStore> {
     let keychain = probe_keychain(data_dir, || {
         let pp = std::env::var("WIRKEN_VAULT_PASSPHRASE").unwrap_or_default();
         // Wipe the passphrase from this process's environ now that
@@ -213,7 +205,13 @@ fn open_vault(data_dir: &Path) -> Option<CredentialStore> {
         }
         pp
     });
-    CredentialStore::open(&data_dir.join("vault.db"), keychain.as_ref()).ok()
+    CredentialStore::open_scoped(
+        &data_dir.join("vault.db"),
+        keychain.as_ref(),
+        "mcp-proxy",
+        names,
+    )
+    .ok()
 }
 
 fn list_agent_ids(data_dir: &Path) -> Vec<String> {
@@ -233,13 +231,9 @@ fn list_agent_ids(data_dir: &Path) -> Vec<String> {
         .collect()
 }
 
-async fn load_for_agent(
-    registry: &mut ProxyRegistry,
-    agent_id: &str,
-    data_dir: &Path,
-    vault: SharedVault,
-    audit: Option<&Arc<dyn SessionLog>>,
-) {
+/// The MCP config `agent_id` runs with: its own `mcp.json`, else the
+/// shared one. `None` when the file does not parse or lists no servers.
+fn load_config(agent_id: &str, data_dir: &Path) -> Option<McpConfig> {
     let per_agent = data_dir.join("agents").join(agent_id).join("mcp.json");
     let shared = data_dir.join("mcp.json");
 
@@ -256,15 +250,21 @@ async fn load_for_agent(
                 "MCP config load failed for agent '{agent_id}' ({}): {e}",
                 path.display()
             );
-            return;
+            return None;
         }
     };
 
-    if config.servers.is_empty() {
-        return;
-    }
+    (!config.servers.is_empty()).then_some(config)
+}
 
-    match registry.load_agent(agent_id, &config, vault, audit).await {
+async fn load_for_agent(
+    registry: &mut ProxyRegistry,
+    agent_id: &str,
+    config: &McpConfig,
+    vault: SharedVault,
+    audit: Option<&Arc<dyn SessionLog>>,
+) {
+    match registry.load_agent(agent_id, config, vault, audit).await {
         Ok(n) if n > 0 => {
             tracing::info!("loaded {n} MCP server(s) for agent '{agent_id}'");
         }

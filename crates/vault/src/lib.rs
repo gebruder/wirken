@@ -5,6 +5,7 @@
 mod crypto;
 mod error;
 mod keychain;
+mod scoped;
 mod secret;
 mod store;
 
@@ -14,6 +15,7 @@ pub use keychain::{
     AgeFileKeychain, Keychain, KeychainKind, load_or_create_alarm_log_key,
     load_or_create_imported_search_key, probe_keychain,
 };
+pub use scoped::{CredentialAccess, ScopedCredentialStore};
 pub use secret::VaultSecret;
 pub use store::{CredentialMetadata, CredentialStore, ResetPlan, reset, reset_plan};
 

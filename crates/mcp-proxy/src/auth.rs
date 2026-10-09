@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use reqwest::header::HeaderValue;
-use wirken_vault::CredentialStore;
+use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 use zeroize::Zeroizing;
 
 use crate::error::ProxyError;
@@ -102,11 +102,11 @@ fn bearer_header(token: &str) -> Result<HeaderValue, ProxyError> {
 /// proxy's address space for as long as possible.
 pub struct BearerAuth {
     credential_name: String,
-    vault: Arc<Mutex<Option<CredentialStore>>>,
+    vault: Arc<Mutex<Option<ScopedCredentialStore>>>,
 }
 
 impl BearerAuth {
-    pub fn new(credential_name: String, vault: Arc<Mutex<Option<CredentialStore>>>) -> Self {
+    pub fn new(credential_name: String, vault: Arc<Mutex<Option<ScopedCredentialStore>>>) -> Self {
         Self {
             credential_name,
             vault,
@@ -152,7 +152,7 @@ impl AuthProvider for BearerAuth {
 pub struct OAuth2Auth {
     credential_name: String,
     provider: String,
-    vault: Arc<Mutex<Option<CredentialStore>>>,
+    vault: Arc<Mutex<Option<ScopedCredentialStore>>>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -160,7 +160,7 @@ impl OAuth2Auth {
     pub fn new(
         credential_name: String,
         provider: String,
-        vault: Arc<Mutex<Option<CredentialStore>>>,
+        vault: Arc<Mutex<Option<ScopedCredentialStore>>>,
         refresh_lock: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
@@ -248,5 +248,79 @@ impl AuthProvider for OAuth2Auth {
 
     fn oauth_context(&self) -> Option<(String, String)> {
         Some((self.credential_name.clone(), self.provider.clone()))
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use crate::oauth::{OAuthCredential, store_oauth};
+
+    fn credential(access_token: &str) -> OAuthCredential {
+        OAuthCredential {
+            access_token: access_token.into(),
+            refresh_token: "RT".into(),
+            expires_at: chrono::Utc::now().timestamp() as u64 + 3600,
+            scope: String::new(),
+            provider: "linear".into(),
+        }
+    }
+
+    /// A vault holding two OAuth entries, opened limited to `names`.
+    fn vault_limited_to(
+        names: &[&str],
+    ) -> (tempfile::TempDir, Arc<Mutex<Option<ScopedCredentialStore>>>) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
+        let store =
+            wirken_vault::CredentialStore::open_with_key(&tmp.path().join("vault.db"), device_key)
+                .unwrap();
+        store_oauth(&store, "linear-oauth", &credential("AT-linear")).unwrap();
+        store_oauth(&store, "notion-oauth", &credential("AT-notion")).unwrap();
+        let scoped = store.into_scoped("mcp-proxy", names.iter().map(|n| n.to_string()));
+        (tmp, Arc::new(Mutex::new(Some(scoped))))
+    }
+
+    fn oauth(name: &str, vault: Arc<Mutex<Option<ScopedCredentialStore>>>) -> OAuth2Auth {
+        OAuth2Auth::new(
+            name.into(),
+            "linear".into(),
+            vault,
+            Arc::new(tokio::sync::Mutex::new(())),
+        )
+    }
+
+    /// The proxy reads its own OAuth credential and writes a refreshed
+    /// one back, as before the scope.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn oauth_reads_and_writes_back_its_own_credential() {
+        let (_tmp, vault) = vault_limited_to(&["linear-oauth"]);
+        let mut auth = oauth("linear-oauth", vault);
+
+        let header = auth.authorization_header().await.unwrap().unwrap();
+        assert_eq!(header.to_str().unwrap(), "Bearer AT-linear");
+
+        auth.store_refreshed(&credential("AT-refreshed")).unwrap();
+        assert_eq!(auth.load_current().unwrap().access_token, "AT-refreshed");
+        let header = auth.authorization_header().await.unwrap().unwrap();
+        assert_eq!(header.to_str().unwrap(), "Bearer AT-refreshed");
+    }
+
+    /// An OAuth credential outside the scope is neither read nor
+    /// written, though the vault holds it.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn oauth_outside_the_scope_is_refused() {
+        let (_tmp, vault) = vault_limited_to(&["linear-oauth"]);
+        let mut auth = oauth("notion-oauth", vault.clone());
+
+        let err = auth.authorization_header().await.unwrap_err().to_string();
+        assert!(err.contains("outside the 'mcp-proxy' scope"), "{err}");
+        let err = auth
+            .store_refreshed(&credential("AT-overwrite"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("outside the 'mcp-proxy' scope"), "{err}");
     }
 }

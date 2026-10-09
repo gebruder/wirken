@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::VerifyingKey;
 use wirken_audit::{SessionEvent, SessionId, SessionLog, TrustLevel};
-use wirken_vault::CredentialStore;
+use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
 use crate::error::ProxyError;
@@ -56,7 +56,7 @@ enum PreSpawnDecision {
 /// - `Option` because the vault may be unavailable (no keychain,
 ///   wrong passphrase) and the proxy still needs to serve `NoAuth`
 ///   and stdio servers
-pub type SharedVault = Arc<Mutex<Option<CredentialStore>>>;
+pub type SharedVault = Arc<Mutex<Option<ScopedCredentialStore>>>;
 
 /// All MCP clients owned by the proxy, keyed by agent id.
 pub struct ProxyRegistry {
@@ -427,7 +427,7 @@ fn pre_spawn_verify(
 /// failure mode (loud, traceable).
 fn resolve_env(
     env: &HashMap<String, String>,
-    vault: Option<&CredentialStore>,
+    vault: Option<&ScopedCredentialStore>,
 ) -> HashMap<String, String> {
     env.iter()
         .map(|(k, v)| {
@@ -457,9 +457,91 @@ fn resolve_env(
         .collect()
 }
 
+/// Every vault name `config` reads: the `vault:` env values of its
+/// stdio servers and the bearer and OAuth credentials of its HTTP
+/// servers. The proxy opens the vault limited to the union of these
+/// over every agent's config.
+pub fn vault_names(config: &McpConfig) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    for server in config.servers.values() {
+        match server {
+            McpServerConfig::Stdio { env, .. } => names.extend(
+                env.values()
+                    .filter_map(|v| v.strip_prefix("vault:"))
+                    .map(str::to_string),
+            ),
+            McpServerConfig::Http { auth, .. } => match auth {
+                Some(McpAuth::Bearer { credential } | McpAuth::Oauth2 { credential, .. }) => {
+                    names.insert(strip_vault_prefix(credential).to_string());
+                }
+                None => {}
+            },
+        }
+    }
+    names
+}
+
 /// Strip the optional `vault:` prefix from a credential reference.
 /// `"vault:linear-token"` → `"linear-token"`. Bare names without
 /// the prefix pass through unchanged for forward compatibility.
 fn strip_vault_prefix(s: &str) -> &str {
     s.strip_prefix("vault:").unwrap_or(s)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    fn config(json: &str) -> McpConfig {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn vault_names_covers_env_bearer_and_oauth_references() {
+        let config = config(
+            r#"{"servers": {
+                "local": {"command": "srv", "args": [], "env": {
+                    "API_KEY": "vault:stdio-key", "PLAIN": "not-a-reference"}},
+                "linear": {"transport": "http", "url": "https://mcp.linear.app/sse",
+                    "auth": {"type": "bearer", "credential": "vault:linear-token"}},
+                "notion": {"transport": "http", "url": "https://mcp.notion.com/mcp",
+                    "auth": {"type": "oauth2", "provider": "notion", "credential": "notion-oauth"}},
+                "open": {"transport": "http", "url": "https://example.com/mcp"}
+            }}"#,
+        );
+        let names: Vec<String> = vault_names(&config).into_iter().collect();
+        assert_eq!(names, ["linear-token", "notion-oauth", "stdio-key"]);
+    }
+
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[test]
+    fn resolve_env_reads_only_names_in_the_scope() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
+        let store =
+            wirken_vault::CredentialStore::open_with_key(&tmp.path().join("vault.db"), device_key)
+                .unwrap();
+        for name in ["stdio-key", "telegram-token"] {
+            store
+                .store(
+                    name,
+                    "",
+                    &wirken_vault::VaultSecret::new(format!("{name}-value")),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let scoped = store.into_scoped("mcp-proxy", ["stdio-key".to_string()]);
+        let env: HashMap<String, String> = [
+            ("OWN", "vault:stdio-key"),
+            ("OTHER", "vault:telegram-token"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let resolved = resolve_env(&env, Some(&scoped));
+        assert_eq!(resolved["OWN"], "stdio-key-value");
+        assert_eq!(resolved["OTHER"], "vault:telegram-token");
+    }
 }

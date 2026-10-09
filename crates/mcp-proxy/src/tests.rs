@@ -519,8 +519,9 @@ mod http_transport_test {
             .store("linear-token", "test", &secret, None, None)
             .unwrap();
 
-        let vault: Arc<Mutex<Option<wirken_vault::CredentialStore>>> =
-            Arc::new(Mutex::new(Some(store)));
+        let vault: Arc<Mutex<Option<wirken_vault::ScopedCredentialStore>>> = Arc::new(Mutex::new(
+            Some(store.into_scoped("mcp-proxy", ["linear-token".to_string()])),
+        ));
         let auth = BearerAuth::new("linear-token".into(), vault);
         let mut transport = HttpTransport::new(url, Box::new(auth)).unwrap();
 
@@ -531,6 +532,37 @@ mod http_transport_test {
         assert!(resp.error.is_none());
 
         server.await.unwrap().unwrap();
+    }
+
+    /// A bearer credential outside the proxy's scope is refused before
+    /// any request leaves, even though the vault holds it.
+    #[cfg_attr(miri, ignore = "touches the filesystem; miri has none")]
+    #[tokio::test]
+    async fn bearer_auth_outside_the_scope_is_refused() {
+        use crate::auth::AuthProvider;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let device_key = wirken_vault::VaultSecret::new("a".repeat(64));
+        let store =
+            wirken_vault::CredentialStore::open_with_key(&tmp.path().join("vault.db"), device_key)
+                .unwrap();
+        for name in ["linear-token", "telegram-token"] {
+            store
+                .store(
+                    name,
+                    "test",
+                    &wirken_vault::VaultSecret::new("t".into()),
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        let vault = Arc::new(Mutex::new(Some(
+            store.into_scoped("mcp-proxy", ["linear-token".to_string()]),
+        )));
+        let mut auth = BearerAuth::new("telegram-token".into(), vault);
+        let err = auth.authorization_header().await.unwrap_err().to_string();
+        assert!(err.contains("outside the 'mcp-proxy' scope"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "opens a socket; miri has no I/O")]

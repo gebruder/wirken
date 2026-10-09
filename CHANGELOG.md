@@ -21,6 +21,14 @@ tagged.
   environment, so an adapter process can no longer decrypt another
   channel's credentials or a provider key. `wirken adapter <channel>`
   is started by `wirken run`; run from a terminal it exits and says so.
+- The MCP proxy opens the vault limited to the credentials its loaded
+  `mcp.json` configs reference: the `vault:` env values of stdio servers
+  and the bearer and OAuth credentials of HTTP servers. A read or write
+  of any other name is refused and logged at error with the scope and
+  the name, so the proxy can no longer decrypt a channel's credentials
+  or a provider key. It reads its own credentials and writes refreshed
+  OAuth tokens back as before. The proxy still receives the vault
+  passphrase in its environment and clears it at startup.
 
 ### Changed
 
