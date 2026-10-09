@@ -41,8 +41,12 @@ challenge-response.
 
 An adapter can deliver inbound messages for its channel, request outbound
 sends for its channel, and read session state scoped to its channel. It cannot
-invoke tools, read another channel's messages, or reach another channel's
-credentials. Compromise one and the blast radius is one channel.
+invoke tools or read another channel's messages. It starts with its own
+channel's credentials and no others, handed over by the gateway, and holds no
+vault passphrase. It runs as the same OS user as the gateway, so code running
+inside a compromised adapter can still reach what that user can: the encrypted
+vault file, and the gateway process itself where the operating system lets one
+process of a user inspect another.
 
 The adapter trait is generic over a zero-sized channel marker, so a
 `SessionHandle<Telegram>` is a different type from a `SessionHandle<Discord>`
@@ -112,10 +116,15 @@ pub struct VaultEntry {
 `String`. That is deliberate. The API makes the safe path easy and the unsafe
 path visible in review.
 
-Each adapter opens the vault directly at startup through the same keychain and
-retrieves its channel credentials; decrypted values are passed to the
-adapter's constructor and never written to environment variables or command
-lines. See [credentials.md](credentials.md).
+Adapters do not open the vault. When the gateway spawns an adapter, and on
+every respawn, it reads that adapter's credentials from the vault by name (its
+token, its adapter key and its channel's entries), writes them to the
+adapter's stdin and closes the pipe. The adapter reads them once into a buffer
+it zeroes and passes the values to its constructor. Credentials are never
+written to environment variables or command lines, and the adapter's
+environment carries no vault passphrase. The MCP proxy opens the vault itself,
+limited to the credentials its `mcp.json` configs reference, and refuses any
+other name. See [credentials.md](credentials.md).
 
 ## 3. Permissions
 
@@ -195,7 +204,10 @@ register a tool costs friction, never silent permission.
 **Threat (CWE-312):** API keys in plaintext config and environment variables;
 one key shared across all agents means one leak exposes everything.
 
-All keys live in the vault, never in environment variables or config files.
+All API keys live in the vault, never in environment variables or config
+files. The vault passphrase reaches two processes through the environment: the
+gateway, when the operator exports `WIRKEN_VAULT_PASSPHRASE`, and the MCP
+proxy, which `wirken run` starts with it and which clears it at startup.
 Each agent has its own auth profile, so agent A can run `openai/gpt-4o` and
 agent B `anthropic/claude-sonnet-4` with separate keys.
 

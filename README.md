@@ -136,9 +136,12 @@ remove them there. See [docs/channels.md](docs/channels.md#platform-side-state).
 
 ## Architecture
 
-Each channel runs as its own isolated process. The gateway is the only
-component that holds credentials and writes the audit log. The agent is
-stateless: it is woken for each message and rebuilt from its session log.
+Each channel runs as its own process and starts with only its own
+credentials, which the gateway hands it at spawn. The gateway holds the vault;
+the MCP proxy opens it limited to the credentials its MCP configs name. The
+gateway writes the audit log, and the MCP proxy appends its server-verification
+rows. The agent is stateless: it is woken for each message and rebuilt from its
+session log.
 
 The message path, inbound to outbound:
 

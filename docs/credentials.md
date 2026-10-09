@@ -1,7 +1,9 @@
 # Credentials and OAuth scopes
 
-Wirken's credential vault is XChaCha20-Poly1305-encrypted and keyed
-from the OS keychain. Two kinds of credentials live in it:
+Wirken's credential vault is XChaCha20-Poly1305-encrypted under a device
+key. The default build wraps the device key with a passphrase (Argon2id) in
+`<data_dir>/keychain/`; builds with the `keychain-macos` or `keychain-linux`
+feature keep it in the OS keychain. Two kinds of credentials live in it:
 
 - **Raw secrets**: API keys, channel tokens, MCP server bearer
   tokens. Operators add these with `wirken credentials add`.
@@ -10,6 +12,25 @@ from the OS keychain. Two kinds of credentials live in it:
   stores the access token, refresh token, and the granted scope
   set; the MCP proxy refreshes the access token automatically when
   it expires.
+
+## Which processes read the vault
+
+- **The gateway** (`wirken run`) opens the vault. It resolves provider
+  keys and `http_request` credentials, and reads each adapter's
+  credentials when it spawns or respawns the adapter.
+- **Adapters** never open the vault. Each starts with its own
+  channel's credentials, which the gateway writes to its stdin, and
+  gets no vault passphrase.
+- **The MCP proxy** opens the vault limited to the names its
+  `mcp.json` configs reference: the `vault:` env values of stdio
+  servers and the `credential` of HTTP servers' bearer and OAuth auth.
+  It reads those and writes refreshed OAuth tokens back. Any other
+  name is refused and logged at error with the scope `mcp-proxy` and
+  the name. It still receives the vault passphrase from `wirken run`
+  in its environment and clears it at startup.
+- **`wirken` commands** that manage credentials (`credentials`,
+  `channel add`, `setup`, `mcp authorize`) open the full vault in the
+  operator's own process.
 
 This page covers OAuth-managed credentials specifically: the
 interactive scope picker, the non-interactive flags, and the
