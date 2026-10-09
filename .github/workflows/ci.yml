@@ -19,7 +19,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-03-27
+      # cargo-deny from its GitHub release with the SHA-256 checked before
+      # it runs, as gitleaks.yml installs gitleaks. The cargo-deny action
+      # builds a container from a Docker Hub base image, and Docker Hub's
+      # unauthenticated pull limit failed this job on shared runners. Same
+      # version the action pinned (0.20.2) and the same arguments.
+      - name: Install cargo-deny
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          VERSION=0.20.2
+          NAME="cargo-deny-${VERSION}-x86_64-unknown-linux-musl"
+          EXPECTED_SHA256="9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${VERSION}/${NAME}.tar.gz" \
+            -o "${NAME}.tar.gz"
+
+          echo "${EXPECTED_SHA256}  ${NAME}.tar.gz" | sha256sum -c -
+
+          tar -xzf "${NAME}.tar.gz" "${NAME}/cargo-deny"
+          install -m 0755 "${NAME}/cargo-deny" "${HOME}/.cargo/bin/cargo-deny"
+          cargo deny --version
+      - run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check
 
   fmt:
     name: Format
