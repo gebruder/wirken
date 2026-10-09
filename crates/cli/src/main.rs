@@ -258,6 +258,23 @@ enum ChannelCommands {
         /// WIRKEN_IMESSAGE_BLUEBUBBLES_URL if not supplied.
         #[arg(long)]
         bluebubbles_url: Option<String>,
+        /// Slack: app-level token (xapp-...) for Socket Mode; --token is the
+        /// bot token. Reads WIRKEN_SLACK_APP_TOKEN if not supplied.
+        #[arg(long)]
+        app_token: Option<String>,
+        /// Signal: phone number registered with signal-cli. Reads
+        /// WIRKEN_SIGNAL_PHONE_NUMBER if not supplied.
+        #[arg(long)]
+        phone_number: Option<String>,
+        /// Signal: signal-cli socket path (default /tmp/signal-cli.sock).
+        /// Reads WIRKEN_SIGNAL_ENDPOINT if not supplied.
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Signal: comma-separated E.164 numbers and group IDs whose messages
+        /// reach the agent; empty drops every inbound message. Reads
+        /// WIRKEN_SIGNAL_ALLOWED_SENDERS if not supplied.
+        #[arg(long)]
+        allowed_senders: Option<String>,
     },
     /// List configured channels
     List,
@@ -1188,6 +1205,10 @@ async fn main() -> Result<()> {
                 homeserver,
                 username,
                 bluebubbles_url,
+                app_token,
+                phone_number,
+                endpoint,
+                allowed_senders,
             } => {
                 commands::channel::add(
                     &channel,
@@ -1201,6 +1222,10 @@ async fn main() -> Result<()> {
                         homeserver,
                         username,
                         bluebubbles_url,
+                        app_token,
+                        phone_number,
+                        endpoint,
+                        allowed_senders,
                     },
                 )
                 .await

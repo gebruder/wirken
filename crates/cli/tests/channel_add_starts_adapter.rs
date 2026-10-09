@@ -1,5 +1,5 @@
 //! A vault populated only by `wirken channel add` starts the adapter,
-//! for every adapter `channel add` configures from flags.
+//! for every adapter.
 //!
 //! `channel add` runs non-interactively from flags into an empty data
 //! directory. Every credential it wrote is then handed to the adapter
@@ -29,7 +29,7 @@ struct Case {
 }
 
 // Low-entropy fixtures, so the secret scanner does not read them as
-// real tokens. Signal is absent: `channel add signal` only prompts.
+// real tokens.
 const CASES: &[Case] = &[
     Case {
         adapter: "telegram",
@@ -53,14 +53,56 @@ const CASES: &[Case] = &[
     },
     Case {
         adapter: "slack",
-        flags: &["--token", "xoxb-aaaa"],
-        env: &[("WIRKEN_SLACK_APP_TOKEN", "xapp-aaaa")],
+        flags: &["--token", "xoxb-aaaa", "--app-token", "xapp-aaaa"],
+        env: &[],
         writes: &[
             ("slack-token", "slack"),
             ("slack-app-token", "slack"),
             ("slack-adapter-key", "slack"),
         ],
         values: &[],
+    },
+    Case {
+        adapter: "signal",
+        flags: &[
+            "--phone-number",
+            "+15550000000",
+            "--endpoint",
+            "/nonexistent/signal-cli.sock",
+            "--allowed-senders",
+            "+15550000001",
+        ],
+        env: &[],
+        writes: &[
+            ("signal-token", "signal"),
+            ("signal-phone-number", "signal"),
+            ("signal-endpoint", "signal"),
+            ("signal-allowed-senders", "signal"),
+            ("signal-adapter-key", "signal"),
+        ],
+        values: &[
+            ("signal-endpoint", "/nonexistent/signal-cli.sock"),
+            ("signal-allowed-senders", "+15550000001"),
+        ],
+    },
+    // Only the phone number and no terminal: the default socket path and
+    // an empty allowlist, as empty answers at the prompts leave them.
+    Case {
+        adapter: "signal",
+        flags: &["--phone-number", "+15550000000"],
+        env: &[],
+        writes: &[
+            ("signal-token", "signal"),
+            ("signal-phone-number", "signal"),
+            ("signal-endpoint", "signal"),
+            ("signal-allowed-senders", "signal"),
+            ("signal-adapter-key", "signal"),
+        ],
+        values: &[
+            ("signal-token", "/tmp/signal-cli.sock"),
+            ("signal-endpoint", "/tmp/signal-cli.sock"),
+            ("signal-allowed-senders", ""),
+        ],
     },
     Case {
         adapter: "teams",

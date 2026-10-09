@@ -102,7 +102,9 @@ Two tokens, both from [api.slack.com/apps](https://api.slack.com/apps):
 | `Slack app token (xapp-...)` | **Basic Information** → App-Level Tokens |
 
 Nothing under **App Credentials** (Client ID, Client Secret, Signing Secret,
-Verification Token) is used.
+Verification Token) is used. To skip the prompts, pass the bot token with
+`--token` or `WIRKEN_SLACK_TOKEN` and the app token with `--app-token` or
+`WIRKEN_SLACK_APP_TOKEN`.
 
 Creating the app: **Create New App** → **From scratch**; enable **Socket
 Mode** and generate the app-level token with `connections:write`; bot token
@@ -255,6 +257,11 @@ wirken channel add signal
 
 You are prompted for the registered E.164 number, the socket path (bare path
 or `unix:///absolute/path`; HTTP URLs are rejected), and the sender allowlist.
+To skip the prompts, pass `--phone-number`, `--endpoint` and
+`--allowed-senders`, or set `WIRKEN_SIGNAL_PHONE_NUMBER`,
+`WIRKEN_SIGNAL_ENDPOINT` and `WIRKEN_SIGNAL_ALLOWED_SENDERS`. With no terminal,
+an endpoint not given is `/tmp/signal-cli.sock` and an allowlist not given is
+empty, which drops every inbound message.
 
 ### The allowlist is the perimeter
 

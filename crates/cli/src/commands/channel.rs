@@ -43,6 +43,10 @@ pub struct AddFlags {
     pub homeserver: Option<String>,
     pub username: Option<String>,
     pub bluebubbles_url: Option<String>,
+    pub app_token: Option<String>,
+    pub phone_number: Option<String>,
+    pub endpoint: Option<String>,
+    pub allowed_senders: Option<String>,
 }
 
 pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
@@ -52,7 +56,7 @@ pub async fn add(channel: &str, flags: AddFlags) -> Result<()> {
     match channel {
         "whatsapp" => add_whatsapp(&cfg, &data, flags).await,
         "slack" => add_slack(&cfg, &data, flags).await,
-        "signal" => add_signal(&cfg, &data).await,
+        "signal" => add_signal(&cfg, &data, flags).await,
         "google-chat" => add_google_chat(&cfg, &data, flags).await,
         "teams" => add_teams(&cfg, &data, flags).await,
         "matrix" => add_matrix(&cfg, &data, flags).await,
@@ -71,46 +75,64 @@ pub struct SignalCreds {
     pub allowlist_csv: String,
 }
 
-pub fn collect_signal_creds() -> Result<SignalCreds> {
+pub fn collect_signal_creds(
+    phone: Option<String>,
+    endpoint: Option<String>,
+    allowed_senders: Option<String>,
+) -> Result<SignalCreds> {
     println!("  Signal requires signal-cli running as a JSON-RPC daemon.");
     println!("  See docs/channels/signal.md for the full setup and threat model.");
 
-    let phone: String = dialoguer::Input::new()
-        .with_prompt("  Registered phone number (e.g., +15551234567)")
-        .interact_text()?;
+    let phone = resolve_with_validation(
+        "Registered phone number (e.g., +15551234567)",
+        phone,
+        "WIRKEN_SIGNAL_PHONE_NUMBER",
+        false,
+        validate_non_empty,
+    )?;
 
     // Validate on input so the adapter never starts against an HTTP URL
     // the transport no longer speaks. Accept bare paths and `unix://`.
-    let endpoint: String = loop {
-        let e: String = dialoguer::Input::new()
-            .with_prompt("  signal-cli socket path")
-            .default("/tmp/signal-cli.sock".into())
-            .interact_text()?;
-        let trimmed = e.trim();
-        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-            println!(
-                "  The signal adapter speaks JSON-RPC over a Unix socket now. \
-                 Restart signal-cli with `daemon --socket /path/to/signal-cli.sock` \
-                 and supply that path here, not an HTTP URL."
-            );
-            continue;
+    let given = endpoint.or_else(|| std::env::var("WIRKEN_SIGNAL_ENDPOINT").ok());
+    let endpoint: String = match given.map(|e| e.trim().to_string()) {
+        Some(e) => {
+            validate_signal_endpoint(&e).context("Invalid --endpoint / WIRKEN_SIGNAL_ENDPOINT")?;
+            e
         }
-        if trimmed.is_empty() {
-            println!("  Socket path cannot be empty.");
-            continue;
+        None if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => {
+            DEFAULT_SIGNAL_ENDPOINT.to_string()
         }
-        break trimmed.to_string();
+        None => loop {
+            let e: String = dialoguer::Input::new()
+                .with_prompt("  signal-cli socket path")
+                .default(DEFAULT_SIGNAL_ENDPOINT.into())
+                .interact_text()?;
+            let trimmed = e.trim();
+            match validate_signal_endpoint(trimmed) {
+                Ok(()) => break trimmed.to_string(),
+                Err(err) => println!("  {err}"),
+            }
+        },
     };
 
-    println!();
-    println!("  Sender allowlist (REQUIRED):");
-    println!("  Only messages from these senders will reach the agent.");
-    println!("  Enter E.164 phone numbers for DMs and/or Signal group IDs,");
-    println!("  comma-separated. Leave empty to drop every inbound message.");
-    let allowlist_csv: String = dialoguer::Input::new()
-        .with_prompt("  Allowed senders (comma-separated)")
-        .allow_empty(true)
-        .interact_text()?;
+    let given = allowed_senders.or_else(|| std::env::var("WIRKEN_SIGNAL_ALLOWED_SENDERS").ok());
+    let allowlist_csv: String = match given {
+        Some(csv) => csv,
+        // No terminal and nothing given: an empty allowlist, as an empty
+        // answer at the prompt leaves it.
+        None if !std::io::IsTerminal::is_terminal(&std::io::stdin()) => String::new(),
+        None => {
+            println!();
+            println!("  Sender allowlist (REQUIRED):");
+            println!("  Only messages from these senders will reach the agent.");
+            println!("  Enter E.164 phone numbers for DMs and/or Signal group IDs,");
+            println!("  comma-separated. Leave empty to drop every inbound message.");
+            dialoguer::Input::new()
+                .with_prompt("  Allowed senders (comma-separated)")
+                .allow_empty(true)
+                .interact_text()?
+        }
+    };
 
     let allowlist_trimmed = allowlist_csv.trim();
     if allowlist_trimmed.is_empty() {
@@ -132,6 +154,25 @@ pub fn collect_signal_creds() -> Result<SignalCreds> {
         endpoint,
         allowlist_csv: allowlist_trimmed.to_string(),
     })
+}
+
+/// The signal-cli socket path when none is given.
+const DEFAULT_SIGNAL_ENDPOINT: &str = "/tmp/signal-cli.sock";
+
+/// The Signal adapter speaks JSON-RPC over a Unix socket: refuse an
+/// empty path and an HTTP URL.
+fn validate_signal_endpoint(endpoint: &str) -> Result<()> {
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        anyhow::bail!(
+            "The signal adapter speaks JSON-RPC over a Unix socket now. \
+             Restart signal-cli with `daemon --socket /path/to/signal-cli.sock` \
+             and supply that path here, not an HTTP URL."
+        );
+    }
+    if endpoint.is_empty() {
+        anyhow::bail!("Socket path cannot be empty.");
+    }
+    Ok(())
 }
 
 /// Persist the three signal-specific credential rows (phone, endpoint,
@@ -170,8 +211,8 @@ pub fn store_signal_creds(store: &CredentialStore, creds: &SignalCreds) -> Resul
     Ok(())
 }
 
-async fn add_signal(cfg: &GatewayConfig, data: &std::path::Path) -> Result<()> {
-    let creds = collect_signal_creds()?;
+async fn add_signal(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags) -> Result<()> {
+    let creds = collect_signal_creds(flags.phone_number, flags.endpoint, flags.allowed_senders)?;
     // register_channel stores signal-token (value is the endpoint) and
     // the adapter keypair. Must run before store_signal_creds so both
     // writes share the same cached vault passphrase.
@@ -435,7 +476,7 @@ async fn add_slack(cfg: &GatewayConfig, data: &std::path::Path, flags: AddFlags)
     )?;
     let app_token = resolve_with_validation(
         "Slack app token (xapp-...)",
-        None,
+        flags.app_token,
         "WIRKEN_SLACK_APP_TOKEN",
         true,
         validate_slack_app_token,
@@ -1072,6 +1113,10 @@ mod tests {
             homeserver: None,
             username: None,
             bluebubbles_url: None,
+            app_token: None,
+            phone_number: None,
+            endpoint: None,
+            allowed_senders: None,
         }
     }
 

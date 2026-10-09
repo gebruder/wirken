@@ -550,7 +550,7 @@ async fn setup_signal_channel(
     cfg: &wirken_gateway::config::GatewayConfig,
     data: &std::path::Path,
 ) -> Result<()> {
-    let creds = super::channel::collect_signal_creds()?;
+    let creds = super::channel::collect_signal_creds(None, None, None)?;
     register_channel("signal", &creds.endpoint, cfg, data).await?;
 
     let pp = super::cached_vault_passphrase()?;

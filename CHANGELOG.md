@@ -102,6 +102,14 @@ tagged.
   `WIRKEN_IMESSAGE_BLUEBUBBLES_URL`, takes the URL without a prompt;
   with no terminal and no URL given, the default
   `http://localhost:1234` is stored.
+- `wirken channel add slack` takes the app token with `--app-token`, and
+  `wirken channel add signal` takes `--phone-number`, `--endpoint` and
+  `--allowed-senders`, falling back to `WIRKEN_SLACK_APP_TOKEN`,
+  `WIRKEN_SIGNAL_PHONE_NUMBER`, `WIRKEN_SIGNAL_ENDPOINT` and
+  `WIRKEN_SIGNAL_ALLOWED_SENDERS`, so both run without prompts. They
+  store the names and channel values `wirken setup` writes. With no
+  terminal, a Signal endpoint not given is `/tmp/signal-cli.sock` and an
+  allowlist not given is empty, which drops every inbound message.
 
 - `wirken audit verify` reports a chain head whose signature or
   signing key field is not ASCII hex as an invalid signature at that
