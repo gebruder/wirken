@@ -70,12 +70,12 @@ extraction on windows).
 connection is gone, so the gateway restarts the process instead. It does so
 when the process exits, and when its connection ends: end of stream, a read
 error, or a panic in the connection's message loop. A process still running
-is killed, an `adapter.restart` audit row records the attempt, the cause and
+is killed, an `adapter_restart` audit event records the attempt, the cause and
 the delay, and the process is spawned again after that delay. The delay
 doubles from 1 s to 60 s and returns to 1 s once a connection has lasted
 60 s. A process that connects and drops is restarted without limit. One that
 never connects is not: after 8 runs in a row that end without connecting,
-which takes about two minutes, an `adapter.restart_abandoned` row records the
+which takes about two minutes, an `adapter_restart_abandoned` event records the
 count and the last cause and exit, the gateway logs one error, and the
 adapter stays down until `wirken run` is restarted. Heartbeats are echoed, not timed: an adapter whose connection stays open
 while it stops forwarding is not detected. What a restart loses, per adapter,

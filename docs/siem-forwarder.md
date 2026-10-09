@@ -117,15 +117,13 @@ or cause: `AdapterConnect` is `info`; `AdapterDisconnect` is `info`, or
 `error`. A legacy row an include list brings onto the typed pipe keeps its
 legacy level, and every other typed event is `info`.
 
-On the legacy pipe only Datadog carries a level, `status`. An adapter's
-`adapter.disconnect` and `adapter.restart` rows take it from why they
-happened: `error` for a panic (`reason: "panic"`, `cause:
-"connection_panicked"`) and for `cause: "spawn_failed"`, `warn` for `cause:
-"process_exited"`, `info` for a connection that ended. `connection.panic` and
-`adapter.restart_abandoned` are `error`. Other legacy rows are `error` when
-the action names a failure, `warn` for denials, threat flags, auth and
-credential actions, and `info` otherwise. Splunk, Sentinel and webhook legacy
-entries carry the row's `reason` or `cause` but no level of their own.
+On the legacy pipe only Datadog carries a level, `status`. `connection.panic`
+is `error`. Other legacy rows are `error` when the action names a failure,
+`warn` for denials, threat flags, auth and credential actions, and `info`
+otherwise. An adapter's connection and restarts are typed events, not legacy
+rows, so they reach a SIEM only through the typed pipe; the `adapter.connect`,
+`adapter.disconnect`, `adapter.restart` and `adapter.restart_abandoned` rows
+in a log written before the typed events forward by action, as `info`.
 
 `Level` is a new column on the typed Sentinel stream. A DCR whose stream
 declaration predates it does not list it, and Azure Monitor stores only the
@@ -161,10 +159,10 @@ three now hands it over. An import row's `actor` used to land in
 was reading a role name.
 
 A legacy row that an include list brings onto the typed pipe fills none of
-the three, with one exception: an adapter's lifecycle rows,
-`adapter.connect`, `adapter.disconnect`, `adapter.restart` and
-`adapter.restart_abandoned`, fill `AdapterId` from their target, which is the
-adapter id.
+the three, with one exception: an adapter's lifecycle rows in a log written
+before the typed events, `adapter.connect`, `adapter.disconnect`,
+`adapter.restart` and `adapter.restart_abandoned`, fill `AdapterId` from
+their target, which is the adapter id.
 
 If an operator identity ever needs a column of its own it gets one under
 its own name, covering every variant that carries such a label rather

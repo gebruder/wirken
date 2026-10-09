@@ -1065,23 +1065,12 @@ pub fn compute_webhook_signature(secret: &[u8], body: &[u8]) -> String {
     s
 }
 
-/// Datadog severity for a legacy audit row. An adapter's disconnect and
-/// restart rows take their level from why they happened: a panic, or a
-/// spawn that failed, is an error, a process that exited on its own a
-/// warning, and a connection that ended an ordinary event. Every other
-/// row takes its level from the action.
-fn severity(action: &str, detail: &serde_json::Value) -> &'static str {
+/// Datadog severity for a legacy audit row: `error` for a connection
+/// panic, otherwise taken from the action. An adapter's connection and
+/// restarts are typed events with levels of their own ([`typed_level`]).
+fn severity(action: &str, _detail: &serde_json::Value) -> &'static str {
     match action {
-        "connection.panic" | "adapter.restart_abandoned" => "error",
-        "adapter.disconnect" => match detail["reason"].as_str() {
-            Some("panic") => "error",
-            _ => "info",
-        },
-        "adapter.restart" => match detail["cause"].as_str() {
-            Some("connection_panicked" | "spawn_failed") => "error",
-            Some("process_exited") => "warn",
-            _ => "info",
-        },
+        "connection.panic" => "error",
         _ => action_to_severity(action),
     }
 }
@@ -1302,49 +1291,23 @@ mod severity_tests {
         }
     }
 
-    /// Adapter rows, each with the Datadog status it must forward at.
+    /// Legacy rows, each with the Datadog status it must forward at. An
+    /// adapter's lifecycle rows in an older log no longer get a level
+    /// from their cause; the typed events carry it now.
     fn cases() -> Vec<(&'static str, serde_json::Value, &'static str)> {
         vec![
-            (
-                "adapter.disconnect",
-                serde_json::json!({"reason": "panic"}),
-                "error",
-            ),
-            (
-                "adapter.disconnect",
-                serde_json::json!({"reason": "ended"}),
-                "info",
-            ),
-            (
-                "adapter.restart",
-                serde_json::json!({"cause": "connection_panicked"}),
-                "error",
-            ),
-            (
-                "adapter.restart",
-                serde_json::json!({"cause": "connection_ended"}),
-                "info",
-            ),
-            (
-                "adapter.restart",
-                serde_json::json!({"cause": "process_exited"}),
-                "warn",
-            ),
-            (
-                "adapter.restart",
-                serde_json::json!({"cause": "spawn_failed"}),
-                "error",
-            ),
             (
                 "connection.panic",
                 serde_json::json!({"kind": "webchat"}),
                 "error",
             ),
             (
-                "adapter.restart_abandoned",
-                serde_json::json!({"attempts": 8}),
-                "error",
+                "adapter.restart",
+                serde_json::json!({"cause": "connection_panicked"}),
+                "info",
             ),
+            ("permission.denied", serde_json::json!({}), "warn"),
+            ("exec.failed", serde_json::json!({}), "error"),
         ]
     }
 

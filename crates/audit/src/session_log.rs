@@ -2119,6 +2119,18 @@ pub enum AdapterRestartCause {
     SpawnFailed,
 }
 
+impl AdapterRestartCause {
+    /// The wire name, as the gateway's log lines print it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessExited => "process_exited",
+            Self::ConnectionEnded => "connection_ended",
+            Self::ConnectionPanicked => "connection_panicked",
+            Self::SpawnFailed => "spawn_failed",
+        }
+    }
+}
+
 /// What kind of hook a [`SessionEvent::HookRegistered`] row
 /// describes. Mirrors `wirken_ipc::HookType` on the wire so audit
 /// consumers don't have to depend on the IPC crate to deserialize.

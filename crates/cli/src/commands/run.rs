@@ -15,7 +15,10 @@ use tokio::sync::Mutex;
 use wirken_agent::factory::CacheMode;
 use wirken_agent::llm::LlmConfig;
 use wirken_agent::{AgentFactory, AgentStaticConfig, session_id_for};
-use wirken_audit::{ActorKind, AlarmLog, AuditEvent, AuditWriter, SiemConfig, SiemTarget};
+use wirken_audit::{
+    ADAPTER_LIFECYCLE_SESSION, ActorKind, AdapterDisconnectReason, AdapterRestartCause, AlarmLog,
+    AuditEvent, AuditWriter, SessionEvent, SessionId, SiemConfig, SiemTarget, TrustLevel,
+};
 use wirken_gateway::adapter_registry::AdapterRegistry;
 use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::injection_detect::InjectionDetector;
@@ -948,7 +951,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         let adapter_id = adapter_entry.adapter_id.clone();
         let channel = adapter_entry.channel.clone();
         let lifeline = lifelines.get(&adapter_id).cloned().unwrap_or_default();
-        let restart_audit = audit.clone();
+        let restart_log = session_log.clone();
         let sock = socket_path.clone();
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
@@ -974,7 +977,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 &channel,
                 spawn,
                 &lifeline,
-                &restart_audit,
+                restart_log.as_ref(),
                 ADAPTER_RESTART_BACKOFF,
             )
             .await;
@@ -1617,6 +1620,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let accept_pending = pending_approval_queue.clone();
     let accept_approvers = approver_registry.clone();
     let accept_lifelines = lifelines.clone();
+    let accept_session_log = session_log.clone();
 
     // SAFETY: `geteuid` is always-safe FFI; documented as never
     // failing and never invoking user-space callbacks.
@@ -1695,12 +1699,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     let pend = accept_pending.clone();
                     let apprv = accept_approvers.clone();
                     let lines = accept_lifelines.clone();
+                    let lane_log = accept_session_log.clone();
                     let adapter_id = super::connection_tasks::AdapterIdSlot::default();
                     let slot = adapter_id.clone();
 
                     accept_connection_tasks.spawn_adapter(adapter_id, async move {
                         if let Err(e) = handle_adapter_connection(
                             stream, reg, fact, au, sess, rtr, det, disp, pend, apprv, lines, slot,
+                            lane_log,
                         )
                         .await
                         {
@@ -2263,14 +2269,14 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// first: the process exiting, or its gateway connection ending. On the
 /// second the process is killed, since every adapter keeps running
 /// after it loses the gateway and none dials back in. Either way an
-/// `adapter.restart` row records the attempt, the cause and the delay
-/// before the next spawn. The delay doubles from `backoff.first` to
+/// `AdapterRestart` event on the adapter lane records the attempt, the
+/// cause and the delay before the next spawn. The delay doubles from `backoff.first` to
 /// `backoff.cap` and goes back to `first` after a connection that
 /// lasted `backoff.reset_after`.
 ///
 /// A process that never connects is not restarted for ever. After
 /// `backoff.abandon_after` runs in a row that end without connecting,
-/// an `adapter.restart_abandoned` row records the count and the last
+/// an `AdapterRestartAbandoned` event records the count and the last
 /// cause and exit, one error line says so, and the loop returns. Only a
 /// restart of `wirken run` starts it again.
 ///
@@ -2283,7 +2289,7 @@ async fn supervise_adapter<S>(
     channel: &str,
     mut spawn: S,
     lifeline: &AdapterLifeline,
-    audit: &AuditWriter,
+    session_log: &dyn wirken_audit::SessionLog,
     backoff: RestartBackoff,
 ) where
     S: FnMut() -> std::io::Result<tokio::process::Child>,
@@ -2309,7 +2315,7 @@ async fn supervise_adapter<S>(
             Ok(mut child) => {
                 tokio::select! {
                     status = child.wait() => (
-                        "process_exited",
+                        AdapterRestartCause::ProcessExited,
                         status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
                     ),
                     _ = lifeline.ended.notified() => {
@@ -2322,16 +2328,16 @@ async fn supervise_adapter<S>(
                             .swap(false, std::sync::atomic::Ordering::Acquire);
                         (
                             if panicked {
-                                "connection_panicked"
+                                AdapterRestartCause::ConnectionPanicked
                             } else {
-                                "connection_ended"
+                                AdapterRestartCause::ConnectionEnded
                             },
                             status.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string()),
                         )
                     }
                 }
             }
-            Err(e) => ("spawn_failed", e.to_string()),
+            Err(e) => (AdapterRestartCause::SpawnFailed, e.to_string()),
         };
 
         let connected_for = lifeline
@@ -2352,56 +2358,53 @@ async fn supervise_adapter<S>(
         if unconnected_runs >= backoff.abandon_after {
             tracing::error!(
                 "Adapter '{adapter_id}' ended {unconnected_runs} runs in a row without connecting \
-                 (last: {cause}, {exit}); it is no longer restarted. Fix its configuration and \
-                 restart `wirken run`."
+                 (last: {}, {exit}); it is no longer restarted. Fix its configuration and \
+                 restart `wirken run`.",
+                cause.as_str()
             );
-            if let Err(e) = audit
-                .log(
-                    AuditEvent::new(
-                        ActorKind::Service,
-                        "gateway",
-                        "adapter.restart_abandoned",
-                        adapter_id,
-                    )
-                    .with_channel(channel)
-                    .with_detail(serde_json::json!({
-                        "attempts": unconnected_runs,
-                        "last_cause": cause,
-                        "last_exit": exit,
-                    })),
-                )
-                .await
-            {
-                tracing::error!(
-                    "adapter.restart_abandoned audit write failed for '{adapter_id}': {e}"
-                );
-            }
+            record_adapter_event(
+                session_log,
+                SessionEvent::AdapterRestartAbandoned {
+                    adapter_id: adapter_id.to_string(),
+                    channel: channel.to_string(),
+                    attempts: unconnected_runs,
+                    last_cause: cause,
+                    last_exit: exit,
+                },
+            );
             return;
         }
         attempt += 1;
         let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
         tracing::warn!(
-            "Adapter '{adapter_id}' {cause} ({exit}); restart {attempt} in {delay_ms} ms"
+            "Adapter '{adapter_id}' {} ({exit}); restart {attempt} in {delay_ms} ms",
+            cause.as_str()
         );
-        if let Err(e) = audit
-            .log(
-                AuditEvent::new(ActorKind::Service, "gateway", "adapter.restart", adapter_id)
-                    .with_channel(channel)
-                    .with_detail(serde_json::json!({
-                        "attempt": attempt,
-                        "delay_ms": delay_ms,
-                        "cause": cause,
-                        "exit": exit,
-                        "connected_ms": connected_for
-                            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
-                    })),
-            )
-            .await
-        {
-            tracing::error!("adapter.restart audit write failed for '{adapter_id}': {e}");
-        }
+        record_adapter_event(
+            session_log,
+            SessionEvent::AdapterRestart {
+                adapter_id: adapter_id.to_string(),
+                channel: channel.to_string(),
+                attempt,
+                cause,
+                exit,
+                delay_ms,
+                connected_for_ms: connected_for
+                    .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            },
+        );
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(backoff.cap);
+    }
+}
+
+/// Append an adapter lifecycle event to the gateway's adapter lane. A
+/// failed write is logged, not returned: the restart loop and the
+/// teardown that call this have nowhere to send it.
+fn record_adapter_event(session_log: &dyn wirken_audit::SessionLog, event: SessionEvent) {
+    let lane = session_log.handle_for(SessionId::new(ADAPTER_LIFECYCLE_SESSION));
+    if let Err(e) = session_log.append(&lane, TrustLevel::System, event) {
+        tracing::error!("adapter lifecycle event write failed: {e}");
     }
 }
 
@@ -2413,24 +2416,22 @@ async fn supervise_adapter<S>(
 /// past all of them, and the adapter stayed registered as connected
 /// while the orchestrator's push dispatcher went on holding a writer
 /// for a socket nobody was reading. Neither is visible from outside:
-/// the audit chain just shows an `adapter.connect` with no matching
+/// the audit chain just shows an adapter connecting with no matching
 /// disconnect. Moving them into a `Drop` makes both paths the same
 /// path.
 ///
-/// `Drop` cannot await, so only the writer unregister, which is
-/// synchronous, happens inline. The registry update and the
-/// `adapter.disconnect` row go onto a task, in that order. The guard
-/// only ever drops inside the connection task, so a runtime is always
-/// current for the spawn; a runtime already shutting down may drop the
-/// task, which is the one case where the row is lost, and the process
-/// is exiting then anyway.
+/// The writer unregister and the `AdapterDisconnect` event happen
+/// inline: both are synchronous, and the event is on the chain before
+/// the connection task has finished, so shutdown, which waits for the
+/// connection tasks before sealing the chain, never seals ahead of it.
+/// The registry update awaits a lock and goes onto a task.
 struct ConnectionTeardown {
     adapter_id: String,
     channel: String,
     pubkey_fingerprint: String,
     registry: Arc<Mutex<AdapterRegistry>>,
     dispatcher: Arc<OutboundDispatcher>,
-    audit: Arc<AuditWriter>,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
     /// The adapter's restart loop, told the connection has ended.
     lifeline: Option<Arc<AdapterLifeline>>,
 }
@@ -2449,39 +2450,29 @@ impl Drop for ConnectionTeardown {
         }
 
         // Dropped during an unwind means the message loop panicked;
-        // the panic message itself is recorded when the connection task
-        // is reaped (`connection.panic`).
-        let reason = if panicked { "panic" } else { "ended" };
+        // the panic itself is recorded by the connection task
+        // (`connection.panic`).
+        let reason = if panicked {
+            AdapterDisconnectReason::Panic
+        } else {
+            AdapterDisconnectReason::Ended
+        };
         let adapter_id = std::mem::take(&mut self.adapter_id);
         let channel = std::mem::take(&mut self.channel);
-        let fingerprint = std::mem::take(&mut self.pubkey_fingerprint);
-        let registry = self.registry.clone();
-        let audit = self.audit.clone();
+        let pubkey_fingerprint = std::mem::take(&mut self.pubkey_fingerprint);
+        record_adapter_event(
+            self.session_log.as_ref(),
+            SessionEvent::AdapterDisconnect {
+                adapter_id: adapter_id.clone(),
+                channel,
+                pubkey_fingerprint,
+                reason,
+            },
+        );
 
+        let registry = self.registry.clone();
         tokio::spawn(async move {
             registry.lock().await.set_connected(&adapter_id, false);
-            // Logged rather than propagated: a `Drop` has nowhere to
-            // return an error to. The previous code propagated it out
-            // of `handle_adapter_connection`, where the spawn site
-            // turned it into exactly this tracing line.
-            if let Err(e) = audit
-                .log(
-                    AuditEvent::new(
-                        ActorKind::Service,
-                        "gateway",
-                        "adapter.disconnect",
-                        &adapter_id,
-                    )
-                    .with_channel(&channel)
-                    .with_detail(serde_json::json!({
-                        "adapter_pubkey_fingerprint": fingerprint,
-                        "reason": reason,
-                    })),
-                )
-                .await
-            {
-                tracing::error!("adapter.disconnect audit write failed for '{adapter_id}': {e}");
-            }
             tracing::info!("Adapter '{adapter_id}' disconnected");
         });
     }
@@ -2502,6 +2493,7 @@ async fn handle_adapter_connection(
     approver_registry: Arc<wirken_gateway::approver_registry::ApproverRegistry>,
     lifelines: Lifelines,
     adapter_id_slot: super::connection_tasks::AdapterIdSlot,
+    session_log: Arc<dyn wirken_audit::SessionLog>,
 ) -> Result<()> {
     let (mut reader, mut writer) = split_stream(stream);
 
@@ -2550,20 +2542,17 @@ async fn handle_adapter_connection(
 
     let pubkey_fingerprint = adapter_pubkey_fingerprint(&pub_key);
 
-    audit
-        .log(
-            AuditEvent::new(
-                ActorKind::Service,
-                "gateway",
-                "adapter.connect",
-                &adapter_id,
-            )
-            .with_channel(authenticated_channel.as_str())
-            .with_detail(serde_json::json!({
-                "adapter_pubkey_fingerprint": pubkey_fingerprint,
-            })),
-        )
-        .await?;
+    // A connection that cannot be recorded is not served.
+    let lane = session_log.handle_for(SessionId::new(ADAPTER_LIFECYCLE_SESSION));
+    session_log.append(
+        &lane,
+        TrustLevel::System,
+        SessionEvent::AdapterConnect {
+            adapter_id: adapter_id.clone(),
+            channel: authenticated_channel.as_str().to_string(),
+            pubkey_fingerprint: pubkey_fingerprint.clone(),
+        },
+    )?;
 
     let writer = Arc::new(Mutex::new(writer));
 
@@ -2579,7 +2568,7 @@ async fn handle_adapter_connection(
         pubkey_fingerprint: pubkey_fingerprint.clone(),
         registry: registry.clone(),
         dispatcher: dispatcher.clone(),
-        audit: audit.clone(),
+        session_log: session_log.clone(),
         lifeline,
     };
 
@@ -4227,27 +4216,28 @@ mod connection_teardown_tests {
     use super::{AdapterRegistry, ConnectionTeardown, OutboundDispatcher};
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use wirken_audit::{AuditEvent, AuditLog, AuditQuery, AuditWriter};
+    use wirken_audit::{
+        ADAPTER_LIFECYCLE_SESSION, AdapterDisconnectReason, SessionEvent, SessionId, SessionLog,
+        SqliteSessionLog,
+    };
 
     /// Run a connection task that holds a teardown guard and either
-    /// returns or panics, then return the `adapter.disconnect` row.
-    async fn disconnect_row(panics: bool) -> AuditEvent {
+    /// returns or panics, then return the reason its `AdapterDisconnect`
+    /// event gives. The event is written as the guard drops, so it is on
+    /// the lane by the time the task has finished.
+    async fn disconnect_reason(panics: bool) -> AdapterDisconnectReason {
         let tmp = tempfile::TempDir::new().unwrap();
-        let db = tmp.path().join("audit.db");
-        let (writer, handle) = AuditWriter::new(&db).unwrap();
-        let audit = Arc::new(writer);
+        let log = Arc::new(SqliteSessionLog::open_in_memory().unwrap());
         let registry = Arc::new(Mutex::new(
             AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap(),
         ));
-        let dispatcher = Arc::new(OutboundDispatcher::new());
-
         let teardown = ConnectionTeardown {
             adapter_id: "telegram".into(),
             channel: "telegram".into(),
             pubkey_fingerprint: "fp".into(),
             registry,
-            dispatcher,
-            audit: audit.clone(),
+            dispatcher: Arc::new(OutboundDispatcher::new()),
+            session_log: log.clone(),
             lifeline: None,
         };
         let result = tokio::spawn(async move {
@@ -4259,30 +4249,35 @@ mod connection_teardown_tests {
         .await;
         assert_eq!(result.is_err(), panics);
 
-        // The row is written from a task the guard spawns.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        drop(audit);
-        handle.await.unwrap();
-        AuditLog::open(&db)
-            .unwrap()
-            .query(&AuditQuery::default())
-            .unwrap()
-            .into_iter()
-            .map(|e| e.event)
-            .find(|e| e.action == "adapter.disconnect")
-            .expect("adapter.disconnect row")
+        let lane = log.handle_for(SessionId::new(ADAPTER_LIFECYCLE_SESSION));
+        let rows = log.get_since(&lane, 0).unwrap();
+        let reasons: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match &r.event {
+                SessionEvent::AdapterDisconnect {
+                    adapter_id, reason, ..
+                } if adapter_id == "telegram" => Some(*reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasons.len(), 1, "{rows:?}");
+        reasons[0]
     }
 
     #[tokio::test]
     async fn a_disconnect_during_a_panic_says_so() {
-        let row = disconnect_row(true).await;
-        assert_eq!(row.detail["reason"].as_str(), Some("panic"));
+        assert_eq!(
+            disconnect_reason(true).await,
+            AdapterDisconnectReason::Panic
+        );
     }
 
     #[tokio::test]
     async fn an_ordinary_disconnect_says_ended() {
-        let row = disconnect_row(false).await;
-        assert_eq!(row.detail["reason"].as_str(), Some("ended"));
+        assert_eq!(
+            disconnect_reason(false).await,
+            AdapterDisconnectReason::Ended
+        );
     }
 }
 
@@ -4297,7 +4292,10 @@ mod adapter_restart_tests {
     use std::time::{Duration, Instant};
     use tokio::sync::{Mutex, mpsc, oneshot};
     use tokio::task::JoinHandle;
-    use wirken_audit::{AuditEvent, AuditLog, AuditQuery, AuditWriter};
+    use wirken_audit::{
+        ADAPTER_LIFECYCLE_SESSION, AuditLog, AuditQuery, AuditWriter, SessionId, SessionLog,
+        SqliteSessionLog,
+    };
 
     const BACKOFF: RestartBackoff = RestartBackoff {
         first: Duration::from_millis(100),
@@ -4317,9 +4315,11 @@ mod adapter_restart_tests {
     const STAYS_UP: &[&str] = &["sleep", "600"];
 
     /// The gateway-side pieces one adapter's restart touches, on a
-    /// scratch audit log.
+    /// scratch audit log: the session log the lifecycle events go to,
+    /// and the audit writer `connection.panic` goes to.
     struct Gateway {
         tmp: tempfile::TempDir,
+        log: Arc<SqliteSessionLog>,
         audit: Arc<AuditWriter>,
         flush: JoinHandle<()>,
         registry: Arc<Mutex<AdapterRegistry>>,
@@ -4333,12 +4333,14 @@ mod adapter_restart_tests {
             let tmp = tempfile::TempDir::new().unwrap();
             let (writer, flush) = AuditWriter::new(&tmp.path().join("audit.db")).unwrap();
             let audit = Arc::new(writer);
+            let log = Arc::new(SqliteSessionLog::open(&tmp.path().join("audit.db")).unwrap());
             let registry = Arc::new(Mutex::new(
                 AdapterRegistry::open(&tmp.path().join("adapters.db")).unwrap(),
             ));
             Self {
                 tasks: ConnectionTasks::new(audit.clone()),
                 tmp,
+                log,
                 audit,
                 flush,
                 registry,
@@ -4369,7 +4371,7 @@ mod adapter_restart_tests {
         {
             let (tx, rx) = mpsc::unbounded_channel();
             let lifeline = self.lifeline.clone();
-            let audit = self.audit.clone();
+            let log = self.log.clone();
             let handle = tokio::spawn(async move {
                 let mut runs = 0;
                 let spawn = || {
@@ -4382,7 +4384,15 @@ mod adapter_restart_tests {
                     let _ = tx.send(child.id().expect("a running child has a pid"));
                     Ok(child)
                 };
-                supervise_adapter("telegram", "telegram", spawn, &lifeline, &audit, backoff).await;
+                supervise_adapter(
+                    "telegram",
+                    "telegram",
+                    spawn,
+                    &lifeline,
+                    log.as_ref(),
+                    backoff,
+                )
+                .await;
             });
             (handle, rx)
         }
@@ -4403,7 +4413,7 @@ mod adapter_restart_tests {
                 pubkey_fingerprint: "fp".into(),
                 registry: self.registry.clone(),
                 dispatcher: self.dispatcher.clone(),
-                audit: self.audit.clone(),
+                session_log: self.log.clone(),
                 lifeline: Some(lifeline.clone()),
             };
             let slot = super::super::connection_tasks::AdapterIdSlot::default();
@@ -4419,33 +4429,37 @@ mod adapter_restart_tests {
             tx
         }
 
-        /// Every row with `action`, read once everything holding the
-        /// writer has let go of it.
-        async fn rows(self, action: &str) -> Vec<AuditEvent> {
-            let action = action.to_string();
-            self.rows_all()
-                .await
-                .into_iter()
-                .filter(|e| e.action == action)
-                .collect()
-        }
-
-        /// Every row, read once everything holding the writer has let
-        /// go of it.
-        async fn rows_all(self) -> Vec<AuditEvent> {
+        /// Every row of `kind`, oldest first: an adapter lifecycle
+        /// event (`adapter_restart` and so on) as its JSON, or a legacy
+        /// row (`connection.panic`) as its detail. Read once everything
+        /// holding the writer has let go of it.
+        async fn rows(self, kind: &str) -> Vec<serde_json::Value> {
             self.tasks.shutdown().await;
-            // Teardown rows are written from tasks of their own.
-            tokio::time::sleep(Duration::from_millis(100)).await;
             let db = self.tmp.path().join("audit.db");
             drop(self.tasks);
             drop(self.audit);
             self.flush.await.unwrap();
-            AuditLog::open(&db)
-                .unwrap()
-                .query(&AuditQuery::default())
+            if kind.contains('.') {
+                let mut rows = AuditLog::open(&db)
+                    .unwrap()
+                    .query(&AuditQuery::default())
+                    .unwrap();
+                rows.sort_by_key(|r| r.id);
+                return rows
+                    .into_iter()
+                    .filter(|r| r.event.action == kind)
+                    .map(|r| r.event.detail)
+                    .collect();
+            }
+            let lane = self
+                .log
+                .handle_for(SessionId::new(ADAPTER_LIFECYCLE_SESSION));
+            self.log
+                .get_since(&lane, 0)
                 .unwrap()
                 .into_iter()
-                .map(|e| e.event)
+                .map(|r| serde_json::to_value(&r.event).unwrap())
+                .filter(|v| v["kind"] == kind)
                 .collect()
         }
     }
@@ -4464,12 +4478,6 @@ mod adapter_restart_tests {
             .await
             .expect("the adapter is spawned again")
             .expect("the restart loop is running")
-    }
-
-    /// Restart rows in the order the restarts happened.
-    fn by_attempt(mut rows: Vec<AuditEvent>) -> Vec<AuditEvent> {
-        rows.sort_by_key(|e| e.detail["attempt"].as_u64());
-        rows
     }
 
     #[tokio::test]
@@ -4498,14 +4506,15 @@ mod adapter_restart_tests {
         supervisor.abort();
         let _ = supervisor.await;
 
-        let restarts = by_attempt(gw.rows("adapter.restart").await);
+        let restarts = gw.rows("adapter_restart").await;
         assert_eq!(restarts.len(), 2, "{restarts:?}");
         for (row, (attempt, delay_ms)) in restarts.iter().zip([(1, 100), (2, 200)]) {
-            assert_eq!(row.target, "telegram");
-            assert_eq!(row.detail["cause"].as_str(), Some("connection_panicked"));
-            assert_eq!(row.detail["attempt"].as_u64(), Some(attempt));
-            assert_eq!(row.detail["delay_ms"].as_u64(), Some(delay_ms));
-            assert!(row.detail["connected_ms"].is_u64(), "{row:?}");
+            assert_eq!(row["adapter_id"], "telegram");
+            assert_eq!(row["channel"], "telegram");
+            assert_eq!(row["cause"], "connection_panicked");
+            assert_eq!(row["attempt"], attempt);
+            assert_eq!(row["delay_ms"], delay_ms);
+            assert!(row["connected_for_ms"].is_u64(), "{row}");
         }
     }
 
@@ -4519,9 +4528,9 @@ mod adapter_restart_tests {
         supervisor.abort();
         let _ = supervisor.await;
 
-        let disconnects = gw.rows("adapter.disconnect").await;
+        let disconnects = gw.rows("adapter_disconnect").await;
         assert_eq!(disconnects.len(), 1, "{disconnects:?}");
-        assert_eq!(disconnects[0].detail["reason"].as_str(), Some("panic"));
+        assert_eq!(disconnects[0]["reason"], "panic");
     }
 
     #[tokio::test]
@@ -4536,13 +4545,10 @@ mod adapter_restart_tests {
 
         let panics = gw.rows("connection.panic").await;
         assert_eq!(panics.len(), 1, "{panics:?}");
-        assert_eq!(panics[0].detail["kind"].as_str(), Some("adapter"));
-        assert_eq!(panics[0].detail["adapter_id"].as_str(), Some("telegram"));
-        assert_eq!(
-            panics[0].detail["payload_len"].as_u64(),
-            Some("message loop panicked".len() as u64)
-        );
-        assert!(panics[0].detail["location"].is_string(), "{panics:?}");
+        assert_eq!(panics[0]["kind"], "adapter");
+        assert_eq!(panics[0]["adapter_id"], "telegram");
+        assert_eq!(panics[0]["payload_len"], "message loop panicked".len());
+        assert!(panics[0]["location"].is_string(), "{panics:?}");
     }
 
     #[tokio::test]
@@ -4555,12 +4561,9 @@ mod adapter_restart_tests {
         supervisor.abort();
         let _ = supervisor.await;
 
-        let restarts = gw.rows("adapter.restart").await;
+        let restarts = gw.rows("adapter_restart").await;
         assert_eq!(restarts.len(), 1, "{restarts:?}");
-        assert_eq!(
-            restarts[0].detail["cause"].as_str(),
-            Some("connection_ended")
-        );
+        assert_eq!(restarts[0]["cause"], "connection_ended");
     }
 
     #[tokio::test]
@@ -4579,11 +4582,11 @@ mod adapter_restart_tests {
         supervisor.abort();
         let _ = supervisor.await;
 
-        let restarts = gw.rows("adapter.restart").await;
+        let restarts = gw.rows("adapter_restart").await;
         assert_eq!(restarts.len(), 2, "{restarts:?}");
         for row in &restarts {
-            assert_eq!(row.detail["attempt"].as_u64(), Some(1));
-            assert_eq!(row.detail["delay_ms"].as_u64(), Some(100));
+            assert_eq!(row["attempt"], 1);
+            assert_eq!(row["delay_ms"], 100);
         }
     }
 
@@ -4597,16 +4600,16 @@ mod adapter_restart_tests {
         supervisor.abort();
         let _ = supervisor.await;
 
-        let restarts = by_attempt(gw.rows("adapter.restart").await);
+        let restarts = gw.rows("adapter_restart").await;
         let delays: Vec<u64> = restarts
             .iter()
-            .map(|r| r.detail["delay_ms"].as_u64().unwrap())
+            .map(|r| r["delay_ms"].as_u64().unwrap())
             .collect();
         assert_eq!(&delays[..4], &[100, 200, 400, 400], "{restarts:?}");
         for row in &restarts {
-            assert_eq!(row.detail["cause"].as_str(), Some("process_exited"));
-            assert_eq!(row.detail["exit"].as_str(), Some("exit status: 3"));
-            assert!(row.detail["connected_ms"].is_null());
+            assert_eq!(row["cause"], "process_exited");
+            assert_eq!(row["exit"], "exit status: 3");
+            assert!(row.get("connected_for_ms").is_none(), "{row}");
         }
     }
 
@@ -4628,23 +4631,23 @@ mod adapter_restart_tests {
         returns(supervisor).await;
         assert!(pids.recv().await.is_none(), "no ninth run");
 
-        let tasks_rows = gw.rows_all().await;
-        let restarts = tasks_rows
+        let log = gw.log.clone();
+        let abandoned = gw.rows("adapter_restart_abandoned").await;
+        let lane = log.handle_for(SessionId::new(ADAPTER_LIFECYCLE_SESSION));
+        let restarts = log
+            .get_since(&lane, 0)
+            .unwrap()
             .iter()
-            .filter(|e| e.action == "adapter.restart")
+            .filter(|r| matches!(r.event, wirken_audit::SessionEvent::AdapterRestart { .. }))
             .count();
         assert_eq!(restarts, 7, "a restart between each pair of runs");
-        let abandoned: Vec<_> = tasks_rows
-            .iter()
-            .filter(|e| e.action == "adapter.restart_abandoned")
-            .collect();
-        assert_eq!(abandoned.len(), 1, "{tasks_rows:?}");
-        let row = abandoned[0];
-        assert_eq!(row.target, "telegram");
-        assert_eq!(row.channel.as_deref(), Some("telegram"));
-        assert_eq!(row.detail["attempts"].as_u64(), Some(8));
-        assert_eq!(row.detail["last_cause"].as_str(), Some("process_exited"));
-        assert_eq!(row.detail["last_exit"].as_str(), Some("exit status: 3"));
+        assert_eq!(abandoned.len(), 1, "{abandoned:?}");
+        let row = &abandoned[0];
+        assert_eq!(row["adapter_id"], "telegram");
+        assert_eq!(row["channel"], "telegram");
+        assert_eq!(row["attempts"], 8);
+        assert_eq!(row["last_cause"], "process_exited");
+        assert_eq!(row["last_exit"], "exit status: 3");
     }
 
     #[tokio::test]
@@ -4665,9 +4668,9 @@ mod adapter_restart_tests {
         returns(supervisor).await;
         assert!(pids.recv().await.is_none(), "fourteen runs and no more");
 
-        let abandoned = gw.rows("adapter.restart_abandoned").await;
+        let abandoned = gw.rows("adapter_restart_abandoned").await;
         assert_eq!(abandoned.len(), 1, "{abandoned:?}");
-        assert_eq!(abandoned[0].detail["attempts"].as_u64(), Some(8));
+        assert_eq!(abandoned[0]["attempts"], 8);
     }
 
     #[tokio::test]
@@ -4687,7 +4690,7 @@ mod adapter_restart_tests {
         tokio::time::sleep(Duration::from_millis(1000)).await;
         assert!(pids.try_recv().is_err(), "nothing was respawned");
 
-        let abandoned = gw.rows("adapter.restart_abandoned").await;
+        let abandoned = gw.rows("adapter_restart_abandoned").await;
         assert!(abandoned.is_empty(), "{abandoned:?}");
     }
 
@@ -4717,9 +4720,9 @@ mod adapter_restart_tests {
         tokio::time::sleep(Duration::from_millis(1500)).await;
         assert!(pids.try_recv().is_err(), "nothing was respawned");
 
-        let restarts = gw.rows("adapter.restart").await;
+        let restarts = gw.rows("adapter_restart").await;
         assert_eq!(restarts.len(), 1, "{restarts:?}");
-        assert_eq!(restarts[0].detail["delay_ms"].as_u64(), Some(1000));
+        assert_eq!(restarts[0]["delay_ms"], 1000);
     }
 }
 
