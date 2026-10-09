@@ -683,21 +683,38 @@ pub async fn list() -> Result<()> {
         return Ok(());
     }
 
+    // Connection state comes from the audit log. The registry's
+    // `connected` flag is the gateway's in-memory view and reads false
+    // from here.
+    let statuses = super::adapter_state::AdapterStatuses::read_path(&cfg.audit_db_path());
+    let entries: Vec<(String, String)> = adapters
+        .into_iter()
+        .map(|a| (a.adapter_id, a.channel))
+        .collect();
     println!("  Configured channels:");
     println!();
-    for adapter in &adapters {
-        let status = if adapter.connected {
-            "connected"
-        } else {
-            "disconnected"
-        };
-        println!(
-            "  {:12} {:12} {}",
-            adapter.adapter_id, adapter.channel, status
-        );
+    for line in list_lines(&entries, &statuses) {
+        println!("{line}");
     }
     println!();
     Ok(())
+}
+
+/// The table `wirken channel list` prints: a header, then one line per
+/// `(adapter id, channel)` with its state and when that was recorded.
+fn list_lines(
+    entries: &[(String, String)],
+    statuses: &super::adapter_state::AdapterStatuses,
+) -> Vec<String> {
+    let line = |id: &str, channel: &str, state: &str, recorded: &str| {
+        format!("  {id:12} {channel:12} {state:42} {recorded}")
+    };
+    let mut lines = vec![line("ADAPTER", "CHANNEL", "STATE", "RECORDED")];
+    for (id, channel) in entries {
+        let status = statuses.of(id);
+        lines.push(line(id, channel, &status.label(), &status.recorded()));
+    }
+    lines
 }
 
 pub async fn remove(channel: &str) -> Result<()> {
@@ -969,5 +986,55 @@ mod tests {
             .retrieve("google-chat-project-number")
             .expect("adapter startup key must be present");
         assert_eq!(secret.expose(), "1234567890");
+    }
+
+    /// Each row sequence in the audit log prints as its state, with the
+    /// time the deciding row was written.
+    #[tokio::test]
+    async fn list_prints_each_adapter_state_from_the_audit_log() {
+        let none = || serde_json::json!({});
+        let statuses = crate::commands::adapter_state::tests::statuses(&[
+            ("adapter.connect", "telegram", none()),
+            ("adapter.connect", "slack", none()),
+            ("adapter.disconnect", "slack", none()),
+            ("adapter.connect", "discord", none()),
+            (
+                "adapter.restart",
+                "discord",
+                serde_json::json!({"attempt": 3}),
+            ),
+            (
+                "adapter.restart_abandoned",
+                "matrix",
+                serde_json::json!({"attempts": 8}),
+            ),
+        ])
+        .await;
+        let entries: Vec<(String, String)> = ["telegram", "slack", "discord", "matrix", "signal"]
+            .iter()
+            .map(|c| (c.to_string(), c.to_string()))
+            .collect();
+        let lines = list_lines(&entries, &statuses);
+
+        assert!(
+            lines[0].starts_with("  ADAPTER      CHANNEL      STATE"),
+            "{lines:?}"
+        );
+        let state_of = |line: &str| line[28..].split("  ").next().unwrap().trim().to_string();
+        let recorded_of = |line: &str| line.split_whitespace().last().unwrap().to_string();
+        assert_eq!(state_of(&lines[1]), "connected");
+        let since = recorded_of(&lines[2]);
+        assert_eq!(state_of(&lines[2]), format!("disconnected (since {since})"));
+        assert_eq!(state_of(&lines[3]), "restarting (attempt 3)");
+        assert_eq!(state_of(&lines[4]), "abandoned (attempts 8)");
+        assert_eq!(state_of(&lines[5]), "no record");
+        assert_eq!(recorded_of(&lines[5]), "-");
+        for line in &lines[1..5] {
+            let recorded = recorded_of(line);
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&recorded).is_ok(),
+                "{line}"
+            );
+        }
     }
 }

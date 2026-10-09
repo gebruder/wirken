@@ -3275,6 +3275,17 @@ impl SqliteSessionLog {
             .collect()
     }
 
+    /// The newest legacy audit row for each target, among the rows
+    /// whose action is one of `actions`, oldest first. An adapter's
+    /// connection state is read this way: the newest lifecycle row per
+    /// adapter id.
+    pub fn latest_legacy_per_target(
+        &self,
+        actions: &[&str],
+    ) -> Result<Vec<crate::event::StoredEvent>, AuditError> {
+        crate::legacy_compat::latest_legacy_per_target(self, actions)
+    }
+
     /// Distinct session ids present in `session_events`, ordered
     /// ascending. Used at gateway shutdown to enumerate which
     /// sessions need a `SessionEnd` chain head before flush.

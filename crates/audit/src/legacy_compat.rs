@@ -385,6 +385,80 @@ pub(crate) fn query_legacy(
     })
 }
 
+/// The newest legacy row for each target, among the rows whose action
+/// is one of `actions`, oldest first. Reads `session_events` itself
+/// rather than the `audit_events` view, so it needs nothing beyond
+/// [`SqliteSessionLog::open`] and works on a log no gateway has
+/// migrated. Row ids are global, so the newest row is the highest id.
+pub(crate) fn latest_legacy_per_target(
+    log: &SqliteSessionLog,
+    actions: &[&str],
+) -> Result<Vec<StoredEvent>, AuditError> {
+    if actions.is_empty() {
+        return Ok(Vec::new());
+    }
+    log.with_conn(|conn| {
+        let placeholders = (1..=actions.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, ts, session_id, payload, hash FROM session_events
+             WHERE id IN (
+                 SELECT MAX(id) FROM session_events
+                 WHERE json_extract(payload, '$.kind') = 'audit_legacy'
+                   AND json_extract(payload, '$.action') IN ({placeholders})
+                 GROUP BY json_extract(payload, '$.target')
+             )
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(actions.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, ts, session, payload, hash) = row?;
+            // The SQL matched on the payload's kind; a payload that then
+            // fails to parse as the legacy variant is skipped.
+            let Ok(SessionEvent::AuditLegacy {
+                actor_kind,
+                actor_id,
+                action,
+                target,
+                channel,
+                detail,
+            }) = serde_json::from_str::<SessionEvent>(&payload)
+            else {
+                continue;
+            };
+            out.push(StoredEvent {
+                id,
+                event: AuditEvent {
+                    ts: chrono::DateTime::parse_from_rfc3339(&ts)
+                        .unwrap_or_default()
+                        .with_timezone(&Utc),
+                    actor_kind,
+                    actor_id,
+                    action,
+                    target,
+                    channel,
+                    session: Some(session),
+                    detail,
+                },
+                hash,
+            });
+        }
+        Ok(out)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Verify
 // ---------------------------------------------------------------------------

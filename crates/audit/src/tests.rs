@@ -481,6 +481,53 @@ fn events_with_json_detail() {
 // Async writer tests
 // ---------------------------------------------------------------------------
 
+/// The newest row per target among the asked-for actions, read from a
+/// log opened the way the CLI opens it. Rows of other actions are not
+/// counted.
+#[tokio::test]
+async fn latest_legacy_per_target_takes_the_newest_row_of_each() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("audit.db");
+    let (writer, handle) = AuditWriter::new(&db_path).unwrap();
+    for (action, target) in [
+        ("adapter.connect", "telegram"),
+        ("adapter.connect", "slack"),
+        ("adapter.disconnect", "telegram"),
+        ("message.inbound", "telegram"),
+        ("adapter.restart", "slack"),
+    ] {
+        writer
+            .log(AuditEvent::new(
+                ActorKind::Service,
+                "gateway",
+                action,
+                target,
+            ))
+            .await
+            .unwrap();
+    }
+    drop(writer);
+    handle.await.unwrap();
+
+    let log = crate::SqliteSessionLog::open(&db_path).unwrap();
+
+    let rows = log
+        .latest_legacy_per_target(&["adapter.connect", "adapter.disconnect", "adapter.restart"])
+        .unwrap();
+    let got: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r.event.target.as_str(), r.event.action.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("telegram", "adapter.disconnect"),
+            ("slack", "adapter.restart")
+        ]
+    );
+    assert!(log.latest_legacy_per_target(&[]).unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn writer_flushes_events() {
     let tmp = TempDir::new().unwrap();

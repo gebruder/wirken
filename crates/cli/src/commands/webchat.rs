@@ -2251,7 +2251,7 @@ function renderAbout() {
     for (const a of adapters) {
       const row = el('span', 'row', a.channel + ' ');
       row.appendChild(el('code', null, a.pubkey_fingerprint || ''));
-      row.appendChild(document.createTextNode(a.connected ? ' · connected' : ' · not connected'));
+      row.appendChild(document.createTextNode(' · ' + (a.state || (a.connected ? 'connected' : 'not connected'))));
       v.appendChild(row);
     }
     kvRow(grid, 'adapters', v);
@@ -3636,6 +3636,10 @@ pub async fn status_snapshot(
         None => json!({ "configured": false }),
     };
 
+    // Connection state as the audit log records it, the same reading
+    // `wirken channel list` makes, rather than the registry's in-memory
+    // flag.
+    let statuses = super::adapter_state::AdapterStatuses::read_path(&cfg.audit_db_path());
     let adapters: Vec<Value> = inputs
         .registry
         .lock()
@@ -3643,10 +3647,13 @@ pub async fn status_snapshot(
         .list()
         .into_iter()
         .map(|a| {
+            let status = statuses.of(&a.adapter_id);
             json!({
                 "adapter_id": a.adapter_id,
                 "channel": a.channel,
-                "connected": a.connected,
+                "connected": status.is_connected(),
+                "state": status.label(),
+                "state_recorded_at": status.recorded_at.map(|t| t.to_rfc3339()),
                 "pubkey_fingerprint": pubkey_fingerprint(&a.public_key),
                 "pid": Value::Null,
                 "restarts": Value::Null,
@@ -5539,6 +5546,40 @@ mod tests {
             data_dir: dir.to_path_buf(),
             ..wirken_gateway::config::GatewayConfig::default()
         }
+    }
+
+    /// An adapter's state comes from the audit log. The registry's flag
+    /// is never set here, so a snapshot that read it would say false.
+    #[tokio::test]
+    async fn status_snapshot_reads_adapter_state_from_the_audit_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let inputs = status_inputs_for(dir.path(), None);
+        inputs
+            .registry
+            .lock()
+            .await
+            .register("telegram", &[7u8; 32], "telegram")
+            .unwrap();
+        let (writer, flush) = wirken_audit::AuditWriter::new(&cfg.audit_db_path()).unwrap();
+        writer
+            .log(wirken_audit::AuditEvent::new(
+                wirken_audit::ActorKind::Service,
+                "gateway",
+                "adapter.connect",
+                "telegram",
+            ))
+            .await
+            .unwrap();
+        drop(writer);
+        flush.await.unwrap();
+
+        let snap = status_snapshot(&cfg, 18790, &inputs, false).await;
+        let adapter = &snap["adapters"][0];
+        assert_eq!(adapter["adapter_id"], "telegram");
+        assert_eq!(adapter["state"], "connected");
+        assert_eq!(adapter["connected"], true);
+        assert!(adapter["state_recorded_at"].is_string(), "{adapter}");
     }
 
     /// A value the gateway does not hold is null, never a default that

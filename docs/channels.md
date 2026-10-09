@@ -15,6 +15,16 @@ wirken channel remove slack
 `remove` deletes the adapter registration, its Ed25519 keypair, and its vault
 credentials.
 
+`list` shows each adapter's state as the audit log records it, with the time
+the deciding row was written: `connected`, `disconnected (since <time>)`,
+`restarting (attempt n)`, `abandoned (attempts n)`, or `no record`. The state
+is the newest `adapter.connect`, `adapter.disconnect`, `adapter.restart` or
+`adapter.restart_abandoned` row for the adapter, unless a `gateway.start` or
+`gateway.stop` row was written after it, which reads as disconnected since
+then. A `wirken run` that was killed rather than stopped writes no
+`gateway.stop`, so its last recorded states stand until the next start. The
+webchat status page shows the same states.
+
 Outbound markdown is rendered per channel by a formatter in
 `wirken-adapter-core`. Tables flatten to `Header: value` lines wherever the
 platform has no table primitive.

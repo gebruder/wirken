@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod adapter_state;
 pub mod agent;
 pub mod agents;
 pub mod approvers;
