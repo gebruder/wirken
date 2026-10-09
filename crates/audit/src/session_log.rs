@@ -1685,6 +1685,51 @@ pub enum SessionEvent {
         #[serde(default)]
         signature_status: HookSignatureStatus,
     },
+    /// An adapter process completed its handshake on the gateway's
+    /// adapter socket and is connected. Written on the
+    /// [`ADAPTER_LIFECYCLE_SESSION`] lane.
+    AdapterConnect {
+        adapter_id: String,
+        channel: String,
+        /// Fingerprint of the Ed25519 key the adapter authenticated
+        /// with.
+        pubkey_fingerprint: String,
+    },
+    /// An adapter's gateway connection ended. `reason` says whether
+    /// the connection's message loop panicked or the connection simply
+    /// ended.
+    AdapterDisconnect {
+        adapter_id: String,
+        channel: String,
+        pubkey_fingerprint: String,
+        reason: AdapterDisconnectReason,
+    },
+    /// The gateway is restarting an adapter process after `cause`, and
+    /// will spawn it again in `delay_ms`. `attempt` counts restarts
+    /// since the adapter last stayed connected long enough to reset
+    /// the backoff. `connected_for_ms` is how long the run that just
+    /// ended was connected, absent when it never connected.
+    AdapterRestart {
+        adapter_id: String,
+        channel: String,
+        attempt: u64,
+        cause: AdapterRestartCause,
+        /// The process's exit status, or why it could not be spawned.
+        exit: String,
+        delay_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connected_for_ms: Option<u64>,
+    },
+    /// The gateway stopped restarting an adapter after `attempts` runs
+    /// in a row that ended without connecting. Only a restart of
+    /// `wirken run` starts it again.
+    AdapterRestartAbandoned {
+        adapter_id: String,
+        channel: String,
+        attempts: u32,
+        last_cause: AdapterRestartCause,
+        last_exit: String,
+    },
     /// One veto-hook invocation completed. Emitted per hook per tool
     /// call (in series, in `hook_registry` insertion order). The
     /// invocation runs after Wirken's tier and per-skill permission
@@ -2041,6 +2086,37 @@ pub enum SandboxEgressModeLabel {
     /// Any host reachable, subject only to the port and IP-literal
     /// rules. Explicit operator configuration only.
     Open,
+}
+
+/// The session lane the gateway writes adapter lifecycle events on:
+/// [`SessionEvent::AdapterConnect`], [`SessionEvent::AdapterDisconnect`],
+/// [`SessionEvent::AdapterRestart`] and
+/// [`SessionEvent::AdapterRestartAbandoned`].
+pub const ADAPTER_LIFECYCLE_SESSION: &str = "gateway-adapters";
+
+/// Why an adapter's gateway connection ended.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterDisconnectReason {
+    /// The connection ended: end of stream, a read error, or the
+    /// message loop returning.
+    Ended,
+    /// The connection's message loop panicked.
+    Panic,
+}
+
+/// Why the gateway restarted an adapter process.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterRestartCause {
+    /// The process exited on its own.
+    ProcessExited,
+    /// Its gateway connection ended; the process was killed.
+    ConnectionEnded,
+    /// Its connection's message loop panicked; the process was killed.
+    ConnectionPanicked,
+    /// The process could not be spawned.
+    SpawnFailed,
 }
 
 /// What kind of hook a [`SessionEvent::HookRegistered`] row

@@ -532,6 +532,11 @@ impl OtelProjector {
             SessionEvent::AuditLegacy { .. } => Vec::new(),
             // Startup lifecycle.
             SessionEvent::HookRegistered { .. } => Vec::new(),
+            // Adapter process lifecycle, outside any agent run.
+            SessionEvent::AdapterConnect { .. } => Vec::new(),
+            SessionEvent::AdapterDisconnect { .. } => Vec::new(),
+            SessionEvent::AdapterRestart { .. } => Vec::new(),
+            SessionEvent::AdapterRestartAbandoned { .. } => Vec::new(),
             // The verdict lands on the tool result the tool span already
             // times.
             SessionEvent::HookDispatched { .. } => Vec::new(),

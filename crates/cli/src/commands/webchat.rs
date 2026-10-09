@@ -4274,6 +4274,12 @@ pub fn session_events(
             SessionEvent::AuditLegacy { .. } => None,
             // A hook installed at startup, before any turn.
             SessionEvent::HookRegistered { .. } => None,
+            // An adapter's connection and restarts, on the gateway's own
+            // lane, never in a conversation. The status panel reads them.
+            SessionEvent::AdapterConnect { .. } => None,
+            SessionEvent::AdapterDisconnect { .. } => None,
+            SessionEvent::AdapterRestart { .. } => None,
+            SessionEvent::AdapterRestartAbandoned { .. } => None,
             // The hook's verdict is already the outcome on the tool row it
             // gated.
             SessionEvent::HookDispatched { .. } => None,

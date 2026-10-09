@@ -66,7 +66,15 @@ Default forward: `AssistantToolCalls`, `ToolResult`, `HttpFetch`,
 `EgressHookDispatched`, `ToolOutputRedacted`, `BudgetExceeded`,
 `SandboxEgressVerdict`, `SandboxEgressUnsupported`, `MemoryEntryWritten`,
 `CrossChannelMemoryRead`, `ImportStarted`, `ImportCompleted`,
-`ImportedChatRead`, `ImportedChatSearched`, `ExecLocationDisagreement`.
+`ImportedChatRead`, `ImportedChatSearched`, `ExecLocationDisagreement`,
+`AdapterConnect`, `AdapterDisconnect`, `AdapterRestart`,
+`AdapterRestartAbandoned`.
+
+The four adapter variants are written by the gateway to the
+`gateway-adapters` lane: an adapter connecting, its connection ending with
+`reason` `ended` or `panic`, a restart with its `attempt`, `cause`, `exit`,
+`delay_ms` and `connected_for_ms`, and the restart loop giving up after runs
+that never connected, with `attempts`, `last_cause` and `last_exit`.
 
 `ExecLocationDisagreement` is written by `wirken sessions verify`, not by a
 running turn, to the `gateway-verify` lane. It is forwarded by default
@@ -89,9 +97,9 @@ only what it lists is forwarded and the default set is ignored. It wins over
 | Target | Envelope | Endpoint |
 |--------|----------|----------|
 | Webhook | Mixed legacy and typed entries in one JSON array | Single POST per flush |
-| Splunk HEC | NDJSON, one event per line; legacy `sourcetype: "wirken:audit"`, typed `wirken:session` | One HEC token for both |
-| Datadog | JSON array per POST; typed entries carry `ddtags: kind:<variant>`, all carry `ddsource: "wirken"` | One endpoint |
-| Sentinel | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`AgentId`/`AdapterId`/`SenderId`/`Event` | Two: legacy to `Custom-WirkenAudit`, typed to the configured `sentinel_typed.endpoint` |
+| Splunk HEC | NDJSON, one event per line; legacy `sourcetype: "wirken:audit"`, typed `wirken:session` with `event.level` | One HEC token for both |
+| Datadog | JSON array per POST; typed entries carry `ddtags: kind:<variant>`, all carry `ddsource: "wirken"` and `status` | One endpoint |
+| Sentinel | PascalCase columns matching the DCR stream; legacy carries `Action`/`Target`, typed carries `Kind`/`Level`/`AgentId`/`AdapterId`/`SenderId`/`Event` | Two: legacy to `Custom-WirkenAudit`, typed to the configured `sentinel_typed.endpoint` |
 
 The Sentinel split is a DCR constraint, not a design choice: the legacy
 stream's DCR pins specific columns and rejects rows that do not match, so the
@@ -99,16 +107,30 @@ typed pipe needs its own stream with its own column schema. Builders:
 `crates/audit/src/siem.rs:267-534`; transport selection at
 `siem_typed.rs:476-520`.
 
-Datadog is the one target with a severity field, `status`. An adapter's
+Every typed entry carries a level: `status` on Datadog, `level` in the Splunk
+HEC `event` object and on each webhook entry, and a `Level` column on
+Sentinel rows. The adapter variants take it from the variant and its reason
+or cause: `AdapterConnect` is `info`; `AdapterDisconnect` is `info`, or
+`error` for `reason: "panic"`; `AdapterRestart` is `info` for
+`connection_ended`, `warn` for `process_exited`, and `error` for
+`connection_panicked` and `spawn_failed`; `AdapterRestartAbandoned` is
+`error`. A legacy row an include list brings onto the typed pipe keeps its
+legacy level, and every other typed event is `info`.
+
+On the legacy pipe only Datadog carries a level, `status`. An adapter's
 `adapter.disconnect` and `adapter.restart` rows take it from why they
 happened: `error` for a panic (`reason: "panic"`, `cause:
 "connection_panicked"`) and for `cause: "spawn_failed"`, `warn` for `cause:
 "process_exited"`, `info` for a connection that ended. `connection.panic` and
-`adapter.restart_abandoned` are `error`. Other legacy rows are `error` when the action names a failure, `warn`
-for denials, threat flags, auth and credential actions, and `info` otherwise.
-Typed entries are `info`, except a legacy row an include list brings onto the
-typed pipe, which keeps its legacy level. Splunk, Sentinel and webhook entries
-carry the row's `reason` or `cause` but no level of their own.
+`adapter.restart_abandoned` are `error`. Other legacy rows are `error` when
+the action names a failure, `warn` for denials, threat flags, auth and
+credential actions, and `info` otherwise. Splunk, Sentinel and webhook legacy
+entries carry the row's `reason` or `cause` but no level of their own.
+
+`Level` is a new column on the typed Sentinel stream. A DCR whose stream
+declaration predates it does not list it, and Azure Monitor stores only the
+fields a stream declaration lists, so add `Level` (string) to the
+declaration and the table to keep it.
 
 Sentinel ingestion uses the Logs Ingestion API over a Data Collection Rule.
 The operator configures DCE, DCR and custom table out of band; `api_key` must

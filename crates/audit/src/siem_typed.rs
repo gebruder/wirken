@@ -201,6 +201,12 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::AuditLegacy { .. } => false,
         // Startup lifecycle, not a per-call outcome.
         SessionEvent::HookRegistered { .. } => false,
+        // An adapter's connection and restarts: what a detection on a
+        // channel going dark or a restart loop reads.
+        SessionEvent::AdapterConnect { .. } => true,
+        SessionEvent::AdapterDisconnect { .. } => true,
+        SessionEvent::AdapterRestart { .. } => true,
+        SessionEvent::AdapterRestartAbandoned { .. } => true,
         // The tool-call hook's verdict; EgressHookDispatched is the egress
         // half the set carries.
         SessionEvent::HookDispatched { .. } => false,
@@ -270,6 +276,10 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::DeliveryFailed { .. } => "delivery_failed",
         SessionEvent::AuditLegacy { .. } => "audit_legacy",
         SessionEvent::HookRegistered { .. } => "hook_registered",
+        SessionEvent::AdapterConnect { .. } => "adapter_connect",
+        SessionEvent::AdapterDisconnect { .. } => "adapter_disconnect",
+        SessionEvent::AdapterRestart { .. } => "adapter_restart",
+        SessionEvent::AdapterRestartAbandoned { .. } => "adapter_restart_abandoned",
         SessionEvent::HookDispatched { .. } => "hook_dispatched",
         SessionEvent::HookCrashed { .. } => "hook_crashed",
         SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",

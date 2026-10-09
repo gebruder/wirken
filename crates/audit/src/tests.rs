@@ -3600,6 +3600,33 @@ fn every_session_event() -> Vec<SessionEvent> {
             server_name: String::new(),
             signer: String::new(),
         },
+        SessionEvent::AdapterConnect {
+            adapter_id: String::new(),
+            channel: String::new(),
+            pubkey_fingerprint: String::new(),
+        },
+        SessionEvent::AdapterDisconnect {
+            adapter_id: String::new(),
+            channel: String::new(),
+            pubkey_fingerprint: String::new(),
+            reason: crate::session_log::AdapterDisconnectReason::Ended,
+        },
+        SessionEvent::AdapterRestart {
+            adapter_id: String::new(),
+            channel: String::new(),
+            attempt: 0,
+            cause: crate::session_log::AdapterRestartCause::ProcessExited,
+            exit: String::new(),
+            delay_ms: 0,
+            connected_for_ms: None,
+        },
+        SessionEvent::AdapterRestartAbandoned {
+            adapter_id: String::new(),
+            channel: String::new(),
+            attempts: 0,
+            last_cause: crate::session_log::AdapterRestartCause::ProcessExited,
+            last_exit: String::new(),
+        },
     ]
 }
 
@@ -3652,6 +3679,10 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::DeliveryFailed { .. } => "DeliveryFailed",
         SessionEvent::AuditLegacy { .. } => "AuditLegacy",
         SessionEvent::HookRegistered { .. } => "HookRegistered",
+        SessionEvent::AdapterConnect { .. } => "AdapterConnect",
+        SessionEvent::AdapterDisconnect { .. } => "AdapterDisconnect",
+        SessionEvent::AdapterRestart { .. } => "AdapterRestart",
+        SessionEvent::AdapterRestartAbandoned { .. } => "AdapterRestartAbandoned",
         SessionEvent::HookDispatched { .. } => "HookDispatched",
         SessionEvent::EgressHookDispatched { .. } => "EgressHookDispatched",
         SessionEvent::ToolOutputRedacted { .. } => "ToolOutputRedacted",
@@ -3670,7 +3701,7 @@ fn variant_name(event: &SessionEvent) -> &'static str {
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 56;
+const SESSION_EVENT_VARIANTS: usize = 60;
 
 /// The list covers the enum.
 #[test]

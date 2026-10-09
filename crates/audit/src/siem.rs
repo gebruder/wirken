@@ -418,7 +418,7 @@ pub fn build_datadog_typed_entry(
         ),
         "hostname": hostname(),
         "service": config.service,
-        "status": typed_severity(&event.event),
+        "status": typed_level(&event.event),
         "timestamp": event.ts.timestamp_millis(),
         "wirken": {
             "kind": kind,
@@ -452,6 +452,7 @@ pub fn build_splunk_typed_body(events: &[&crate::session_log::StoredSessionEvent
         let hec = serde_json::json!({
             "event": {
                 "kind": kind,
+                "level": typed_level(&stored.event),
                 "session_id": stored.session_id.as_str(),
                 "seq": stored.seq,
                 "trust": trust_label(stored.trust),
@@ -484,6 +485,7 @@ pub fn build_sentinel_typed_payload(
                 "SessionId": stored.session_id.as_str(),
                 "Seq": stored.seq,
                 "Kind": kind,
+                "Level": typed_level(&stored.event),
                 "Trust": trust_label(stored.trust),
                 "AgentId": agent_id,
                 "AdapterId": adapter_id,
@@ -513,6 +515,7 @@ pub fn build_webhook_typed_request(
                 "session_id": stored.session_id.as_str(),
                 "seq": stored.seq,
                 "kind": kind,
+                "level": typed_level(&stored.event),
                 "trust": trust_label(stored.trust),
                 "event": stored.event,
                 "service": config.service,
@@ -807,6 +810,13 @@ fn extract_identity_for_sentinel(
         },
         // A hook id and its signature status; none of the three.
         SessionEvent::HookRegistered { .. } => (None, None, None),
+        // An adapter's own lifecycle names the adapter.
+        SessionEvent::AdapterConnect { adapter_id, .. }
+        | SessionEvent::AdapterDisconnect { adapter_id, .. }
+        | SessionEvent::AdapterRestart { adapter_id, .. }
+        | SessionEvent::AdapterRestartAbandoned { adapter_id, .. } => {
+            (Some(adapter_id.clone()), None, None)
+        }
         // A hook id and an error; none of the three.
         SessionEvent::HookCrashed { .. } => (None, None, None),
         // A server name and a signer; none of the three.
@@ -977,6 +987,34 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::AuditLegacy { .. } => debug_summary(event),
         // A hook id and its signature status.
         SessionEvent::HookRegistered { .. } => debug_summary(event),
+        SessionEvent::AdapterConnect {
+            adapter_id,
+            channel,
+            ..
+        } => format!("adapter_connect adapter={adapter_id} channel={channel}"),
+        SessionEvent::AdapterDisconnect {
+            adapter_id,
+            channel,
+            reason,
+            ..
+        } => format!("adapter_disconnect adapter={adapter_id} channel={channel} reason={reason:?}"),
+        SessionEvent::AdapterRestart {
+            adapter_id,
+            attempt,
+            cause,
+            delay_ms,
+            ..
+        } => format!(
+            "adapter_restart adapter={adapter_id} cause={cause:?} attempt={attempt} delay_ms={delay_ms}"
+        ),
+        SessionEvent::AdapterRestartAbandoned {
+            adapter_id,
+            attempts,
+            last_cause,
+            ..
+        } => format!(
+            "adapter_restart_abandoned adapter={adapter_id} attempts={attempts} last_cause={last_cause:?}"
+        ),
         // A hook id, a tool and a decision.
         SessionEvent::HookDispatched { .. } => debug_summary(event),
         // A hook id and an error.
@@ -1048,14 +1086,29 @@ fn severity(action: &str, detail: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Datadog severity for a typed event. A legacy row that an include list
-/// brings onto the typed pipe keeps the level the legacy pipe gives it;
-/// every other typed event is `info`.
-fn typed_severity(event: &crate::session_log::SessionEvent) -> &'static str {
+/// The level a typed event forwards at, on every target: Datadog's
+/// `status`, `level` on Splunk and webhook entries, `Level` on
+/// Sentinel rows. An adapter's lifecycle events take it from the
+/// variant and its reason or cause. A legacy row an include list brings
+/// onto the typed pipe keeps the level the legacy pipe gives it. Every
+/// other typed event is `info`.
+pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static str {
+    use crate::session_log::{
+        AdapterDisconnectReason as Reason, AdapterRestartCause as Cause, SessionEvent,
+    };
     match event {
-        crate::session_log::SessionEvent::AuditLegacy { action, detail, .. } => {
-            severity(action, detail)
-        }
+        SessionEvent::AdapterConnect { .. } => "info",
+        SessionEvent::AdapterDisconnect { reason, .. } => match reason {
+            Reason::Ended => "info",
+            Reason::Panic => "error",
+        },
+        SessionEvent::AdapterRestart { cause, .. } => match cause {
+            Cause::ConnectionEnded => "info",
+            Cause::ProcessExited => "warn",
+            Cause::ConnectionPanicked | Cause::SpawnFailed => "error",
+        },
+        SessionEvent::AdapterRestartAbandoned { .. } => "error",
+        SessionEvent::AuditLegacy { action, detail, .. } => severity(action, detail),
         _ => "info",
     }
 }
@@ -1079,6 +1132,152 @@ fn hostname() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "wirken".into())
+}
+
+#[cfg(test)]
+mod adapter_lifecycle_tests {
+    use super::*;
+    use crate::session_log::{
+        AdapterDisconnectReason as Reason, AdapterRestartCause as Cause, HashHex, SessionEvent,
+        SessionId, StoredSessionEvent, TrustLevel,
+    };
+
+    fn config(target: SiemTarget) -> SiemConfig {
+        SiemConfig {
+            target,
+            endpoint: "http://127.0.0.1:0/x".into(),
+            api_key: String::new(),
+            service: "wirken".into(),
+            environment: "test".into(),
+            hmac_secret: None,
+            sentinel_typed: None,
+            typed_include_variants: None,
+            typed_exclude_variants: None,
+            typed_forwarding_enabled: None,
+            typed_poll_interval_ms: None,
+        }
+    }
+
+    fn restart(cause: Cause) -> SessionEvent {
+        SessionEvent::AdapterRestart {
+            adapter_id: "telegram".into(),
+            channel: "telegram".into(),
+            attempt: 2,
+            cause,
+            exit: "exit status: 3".into(),
+            delay_ms: 2000,
+            connected_for_ms: Some(1500),
+        }
+    }
+
+    /// Every variant, with each reason or cause, and the level it must
+    /// forward at.
+    fn cases() -> Vec<(SessionEvent, &'static str)> {
+        let disconnect = |reason| SessionEvent::AdapterDisconnect {
+            adapter_id: "telegram".into(),
+            channel: "telegram".into(),
+            pubkey_fingerprint: "fp".into(),
+            reason,
+        };
+        vec![
+            (
+                SessionEvent::AdapterConnect {
+                    adapter_id: "telegram".into(),
+                    channel: "telegram".into(),
+                    pubkey_fingerprint: "fp".into(),
+                },
+                "info",
+            ),
+            (disconnect(Reason::Ended), "info"),
+            (disconnect(Reason::Panic), "error"),
+            (restart(Cause::ConnectionEnded), "info"),
+            (restart(Cause::ProcessExited), "warn"),
+            (restart(Cause::SpawnFailed), "error"),
+            (restart(Cause::ConnectionPanicked), "error"),
+            (
+                SessionEvent::AdapterRestartAbandoned {
+                    adapter_id: "telegram".into(),
+                    channel: "telegram".into(),
+                    attempts: 8,
+                    last_cause: Cause::ProcessExited,
+                    last_exit: "exit status: 3".into(),
+                },
+                "error",
+            ),
+        ]
+    }
+
+    fn stored(event: SessionEvent) -> StoredSessionEvent {
+        StoredSessionEvent {
+            id: 1,
+            session_id: SessionId::new(crate::session_log::ADAPTER_LIFECYCLE_SESSION),
+            seq: 0,
+            ts: chrono::Utc::now(),
+            trust: TrustLevel::System,
+            event,
+            leaf_hash: HashHex(String::new()),
+            prev_hash: HashHex(String::new()),
+            hash: HashHex(String::new()),
+        }
+    }
+
+    fn back(value: &serde_json::Value) -> SessionEvent {
+        serde_json::from_value(value.clone()).expect("the event deserializes")
+    }
+
+    #[test]
+    fn each_lifecycle_event_is_forwarded_by_default() {
+        for (event, _) in cases() {
+            assert!(
+                crate::siem_typed::should_forward(&event, &config(SiemTarget::Webhook)),
+                "{event:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn datadog_carries_the_level_and_the_event() {
+        for (event, level) in cases() {
+            let entry =
+                build_datadog_typed_entry(&stored(event.clone()), &config(SiemTarget::Datadog));
+            assert_eq!(entry["status"], level, "{event:?}");
+            assert_eq!(back(&entry["wirken"]["event"]), event);
+        }
+    }
+
+    #[test]
+    fn splunk_carries_the_level_and_the_event() {
+        for (event, level) in cases() {
+            let row = stored(event.clone());
+            let body = build_splunk_typed_body(&[&row]);
+            let hec: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+            assert_eq!(hec["event"]["level"], level, "{event:?}");
+            assert_eq!(back(&hec["event"]["event"]), event);
+        }
+    }
+
+    #[test]
+    fn sentinel_carries_the_level_the_adapter_and_the_event() {
+        for (event, level) in cases() {
+            let row = stored(event.clone());
+            let payload = build_sentinel_typed_payload(&[&row]);
+            assert_eq!(payload[0]["Level"], level, "{event:?}");
+            assert_eq!(payload[0]["AdapterId"], "telegram", "{event:?}");
+            assert_eq!(back(&payload[0]["Event"]), event);
+        }
+    }
+
+    #[test]
+    fn webhook_carries_the_level_and_the_event() {
+        for (event, level) in cases() {
+            let row = stored(event.clone());
+            let (body, _) =
+                build_webhook_typed_request(&[&row], &config(SiemTarget::Webhook)).unwrap();
+            let entries: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(entries[0]["level"], level, "{event:?}");
+            assert_eq!(back(&entries[0]["event"]), event);
+        }
+    }
 }
 
 #[cfg(test)]
