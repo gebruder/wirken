@@ -143,10 +143,15 @@ stops, so the disconnects written at shutdown go out. A deployment with typed
 forwarding on receives the typed events and never this shape. Source:
 `crates/audit/src/siem_legacy_shim.rs`.
 
-`Level` is a new column on the typed Sentinel stream. A DCR whose stream
-declaration predates it does not list it, and Azure Monitor stores only the
-fields a stream declaration lists, so add `Level` (string) to the
-declaration and the table to keep it.
+`Level` is a new column on the typed Sentinel stream. Operators must add
+`Level` (string) to the DCR stream declaration, and to the table, to store
+it. Rows sent to a stream declaration without it are accepted by the API.
+What happens to the undeclared field is unverified (Tier B): Microsoft's
+documentation does not say whether it is dropped or rejected. See the
+[Logs Ingestion API overview](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview),
+[migrating from the HTTP Data Collector API](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/custom-logs-migrate),
+and [monitoring DCR data collection](https://learn.microsoft.com/en-us/azure/azure-monitor/data-collection/data-collection-monitor),
+whose Log Columns Dropped metric counts columns removed in processing.
 
 Sentinel ingestion uses the Logs Ingestion API over a Data Collection Rule.
 The operator configures DCE, DCR and custom table out of band; `api_key` must
