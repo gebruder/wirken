@@ -79,6 +79,14 @@ tagged.
 
 ### Fixed
 
+- `wirken skills install` writes the index entry's
+  `signer_key_delegation` to `SKILL.deleg` beside `SKILL.sig` and
+  `SKILL.pub`, so a skill installed from the registry loads under a
+  configured registry root (strict mode). Before, strict mode refused it
+  for lack of `SKILL.deleg` even when the index carried a valid
+  delegation. An entry without a delegation leaves no `SKILL.deleg`,
+  and its skill is still refused under a root.
+
 - `wirken channel add teams` stores the App ID as `teams-app-id`, and
   `wirken channel add matrix` stores `matrix-homeserver` and
   `matrix-username`, with the names and channel values `wirken setup`

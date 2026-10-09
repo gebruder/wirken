@@ -115,6 +115,20 @@ pub async fn install(name: &str) -> Result<()> {
                 // Write sig/pub files for future local verification
                 std::fs::write(skill_dir.join("SKILL.sig"), sig_hex)?;
                 std::fs::write(skill_dir.join("SKILL.pub"), key_hex)?;
+                // The index's delegation of the signer key goes beside
+                // them, so the skill also loads under a configured
+                // registry root (strict mode), which checks SKILL.deleg.
+                // An entry without one leaves no stale file from an
+                // earlier install.
+                let deleg_path = skill_dir.join("SKILL.deleg");
+                match delegation {
+                    Some(deleg_hex) => std::fs::write(&deleg_path, deleg_hex.trim())?,
+                    None => match std::fs::remove_file(&deleg_path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e.into()),
+                    },
+                }
                 #[allow(
                     clippy::string_slice,
                     reason = "signer is key hex the ASCII-checked decoder accepted as 32 bytes: 64 ASCII chars"

@@ -240,3 +240,53 @@ pub fn run_adapter(adapter: &str, data_dir: &Path, payload: &[u8]) -> (ExitStatu
     };
     (status, reader.join().unwrap())
 }
+
+/// Serve the files under `root` on a loopback port, one request per
+/// connection, for the rest of the test process. A path that names no
+/// file under `root` is answered 404.
+pub fn serve_dir(root: std::path::PathBuf) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                return;
+            };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let path = request_line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("/")
+                .trim_start_matches('/')
+                .to_string();
+            let body = (!path.split('/').any(|c| c.is_empty() || c == ".."))
+                .then(|| root.join(&path))
+                .and_then(|file| std::fs::read(file).ok());
+            let response = match body {
+                Some(body) => {
+                    let mut r = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    r.extend(body);
+                    r
+                }
+                None => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec(),
+            };
+            let _ = stream.write_all(&response);
+        }
+    });
+    base_url
+}
