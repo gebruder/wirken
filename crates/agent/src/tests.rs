@@ -4824,6 +4824,79 @@ async fn mcp_proxy_client_connects_and_reports_no_servers() {
     server_handle.abort();
 }
 
+/// A host-run MCP server answering `initialize` and `tools/list` with
+/// one tool named `tool`, then waiting for end of input.
+#[cfg(unix)]
+fn one_tool_server(tool: &str) -> wirken_mcp_proxy::mcp_config::McpConfig {
+    let script = format!(
+        r#"read a; printf '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"t","version":"1"}}}}}}\n'; read b; read c; printf '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool}","description":"d","inputSchema":{{"type":"object","properties":{{}}}}}}]}}}}\n'; cat >/dev/null"#
+    );
+    serde_json::from_value(serde_json::json!({ "servers": { "srv": {
+        "command": "sh",
+        "args": ["-c", script],
+        "sandbox": "off"
+    }}}))
+    .unwrap()
+}
+
+/// Each turn offers the proxy's current MCP tools, not the list the
+/// agent got when it connected: a server restarted with other tools is
+/// offered with those on the next turn.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_turn_offers_the_tools_the_proxy_has_now() {
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use wirken_mcp_proxy::mcp_registry::ProxyRegistry;
+    use wirken_mcp_proxy::server;
+
+    use crate::identity::AgentIdentity;
+
+    let tmp = TempDir::new().unwrap();
+    let socket_path = tmp.path().join("mcp-proxy.sock");
+    let identity = AgentIdentity::generate("test-agent");
+    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(&identity.public_key_bytes()).unwrap();
+    let vault = Arc::new(std::sync::Mutex::new(None));
+    let mut reg = ProxyRegistry::new();
+    reg.register_identity("test-agent", pubkey);
+    reg.load_agent("test-agent", &one_tool_server("alpha"), vault.clone(), None)
+        .await
+        .unwrap();
+    let registry = Arc::new(Mutex::new(reg));
+    let server_socket = socket_path.clone();
+    let server_registry = registry.clone();
+    let server_handle = tokio::spawn(async move {
+        let _ = server::serve(server_socket, server_registry).await;
+    });
+
+    let mut agent = crate::runtime::Agent::new(
+        "test-agent".into(),
+        tmp.path().to_path_buf(),
+        LlmConfig::ollama("test"),
+        None,
+        None,
+        test_session_log(),
+    )
+    .unwrap();
+    assert_eq!(agent.load_mcp(&socket_path, &identity).await.unwrap(), 1);
+    let names = |defs: Vec<crate::tool::ToolDef>| -> Vec<String> {
+        defs.into_iter().map(|d| d.name).collect()
+    };
+    assert_eq!(names(agent.turn_mcp_defs().await), ["mcp_srv_alpha"]);
+
+    // The server comes back offering another tool.
+    registry
+        .lock()
+        .await
+        .load_agent("test-agent", &one_tool_server("beta"), vault, None)
+        .await
+        .unwrap();
+    assert_eq!(names(agent.turn_mcp_defs().await), ["mcp_srv_beta"]);
+
+    registry.lock().await.shutdown().await;
+    server_handle.abort();
+}
+
 // ---------------------------------------------------------------------------
 // Permission tier labels
 // ---------------------------------------------------------------------------

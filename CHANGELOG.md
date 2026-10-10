@@ -74,6 +74,12 @@ tagged.
   when the proxy stopped the container and `warn` otherwise; a restart
   after an exit is `warn`; a restart after `start_failed` or
   `initialize_failed`, and an abandoned restart, are `error`.
+- Each agent turn asks the MCP proxy for its current tool list, waiting at
+  most two seconds before using the list it had. Before, an agent kept the
+  list it got when it connected, so a server restarted with other tools,
+  or one whose first start failed, was offered stale or not at all. An
+  agent whose servers all failed at start now keeps its proxy connection
+  while a supervisor retries them.
 - When a contained MCP server fails `initialize` or its container exits,
   the proxy logs the last 20 lines it wrote to stderr, read before the
   container is removed. Before, that output went with the container. It

@@ -1118,12 +1118,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                     client.shutdown().await;
                     continue;
                 }
+                // Kept with no tools too: servers still starting under a
+                // supervisor are offered once they are up, since each
+                // turn asks the proxy for its current list.
                 match client.load_tools().await {
-                    Ok(n) if n > 0 => {
+                    Ok(n) => {
                         println!("  MCP: {n} tools for agent:{agent_id}");
                         cfg.mcp_client = Some(Arc::new(tokio::sync::Mutex::new(client)));
                     }
-                    Ok(_) => {}
                     Err(e) => {
                         tracing::warn!("MCP load_tools failed for agent '{agent_id}': {e}");
                     }

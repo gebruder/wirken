@@ -59,6 +59,10 @@ enum InterceptorOutcome {
 /// Cheap insurance against `A → B → A → B → …` cycles.
 const MAX_SUBAGENT_DEPTH: usize = 4;
 
+/// How long a turn waits for the MCP proxy's current tool list before
+/// it goes on with the list from the last answer.
+const MCP_TOOLS_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The built-in tool name for spawning a child agent.
 pub(crate) const SPAWN_SUBAGENT_TOOL: &str = "spawn_subagent";
 
@@ -938,6 +942,32 @@ impl Agent {
         let count = client.load_tools().await?;
         self.mcp = Some(Arc::new(tokio::sync::Mutex::new(client)));
         Ok(count)
+    }
+
+    /// The MCP tools to offer this turn: the proxy's current list, so a
+    /// server its supervisor restarted, or started after this agent
+    /// connected, is offered with the tools it has now. When the proxy
+    /// does not answer within [`MCP_TOOLS_REFRESH_WAIT`], for example
+    /// because another agent's long tool call holds its registry, the
+    /// list from the last answer. An answer that arrives after that is
+    /// skipped by request id on the next call.
+    pub(crate) async fn turn_mcp_defs(&self) -> Vec<crate::tool::ToolDef> {
+        let Some(mcp) = &self.mcp else {
+            return Vec::new();
+        };
+        let mut client = mcp.lock().await;
+        match tokio::time::timeout(MCP_TOOLS_REFRESH_WAIT, client.load_tools()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::debug!(agent_id = %self.id, "MCP tool list not refreshed: {e}");
+            }
+            Err(_) => tracing::debug!(
+                agent_id = %self.id,
+                "MCP tool list not refreshed within {}s; offering the last one",
+                MCP_TOOLS_REFRESH_WAIT.as_secs()
+            ),
+        }
+        client.definitions()
     }
 
     /// Configure the path the `sqlite_query` librarian tool opens.
@@ -2435,13 +2465,9 @@ impl Agent {
             },
         )?;
 
-        // MCP definitions are cached on the proxy client; lock briefly
-        // to read them. The shared Mutex is held only across the
-        // synchronous .definitions() copy, never across an LLM call.
-        let mcp_defs = match &self.mcp {
-            Some(mcp) => mcp.lock().await.definitions(),
-            None => Vec::new(),
-        };
+        // The shared MCP client is locked for one bounded list request,
+        // never across an LLM call.
+        let mcp_defs = self.turn_mcp_defs().await;
 
         let tool_defs = self.build_turn_tool_defs(mcp_defs);
 
@@ -2757,10 +2783,7 @@ impl Agent {
             },
         )?;
 
-        let mcp_defs = match &self.mcp {
-            Some(mcp) => mcp.lock().await.definitions(),
-            None => Vec::new(),
-        };
+        let mcp_defs = self.turn_mcp_defs().await;
 
         let tool_defs = self.build_turn_tool_defs(mcp_defs);
 

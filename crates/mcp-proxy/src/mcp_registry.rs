@@ -104,6 +104,8 @@ pub struct ProxyRegistry {
     sandbox: SandboxHost,
     /// Contained servers loaded and not yet handed to a supervisor.
     pending: Vec<Pending>,
+    /// Agents with a server under supervision, running or not.
+    supervised_agents: std::collections::HashSet<String>,
     /// Where shutdown records the containers it stopped.
     audit: Option<Arc<dyn SessionLog>>,
 }
@@ -117,6 +119,7 @@ impl ProxyRegistry {
             oauth_refresh_locks: HashMap::new(),
             sandbox: SandboxHost::unavailable(),
             pending: Vec::new(),
+            supervised_agents: Default::default(),
             audit: None,
         }
     }
@@ -303,6 +306,7 @@ impl ProxyRegistry {
                         }
                     };
                     if let (Some(sandbox), Some(first)) = (contained, first) {
+                        self.supervised_agents.insert(agent_id.to_string());
                         self.pending.push(Pending {
                             agent_id: agent_id.to_string(),
                             server: name.clone(),
@@ -397,9 +401,12 @@ impl ProxyRegistry {
         self.by_agent.get_mut(agent_id)?.remove(server)
     }
 
-    /// Whether an agent has any MCP servers loaded.
+    /// Whether an agent has MCP servers: loaded now, or under a
+    /// supervisor that may start them later. An agent whose servers all
+    /// failed at load keeps its proxy connection on this, so the tools a
+    /// restart brings are offered on its next turn.
     pub fn has_agent(&self, agent_id: &str) -> bool {
-        self.by_agent.contains_key(agent_id)
+        self.by_agent.contains_key(agent_id) || self.supervised_agents.contains(agent_id)
     }
 
     /// Tool definitions for one agent. Empty if the agent has no servers.
@@ -987,6 +994,22 @@ mod start_tests {
     }
 
     #[tokio::test]
+    async fn an_agent_whose_servers_were_all_refused_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: McpConfig = serde_json::from_value(serde_json::json!({ "servers": { "srv": {
+            "command": "/bin/true"
+        }}}))
+        .unwrap();
+        let mut registry = ProxyRegistry::new().with_sandbox(host(dir.path(), None));
+        registry
+            .load_agent("agent-1", &config, no_vault(), None)
+            .await
+            .unwrap();
+        assert!(registry.take_pending().is_empty());
+        assert!(!registry.has_agent("agent-1"));
+    }
+
+    #[tokio::test]
     async fn sandbox_off_starts_on_the_host_and_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let (_, events) = load(
@@ -1052,6 +1075,9 @@ mod start_tests {
             .unwrap();
         let pending = registry.take_pending();
         assert_eq!(loaded, 0);
+        // Nothing runs, but a supervisor will retry, so the agent keeps
+        // its proxy connection for the tools a restart brings.
+        assert!(registry.has_agent("agent-1"));
         let failure = pending[0].first.as_ref().unwrap_err();
         assert_eq!(failure.cause, McpServerRestartCause::InitializeFailed);
         assert_eq!(failure.output.as_deref(), Some("boom: API_URL is not set"));
