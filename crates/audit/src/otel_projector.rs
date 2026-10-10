@@ -549,6 +549,10 @@ impl OtelProjector {
             // What a server started with; no span to attach it to.
             SessionEvent::McpServerSandboxed { .. } => Vec::new(),
             SessionEvent::McpServerUnsandboxed { .. } => Vec::new(),
+            // Server lifecycle in the proxy; no span to attach it to.
+            SessionEvent::McpServerExited { .. } => Vec::new(),
+            SessionEvent::McpServerRestart { .. } => Vec::new(),
+            SessionEvent::McpServerRestartAbandoned { .. } => Vec::new(),
             // Rides the tool result the tool span times.
             SessionEvent::EgressHookDispatched { .. } => Vec::new(),
             // Rides the tool result the tool span times.

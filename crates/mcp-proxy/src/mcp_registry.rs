@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::VerifyingKey;
-use wirken_audit::{SessionEvent, SessionId, SessionLog, TrustLevel};
+use wirken_audit::{McpServerRestartCause, SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
@@ -32,6 +32,7 @@ use crate::mcp_client::{McpClient, McpToolResult};
 use crate::mcp_config::{McpAuth, McpConfig, McpServerConfig, StdioSandbox};
 use crate::mcp_signing::{McpVerifyResult, bundled_mcp_pubkey, verify_mcp_entry};
 use crate::mcp_transport::{HttpTransport, StdioTransport, Transport};
+use crate::supervise::{Failure, Pending};
 use crate::wire::ToolDefWire;
 
 /// Sentinel session id for cross-cutting MCP load-time events.
@@ -101,6 +102,8 @@ pub struct ProxyRegistry {
     oauth_refresh_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
     /// Where stdio servers with a `sandbox` block are contained.
     sandbox: SandboxHost,
+    /// Contained servers loaded and not yet handed to a supervisor.
+    pending: Vec<Pending>,
 }
 
 impl ProxyRegistry {
@@ -111,6 +114,7 @@ impl ProxyRegistry {
             identities: HashMap::new(),
             oauth_refresh_locks: HashMap::new(),
             sandbox: SandboxHost::unavailable(),
+            pending: Vec::new(),
         }
     }
 
@@ -232,18 +236,34 @@ impl ProxyRegistry {
                         audit,
                     )
                     .await;
-                    match spawned {
+                    // A contained server is supervised from here,
+                    // whether this first run started or not, unless it
+                    // was refused: that waits on the operator.
+                    let contained = match sandbox.as_deref() {
+                        Some(StdioSandbox::Container(_)) => sandbox.as_deref().cloned(),
+                        _ => None,
+                    };
+                    let first: Option<Result<String, Failure>> = match spawned {
                         Ok(stdio) => {
+                            let container_id = stdio.container_id().map(str::to_string);
                             let mut client =
                                 McpClient::new(name.clone(), Transport::Stdio(Box::new(stdio)));
-                            if let Err(e) = init_and_list(&mut client, agent_id).await {
-                                tracing::warn!(
-                                    "MCP stdio server '{name}' (agent '{agent_id}') skipped: {e}"
-                                );
-                                client.shutdown().await;
-                                continue;
+                            match init_and_list(&mut client, agent_id).await {
+                                Ok(()) => {
+                                    clients.insert(name.clone(), client);
+                                    container_id.map(Ok)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "MCP stdio server '{name}' (agent '{agent_id}') skipped: {e}"
+                                    );
+                                    client.shutdown().await;
+                                    Some(Err(Failure {
+                                        cause: McpServerRestartCause::InitializeFailed,
+                                        detail: e.to_string(),
+                                    }))
+                                }
                             }
-                            clients.insert(name.clone(), client);
                         }
                         Err(StartError::Refused { reason, why }) => {
                             tracing::warn!(
@@ -259,12 +279,29 @@ impl ProxyRegistry {
                                     reason: reason.to_string(),
                                 },
                             );
+                            None
                         }
                         Err(StartError::Failed(e)) => {
                             tracing::warn!(
                                 "MCP server '{name}' (agent '{agent_id}') spawn failed: {e}"
                             );
+                            Some(Err(Failure {
+                                cause: McpServerRestartCause::StartFailed,
+                                detail: e.to_string(),
+                            }))
                         }
+                    };
+                    if let (Some(sandbox), Some(first)) = (contained, first) {
+                        self.pending.push(Pending {
+                            agent_id: agent_id.to_string(),
+                            server: name.clone(),
+                            command: command.clone(),
+                            args: args.clone(),
+                            env: env.clone(),
+                            sandbox,
+                            host: self.sandbox.clone(),
+                            first,
+                        });
                     }
                 }
                 McpServerConfig::Http { url, auth, .. } => {
@@ -311,23 +348,42 @@ impl ProxyRegistry {
         }
 
         let count = clients.len();
+        // Every configured server's costs, not only the ones that
+        // started: a server a supervisor starts later is gated the same.
+        let costs: HashMap<String, HashMap<String, u64>> = config
+            .servers
+            .iter()
+            .map(|(server, c)| (server.clone(), c.tool_costs().clone()))
+            .filter(|(_, m)| !m.is_empty())
+            .collect();
+        if !costs.is_empty() {
+            self.costs_by_agent.insert(agent_id.to_string(), costs);
+        }
         if !clients.is_empty() {
-            let costs: HashMap<String, HashMap<String, u64>> = clients
-                .keys()
-                .filter_map(|server| {
-                    config
-                        .servers
-                        .get(server)
-                        .map(|c| (server.clone(), c.tool_costs().clone()))
-                })
-                .filter(|(_, m)| !m.is_empty())
-                .collect();
-            if !costs.is_empty() {
-                self.costs_by_agent.insert(agent_id.to_string(), costs);
-            }
             self.by_agent.insert(agent_id.to_string(), clients);
         }
         Ok(count)
+    }
+
+    /// The contained servers loaded so far, for [`Supervisors`] to
+    /// take over.
+    ///
+    /// [`Supervisors`]: crate::supervise::Supervisors
+    pub(crate) fn take_pending(&mut self) -> Vec<Pending> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Put a started server's client in place, replacing any before it.
+    pub(crate) fn install(&mut self, agent_id: &str, server: &str, client: McpClient) {
+        self.by_agent
+            .entry(agent_id.to_string())
+            .or_default()
+            .insert(server.to_string(), client);
+    }
+
+    /// Take a server's client out, to stop it.
+    pub(crate) fn take(&mut self, agent_id: &str, server: &str) -> Option<McpClient> {
+        self.by_agent.get_mut(agent_id)?.remove(server)
     }
 
     /// Whether an agent has any MCP servers loaded.
@@ -415,7 +471,7 @@ impl Default for ProxyRegistry {
 }
 
 /// Append `event` to the `gateway-mcp` session, when there is a log.
-fn record(audit: Option<&Arc<dyn SessionLog>>, event: SessionEvent) {
+pub(crate) fn record(audit: Option<&Arc<dyn SessionLog>>, event: SessionEvent) {
     let Some(log) = audit else {
         return;
     };
@@ -582,7 +638,10 @@ pub(crate) async fn start_stdio(
     Ok(transport)
 }
 
-async fn init_and_list(client: &mut McpClient, agent_id: &str) -> Result<(), ProxyError> {
+pub(crate) async fn init_and_list(
+    client: &mut McpClient,
+    agent_id: &str,
+) -> Result<(), ProxyError> {
     client.initialize().await?;
     let tools = client.list_tools().await?;
     tracing::info!(
@@ -668,7 +727,7 @@ fn pre_spawn_verify(
 /// the literal string `vault:NAME` and a warning is logged — the MCP
 /// server will most likely fail to authenticate, which is the right
 /// failure mode (loud, traceable).
-fn resolve_env(
+pub(crate) fn resolve_env(
     env: &HashMap<String, String>,
     vault: Option<&ScopedCredentialStore>,
 ) -> HashMap<String, String> {

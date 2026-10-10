@@ -4302,6 +4302,9 @@ pub fn session_events(
             // connectors.
             SessionEvent::McpServerSandboxed { .. } => None,
             SessionEvent::McpServerUnsandboxed { .. } => None,
+            SessionEvent::McpServerExited { .. } => None,
+            SessionEvent::McpServerRestart { .. } => None,
+            SessionEvent::McpServerRestartAbandoned { .. } => None,
             // The verdict rides the tool row it gated.
             SessionEvent::EgressHookDispatched { .. } => None,
             // The tool row already carries the output as redacted.

@@ -1827,6 +1827,43 @@ pub enum SessionEvent {
         server_name: String,
         agent_id: String,
     },
+    /// A contained stdio MCP server's container exited on its own,
+    /// after it had started and answered `initialize`. The proxy
+    /// restarts it; see [`SessionEvent::McpServerRestart`].
+    McpServerExited {
+        server_name: String,
+        agent_id: String,
+        container_id: String,
+        /// The container's exit code, absent when the runtime gave none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i64>,
+    },
+    /// The proxy is starting a contained stdio MCP server again after
+    /// `cause`, in `delay_ms`. `attempt` counts restarts since the
+    /// server last stayed up long enough to reset the backoff.
+    /// `ran_for_ms` is how long the run that ended was up after
+    /// `initialize`, absent when it never got that far.
+    McpServerRestart {
+        server_name: String,
+        agent_id: String,
+        attempt: u64,
+        cause: McpServerRestartCause,
+        /// The exit code, or why the start failed.
+        detail: String,
+        delay_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ran_for_ms: Option<u64>,
+    },
+    /// The proxy stopped restarting a contained stdio MCP server after
+    /// `attempts` runs in a row that never completed `initialize`. Only
+    /// a restart of the gateway starts it again.
+    McpServerRestartAbandoned {
+        server_name: String,
+        agent_id: String,
+        attempts: u32,
+        last_cause: McpServerRestartCause,
+        last_detail: String,
+    },
     /// One egress-hook invocation completed. Emitted per hook per
     /// tool result in registration order (parallel to
     /// `HookDispatched` on the veto path). The invocation runs
@@ -2159,6 +2196,30 @@ pub enum AdapterDisconnectReason {
     Ended,
     /// The connection's message loop panicked.
     Panic,
+}
+
+/// Why the MCP proxy restarted a contained stdio server.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerRestartCause {
+    /// The container exited after the server had answered `initialize`.
+    Exited,
+    /// The container could not be started.
+    StartFailed,
+    /// The container started and the server did not answer
+    /// `initialize` and `tools/list`.
+    InitializeFailed,
+}
+
+impl McpServerRestartCause {
+    /// The wire name, as the proxy's log lines print it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exited => "exited",
+            Self::StartFailed => "start_failed",
+            Self::InitializeFailed => "initialize_failed",
+        }
+    }
 }
 
 /// Why the gateway restarted an adapter process.

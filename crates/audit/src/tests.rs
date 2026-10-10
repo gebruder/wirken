@@ -3621,6 +3621,28 @@ fn every_session_event() -> Vec<SessionEvent> {
             server_name: String::new(),
             agent_id: String::new(),
         },
+        SessionEvent::McpServerExited {
+            server_name: String::new(),
+            agent_id: String::new(),
+            container_id: String::new(),
+            exit_code: None,
+        },
+        SessionEvent::McpServerRestart {
+            server_name: String::new(),
+            agent_id: String::new(),
+            attempt: 0,
+            cause: crate::session_log::McpServerRestartCause::Exited,
+            detail: String::new(),
+            delay_ms: 0,
+            ran_for_ms: None,
+        },
+        SessionEvent::McpServerRestartAbandoned {
+            server_name: String::new(),
+            agent_id: String::new(),
+            attempts: 0,
+            last_cause: crate::session_log::McpServerRestartCause::StartFailed,
+            last_detail: String::new(),
+        },
         SessionEvent::AdapterConnect {
             adapter_id: String::new(),
             channel: String::new(),
@@ -3719,12 +3741,15 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::McpEntryRefused { .. } => "McpEntryRefused",
         SessionEvent::McpServerSandboxed { .. } => "McpServerSandboxed",
         SessionEvent::McpServerUnsandboxed { .. } => "McpServerUnsandboxed",
+        SessionEvent::McpServerExited { .. } => "McpServerExited",
+        SessionEvent::McpServerRestart { .. } => "McpServerRestart",
+        SessionEvent::McpServerRestartAbandoned { .. } => "McpServerRestartAbandoned",
         SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
     }
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 62;
+const SESSION_EVENT_VARIANTS: usize = 65;
 
 /// The list covers the enum.
 #[test]

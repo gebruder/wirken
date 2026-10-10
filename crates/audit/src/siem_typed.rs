@@ -69,6 +69,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   and sandbox posture on the `gateway-mcp` sentinel session.
 /// - `McpServerSandboxed`, `McpServerUnsandboxed`: what each stdio MCP
 ///   server started with, contained or on the host.
+/// - `McpServerExited`, `McpServerRestart`, `McpServerRestartAbandoned`:
+///   a contained server's container exiting, being started again, and
+///   being given up on.
 /// - `EgressHookDispatched`, `ToolOutputRedacted`: post-execution
 ///   egress-hook outcomes and redaction events. Plaintext is never
 ///   on the row; both carry sha256 hashes only.
@@ -131,6 +134,9 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::McpEntryRefused { .. } => true,
         SessionEvent::McpServerSandboxed { .. } => true,
         SessionEvent::McpServerUnsandboxed { .. } => true,
+        SessionEvent::McpServerExited { .. } => true,
+        SessionEvent::McpServerRestart { .. } => true,
+        SessionEvent::McpServerRestartAbandoned { .. } => true,
         SessionEvent::EgressHookDispatched { .. } => true,
         SessionEvent::ToolOutputRedacted { .. } => true,
         SessionEvent::BudgetExceeded { .. } => true,
@@ -290,6 +296,9 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::McpEntryRefused { .. } => "mcp_entry_refused",
         SessionEvent::McpServerSandboxed { .. } => "mcp_server_sandboxed",
         SessionEvent::McpServerUnsandboxed { .. } => "mcp_server_unsandboxed",
+        SessionEvent::McpServerExited { .. } => "mcp_server_exited",
+        SessionEvent::McpServerRestart { .. } => "mcp_server_restart",
+        SessionEvent::McpServerRestartAbandoned { .. } => "mcp_server_restart_abandoned",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
         SessionEvent::SandboxEgressVerdict { .. } => "sandbox_egress_verdict",
         SessionEvent::SandboxEgressUnsupported { .. } => "sandbox_egress_unsupported",

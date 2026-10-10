@@ -22,6 +22,7 @@ pub mod mcp_signing;
 pub mod mcp_transport;
 pub mod oauth;
 pub mod server;
+pub mod supervise;
 pub mod tool_error;
 pub mod wire;
 

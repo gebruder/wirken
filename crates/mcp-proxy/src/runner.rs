@@ -160,9 +160,14 @@ pub async fn run() -> Result<(), ProxyError> {
 
     let registry = Arc::new(Mutex::new(registry));
 
+    // Contained servers are restarted when their containers exit.
+    let supervisors =
+        crate::supervise::Supervisors::start(registry.clone(), vault.clone(), audit.clone()).await;
+
     // Serve until the socket fails or the proxy is told to stop, then
     // stop every server: host children are killed, containers stopped
-    // and removed.
+    // and removed. Supervision stops first, so the containers stopping
+    // are not taken for exits to restart from.
     let served = tokio::select! {
         result = server::serve(socket_path, registry.clone()) => result,
         () = shutdown_signal() => {
@@ -170,6 +175,7 @@ pub async fn run() -> Result<(), ProxyError> {
             Ok(())
         }
     };
+    supervisors.stop().await;
     registry.lock().await.shutdown().await;
     served
 }

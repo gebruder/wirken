@@ -866,7 +866,10 @@ fn extract_identity_for_sentinel(
         SessionEvent::McpEntryRefused { .. } => (None, None, None),
         // A server started for one agent; no adapter or sender.
         SessionEvent::McpServerSandboxed { agent_id, .. }
-        | SessionEvent::McpServerUnsandboxed { agent_id, .. } => {
+        | SessionEvent::McpServerUnsandboxed { agent_id, .. }
+        | SessionEvent::McpServerExited { agent_id, .. }
+        | SessionEvent::McpServerRestart { agent_id, .. }
+        | SessionEvent::McpServerRestartAbandoned { agent_id, .. } => {
             (None, None, Some(agent_id.clone()))
         }
     }
@@ -1089,6 +1092,30 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpServerUnsandboxed { server_name, .. } => {
             format!("mcp_server_unsandboxed server={server_name}")
         }
+        SessionEvent::McpServerExited {
+            server_name,
+            exit_code,
+            ..
+        } => format!("mcp_server_exited server={server_name} exit_code={exit_code:?}"),
+        SessionEvent::McpServerRestart {
+            server_name,
+            attempt,
+            cause,
+            delay_ms,
+            ..
+        } => format!(
+            "mcp_server_restart server={server_name} attempt={attempt} cause={} delay_ms={delay_ms}",
+            cause.as_str()
+        ),
+        SessionEvent::McpServerRestartAbandoned {
+            server_name,
+            attempts,
+            last_cause,
+            ..
+        } => format!(
+            "mcp_server_restart_abandoned server={server_name} attempts={attempts} last_cause={}",
+            last_cause.as_str()
+        ),
         // A hook id, a tool and an egress decision.
         SessionEvent::EgressHookDispatched { .. } => debug_summary(event),
         // A call id, a hook id and the two sizes.
@@ -1149,7 +1176,8 @@ fn severity(action: &str, _detail: &serde_json::Value) -> &'static str {
 /// other typed event is `info`.
 pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static str {
     use crate::session_log::{
-        AdapterDisconnectReason as Reason, AdapterRestartCause as Cause, SessionEvent,
+        AdapterDisconnectReason as Reason, AdapterRestartCause as Cause,
+        McpServerRestartCause as McpCause, SessionEvent,
     };
     match event {
         SessionEvent::AdapterConnect { .. } => "info",
@@ -1163,6 +1191,12 @@ pub(crate) fn typed_level(event: &crate::session_log::SessionEvent) -> &'static 
             Cause::ConnectionPanicked | Cause::SpawnFailed => "error",
         },
         SessionEvent::AdapterRestartAbandoned { .. } => "error",
+        SessionEvent::McpServerExited { .. } => "warn",
+        SessionEvent::McpServerRestart { cause, .. } => match cause {
+            McpCause::Exited => "warn",
+            McpCause::StartFailed | McpCause::InitializeFailed => "error",
+        },
+        SessionEvent::McpServerRestartAbandoned { .. } => "error",
         SessionEvent::AuditLegacy { action, detail, .. } => severity(action, detail),
         _ => "info",
     }
@@ -2066,6 +2100,43 @@ mod identity_tests {
                 SessionEvent::McpServerUnsandboxed {
                     server_name: "github".into(),
                     agent_id: agent(),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::McpServerExited {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                    container_id: "c".into(),
+                    exit_code: Some(1),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::McpServerRestart {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                    attempt: 1,
+                    cause: crate::McpServerRestartCause::Exited,
+                    detail: "exit code 1".into(),
+                    delay_ms: 1000,
+                    ran_for_ms: Some(5),
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::McpServerRestartAbandoned {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                    attempts: 8,
+                    last_cause: crate::McpServerRestartCause::StartFailed,
+                    last_detail: "image gone".into(),
                 },
                 None,
                 None,
