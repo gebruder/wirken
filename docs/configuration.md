@@ -193,20 +193,36 @@ gap: [cost-monitoring.md](cost-monitoring.md#enforcement).
 
 ## mcp.json
 
+Install the server first, then give its entry a `sandbox` block naming the
+image it runs in:
+
+```bash
+npm install --prefix ~/.wirken/mcp/filesystem @modelcontextprotocol/server-filesystem
+docker pull node:22-slim
+```
+
 ```json
 {
     "servers": {
-        "github": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
-            "env": { "GITHUB_TOKEN": "vault:github-token" }
+        "filesystem": {
+            "command": "/opt/mcp/node_modules/.bin/mcp-server-filesystem",
+            "args": ["/projects"],
+            "sandbox": {
+                "image": "node:22-slim",
+                "install_dir": "/home/user/.wirken/mcp/filesystem",
+                "mounts": [{ "source": "/home/user/projects", "target": "/projects" }]
+            }
         }
     }
 }
 ```
 
-The `vault:` prefix resolves values from the encrypted vault at runtime. See
-[mcp.md](mcp.md).
+Each stdio server runs in its own container with no network unless
+`sandbox.egress.hosts` lists hosts. An entry with no `sandbox` block is
+refused; `"sandbox": "off"` runs that one server on the host instead. A
+`vault:` value in `env` resolves from the encrypted vault and reaches the
+server as a file, `NAME_FILE`, unless `sandbox.secrets_in_env` lists the
+variable. See [mcp.md](mcp.md).
 
 ## Environment variables
 

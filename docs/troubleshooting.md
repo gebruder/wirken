@@ -117,17 +117,29 @@ wirken setup
 
 ## MCP server won't start
 
-**"spawn 'npx': No such file or directory"**
+**"MCP server '<name>' (agent '<id>') not started: a stdio server needs a sandbox block"**
 
-Node.js is not installed or not in PATH. Install Node.js 18+ and ensure `npx` is available.
+The entry predates contained MCP servers, or was written without a `sandbox` block. Add one naming the image the server runs in, with the server installed beforehand into an `install_dir`, or set `"sandbox": "off"` to run it on the host; then re-sign the entry if it is signed (`wirken mcp sign <name>`). `wirken mcp verify` and `wirken doctor` list every entry in this state. See [mcp.md](mcp.md#when-a-server-is-not-started) for the other refusal reasons, each recorded as an `mcp_entry_refused` row:
+
+```bash
+wirken audit log --action mcp_entry_refused -n 5 --format json
+```
+
+**"image <ref> is not on this host and the proxy does not pull"**
+
+Pull it: `docker pull <ref>`, then restart `wirken run`.
+
+**"MCP server '<name>' ended 8 runs in a row without completing initialize ... it is no longer restarted"**
+
+The server's container started and exited, or never answered `initialize`, eight times in a row. The `mcp_server_restart` rows carry each cause and exit code, and `docker logs` is no help once the container is removed, so run the image by hand with the entry's command to see its output:
+
+```bash
+docker run --rm -i --entrypoint <command> <image> <args>
+```
 
 **"MCP server timed out after 30s"**
 
-The server didn't respond to the `initialize` handshake within 30 seconds. Check that the command runs successfully on its own:
-
-```bash
-npx -y @modelcontextprotocol/server-filesystem /tmp
-```
+The server didn't respond to the `initialize` handshake within 30 seconds. Check that the command runs on its own, as above, and that it reads JSON-RPC on stdin and writes it on stdout.
 
 ## SIEM forwarding
 

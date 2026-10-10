@@ -150,7 +150,7 @@ impl Supervisors {
         Self { stop, tasks }
     }
 
-    /// Stop supervising. A start under way gets [`STOP_GRACE`] to finish
+    /// Stop supervising. A start under way gets five seconds to finish
     /// and leave its client in the registry, where the registry's own
     /// shutdown stops it.
     pub async fn stop(mut self) {

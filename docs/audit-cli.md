@@ -35,11 +35,13 @@ adapter handshake records). Variants are serde-tagged with `kind =
 | `permission_revoked` | `agent_id` | An operator removed a grant. Carries `revoked_by` and the `tier` and `expires_at` the row held. |
 | `permission_approval_refused` | `adapter_id` | A decision arrived from a caller the gate would not take it from. Carries `request_id`, `caller` and `reason`; see [permissions](permissions-and-identity.md#what-the-chain-records-about-a-grant). |
 | `skill_permission_denied` | `agent_id` | A per-skill profile denied an axis. |
-| `sandbox_egress_verdict` / `sandbox_egress_unsupported` | `agent_id`, `channel`, `adapter_id`, `sender_id` | One row per sandbox egress request, allowed or not. See [egress](egress.md#audit). |
+| `sandbox_egress_verdict` / `sandbox_egress_unsupported` | `agent_id`, `channel`, `adapter_id`, `sender_id`, `mcp_server` | One row per sandbox egress request, allowed or not, from an `exec` or a contained MCP server. See [egress](egress.md#audit). |
 | `subagent_spawned` / `subagent_session_bound` / `subagent_result` | `agent_id`, `child_agent_id` | Sub-agent lifecycle under capability-attenuated ceilings. |
 | `phase_entered` / `phase_exited` | `skill_id` | Skill-declared phase overlays. See [skills](skills.md#phase-boundaries). |
 | `hook_dispatched` / `egress_hook_dispatched` / `tool_output_redacted` | `hook_id`, `agent_id` | Operator hook outcomes. See [enforcement model](enforcement-model.md#veto-and-egress-hooks). |
-| `mcp_entry_verified` / `mcp_entry_refused` | `server_name`, `signer` | MCP entry signature check, on the `gateway-mcp` sentinel session. |
+| `mcp_entry_verified` / `mcp_entry_refused` | `server_name`, `signer` | MCP entry signature check, and the stdio sandbox's refusals, on the `gateway-mcp` sentinel session. See [mcp](mcp.md#when-a-server-is-not-started). |
+| `mcp_server_sandboxed` / `mcp_server_unsandboxed` | `server_name`, `agent_id` | How a stdio MCP server started: in its container, with what it was given, or on the host. See [mcp](mcp.md#signing-mcp-entries). |
+| `mcp_server_exited` / `mcp_server_restart` / `mcp_server_restart_abandoned` | `server_name`, `agent_id` | A contained MCP server's container exiting and being restarted. See [mcp](mcp.md#restarts). |
 | `memory_entry_written` / `cross_channel_memory_read` | `agent_id` | Memory provenance and trust-zone crossings. |
 | `import_started` / `import_completed` / `imported_chat_read` / `imported_chat_searched` | `agent_id` | Archive imports and gated reads. See [imported archives](imported-archives.md). |
 | `compaction` | `agent_id`, `provider`, `model` | Context engine trimmed the conversation. |

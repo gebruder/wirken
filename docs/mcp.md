@@ -2,132 +2,186 @@
 
 Wirken includes an MCP (Model Context Protocol) client. MCP servers expose tools, resources, and prompts that the agent can use alongside its built-in tools.
 
+A stdio MCP server runs in a container of its own, under the same hardening as the `exec` sandbox. It is installed beforehand, nothing is fetched when it starts, and it has no network unless its entry lists the hosts it may reach. Stdio servers therefore need Docker, or a per-server opt-out that runs them on the host.
+
 ## Configuration
 
-Create `~/.wirken/mcp.json`:
+Install the server into a directory of its own, and pull the image it runs in:
+
+```bash
+mkdir -p ~/.wirken/mcp/filesystem
+npm install --prefix ~/.wirken/mcp/filesystem @modelcontextprotocol/server-filesystem
+docker pull node:22-slim
+```
+
+Then add it to `~/.wirken/mcp.json`:
 
 ```json
 {
     "servers": {
         "filesystem": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"],
-            "env": {}
+            "command": "/opt/mcp/node_modules/.bin/mcp-server-filesystem",
+            "args": ["/projects"],
+            "sandbox": {
+                "image": "node:22-slim",
+                "install_dir": "/home/user/.wirken/mcp/filesystem",
+                "mounts": [
+                    { "source": "/home/user/projects", "target": "/projects" }
+                ]
+            }
         }
     }
 }
 ```
 
-Each server entry specifies a command to spawn. Wirken communicates with the server over stdin/stdout using JSON-RPC 2.0.
+`install_dir` is mounted read-only at `/opt/mcp`, which is also the working directory. `command` and `args` run as the container's entrypoint, so the image's own entrypoint is not used. Wirken talks to the server over its stdin and stdout using JSON-RPC 2.0.
+
+If the entry is signed, re-sign it after any change to it, the `sandbox` block included: `wirken mcp sign filesystem`.
+
+### The `sandbox` block
+
+| Field | Default | Meaning |
+|---|---|---|
+| `image` | required | Image the server runs in. Pull it first; the proxy does not. A digest-pinned reference (`node:22-slim@sha256:...`) fixes what runs. |
+| `install_dir` | none | Absolute host path, mounted read-only at `/opt/mcp`. |
+| `mounts` | none | `{ "source", "target", "writable" }`. Read-only unless `writable` is `true`. `source` must be an absolute path that exists. `target` must be absolute, and may not be, or sit under, `/opt/mcp`, `/scratch`, `/run/wirken-secrets`, `/tmp`, `/proc`, `/sys` or `/dev`. |
+| `scratch` | `false` | A writable directory at `/scratch`, kept on the host at `~/.wirken/mcp-scratch/<agent>/<server>`. |
+| `egress.hosts` | none | Domain names the server may reach over HTTP(S). Empty or absent means no network. See [Network](#network). |
+| `limits` | 512 MB, 256 processes, 1 CPU | `memory_mb`, `pids`, `cpus`. Each one given replaces its default; there is no ceiling. |
+| `secrets_in_env` | none | `vault:` variables to deliver in the environment instead of as files. See [Using vault secrets](#using-vault-secrets-in-mcp-config). |
+
+Every container also gets: all Linux capabilities dropped, `no-new-privileges`, Docker's default seccomp profile, a read-only root with a 64 MB tmpfs at `/tmp`, and the operator's own uid and gid (container uid 0 under a rootless runtime, which is the operator). `sandbox.json`'s `mode` chooses the runtime: `gvisor` runs servers under `runsc`, anything else under Docker's default. `"mode": "off"` turns off the `exec` sandbox only. It does not run MCP servers on the host.
+
+### Running one server on the host
+
+`"sandbox": "off"` runs that one server as a child process of the proxy, outside any container, with the trust model described under [`"sandbox": "off"`](#sandbox-off) below. It needs no container runtime. Every start logs a warning and writes `mcp_server_unsandboxed` to the audit chain.
+
+```json
+"legacy-tool": { "command": "/usr/local/bin/legacy-mcp", "sandbox": "off" }
+```
+
+### When a server is not started
+
+The proxy refuses a stdio server, logs why and what to change, and writes `mcp_entry_refused` with one of these reasons:
+
+| Reason | When |
+|---|---|
+| `sandbox_config_invalid` | No `sandbox` block. A block with no `image`. A path that is not absolute or does not exist. A reserved or repeated mount target. A limit of zero. An `egress.hosts` entry that is not a domain name. A `secrets_in_env` name that is not a `vault:` variable. |
+| `sandbox_unavailable` | No container runtime answers. A secret has to be delivered as a file and the host has no memory-backed directory for it. The egress sidecar's binary is missing. |
+| `image_unavailable` | The image is not on the host. |
+| `egress_unsupported_runtime` | `egress.hosts` is set and the runtime is rootless Docker, Podman, or Windows. |
+
+A refused server is not retried; fix the entry or the host and restart the gateway. `wirken mcp verify` and `wirken doctor` both name stdio entries that will be refused for want of a `sandbox` block, before the gateway starts.
+
+**Entries from before this release** have no `sandbox` block and are refused with `sandbox_config_invalid`. There is no silent fallback to the host. Either add a block naming the server's image (and an `install_dir` in place of `npx -y`), or set `"sandbox": "off"`; then re-sign the entry if it is signed.
 
 ## Using vault secrets in MCP config
 
-Prefix environment variable values with `vault:` to resolve them from the encrypted credential vault:
+Prefix an `env` value with `vault:` to resolve it from the encrypted credential vault. The vault entry must already exist. Vault entries are populated by `wirken setup` (provider API key), `wirken channel add` (per-channel tokens), and `wirken credentials add NAME`, which stores an arbitrary secret under `NAME` for reference as `vault:NAME` in `mcp.json`.
+
+By default a `vault:` value is delivered as a file, not as an environment variable. `TOKEN` becomes `TOKEN_FILE=/run/wirken-secrets/TOKEN`, pointing at a file readable only by the server's uid, in a memory-backed host directory (`$XDG_RUNTIME_DIR`, else `/dev/shm`) mounted read-only. The value is in no process environment and in no container configuration. The file is removed when the server stops.
+
+A server that reads its credential only from its environment needs the variable listed in `secrets_in_env`. The value is then in the container's environment, where the server's own processes and anyone with access to the Docker socket (`docker inspect`) can read it. The `mcp_server_sandboxed` row names every variable delivered this way.
+
+The official GitHub server is one such server. It reads its token from the environment and reaches the GitHub API:
+
+```bash
+docker pull ghcr.io/github/github-mcp-server
+```
 
 ```json
 {
     "servers": {
         "github": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
+            "command": "/server/github-mcp-server",
+            "args": ["stdio"],
             "env": {
-                "GITHUB_TOKEN": "vault:github-token"
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "vault:github-token"
+            },
+            "sandbox": {
+                "image": "ghcr.io/github/github-mcp-server",
+                "egress": { "hosts": ["api.github.com"] },
+                "secrets_in_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
             }
         }
     }
 }
 ```
 
-The vault entry referenced by `vault:github-token` must already exist. Vault entries are populated by `wirken setup` (provider API key), `wirken channel add` (per-channel tokens), and `wirken credentials add NAME`, which stores an arbitrary secret under `NAME` for reference as `vault:NAME` in `mcp.json`. An MCP server can also read a credential from a regular environment variable in the `env` block instead.
+## Network
+
+A server with no `egress.hosts` runs with `--network none`.
+
+A server that lists hosts gets the route `exec` gets under an allowlist ([egress.md](egress.md#sandbox-egress)): an internal network it shares only with its own egress sidecar, which is its `HTTP_PROXY` and `HTTPS_PROXY`, and a decision broker in `wirken-mcp-proxy`. For every request the broker checks the target against the listed hosts, resolves the name itself, and drops any address outside global unicast. Each verdict, allowed or not, is a `sandbox_egress_verdict` row naming the agent and the server (`mcp_server`).
+
+- An entry is a domain name, `*.` and a domain name (one label under it), or `*` for any domain name.
+- CONNECT to port 443 and plain HTTP to port 80 are the only requests forwarded. IP-address targets are refused whatever the list says.
+- A server that ignores the proxy variables and opens its own socket has no route anywhere.
+- The CONNECT tunnel is not inspected after the target is decided. A client that presents a different TLS server name inside an allowed tunnel reaches whatever the allowed host's address serves for that name.
+
+Proxied egress is verified on rootful Docker on Linux, and refused elsewhere with `egress_unsupported_runtime`. `--network none` works on every runtime.
 
 ## How it works
 
-On startup, wirken:
+On startup, `wirken-mcp-proxy`:
 
-1. Spawns each configured MCP server as a child process
-2. Performs the MCP `initialize` handshake
-3. Calls `tools/list` to discover available tools
-4. Adds discovered tools to the agent's tool definitions (prefixed with `mcp_{server}_`)
+1. Verifies each entry's signature (see [Signing MCP entries](#signing-mcp-entries)).
+2. Removes any container, network and secret file an earlier proxy for the same data directory left behind.
+3. Starts each stdio server in its container, one container per agent and server, labelled with the data directory's instance, the agent and the server, and writes `mcp_server_sandboxed`.
+4. Performs the MCP `initialize` handshake and calls `tools/list` to discover tools.
+5. Adds discovered tools to the agent's tool definitions, prefixed with `mcp_{server}_`.
 
-When the LLM calls an MCP tool, wirken routes the call to the correct server via `tools/call` and returns the result.
+When the LLM calls an MCP tool, the proxy routes the call to the correct server via `tools/call` and returns the result. When the gateway stops, the proxy stops and removes every container, sidecar, network and secret file it started.
+
+### Restarts
+
+When a contained server's container exits, the proxy writes `mcp_server_exited`, removes it, and starts the server again, running `initialize` and `tools/list` before the new run takes calls. Each restart is an `mcp_server_restart` row with its cause (`exited`, `start_failed` or `initialize_failed`) and delay. The delay starts at one second, doubles to a minute, and goes back to one second after a run that stayed up for a minute. After eight runs in a row that never complete `initialize`, the proxy writes `mcp_server_restart_abandoned`, logs an error, and stops trying until the gateway restarts. A server that initializes and later exits is restarted without limit.
+
+Servers run with `"sandbox": "off"` are not restarted.
 
 ## Per-agent MCP config
 
 For multi-agent setups, place the config at `~/.wirken/agents/{agent-id}/mcp.json`. If a per-agent config doesn't exist, the shared `~/.wirken/mcp.json` is used.
 
-## Example: Datadog MCP
-
-Connect the agent to Datadog for querying logs, metrics, and incidents:
-
-```json
-{
-    "servers": {
-        "datadog": {
-            "command": "npx",
-            "args": ["-y", "@datadog/mcp-server"],
-            "env": {
-                "DD_API_KEY": "vault:datadog-api-key",
-                "DD_APP_KEY": "vault:datadog-app-key"
-            }
-        }
-    }
-}
-```
-
 ## Trust boundary
 
-MCP servers are an explicit trust extension by the operator. Read this section before pasting an MCP-server command from the internet into `mcp.json`.
+MCP servers are an explicit trust extension by the operator. Read this section before adding a server.
 
 ### Process topology
 
 ```
-wirken run                              gateway + agent (one process; holds vault key + provider API keys + audit handle)
-  └─ wirken mcp-proxy                   separate subprocess; holds the resolved keychain for vault: lookups + per-MCP credentials
-       └─ <your MCP server>             grandchild of the gateway; spawned by mcp-proxy with a sanitised environment
+wirken run                        gateway + agent (holds the vault key, provider API keys, audit handle)
+  └─ wirken mcp-proxy             separate subprocess; resolves vault: values for MCP servers
+       ├─ <server container>      one per agent and server, started through the container runtime
+       └─ <egress sidecar>        one per server that lists egress hosts; that server's only route out
 ```
 
-The MCP server runs as a grandchild of the gateway, parented by `wirken-mcp-proxy`. It does **not** share the gateway's address space. Provider API keys, the agent's session log writer, and adapter Ed25519 secrets all live in the gateway process and are not reachable from inside an MCP server process.
+The proxy reaches each server through the container runtime's attach stream, not as a child process. Provider API keys, the agent's session log writer, and adapter Ed25519 secrets live in the gateway process and adapter subprocesses, and are not reachable from inside a server's container.
 
-### What a compromised MCP server can reach
+### What a contained server can reach
 
-Protected, because they live in the gateway process and are not reachable from
-an MCP child: provider API keys; the vault unwrap key, since
-`WIRKEN_VAULT_PASSPHRASE` is removed from `mcp-proxy`'s environ after
-`probe_keychain` reads it and `StdioTransport::spawn` calls `env_clear()`
-before adding back only allowlisted shell variables; the vault contents at
-rest, which are inert without that key; and adapter Ed25519 secrets, which
-stay in their own subprocesses.
+- **Files:** its install directory (read-only), the mounts its entry declares, its scratch directory, its own secret files, and its `/tmp`. Not the operator's home or the data directory (`audit.db`, `vault.db`, agent identity keys) unless a mount puts them there.
+- **Network:** nothing, or HTTP(S) to its listed hosts through its sidecar.
+- **Credentials:** the `vault:` values in its own `env` block, and nothing else from the vault.
+- **Resources:** its memory, process and CPU limits.
+- **Its declared tool surface,** which is operator-trusted like any tool.
 
-At risk, which is the operator's blast radius:
+### What containment does not cover
 
-- **Operator UID filesystem.** Same UID as the gateway, so the child can read
-  or write anything the operator can, `audit.db` and the home directory
-  included. Byte-tampering of `audit.db` is detected by
-  `wirken sessions verify`, but the tamper happens and the detection is after
-  the fact.
-- **Operator UID network reach.** Outbound to any host the operator can
-  reach.
-- **Per-MCP credentials in `env`.** Anything in the `env` block is plaintext
-  in the child's environment, `vault:`-resolved secrets included. That is
-  operator design, not an inadvertent leak, but a compromised server reads its
-  own environ and gets those tokens.
-- **The server's declared tool surface.** Whatever it exposes to the LLM is
-  operator-trusted.
+- **The kernel.** Under Docker's default runtime the container shares the host kernel, bounded by namespaces, the default seccomp profile and an empty capability set. `sandbox.json` `"mode": "gvisor"` puts it under `runsc` instead.
+- **Writable mounts.** Files a server writes there are owned by the operator's uid on the host.
+- **Env-delivered secrets.** A variable in `secrets_in_env` is readable through `docker inspect` by anyone who can reach the Docker socket.
+- **The image.** The signature covers the entry, not the image's contents; a digest-pinned `image` fixes them.
 
-**This is not a sandbox.** There is no `cap_drop`, seccomp filter, namespace,
-gVisor or Wasm runtime around the MCP child. The `exec` tool runs in a
-container ([sandbox-properties.md](sandbox-properties.md)); MCP servers do
-not. Closing that asymmetry is design work that depends on whether agents
-themselves run as subprocesses (#267, #269).
+### `"sandbox": "off"`
 
-For a server that does not need the operator's network reach, run
-`wirken-mcp-proxy`, or the whole gateway, inside a network-namespaced
-container or a `firejail` profile.
+A server with `"sandbox": "off"` runs as a child of `wirken-mcp-proxy` at the operator's UID, with no `cap_drop`, seccomp filter, namespace or resource limit. `StdioTransport::spawn` clears its environment and adds back only allowlisted shell variables and its own `env` block. What is at risk is the operator's blast radius:
 
-Treat each server like a third-party CLI: audit the source or the `npx`
-package provenance before adding it, and use a per-server `env` block carrying
-only the credentials that server needs rather than dumping shared secrets
-across several.
+- **Operator UID filesystem.** It can read or write anything the operator can, `audit.db` and the home directory included. Byte-tampering of `audit.db` is detected by `wirken sessions verify`, after the fact.
+- **Operator UID network reach.** Outbound to any host the operator can reach.
+- **Per-MCP credentials in `env`.** Anything in its `env` block, `vault:`-resolved secrets included, is plaintext in its environment.
+
+Treat such a server like a third-party CLI: audit the source and the package provenance before adding it, and give it only the credentials it needs.
 
 ### Signing MCP entries
 
@@ -141,18 +195,29 @@ across several.
 
 **Canonical hash layout.** `crates/mcp-proxy/src/mcp_signing.rs::hash_mcp_entry` is the source of truth.
 
-- **Stdio:** `sha256("stdio\0" || name_len_le || name || command_len_le || command || arg_count_le || (per-arg arg_len_le || arg) || env_count_le || (per-env key_len_le || key))`. Env keys, sorted ascending. Env values are not in the payload because they are `vault:NAME` references the proxy resolves at load time; the signature stays stable across vault rotations of the same logical credential.
+- **Stdio:** `sha256("stdio\0" || name_len_le || name || command_len_le || command || arg_count_le || (per-arg arg_len_le || arg) || env_count_le || (per-env key_len_le || key) || sandbox)`. Env keys, sorted ascending. Env values are not in the payload because they are `vault:NAME` references the proxy resolves at load time; the signature stays stable across vault rotations of the same logical credential.
+- **Stdio `sandbox`:** absent, it adds nothing, so an entry signed before the block existed keeps its signature (and is then refused at start for having no block). Present, it is `"sandbox\0"` followed by `"off\0"`, or by `"container\0"` and every field of the block: `image` and `install_dir` (each a presence byte, then length-prefixed), `egress.hosts` sorted and deduplicated, `mounts` sorted by target, source and `writable` (each as source, target and a `writable` byte), a `scratch` byte, `memory_mb`, `pids` and the bits of `cpus` (each a presence byte, then a little-endian `u64`), and `secrets_in_env` sorted and deduplicated. Lists are a little-endian `u32` count, then each item length-prefixed. Widening a server's hosts or mounts, raising its limits, or moving a secret into its environment changes the hash, so a signed entry no longer verifies until it is re-signed.
 - **Http:** `sha256("http\0" || name_len_le || name || url_len_le || url || auth_kind_le)` where `auth_kind_le` is `u8`: 0 = none, 1 = bearer, 2 = oauth2. The credential ref is not in the payload for the same reason.
 
-**What the signature attests.** "This is the entry config the publisher intended." It does not attest to the binary at `command` resolving to a specific artifact on disk: a signed entry whose `command` is `/usr/local/bin/foo` verifies the same on two operator machines where `foo` is built differently. Per-binary attestation is a separate concern (operator's package manager, sandbox posture).
+**What the signature attests.** "This is the entry config the publisher intended," the sandbox block included: the image reference, what the server may reach, and how its secrets are delivered. It does not attest to the binary at `command` resolving to a specific artifact on disk, nor to an image tag resolving to specific contents; a digest-pinned `image` does that: a signed entry whose `command` is `/usr/local/bin/foo` verifies the same on two operator machines where `foo` is built differently. Per-binary attestation is a separate concern (operator's package manager, sandbox posture).
 
 **CLI.** `wirken mcp sign <server>` signs one entry against `~/.wirken/signing-key.hex` (shared with `wirken skills sign`; generated on first use). `wirken mcp verify [<server>]` reports `valid` / `invalid` / `unsigned` per entry, applying the delegation gate when an anchor is configured.
 
-**Audit.** Every load attempt lands on the `gateway-mcp` sentinel session as `SessionEvent::McpEntryVerified { server_name, signer }` or `SessionEvent::McpEntryRefused { server_name, reason }`. Both variants are on the default typed-SIEM forwarded set; consumers can pivot on `kind == "mcp_entry_refused"` without an opt-in.
+**Audit.** Every load attempt lands on the `gateway-mcp` sentinel session as `SessionEvent::McpEntryVerified { server_name, signer }` or `SessionEvent::McpEntryRefused { server_name, reason }`. A stdio entry that verified and was then refused by the sandbox has both rows; its `reason` is one of the four in [When a server is not started](#when-a-server-is-not-started). The same session carries how each server ran:
+
+| Kind | Written |
+|---|---|
+| `mcp_server_sandboxed` | At every contained start, restarts included: agent, image, image id and registry digest, runtime, container id, egress hosts, mounts, limits, and the names of secrets delivered as files and through the environment. Never a value. |
+| `mcp_server_unsandboxed` | At every start of a server with `"sandbox": "off"`. |
+| `mcp_server_exited` | A contained server's container exited on its own, with its exit code. |
+| `mcp_server_restart` / `mcp_server_restart_abandoned` | See [Restarts](#restarts). |
+| `sandbox_egress_verdict` | One per request through a server's sidecar, with `mcp_server` set. |
+
+All of them are on the default typed-SIEM forwarded set; consumers can pivot on `kind == "mcp_entry_refused"` without an opt-in.
 
 ## Supported transports
 
-- **stdio**: spawn process, communicate via stdin/stdout. Default for local MCP servers.
+- **stdio**: start the server in its container (or, with `"sandbox": "off"`, as a host process) and communicate via stdin/stdout. Default for local MCP servers.
 - **HTTP**: connect to a remote MCP server over HTTP/HTTPS. Supports three auth modes:
   - `NoAuth`: no authentication header.
   - `BearerAuth`: static bearer token from the vault.
@@ -169,7 +234,8 @@ An MCP tool can carry a per-call cost, in USD micros, on its server entry:
   "servers": {
     "vendor": {
       "transport": "stdio",
-      "command": "vendor-mcp",
+      "command": "/opt/mcp/vendor-mcp",
+      "sandbox": { "image": "debian:bookworm-slim", "install_dir": "/opt/vendor-mcp" },
       "tool_costs": { "provision": 600000 }
     }
   }

@@ -29,7 +29,7 @@ their own bot tokens. On every `wirken run` the org config refreshes.
         "service": "wirken",
         "environment": "production"
     },
-    "mcp": { "servers": { "datadog": { "command": "npx", "args": ["-y", "@datadog/mcp-server"], "env": {} } } },
+    "mcp": { "servers": { "github": { "command": "/server/github-mcp-server", "args": ["stdio"], "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "vault:github-token" }, "sandbox": { "image": "ghcr.io/github/github-mcp-server", "egress": { "hosts": ["api.github.com"] }, "secrets_in_env": ["GITHUB_PERSONAL_ACCESS_TOKEN"] } } } },
     "permissions": { "sandbox_mode": "exec-only" }
 }
 ```

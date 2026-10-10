@@ -99,11 +99,16 @@ When the agent invokes the `exec` tool, the shell runs the command inside the sa
 
 Under `mode: off` the shell runs on the host directly and has no network bound at all. That mode is opt-in and requires explicit operator firewalling (`iptables`, `nftables`, `pf`) if the shell must be constrained.
 
-### MCP server children
+### MCP servers
 
-MCP servers spawned by `wirken-mcp-proxy` are separate processes at the wirken UID with no process-level sandbox. They open their own outbound connections (HTTP, WebSocket, stdio, whatever the server speaks) directly through the OS. The agent's permission gate checks the MCP tool *name* before invocation but does not constrain what the child does once spawned.
+A stdio MCP server runs in its own container with `--network none`, unless its signed `mcp.json` entry lists `sandbox.egress.hosts`; then it reaches those hosts through its own sidecar, as described under [MCP server egress](#mcp-server-egress) below. `egress.domains` is not consulted for either.
 
-**Mitigation.** Same as the `exec` sink: OS-level network controls. The gateway lists configured MCP server names at startup so the operator can see the inventory; install MCP servers only from trusted sources, and pin versions in `mcp.json`.
+Two kinds of MCP traffic are outside that boundary:
+
+- **HTTP MCP servers.** `wirken-mcp-proxy` connects to the entry's `url` itself, from the host.
+- **`"sandbox": "off"`.** A stdio server whose entry turns the sandbox off runs as a host process at the wirken UID and opens its own outbound connections directly through the OS.
+
+**Mitigation for those two.** Same as the `exec` sink under `mode: off`: OS-level network controls. Install MCP servers only from trusted sources, and pin versions in `mcp.json`.
 
 ### LLM HTTP client
 
@@ -127,7 +132,7 @@ Sandboxed `exec` has its own egress axis, configured per channel on the agent's 
 
 `none` is the default and the posture every unresolved case lands on: a channel with no entry, a turn with no channel (cron, CLI `ask`), an unrecognized mode string, and a stored policy blob that no longer parses. `open` is reachable only by writing it explicitly.
 
-Source: `crates/agent/src/sandbox_egress.rs`, `crates/gateway/src/agent_config.rs::ChannelEgress`.
+Source: `crates/agent/src/sandbox_egress.rs` (exec's policy), `crates/sandbox/src/egress.rs` (the sidecar, the broker and the rules every request is held to), `crates/sandbox/src/egress_net.rs` (the networks and the sidecar container), `crates/gateway/src/agent_config.rs::ChannelEgress`.
 
 ### Configuring
 
@@ -210,6 +215,19 @@ The platform refusal is a separate variant rather than a reason on this one, bec
 
 Both variants are forwarded to a typed SIEM by default.
 
+### MCP server egress
+
+A contained stdio MCP server whose entry lists `sandbox.egress.hosts` gets the same topology, sidecar, broker protocol and properties as an `exec` under `allowlist`, with these differences:
+
+- **Policy.** The allowlist is the entry's `egress.hosts`, inside the signed entry hash, so widening it breaks the signature. `*` allows any domain name, still bounded by the port and address rules. There is no confidentiality stage: the proxy has no session whose reads could condition the verdict.
+- **Broker.** It runs in `wirken-mcp-proxy`, not the gateway.
+- **Lifetime.** The sidecar and both networks are created before the server's container and live as long as it; they are removed when it stops or is restarted, and swept at the next proxy start if the proxy died.
+- **Socket.** The sidecar runs as the operator's uid, so the broker socket and its directory are mode 0600 and 0700.
+- **Audit.** Each verdict is a `SandboxEgressVerdict` on the `gateway-mcp` session with `mcp_server` set to the server's name and `agent_id` to its agent; `channel`, `adapter_id` and `sender_id` are absent. `mode` is `allowlist`, or `open` when the hosts list `*`.
+- **Runtime.** Refused on rootless Docker, Podman and Windows with `McpEntryRefused` reason `egress_unsupported_runtime`; the server does not start rather than start without its proxy.
+
+Configuration and the rest of the containment: [mcp.md](mcp.md#network).
+
 ## Cross-reference
 
 The same gap appears in [security-properties.md](security-properties.md) under T11 (Unexpected RCE and code attacks), where it is described as a code-execution surface rather than a configuration-side scope. The two pages describe the same constraint from different angles; if you are reading this page to evaluate a deployment, the T11 row carries the threat-model context.
@@ -217,5 +235,6 @@ The same gap appears in [security-properties.md](security-properties.md) under T
 ## Source references
 
 - `EgressClient` scope and host check: `EgressClient`, `EgressClient::check_egress` and `EgressClient::check_egress_declared` in `crates/agent/src/egress.rs`.
-- Allowset and wildcard resolution: `merge` and `union_allow` in `crates/agent/src/skill_perms.rs`, matching in `host_in_set` and `host_matches` in the same file.
+- Allowset and wildcard resolution: `merge` and `union_allow` in `crates/agent/src/skill_perms.rs`, matching in `host_in_set` in the same file and `host_matches` in `crates/sandbox/src/egress.rs`.
+- MCP server egress: `McpEgressPolicy` and `check_host_pattern` in `crates/mcp-proxy/src/egress.rs`, `start_route` in `crates/mcp-proxy/src/container.rs`.
 - Threat-model row: [security-properties.md](security-properties.md), row `T11` (Unexpected RCE and code attacks).

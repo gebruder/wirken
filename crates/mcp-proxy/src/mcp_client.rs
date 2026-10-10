@@ -222,7 +222,7 @@ impl McpClient {
     }
 
     /// Shut down the MCP server: ask it to stop, then stop it whether or
-    /// not it answered within [`SHUTDOWN_REPLY_WAIT`].
+    /// not it answered within a second.
     pub async fn shutdown(&mut self) {
         let _ = tokio::time::timeout(
             SHUTDOWN_REPLY_WAIT,

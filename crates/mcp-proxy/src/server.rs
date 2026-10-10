@@ -7,26 +7,33 @@
 //! line of defense — the authoritative trust boundary is the
 //! registered public key for each agent_id in the [`ProxyRegistry`].
 //!
-//! ## MCP child trust model
+//! ## MCP server trust model
 //!
-//! MCP servers configured in `mcp.json` are spawned by this proxy as
-//! direct child processes (`StdioTransport::spawn`). Children run at
-//! the wirken UID with no chroot, no uid drop, no syscall sandbox,
-//! and no resource limits. The agent's per-tool permission gate
+//! A stdio server whose `mcp.json` entry carries a `sandbox` block runs
+//! in its own container ([`crate::container`]): capabilities dropped,
+//! `no-new-privileges`, a read-only root, memory, process and CPU caps,
+//! the operator's uid, and only the mounts the signed entry declares.
+//! It has no network unless the entry lists egress hosts, which it then
+//! reaches only through its own sidecar and the broker in this process
+//! ([`crate::egress`]). Its `vault:` values arrive as read-only files
+//! unless the entry lists them for the environment. An entry with no
+//! `sandbox` block is refused.
+//!
+//! An entry with `"sandbox": "off"` is spawned as a direct child
+//! process (`StdioTransport::spawn`) at the wirken UID with no chroot,
+//! no uid drop, no syscall sandbox and no resource limits. Such a
+//! child can read `~/.wirken/audit.db`, rotate
+//! `~/.wirken/agents/<id>/identity.key`, exfiltrate
+//! `~/.wirken/vault.db`, or open its own outbound network connections,
+//! without crossing any wirken-side gate. `StdioTransport::spawn`
+//! clears its env and re-applies a small allowlist plus its `env` from
+//! `mcp.json`, so `WIRKEN_VAULT_PASSPHRASE` and other harness env does
+//! not leak into it; that does not change the filesystem-level posture.
+//!
+//! Either way, the agent's per-tool permission gate
 //! ([`runtime::execute_tool`](../../agent/src/runtime.rs)) checks the
-//! MCP tool *name* against the configured permission tier; the gate
-//! does **not** bound the child's own behavior once spawned. A child
-//! can read `~/.wirken/audit.db`, rotate `~/.wirken/agents/<id>/identity.key`,
-//! exfiltrate `~/.wirken/vault.db`, or open its own outbound network
-//! connections, all without crossing any wirken-side gate.
-//!
-//! Treat each MCP server install as equivalent to running its binary
-//! directly. Operators are responsible for trusting the source.
-//! `mcp_transport.rs::StdioTransport::spawn` clears the child's env
-//! and re-applies a small allowlist plus the per-MCP `env` from
-//! `mcp.json`, so `WIRKEN_VAULT_PASSPHRASE` and other harness env
-//! does not leak into the child; that does not change the
-//! filesystem-level trust posture above.
+//! MCP tool *name* against the configured permission tier, and does
+//! not bound what the server does with a call it receives.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

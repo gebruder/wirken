@@ -45,10 +45,16 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "skill_permission_denied",
         "subagent_spawned",
         "subagent_session_bound",
+        "exec_location_disagreement",
         "subagent_result",
         "chain_head",
         "mcp_entry_verified",
         "mcp_entry_refused",
+        "mcp_server_sandboxed",
+        "mcp_server_unsandboxed",
+        "mcp_server_exited",
+        "mcp_server_restart",
+        "mcp_server_restart_abandoned",
         "egress_hook_dispatched",
         "tool_output_redacted",
         "budget_exceeded",
@@ -60,12 +66,16 @@ Cost is metered per `agent_id` and per `credential_id`, so spend attributes to a
         "import_completed",
         "imported_chat_read",
         "imported_chat_searched",
+        "adapter_connect",
+        "adapter_disconnect",
+        "adapter_restart",
+        "adapter_restart_abandoned",
         "llm_response"
     ]
 }
 ```
 
-The twenty-four entries above `llm_response` are the default-forward set (`crates/audit/src/siem_typed.rs:106-129`); drop any you do not want, and dropping one stops forwarding it. `LlmResponse` rows carry no message bodies, so forwarding them adds per-call token and cost accounting to the feed, not personally identifiable information (PII).
+The thirty-four entries above `llm_response` are the default-forward set (`should_forward` in `crates/audit/src/siem_typed.rs`); drop any you do not want, and dropping one stops forwarding it. `LlmResponse` rows carry no message bodies, so forwarding them adds per-call token and cost accounting to the feed, not personally identifiable information (PII).
 
 ## Per-agent daily spend queries
 

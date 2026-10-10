@@ -47,8 +47,10 @@ first.
 
 Prerequisites: Linux (x86_64 or aarch64), macOS (Intel or Apple Silicon), or
 Windows 11 (x86_64); at least one model endpoint; and Docker if you want shell
-commands sandboxed, which is the default. Without Docker the agent simply
-cannot run shell commands and nothing else is affected.
+commands sandboxed, which is the default. Without Docker the agent cannot run
+shell commands, and stdio MCP servers do not start: each one runs in its own
+container unless its `mcp.json` entry sets `"sandbox": "off"` to run it on the
+host ([docs/mcp.md](docs/mcp.md)).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gebruder/wirken/main/install.sh | sh
@@ -140,7 +142,8 @@ Each channel runs as its own process and starts with only its own
 credentials, which the gateway hands it at spawn. The gateway holds the vault;
 the MCP proxy opens it limited to the credentials its MCP configs name. The
 gateway writes the audit log, and the MCP proxy appends its server-verification
-rows. The agent is stateless: it is woken for each message and rebuilt from its
+and server-lifecycle rows. Each stdio MCP server runs in its own container,
+started and restarted by the MCP proxy. The agent is stateless: it is woken for each message and rebuilt from its
 session log.
 
 The message path, inbound to outbound:
@@ -168,7 +171,7 @@ graph TD
     Agent -- HTTPS --> LLM[LLM Providers]
     Agent -- "declared cost" --> Budget[Budget Gate]
     Budget -- "UDS" --> McpProxy["MCP Proxy · separate process"]
-    McpProxy -- "stdio · HTTP · OAuth2" --> McpServers[MCP Servers]
+    McpProxy -- "stdio, one container each · HTTP · OAuth2" --> McpServers[MCP Servers]
 
     Agent --> Outbound["Outbound Dispatch · message_loop writer, OutboundDispatcher"]
     Outbound -- "OutboundMessage · correlation handle" --> Channels
@@ -201,10 +204,12 @@ enforces and which are runtime policy is in
 Wirken contains the blast radius of a compromised agent; it does not make
 compromise impossible. The honest edges:
 
-- **Egress is not fully contained.** Sandboxed `exec` is bounded, but MCP
-  server children and the LLM client open their own outbound connections and
-  need a network namespace, a restricted-egress container, or firewall rules.
-  See [docs/egress.md](docs/egress.md).
+- **Egress is not fully contained.** Sandboxed `exec` and contained stdio MCP
+  servers are bounded, but HTTP MCP servers are reached by the proxy directly,
+  a stdio server with `"sandbox": "off"` runs on the host, and the LLM client
+  opens its own outbound connections. Those need a network namespace, a
+  restricted-egress container, or firewall rules. See
+  [docs/egress.md](docs/egress.md).
 - **The sandbox can be turned off.** With `sandbox.json` set to `mode: off`,
   `exec` runs at the Wirken UID with no container, and the host shell can then
   read or rewrite trust files under the data directory. The gateway warns at
