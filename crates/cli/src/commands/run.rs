@@ -1609,6 +1609,9 @@ pub async fn run(port: Option<u16>) -> Result<()> {
 
     println!("  WebChat: http://localhost:{webchat_port}");
     println!();
+    // Taken before the line below says the gateway is up, so a signal
+    // sent on seeing it is never handled by the default action instead.
+    let stop = StopSignal::install()?;
     println!("  Wirken running. Press Ctrl+C to stop.");
     println!();
 
@@ -2056,7 +2059,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     });
 
     // --- Wait for shutdown ---
-    tokio::signal::ctrl_c().await?;
+    stop.wait().await?;
     println!();
     println!("  Shutting down...");
 
@@ -2325,6 +2328,53 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// drop. Shutdown aborts the task running it before it stops the
 /// connection tasks, so a connection ending at shutdown respawns
 /// nothing.
+/// Ctrl-C, or SIGTERM where there is one, which is how a service
+/// manager or `kill` asks the gateway to stop. Both run the same
+/// shutdown, so the MCP proxy is asked to stop its servers either way;
+/// before, SIGTERM ended the gateway at once and left the proxy and its
+/// containers running.
+struct StopSignal {
+    #[cfg(unix)]
+    int: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    term: tokio::signal::unix::Signal,
+}
+
+impl StopSignal {
+    /// Take both signals from here on.
+    fn install() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                int: signal(SignalKind::interrupt())?,
+                term: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    /// Resolve on the first of them.
+    async fn wait(mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.int.recv() => {}
+                _ = self.term.recv() => {}
+            }
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &mut self;
+            tokio::signal::ctrl_c().await
+        }
+    }
+}
+
 /// How long the MCP proxy gets to stop its servers at shutdown.
 const MCP_PROXY_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 

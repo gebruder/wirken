@@ -144,6 +144,9 @@ tagged.
 
 ### Fixed
 
+- `wirken run` takes SIGTERM the way it takes Ctrl-C and runs its
+  shutdown. Before, SIGTERM ended the gateway at once: the MCP proxy kept
+  running, and so did every container it had started.
 - The MCP proxy stops its servers when the gateway stops. Before, the
   proxy was killed without stopping them, and a stdio child that did not
   exit at end of input kept running. Each server now gets one second to
