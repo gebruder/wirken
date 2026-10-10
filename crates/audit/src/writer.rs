@@ -1672,8 +1672,15 @@ mod tests {
         // tampered chain triggering verify-pass failures, the
         // alarm-write counter climbs in lockstep with integrity. Both
         // halt at MAX=3; this asserts the behavior holds end-to-end.
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let tmp = tempfile::TempDir::new().unwrap();
+        // A directory this process creates is owned by its effective
+        // uid. At euid 0 the open succeeds whatever the file mode, so
+        // the failure this test needs cannot be produced.
+        if std::fs::metadata(tmp.path()).unwrap().uid() == 0 {
+            eprintln!("skipping: running as euid 0, which mode 0o000 does not stop");
+            return;
+        }
         let db_path = tmp.path().join("audit.db");
         {
             let log = AuditLog::open(&db_path).unwrap();
