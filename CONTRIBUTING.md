@@ -62,6 +62,8 @@ cargo +nightly miri test -p wirken-ipc
 cargo +nightly miri test -p wirken-mcp-proxy
 ```
 
+CI runs the same two commands on every push, in the `Miri` job of `.github/workflows/ci.yml`.
+
 Miri interprets Rust. It has no sockets, no filesystem and no C, so a test that opens one is marked `#[cfg_attr(miri, ignore = "...")]` with the reason, rather than deleted. The reason belongs in the attribute: a bare `ignore` reads as a quarantined test.
 
 What this covers, and what it does not. Miri checks the safe code of these crates for undefined behaviour: aliasing, alignment, uninitialised reads, out-of-bounds. It cannot execute the `unsafe` that is left, because all of it is FFI or a syscall Miri has no implementation for. So a green Miri run is evidence about the rest of the crate, not about the `unsafe` lines, and it is worth saying which when you cite one.
