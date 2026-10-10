@@ -1015,45 +1015,23 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     //
     // The agent's per-tool gate at runtime checks the MCP tool *name*
     // against the operator's permission tier; the gate does not bound
-    // the MCP child process's own behavior. MCP children spawn at the
-    // wirken UID with no chroot, no uid drop, no syscall sandbox, and
-    // can read or write any file the wirken user can. Operators
-    // installing third-party MCP servers should treat them with the
-    // same trust as a binary they would run directly. List configured
-    // servers at startup so the inventory is operator-visible.
+    // what a server does with a call. A stdio server with a `sandbox`
+    // block runs in its own container; one set to `"off"` runs at the
+    // wirken UID with no process sandbox and can read or write any file
+    // the wirken user can. List configured servers at startup, each with
+    // how it will run, so the inventory is operator-visible.
     {
         let mcp_config_path = cfg.data_dir.join("mcp.json");
         if mcp_config_path.exists()
-            && let Ok(body) = std::fs::read_to_string(&mcp_config_path)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&body)
-            && let Some(servers) = val.get("servers").and_then(|s| s.as_object())
-            && !servers.is_empty()
+            && let Ok(config) = wirken_mcp_proxy::mcp_config::McpConfig::load(&mcp_config_path)
+            && !config.servers.is_empty()
         {
-            // Surface the command path the operator configured next to
-            // the server name. The command is the binary that will be
-            // spawned at the wirken UID; pairing the name with the path
-            // lets the operator spot a tampered or shadowed entry from
-            // the startup line alone, without re-reading mcp.json.
-            //
-            // Long paths get trimmed at 80 chars to keep the warn line
-            // legible; the on-disk config remains canonical.
-            let inventory: Vec<String> = servers
-                .iter()
-                .map(|(name, body)| {
-                    let cmd = body
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("<no command>");
-                    let trimmed = trim_command_for_inventory(cmd);
-                    format!("{name}={trimmed}")
-                })
-                .collect();
             tracing::warn!(
-                servers = ?inventory,
-                "MCP servers configured: each runs at the wirken UID with no \
-                 process sandbox; the agent's per-tool permission gate checks tool \
-                 names only, not child process behavior. Install only from trusted \
-                 sources. See docs/security-properties.md."
+                servers = ?mcp_inventory(&config),
+                "MCP servers configured. A contained server runs in its own container; \
+                 one marked host runs at the wirken UID with no process sandbox. The \
+                 agent's per-tool permission gate checks tool names only, not what a \
+                 server does. Install only from trusted sources. See docs/mcp.md."
             );
         }
     }
@@ -4285,6 +4263,32 @@ fn truncate(s: &str, max: usize) -> String {
 /// visible; the on-disk `mcp.json` is canonical.
 const MCP_INVENTORY_WIDTH: usize = 80;
 
+/// One startup line entry per configured server, sorted by name: the
+/// command the operator configured next to the name, so a tampered or
+/// shadowed entry shows from the startup line alone, and how it will
+/// run. An HTTP server's URL is left out.
+fn mcp_inventory(config: &wirken_mcp_proxy::mcp_config::McpConfig) -> Vec<String> {
+    use wirken_mcp_proxy::mcp_config::{McpServerConfig, StdioSandbox};
+    let mut names: Vec<&String> = config.servers.keys().collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| match &config.servers[name] {
+            McpServerConfig::Stdio {
+                command, sandbox, ..
+            } => {
+                let posture = match sandbox.as_deref() {
+                    Some(StdioSandbox::Container(_)) => "contained",
+                    Some(StdioSandbox::Off(_)) => "host",
+                    None | Some(StdioSandbox::Invalid(_)) => "refused: no valid sandbox block",
+                };
+                format!("{name}={} ({posture})", trim_command_for_inventory(command))
+            }
+            McpServerConfig::Http { .. } => format!("{name}=(http)"),
+        })
+        .collect()
+}
+
 fn trim_command_for_inventory(cmd: &str) -> String {
     if cmd.chars().count() <= MCP_INVENTORY_WIDTH {
         return cmd.to_string();
@@ -4306,7 +4310,29 @@ fn trim_command_for_inventory(cmd: &str) -> String {
 
 #[cfg(test)]
 mod inventory_tests {
-    use super::{MCP_INVENTORY_WIDTH, trim_command_for_inventory};
+    use super::{MCP_INVENTORY_WIDTH, mcp_inventory, trim_command_for_inventory};
+
+    #[test]
+    fn the_inventory_says_how_each_server_runs() {
+        let config: wirken_mcp_proxy::mcp_config::McpConfig = serde_json::from_str(
+            r#"{"servers": {
+                    "boxed": {"command": "/opt/mcp/srv", "sandbox": {"image": "img"}},
+                    "hosted": {"command": "/usr/bin/srv", "sandbox": "off"},
+                    "legacy": {"command": "npx"},
+                    "remote": {"transport": "http", "url": "https://mcp.example.internal/secret"}
+                }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            mcp_inventory(&config),
+            [
+                "boxed=/opt/mcp/srv (contained)",
+                "hosted=/usr/bin/srv (host)",
+                "legacy=npx (refused: no valid sandbox block)",
+                "remote=(http)",
+            ]
+        );
+    }
 
     #[test]
     fn short_command_passes_through() {

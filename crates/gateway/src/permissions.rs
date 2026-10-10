@@ -70,8 +70,9 @@ pub enum Action {
     /// `mcp_{server}_{tool}` string the proxy generates; the server
     /// segment is not parsed out because operator-chosen server names
     /// can contain underscores, so the prefix is not unambiguously
-    /// splittable. Always Tier 3: MCP children run at the wirken UID
-    /// with no process sandbox, so every call is gated.
+    /// splittable. Always Tier 3: a server is third-party code whose
+    /// handling of a call the gate cannot see, contained or not, so
+    /// every call is gated.
     McpToolCall {
         tool: String,
     },
