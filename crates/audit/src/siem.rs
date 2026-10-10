@@ -925,11 +925,18 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
             allowed,
             reason,
             escalated,
+            mcp_server,
             ..
-        } => format!(
-            "sandbox_egress_verdict host={host} port={port} allowed={allowed} \
-             escalated={escalated} reason={reason:?}"
-        ),
+        } => {
+            let mut line = format!(
+                "sandbox_egress_verdict host={host} port={port} allowed={allowed} \
+                 escalated={escalated} reason={reason:?}"
+            );
+            if let Some(server) = mcp_server {
+                line.push_str(&format!(" mcp_server={server}"));
+            }
+            line
+        }
         SessionEvent::SandboxEgressUnsupported { mode, .. } => {
             format!("sandbox_egress_unsupported mode={mode:?}")
         }
@@ -2010,6 +2017,7 @@ mod identity_tests {
                     channel: None,
                     adapter_id: adapter(),
                     sender_id: sender(),
+                    mcp_server: None,
                 },
                 Some("slack"),
                 Some("U123"),

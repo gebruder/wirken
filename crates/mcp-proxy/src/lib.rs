@@ -13,6 +13,7 @@
 
 pub mod auth;
 pub mod container;
+pub mod egress;
 pub mod error;
 pub mod mcp_client;
 pub mod mcp_config;

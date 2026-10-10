@@ -7079,8 +7079,14 @@ dependencies = [
 name = "wirken-sandbox"
 version = "1.28.0"
 dependencies = [
+ "async-trait",
  "bollard",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
+ "url",
  "wirken-audit",
 ]
 

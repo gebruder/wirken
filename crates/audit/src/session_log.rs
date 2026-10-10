@@ -1989,6 +1989,10 @@ pub enum SessionEvent {
     /// `host` is the CONNECT target or absolute-form request host as
     /// the proxy parsed it. It is attacker-influenced text; treat it
     /// as data, not as a trusted identifier.
+    ///
+    /// A contained MCP server's requests carry `mcp_server` instead of
+    /// a channel: its sidecar and broker are bound to one agent and
+    /// one server, and the row lands on the `gateway-mcp` session.
     SandboxEgressVerdict {
         host: String,
         port: u16,
@@ -2014,6 +2018,10 @@ pub enum SessionEvent {
         adapter_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+        /// The MCP server whose sidecar forwarded the request. Absent
+        /// for `exec`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mcp_server: Option<String>,
     },
     /// Sandbox egress was configured for a channel on a platform with
     /// no transport for the decision broker, so the `exec` was

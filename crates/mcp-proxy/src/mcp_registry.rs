@@ -100,18 +100,28 @@ impl ProxyRegistry {
     }
 
     /// Start the container `plan` describes, handing it the resolved
-    /// vault values.
+    /// vault values. A plan with egress hosts gets its route first, so
+    /// the server is never started without its only way out up.
     async fn spawn_contained(
         &self,
         plan: &ContainerPlan,
         resolved_env: &HashMap<String, String>,
+        audit: Option<&Arc<dyn SessionLog>>,
     ) -> Result<StdioTransport, ProxyError> {
         let docker = self
             .sandbox
             .docker
             .as_ref()
             .ok_or_else(|| ProxyError::Mcp("no container runtime is reachable".into()))?;
-        StdioTransport::spawn_container(docker, plan, resolved_env).await
+        let route = if plan.egress_hosts.is_empty() {
+            None
+        } else {
+            let route = crate::container::start_route(docker, &self.sandbox, plan, audit.cloned())
+                .await
+                .map_err(|e| ProxyError::Mcp(format!("egress route for '{}': {e}", plan.server)))?;
+            Some(route)
+        };
+        StdioTransport::spawn_container(docker, plan, resolved_env, route).await
     }
 
     /// Register an Ed25519 public key as the authoritative identity
@@ -223,7 +233,7 @@ impl ProxyRegistry {
                                 env,
                                 block,
                             ) {
-                                Ok(plan) => self.spawn_contained(&plan, &resolved_env).await,
+                                Ok(plan) => self.spawn_contained(&plan, &resolved_env, audit).await,
                                 Err(e) => Err(ProxyError::Mcp(e.to_string())),
                             }
                         }

@@ -4133,16 +4133,23 @@ pub fn session_events(
                 reason,
                 mode,
                 escalated,
+                mcp_server,
                 ..
-            } => Some(json!({
-                "kind": "sandbox_egress_verdict",
-                "host": host,
-                "port": port,
-                "allowed": allowed,
-                "reason": serde_json::to_value(reason).unwrap_or(Value::Null),
-                "mode": serde_json::to_value(mode).unwrap_or(Value::Null),
-                "escalated": escalated,
-            })),
+            } => {
+                let mut row = json!({
+                    "kind": "sandbox_egress_verdict",
+                    "host": host,
+                    "port": port,
+                    "allowed": allowed,
+                    "reason": serde_json::to_value(reason).unwrap_or(Value::Null),
+                    "mode": serde_json::to_value(mode).unwrap_or(Value::Null),
+                    "escalated": escalated,
+                });
+                if let Some(server) = mcp_server {
+                    row["mcp_server"] = json!(server);
+                }
+                Some(row)
+            }
             SessionEvent::SubagentSpawned {
                 child_session_id,
                 child_agent_id,
@@ -6185,6 +6192,7 @@ mod tests {
                     channel: Some("webchat".into()),
                     adapter_id: Some("webchat".into()),
                     sender_id: None,
+                    mcp_server: None,
                 },
             ),
             (

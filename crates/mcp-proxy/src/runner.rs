@@ -80,7 +80,8 @@ pub async fn run() -> Result<(), ProxyError> {
     // before `open_vault`'s scrub. Containers an earlier proxy for this
     // data directory left behind, for example after the gateway killed
     // it, are removed before any new one starts.
-    let sandbox = SandboxHost::new(&data_dir);
+    let mut sandbox = SandboxHost::new(&data_dir);
+    sandbox.probe().await;
     if let Some(docker) = &sandbox.docker {
         let removed = container::sweep(docker, &sandbox).await;
         if removed > 0 {

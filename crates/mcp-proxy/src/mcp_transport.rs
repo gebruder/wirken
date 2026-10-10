@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-use crate::container::{ContainerHandle, ContainerPlan};
+use crate::container::{ContainerHandle, ContainerPlan, ServerRoute};
 
 use crate::error::ProxyError;
 
@@ -175,31 +175,39 @@ impl StdioTransport {
     /// first is lost. Any failure after the container exists removes it.
     /// `secrets` holds the resolved `vault:` values: those the plan
     /// delivers as files are written before the container is created,
-    /// the rest go into its environment.
+    /// the rest go into its environment. `route` is the server's way
+    /// out when its plan lists egress hosts; the container owns it from
+    /// here, and every failure tears it down.
     pub async fn spawn_container(
         docker: &bollard::Docker,
         plan: &ContainerPlan,
         secrets: &HashMap<String, String>,
+        route: Option<ServerRoute>,
     ) -> Result<Self, ProxyError> {
         use bollard::container::LogOutput;
         use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
 
-        if let Some(dir) = &plan.scratch_dir {
-            create_private_dir(dir).map_err(|e| {
-                ProxyError::Mcp(format!("create scratch dir {}: {e}", dir.display()))
-            })?;
-        }
-
-        if let Some(dir) = &plan.secrets_dir {
-            crate::container::write_secret_files(dir, &plan.secret_file_names, secrets).map_err(
-                |e| ProxyError::Mcp(format!("write secret files for '{}': {e}", plan.server)),
-            )?;
-        }
-        let remove_secrets = || {
-            if let Some(dir) = &plan.secrets_dir {
-                let _ = std::fs::remove_dir_all(dir);
-            }
+        let mut handle = ContainerHandle {
+            docker: docker.clone(),
+            id: String::new(),
+            secrets_dir: plan.secrets_dir.clone(),
+            route,
         };
+        let prepared = (|| {
+            if let Some(dir) = &plan.scratch_dir {
+                create_private_dir(dir)
+                    .map_err(|e| format!("create scratch dir {}: {e}", dir.display()))?;
+            }
+            if let Some(dir) = &plan.secrets_dir {
+                crate::container::write_secret_files(dir, &plan.secret_file_names, secrets)
+                    .map_err(|e| format!("write secret files for '{}': {e}", plan.server))?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(e) = prepared {
+            handle.remove().await;
+            return Err(ProxyError::Mcp(e));
+        }
 
         let name = format!("wirken-mcp-{}", random_suffix());
         let created = docker
@@ -208,18 +216,19 @@ impl StdioTransport {
                     name: Some(name),
                     platform: String::new(),
                 }),
-                plan.create_body(secrets),
+                plan.create_body(secrets, handle.route.as_ref()),
             )
-            .await
-            .map_err(|e| {
-                remove_secrets();
-                ProxyError::Mcp(format!("create container for '{}': {e}", plan.server))
-            })?;
-        let handle = ContainerHandle {
-            docker: docker.clone(),
-            id: created.id,
-            secrets_dir: plan.secrets_dir.clone(),
-        };
+            .await;
+        match created {
+            Ok(created) => handle.id = created.id,
+            Err(e) => {
+                handle.remove().await;
+                return Err(ProxyError::Mcp(format!(
+                    "create container for '{}': {e}",
+                    plan.server
+                )));
+            }
+        }
 
         let attached = match docker
             .attach_container(
@@ -408,7 +417,7 @@ fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Twelve random hex characters for a container name.
-fn random_suffix() -> String {
+pub(crate) fn random_suffix() -> String {
     use rand::Rng;
     let mut bytes = [0u8; 6];
     rand::rng().fill_bytes(&mut bytes);

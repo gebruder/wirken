@@ -10,16 +10,24 @@
 //! instance, the agent and the server. The proxy stops and removes its
 //! containers on shutdown, and on start removes any its instance left
 //! behind, for example after the gateway killed it.
+//!
+//! A server with no `egress.hosts` has no network. One with hosts gets
+//! an internal network shared only with its own egress sidecar, which
+//! is its HTTP(S) proxy; see [`crate::egress`]. The sidecar and both
+//! networks carry the same labels and go with the server.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, Mount, MountType};
 use bollard::query_parameters::{
-    ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
+    ListContainersOptions, ListNetworksOptions, RemoveContainerOptions, StopContainerOptions,
 };
 use sha2::{Digest, Sha256};
+use wirken_audit::SessionLog;
+use wirken_sandbox::RuntimeFacts;
 
 use crate::mcp_config::{ContainerSandbox, INSTALL_DIR_TARGET, SCRATCH_TARGET};
 
@@ -67,6 +75,12 @@ pub struct SandboxHost {
     /// RAM-backed directory secret files are written under; `None`
     /// where there is none, which refuses any server needing one.
     pub secrets_base: Option<PathBuf>,
+    /// What the runtime is, once [`Self::probe`] has asked. `None`
+    /// until then, or when it could not be asked.
+    pub facts: Option<RuntimeFacts>,
+    /// The statically linked binary egress sidecars run:
+    /// `sandbox.json`'s `sidecar_binary`, else this executable.
+    pub sidecar_binary: Option<PathBuf>,
 }
 
 impl SandboxHost {
@@ -78,6 +92,20 @@ impl SandboxHost {
             data_dir: data_dir.to_path_buf(),
             runtime: sandbox_runtime(data_dir),
             secrets_base: ram_backed_dir(),
+            facts: None,
+            sidecar_binary: sidecar_binary(data_dir).or_else(|| std::env::current_exe().ok()),
+        }
+    }
+
+    /// Ask the runtime what it is. Without an answer, a server that
+    /// declares egress hosts is not refused here and fails at start if
+    /// the runtime is unreachable.
+    pub async fn probe(&mut self) {
+        if let Some(docker) = &self.docker {
+            match RuntimeFacts::probe(docker).await {
+                Ok(facts) => self.facts = Some(facts),
+                Err(e) => tracing::warn!("could not ask the container runtime what it is: {e}"),
+            }
         }
     }
 
@@ -90,6 +118,8 @@ impl SandboxHost {
             data_dir: PathBuf::new(),
             runtime: None,
             secrets_base: None,
+            facts: None,
+            sidecar_binary: None,
         }
     }
 
@@ -98,6 +128,23 @@ impl SandboxHost {
         self.secrets_base
             .as_ref()
             .map(|base| base.join(format!("wirken-mcp-{}", self.instance)))
+    }
+
+    /// Prefix of this instance's egress socket directories.
+    fn egress_socket_prefix(&self) -> String {
+        format!("wirken-mcp-egress-{}-", self.instance)
+    }
+
+    /// The uid:gid servers and sidecars run as. Under a rootless
+    /// runtime, container uid 0 is the operator and every other uid a
+    /// subordinate one that could not read the install directory or the
+    /// secret files.
+    fn container_user(&self) -> String {
+        if self.facts.is_some_and(|f| f.rootless) {
+            "0:0".to_string()
+        } else {
+            container_user()
+        }
     }
 }
 
@@ -146,12 +193,16 @@ pub enum PlanError {
     Invalid(String),
     /// The block is fine but this host cannot provide what it needs.
     Unavailable(String),
+    /// The block lists egress hosts and this runtime cannot proxy them.
+    EgressUnsupported(String),
 }
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(why) | Self::Unavailable(why) => f.write_str(why),
+            Self::Invalid(why) | Self::Unavailable(why) | Self::EgressUnsupported(why) => {
+                f.write_str(why)
+            }
         }
     }
 }
@@ -180,10 +231,23 @@ pub fn instance_id(data_dir: &Path) -> String {
 /// anything else, including `off`, is Docker's default. `off` turns off
 /// the `exec` sandbox only; MCP servers stay contained.
 pub fn sandbox_runtime(data_dir: &Path) -> Option<String> {
-    let body = std::fs::read_to_string(data_dir.join("sandbox.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let value = sandbox_json(data_dir)?;
     let mode = value.get("mode").and_then(|m| m.as_str()).unwrap_or("");
     wirken_sandbox::SandboxMode::from_str_config(mode).runtime_name()
+}
+
+/// `sandbox.json`'s `sidecar_binary`, the override `exec` reads too.
+pub fn sidecar_binary(data_dir: &Path) -> Option<PathBuf> {
+    sandbox_json(data_dir)?
+        .get("sidecar_binary")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+fn sandbox_json(data_dir: &Path) -> Option<serde_json::Value> {
+    let body = std::fs::read_to_string(data_dir.join("sandbox.json")).ok()?;
+    serde_json::from_str(&body).ok()
 }
 
 /// One server's container, decided from its config. Building a plan is
@@ -210,7 +274,12 @@ pub struct ContainerPlan {
     pub user: String,
     pub working_dir: Option<String>,
     pub mounts: Vec<Mount>,
+    /// `none`. A server with egress hosts joins its route's internal
+    /// network instead; see [`Self::create_body`].
     pub network_mode: String,
+    /// The block's `egress.hosts`, checked, sorted and deduplicated.
+    /// Empty means no network.
+    pub egress_hosts: Vec<String>,
     pub memory_bytes: i64,
     pub pids: i64,
     pub nano_cpus: i64,
@@ -338,6 +407,25 @@ impl ContainerPlan {
             Some(dir)
         };
 
+        let mut egress_hosts = block
+            .egress
+            .as_ref()
+            .map(|e| e.hosts.clone())
+            .unwrap_or_default();
+        for pattern in &egress_hosts {
+            crate::egress::check_host_pattern(pattern)?;
+        }
+        egress_hosts.sort();
+        egress_hosts.dedup();
+        if !egress_hosts.is_empty()
+            && let Some(why) = host.facts.and_then(|f| f.egress_unsupported())
+        {
+            return Err(PlanError::EgressUnsupported(format!(
+                "{why}; egress.hosts needs rootful Docker on Linux. Remove egress.hosts \
+                 to run the server with no network"
+            )));
+        }
+
         let labels = HashMap::from([
             (LABEL_ROLE.to_string(), "1".to_string()),
             (LABEL_INSTANCE.to_string(), host.instance.clone()),
@@ -356,10 +444,11 @@ impl ContainerPlan {
             env_secret_names,
             secret_file_names,
             secrets_dir,
-            user: container_user(),
+            user: host.container_user(),
             working_dir,
             mounts,
             network_mode: "none".to_string(),
+            egress_hosts,
             memory_bytes,
             pids,
             nano_cpus,
@@ -374,14 +463,28 @@ impl ContainerPlan {
     /// exits at end of input exits with the proxy.
     ///
     /// `secrets` holds the resolved `vault:` values; only those named in
-    /// [`Self::env_secret_names`] go into the body.
-    pub fn create_body(&self, secrets: &HashMap<String, String>) -> ContainerCreateBody {
+    /// [`Self::env_secret_names`] go into the body. With a `route`, the
+    /// container joins its internal network, gets the sidecar as its
+    /// proxy, and has no working resolver: names are resolved by the
+    /// broker, after the policy decision.
+    pub fn create_body(
+        &self,
+        secrets: &HashMap<String, String>,
+        route: Option<&ServerRoute>,
+    ) -> ContainerCreateBody {
         let mut env = self.env.clone();
         for name in &self.env_secret_names {
             if let Some(value) = secrets.get(name) {
                 env.push(format!("{name}={value}"));
             }
         }
+        let (network_mode, dns) = match route {
+            Some(route) => {
+                env.extend(route.proxy_env());
+                (route.network(), Some(vec!["127.0.0.1".to_string()]))
+            }
+            None => (self.network_mode.clone(), None),
+        };
         ContainerCreateBody {
             image: Some(self.image.clone()),
             cmd: Some(self.cmd.clone()),
@@ -399,8 +502,8 @@ impl ContainerPlan {
                 wirken_sandbox::HostSettings {
                     binds: Vec::new(),
                     mounts: self.mounts.clone(),
-                    network_mode: Some(self.network_mode.clone()),
-                    dns: None,
+                    network_mode: Some(network_mode),
+                    dns,
                     memory: self.memory_bytes,
                     pids: self.pids,
                     nano_cpus: Some(self.nano_cpus),
@@ -527,17 +630,115 @@ fn container_user() -> String {
     "1000:1000".to_string()
 }
 
+/// A contained server's route out: its networks, sidecar and broker.
+/// Held with the server's container and torn down after it.
+#[cfg(unix)]
+pub struct ServerRoute(wirken_sandbox::egress_net::EgressRoute);
+
+/// No route can exist without a Unix socket for the broker; a plan
+/// with egress hosts is refused on this host before one is asked for.
+#[cfg(not(unix))]
+pub enum ServerRoute {}
+
+impl ServerRoute {
+    #[cfg(unix)]
+    fn network(&self) -> String {
+        self.0.internal_network.clone()
+    }
+
+    #[cfg(unix)]
+    fn proxy_env(&self) -> Vec<String> {
+        self.0.proxy_env()
+    }
+
+    #[cfg(unix)]
+    pub async fn teardown(self, docker: &Docker) {
+        self.0.teardown(docker).await;
+    }
+
+    #[cfg(not(unix))]
+    fn network(&self) -> String {
+        match *self {}
+    }
+
+    #[cfg(not(unix))]
+    fn proxy_env(&self) -> Vec<String> {
+        match *self {}
+    }
+
+    #[cfg(not(unix))]
+    pub async fn teardown(self, _docker: &Docker) {
+        match self {}
+    }
+}
+
+/// Provision `plan`'s route: networks, sidecar, and a broker deciding
+/// on its egress hosts. The sidecar runs the server's image with the
+/// sidecar binary mounted in, as the server's user, so its socket
+/// needs no wider permissions than the operator's own.
+#[cfg(unix)]
+pub async fn start_route(
+    docker: &Docker,
+    host: &SandboxHost,
+    plan: &ContainerPlan,
+    audit: Option<Arc<dyn SessionLog>>,
+) -> Result<ServerRoute, String> {
+    let binary = host
+        .sidecar_binary
+        .clone()
+        .ok_or("no binary for the egress sidecar")?;
+    if !binary.exists() {
+        return Err(format!(
+            "sidecar binary {} does not exist; set sidecar_binary in sandbox.json",
+            binary.display()
+        ));
+    }
+    let id = crate::mcp_transport::random_suffix();
+    let spec = wirken_sandbox::egress_net::SidecarSpec {
+        name_prefix: "wirken-mcp-egress".into(),
+        socket_dir: std::env::temp_dir().join(format!("{}{id}", host.egress_socket_prefix())),
+        id,
+        image: plan.image.clone(),
+        binary,
+        labels: plan.labels.clone(),
+        user: Some(plan.user.clone()),
+        socket_dir_mode: 0o700,
+        socket_mode: 0o600,
+    };
+    let policy = crate::egress::McpEgressPolicy {
+        agent_id: plan.agent_id.clone(),
+        server: plan.server.clone(),
+        hosts: plan.egress_hosts.clone(),
+        audit,
+    };
+    wirken_sandbox::egress_net::provision(docker, spec, Arc::new(policy))
+        .await
+        .map(ServerRoute)
+}
+
+#[cfg(not(unix))]
+pub async fn start_route(
+    _docker: &Docker,
+    _host: &SandboxHost,
+    _plan: &ContainerPlan,
+    _audit: Option<Arc<dyn SessionLog>>,
+) -> Result<ServerRoute, String> {
+    Err("the egress broker needs a Unix socket, which this host does not have".into())
+}
+
 /// A running server container.
 pub struct ContainerHandle {
     pub docker: Docker,
     pub id: String,
     /// Its secret files, removed with it.
     pub secrets_dir: Option<PathBuf>,
+    /// Its route out, torn down after it.
+    pub route: Option<ServerRoute>,
 }
 
 impl ContainerHandle {
     /// Stop the container, giving the server two seconds, and remove it.
-    pub async fn stop_and_remove(&self) {
+    pub async fn stop_and_remove(&mut self) {
         let _ = self
             .docker
             .stop_container(
@@ -551,29 +752,48 @@ impl ContainerHandle {
         self.remove().await;
     }
 
-    /// Remove the container, running or not, and its secret files.
-    pub async fn remove(&self) {
-        let _ = self
-            .docker
-            .remove_container(
-                &self.id,
-                Some(RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await;
+    /// Remove the container, running or not, its secret files, and its
+    /// route.
+    pub async fn remove(&mut self) {
+        // Empty until the container exists; the secrets and the route
+        // may already need removing before then.
+        if !self.id.is_empty() {
+            let _ = self
+                .docker
+                .remove_container(
+                    &self.id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
+        }
         if let Some(dir) = &self.secrets_dir {
             let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some(route) = self.route.take() {
+            route.teardown(&self.docker).await;
         }
     }
 }
 
-/// Remove every container `host`'s instance left behind, and its
-/// secret files. Returns how many containers.
+/// Remove every container and network `host`'s instance left behind,
+/// its secret files, and its egress socket directories. Returns how
+/// many containers.
 pub async fn sweep(docker: &Docker, host: &SandboxHost) -> usize {
     if let Some(root) = host.secrets_root() {
         let _ = std::fs::remove_dir_all(root);
+    }
+    if !host.instance.is_empty()
+        && let Ok(entries) = std::fs::read_dir(std::env::temp_dir())
+    {
+        let prefix = host.egress_socket_prefix();
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
     }
     let instance = &host.instance;
     let filters = HashMap::from([(
@@ -596,10 +816,29 @@ pub async fn sweep(docker: &Docker, host: &SandboxHost) -> usize {
             docker: docker.clone(),
             id,
             secrets_dir: None,
+            route: None,
         }
         .remove()
         .await;
         removed += 1;
+    }
+    // Networks after containers: one with a container still attached
+    // cannot be removed.
+    let filters = HashMap::from([(
+        "label".to_string(),
+        vec![format!("{LABEL_INSTANCE}={instance}")],
+    )]);
+    if let Ok(networks) = docker
+        .list_networks(Some(ListNetworksOptions {
+            filters: Some(filters),
+        }))
+        .await
+    {
+        for name in networks.into_iter().filter_map(|n| n.name) {
+            if let Err(e) = docker.remove_network(&name).await {
+                tracing::warn!("could not remove MCP egress network {name}: {e}");
+            }
+        }
     }
     removed
 }
@@ -616,6 +855,8 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             runtime: Some("runsc".into()),
             secrets_base: Some(data_dir.join("ram")),
+            facts: Some(RuntimeFacts::default()),
+            sidecar_binary: None,
         }
     }
 
@@ -659,7 +900,7 @@ mod tests {
         let dirs = tempfile::tempdir().unwrap();
         let host = host(dirs.path());
         let plan = plan(&host, &block(&dirs)).unwrap();
-        let body = plan.create_body(&HashMap::new());
+        let body = plan.create_body(&HashMap::new(), None);
         let host_config = body.host_config.as_ref().unwrap();
 
         assert_eq!(body.image.as_deref(), Some("node:22-slim"));
@@ -863,7 +1104,7 @@ mod tests {
             )
         );
         assert_eq!(mount(&plan, SECRETS_TARGET).unwrap().read_only, Some(true));
-        let body_env = plan.create_body(&resolved()).env.unwrap();
+        let body_env = plan.create_body(&resolved(), None).env.unwrap();
         assert!(
             body_env.iter().all(|e| !e.contains("resolved-token-value")),
             "{body_env:?}"
@@ -881,7 +1122,7 @@ mod tests {
         assert!(plan.secret_file_names.is_empty());
         assert!(plan.secrets_dir.is_none());
         assert!(mount(&plan, SECRETS_TARGET).is_none());
-        let body_env = plan.create_body(&resolved()).env.unwrap();
+        let body_env = plan.create_body(&resolved(), None).env.unwrap();
         assert!(body_env.contains(&"GITHUB_TOKEN=resolved-token-value".to_string()));
     }
 
@@ -957,6 +1198,80 @@ mod tests {
         assert!(!is_tmpfs(Path::new("/proc")));
     }
 
+    fn with_hosts(dirs: &tempfile::TempDir, hosts: &[&str]) -> ContainerSandbox {
+        ContainerSandbox {
+            egress: Some(crate::mcp_config::SandboxEgress {
+                hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            }),
+            ..block(dirs)
+        }
+    }
+
+    #[test]
+    fn egress_hosts_are_checked_sorted_and_deduplicated() {
+        let dirs = tempfile::tempdir().unwrap();
+        let host = host(dirs.path());
+        let plan = plan(
+            &host,
+            &with_hosts(&dirs, &["b.example", "*.a.example", "b.example"]),
+        )
+        .unwrap();
+        assert_eq!(plan.egress_hosts, ["*.a.example", "b.example"]);
+        // The plan alone has no network; the route supplies one.
+        assert_eq!(plan.network_mode, "none");
+
+        for bad in ["1.2.3.4", "api.example.com:443", ""] {
+            assert!(
+                matches!(
+                    plan_with_env(&host, &with_hosts(&dirs, &[bad]), &HashMap::new()),
+                    Err(PlanError::Invalid(_))
+                ),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn egress_hosts_are_refused_where_the_runtime_cannot_proxy_them() {
+        let dirs = tempfile::tempdir().unwrap();
+        let listed = with_hosts(&dirs, &["api.example.com"]);
+        for facts in [
+            RuntimeFacts {
+                rootless: true,
+                ..Default::default()
+            },
+            RuntimeFacts {
+                podman: true,
+                ..Default::default()
+            },
+            RuntimeFacts {
+                windows: true,
+                ..Default::default()
+            },
+        ] {
+            let mut host = host(dirs.path());
+            host.facts = Some(facts);
+            assert!(
+                matches!(plan(&host, &listed), Err(PlanError::EgressUnsupported(_))),
+                "{facts:?}"
+            );
+            // No hosts, no network: that runs on any runtime.
+            assert!(plan(&host, &block(&dirs)).is_ok(), "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn under_a_rootless_runtime_the_server_runs_as_the_operator() {
+        let dirs = tempfile::tempdir().unwrap();
+        let mut host = host(dirs.path());
+        assert_eq!(plan(&host, &block(&dirs)).unwrap().user, container_user());
+        host.facts = Some(RuntimeFacts {
+            rootless: true,
+            ..Default::default()
+        });
+        assert_eq!(plan(&host, &block(&dirs)).unwrap().user, "0:0");
+    }
+
     #[test]
     fn instance_ids_are_stable_and_differ_by_data_dir() {
         let a = instance_id(Path::new("/srv/wirken-a"));
@@ -1008,6 +1323,8 @@ mod live_tests {
             data_dir: data_dir.to_path_buf(),
             runtime: None,
             secrets_base: Some(data_dir.join("ram")),
+            facts: None,
+            sidecar_binary: None,
         }
     }
 
@@ -1044,7 +1361,7 @@ mod live_tests {
             &host,
             r#"read line; printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"ok":true}}'; read rest"#,
         );
-        let mut transport = StdioTransport::spawn_container(&docker, &plan, &HashMap::new())
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &HashMap::new(), None)
             .await
             .unwrap();
         let id = transport.container_id().unwrap().to_string();
@@ -1113,7 +1430,7 @@ mod live_tests {
         )
         .unwrap();
         let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
-        let mut transport = StdioTransport::spawn_container(&docker, &plan, &secrets)
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &secrets, None)
             .await
             .unwrap();
         let id = transport.container_id().unwrap().to_string();
@@ -1171,7 +1488,7 @@ mod live_tests {
         )
         .unwrap();
         let secrets = HashMap::from([("TOKEN".to_string(), secret.clone())]);
-        let mut transport = StdioTransport::spawn_container(&docker, &plan, &secrets)
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &secrets, None)
             .await
             .unwrap();
         let id = transport.container_id().unwrap().to_string();
@@ -1187,6 +1504,159 @@ mod live_tests {
         assert!(config_env.contains(&format!("TOKEN={secret}")));
     }
 
+    /// The statically linked binary a sidecar can run in any image:
+    /// `WIRKEN_SIDECAR_BINARY`, else the musl build next to this test's
+    /// target directory. The exec sandbox's live tests look in the same
+    /// places.
+    fn sidecar_binary() -> Option<PathBuf> {
+        let path = match std::env::var_os("WIRKEN_SIDECAR_BINARY") {
+            Some(p) => PathBuf::from(p),
+            None => std::env::current_exe()
+                .ok()?
+                .parent()?
+                .parent()?
+                .parent()?
+                .join("x86_64-unknown-linux-musl/debug/wirken"),
+        };
+        path.exists().then_some(path)
+    }
+
+    /// A server with egress hosts reaches the sidecar and nothing else:
+    /// a listed host is tunnelled, an unlisted one is refused, a direct
+    /// connection has no route, and each verdict is a row naming the
+    /// agent and the server. The route goes with the server.
+    #[tokio::test]
+    async fn a_server_with_egress_hosts_reaches_only_those_through_its_sidecar() {
+        let Some(docker) = docker().await else {
+            return;
+        };
+        let Some(binary) = sidecar_binary() else {
+            eprintln!(
+                "skipping: no static sidecar binary; set WIRKEN_SIDECAR_BINARY or build \
+                 `cargo build -p wirken-cli --bin wirken --target x86_64-unknown-linux-musl`"
+            );
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let mut host = host(&docker, data.path());
+        host.sidecar_binary = Some(binary);
+        host.probe().await;
+        if let Some(why) = host.facts.and_then(|f| f.egress_unsupported()) {
+            eprintln!("skipping: {why}");
+            return;
+        }
+        // Whether the listed host can be reached depends on this host's
+        // own connectivity; the refusals do not.
+        let online = tokio::net::lookup_host("example.com:443").await.is_ok();
+
+        let script = r#"read line
+p=${HTTPS_PROXY#http://}; ph=${p%:*}; pp=${p##*:}
+ask() { exec 3<>/dev/tcp/$ph/$pp; printf 'CONNECT %s:443 HTTP/1.1\r\n\r\n' "$1" >&3; read -r s <&3; exec 3>&-; s=${s%$'\r'}; echo "${s:9:3}"; }
+denied=$(ask evil.example.com)
+allowed=$(ask example.com)
+if (exec 4<>/dev/tcp/1.1.1.1/443) 2>/dev/null; then direct=open; else direct=closed; fi
+printf '{"jsonrpc":"2.0","id":1,"result":{"denied":"%s","allowed":"%s","direct":"%s"}}\n' "$denied" "$allowed" "$direct"
+read rest"#;
+        let plan = ContainerPlan::new(
+            &host,
+            "agent-1",
+            "fetch",
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &HashMap::new(),
+            &ContainerSandbox {
+                image: Some(IMAGE.into()),
+                egress: Some(crate::mcp_config::SandboxEgress {
+                    hosts: vec!["example.com".into()],
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let log: Arc<dyn SessionLog> =
+            Arc::new(wirken_audit::SqliteSessionLog::open_in_memory().unwrap());
+        let route = start_route(&docker, &host, &plan, Some(log.clone()))
+            .await
+            .unwrap();
+        let network = route.network();
+        let mut transport =
+            StdioTransport::spawn_container(&docker, &plan, &HashMap::new(), Some(route))
+                .await
+                .unwrap();
+
+        let response = transport.request("probe", None).await.unwrap();
+        let result = response.result.unwrap();
+        eprintln!("egress probe: online={online} result={result}");
+        assert_eq!(result["denied"], "403", "{result}");
+        assert_eq!(result["direct"], "closed", "{result}");
+        if online {
+            assert_eq!(result["allowed"], "200", "{result}");
+        }
+
+        let handle = log.handle_for(wirken_audit::SessionId::new(
+            crate::mcp_registry::MCP_SENTINEL_SESSION,
+        ));
+        let rows: Vec<_> = log
+            .get_since(&handle, 0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.event {
+                wirken_audit::SessionEvent::SandboxEgressVerdict {
+                    host,
+                    allowed,
+                    agent_id,
+                    mcp_server,
+                    ..
+                } => Some((host, allowed, agent_id, mcp_server)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            rows.contains(&(
+                "evil.example.com".to_string(),
+                false,
+                "agent-1".to_string(),
+                Some("fetch".to_string())
+            )),
+            "{rows:?}"
+        );
+        if online {
+            assert!(
+                rows.contains(&(
+                    "example.com".to_string(),
+                    true,
+                    "agent-1".to_string(),
+                    Some("fetch".to_string())
+                )),
+                "{rows:?}"
+            );
+        }
+
+        transport.shutdown().await;
+        let left = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters: Some(HashMap::from([(
+                    "label".to_string(),
+                    vec![format!("{LABEL_INSTANCE}={}", host.instance)],
+                )])),
+                ..Default::default()
+            }))
+            .await
+            .unwrap();
+        assert!(left.is_empty(), "containers outlived shutdown: {left:?}");
+        assert!(
+            docker
+                .inspect_network(
+                    &network,
+                    None::<bollard::query_parameters::InspectNetworkOptions>
+                )
+                .await
+                .is_err(),
+            "the internal network outlived shutdown"
+        );
+    }
+
     /// A container a dead proxy left behind is removed by the sweep the
     /// next proxy for the same data directory runs.
     #[tokio::test]
@@ -1196,10 +1666,14 @@ mod live_tests {
         };
         let data = tempfile::tempdir().unwrap();
         let host = host(&docker, data.path());
-        let transport =
-            StdioTransport::spawn_container(&docker, &plan(&host, "sleep 300"), &HashMap::new())
-                .await
-                .unwrap();
+        let transport = StdioTransport::spawn_container(
+            &docker,
+            &plan(&host, "sleep 300"),
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
         let id = transport.container_id().unwrap().to_string();
         // The proxy dies without shutting the server down.
         drop(transport);

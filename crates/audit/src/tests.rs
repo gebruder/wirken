@@ -3580,6 +3580,7 @@ fn every_session_event() -> Vec<SessionEvent> {
             channel: None,
             adapter_id: None,
             sender_id: None,
+            mcp_server: None,
         },
         SessionEvent::SandboxEgressUnsupported {
             mode: SandboxEgressModeLabel::None,

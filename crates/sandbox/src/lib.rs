@@ -6,14 +6,22 @@
 //! root with a tmpfs at `/tmp`, and memory and PID caps. What differs
 //! between an `exec` and an MCP server, its mounts, network and
 //! limits, is passed in as [`HostSettings`].
+//!
+//! The egress proxy both use, a policy-free sidecar and a host-side
+//! decision broker, is in [`egress`], and the networks that make the
+//! sidecar the sandbox's only route are built by `egress_net`.
 
 // Slicing a str off a character boundary panics. Each slice that
 // stays carries an allow naming why its offsets are boundaries.
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
+pub mod egress;
+#[cfg(unix)]
+pub mod egress_net;
+
 use std::collections::HashMap;
 
-use bollard::models::{HostConfig, Mount};
+use bollard::models::{HostConfig, Mount, SystemInfo, SystemVersion};
 
 /// Default container memory cap.
 pub const MEMORY_LIMIT: i64 = 512 * 1024 * 1024; // 512 MB
@@ -165,6 +173,77 @@ pub fn hardened_host_config(settings: HostSettings) -> HostConfig {
     }
 }
 
+/// What the container runtime behind a Docker API socket is, as far
+/// as proxied egress is concerned.
+///
+/// Proxied egress needs an `Internal` network, a sidecar that can
+/// connect a bind-mounted Unix socket, and the broker on the same
+/// host. It is verified on rootful Docker on Linux and nowhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RuntimeFacts {
+    /// The API is served by Podman.
+    pub podman: bool,
+    /// The daemon runs without root, so container uid 0 is the
+    /// invoking user and other uids are subordinate ones.
+    pub rootless: bool,
+    /// The daemon runs Windows containers, or this host has no Unix
+    /// sockets for the broker.
+    pub windows: bool,
+}
+
+impl RuntimeFacts {
+    /// Ask the daemon.
+    pub async fn probe(docker: &bollard::Docker) -> Result<Self, String> {
+        let info = docker
+            .info()
+            .await
+            .map_err(|e| format!("runtime info: {e}"))?;
+        let version = docker
+            .version()
+            .await
+            .map_err(|e| format!("runtime version: {e}"))?;
+        Ok(Self::from_reports(&info, &version))
+    }
+
+    /// Read the facts out of the daemon's `/info` and `/version`.
+    pub fn from_reports(info: &SystemInfo, version: &SystemVersion) -> Self {
+        let is_podman = |name: &str| name.to_ascii_lowercase().contains("podman");
+        let podman = version
+            .components
+            .iter()
+            .flatten()
+            .any(|c| is_podman(&c.name))
+            || version
+                .platform
+                .as_ref()
+                .is_some_and(|p| is_podman(&p.name));
+        let rootless = info
+            .security_options
+            .iter()
+            .flatten()
+            .any(|o| o.split(',').any(|kv| kv == "name=rootless"));
+        let windows = cfg!(not(unix)) || info.os_type.as_deref() == Some("windows");
+        Self {
+            podman,
+            rootless,
+            windows,
+        }
+    }
+
+    /// Why proxied egress cannot run on this runtime, if it cannot.
+    pub fn egress_unsupported(&self) -> Option<&'static str> {
+        if self.windows {
+            Some("the egress broker needs a Unix socket, which this host does not have")
+        } else if self.podman {
+            Some("proxied egress is not verified on Podman")
+        } else if self.rootless {
+            Some("proxied egress is not verified on rootless Docker")
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +295,59 @@ mod tests {
         assert_eq!(SandboxMode::ExecOnly.runtime_name(), None);
         assert_eq!(SandboxMode::from_str_config("gvisor"), SandboxMode::GVisor);
         assert_eq!(SandboxMode::from_str_config("typo"), SandboxMode::ExecOnly);
+    }
+
+    fn reports(security: &[&str], components: &[&str], os: &str) -> (SystemInfo, SystemVersion) {
+        let info = SystemInfo {
+            security_options: Some(security.iter().map(|s| s.to_string()).collect()),
+            os_type: Some(os.to_string()),
+            ..Default::default()
+        };
+        let version = SystemVersion {
+            components: Some(
+                components
+                    .iter()
+                    .map(|n| bollard::models::SystemVersionComponents {
+                        name: n.to_string(),
+                        version: "1".into(),
+                        details: None,
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        (info, version)
+    }
+
+    #[test]
+    fn rootful_docker_on_linux_supports_proxied_egress() {
+        let (info, version) = reports(
+            &["name=seccomp,profile=builtin", "name=cgroupns"],
+            &["Engine", "containerd"],
+            "linux",
+        );
+        let facts = RuntimeFacts::from_reports(&info, &version);
+        assert_eq!(facts, RuntimeFacts::default());
+        assert_eq!(facts.egress_unsupported(), None);
+    }
+
+    #[test]
+    fn rootless_podman_and_windows_do_not() {
+        let (info, version) = reports(&["name=rootless"], &["Engine"], "linux");
+        let rootless = RuntimeFacts::from_reports(&info, &version);
+        assert!(rootless.rootless && !rootless.podman);
+        assert!(rootless.egress_unsupported().is_some());
+
+        let (info, version) = reports(&[], &["Podman Engine"], "linux");
+        let podman = RuntimeFacts::from_reports(&info, &version);
+        assert!(podman.podman);
+        assert!(podman.egress_unsupported().is_some());
+
+        let (info, version) = reports(&[], &["Engine"], "windows");
+        assert!(
+            RuntimeFacts::from_reports(&info, &version)
+                .egress_unsupported()
+                .is_some()
+        );
     }
 }

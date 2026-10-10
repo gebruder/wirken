@@ -629,24 +629,10 @@ fn expand_workspace_set(set: BTreeSet<PathBuf>, workspace: &Path) -> BTreeSet<Pa
 pub fn host_in_set(host: &str, domains: &AllowSet) -> bool {
     match domains {
         AllowSet::Wildcard => true,
-        AllowSet::Set(set) => set.iter().any(|pat| host_matches(host, pat)),
+        AllowSet::Set(set) => set
+            .iter()
+            .any(|pat| wirken_sandbox::egress::host_matches(host, pat)),
     }
-}
-
-fn host_matches(host: &str, pattern: &str) -> bool {
-    if pattern == host {
-        return true;
-    }
-    if let Some(suffix) = pattern.strip_prefix("*.")
-        && let Some(dotidx) = host.find('.')
-    {
-        #[allow(
-            clippy::string_slice,
-            reason = "idx + 1 is just past an ASCII '.' found by find"
-        )]
-        return &host[dotidx + 1..] == suffix;
-    }
-    false
 }
 
 fn path_under_any(path: &Path, allowed: &BTreeSet<PathBuf>) -> bool {
