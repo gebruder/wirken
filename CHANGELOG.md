@@ -147,6 +147,11 @@ tagged.
 
 ### Fixed
 
+- `wirken run` exits after its shutdown. Since connection tasks were
+  tracked for `connection.panic` rows (unreleased; not in 1.28.0), the
+  tracker held a handle on the audit writer to the end of the shutdown,
+  and the gateway waited for ever after "Shutting down" for the audit log
+  to flush.
 - `wirken run` takes SIGTERM the way it takes Ctrl-C and runs its
   shutdown. Before, SIGTERM ended the gateway at once: the MCP proxy kept
   running, and so did every container it had started.

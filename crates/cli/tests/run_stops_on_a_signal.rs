@@ -1,7 +1,9 @@
-//! `wirken run` takes SIGTERM the way it takes Ctrl-C: it runs
-//! its shutdown, which asks the MCP proxy to stop its servers, and the
-//! proxy exits with it. A gateway that died on SIGTERM left the proxy
-//! running, and every container the proxy had started with it.
+//! `wirken run` stops on SIGTERM and on Ctrl-C (SIGINT) the same way: it
+//! runs its shutdown, which asks the MCP proxy to stop its servers, the
+//! proxy exits with it, and the gateway itself exits once its audit log
+//! is flushed. A gateway that died on SIGTERM left the proxy running,
+//! and every container the proxy had started with it; one that ran its
+//! shutdown never returned from the flush.
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader};
@@ -52,8 +54,9 @@ fn free_port() -> u16 {
         .port()
 }
 
-#[test]
-fn sigterm_runs_the_shutdown_and_takes_the_mcp_proxy_with_it() {
+/// Start the gateway, send it `signal` once it says it is running, and
+/// check that it stops its MCP proxy and then exits by itself.
+fn stops_on(signal: libc::c_int) {
     let data = tempfile::tempdir().unwrap();
     // Nothing listens on the discard port; the gateway starts anyway.
     std::fs::write(
@@ -99,26 +102,40 @@ fn sigterm_runs_the_shutdown_and_takes_the_mcp_proxy_with_it() {
 
     // SAFETY: kill(2) on the child this test spawned and still holds.
     unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        libc::kill(pid as libc::pid_t, signal);
     }
     let deadline = Instant::now() + Duration::from_secs(30);
-    while proxies.iter().any(|p| alive(*p)) && Instant::now() < deadline {
+    let status = loop {
+        if let Some(status) = gateway.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() > deadline {
+            let _ = gateway.kill();
+            let _ = gateway.wait();
+            break None;
+        }
         std::thread::sleep(Duration::from_millis(100));
-    }
+    };
     output.extend(lines.try_iter());
-    let survivors: Vec<u32> = proxies.iter().copied().filter(|p| alive(*p)).collect();
-    // This test is about the proxy; the gateway is stopped once that is
-    // checked.
-    let _ = gateway.kill();
-    let _ = gateway.wait();
+    let output = output.join("\n");
 
+    let survivors: Vec<u32> = proxies.iter().copied().filter(|p| alive(*p)).collect();
     assert!(
         survivors.is_empty(),
-        "MCP proxy {survivors:?} outlived SIGTERM"
+        "MCP proxy {survivors:?} outlived the gateway"
     );
-    assert!(
-        output.iter().any(|l| l.contains("Shutting down")),
-        "{}",
-        output.join("\n")
-    );
+    let status = status.unwrap_or_else(|| panic!("gateway did not exit:\n{output}"));
+    assert!(status.success(), "{status:?}\n{output}");
+    assert!(output.contains("Shutting down"), "{output}");
+    assert!(output.contains("Wirken stopped."), "{output}");
+}
+
+#[test]
+fn sigterm_stops_the_proxy_and_the_gateway() {
+    stops_on(libc::SIGTERM);
+}
+
+#[test]
+fn ctrl_c_stops_the_proxy_and_the_gateway() {
+    stops_on(libc::SIGINT);
 }

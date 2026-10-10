@@ -2070,6 +2070,10 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     // flight would otherwise append after the SessionEnd heads below,
     // and hold the audit writer open past the flush.
     connection_tasks.shutdown().await;
+    // It holds a handle on the audit writer, and the flush below waits
+    // for every handle to go. Kept to the end of this function, it kept
+    // the gateway waiting there for ever after "Shutting down".
+    drop(connection_tasks);
 
     // Emit a SessionEnd ChainHead per active session so a clean
     // shutdown leaves a signed terminal head rather than an
