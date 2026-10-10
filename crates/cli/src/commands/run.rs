@@ -1068,11 +1068,15 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     if mcp_proxy_socket.exists() {
         let _ = std::fs::remove_file(&mcp_proxy_socket);
     }
-    let mcp_proxy_handle = {
+    // The proxy's pid while it runs, zero otherwise, so shutdown can
+    // ask it to stop its servers before the handle is dropped.
+    let mcp_proxy_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let mut mcp_proxy_handle = {
         let exe = exe.clone();
         let data_dir = cfg.data_dir.clone();
         let vp = vault_passphrase.clone().unwrap_or_default();
         let socket = mcp_proxy_socket.clone();
+        let pid = mcp_proxy_pid.clone();
         tokio::spawn(async move {
             tracing::info!("Spawning MCP proxy");
             let result = Command::new(&exe)
@@ -1084,7 +1088,12 @@ pub async fn run(port: Option<u16>) -> Result<()> {
                 .spawn();
             match result {
                 Ok(mut child) => {
+                    pid.store(
+                        child.id().unwrap_or(0),
+                        std::sync::atomic::Ordering::Release,
+                    );
                     let status = child.wait().await;
+                    pid.store(0, std::sync::atomic::Ordering::Release);
                     tracing::info!("MCP proxy exited: {status:?}");
                 }
                 Err(e) => {
@@ -2065,7 +2074,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     for handle in adapter_handles {
         handle.abort();
     }
-    mcp_proxy_handle.abort();
+    stop_mcp_proxy(&mcp_proxy_pid, &mut mcp_proxy_handle).await;
     accept_handle.abort();
     hooks_accept_handle.abort();
     #[cfg(unix)]
@@ -2316,6 +2325,42 @@ const ADAPTER_RESTART_BACKOFF: RestartBackoff = RestartBackoff {
 /// drop. Shutdown aborts the task running it before it stops the
 /// connection tasks, so a connection ending at shutdown respawns
 /// nothing.
+/// How long the MCP proxy gets to stop its servers at shutdown.
+const MCP_PROXY_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ask the MCP proxy to stop, then drop it. On SIGTERM it stops and
+/// removes its server containers; Ctrl-C has usually reached it already
+/// as part of the same process group. It is aborted, which kills it,
+/// only if it has not exited within [`MCP_PROXY_STOP_GRACE`].
+async fn stop_mcp_proxy(
+    pid: &std::sync::atomic::AtomicU32,
+    handle: &mut tokio::task::JoinHandle<()>,
+) {
+    #[cfg(unix)]
+    {
+        // Zero once the proxy has exited, so a pid the system has since
+        // given to another process is never signalled.
+        let pid = pid.load(std::sync::atomic::Ordering::Acquire);
+        if pid != 0
+            && let Ok(pid) = libc::pid_t::try_from(pid)
+        {
+            // SAFETY: kill(2) on a pid this process spawned and still
+            // waits on, with a valid signal number.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    if tokio::time::timeout(MCP_PROXY_STOP_GRACE, &mut *handle)
+        .await
+        .is_err()
+    {
+        handle.abort();
+    }
+}
+
 async fn supervise_adapter<S>(
     adapter_id: &str,
     channel: &str,

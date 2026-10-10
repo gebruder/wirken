@@ -5,6 +5,7 @@ members = [
     "crates/audit",
     "crates/ipc",
     "crates/gateway",
+    "crates/sandbox",
     "crates/adapter-core",
     "crates/adapter-telegram",
     "crates/adapter-discord",

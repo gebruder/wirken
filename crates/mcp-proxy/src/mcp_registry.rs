@@ -26,9 +26,10 @@ use wirken_audit::{SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
+use crate::container::{ContainerPlan, SandboxHost};
 use crate::error::ProxyError;
 use crate::mcp_client::{McpClient, McpToolResult};
-use crate::mcp_config::{McpAuth, McpConfig, McpServerConfig};
+use crate::mcp_config::{ContainerSandbox, McpAuth, McpConfig, McpServerConfig, StdioSandbox};
 use crate::mcp_signing::{McpVerifyResult, bundled_mcp_pubkey, verify_mcp_entry};
 use crate::mcp_transport::{HttpTransport, StdioTransport, Transport};
 use crate::wire::ToolDefWire;
@@ -77,6 +78,8 @@ pub struct ProxyRegistry {
     /// second refresh otherwise. Keyed by the vault credential name
     /// (after stripping the `vault:` prefix).
     oauth_refresh_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// Where stdio servers with a `sandbox` block are contained.
+    sandbox: SandboxHost,
 }
 
 impl ProxyRegistry {
@@ -86,7 +89,34 @@ impl ProxyRegistry {
             costs_by_agent: HashMap::new(),
             identities: HashMap::new(),
             oauth_refresh_locks: HashMap::new(),
+            sandbox: SandboxHost::unavailable(),
         }
+    }
+
+    /// Use `host` to start contained stdio servers.
+    pub fn with_sandbox(mut self, host: SandboxHost) -> Self {
+        self.sandbox = host;
+        self
+    }
+
+    /// Start `server`'s container from its `sandbox` block.
+    async fn spawn_contained(
+        &self,
+        agent_id: &str,
+        server: &str,
+        command: &str,
+        args: &[String],
+        env: &HashMap<String, String>,
+        block: &ContainerSandbox,
+    ) -> Result<StdioTransport, ProxyError> {
+        let docker = self
+            .sandbox
+            .docker
+            .as_ref()
+            .ok_or_else(|| ProxyError::Mcp("no container runtime is reachable".into()))?;
+        let plan = ContainerPlan::new(&self.sandbox, agent_id, server, command, args, env, block)
+            .map_err(ProxyError::Mcp)?;
+        StdioTransport::spawn_container(docker, &plan).await
     }
 
     /// Register an Ed25519 public key as the authoritative identity
@@ -174,7 +204,11 @@ impl ProxyRegistry {
 
             match server_config {
                 McpServerConfig::Stdio {
-                    command, args, env, ..
+                    command,
+                    args,
+                    env,
+                    sandbox,
+                    ..
                 } => {
                     // Resolve `vault:`-prefixed env values via a
                     // brief read on the shared vault.
@@ -183,7 +217,26 @@ impl ProxyRegistry {
                         resolve_env(env, guard.as_ref())
                     };
 
-                    match StdioTransport::spawn(command, args, &resolved_env).await {
+                    let spawned = match sandbox.as_deref() {
+                        Some(StdioSandbox::Container(block)) => {
+                            self.spawn_contained(
+                                agent_id,
+                                name,
+                                command,
+                                args,
+                                &resolved_env,
+                                block,
+                            )
+                            .await
+                        }
+                        Some(StdioSandbox::Invalid(_)) => Err(ProxyError::Mcp(
+                            "sandbox is neither \"off\" nor a sandbox block".into(),
+                        )),
+                        Some(StdioSandbox::Off(_)) | None => {
+                            StdioTransport::spawn(command, args, &resolved_env).await
+                        }
+                    };
+                    match spawned {
                         Ok(stdio) => {
                             let mut client =
                                 McpClient::new(name.clone(), Transport::Stdio(Box::new(stdio)));
@@ -191,6 +244,7 @@ impl ProxyRegistry {
                                 tracing::warn!(
                                     "MCP stdio server '{name}' (agent '{agent_id}') skipped: {e}"
                                 );
+                                client.shutdown().await;
                                 continue;
                             }
                             clients.insert(name.clone(), client);

@@ -5,8 +5,13 @@
 //! is the error type (ProxyError instead of AgentError).
 
 use std::collections::HashMap;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::pin::Pin;
+
+use futures_util::StreamExt;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
+
+use crate::container::{ContainerHandle, ContainerPlan};
 
 use crate::error::ProxyError;
 
@@ -107,12 +112,19 @@ pub(crate) fn build_spawn_env(
     out
 }
 
-/// Stdio transport: spawn a child process and communicate via JSON-RPC over stdin/stdout.
+/// Stdio transport: JSON-RPC over the server's stdin and stdout, whether
+/// the server is a host child or runs in a container.
 pub struct StdioTransport {
-    child: Child,
-    stdin: tokio::process::ChildStdin,
-    reader: BufReader<tokio::process::ChildStdout>,
+    process: StdioProcess,
+    stdin: Pin<Box<dyn AsyncWrite + Send>>,
+    reader: Pin<Box<dyn AsyncBufRead + Send>>,
     next_id: u64,
+}
+
+/// What the stdio stream is attached to.
+enum StdioProcess {
+    Host(Child),
+    Container(ContainerHandle),
 }
 
 impl StdioTransport {
@@ -150,9 +162,86 @@ impl StdioTransport {
             .ok_or_else(|| ProxyError::Mcp("no stdout on child".into()))?;
 
         Ok(Self {
-            child,
-            stdin,
-            reader: BufReader::new(stdout),
+            process: StdioProcess::Host(child),
+            stdin: Box::pin(stdin),
+            reader: Box::pin(BufReader::new(stdout)),
+            next_id: 1,
+        })
+    }
+
+    /// Start `plan`'s container and attach to its stdin and stdout.
+    ///
+    /// The attach comes before the start, so nothing the server writes
+    /// first is lost. Any failure after the container exists removes it.
+    pub async fn spawn_container(
+        docker: &bollard::Docker,
+        plan: &ContainerPlan,
+    ) -> Result<Self, ProxyError> {
+        use bollard::container::LogOutput;
+        use bollard::query_parameters::{AttachContainerOptions, CreateContainerOptions};
+
+        if let Some(dir) = &plan.scratch_dir {
+            create_private_dir(dir).map_err(|e| {
+                ProxyError::Mcp(format!("create scratch dir {}: {e}", dir.display()))
+            })?;
+        }
+
+        let name = format!("wirken-mcp-{}", random_suffix());
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(name),
+                    platform: String::new(),
+                }),
+                plan.create_body(),
+            )
+            .await
+            .map_err(|e| ProxyError::Mcp(format!("create container for '{}': {e}", plan.server)))?;
+        let handle = ContainerHandle {
+            docker: docker.clone(),
+            id: created.id,
+        };
+
+        let attached = match docker
+            .attach_container(
+                &handle.id,
+                Some(AttachContainerOptions {
+                    stream: true,
+                    stdin: true,
+                    stdout: true,
+                    ..Default::default()
+                }),
+            )
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                handle.remove().await;
+                return Err(ProxyError::Mcp(format!("attach to '{}': {e}", plan.server)));
+            }
+        };
+        if let Err(e) = docker.start_container(&handle.id, None).await {
+            handle.remove().await;
+            return Err(ProxyError::Mcp(format!(
+                "start container for '{}': {e}",
+                plan.server
+            )));
+        }
+
+        // Only stdout carries JSON-RPC. Stderr is not attached.
+        let stdout = attached.output.filter_map(|item| async move {
+            match item {
+                Ok(LogOutput::StdOut { message }) | Ok(LogOutput::Console { message }) => {
+                    Some(Ok(message))
+                }
+                Ok(_) => None,
+                Err(e) => Some(Err(std::io::Error::other(e))),
+            }
+        });
+        Ok(Self {
+            process: StdioProcess::Container(handle),
+            stdin: attached.input,
+            reader: Box::pin(tokio_util::io::StreamReader::new(Box::pin(stdout))),
             next_id: 1,
         })
     }
@@ -269,10 +358,42 @@ impl StdioTransport {
         }
     }
 
-    /// Kill the child process.
-    pub async fn shutdown(&mut self) {
-        let _ = self.child.kill().await;
+    /// The container's id, for a contained server.
+    pub fn container_id(&self) -> Option<&str> {
+        match &self.process {
+            StdioProcess::Host(_) => None,
+            StdioProcess::Container(handle) => Some(&handle.id),
+        }
     }
+
+    /// Kill the host child, or stop and remove the container.
+    pub async fn shutdown(&mut self) {
+        match &mut self.process {
+            StdioProcess::Host(child) => {
+                let _ = child.kill().await;
+            }
+            StdioProcess::Container(handle) => handle.stop_and_remove().await,
+        }
+    }
+}
+
+/// Create `dir` and its parents, the last one readable only by its owner.
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Twelve random hex characters for a container name.
+fn random_suffix() -> String {
+    use rand::Rng;
+    let mut bytes = [0u8; 6];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------

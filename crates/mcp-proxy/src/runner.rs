@@ -14,6 +14,7 @@ use wirken_gateway::agent_config::AgentConfigStore;
 use wirken_gateway::config::GatewayConfig;
 use wirken_vault::{CredentialStore, ScopedCredentialStore, probe_keychain};
 
+use crate::container::{self, SandboxHost};
 use crate::error::ProxyError;
 use crate::mcp_config::McpConfig;
 use crate::mcp_registry::{ProxyRegistry, SharedVault, vault_names};
@@ -74,7 +75,21 @@ pub async fn run() -> Result<(), ProxyError> {
         );
     }
 
-    let mut registry = ProxyRegistry::new();
+    // Stdio servers with a `sandbox` block run in containers. Built
+    // after the vault so nothing touches the environment, or awaits,
+    // before `open_vault`'s scrub. Containers an earlier proxy for this
+    // data directory left behind, for example after the gateway killed
+    // it, are removed before any new one starts.
+    let sandbox = SandboxHost::new(&data_dir);
+    if let Some(docker) = &sandbox.docker {
+        let removed = container::sweep(docker, &sandbox.instance).await;
+        if removed > 0 {
+            tracing::info!(
+                "removed {removed} MCP server container(s) an earlier proxy left behind"
+            );
+        }
+    }
+    let mut registry = ProxyRegistry::new().with_sandbox(sandbox);
 
     // Open the audit log so MCP signature-verify outcomes land on the
     // `gateway-mcp` sentinel session. The proxy is the sole writer of
@@ -144,7 +159,44 @@ pub async fn run() -> Result<(), ProxyError> {
 
     let registry = Arc::new(Mutex::new(registry));
 
-    server::serve(socket_path, registry).await
+    // Serve until the socket fails or the proxy is told to stop, then
+    // stop every server: host children are killed, containers stopped
+    // and removed.
+    let served = tokio::select! {
+        result = server::serve(socket_path, registry.clone()) => result,
+        () = shutdown_signal() => {
+            tracing::info!("wirken-mcp-proxy shutting down");
+            Ok(())
+        }
+    };
+    registry.lock().await.shutdown().await;
+    served
+}
+
+/// Resolves on SIGTERM or SIGINT (Ctrl-C elsewhere). If the handlers
+/// cannot be installed it never resolves, and the proxy runs until it
+/// is killed, as before.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut int)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) else {
+            return std::future::pending().await;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 /// Read `{data_dir}/agents/{agent_id}/identity.pub` and parse it as a

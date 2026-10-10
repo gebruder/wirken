@@ -12,6 +12,7 @@
 #![cfg_attr(not(test), deny(clippy::string_slice))]
 
 pub mod auth;
+pub mod container;
 pub mod error;
 pub mod mcp_client;
 pub mod mcp_config;

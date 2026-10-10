@@ -1,0 +1,12 @@
+[package]
+name = "wirken-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Container hardening and the sandbox mode shared by Wirken's exec sandbox and its MCP server containers."
+
+[dependencies]
+bollard = { workspace = true }
+tracing = { workspace = true }
+wirken-audit = { path = "../audit" }

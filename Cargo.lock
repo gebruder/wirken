@@ -6924,6 +6924,7 @@ dependencies = [
  "wirken-gateway",
  "wirken-ipc",
  "wirken-mcp-proxy",
+ "wirken-sandbox",
 ]
 
 [[package]]
@@ -7049,8 +7050,11 @@ version = "1.28.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bollard",
  "chrono",
  "ed25519-dalek 3.0.0",
+ "futures-util",
+ "libc",
  "oauth2",
  "open",
  "rand 0.10.3",
@@ -7061,12 +7065,23 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
  "wirken-audit",
  "wirken-gateway",
  "wirken-ipc",
+ "wirken-sandbox",
  "wirken-vault",
  "zeroize",
+]
+
+[[package]]
+name = "wirken-sandbox"
+version = "1.28.0"
+dependencies = [
+ "bollard",
+ "tracing",
+ "wirken-audit",
 ]
 
 [[package]]

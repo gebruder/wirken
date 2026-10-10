@@ -20,72 +20,13 @@ use crate::sandbox_egress::SandboxEgressContext;
 use crate::tool::ToolResult;
 
 const DEFAULT_IMAGE: &str = "debian:bookworm-slim";
-/// Container memory cap. Public so the webchat status route reports the
-/// value the sandbox actually applies rather than a copy of it.
-pub const MEMORY_LIMIT: i64 = 512 * 1024 * 1024; // 512 MB
-/// Container PID cap; see [`MEMORY_LIMIT`].
-pub const PIDS_LIMIT: i64 = 256;
-
-/// Sandbox mode for tool execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SandboxMode {
-    /// No sandboxing. Direct host execution. Opt-in only; set
-    /// `"mode": "off"` in `sandbox.json` to use this.
-    Off,
-    /// Only the `exec` tool runs in a Docker container (default runc runtime).
-    /// This is the default as of 0.7.5. If Docker is not reachable, the
-    /// `exec` tool refuses to run rather than silently falling back to
-    /// host execution; operators who want host execution must set
-    /// `"mode":"off"` explicitly. Sandbox provisioning is still lazy
-    /// (attempted on first `exec` call), so a missing runtime only
-    /// surfaces when a tool call is issued.
-    #[default]
-    ExecOnly,
-    /// Only the `exec` tool runs in a gVisor container (runsc runtime).
-    /// Provides kernel attack surface reduction: syscalls are intercepted by
-    /// gVisor's Sentry rather than reaching the host kernel. Requires
-    /// `runsc` registered as a Docker runtime.
-    GVisor,
-}
-
-impl SandboxMode {
-    /// Parse a sandbox mode from a config string. Unknown modes fall
-    /// back to [`SandboxMode::default`] rather than forcing `Off`, so
-    /// a config typo does not silently strip the sandbox; the
-    /// operator gets the secure default instead, with a warning.
-    pub fn from_str_config(s: &str) -> Self {
-        match s {
-            "exec-only" => Self::ExecOnly,
-            "gvisor" => Self::GVisor,
-            "off" => Self::Off,
-            "" => Self::default(),
-            _ => {
-                tracing::warn!(
-                    "Unknown sandbox_mode '{s}', falling back to default ({:?})",
-                    Self::default()
-                );
-                Self::default()
-            }
-        }
-    }
-
-    /// How this mode is named on an audit row.
-    pub(crate) fn label(self) -> wirken_audit::SandboxModeLabel {
-        match self {
-            Self::Off => wirken_audit::SandboxModeLabel::Off,
-            Self::ExecOnly => wirken_audit::SandboxModeLabel::ExecOnly,
-            Self::GVisor => wirken_audit::SandboxModeLabel::Gvisor,
-        }
-    }
-
-    /// The OCI runtime name to pass to Docker, or None for the default (runc).
-    pub(crate) fn runtime_name(self) -> Option<String> {
-        match self {
-            Self::GVisor => Some("runsc".to_string()),
-            _ => None,
-        }
-    }
-}
+/// Sandbox mode, shared with MCP server containers.
+pub use wirken_sandbox::SandboxMode;
+pub(crate) use wirken_sandbox::runtime_label;
+/// Container memory and PID caps, shared with MCP server containers.
+/// Public so the webchat status route reports the value the sandbox
+/// actually applies rather than a copy of it.
+pub use wirken_sandbox::{MEMORY_LIMIT, PIDS_LIMIT};
 
 /// Which interpreter the `exec` tool uses when running commands on
 /// the host (i.e. when `SandboxMode::Off` is configured).
@@ -994,21 +935,13 @@ pub(crate) enum EgressDecision<'a> {
 /// Build the `HostConfig` for a sandboxed exec. Extracted so the
 /// hardening settings can be asserted without spinning up Docker.
 ///
-/// Kernel-level hardening, in addition to the memory, PID, network,
-/// and user caps already set below:
+/// The fixed hardening (no capabilities, no privilege elevation,
+/// default seccomp, read-only root, tmpfs `/tmp`) comes from
+/// [`wirken_sandbox::hardened_host_config`], the same function MCP server
+/// containers use. What is particular to `exec` is set here:
 ///
-/// * `cap_drop=ALL`: strip every Linux capability. The agent never
-///   needs `CAP_NET_BIND_SERVICE`, `CAP_CHOWN`, etc. If a real use
-///   case breaks this, re-evaluate rather than loosening by default.
-/// * `no-new-privileges`: block setuid/setgid elevation inside the
-///   container. Pairs with `cap_drop`.
-/// * seccomp: rely on Docker's default seccomp profile. Docker
-///   applies it automatically when no seccomp SecurityOpt is set;
-///   the string `seccomp=default` is not a valid option and causes
-///   the daemon to reject container start.
-/// * `readonly_rootfs`: make the container's `/` read-only. The
-///   workspace bind-mount stays RW, and a tmpfs at `/tmp` gives the
-///   shell somewhere to scratch.
+/// * the agent workspace, bind-mounted read-write at `/workspace`;
+/// * the memory and PID caps, and no CPU cap;
 /// * `egress`: what the egress layer decided. `Proxied` joins the
 ///   named Docker network, created `Internal` with inter-container
 ///   communication off, so the only address it can reach is the
@@ -1041,33 +974,16 @@ pub(crate) fn build_host_config(
         EgressDecision::Proxied(_) => Some(vec!["127.0.0.1".to_string()]),
         _ => None,
     };
-    let tmpfs_mounts: std::collections::HashMap<String, String> = {
-        let mut m = std::collections::HashMap::new();
-        m.insert("/tmp".into(), "size=64m,mode=1777".into());
-        m
-    };
-    HostConfig {
-        binds: Some(vec![format!("{workspace_str}:/workspace:rw")]),
+    wirken_sandbox::hardened_host_config(wirken_sandbox::HostSettings {
+        binds: vec![format!("{workspace_str}:/workspace:rw")],
+        mounts: Vec::new(),
         network_mode,
         dns,
-        memory: Some(MEMORY_LIMIT),
-        pids_limit: Some(PIDS_LIMIT),
-        // With auto_remove=true the container is torn down the
-        // moment it exits, which races the post-wait `logs` call and
-        // leaves no output to return to the agent. Rely on the
-        // explicit `kill_and_remove` cleanup instead.
-        auto_remove: Some(false),
+        memory: MEMORY_LIMIT,
+        pids: PIDS_LIMIT,
+        nano_cpus: None,
         runtime: config.mode.runtime_name(),
-        cap_drop: Some(vec!["ALL".into()]),
-        cap_add: Some(Vec::new()),
-        security_opt: Some(vec![
-            "no-new-privileges:true".into(),
-            // Docker applies its default seccomp profile when no seccomp SecurityOpt is set.
-        ]),
-        readonly_rootfs: Some(true),
-        tmpfs: Some(tmpfs_mounts),
-        ..Default::default()
-    }
+    })
 }
 
 /// Detect if Docker is available.
@@ -1090,22 +1006,6 @@ pub async fn detect_image(image: &str) -> bool {
         return false;
     };
     docker.inspect_image(image).await.is_ok()
-}
-
-/// The runtime an audit row names, from the OCI runtime on the
-/// container body about to be sent.
-///
-/// Read off the body rather than off the sandbox's mode: this is what
-/// Docker is being told to use for this one container. A mode whose
-/// `runtime_name` says `runsc` and a body that carries none shows up
-/// as a `docker` row under a `gvisor` mode, which is the disagreement
-/// worth being able to see on the chain. `None` is Docker's default
-/// runtime, runc.
-pub(crate) fn runtime_label(runtime: Option<&str>) -> wirken_audit::SandboxRuntimeLabel {
-    match runtime {
-        Some("runsc") => wirken_audit::SandboxRuntimeLabel::Gvisor,
-        _ => wirken_audit::SandboxRuntimeLabel::Docker,
-    }
 }
 
 /// Detect if gVisor (runsc) is available as a Docker runtime.

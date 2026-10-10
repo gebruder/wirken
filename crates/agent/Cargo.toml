@@ -11,6 +11,7 @@ wirken-audit = { path = "../audit" }
 wirken-ipc = { path = "../ipc" }
 wirken-gateway = { path = "../gateway" }
 wirken-mcp-proxy = { path = "../mcp-proxy" }
+wirken-sandbox = { path = "../sandbox" }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 lru = { workspace = true }
