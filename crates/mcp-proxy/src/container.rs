@@ -56,6 +56,38 @@ const RESERVED_TARGETS: &[&str] = &[
     "/dev",
 ];
 
+/// How many stderr lines of a failed or exited server reach the log.
+const STDERR_TAIL_LINES: usize = 20;
+
+/// The most bytes of them, so one long line cannot flood the log.
+const STDERR_TAIL_BYTES: usize = 4096;
+
+/// `raw` as text fit for a log line: control characters other than
+/// newline and tab shown as `?`, cut to the last [`STDERR_TAIL_BYTES`]
+/// on a character boundary, and `None` when nothing is left.
+fn printable_tail(raw: &[u8]) -> Option<String> {
+    let text: String = String::from_utf8_lossy(raw)
+        .chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let mut start = text.len().saturating_sub(STDERR_TAIL_BYTES);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    #[allow(clippy::string_slice, reason = "start was moved to a char boundary")]
+    Some(text[start..].to_string())
+}
+
 /// Default CPU cap: one CPU, in the billionths Docker counts in.
 const DEFAULT_NANO_CPUS: i64 = 1_000_000_000;
 
@@ -749,6 +781,28 @@ pub struct ContainerHandle {
 }
 
 impl ContainerHandle {
+    /// The last lines the server wrote to stderr, for the operator log
+    /// when it failed or exited. Read before the container is removed,
+    /// since the runtime keeps them only until then. `None` when it
+    /// wrote nothing or the runtime could not be asked.
+    pub async fn stderr_tail(&self) -> Option<String> {
+        use futures_util::StreamExt;
+        let mut logs = self.docker.logs(
+            &self.id,
+            Some(bollard::query_parameters::LogsOptions {
+                stdout: false,
+                stderr: true,
+                tail: STDERR_TAIL_LINES.to_string(),
+                ..Default::default()
+            }),
+        );
+        let mut raw = Vec::new();
+        while let Some(Ok(chunk)) = logs.next().await {
+            raw.extend_from_slice(&chunk.into_bytes());
+        }
+        printable_tail(&raw)
+    }
+
     /// Stop the container, giving the server two seconds, and remove it.
     /// Returns the exit code the runtime recorded, when it gave one.
     pub async fn stop_and_remove(&mut self) -> Option<i64> {
@@ -1298,6 +1352,20 @@ mod tests {
     }
 
     #[test]
+    fn a_stderr_tail_is_printable_and_bounded() {
+        assert_eq!(printable_tail(b""), None);
+        assert_eq!(printable_tail(b"  \n "), None);
+        assert_eq!(
+            printable_tail(b"error: \x1b[31mno token\x1b[0m\n\tat main\n").as_deref(),
+            Some("error: ?[31mno token?[0m\n\tat main")
+        );
+        let long = "\u{e4}".repeat(STDERR_TAIL_BYTES);
+        let tail = printable_tail(long.as_bytes()).unwrap();
+        assert!(tail.len() <= STDERR_TAIL_BYTES, "{}", tail.len());
+        assert!(tail.chars().all(|c| c == '\u{e4}'));
+    }
+
+    #[test]
     fn instance_ids_are_stable_and_differ_by_data_dir() {
         let a = instance_id(Path::new("/srv/wirken-a"));
         assert_eq!(a, instance_id(Path::new("/srv/wirken-a")));
@@ -1680,6 +1748,32 @@ read rest"#;
                 .is_err(),
             "the internal network outlived shutdown"
         );
+    }
+
+    /// What a server wrote to stderr can still be read after its
+    /// container has exited, until the container is removed.
+    #[tokio::test]
+    async fn a_servers_stderr_is_read_after_it_exits() {
+        let Some(docker) = docker().await else {
+            return;
+        };
+        let data = tempfile::tempdir().unwrap();
+        let host = host(&docker, data.path());
+        let plan = plan(
+            &host,
+            "echo 'fatal: no config at /etc/srv.toml' >&2; exit 2",
+        );
+        let mut transport = StdioTransport::spawn_container(&docker, &plan, &HashMap::new(), None)
+            .await
+            .unwrap();
+        let id = transport.container_id().unwrap().to_string();
+        let mut wait =
+            docker.wait_container(&id, None::<bollard::query_parameters::WaitContainerOptions>);
+        let _ = futures_util::StreamExt::next(&mut wait).await;
+
+        let tail = transport.stderr_tail().await;
+        transport.shutdown().await;
+        assert_eq!(tail.as_deref(), Some("fatal: no config at /etc/srv.toml"));
     }
 
     /// A container a dead proxy left behind is removed by the sweep the

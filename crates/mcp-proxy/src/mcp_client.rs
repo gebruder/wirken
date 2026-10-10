@@ -223,6 +223,11 @@ impl McpClient {
 
     /// Shut down the MCP server: ask it to stop, then stop it whether or
     /// not it answered within a second.
+    /// The last lines a contained server wrote to stderr.
+    pub async fn stderr_tail(&mut self) -> Option<String> {
+        self.transport.stderr_tail().await
+    }
+
     /// For a contained server, returns how its container ended.
     pub async fn shutdown(&mut self) -> Option<crate::mcp_transport::ContainerExit> {
         let _ = tokio::time::timeout(

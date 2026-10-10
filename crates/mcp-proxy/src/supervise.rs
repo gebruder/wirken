@@ -66,6 +66,10 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 pub(crate) struct Failure {
     pub cause: McpServerRestartCause,
     pub detail: String,
+    /// The last lines the server wrote to stderr, when it got as far
+    /// as running. Logged for the operator, never recorded: it is the
+    /// server's own text and can hold anything, a credential included.
+    pub output: Option<String>,
 }
 
 /// One supervised server, as the loop drives it.
@@ -77,7 +81,8 @@ pub(crate) trait ServerLife: Send {
     /// Resolve when the container exits, with its exit code.
     async fn exited(&mut self, container_id: &str) -> Option<i64>;
     /// Take the server's client out of the registry and stop it.
-    async fn retire(&mut self);
+    /// Returns the last lines it wrote to stderr.
+    async fn retire(&mut self) -> Option<String>;
 }
 
 /// A server the registry started, or failed to start, at load, waiting
@@ -202,7 +207,7 @@ pub(crate) async fn supervise(
                         stopped_by_proxy: false,
                     },
                 );
-                life.retire().await;
+                let output = life.retire().await;
                 uninitialized_runs = 0;
                 let detail = match exit_code {
                     Some(code) => format!("exit code {code}"),
@@ -212,6 +217,7 @@ pub(crate) async fn supervise(
                     Failure {
                         cause: McpServerRestartCause::Exited,
                         detail,
+                        output,
                     },
                     Some(ran_for),
                 )
@@ -222,6 +228,14 @@ pub(crate) async fn supervise(
             }
         };
 
+        if let Some(output) = &failure.output {
+            tracing::warn!(
+                agent_id,
+                server,
+                "MCP server '{server}' wrote to stderr before it {}:\n{output}",
+                failure.cause.as_str()
+            );
+        }
         if ran_for.is_some_and(|d| d >= backoff.reset_after) {
             delay = backoff.first;
             attempt = 0;
@@ -316,14 +330,17 @@ impl ServerLife for ContainerLife {
                     StartError::Refused { reason, why } => format!("{reason}: {why}"),
                     StartError::Failed(e) => e.to_string(),
                 },
+                output: None,
             })?;
         let container_id = transport.container_id().unwrap_or_default().to_string();
         let mut client = McpClient::new(p.server.clone(), Transport::Stdio(Box::new(transport)));
         if let Err(e) = init_and_list(&mut client, &p.agent_id).await {
+            let output = client.stderr_tail().await;
             client.shutdown().await;
             return Err(Failure {
                 cause: McpServerRestartCause::InitializeFailed,
                 detail: e.to_string(),
+                output,
             });
         }
         self.registry
@@ -348,15 +365,16 @@ impl ServerLife for ContainerLife {
         }
     }
 
-    async fn retire(&mut self) {
+    async fn retire(&mut self) -> Option<String> {
         let client = self
             .registry
             .lock()
             .await
             .take(&self.pending.agent_id, &self.pending.server);
-        if let Some(mut client) = client {
-            client.shutdown().await;
-        }
+        let mut client = client?;
+        let output = client.stderr_tail().await;
+        client.shutdown().await;
+        output
     }
 }
 
@@ -421,8 +439,9 @@ mod tests {
             }
         }
 
-        async fn retire(&mut self) {
+        async fn retire(&mut self) -> Option<String> {
             self.retired += 1;
+            None
         }
     }
 
@@ -430,6 +449,7 @@ mod tests {
         Failure {
             cause: McpServerRestartCause::StartFailed,
             detail: "image_unavailable: gone".into(),
+            output: None,
         }
     }
 

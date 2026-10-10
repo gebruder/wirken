@@ -386,6 +386,15 @@ impl StdioTransport {
         }
     }
 
+    /// The last lines a contained server wrote to stderr; `None` for a
+    /// host child, whose stderr goes where the proxy's does.
+    pub async fn stderr_tail(&mut self) -> Option<String> {
+        match &self.process {
+            StdioProcess::Host(_) => None,
+            StdioProcess::Container(handle) => handle.stderr_tail().await,
+        }
+    }
+
     /// The container's id, for a contained server.
     pub fn container_id(&self) -> Option<&str> {
         match &self.process {
@@ -591,6 +600,14 @@ impl Transport {
         match self {
             Transport::Stdio(t) => t.notify(method, params).await,
             Transport::Http(t) => t.notify(method, params).await,
+        }
+    }
+
+    /// The last lines a contained server wrote to stderr.
+    pub async fn stderr_tail(&mut self) -> Option<String> {
+        match self {
+            Transport::Stdio(t) => t.stderr_tail().await,
+            Transport::Http(_) => None,
         }
     }
 

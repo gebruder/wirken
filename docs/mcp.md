@@ -137,6 +137,8 @@ When the LLM calls an MCP tool, the proxy routes the call to the correct server 
 
 When a contained server's container exits, the proxy writes `mcp_server_exited`, removes it, and starts the server again, running `initialize` and `tools/list` before the new run takes calls. Each restart is an `mcp_server_restart` row with its cause (`exited`, `start_failed` or `initialize_failed`) and delay. The delay starts at one second, doubles to a minute, and goes back to one second after a run that stayed up for a minute. After eight runs in a row that never complete `initialize`, the proxy writes `mcp_server_restart_abandoned`, logs an error, and stops trying until the gateway restarts. A server that initializes and later exits is restarted without limit.
 
+When a run fails `initialize` or its container exits, the proxy logs the last 20 lines the server wrote to stderr, read before the container is removed. They go to the log only, not the audit chain: they are the server's own text and can hold anything, a credential included.
+
 Servers run with `"sandbox": "off"` are not restarted.
 
 ## Per-agent MCP config

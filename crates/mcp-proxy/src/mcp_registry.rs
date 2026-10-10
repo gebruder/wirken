@@ -263,10 +263,14 @@ impl ProxyRegistry {
                                     tracing::warn!(
                                         "MCP stdio server '{name}' (agent '{agent_id}') skipped: {e}"
                                     );
+                                    // Read before shutdown removes the
+                                    // container, and with it the log.
+                                    let output = client.stderr_tail().await;
                                     client.shutdown().await;
                                     Some(Err(Failure {
                                         cause: McpServerRestartCause::InitializeFailed,
                                         detail: e.to_string(),
+                                        output,
                                     }))
                                 }
                             }
@@ -294,6 +298,7 @@ impl ProxyRegistry {
                             Some(Err(Failure {
                                 cause: McpServerRestartCause::StartFailed,
                                 detail: e.to_string(),
+                                output: None,
                             }))
                         }
                     };
@@ -1022,6 +1027,34 @@ mod start_tests {
         .await;
         assert_eq!(loaded, 0);
         assert_eq!(refused(&events), [REFUSED_IMAGE_UNAVAILABLE]);
+    }
+
+    /// Live: a server that dies before answering `initialize` leaves its
+    /// last stderr lines on the failure its supervisor starts from, read
+    /// before its container was removed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_server_that_fails_initialize_leaves_its_stderr() {
+        let Some(docker) = docker_with("debian:bookworm-slim").await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let config: McpConfig = serde_json::from_value(serde_json::json!({ "servers": { "srv": {
+            "command": "sh",
+            "args": ["-c", "echo 'boom: API_URL is not set' >&2; exit 1"],
+            "sandbox": { "image": "debian:bookworm-slim" }
+        }}}))
+        .unwrap();
+        let mut registry = ProxyRegistry::new().with_sandbox(host(dir.path(), Some(docker)));
+        let loaded = registry
+            .load_agent("agent-1", &config, no_vault(), None)
+            .await
+            .unwrap();
+        let pending = registry.take_pending();
+        assert_eq!(loaded, 0);
+        let failure = pending[0].first.as_ref().unwrap_err();
+        assert_eq!(failure.cause, McpServerRestartCause::InitializeFailed);
+        assert_eq!(failure.output.as_deref(), Some("boom: API_URL is not set"));
     }
 
     /// Live: a contained start writes what the server was given, by

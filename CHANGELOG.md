@@ -74,6 +74,11 @@ tagged.
   when the proxy stopped the container and `warn` otherwise; a restart
   after an exit is `warn`; a restart after `start_failed` or
   `initialize_failed`, and an abandoned restart, are `error`.
+- When a contained MCP server fails `initialize` or its container exits,
+  the proxy logs the last 20 lines it wrote to stderr, read before the
+  container is removed. Before, that output went with the container. It
+  is logged only, not recorded on the audit chain, since a server's own
+  text can hold a credential.
 - `wirken mcp verify` and `wirken doctor` name the stdio entries the proxy
   will refuse for want of a `sandbox` block, and the ones set to run on the
   host.

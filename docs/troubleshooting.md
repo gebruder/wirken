@@ -131,7 +131,7 @@ Pull it: `docker pull <ref>`, then restart `wirken run`.
 
 **"MCP server '<name>' ended 8 runs in a row without completing initialize ... it is no longer restarted"**
 
-The server's container started and exited, or never answered `initialize`, eight times in a row. The `mcp_server_restart` rows carry each cause and exit code, and `docker logs` is no help once the container is removed, so run the image by hand with the entry's command to see its output:
+The server's container started and exited, or never answered `initialize`, eight times in a row. The `mcp_server_restart` rows carry each cause and exit code. The gateway's log carries the last 20 lines the server wrote to stderr on each failed run, read before its container was removed, under "MCP server '<name>' wrote to stderr before it ...". To watch it fail live instead, run the image by hand with the entry's command:
 
 ```bash
 docker run --rm -i --entrypoint <command> <image> <args>
