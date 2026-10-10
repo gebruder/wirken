@@ -196,6 +196,8 @@ impl Watch {
         let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
         assert!(fd >= 0);
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fd` is the inotify instance opened above and `c_path`
+        // a NUL-terminated path that outlives the call.
         let wd = unsafe { libc::inotify_add_watch(fd, c_path.as_ptr(), libc::IN_OPEN) };
         assert!(wd >= 0);
         Self { fd }
