@@ -258,6 +258,9 @@ pub struct ContainerPlan {
     pub agent_id: String,
     pub server: String,
     pub image: String,
+    /// The entry's `command` then its `args`. The command runs as the
+    /// container's entrypoint, so the image's own entrypoint never sees
+    /// it: what runs is what the signed entry says.
     pub cmd: Vec<String>,
     /// `NAME=value` for the variables that are not secrets, and
     /// `NAME_FILE=<path>` for each secret delivered as a file. Sorted.
@@ -485,9 +488,11 @@ impl ContainerPlan {
             }
             None => (self.network_mode.clone(), None),
         };
+        let (entrypoint, args) = self.cmd.split_at(self.cmd.len().min(1));
         ContainerCreateBody {
             image: Some(self.image.clone()),
-            cmd: Some(self.cmd.clone()),
+            entrypoint: Some(entrypoint.to_vec()),
+            cmd: Some(args.to_vec()),
             env: Some(env),
             user: Some(self.user.clone()),
             working_dir: self.working_dir.clone(),
@@ -904,10 +909,8 @@ mod tests {
         let host_config = body.host_config.as_ref().unwrap();
 
         assert_eq!(body.image.as_deref(), Some("node:22-slim"));
-        assert_eq!(
-            body.cmd,
-            Some(vec!["node".to_string(), "/opt/mcp/index.js".to_string()])
-        );
+        assert_eq!(body.entrypoint, Some(vec!["node".to_string()]));
+        assert_eq!(body.cmd, Some(vec!["/opt/mcp/index.js".to_string()]));
         assert_eq!(body.env, Some(vec!["LOG=info".to_string()]));
         assert_eq!(body.working_dir.as_deref(), Some(INSTALL_DIR_TARGET));
         assert_eq!(body.open_stdin, Some(true));
