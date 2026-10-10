@@ -109,6 +109,9 @@ tagged.
   before the root writes its `signer_key_delegation`, and `sha256` is
   added where the entry has none. No root key ships;
   `wirken-registry-pubkey.pub` stays empty until one is committed.
+- `docker/audit.Dockerfile` builds an image for security review: the
+  pinned toolchain, `capnp`, every crate fetched and every test target
+  compiled, so `cargo test --workspace` runs in it with no network.
 
 ### Changed
 
