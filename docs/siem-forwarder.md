@@ -359,11 +359,9 @@ invocation before dispatch), `observe` onto Sentinel and Defender XDR (stream
 the typed chain).
 
 `gen_ai.tool.type` takes two values: MCP server tools emit `MCP Server`, and
-everything else (built-ins, Wasm skills, `exec`, `web_search`,
-`generate_image`) emits `function`. Microsoft derives `ExecuteToolByGateway`
-and `ExecuteToolByMCPServer` from these. Wasm skills emit `function` because
-Microsoft's enumeration has no Wasm entry and that is the closest match for a
-runtime-executed tool.
+everything else (built-ins, `exec`, `web_search`, `generate_image`) emits
+`function`. Microsoft derives `ExecuteToolByGateway` and
+`ExecuteToolByMCPServer` from these.
 
 `channel.name` pivots on a canonical set. The Teams adapter emits literal
 `msteams` to land in the native pivot; `outlook` is the other documented

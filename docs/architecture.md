@@ -19,7 +19,7 @@ compiler provides and a garbage-collected runtime cannot.
    another.
 2. Credentials are encrypted at rest and scoped by lifetime.
 3. Every agent action is logged to an append-only ledger before execution.
-4. Skills run in sandboxed execution environments by default, not as opt-in.
+4. Shell commands a skill has the agent run go through `exec`, which runs in a container by default, not as opt-in.
 5. The user never configures security. Secure defaults are the only defaults.
 6. Security boundaries are enforced by the type system where the code carries
    the type.
@@ -191,7 +191,7 @@ chain hash computed inline.
 **Threat (OWASP T11):** skills running in-process with full OS privileges and
 no sandbox.
 
-Three execution models, because the skill ecosystem is not one thing.
+Two execution models, because the skill ecosystem is not one thing.
 
 **Markdown skills** are the majority: structured natural-language instructions
 the LLM reads as system-prompt context, carried out with built-in tools. Zero
@@ -202,8 +202,10 @@ when configured, which is what actually confines a skill that shells out to
 `git`, `curl` or `jq`. Owned by
 [sandbox-properties.md](sandbox-properties.md).
 
-**Wasm skills** run in Wasmtime with a fuel limit, no filesystem and no
-network. Owned by [skills.md](skills.md).
+No third-party code runs inside the gateway process: skills are text, `exec`
+runs in a container, and MCP servers run in containers under the separate MCP
+proxy process, or remotely over HTTP. The `off` settings move `exec` or a
+server onto the host as a process of its own, not into the gateway.
 
 ### Classifier failure direction
 
@@ -329,7 +331,6 @@ Versions are pinned in the workspace `Cargo.toml` and are not restated here.
 | Password hashing | `argon2` | Argon2id for the age-file passphrase |
 | Hashing | `sha2` | Audit hash chain |
 | IPC | `capnp` | Zero-copy, traversal limits, schema evolution |
-| Wasm | `wasmtime` | WASI preview 1, fuel metering, resource limits |
 | Containers | `bollard` | Async Docker and gVisor integration |
 | CLI | `clap` | Derive and builder APIs |
 | Prompts | `dialoguer` | Setup wizard |
@@ -352,7 +353,7 @@ binary with subcommands; one `cargo build --release` produces everything.
 | Plaintext credentials on disk | CWE-256, CWE-312 | XChaCha20-Poly1305 vault, OS keychain for the device key |
 | No per-channel isolation | CWE-653 | Separate adapter processes |
 | Excessive agent privileges | OWASP T3 | Three-tier model with expiring approvals |
-| Unsandboxed code execution | OWASP T11 | Docker and Wasm sandboxes, workspace confinement |
+| Unsandboxed code execution | OWASP T11 | Docker and gVisor sandboxes for `exec`, workspace confinement |
 | No audit trail | OWASP T8 | Append-only hash-chained log, SIEM forwarding |
 | Localhost rate limit exemption | CWE-307 | Uniform limiting, no loopback exemption |
 | No session expiry | CWE-613 | 24h inactivity expiry |

@@ -12,7 +12,7 @@ Every tool action falls into one of three tiers:
 
 - **Tier 1, always allowed.** Workspace file access, channel converse, web search, and the `http_request` built-in. Tier 1 on `http_request` means it adds no prompt; authorization is the skill's own `permissions` block, enforced as hard refusals at the gate and by `EgressClient`.
 - **Tier 2, first-use approval with a 30-day expiry.** External file access (per path), cross-conversation message, and a small curated allowlist of shell-inspection verbs (see below). Everything else that would have been Tier 2 under a denylist model is Tier 3 instead.
-- **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, MCP tool calls, Wasm skill dispatch, cross-channel memory reads, imported-archive reads and searches, any unregistered tool name, and every shell verb outside the Tier 2 allowlist. Skill installation is not on this list and is not tier-gated: `Action::SkillInstall` was removed because the CLI install path never reached it, and installs gate on signature verification instead.
+- **Tier 3, always prompt.** Destructive file operations, network requests (per domain), credential access, cron create, MCP tool calls, cross-channel memory reads, imported-archive reads and searches, any unregistered tool name, and every shell verb outside the Tier 2 allowlist. Skill installation is not on this list and is not tier-gated: `Action::SkillInstall` was removed because the CLI install path never reached it, and installs gate on signature verification instead.
 
 ### Shell exec allowlist
 
@@ -57,7 +57,6 @@ Each `Action` variant maps to one explicitly:
 | `cross-conversation` | `CrossConversationMessage` |
 | `mcp:<tool>` | `McpToolCall` |
 | `tool:<name>` | `UnknownTool` |
-| `wasm:<skill>` | `WasmSkillCall` |
 | `cross_channel_memory:<from>` | `CrossChannelMemoryRead` |
 | `imported_chat:<source>` | `ImportedChatRead` |
 | `imported_search:<source>`, `imported_search_corpus` | `ImportedChatSearch`, scoped and unscoped |

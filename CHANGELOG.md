@@ -115,6 +115,9 @@ tagged.
 
 ### Changed
 
+- The minimum Rust version is 1.91, down from 1.96, which wasmtime 49
+  required. The workspace's own use of `str::floor_char_boundary` sets it
+  now; no dependency declares a higher one.
 - An agent can no longer be built without a permission store (#229).
   `Agent::new` and `Agent::new_with_sandbox` take the store as a required
   argument and `set_permissions` is gone, so the shape in which every tool
@@ -179,6 +182,10 @@ tagged.
   typed event's level as `status`: `error` for a panic, `spawn_failed` and
   an abandoned restart, `warn` for `process_exited`, `info` for an ended
   connection and a connect.
+
+### Removed
+
+- Removed the Wasm skill loader and wasmtime; no path loaded a Wasm skill.
 
 ### Fixed
 

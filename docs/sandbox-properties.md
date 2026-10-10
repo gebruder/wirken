@@ -1,6 +1,6 @@
 # Sandbox Properties
 
-What Wirken's `exec` and Wasm sandboxes actually enforce. Every claim cites
+What Wirken's `exec` sandbox actually enforces. Every claim cites
 the source line that implements it; every command in [Verification](#verification)
 can be run on a Wirken host to confirm.
 
@@ -217,32 +217,6 @@ opt-in for operators who want kernel attack surface reduction. Detection
 ([`sandbox.rs:1113-1125`](../crates/agent/src/sandbox.rs)) is automatic;
 the wizard refuses to enable `GVisor` mode if `runsc` is not registered as
 a Docker runtime.
-
-## Wasm skills
-
-Wasm skills are orthogonal to the `exec` sandbox. They are loaded and
-executed by `wasmtime`
-([`crates/agent/src/wasm_sandbox.rs:19-21`](../crates/agent/src/wasm_sandbox.rs))
-inside the agent process, not in a container. The isolation surface is
-the WebAssembly + WASI boundary:
-
-- **No filesystem.** `WasiCtxBuilder::new()` is built without
-  `preopened_dir`/`inherit_stdio`-style filesystem handles; only `stdin`,
-  `stdout`, `stderr` are wired, and they are
-  `MemoryInputPipe`/`MemoryOutputPipe` (in-memory, capped). See
-  [`wasm_sandbox.rs:115-119`](../crates/agent/src/wasm_sandbox.rs).
-- **No network.** No network handles are exposed via WASI.
-- **CPU bound.** `Config::consume_fuel(true)` and `store.set_fuel(DEFAULT_FUEL)`
-  give a hard fuel cap. An infinite loop trips fuel exhaustion (caught at
-  [`wasm_sandbox.rs:163-167`](../crates/agent/src/wasm_sandbox.rs)) and
-  returns a tool error rather than hanging the agent.
-- **Memory bound.** Output pipe sizes are constants (`MAX_MEMORY_BYTES`
-  for stdout, 4096 for stderr); a runaway producer caps at the pipe
-  limit instead of growing without bound.
-
-Wasm skills are not a replacement for `exec` confinement; they are a
-sandbox for trusted-source compiled skills that need a clean boundary
-without the latency cost of a container.
 
 ## What is not enforced
 

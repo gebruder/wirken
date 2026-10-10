@@ -197,9 +197,7 @@ proxy or a hook process, which all run as that user.
   `crates/skill-store`, SIEM and OTel forwarding.
 - **Lower:** `crates/zirkel`, the `lyrik` commands
   (`crates/cli/src/commands/lyrik*.rs`), pricing and cost reporting, setup and
-  `doctor`, `install.sh`. Wasm skills (`crates/agent/src/wasm_sandbox.rs`):
-  `wirken run` passes an empty Wasm skill set, so a finding there needs a
-  traced path that loads one.
+  `doctor`, `install.sh`.
 - **Out of scope:** the harness code in `fuzz/`, `scripts/`, `docs/`,
   `.github/`, the content of `skills/` and `preset/`, and test fixtures.
 

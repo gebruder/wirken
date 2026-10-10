@@ -23,8 +23,9 @@ first use, stored owner-only, and never leaves the gateway process.
 
 ## Skill signing
 
-The signature covers `SKILL.md` plus `skill.wasm` when present. Other sibling
-files in the directory (`README.md`, `LICENSE`, fixtures) are out of scope.
+The signature covers `SKILL.md` plus `skill.wasm` when present. Wirken does
+not run `skill.wasm`. Other sibling files in the directory (`README.md`,
+`LICENSE`, fixtures) are out of scope.
 
 **Composite hash.** With `skill.wasm`:
 `sha256(SKILL.md_bytes || 0x00 || skill.wasm_bytes)`. Without it:

@@ -1,16 +1,15 @@
 # Skills
 
 A skill is an operator-installable behavior bundle: a directory whose basename
-is the skill name, containing `SKILL.md` and optionally a compiled
-`skill.wasm` and a `SKILL.sig` / `SKILL.pub` pair.
+is the skill name, containing `SKILL.md` and optionally a `SKILL.sig` /
+`SKILL.pub` pair.
 
 ```
 my-skill/
 ├── SKILL.md     (required)
 ├── SKILL.sig    (required unless the unsigned bypass is set)
 ├── SKILL.pub    (pairs with SKILL.sig)
-├── SKILL.deleg  (required once an operator registry root is configured)
-└── skill.wasm   (optional; loaded by its fixed filename, no frontmatter key)
+└── SKILL.deleg  (required once an operator registry root is configured)
 ```
 
 `SKILL.md` is YAML frontmatter followed by a markdown body. The body is what
@@ -23,7 +22,7 @@ set and `~/.wirken` otherwise. The gateway, the CLI and the load-time
 signature gate all resolve it the same way, so discovery and the gate never
 look in different places.
 
-## Two kinds of skill
+## Markdown skills
 
 **Markdown skills** are the majority: instructions the agent reads as part of
 its system prompt, carried out with the built-in tools. Zero compilation, zero
@@ -77,30 +76,6 @@ own root re-sign the bundled set as delegates of it, which is what the
 Editing a bundled `SKILL.md` invalidates its committed signature until a
 maintainer re-signs it offline. A test in the repo fails when that happens, so
 it surfaces at build time rather than as a skill that quietly stops loading.
-
-**Wasm skills** are compiled modules that run as a custom tool inside a
-Wasmtime sandbox. Place `skill.wasm` beside `SKILL.md` and add a `parameters`
-field to the frontmatter defining the JSON schema:
-
-```yaml
----
-name: hash
-description: Compute SHA-256 hash of input text
-parameters:
-  type: object
-  properties:
-    text: { type: string, description: Text to hash }
-  required: [text]
----
-```
-
-The module reads a JSON object of tool arguments on stdin and writes a JSON
-result to stdout. It appears to the LLM as `wasm_hash`. The sandbox gives it
-no filesystem access, no network, a 64 MB stdout buffer cap with 4 KB for
-stderr, and a fuel-based CPU limit that terminates an infinite loop rather
-than hanging the agent. Wasm skills are not a replacement for `exec`
-confinement; they are a boundary for trusted-source compiled skills without
-the latency of a container.
 
 ## Frontmatter rules
 
@@ -271,5 +246,5 @@ bundles by default. **Run `wirken skills migrate`** to rewrite
 block a skill loads but has no capability.
 
 Skills on ClawHub that are JavaScript or TypeScript running as a custom tool
-do not port. Wirken has no JS or TS skill runtime; its compiled-skill path is
-Wasm, described above.
+do not port. Wirken has no runtime for compiled skills; code a skill needs runs
+through `exec`.
