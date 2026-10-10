@@ -83,7 +83,7 @@ By default a `vault:` value is delivered as a file, not as an environment variab
 
 A server that reads its credential only from its environment needs the variable listed in `secrets_in_env`. The value is then in the container's environment, where the server's own processes and anyone with access to the Docker socket (`docker inspect`) can read it. The `mcp_server_sandboxed` row names every variable delivered this way.
 
-The official GitHub server is one such server. It reads its token from the environment and reaches the GitHub API:
+The official GitHub server is one such server. It reads its token only from `GITHUB_PERSONAL_ACCESS_TOKEN` and has no shell to read a file into it. Delivered as a file, the token goes unread: the server starts without one, and at its first call tries to log in through `github.com`, which its sidecar refuses because only `api.github.com` is listed. So its entry lists the variable in `secrets_in_env`:
 
 ```bash
 docker pull ghcr.io/github/github-mcp-server
@@ -112,7 +112,7 @@ docker pull ghcr.io/github/github-mcp-server
 
 A server with no `egress.hosts` runs with `--network none`.
 
-A server that lists hosts gets the route `exec` gets under an allowlist ([egress.md](egress.md#sandbox-egress)): an internal network it shares only with its own egress sidecar, which is its `HTTP_PROXY` and `HTTPS_PROXY`, and a decision broker in `wirken-mcp-proxy`. For every request the broker checks the target against the listed hosts, resolves the name itself, and drops any address outside global unicast. Each verdict, allowed or not, is a `sandbox_egress_verdict` row naming the agent and the server (`mcp_server`).
+A server that lists hosts gets the route `exec` gets under an allowlist ([egress.md](egress.md#sandbox-egress)): an internal network it shares only with its own egress sidecar, which is its `HTTP_PROXY` and `HTTPS_PROXY`, and a decision broker in `wirken-mcp-proxy`. For every connection the server opens through the sidecar, a CONNECT tunnel or a plain-HTTP request, the broker checks the target against the listed hosts, resolves the name itself, and drops any address outside global unicast. Each verdict, allowed or not, is a `sandbox_egress_verdict` row naming the agent and the server (`mcp_server`). Requests a server sends inside a tunnel it already holds are not decided again: a row stands for a connection, not for each HTTP request on it.
 
 - An entry is a domain name, `*.` and a domain name (one label under it), or `*` for any domain name.
 - CONNECT to port 443 and plain HTTP to port 80 are the only requests forwarded. IP-address targets are refused whatever the list says.

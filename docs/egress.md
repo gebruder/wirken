@@ -209,7 +209,7 @@ Verified on rootful Docker, on a host with a default-deny inbound firewall. If t
 
 ### Audit
 
-Every request that reaches the proxy emits `SessionEvent::SandboxEgressVerdict` on the agent's hash-chained session log, allowed or not. The row carries the host, the port, `allowed`, the mode in force, the confidentiality labels the session had observed, whether a label changed the verdict, and the structural attribution. On a refusal it also carries a closed-set `reason`: `mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, or `sensitivity_refused`.
+Every request that reaches the proxy emits `SessionEvent::SandboxEgressVerdict` on the agent's hash-chained session log, allowed or not. A CONNECT tunnel is one request to the proxy, however many HTTP requests the client then sends inside it. The row carries the host, the port, `allowed`, the mode in force, the confidentiality labels the session had observed, whether a label changed the verdict, and the structural attribution. On a refusal it also carries a closed-set `reason`: `mode_none`, `not_allowed`, `ip_literal`, `port_not_allowed`, `method_not_allowed`, `malformed`, `resolution_failed`, or `sensitivity_refused`.
 
 The platform refusal is a separate variant rather than a reason on this one, because nothing reached a proxy to have a verdict taken on it: `SessionEvent::SandboxEgressUnsupported` carries the mode and the attribution and no host.
 
