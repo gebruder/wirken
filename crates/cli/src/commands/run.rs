@@ -1271,7 +1271,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let factory = AgentFactory::with_options(
         static_configs,
         session_log.clone(),
-        Some(permissions.clone()),
+        permissions.clone(),
         org_tool_policy,
         cache_mode,
         cache_capacity,

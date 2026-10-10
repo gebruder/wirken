@@ -7252,7 +7252,16 @@ mod tests {
             },
         );
         let log = wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
-        let factory = AgentFactory::new(configs, Arc::new(log), None);
+        let factory = AgentFactory::new(
+            configs,
+            Arc::new(log),
+            Arc::new(std::sync::Mutex::new(
+                wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                    ":memory:",
+                ))
+                .unwrap(),
+            )),
+        );
         let store = super::super::open_permission_store(&cfg).expect("store opens");
         store
             .approve(
@@ -8268,7 +8277,16 @@ mod tests {
             let shared = Shared {
                 port: TEST_PORT,
                 cfg: cfg.clone(),
-                factory: wirken_agent::AgentFactory::new(configs, Arc::new(log), None),
+                factory: wirken_agent::AgentFactory::new(
+                    configs,
+                    Arc::new(log),
+                    Arc::new(std::sync::Mutex::new(
+                        wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(
+                            ":memory:",
+                        ))
+                        .unwrap(),
+                    )),
+                ),
                 audit: Arc::new(audit),
                 sessions: Arc::new(Mutex::new(sessions)),
                 pending_approvals: Arc::new(PendingApprovalQueue::new()),

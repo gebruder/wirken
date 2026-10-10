@@ -49,7 +49,7 @@ pub use recovery::{
 };
 pub use runtime::{
     Agent, DivergenceRecord, ExecLocationFinding, InboundContext, PARTIAL_RESULT_LOST_SENTINEL,
-    ProcessResult, VerifyOptions, VerifyReport,
+    ProcessResult, ToolGate, VerifyOptions, VerifyReport,
 };
 pub use skill::SkillLoader;
 

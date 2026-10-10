@@ -519,6 +519,8 @@ async fn dispatch_via_agent_runtime(
     // Workspace for the agent IS the target. The agent reads source
     // files from there and writes findings.json back into the target's
     // `.lyrik/state/runs/<run-id>/` per the Lyrik skill instructions.
+    let perms = open_permission_store(&cfg)?;
+    let perms_arc = Arc::new(Mutex::new(perms));
     let mut agent = Agent::new_with_sandbox(
         agent_id.clone(),
         target.to_path_buf(),
@@ -527,15 +529,13 @@ async fn dispatch_via_agent_runtime(
         api_key_credential.clone(),
         session_log.clone(),
         super::load_sandbox_config(&cfg.data_dir),
+        perms_arc.clone(),
     )?;
 
-    // Named before the store is attached: an agent that has not
-    // named itself gets no persisted grants. The run's agent id is
-    // also its session id here, both derived from the run id.
+    // Named before any call is gated: an agent that has not named
+    // itself gets no persisted grants. The run's agent id is also its
+    // session id here, both derived from the run id.
     agent.set_agent_id(agent_id.clone());
-    let perms = open_permission_store(&cfg)?;
-    let perms_arc = Arc::new(Mutex::new(perms));
-    agent.set_permissions(perms_arc.clone());
 
     // `exec` stays gated. With a terminal, the operator is asked at the
     // moment a command is about to run, one prompt at a time across
@@ -1119,6 +1119,7 @@ async fn dispatch_walks_concurrent(
                 api_key_credential_t,
                 session_log_t,
                 sandbox_t,
+                permissions_t,
             ) {
                 Ok(a) => a,
                 Err(e) => {
@@ -1133,11 +1134,10 @@ async fn dispatch_walks_concurrent(
                     };
                 }
             };
-            // Named before the store, like the run agent above:
-            // an agent that has not named itself gets no persisted
-            // grants.
+            // Named before any call is gated, like the run agent
+            // above: an agent that has not named itself gets no
+            // persisted grants.
             local_agent.set_agent_id(agent_id_t.clone());
-            local_agent.set_permissions(permissions_t);
             if let Some(terminal) = terminal_t {
                 local_agent.set_approval_gate(Arc::new(
                     super::stdin_approval::LyrikPromptGate::new(&walk_name, terminal),

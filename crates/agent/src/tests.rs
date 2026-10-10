@@ -16,6 +16,16 @@ fn test_session_log() -> Arc<dyn SessionLog> {
     Arc::new(SqliteSessionLog::open_in_memory().expect("in-memory session log"))
 }
 
+/// Test helper: an in-memory permission store. Every agent is built
+/// with one; there is no ungated agent to build.
+pub(crate) fn test_permissions()
+-> Arc<std::sync::Mutex<wirken_gateway::permissions::PermissionStore>> {
+    Arc::new(std::sync::Mutex::new(
+        wirken_gateway::permissions::PermissionStore::open(std::path::Path::new(":memory:"))
+            .expect("in-memory permission store"),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Conversation
 // ---------------------------------------------------------------------------
@@ -1662,6 +1672,7 @@ fn agent_loads_skills() {
         None,
         None,
         test_session_log(),
+        crate::tests::test_permissions(),
     )
     .unwrap();
 
@@ -1682,6 +1693,7 @@ fn agent_conversation_tracking() {
         None,
         None,
         test_session_log(),
+        crate::tests::test_permissions(),
     )
     .unwrap();
 
@@ -1715,6 +1727,7 @@ mod durability {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         (agent, log)
@@ -1885,6 +1898,7 @@ mod durability {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         let b = crate::runtime::Agent::new(
@@ -1894,6 +1908,7 @@ mod durability {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -2001,7 +2016,63 @@ mod wake {
                 channel_egress: Default::default(),
             },
         );
-        (AgentFactory::new(configs, log, None), tmp)
+        (
+            AgentFactory::new(configs, log, crate::tests::test_permissions()),
+            tmp,
+        )
+    }
+
+    /// The agent `wirken sessions verify` wakes dispatches nothing: a
+    /// built-in read, an unregistered name and the sub-agent intercept
+    /// are all refused, and the refusals write no row.
+    #[tokio::test]
+    async fn a_replay_agent_refuses_every_dispatch() {
+        let log = make_log();
+        seed_user_message(&*log, "replayed", "hello");
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "x").unwrap();
+        let configs = HashMap::from([(
+            "a".to_string(),
+            AgentStaticConfig {
+                agent_id: "a".to_string(),
+                workspace: tmp.path().to_path_buf(),
+                llm_config: LlmConfig::ollama("test"),
+                channel_overrides: HashMap::new(),
+                api_key: None,
+                api_key_credential: None,
+                skills: Vec::new(),
+                wasm_skills: Vec::new(),
+                mcp_client: None,
+                identity: None,
+                allowed_subagents: Default::default(),
+                sandbox: Default::default(),
+                extra_interceptors: vec![],
+                zirkel_db_path: None,
+                channel_egress: Default::default(),
+            },
+        )]);
+        let factory = AgentFactory::for_verify(configs, log.clone());
+        let agent = factory.wake("a", "replayed").unwrap();
+        let mut agent = agent.lock().await;
+        let rows = || {
+            log.get_since(&log.handle_for(SessionId::new("replayed")), 0)
+                .unwrap()
+                .len()
+        };
+        let before = rows();
+        for (tool, args) in [
+            ("read_file", r#"{"path":"notes.txt"}"#),
+            ("totally_unregistered", "{}"),
+            ("spawn_subagent", r#"{"agent":"b","task":"t"}"#),
+        ] {
+            let err = agent
+                .execute_tool(tool, args)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("dispatches no tool"), "{tool}: {err}");
+        }
+        assert_eq!(before, rows(), "a refused dispatch wrote rows");
     }
 
     fn seed_user_message(log: &dyn SessionLog, session: &str, content: &str) {
@@ -2439,7 +2510,14 @@ mod wake {
                 channel_egress: Default::default(),
             },
         );
-        let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 64);
+        let factory = AgentFactory::with_options(
+            configs,
+            log,
+            crate::tests::test_permissions(),
+            None,
+            CacheMode::Drop,
+            64,
+        );
 
         let session = "agent-drop/test/conv-1";
         let a = factory.wake("agent-drop", session).unwrap();
@@ -2526,7 +2604,10 @@ mod subagent {
                 channel_egress: Default::default(),
             },
         );
-        (AgentFactory::new(configs, log, None), tmp)
+        (
+            AgentFactory::new(configs, log, crate::tests::test_permissions()),
+            tmp,
+        )
     }
 
     fn parse_envelope(s: &str) -> serde_json::Value {
@@ -2592,6 +2673,7 @@ mod subagent {
             None,
             None,
             log,
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -2831,6 +2913,7 @@ mod subagent {
             None,
             None,
             log,
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -2921,6 +3004,7 @@ mod subagent {
             None,
             None,
             log,
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -2969,13 +3053,14 @@ mod subagent {
             None,
             None,
             log,
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
         let perm_path = tmp.path().join("perms.db");
         let store = wirken_gateway::permissions::PermissionStore::open(&perm_path).unwrap();
         agent.set_agent_id("lapsed");
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(store)));
 
         // Insert AFTER the store is open, on a second connection.
         // `open` sweeps lapsed rows, so a row written before it would
@@ -3030,13 +3115,14 @@ mod subagent {
             None,
             None,
             log,
+            crate::tests::test_permissions(),
         )
         .unwrap();
         agent.set_agent_id("default");
         let store =
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap();
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(store)));
 
         let err = agent
             .execute_tool("exec", r#"{"command":"ls"}"#)
@@ -3078,6 +3164,7 @@ mod subagent {
             None,
             None,
             make_log(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -3142,6 +3229,7 @@ mod subagent {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         child.set_agent_id("researcher");
@@ -3239,7 +3327,7 @@ mod subagent {
         let factory = AgentFactory::with_options(
             configs,
             log.clone(),
-            Some(store),
+            store,
             None,
             crate::factory::CacheMode::Drop,
             64,
@@ -3374,13 +3462,14 @@ mod subagent {
             None,
             None,
             log,
+            crate::tests::test_permissions(),
         )
         .unwrap();
         let store =
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap();
         agent.set_agent_id("ungranted");
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(store)));
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(store)));
 
         let err = agent
             .execute_tool("exec", r#"{"command":"ls"}"#)
@@ -3407,7 +3496,7 @@ mod subagent {
         // deny envelope at `crates/agent/src/runtime.rs:1468-1477`
         // wins.
         let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
-        agent.set_permissions(store);
+        agent.swap_permissions_for_test(store);
 
         // The clamp is set by `set_subagent_runtime`. Equivalent
         // to what `spawn_subagent_intercept` does on a freshly-
@@ -3453,7 +3542,7 @@ mod subagent {
         // clamp gate's behavior is what we pin: it must NOT produce
         // the auto-deny envelope when action.tier() == cap.
         let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
-        agent.set_permissions(store);
+        agent.swap_permissions_for_test(store);
         agent.set_subagent_runtime(
             1,
             wirken_gateway::permissions::PermissionTier::Tier2,
@@ -3493,7 +3582,7 @@ mod subagent {
         // clamp at Tier 2 must auto-deny it before reaching the
         // regular store check.
         let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
-        agent.set_permissions(store);
+        agent.swap_permissions_for_test(store);
         agent.set_subagent_runtime(
             1,
             wirken_gateway::permissions::PermissionTier::Tier2,
@@ -3524,7 +3613,7 @@ mod subagent {
         // unknown tool returns a permission-denial rather than reaching
         // dispatch.
         let (mut agent, store, _tmp) = make_child_agent_for_clamp_test();
-        agent.set_permissions(store);
+        agent.swap_permissions_for_test(store);
 
         let result = agent
             .execute_tool("totally_unregistered_tool_xyz", "{}")
@@ -4876,6 +4965,7 @@ async fn a_turn_offers_the_tools_the_proxy_has_now() {
         None,
         None,
         test_session_log(),
+        crate::tests::test_permissions(),
     )
     .unwrap();
     assert_eq!(agent.load_mcp(&socket_path, &identity).await.unwrap(), 1);
@@ -5379,6 +5469,7 @@ mod auto_attest {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         agent.attach_identity(AgentIdentity::generate("auto-attest"));
@@ -5405,6 +5496,7 @@ mod auto_attest {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -6218,6 +6310,7 @@ mod verify {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         (agent, log, tmp)
@@ -6518,6 +6611,7 @@ mod verify {
                 None,
                 None,
                 log.clone(),
+                crate::tests::test_permissions(),
             )
             .unwrap();
             // What the verify-purpose factory does for a sub-agent
@@ -7091,7 +7185,14 @@ mod per_channel_llm_override {
                 channel_egress: Default::default(),
             },
         );
-        let factory = AgentFactory::with_options(configs, log, None, None, CacheMode::Drop, 4);
+        let factory = AgentFactory::with_options(
+            configs,
+            log,
+            crate::tests::test_permissions(),
+            None,
+            CacheMode::Drop,
+            4,
+        );
         (factory, tmp)
     }
 
@@ -7234,8 +7335,14 @@ mod per_channel_llm_override {
                 channel_egress: Default::default(),
             },
         );
-        let factory =
-            AgentFactory::with_options(configs, log.clone(), None, None, CacheMode::Drop, 4);
+        let factory = AgentFactory::with_options(
+            configs,
+            log.clone(),
+            crate::tests::test_permissions(),
+            None,
+            CacheMode::Drop,
+            4,
+        );
 
         // Wake each channel, assert the factory picked the right
         // (llm_config, api_key) pair, then emit an LlmRequest event
@@ -7388,8 +7495,14 @@ mod per_channel_llm_override {
                 channel_egress: Default::default(),
             },
         );
-        let factory =
-            AgentFactory::with_options(configs, log.clone(), None, None, CacheMode::Drop, 4);
+        let factory = AgentFactory::with_options(
+            configs,
+            log.clone(),
+            crate::tests::test_permissions(),
+            None,
+            CacheMode::Drop,
+            4,
+        );
 
         for (channel, expected_credential) in [
             ("signal", "signal-anthropic-slot"),
@@ -7507,8 +7620,14 @@ mod org_tool_policy {
                 channel_egress: Default::default(),
             },
         );
-        let factory =
-            AgentFactory::with_options(configs, log, None, org.map(Arc::new), CacheMode::Drop, 4);
+        let factory = AgentFactory::with_options(
+            configs,
+            log,
+            crate::tests::test_permissions(),
+            org.map(Arc::new),
+            CacheMode::Drop,
+            4,
+        );
         let arc = factory.wake("a1", "a1/test/conv-1").unwrap();
         (arc, tmp)
     }
@@ -8308,6 +8427,7 @@ mod recovery_tool_validation {
             None,
             None,
             test_session_log(),
+            crate::tests::test_permissions(),
         )
         .unwrap()
     }
@@ -8430,6 +8550,7 @@ mod phase_overlay {
             None,
             None,
             log_dyn,
+            crate::tests::test_permissions(),
         )
         .unwrap();
         // Keep `tmp` alive for the agent's lifetime via the workspace
@@ -9462,6 +9583,7 @@ mod budget_enforcement {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         agent.set_budget(Some(b), Some(store));
@@ -9808,6 +9930,7 @@ mod obo_identity {
             None,
             None,
             log.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -11872,9 +11995,10 @@ mod approved_unknown_tool {
             Some("unused".into()),
             None,
             log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
         )
         .unwrap();
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap(),
         )));
@@ -11991,9 +12115,10 @@ mod unanswered_approval {
             Some("unused".into()),
             None,
             log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
         )
         .unwrap();
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap(),
         )));
@@ -12307,9 +12432,10 @@ mod memory_is_not_policy {
             Some("unused".into()),
             None,
             log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
         )
         .unwrap();
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap(),
         )));
@@ -12625,9 +12751,10 @@ mod http_request_after_a_restricting_read {
             Some("unused".into()),
             None,
             log.clone() as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
         )
         .unwrap();
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap(),
         )));
@@ -12805,9 +12932,10 @@ mod exec_location_reaches_the_gate {
             Some("unused".into()),
             None,
             log as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
         )
         .unwrap();
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap(),
         )));
@@ -13050,12 +13178,13 @@ mod webchat_approval_reaches_the_page {
             Some("unused".into()),
             None,
             log as Arc<dyn SessionLog>,
+            crate::tests::test_permissions(),
         )
         .unwrap();
         // What `AgentFactory::wake` does: the config key the agent was
         // looked up under, which is what every audit row carries.
         agent.set_agent_id("default");
-        agent.set_permissions(Arc::new(std::sync::Mutex::new(
+        agent.swap_permissions_for_test(Arc::new(std::sync::Mutex::new(
             wirken_gateway::permissions::PermissionStore::open(&tmp.path().join("perms.db"))
                 .unwrap(),
         )));

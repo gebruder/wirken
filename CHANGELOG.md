@@ -104,6 +104,13 @@ tagged.
 
 ### Changed
 
+- An agent can no longer be built without a permission store (#229).
+  `Agent::new` and `Agent::new_with_sandbox` take the store as a required
+  argument and `set_permissions` is gone, so the shape in which every tool
+  ran ungated, the residual default-deny of unclassified tools included,
+  cannot be constructed. The session replay `wirken sessions verify` wakes
+  is the one agent without a store: it is replay-only and refuses every
+  dispatch, re-running recorded reads through its tool registry as before.
 - A stdio MCP server with no `sandbox` block is no longer started (#269).
   The proxy refuses it with `mcp_entry_refused` reason
   `sandbox_config_invalid` and logs the server's name with the two ways

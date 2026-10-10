@@ -150,6 +150,9 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
     let session_log_concrete = open_signed_session_log(&cfg)?;
     let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
 
+    // The gateway's permission store, so tier gating applies on the
+    // ask path as on every other; an agent cannot be built without one.
+    let perms = open_permission_store(&cfg)?;
     let mut agent = Agent::new_with_sandbox(
         "default".into(),
         workspace.clone(),
@@ -158,18 +161,13 @@ pub async fn send(message: &str, agent_id: &str) -> Result<()> {
         api_key_credential,
         session_log,
         super::load_sandbox_config(&cfg.data_dir),
+        Arc::new(Mutex::new(perms)),
     )?;
 
-    // Attach the gateway's permission store so tier gating applies
-    // on the ask path too — otherwise Tier 2/3 actions execute
-    // unchecked and bypass the three-tier model.
-    //
-    // The agent id must be set before the store: an agent that has
-    // not named itself gets no persisted grants and prompts for
-    // every Tier 2 action.
+    // Named before any call is gated: an agent that has not named
+    // itself gets no persisted grants and prompts for every Tier 2
+    // action.
     agent.set_agent_id("default");
-    let perms = open_permission_store(&cfg)?;
-    agent.set_permissions(Arc::new(Mutex::new(perms)));
 
     // Attach the stdin approval gate when (and only when) stdin is
     // a TTY. A piped / redirected `wirken ask` keeps the unmediated
@@ -252,6 +250,7 @@ async fn send_with_agent_config(
     let session_log_concrete = open_signed_session_log(cfg)?;
     let session_log: std::sync::Arc<dyn wirken_audit::SessionLog> = session_log_concrete.clone();
 
+    let perms = open_permission_store(cfg)?;
     let mut agent = Agent::new_with_sandbox(
         agent_cfg.id.clone(),
         workspace.clone(),
@@ -260,6 +259,7 @@ async fn send_with_agent_config(
         api_key_credential,
         session_log,
         super::load_sandbox_config(&cfg.data_dir),
+        Arc::new(Mutex::new(perms)),
     )?;
 
     // The configured agent's own id, not the literal "default": this
@@ -267,8 +267,6 @@ async fn send_with_agent_config(
     // another agent's grants is the failure this whole argument split
     // exists to prevent.
     agent.set_agent_id(agent_cfg.id.clone());
-    let perms = open_permission_store(cfg)?;
-    agent.set_permissions(Arc::new(Mutex::new(perms)));
 
     if super::oauth_scope::stdin_is_tty() {
         agent.set_approval_gate(std::sync::Arc::new(

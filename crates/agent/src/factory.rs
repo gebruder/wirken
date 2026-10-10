@@ -52,7 +52,7 @@ use wirken_gateway::permissions::{
 use crate::error::AgentError;
 use crate::llm::LlmConfig;
 use crate::mcp::McpProxyClient;
-use crate::runtime::{Agent, SUBAGENT_SESSION_MARKER};
+use crate::runtime::{Agent, SUBAGENT_SESSION_MARKER, ToolGate};
 use crate::skill::Skill;
 use crate::wasm_sandbox::WasmSkill;
 
@@ -232,7 +232,8 @@ pub enum FactoryPurpose {
 pub struct AgentFactory {
     static_configs: HashMap<String, AgentStaticConfig>,
     session_log: Arc<dyn SessionLog>,
-    permissions: Option<Arc<StdMutex<PermissionStore>>>,
+    /// The gate every agent this factory wakes runs under.
+    permissions: ToolGate,
     /// Org-level tool allow/deny policy, applied before the per-tier
     /// permission check. Shared across every waked Agent because org
     /// policy is a gateway-wide setting, not a per-agent one.
@@ -335,7 +336,7 @@ impl AgentFactory {
     pub fn new(
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
-        permissions: Option<Arc<StdMutex<PermissionStore>>>,
+        permissions: Arc<StdMutex<PermissionStore>>,
     ) -> Arc<Self> {
         Self::with_options(
             static_configs,
@@ -358,7 +359,7 @@ impl AgentFactory {
     pub fn with_options(
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
-        permissions: Option<Arc<StdMutex<PermissionStore>>>,
+        permissions: Arc<StdMutex<PermissionStore>>,
         org_permissions: Option<Arc<OrgPermissions>>,
         cache_mode: CacheMode,
         cache_capacity: usize,
@@ -366,7 +367,7 @@ impl AgentFactory {
         Self::with_purpose(
             static_configs,
             session_log,
-            permissions,
+            ToolGate::Store(permissions),
             org_permissions,
             cache_mode,
             cache_capacity,
@@ -376,7 +377,8 @@ impl AgentFactory {
 
     /// A factory for rebuilding recorded sessions offline. Wakes no
     /// agent that will run, so an incomplete session is reported
-    /// rather than guessed at. See [`FactoryPurpose`].
+    /// rather than guessed at. See [`FactoryPurpose`]. Its agents are
+    /// [`ToolGate::ReplayOnly`]: they dispatch no tool.
     pub fn for_verify(
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
@@ -384,7 +386,7 @@ impl AgentFactory {
         Self::with_purpose(
             static_configs,
             session_log,
-            None,
+            ToolGate::ReplayOnly,
             None,
             CacheMode::Drop,
             1,
@@ -396,7 +398,7 @@ impl AgentFactory {
     fn with_purpose(
         static_configs: HashMap<String, AgentStaticConfig>,
         session_log: Arc<dyn SessionLog>,
-        permissions: Option<Arc<StdMutex<PermissionStore>>>,
+        permissions: ToolGate,
         org_permissions: Option<Arc<OrgPermissions>>,
         cache_mode: CacheMode,
         cache_capacity: usize,
@@ -654,6 +656,7 @@ impl AgentFactory {
             api_key_credential,
             self.session_log.clone(),
             cfg.sandbox.clone(),
+            self.permissions.clone(),
         )?;
         // Name the agent before anything can gate on it. `agent_id`
         // is the key this config was looked up under, so a sub-agent
@@ -662,8 +665,7 @@ impl AgentFactory {
         agent.set_agent_id(agent_id);
         // Inject the per-agent shared resources.
         agent.attach_skills(cfg.skills.clone(), cfg.wasm_skills.clone())?;
-        if let Some(perms) = &self.permissions {
-            agent.set_permissions(perms.clone());
+        if let ToolGate::Store(perms) = &self.permissions {
             // Replay session-scoped approval events for this
             // session id so a wake-after-crash re-establishes any
             // grants the operator made before the crash. Persisted
@@ -793,7 +795,7 @@ impl AgentFactory {
             self.cache.lock().unwrap().pop(session_id);
         }
 
-        if let Some(perms) = &self.permissions {
+        if let ToolGate::Store(perms) = &self.permissions {
             let cleared = {
                 let store = match perms.lock() {
                     Ok(s) => s,
@@ -1343,6 +1345,7 @@ mod replay_tests {
             None,
             None,
             log_dyn,
+            crate::tests::test_permissions(),
         )
         .unwrap();
         (agent, concrete, session_id, tmp)
@@ -1462,6 +1465,7 @@ mod replay_tests {
             None,
             None,
             log_dyn.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -1499,6 +1503,7 @@ mod replay_tests {
             None,
             None,
             log_dyn.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
 
@@ -1536,6 +1541,7 @@ mod replay_tests {
             None,
             None,
             log_dyn.clone(),
+            crate::tests::test_permissions(),
         )
         .unwrap();
         super::replay_subagent_binding(&mut agent, &log_dyn, &session_id, FactoryPurpose::Live)

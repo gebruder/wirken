@@ -92,6 +92,17 @@ Cap'n Proto's generated reader types are lifetime-parameterized, so
 deserialized data cannot outlive its buffer, and the schema is compiled from
 `.capnp` at build time, so structure mismatches are caught by `cargo build`.
 
+### Tool dispatch gate
+
+`crates/agent/src/runtime.rs`, `ToolGate`. An agent has no ungated shape.
+`Agent::new` and `Agent::new_with_sandbox` take the operator's permission
+store as a required argument, so code that builds a dispatching agent without
+one does not compile; every dispatched tool call then passes the tier gate,
+including the default-deny of a tool name nothing classifies. The one agent
+built without a store is the session replay `wirken sessions verify` wakes
+(`AgentFactory::for_verify`): it is `ToolGate::ReplayOnly`, re-runs recorded
+deterministic reads through its tool registry, and refuses every dispatch.
+
 ## Runtime
 
 Enforced by configuration and runtime checks. Changeable by operators without

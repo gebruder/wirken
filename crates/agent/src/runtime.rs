@@ -153,6 +153,57 @@ pub struct ProcessResult {
 
 /// The agent runtime. Processes inbound messages, calls the LLM,
 /// executes tools, and produces responses.
+/// What decides whether an agent may run a tool call.
+///
+/// There is no ungated shape. A live agent checks every dispatched call
+/// against the operator's permission store, including the default-deny
+/// of a tool name nothing classifies. A session replay, the agent
+/// `wirken sessions verify` wakes, re-runs recorded deterministic reads
+/// through its tool registry itself and dispatches nothing: every call
+/// is refused.
+///
+/// [`Agent::new`] and [`Agent::new_with_sandbox`] take the store, so a
+/// dispatching agent cannot be built without one:
+///
+/// ```compile_fail,E0061
+/// # use std::sync::Arc;
+/// # fn build(log: Arc<dyn wirken_audit::SessionLog>) {
+/// let agent = wirken_agent::Agent::new(
+///     "a".into(),
+///     std::env::temp_dir(),
+///     wirken_agent::llm::LlmConfig::ollama("m"),
+///     None,
+///     None,
+///     log,
+/// );
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use std::sync::{Arc, Mutex};
+/// # fn build(
+/// #     log: Arc<dyn wirken_audit::SessionLog>,
+/// #     store: wirken_gateway::permissions::PermissionStore,
+/// # ) {
+/// let agent = wirken_agent::Agent::new(
+///     "a".into(),
+///     std::env::temp_dir(),
+///     wirken_agent::llm::LlmConfig::ollama("m"),
+///     None,
+///     None,
+///     log,
+///     Arc::new(Mutex::new(store)),
+/// );
+/// # }
+/// ```
+#[derive(Clone)]
+pub enum ToolGate {
+    /// The operator's permission store.
+    Store(Arc<std::sync::Mutex<PermissionStore>>),
+    /// A recorded session's replay. Refuses every dispatch.
+    ReplayOnly,
+}
+
 pub struct Agent {
     pub id: String,
     /// Logical agent id this runtime is an instance of, when it has
@@ -194,9 +245,9 @@ pub struct Agent {
     /// `provider.json`, env-var override, tests). Never the secret
     /// itself.
     api_key_credential: Option<String>,
-    /// Optional permission store for checking tool execution permissions.
-    /// When None, all tools execute without permission checks (standalone mode).
-    permissions: Option<Arc<std::sync::Mutex<PermissionStore>>>,
+    /// What every dispatched tool call passes. There is no ungated
+    /// shape: see [`ToolGate`].
+    permissions: ToolGate,
     /// Optional org-level tool allow/deny policy. Evaluated before
     /// the tier permission check: `blocked_tools` short-circuits to
     /// denial; a non-empty `allowed_tools` acts as an allowlist.
@@ -542,6 +593,7 @@ impl Agent {
         api_key: Option<String>,
         api_key_credential: Option<String>,
         session_log: Arc<dyn SessionLog>,
+        permissions: Arc<std::sync::Mutex<PermissionStore>>,
     ) -> Result<Self, AgentError> {
         Self::new_with_sandbox(
             id,
@@ -551,6 +603,7 @@ impl Agent {
             api_key_credential,
             session_log,
             crate::sandbox::SandboxConfig::default(),
+            permissions,
         )
     }
 
@@ -558,6 +611,10 @@ impl Agent {
     /// `Agent::new` is a shim over this that uses the default
     /// `SandboxConfig`. Production callers that load sandbox mode
     /// from user config should use this constructor.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is a required part of an agent, the permission gate included"
+    )]
     pub fn new_with_sandbox(
         id: String,
         workspace: PathBuf,
@@ -566,6 +623,7 @@ impl Agent {
         api_key_credential: Option<String>,
         session_log: Arc<dyn SessionLog>,
         sandbox: crate::sandbox::SandboxConfig,
+        permissions: Arc<std::sync::Mutex<PermissionStore>>,
     ) -> Result<Self, AgentError> {
         let tool_config = ToolConfig {
             api_key: api_key.clone(),
@@ -593,7 +651,7 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
-            permissions: None,
+            permissions: ToolGate::Store(permissions),
             org_permissions: None,
             current_trigger: None,
             current_assistant_text: None,
@@ -640,9 +698,14 @@ impl Agent {
     /// conversation projection is built — the session log is
     /// self-healing as soon as wake runs.
     ///
-    /// Skills, MCP, and permissions are NOT replayed — they're
-    /// external state that the caller (the AgentFactory) injects
-    /// after construction.
+    /// Skills and MCP are NOT replayed — they're external state that the
+    /// caller (the AgentFactory) injects after construction. The gate
+    /// is decided by the caller too: the operator's store for a live
+    /// wake, replay-only for `wirken sessions verify`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is a required part of an agent, the permission gate included"
+    )]
     pub(crate) fn from_session_log(
         id: String,
         workspace: PathBuf,
@@ -651,6 +714,7 @@ impl Agent {
         api_key_credential: Option<String>,
         session_log: Arc<dyn SessionLog>,
         sandbox: crate::sandbox::SandboxConfig,
+        permissions: ToolGate,
     ) -> Result<Self, AgentError> {
         let session_id = SessionId::new(id.clone());
         let session_handle = session_log.handle_for(session_id);
@@ -692,7 +756,7 @@ impl Agent {
             system_prompt,
             api_key,
             api_key_credential,
-            permissions: None,
+            permissions,
             org_permissions: None,
             current_trigger: None,
             current_assistant_text: None,
@@ -800,11 +864,14 @@ impl Agent {
         Ok(())
     }
 
-    /// Set the permission store for tool execution permission checks.
-    /// When set, tool calls are checked against the three-tier permission model
-    /// before execution. Denials are collected in the `ProcessResult`.
-    pub fn set_permissions(&mut self, store: Arc<std::sync::Mutex<PermissionStore>>) {
-        self.permissions = Some(store);
+    /// Replace the permission store, for tests that build an agent and
+    /// then give it a store of their own.
+    #[cfg(test)]
+    pub(crate) fn swap_permissions_for_test(
+        &mut self,
+        store: Arc<std::sync::Mutex<PermissionStore>>,
+    ) {
+        self.permissions = ToolGate::Store(store);
     }
 
     /// Attach the org-level tool allow/deny policy. See
@@ -3029,6 +3096,15 @@ impl Agent {
         name: &str,
         arguments: &str,
     ) -> Result<crate::tool::ToolResult, AgentError> {
+        // A session replay dispatches nothing, not even the in-process
+        // intercepts below; it re-runs recorded reads itself.
+        if matches!(self.permissions, ToolGate::ReplayOnly) {
+            return Err(AgentError::PermissionDenied(format!(
+                "tool '{name}' was not run: this agent replays a recorded session and \
+                 dispatches no tool"
+            )));
+        }
+
         // spawn_subagent runs through a dedicated intercept that
         // re-enters the factory; it never goes
         // through the sandbox/permission/MCP routing below.
@@ -3314,8 +3390,12 @@ impl Agent {
             }
         }
 
-        // Permission check before execution.
-        if let Some(ref perms) = self.permissions {
+        // Permission check before execution. Every dispatched call
+        // reaches it: a replay-only agent was refused above.
+        let ToolGate::Store(ref perms) = self.permissions else {
+            unreachable!("a replay-only agent is refused at the top of execute_tool");
+        };
+        {
             let args: serde_json::Value =
                 serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
             // Resolve the action to gate on. Built-in, MCP (`mcp_`),
