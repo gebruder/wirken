@@ -5832,7 +5832,6 @@ version = "1.28.0"
 name = "wirken-adapter-discord"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "capnp",
  "chrono",
  "serde",
@@ -5842,7 +5841,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5862,7 +5860,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5879,7 +5876,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5888,9 +5884,7 @@ dependencies = [
 name = "wirken-adapter-matrix"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "capnp",
- "chrono",
  "reqwest 0.13.5",
  "serde",
  "serde_json",
@@ -5898,7 +5892,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5915,7 +5908,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5924,9 +5916,7 @@ dependencies = [
 name = "wirken-adapter-slack"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "capnp",
- "chrono",
  "serde",
  "serde_json",
  "slack-morphism",
@@ -5935,7 +5925,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5944,7 +5933,6 @@ dependencies = [
 name = "wirken-adapter-teams"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "base64 0.23.1",
  "capnp",
  "chrono",
@@ -5956,7 +5944,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5965,7 +5952,6 @@ dependencies = [
 name = "wirken-adapter-telegram"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "capnp",
  "chrono",
  "serde",
@@ -5975,7 +5961,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -5984,9 +5969,7 @@ dependencies = [
 name = "wirken-adapter-whatsapp"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "capnp",
- "chrono",
  "hmac 0.13.0",
  "reqwest 0.13.5",
  "serde",
@@ -5997,7 +5980,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "wirken-adapter-core",
  "wirken-ipc",
 ]
@@ -6006,7 +5988,6 @@ dependencies = [
 name = "wirken-agent"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.23.1",
  "bollard",
@@ -6113,7 +6094,6 @@ dependencies = [
 name = "wirken-gateway"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.23.1",
  "capnp",
@@ -6153,7 +6133,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -6161,7 +6140,6 @@ dependencies = [
 name = "wirken-mcp-proxy"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bollard",
  "chrono",
@@ -6229,7 +6207,6 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -6239,11 +6216,6 @@ dependencies = [
 [[package]]
 name = "wirken-webchat"
 version = "1.28.0"
-dependencies = [
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "wirken-zirkel"

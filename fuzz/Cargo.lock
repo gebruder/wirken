@@ -49,12 +49,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3963,7 +3957,6 @@ dependencies = [
 name = "wirken-agent"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.23.1",
  "bollard",
@@ -4034,7 +4027,6 @@ dependencies = [
 name = "wirken-gateway"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.23.1",
  "capnp",
@@ -4072,7 +4064,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -4080,7 +4071,6 @@ dependencies = [
 name = "wirken-mcp-proxy"
 version = "1.28.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bollard",
  "chrono",
@@ -4134,7 +4124,6 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 2.0.20",
  "tracing",
  "zeroize",
