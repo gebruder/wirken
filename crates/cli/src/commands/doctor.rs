@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::config;
 use wirken_audit::{AlarmLog, AlarmVerifyStatus, AuditLog, VerifyResult};
 use wirken_gateway::adapter_registry::AdapterRegistry;
-use wirken_mcp_proxy::mcp_config::{McpConfig, McpServerConfig};
+use wirken_mcp_proxy::mcp_config::{McpConfig, McpServerConfig, StdioSandbox};
 use wirken_mcp_proxy::mcp_signing::{McpVerifyResult, bundled_mcp_pubkey, verify_mcp_entry};
 use wirken_vault::probe_keychain;
 
@@ -170,6 +170,40 @@ pub async fn run() -> Result<()> {
                 print_fail(&format!("  {e}"));
                 issues += 1;
             }
+        }
+    }
+
+    // Check that every stdio MCP server can start: the proxy refuses one
+    // with no sandbox block rather than run it on the host.
+    if let Ok(mcp_cfg) = McpConfig::load(&mcp_path) {
+        let mut names: Vec<&String> = mcp_cfg.servers.keys().collect();
+        names.sort();
+        let (mut refused, mut unsandboxed) = (Vec::new(), Vec::new());
+        for name in names {
+            let McpServerConfig::Stdio { sandbox, .. } = &mcp_cfg.servers[name] else {
+                continue;
+            };
+            match sandbox.as_deref() {
+                None | Some(StdioSandbox::Invalid(_)) => refused.push(name.as_str()),
+                Some(StdioSandbox::Off(_)) => unsandboxed.push(name.as_str()),
+                Some(StdioSandbox::Container(_)) => {}
+            }
+        }
+        print_check("MCP sandbox", &mcp_path.display().to_string());
+        if !refused.is_empty() {
+            print_fail(&format!(
+                "  {} will not start: a stdio server needs a sandbox block. Add one naming \
+                 its image, or set \"sandbox\": \"off\", then re-sign (wirken mcp sign)",
+                refused.join(", ")
+            ));
+            issues += 1;
+        } else if !unsandboxed.is_empty() {
+            print_warn(&format!(
+                "  {} run on the host unsandboxed (\"sandbox\": \"off\")",
+                unsandboxed.join(", ")
+            ));
+        } else {
+            print_ok();
         }
     }
 

@@ -546,6 +546,9 @@ impl OtelProjector {
             SessionEvent::McpEntryVerified { .. } => Vec::new(),
             // A load-time registry check.
             SessionEvent::McpEntryRefused { .. } => Vec::new(),
+            // What a server started with; no span to attach it to.
+            SessionEvent::McpServerSandboxed { .. } => Vec::new(),
+            SessionEvent::McpServerUnsandboxed { .. } => Vec::new(),
             // Rides the tool result the tool span times.
             SessionEvent::EgressHookDispatched { .. } => Vec::new(),
             // Rides the tool result the tool span times.

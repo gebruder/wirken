@@ -2460,6 +2460,7 @@ function renderVaultRows(grid) {
         const t = c.trust;
         if (t && t.verified === true) right += ' · admitted';
         else if (t && t.verified === false) right += ' · refused';
+        if (t && t.not_started) right += ' · not started (' + t.not_started + ')';
         const parts = ['auth ' + (c.auth || 'none')];
         if (c.provider) parts.push('via ' + c.provider);
         if (Array.isArray(c.credentials) && c.credentials.length) parts.push('uses ' + c.credentials.join(', '));
@@ -4297,6 +4298,10 @@ pub fn session_events(
             SessionEvent::McpEntryVerified { .. } => None,
             // The refusing half of that check.
             SessionEvent::McpEntryRefused { .. } => None,
+            // How a connector's server started. The About panel lists
+            // connectors.
+            SessionEvent::McpServerSandboxed { .. } => None,
+            SessionEvent::McpServerUnsandboxed { .. } => None,
             // The verdict rides the tool row it gated.
             SessionEvent::EgressHookDispatched { .. } => None,
             // The tool row already carries the output as redacted.
@@ -4606,6 +4611,18 @@ pub fn credentials_snapshot(cfg: &wirken_gateway::config::GatewayConfig) -> serd
                         signer,
                     } => {
                         trust.insert(server_name, json!({ "verified": true, "signer": signer }));
+                    }
+                    // A sandbox refusal comes after the signature
+                    // verified, so it adds to that verdict rather than
+                    // replacing it.
+                    SessionEvent::McpEntryRefused {
+                        server_name,
+                        reason,
+                    } if wirken_mcp_proxy::mcp_registry::SANDBOX_REFUSALS
+                        .contains(&reason.as_str()) =>
+                    {
+                        let entry = trust.entry(server_name).or_insert_with(|| json!({}));
+                        entry["not_started"] = json!(reason);
                     }
                     // The reason names the flag that would weaken the
                     // check; the verdict is enough, and the hatch banner
@@ -7141,6 +7158,45 @@ mod tests {
             );
         }
         assert!(vault.contains("'none stored'") && vault.contains("'none configured'"));
+    }
+
+    /// A stdio server refused by the sandbox had its signature verify
+    /// first. The panel keeps that verdict and says the server did not
+    /// start, rather than reporting the signature as refused.
+    #[test]
+    fn a_sandbox_refusal_does_not_read_as_a_failed_signature() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_at(dir.path());
+        let mcp = cfg.mcp_config_path("default");
+        std::fs::create_dir_all(mcp.parent().unwrap()).unwrap();
+        std::fs::write(&mcp, r#"{"servers":{"files":{"command":"/srv"}}}"#).unwrap();
+        {
+            use wirken_audit::{SessionEvent, SessionLog, TrustLevel};
+            let log =
+                wirken_audit::SqliteSessionLog::open(&cfg.audit_db_path()).expect("log opens");
+            let handle = log.handle_for(wirken_audit::SessionId::new("gateway-mcp".to_string()));
+            for event in [
+                SessionEvent::McpEntryVerified {
+                    server_name: "files".into(),
+                    signer: "<no-anchor>".into(),
+                },
+                SessionEvent::McpEntryRefused {
+                    server_name: "files".into(),
+                    reason: "image_unavailable".into(),
+                },
+            ] {
+                log.append(&handle, TrustLevel::System, event).unwrap();
+            }
+        }
+        let snap = credentials_snapshot(&cfg);
+        assert_eq!(
+            snap["connectors"][0]["trust"],
+            serde_json::json!({
+                "verified": true,
+                "signer": "<no-anchor>",
+                "not_started": "image_unavailable"
+            })
+        );
     }
 
     /// The default agent's capabilities, drawn from a factory over an

@@ -66,7 +66,9 @@ pub fn resolve_poll_interval(config: &SiemConfig) -> Duration {
 ///   correlation.
 /// - `ChainHead`: per-session signed-head feed.
 /// - `McpEntryVerified`, `McpEntryRefused`: MCP load-time signature
-///   posture on the `gateway-mcp` sentinel session.
+///   and sandbox posture on the `gateway-mcp` sentinel session.
+/// - `McpServerSandboxed`, `McpServerUnsandboxed`: what each stdio MCP
+///   server started with, contained or on the host.
 /// - `EgressHookDispatched`, `ToolOutputRedacted`: post-execution
 ///   egress-hook outcomes and redaction events. Plaintext is never
 ///   on the row; both carry sha256 hashes only.
@@ -127,6 +129,8 @@ pub fn should_forward(event: &SessionEvent, config: &SiemConfig) -> bool {
         SessionEvent::ChainHead { .. } => true,
         SessionEvent::McpEntryVerified { .. } => true,
         SessionEvent::McpEntryRefused { .. } => true,
+        SessionEvent::McpServerSandboxed { .. } => true,
+        SessionEvent::McpServerUnsandboxed { .. } => true,
         SessionEvent::EgressHookDispatched { .. } => true,
         SessionEvent::ToolOutputRedacted { .. } => true,
         SessionEvent::BudgetExceeded { .. } => true,
@@ -284,6 +288,8 @@ pub(crate) fn variant_kind(event: &SessionEvent) -> &'static str {
         SessionEvent::HookCrashed { .. } => "hook_crashed",
         SessionEvent::McpEntryVerified { .. } => "mcp_entry_verified",
         SessionEvent::McpEntryRefused { .. } => "mcp_entry_refused",
+        SessionEvent::McpServerSandboxed { .. } => "mcp_server_sandboxed",
+        SessionEvent::McpServerUnsandboxed { .. } => "mcp_server_unsandboxed",
         SessionEvent::EgressHookDispatched { .. } => "egress_hook_dispatched",
         SessionEvent::SandboxEgressVerdict { .. } => "sandbox_egress_verdict",
         SessionEvent::SandboxEgressUnsupported { .. } => "sandbox_egress_unsupported",

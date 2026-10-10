@@ -864,6 +864,11 @@ fn extract_identity_for_sentinel(
         SessionEvent::McpEntryVerified { .. } => (None, None, None),
         // A server name and a reason; none of the three.
         SessionEvent::McpEntryRefused { .. } => (None, None, None),
+        // A server started for one agent; no adapter or sender.
+        SessionEvent::McpServerSandboxed { agent_id, .. }
+        | SessionEvent::McpServerUnsandboxed { agent_id, .. } => {
+            (None, None, Some(agent_id.clone()))
+        }
     }
 }
 
@@ -1071,6 +1076,19 @@ fn typed_summary(event: &crate::session_log::SessionEvent) -> String {
         SessionEvent::McpEntryVerified { .. } => debug_summary(event),
         // A server name and a reason.
         SessionEvent::McpEntryRefused { .. } => debug_summary(event),
+        SessionEvent::McpServerSandboxed {
+            server_name,
+            image,
+            egress_hosts,
+            secrets_in_env,
+            ..
+        } => format!(
+            "mcp_server_sandboxed server={server_name} image={image} egress_hosts={egress_hosts:?} \
+             secrets_in_env={secrets_in_env:?}"
+        ),
+        SessionEvent::McpServerUnsandboxed { server_name, .. } => {
+            format!("mcp_server_unsandboxed server={server_name}")
+        }
         // A hook id, a tool and an egress decision.
         SessionEvent::EgressHookDispatched { .. } => debug_summary(event),
         // A call id, a hook id and the two sizes.
@@ -2021,6 +2039,36 @@ mod identity_tests {
                 },
                 Some("slack"),
                 Some("U123"),
+                Some("worker"),
+            ),
+            (
+                SessionEvent::McpServerSandboxed {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                    image: "ghcr.io/github/github-mcp-server".into(),
+                    image_id: None,
+                    image_digest: None,
+                    runtime: crate::SandboxRuntimeLabel::Docker,
+                    container_id: "c".into(),
+                    egress_hosts: vec!["api.github.com".into()],
+                    mounts: vec![],
+                    memory_bytes: 1,
+                    pids: 1,
+                    nano_cpus: 1,
+                    secrets_as_files: vec![],
+                    secrets_in_env: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".into()],
+                },
+                None,
+                None,
+                Some("worker"),
+            ),
+            (
+                SessionEvent::McpServerUnsandboxed {
+                    server_name: "github".into(),
+                    agent_id: agent(),
+                },
+                None,
+                None,
                 Some("worker"),
             ),
             (

@@ -3601,6 +3601,26 @@ fn every_session_event() -> Vec<SessionEvent> {
             server_name: String::new(),
             signer: String::new(),
         },
+        SessionEvent::McpServerSandboxed {
+            server_name: String::new(),
+            agent_id: String::new(),
+            image: String::new(),
+            image_id: None,
+            image_digest: None,
+            runtime: crate::session_log::SandboxRuntimeLabel::Docker,
+            container_id: String::new(),
+            egress_hosts: Vec::new(),
+            mounts: Vec::new(),
+            memory_bytes: 0,
+            pids: 0,
+            nano_cpus: 0,
+            secrets_as_files: Vec::new(),
+            secrets_in_env: Vec::new(),
+        },
+        SessionEvent::McpServerUnsandboxed {
+            server_name: String::new(),
+            agent_id: String::new(),
+        },
         SessionEvent::AdapterConnect {
             adapter_id: String::new(),
             channel: String::new(),
@@ -3697,12 +3717,14 @@ fn variant_name(event: &SessionEvent) -> &'static str {
         SessionEvent::SandboxEgressUnsupported { .. } => "SandboxEgressUnsupported",
         SessionEvent::HookCrashed { .. } => "HookCrashed",
         SessionEvent::McpEntryRefused { .. } => "McpEntryRefused",
+        SessionEvent::McpServerSandboxed { .. } => "McpServerSandboxed",
+        SessionEvent::McpServerUnsandboxed { .. } => "McpServerUnsandboxed",
         SessionEvent::McpEntryVerified { .. } => "McpEntryVerified",
     }
 }
 
 /// Raised in the same edit that adds a variant.
-const SESSION_EVENT_VARIANTS: usize = 60;
+const SESSION_EVENT_VARIANTS: usize = 62;
 
 /// The list covers the enum.
 #[test]

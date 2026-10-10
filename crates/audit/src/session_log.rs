@@ -1773,12 +1773,60 @@ pub enum SessionEvent {
     /// at a glance.
     McpEntryVerified { server_name: String, signer: String },
     /// An MCP entry was refused at proxy load. `reason` is a stable
-    /// snake_case label (`"signature_invalid"`, `"unsigned"`,
-    /// `"signer_key_missing"`, `"signer_key_decode_failed"`,
-    /// `"delegation_required"`) so SIEM detections pivot on a
-    /// closed set of strings. The entry's spawn never happened; the
-    /// MCP client is not in the proxy's registry.
+    /// snake_case label so SIEM detections pivot on a closed set of
+    /// strings. From the signature check: `"signature_invalid"`,
+    /// `"unsigned"`, `"signer_key_missing"`,
+    /// `"signer_key_decode_failed"`, `"delegation_required"`. From the
+    /// stdio sandbox, after the signature verified:
+    /// `"sandbox_config_invalid"`, `"sandbox_unavailable"`,
+    /// `"image_unavailable"`, `"egress_unsupported_runtime"`. The
+    /// entry's spawn never happened; the MCP client is not in the
+    /// proxy's registry.
     McpEntryRefused { server_name: String, reason: String },
+    /// A stdio MCP server started in its container. Written at every
+    /// start, restarts included, on the `gateway-mcp` sentinel session.
+    ///
+    /// Records what the server was given, never a secret's value:
+    /// `secrets_as_files` and `secrets_in_env` are variable names.
+    /// `secrets_in_env` names each value the operator chose to deliver
+    /// through the container's environment, where `docker inspect` and
+    /// the container's own processes can read it.
+    McpServerSandboxed {
+        server_name: String,
+        agent_id: String,
+        image: String,
+        /// The local image id, a digest of its configuration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_id: Option<String>,
+        /// The image's registry digest, absent for an image that never
+        /// came from a registry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image_digest: Option<String>,
+        runtime: SandboxRuntimeLabel,
+        container_id: String,
+        /// Domain patterns the server may reach through its sidecar.
+        /// Empty means it has no network.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        egress_hosts: Vec<String>,
+        /// `source:target:ro` or `source:target:rw`, install directory,
+        /// declared mounts and scratch included.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mounts: Vec<String>,
+        memory_bytes: i64,
+        pids: i64,
+        nano_cpus: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets_as_files: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        secrets_in_env: Vec<String>,
+    },
+    /// A stdio MCP server started on the host, outside any container,
+    /// because its entry says `"sandbox": "off"`. Written at every
+    /// start, on the `gateway-mcp` sentinel session.
+    McpServerUnsandboxed {
+        server_name: String,
+        agent_id: String,
+    },
     /// One egress-hook invocation completed. Emitted per hook per
     /// tool result in registration order (parallel to
     /// `HookDispatched` on the veto path). The invocation runs

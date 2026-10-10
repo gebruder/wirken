@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 
 use wirken_gateway::skill_registry::{self, generate_signing_keypair};
-use wirken_mcp_proxy::mcp_config::{McpAuth, McpConfig, McpServerConfig};
+use wirken_mcp_proxy::mcp_config::{McpAuth, McpConfig, McpServerConfig, StdioSandbox};
 use wirken_mcp_proxy::mcp_signing::{
     McpVerifyResult, bundled_mcp_pubkey, sign_mcp_entry, verify_mcp_entry,
 };
@@ -295,6 +295,9 @@ pub fn verify(server: Option<&str>, agent: Option<&str>) -> Result<()> {
             McpVerifyResult::Unsigned => "unsigned".to_string(),
         };
         println!("  {name:.<24} {label}");
+        if let Some(note) = sandbox_note(entry) {
+            println!("  {:24} {note}", "");
+        }
     }
 
     if bundled_root.is_none() {
@@ -316,6 +319,25 @@ pub fn verify(server: Option<&str>, agent: Option<&str>) -> Result<()> {
         anyhow::bail!("one or more entries failed verification");
     }
     Ok(())
+}
+
+/// What the proxy will do with a stdio entry's `sandbox` setting, when
+/// that is anything but start it in its container.
+fn sandbox_note(entry: &McpServerConfig) -> Option<&'static str> {
+    let McpServerConfig::Stdio { sandbox, .. } = entry else {
+        return None;
+    };
+    match sandbox.as_deref() {
+        None => Some(
+            "no sandbox block: the proxy will not start it. Add a block naming its image, \
+             or set \"sandbox\": \"off\", then re-sign",
+        ),
+        Some(StdioSandbox::Invalid(_)) => {
+            Some("sandbox is neither \"off\" nor a sandbox block: the proxy will not start it")
+        }
+        Some(StdioSandbox::Off(_)) => Some("sandbox off: runs on the host, unsandboxed"),
+        Some(StdioSandbox::Container(_)) => None,
+    }
 }
 
 fn load_or_create_signing_key(key_path: &std::path::Path) -> Result<SigningKey> {

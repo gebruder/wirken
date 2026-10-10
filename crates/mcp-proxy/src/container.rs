@@ -130,6 +130,22 @@ impl SandboxHost {
             .map(|base| base.join(format!("wirken-mcp-{}", self.instance)))
     }
 
+    /// The sidecar binary, if it is there to mount.
+    pub fn ready_sidecar_binary(&self) -> Result<PathBuf, String> {
+        let binary = self
+            .sidecar_binary
+            .clone()
+            .ok_or("no binary for the egress sidecar")?;
+        if binary.exists() {
+            Ok(binary)
+        } else {
+            Err(format!(
+                "egress sidecar binary {} does not exist; set sidecar_binary in sandbox.json",
+                binary.display()
+            ))
+        }
+    }
+
     /// Prefix of this instance's egress socket directories.
     fn egress_socket_prefix(&self) -> String {
         format!("wirken-mcp-egress-{}-", self.instance)
@@ -461,6 +477,26 @@ impl ContainerPlan {
         })
     }
 
+    /// Each mount as `source:target:ro` or `source:target:rw`, for the
+    /// start row.
+    pub fn mount_summary(&self) -> Vec<String> {
+        self.mounts
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}:{}:{}",
+                    m.source.as_deref().unwrap_or_default(),
+                    m.target.as_deref().unwrap_or_default(),
+                    if m.read_only == Some(false) {
+                        "rw"
+                    } else {
+                        "ro"
+                    }
+                )
+            })
+            .collect()
+    }
+
     /// The body sent to Docker. Stdin stays open for the JSON-RPC
     /// stream and closes when the proxy's attach does, so a server that
     /// exits at end of input exits with the proxy.
@@ -688,16 +724,7 @@ pub async fn start_route(
     plan: &ContainerPlan,
     audit: Option<Arc<dyn SessionLog>>,
 ) -> Result<ServerRoute, String> {
-    let binary = host
-        .sidecar_binary
-        .clone()
-        .ok_or("no binary for the egress sidecar")?;
-    if !binary.exists() {
-        return Err(format!(
-            "sidecar binary {} does not exist; set sidecar_binary in sandbox.json",
-            binary.display()
-        ));
-    }
+    let binary = host.ready_sidecar_binary()?;
     let id = crate::mcp_transport::random_suffix();
     let spec = wirken_sandbox::egress_net::SidecarSpec {
         name_prefix: "wirken-mcp-egress".into(),

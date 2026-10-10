@@ -26,7 +26,7 @@ use wirken_audit::{SessionEvent, SessionId, SessionLog, TrustLevel};
 use wirken_vault::{CredentialAccess, ScopedCredentialStore};
 
 use crate::auth::{AuthProvider, BearerAuth, NoAuth, OAuth2Auth};
-use crate::container::{ContainerPlan, SandboxHost};
+use crate::container::{ContainerPlan, PlanError, SandboxHost};
 use crate::error::ProxyError;
 use crate::mcp_client::{McpClient, McpToolResult};
 use crate::mcp_config::{McpAuth, McpConfig, McpServerConfig, StdioSandbox};
@@ -37,6 +37,27 @@ use crate::wire::ToolDefWire;
 /// Sentinel session id for cross-cutting MCP load-time events.
 /// Parallels `gateway-hooks` used by the hook accept loop.
 pub const MCP_SENTINEL_SESSION: &str = "gateway-mcp";
+
+/// `McpEntryRefused` reason: the stdio entry has no `sandbox` block, or
+/// one the proxy cannot start as written.
+pub const REFUSED_SANDBOX_CONFIG_INVALID: &str = "sandbox_config_invalid";
+/// `McpEntryRefused` reason: no container runtime is reachable, or the
+/// host lacks something the block needs.
+pub const REFUSED_SANDBOX_UNAVAILABLE: &str = "sandbox_unavailable";
+/// `McpEntryRefused` reason: the block's image is not on this host.
+pub const REFUSED_IMAGE_UNAVAILABLE: &str = "image_unavailable";
+/// `McpEntryRefused` reason: the block lists egress hosts and the
+/// runtime cannot proxy them.
+pub const REFUSED_EGRESS_UNSUPPORTED_RUNTIME: &str = "egress_unsupported_runtime";
+
+/// The refusals that come from the stdio sandbox rather than the
+/// signature check. An entry refused for one of these verified.
+pub const SANDBOX_REFUSALS: &[&str] = &[
+    REFUSED_SANDBOX_CONFIG_INVALID,
+    REFUSED_SANDBOX_UNAVAILABLE,
+    REFUSED_IMAGE_UNAVAILABLE,
+    REFUSED_EGRESS_UNSUPPORTED_RUNTIME,
+];
 
 /// Outcome of [`pre_spawn_verify`]: do we spawn, and what audit row
 /// do we emit?
@@ -97,31 +118,6 @@ impl ProxyRegistry {
     pub fn with_sandbox(mut self, host: SandboxHost) -> Self {
         self.sandbox = host;
         self
-    }
-
-    /// Start the container `plan` describes, handing it the resolved
-    /// vault values. A plan with egress hosts gets its route first, so
-    /// the server is never started without its only way out up.
-    async fn spawn_contained(
-        &self,
-        plan: &ContainerPlan,
-        resolved_env: &HashMap<String, String>,
-        audit: Option<&Arc<dyn SessionLog>>,
-    ) -> Result<StdioTransport, ProxyError> {
-        let docker = self
-            .sandbox
-            .docker
-            .as_ref()
-            .ok_or_else(|| ProxyError::Mcp("no container runtime is reachable".into()))?;
-        let route = if plan.egress_hosts.is_empty() {
-            None
-        } else {
-            let route = crate::container::start_route(docker, &self.sandbox, plan, audit.cloned())
-                .await
-                .map_err(|e| ProxyError::Mcp(format!("egress route for '{}': {e}", plan.server)))?;
-            Some(route)
-        };
-        StdioTransport::spawn_container(docker, plan, resolved_env, route).await
     }
 
     /// Register an Ed25519 public key as the authoritative identity
@@ -222,28 +218,20 @@ impl ProxyRegistry {
                         resolve_env(env, guard.as_ref())
                     };
 
-                    let spawned = match sandbox.as_deref() {
-                        Some(StdioSandbox::Container(block)) => {
-                            match ContainerPlan::new(
-                                &self.sandbox,
-                                agent_id,
-                                name,
-                                command,
-                                args,
-                                env,
-                                block,
-                            ) {
-                                Ok(plan) => self.spawn_contained(&plan, &resolved_env, audit).await,
-                                Err(e) => Err(ProxyError::Mcp(e.to_string())),
-                            }
-                        }
-                        Some(StdioSandbox::Invalid(_)) => Err(ProxyError::Mcp(
-                            "sandbox is neither \"off\" nor a sandbox block".into(),
-                        )),
-                        Some(StdioSandbox::Off(_)) | None => {
-                            StdioTransport::spawn(command, args, &resolved_env).await
-                        }
-                    };
+                    let spawned = start_stdio(
+                        &self.sandbox,
+                        StdioEntry {
+                            agent_id,
+                            server: name,
+                            command,
+                            args,
+                            env,
+                            sandbox: sandbox.as_deref(),
+                        },
+                        &resolved_env,
+                        audit,
+                    )
+                    .await;
                     match spawned {
                         Ok(stdio) => {
                             let mut client =
@@ -257,7 +245,22 @@ impl ProxyRegistry {
                             }
                             clients.insert(name.clone(), client);
                         }
-                        Err(e) => {
+                        Err(StartError::Refused { reason, why }) => {
+                            tracing::warn!(
+                                agent_id,
+                                server = name,
+                                reason,
+                                "MCP server '{name}' (agent '{agent_id}') not started: {why}"
+                            );
+                            record(
+                                audit,
+                                SessionEvent::McpEntryRefused {
+                                    server_name: name.clone(),
+                                    reason: reason.to_string(),
+                                },
+                            );
+                        }
+                        Err(StartError::Failed(e)) => {
                             tracing::warn!(
                                 "MCP server '{name}' (agent '{agent_id}') spawn failed: {e}"
                             );
@@ -403,6 +406,174 @@ impl Default for ProxyRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Append `event` to the `gateway-mcp` session, when there is a log.
+fn record(audit: Option<&Arc<dyn SessionLog>>, event: SessionEvent) {
+    let Some(log) = audit else {
+        return;
+    };
+    let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
+    if let Err(e) = log.append(&handle, TrustLevel::System, event) {
+        tracing::warn!("could not record an MCP server event: {e}");
+    }
+}
+
+/// A stdio entry, as [`start_stdio`] needs it.
+pub(crate) struct StdioEntry<'a> {
+    pub agent_id: &'a str,
+    pub server: &'a str,
+    pub command: &'a str,
+    pub args: &'a [String],
+    /// The config's env: `vault:` values are still references.
+    pub env: &'a HashMap<String, String>,
+    pub sandbox: Option<&'a StdioSandbox>,
+}
+
+/// Why a stdio server did not start.
+pub(crate) enum StartError {
+    /// The entry, or the host, rules it out until the operator acts.
+    /// Recorded as `McpEntryRefused` with `reason`; `why` goes to the
+    /// log and says what to change.
+    Refused { reason: &'static str, why: String },
+    /// Starting failed for a reason nothing in the entry names.
+    Failed(ProxyError),
+}
+
+impl StartError {
+    fn refused(reason: &'static str, why: impl Into<String>) -> Self {
+        Self::Refused {
+            reason,
+            why: why.into(),
+        }
+    }
+}
+
+/// Start one stdio server: in its container, or on the host when its
+/// entry says `"sandbox": "off"`. An entry with no `sandbox` block is
+/// refused; nothing starts a stdio server on the host by default.
+pub(crate) async fn start_stdio(
+    host: &SandboxHost,
+    entry: StdioEntry<'_>,
+    resolved_env: &HashMap<String, String>,
+    audit: Option<&Arc<dyn SessionLog>>,
+) -> Result<StdioTransport, StartError> {
+    let block = match entry.sandbox {
+        Some(StdioSandbox::Container(block)) => block,
+        None => {
+            return Err(StartError::refused(
+                REFUSED_SANDBOX_CONFIG_INVALID,
+                "a stdio server needs a sandbox block. Either add one naming the image it \
+                 runs in and re-sign the entry with `wirken mcp sign`, or set \
+                 \"sandbox\": \"off\" and re-sign to run it on the host unsandboxed",
+            ));
+        }
+        Some(StdioSandbox::Invalid(_)) => {
+            return Err(StartError::refused(
+                REFUSED_SANDBOX_CONFIG_INVALID,
+                "sandbox is neither \"off\" nor a sandbox block",
+            ));
+        }
+        Some(StdioSandbox::Off(_)) => {
+            tracing::warn!(
+                agent_id = entry.agent_id,
+                server = entry.server,
+                "MCP server '{}' runs on the host without a sandbox (\"sandbox\": \"off\")",
+                entry.server
+            );
+            record(
+                audit,
+                SessionEvent::McpServerUnsandboxed {
+                    server_name: entry.server.to_string(),
+                    agent_id: entry.agent_id.to_string(),
+                },
+            );
+            return StdioTransport::spawn(entry.command, entry.args, resolved_env)
+                .await
+                .map_err(StartError::Failed);
+        }
+    };
+
+    let plan = ContainerPlan::new(
+        host,
+        entry.agent_id,
+        entry.server,
+        entry.command,
+        entry.args,
+        entry.env,
+        block,
+    )
+    .map_err(|e| match e {
+        PlanError::Invalid(why) => StartError::refused(REFUSED_SANDBOX_CONFIG_INVALID, why),
+        PlanError::Unavailable(why) => StartError::refused(REFUSED_SANDBOX_UNAVAILABLE, why),
+        PlanError::EgressUnsupported(why) => {
+            StartError::refused(REFUSED_EGRESS_UNSUPPORTED_RUNTIME, why)
+        }
+    })?;
+
+    // A client exists even when the daemon does not; `facts` is set
+    // only once the daemon answered.
+    let docker = match (&host.docker, host.facts) {
+        (Some(docker), Some(_)) => docker,
+        _ => {
+            return Err(StartError::refused(
+                REFUSED_SANDBOX_UNAVAILABLE,
+                "no container runtime is reachable. Start Docker and restart the gateway, or \
+                 set \"sandbox\": \"off\" and re-sign to run it on the host unsandboxed",
+            ));
+        }
+    };
+    let image = docker.inspect_image(&plan.image).await.map_err(|_| {
+        StartError::refused(
+            REFUSED_IMAGE_UNAVAILABLE,
+            format!(
+                "image {} is not on this host and the proxy does not pull; run `docker pull {}`",
+                plan.image, plan.image
+            ),
+        )
+    })?;
+    if !plan.egress_hosts.is_empty() {
+        host.ready_sidecar_binary()
+            .map_err(|why| StartError::refused(REFUSED_SANDBOX_UNAVAILABLE, why))?;
+    }
+
+    let route = if plan.egress_hosts.is_empty() {
+        None
+    } else {
+        let route = crate::container::start_route(docker, host, &plan, audit.cloned())
+            .await
+            .map_err(|e| {
+                StartError::Failed(ProxyError::Mcp(format!(
+                    "egress route for '{}': {e}",
+                    plan.server
+                )))
+            })?;
+        Some(route)
+    };
+    let transport = StdioTransport::spawn_container(docker, &plan, resolved_env, route)
+        .await
+        .map_err(StartError::Failed)?;
+
+    record(
+        audit,
+        SessionEvent::McpServerSandboxed {
+            server_name: plan.server.clone(),
+            agent_id: plan.agent_id.clone(),
+            image: plan.image.clone(),
+            image_id: image.id,
+            image_digest: image.repo_digests.and_then(|d| d.into_iter().next()),
+            runtime: wirken_sandbox::runtime_label(plan.runtime.as_deref()),
+            container_id: transport.container_id().unwrap_or_default().to_string(),
+            egress_hosts: plan.egress_hosts.clone(),
+            mounts: plan.mount_summary(),
+            memory_bytes: plan.memory_bytes,
+            pids: plan.pids,
+            nano_cpus: plan.nano_cpus,
+            secrets_as_files: plan.secret_file_names.clone(),
+            secrets_in_env: plan.env_secret_names.clone(),
+        },
+    );
+    Ok(transport)
 }
 
 async fn init_and_list(client: &mut McpClient, agent_id: &str) -> Result<(), ProxyError> {
@@ -609,5 +780,222 @@ mod scope_tests {
         let resolved = resolve_env(&env, Some(&scoped));
         assert_eq!(resolved["OWN"], "stdio-key-value");
         assert_eq!(resolved["OTHER"], "vault:telegram-token");
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+    use wirken_sandbox::RuntimeFacts;
+
+    fn log() -> Arc<dyn SessionLog> {
+        Arc::new(wirken_audit::SqliteSessionLog::open_in_memory().unwrap())
+    }
+
+    fn events(log: &Arc<dyn SessionLog>) -> Vec<SessionEvent> {
+        let handle = log.handle_for(SessionId::new(MCP_SENTINEL_SESSION));
+        log.get_since(&handle, 0)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.event)
+            .collect()
+    }
+
+    fn no_vault() -> SharedVault {
+        Arc::new(Mutex::new(None))
+    }
+
+    fn host(data_dir: &std::path::Path, docker: Option<bollard::Docker>) -> SandboxHost {
+        SandboxHost {
+            facts: docker.as_ref().map(|_| RuntimeFacts::default()),
+            docker,
+            instance: crate::container::instance_id(data_dir),
+            data_dir: data_dir.to_path_buf(),
+            runtime: None,
+            secrets_base: Some(data_dir.join("ram")),
+            sidecar_binary: None,
+        }
+    }
+
+    /// Load one server named `srv` and return the rows written.
+    async fn load(host: SandboxHost, entry: serde_json::Value) -> (usize, Vec<SessionEvent>) {
+        let config: McpConfig =
+            serde_json::from_value(serde_json::json!({ "servers": { "srv": entry } })).unwrap();
+        let log = log();
+        let mut registry = ProxyRegistry::new().with_sandbox(host);
+        let loaded = registry
+            .load_agent("agent-1", &config, no_vault(), Some(&log))
+            .await
+            .unwrap();
+        registry.shutdown().await;
+        (loaded, events(&log))
+    }
+
+    fn refused(events: &[SessionEvent]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::McpEntryRefused { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_entry_without_a_sandbox_block_is_refused_after_it_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let (loaded, events) = load(
+            host(dir.path(), None),
+            serde_json::json!({ "command": "/bin/true" }),
+        )
+        .await;
+        assert_eq!(loaded, 0);
+        assert!(
+            matches!(events[0], SessionEvent::McpEntryVerified { .. }),
+            "{events:?}"
+        );
+        assert_eq!(refused(&events), [REFUSED_SANDBOX_CONFIG_INVALID]);
+    }
+
+    #[tokio::test]
+    async fn each_sandbox_refusal_has_its_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                serde_json::json!({ "command": "srv", "sandbox": "on" }),
+                None,
+                REFUSED_SANDBOX_CONFIG_INVALID,
+            ),
+            (
+                serde_json::json!({ "command": "srv", "sandbox": {} }),
+                None,
+                REFUSED_SANDBOX_CONFIG_INVALID,
+            ),
+            (
+                serde_json::json!({ "command": "srv", "sandbox": { "image": "img" } }),
+                None,
+                REFUSED_SANDBOX_UNAVAILABLE,
+            ),
+            (
+                serde_json::json!({ "command": "srv", "sandbox": {
+                    "image": "img", "egress": { "hosts": ["api.example.com"] } } }),
+                Some(RuntimeFacts {
+                    rootless: true,
+                    ..Default::default()
+                }),
+                REFUSED_EGRESS_UNSUPPORTED_RUNTIME,
+            ),
+        ];
+        for (entry, facts, reason) in cases {
+            let mut host = host(dir.path(), None);
+            host.facts = facts;
+            let (loaded, events) = load(host, entry.clone()).await;
+            assert_eq!(loaded, 0, "{entry}");
+            assert_eq!(refused(&events), [reason], "{entry}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_off_starts_on_the_host_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, events) = load(
+            host(dir.path(), None),
+            serde_json::json!({ "command": "/bin/true", "sandbox": "off" }),
+        )
+        .await;
+        assert!(refused(&events).is_empty(), "{events:?}");
+        assert!(
+            events.contains(&SessionEvent::McpServerUnsandboxed {
+                server_name: "srv".into(),
+                agent_id: "agent-1".into(),
+            }),
+            "{events:?}"
+        );
+    }
+
+    async fn docker_with(image: &str) -> Option<bollard::Docker> {
+        let docker = bollard::Docker::connect_with_local_defaults().ok()?;
+        docker.ping().await.ok()?;
+        docker.inspect_image(image).await.ok()?;
+        Some(docker)
+    }
+
+    /// Live: an image the host does not have is refused, not pulled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_image_not_on_the_host_is_refused() {
+        let Some(docker) = docker_with("debian:bookworm-slim").await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (loaded, events) = load(
+            host(dir.path(), Some(docker)),
+            serde_json::json!({ "command": "srv", "sandbox": {
+                "image": "wirken-test-absent-image:0" } }),
+        )
+        .await;
+        assert_eq!(loaded, 0);
+        assert_eq!(refused(&events), [REFUSED_IMAGE_UNAVAILABLE]);
+    }
+
+    /// Live: a contained start writes what the server was given, by
+    /// secret name only, and the server answers.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_contained_start_records_what_the_server_was_given() {
+        let Some(docker) = docker_with("debian:bookworm-slim").await else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        // Answers initialize and tools/list, then waits for end of input.
+        let script = r#"read a; printf '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"t","version":"1"}}}\n'; read b; read c; printf '{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}\n'; cat >/dev/null"#;
+        let (loaded, events) = load(
+            host(dir.path(), Some(docker)),
+            serde_json::json!({
+                "command": "sh",
+                "args": ["-c", script],
+                "env": { "FILE_TOKEN": "vault:a", "ENV_TOKEN": "vault:b" },
+                "sandbox": {
+                    "image": "debian:bookworm-slim",
+                    "install_dir": install.to_string_lossy(),
+                    "secrets_in_env": ["ENV_TOKEN"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(loaded, 1, "{events:?}");
+        let row = events
+            .iter()
+            .find(|e| matches!(e, SessionEvent::McpServerSandboxed { .. }))
+            .expect("a start row");
+        let SessionEvent::McpServerSandboxed {
+            server_name,
+            agent_id,
+            image,
+            image_id,
+            container_id,
+            egress_hosts,
+            mounts,
+            secrets_as_files,
+            secrets_in_env,
+            ..
+        } = row
+        else {
+            unreachable!()
+        };
+        assert_eq!(server_name, "srv");
+        assert_eq!(agent_id, "agent-1");
+        assert_eq!(image, "debian:bookworm-slim");
+        assert!(image_id.is_some());
+        assert!(!container_id.is_empty());
+        assert!(egress_hosts.is_empty());
+        assert!(
+            mounts.contains(&format!("{}:/opt/mcp:ro", install.display())),
+            "{mounts:?}"
+        );
+        assert_eq!(secrets_as_files, &["FILE_TOKEN"]);
+        assert_eq!(secrets_in_env, &["ENV_TOKEN"]);
     }
 }
