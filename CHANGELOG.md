@@ -30,8 +30,43 @@ tagged.
   proxy still receives the vault passphrase in its environment, clears
   it at startup and holds the vault's device key, so it does not stop
   code running inside the proxy from reading the vault file.
+- Stdio MCP servers run in containers (#269). Each server whose
+  `mcp.json` entry has a `sandbox` block runs in its own container, one per
+  agent and server, with every capability dropped, `no-new-privileges`, a
+  read-only root, a 64 MB `/tmp`, 512 MB of memory, 256 processes and one
+  CPU unless the block sets `limits`, and the operator's uid. `sandbox.json`'s
+  `gvisor` mode runs them under `runsc`. The block names the image (required;
+  the proxy does not pull), an `install_dir` mounted read-only at `/opt/mcp`,
+  extra `mounts` (read-only unless `writable`), an opt-in `scratch`
+  directory, and `egress.hosts`. A server with no hosts has no network. One
+  with hosts reaches them only over HTTP(S) through its own sidecar, with
+  the decision broker in `wirken-mcp-proxy`, the same rules as `exec`'s
+  allowlist, and a `sandbox_egress_verdict` row per request carrying the
+  new `mcp_server` field. Proxied egress is refused on rootless Docker,
+  Podman and Windows. `vault:` values reach the server as 0600 files on a
+  memory-backed mount (`NAME_FILE`), not in its environment, unless
+  `secrets_in_env` lists the variable. The block is inside the signed entry
+  hash; an absent block hashes as before, so existing signatures still
+  verify. The proxy removes what an earlier proxy left behind at start,
+  stops its containers at shutdown, and restarts a server whose container
+  exits, one second doubling to a minute, giving up after eight runs in a
+  row that never complete `initialize`.
 
 ### Added
+
+- Audit events on the `gateway-mcp` session, all on the default typed SIEM
+  set: `mcp_server_sandboxed` at every contained start (agent, image, image
+  id and digest, runtime, container id, egress hosts, mounts, limits, and
+  the names of secrets delivered as files and through the environment),
+  `mcp_server_unsandboxed` at every start of a server with
+  `"sandbox": "off"`, `mcp_server_exited`, `mcp_server_restart` (`attempt`,
+  `cause`, `detail`, `delay_ms`, `ran_for_ms`) and
+  `mcp_server_restart_abandoned`. Levels: `mcp_server_exited` and a restart
+  after an exit are `warn`; a restart after `start_failed` or
+  `initialize_failed`, and an abandoned restart, are `error`.
+- `wirken mcp verify` and `wirken doctor` name the stdio entries the proxy
+  will refuse for want of a `sandbox` block, and the ones set to run on the
+  host.
 
 - `wirken skills sign-index` and `scripts/sign-skills-index.sh` sign a
   registry index offline under the registry root. Each entry's signature
@@ -42,6 +77,29 @@ tagged.
 
 ### Changed
 
+- A stdio MCP server with no `sandbox` block is no longer started (#269).
+  The proxy refuses it with `mcp_entry_refused` reason
+  `sandbox_config_invalid` and logs the server's name with the two ways
+  forward; nothing falls back to the host. **Operator action, for every
+  stdio entry in `mcp.json`:** either install the server into a directory
+  (for example `npm install --prefix <dir> <package>` in place of
+  `npx -y <package>`), pull its image, and add a `sandbox` block naming the
+  image and the `install_dir`; or set `"sandbox": "off"` to keep running it
+  on the host as before, which warns and writes `mcp_server_unsandboxed` at
+  every start. Re-sign a signed entry after either change
+  (`wirken mcp sign <server>`). Stdio servers therefore need Docker unless
+  they are set to `"off"`. `sandbox.json` `"mode": "off"` does not run MCP
+  servers on the host. `wirken mcp verify` lists the entries that need the
+  change.
+- `mcp_entry_refused` has four new reasons for a stdio entry that verified
+  and that the sandbox would not start: `sandbox_config_invalid`,
+  `sandbox_unavailable`, `image_unavailable` and
+  `egress_unsupported_runtime`. A refused server is not retried.
+- A contained MCP server's `command` runs as the container's entrypoint,
+  not as arguments to the image's own entrypoint.
+- The webchat About panel shows a connector the sandbox refused as
+  admitted and not started, rather than as refused, since its signature
+  verified.
 - The README's architecture diagram no longer lists Wasm as a tool
   sandbox. Wasm skills are not loaded on the default path.
 
@@ -78,6 +136,13 @@ tagged.
   connection and a connect.
 
 ### Fixed
+
+- The MCP proxy stops its servers when the gateway stops. Before, the
+  proxy was killed without stopping them, and a stdio child that did not
+  exit at end of input kept running. Each server now gets one second to
+  answer each shutdown message instead of the 30-second request timeout,
+  and all servers stop at once, so the stop fits the gateway's 10-second
+  grace.
 
 - `wirken skills search` and `wirken skills install` stop with an error
   naming the index URL when there is no index there (HTTP 404), and with
